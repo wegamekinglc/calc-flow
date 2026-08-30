@@ -3,24 +3,24 @@
         "node": "chengli-i9",
         "processor": "",
         "machine": "x86_64",
-        "python_compiler": "GCC 11.2.0",
+        "python_compiler": "Clang 22.1.3 ",
         "python_implementation": "CPython",
-        "python_implementation_version": "3.13.9",
-        "python_version": "3.13.9",
+        "python_implementation_version": "3.13.13",
+        "python_version": "3.13.13",
         "python_build": [
             "main",
-            "Oct 21 2025 19:16:10"
+            "Jun  2 2026 22:27:49"
         ],
         "release": "5.15.167.4-microsoft-standard-WSL2",
         "system": "Linux",
         "cpu": {
-            "python_version": "3.13.9.final.0 (64 bit)",
+            "python_version": "3.13.13.final.0 (64 bit)",
             "cpuinfo_version": [
-                10,
-                1,
-                1
+                9,
+                0,
+                0
             ],
-            "cpuinfo_version_string": "10.1.1",
+            "cpuinfo_version_string": "9.0.0",
             "arch": "X86_64",
             "bits": 64,
             "count": 32,
@@ -156,12 +156,12 @@
         }
     },
     "commit_info": {
-        "id": "c562d405f6117a474d9566641b23dcb571fedcee",
-        "time": "2026-08-31T03:13:04+08:00",
-        "author_time": "2026-08-31T03:13:04+08:00",
+        "id": "9680d60ba81e45f6cc5f6eafbd6eef586c26f210",
+        "time": "2026-08-31T06:06:49+08:00",
+        "author_time": "2026-08-31T06:06:49+08:00",
         "dirty": false,
         "project": "calc-flow",
-        "branch": "feature/symbolic-optimization"
+        "branch": "(detached head)"
     },
     "benchmarks": [
         {
@@ -180,11 +180,11 @@
                 "matrix_dimension": 256,
                 "input_rows": 99968,
                 "output_rows": 199936,
-                "process_rss_bytes": 440676352,
-                "datafusion_planning_ns": 5431944,
-                "datafusion_execution_ns": 3731657,
+                "process_rss_bytes": 460869632,
+                "datafusion_planning_ns": 5400436,
+                "datafusion_execution_ns": 3923467,
                 "datafusion_query_count": 3,
-                "peak_rss_bytes": 545959936,
+                "peak_rss_bytes": 550187008,
                 "comparison_contract": "same-process-alternating-v1",
                 "workload_contract": "sce14-cross-domain-sharing-v1",
                 "entities": 64,
@@ -194,153 +194,153 @@
                 "paired_samples": [
                     {
                         "order": "hand-built-first",
-                        "hand_built_seconds": 1.742366768,
-                        "symbolic_seconds": 0.953791316
+                        "hand_built_seconds": 1.763556657,
+                        "symbolic_seconds": 0.953632203
                     },
                     {
                         "order": "symbolic-first",
-                        "hand_built_seconds": 1.726334512,
-                        "symbolic_seconds": 0.967410017
+                        "hand_built_seconds": 1.73595254,
+                        "symbolic_seconds": 0.965650082
                     },
                     {
                         "order": "hand-built-first",
-                        "hand_built_seconds": 1.789324464,
-                        "symbolic_seconds": 0.972914531
+                        "hand_built_seconds": 1.756235943,
+                        "symbolic_seconds": 0.945718808
                     },
                     {
                         "order": "symbolic-first",
-                        "hand_built_seconds": 1.72755463,
-                        "symbolic_seconds": 0.958236114
+                        "hand_built_seconds": 1.726841187,
+                        "symbolic_seconds": 0.951336585
                     },
                     {
                         "order": "hand-built-first",
-                        "hand_built_seconds": 1.751784318,
-                        "symbolic_seconds": 0.950633852
+                        "hand_built_seconds": 1.733213236,
+                        "symbolic_seconds": 0.936346301
                     },
                     {
                         "order": "symbolic-first",
-                        "hand_built_seconds": 1.753778874,
-                        "symbolic_seconds": 0.969236829
+                        "hand_built_seconds": 1.737996286,
+                        "symbolic_seconds": 0.983644582
                     },
                     {
                         "order": "hand-built-first",
-                        "hand_built_seconds": 1.740260153,
-                        "symbolic_seconds": 0.978300829
+                        "hand_built_seconds": 1.747015458,
+                        "symbolic_seconds": 0.998581196
                     },
                     {
                         "order": "symbolic-first",
-                        "hand_built_seconds": 1.742479816,
-                        "symbolic_seconds": 0.935768336
+                        "hand_built_seconds": 1.770958331,
+                        "symbolic_seconds": 0.99208576
                     },
                     {
                         "order": "hand-built-first",
-                        "hand_built_seconds": 1.726421395,
-                        "symbolic_seconds": 0.965155159
+                        "hand_built_seconds": 1.755094614,
+                        "symbolic_seconds": 0.940535869
                     },
                     {
                         "order": "symbolic-first",
-                        "hand_built_seconds": 1.729985954,
-                        "symbolic_seconds": 0.941282201
+                        "hand_built_seconds": 1.757149236,
+                        "symbolic_seconds": 0.964260506
                     },
                     {
                         "order": "hand-built-first",
-                        "hand_built_seconds": 1.742175152,
-                        "symbolic_seconds": 0.954438089
+                        "hand_built_seconds": 1.773313692,
+                        "symbolic_seconds": 0.964500737
                     },
                     {
                         "order": "symbolic-first",
-                        "hand_built_seconds": 1.750032839,
-                        "symbolic_seconds": 0.941118799
+                        "hand_built_seconds": 1.750620217,
+                        "symbolic_seconds": 0.966190543
                     },
                     {
                         "order": "hand-built-first",
-                        "hand_built_seconds": 1.76633405,
-                        "symbolic_seconds": 0.947951995
+                        "hand_built_seconds": 1.747567178,
+                        "symbolic_seconds": 0.955073378
                     },
                     {
                         "order": "symbolic-first",
-                        "hand_built_seconds": 1.72573677,
-                        "symbolic_seconds": 0.947705009
+                        "hand_built_seconds": 1.743653727,
+                        "symbolic_seconds": 0.972266812
                     },
                     {
                         "order": "hand-built-first",
-                        "hand_built_seconds": 1.72777556,
-                        "symbolic_seconds": 0.944259727
+                        "hand_built_seconds": 1.749890661,
+                        "symbolic_seconds": 0.955271904
                     },
                     {
                         "order": "symbolic-first",
-                        "hand_built_seconds": 1.722351376,
-                        "symbolic_seconds": 0.922246137
+                        "hand_built_seconds": 1.758345308,
+                        "symbolic_seconds": 0.954460746
                     },
                     {
                         "order": "hand-built-first",
-                        "hand_built_seconds": 1.732432123,
-                        "symbolic_seconds": 0.940074852
+                        "hand_built_seconds": 1.779838313,
+                        "symbolic_seconds": 0.963414276
                     },
                     {
                         "order": "symbolic-first",
-                        "hand_built_seconds": 1.74432821,
-                        "symbolic_seconds": 0.940313836
+                        "hand_built_seconds": 1.733211524,
+                        "symbolic_seconds": 0.977396682
                     },
                     {
                         "order": "hand-built-first",
-                        "hand_built_seconds": 1.736227826,
-                        "symbolic_seconds": 0.949746348
+                        "hand_built_seconds": 1.765939671,
+                        "symbolic_seconds": 0.968855993
                     },
                     {
                         "order": "symbolic-first",
-                        "hand_built_seconds": 1.760965773,
-                        "symbolic_seconds": 0.941365886
+                        "hand_built_seconds": 1.761978706,
+                        "symbolic_seconds": 0.94686828
                     },
                     {
                         "order": "hand-built-first",
-                        "hand_built_seconds": 1.746868346,
-                        "symbolic_seconds": 0.941228766
+                        "hand_built_seconds": 1.757907443,
+                        "symbolic_seconds": 0.978413198
                     },
                     {
                         "order": "symbolic-first",
-                        "hand_built_seconds": 1.751715158,
-                        "symbolic_seconds": 0.941060582
+                        "hand_built_seconds": 1.750729517,
+                        "symbolic_seconds": 0.941879282
                     },
                     {
                         "order": "hand-built-first",
-                        "hand_built_seconds": 1.74966366,
-                        "symbolic_seconds": 0.941930733
+                        "hand_built_seconds": 1.751981755,
+                        "symbolic_seconds": 0.94941401
                     },
                     {
                         "order": "symbolic-first",
-                        "hand_built_seconds": 1.77018265,
-                        "symbolic_seconds": 0.951639693
+                        "hand_built_seconds": 1.746827301,
+                        "symbolic_seconds": 0.959418562
                     },
                     {
                         "order": "hand-built-first",
-                        "hand_built_seconds": 1.748081263,
-                        "symbolic_seconds": 0.952725361
+                        "hand_built_seconds": 1.75295134,
+                        "symbolic_seconds": 0.958294965
                     },
                     {
                         "order": "symbolic-first",
-                        "hand_built_seconds": 1.725806474,
-                        "symbolic_seconds": 0.939736202
+                        "hand_built_seconds": 1.804322691,
+                        "symbolic_seconds": 0.946609417
                     },
                     {
                         "order": "hand-built-first",
-                        "hand_built_seconds": 1.726319819,
-                        "symbolic_seconds": 0.940595043
+                        "hand_built_seconds": 1.753264657,
+                        "symbolic_seconds": 0.961862205
                     },
                     {
                         "order": "symbolic-first",
-                        "hand_built_seconds": 1.737747473,
-                        "symbolic_seconds": 0.942009675
+                        "hand_built_seconds": 1.753974051,
+                        "symbolic_seconds": 0.943157737
                     },
                     {
                         "order": "hand-built-first",
-                        "hand_built_seconds": 1.794752003,
-                        "symbolic_seconds": 0.983911932
+                        "hand_built_seconds": 1.73586615,
+                        "symbolic_seconds": 0.95518592
                     },
                     {
                         "order": "symbolic-first",
-                        "hand_built_seconds": 1.743819333,
-                        "symbolic_seconds": 0.951320125
+                        "hand_built_seconds": 1.774866089,
+                        "symbolic_seconds": 0.9637188
                     }
                 ]
             },
@@ -355,31 +355,31 @@
                 "warmup": false
             },
             "stats": {
-                "min": 2.664573822999955,
-                "max": 2.686951761999808,
-                "mean": 2.6791196033348874,
-                "stddev": 0.0126094240715553,
+                "min": 2.67685226300091,
+                "max": 2.7287175539968302,
+                "mean": 2.6960959863329967,
+                "stddev": 0.028402942483943688,
                 "rounds": 3,
-                "median": 2.685833225004899,
-                "iqr": 0.016783454249889473,
-                "q1": 2.669888673501191,
-                "q3": 2.6866721277510806,
+                "median": 2.6827181420012494,
+                "iqr": 0.03889896824694006,
+                "q1": 2.678318732750995,
+                "q3": 2.717217700997935,
                 "iqr_outliers": 0,
                 "stddev_outliers": 1,
                 "outliers": "1;0",
-                "ld15iqr": 2.664573822999955,
-                "hd15iqr": 2.686951761999808,
-                "ops": 0.37325694558586714,
-                "total": 8.037358810004662,
+                "ld15iqr": 2.67685226300091,
+                "hd15iqr": 2.7287175539968302,
+                "ops": 0.37090667582652204,
+                "total": 8.08828795899899,
                 "data": [
-                    2.686951761999808,
-                    2.685833225004899,
-                    2.664573822999955
+                    2.67685226300091,
+                    2.6827181420012494,
+                    2.7287175539968302
                 ],
                 "iterations": 1
             }
         }
     ],
-    "datetime": "2026-08-30T19:17:18.848847+00:00",
+    "datetime": "2026-08-30T22:28:54.619785+00:00",
     "version": "5.3.0"
 }

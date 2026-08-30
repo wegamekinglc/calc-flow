@@ -3,24 +3,24 @@
         "node": "chengli-i9",
         "processor": "",
         "machine": "x86_64",
-        "python_compiler": "GCC 11.2.0",
+        "python_compiler": "Clang 22.1.3 ",
         "python_implementation": "CPython",
-        "python_implementation_version": "3.13.9",
-        "python_version": "3.13.9",
+        "python_implementation_version": "3.13.13",
+        "python_version": "3.13.13",
         "python_build": [
             "main",
-            "Oct 21 2025 19:16:10"
+            "Jun  2 2026 22:27:49"
         ],
         "release": "5.15.167.4-microsoft-standard-WSL2",
         "system": "Linux",
         "cpu": {
-            "python_version": "3.13.9.final.0 (64 bit)",
+            "python_version": "3.13.13.final.0 (64 bit)",
             "cpuinfo_version": [
-                10,
-                1,
-                1
+                9,
+                0,
+                0
             ],
-            "cpuinfo_version_string": "10.1.1",
+            "cpuinfo_version_string": "9.0.0",
             "arch": "X86_64",
             "bits": 64,
             "count": 32,
@@ -156,12 +156,12 @@
         }
     },
     "commit_info": {
-        "id": "c562d405f6117a474d9566641b23dcb571fedcee",
-        "time": "2026-08-31T03:13:04+08:00",
-        "author_time": "2026-08-31T03:13:04+08:00",
+        "id": "9680d60ba81e45f6cc5f6eafbd6eef586c26f210",
+        "time": "2026-08-31T06:06:49+08:00",
+        "author_time": "2026-08-31T06:06:49+08:00",
         "dirty": false,
         "project": "calc-flow",
-        "branch": "feature/symbolic-optimization"
+        "branch": "(detached head)"
     },
     "benchmarks": [
         {
@@ -180,11 +180,11 @@
                 "matrix_dimension": 256,
                 "input_rows": 99968,
                 "output_rows": 199936,
-                "process_rss_bytes": 435556352,
-                "datafusion_planning_ns": 5713345,
-                "datafusion_execution_ns": 4050041,
+                "process_rss_bytes": 454070272,
+                "datafusion_planning_ns": 5513846,
+                "datafusion_execution_ns": 3768161,
                 "datafusion_query_count": 3,
-                "peak_rss_bytes": 540086272,
+                "peak_rss_bytes": 549134336,
                 "comparison_contract": "same-process-alternating-v1",
                 "workload_contract": "sce14-cross-domain-sharing-v1",
                 "entities": 64,
@@ -194,153 +194,153 @@
                 "paired_samples": [
                     {
                         "order": "hand-built-first",
-                        "hand_built_seconds": 1.728926776,
-                        "symbolic_seconds": 0.934280066
+                        "hand_built_seconds": 1.737798029,
+                        "symbolic_seconds": 0.96805259
                     },
                     {
                         "order": "symbolic-first",
-                        "hand_built_seconds": 1.757754654,
-                        "symbolic_seconds": 0.957369793
+                        "hand_built_seconds": 1.725517202,
+                        "symbolic_seconds": 0.945570346
                     },
                     {
                         "order": "hand-built-first",
-                        "hand_built_seconds": 1.735973473,
-                        "symbolic_seconds": 0.944335098
+                        "hand_built_seconds": 1.73210928,
+                        "symbolic_seconds": 0.958232053
                     },
                     {
                         "order": "symbolic-first",
-                        "hand_built_seconds": 1.75784326,
-                        "symbolic_seconds": 0.939065936
+                        "hand_built_seconds": 1.720944822,
+                        "symbolic_seconds": 0.95058332
                     },
                     {
                         "order": "hand-built-first",
-                        "hand_built_seconds": 1.749488306,
-                        "symbolic_seconds": 0.958190237
+                        "hand_built_seconds": 1.737740445,
+                        "symbolic_seconds": 0.947159658
                     },
                     {
                         "order": "symbolic-first",
-                        "hand_built_seconds": 1.729846479,
-                        "symbolic_seconds": 0.946933433
+                        "hand_built_seconds": 1.738586778,
+                        "symbolic_seconds": 0.932897748
                     },
                     {
                         "order": "hand-built-first",
-                        "hand_built_seconds": 1.742341389,
-                        "symbolic_seconds": 0.958038582
+                        "hand_built_seconds": 1.753307639,
+                        "symbolic_seconds": 0.943890717
                     },
                     {
                         "order": "symbolic-first",
-                        "hand_built_seconds": 1.725353093,
-                        "symbolic_seconds": 0.972273625
+                        "hand_built_seconds": 1.735222063,
+                        "symbolic_seconds": 0.965082615
                     },
                     {
                         "order": "hand-built-first",
-                        "hand_built_seconds": 1.765301083,
-                        "symbolic_seconds": 0.968317472
+                        "hand_built_seconds": 1.746576838,
+                        "symbolic_seconds": 0.958837363
                     },
                     {
                         "order": "symbolic-first",
-                        "hand_built_seconds": 1.722659097,
-                        "symbolic_seconds": 0.937426864
+                        "hand_built_seconds": 1.761964217,
+                        "symbolic_seconds": 0.945720337
                     },
                     {
                         "order": "hand-built-first",
-                        "hand_built_seconds": 1.750782645,
-                        "symbolic_seconds": 0.954603671
+                        "hand_built_seconds": 1.759582616,
+                        "symbolic_seconds": 0.963223456
                     },
                     {
                         "order": "symbolic-first",
-                        "hand_built_seconds": 1.750186862,
-                        "symbolic_seconds": 0.984191321
+                        "hand_built_seconds": 1.748472141,
+                        "symbolic_seconds": 0.956337126
                     },
                     {
                         "order": "hand-built-first",
-                        "hand_built_seconds": 1.760349334,
-                        "symbolic_seconds": 0.975223449
+                        "hand_built_seconds": 1.762255375,
+                        "symbolic_seconds": 0.953585612
                     },
                     {
                         "order": "symbolic-first",
-                        "hand_built_seconds": 1.741051849,
-                        "symbolic_seconds": 0.934264129
+                        "hand_built_seconds": 1.741251456,
+                        "symbolic_seconds": 0.95694967
                     },
                     {
                         "order": "hand-built-first",
-                        "hand_built_seconds": 1.725709929,
-                        "symbolic_seconds": 0.95588984
+                        "hand_built_seconds": 1.765622164,
+                        "symbolic_seconds": 0.961896052
                     },
                     {
                         "order": "symbolic-first",
-                        "hand_built_seconds": 1.758843096,
-                        "symbolic_seconds": 0.936799004
+                        "hand_built_seconds": 1.758986852,
+                        "symbolic_seconds": 0.950381094
                     },
                     {
                         "order": "hand-built-first",
-                        "hand_built_seconds": 1.736007672,
-                        "symbolic_seconds": 0.953212524
+                        "hand_built_seconds": 1.755470596,
+                        "symbolic_seconds": 0.955883611
                     },
                     {
                         "order": "symbolic-first",
-                        "hand_built_seconds": 1.720895617,
-                        "symbolic_seconds": 0.938859854
+                        "hand_built_seconds": 1.752461075,
+                        "symbolic_seconds": 0.96199215
                     },
                     {
                         "order": "hand-built-first",
-                        "hand_built_seconds": 1.73342223,
-                        "symbolic_seconds": 0.938836022
+                        "hand_built_seconds": 1.727631541,
+                        "symbolic_seconds": 0.952529428
                     },
                     {
                         "order": "symbolic-first",
-                        "hand_built_seconds": 1.740336778,
-                        "symbolic_seconds": 0.968690891
+                        "hand_built_seconds": 1.749695038,
+                        "symbolic_seconds": 0.94649416
                     },
                     {
                         "order": "hand-built-first",
-                        "hand_built_seconds": 1.732284064,
-                        "symbolic_seconds": 0.941963235
+                        "hand_built_seconds": 1.760920846,
+                        "symbolic_seconds": 0.956864791
                     },
                     {
                         "order": "symbolic-first",
-                        "hand_built_seconds": 1.740049195,
-                        "symbolic_seconds": 0.940127338
+                        "hand_built_seconds": 1.755006698,
+                        "symbolic_seconds": 0.965400956
                     },
                     {
                         "order": "hand-built-first",
-                        "hand_built_seconds": 1.775299336,
-                        "symbolic_seconds": 0.946056108
+                        "hand_built_seconds": 1.744175202,
+                        "symbolic_seconds": 0.964757177
                     },
                     {
                         "order": "symbolic-first",
-                        "hand_built_seconds": 1.74444119,
-                        "symbolic_seconds": 0.944630216
+                        "hand_built_seconds": 1.759965228,
+                        "symbolic_seconds": 0.953205476
                     },
                     {
                         "order": "hand-built-first",
-                        "hand_built_seconds": 1.743519594,
-                        "symbolic_seconds": 0.948784891
+                        "hand_built_seconds": 1.755412226,
+                        "symbolic_seconds": 0.959694507
                     },
                     {
                         "order": "symbolic-first",
-                        "hand_built_seconds": 1.7386392,
-                        "symbolic_seconds": 0.93643679
+                        "hand_built_seconds": 1.779543175,
+                        "symbolic_seconds": 0.963474644
                     },
                     {
                         "order": "hand-built-first",
-                        "hand_built_seconds": 1.748593111,
-                        "symbolic_seconds": 0.940896945
+                        "hand_built_seconds": 1.749525908,
+                        "symbolic_seconds": 0.951724418
                     },
                     {
                         "order": "symbolic-first",
-                        "hand_built_seconds": 1.761148115,
-                        "symbolic_seconds": 0.951370603
+                        "hand_built_seconds": 1.737655821,
+                        "symbolic_seconds": 0.942257234
                     },
                     {
                         "order": "hand-built-first",
-                        "hand_built_seconds": 1.75363223,
-                        "symbolic_seconds": 0.941443721
+                        "hand_built_seconds": 1.741289588,
+                        "symbolic_seconds": 0.95096553
                     },
                     {
                         "order": "symbolic-first",
-                        "hand_built_seconds": 1.720667458,
-                        "symbolic_seconds": 0.958695581
+                        "hand_built_seconds": 1.745888114,
+                        "symbolic_seconds": 0.960776317
                     }
                 ]
             },
@@ -355,31 +355,31 @@
                 "warmup": false
             },
             "stats": {
-                "min": 2.6983959410063107,
-                "max": 2.7058542290033074,
-                "mean": 2.7017251106687277,
-                "stddev": 0.0037929478470059472,
+                "min": 2.7014218520052964,
+                "max": 2.7394293589968584,
+                "mean": 2.7172181390002756,
+                "stddev": 0.01979914571363373,
                 "rounds": 3,
-                "median": 2.7009251619965653,
-                "iqr": 0.005593715997747495,
-                "q1": 2.6990282462538744,
-                "q3": 2.704621962251622,
+                "median": 2.7108032059986726,
+                "iqr": 0.028505630243671476,
+                "q1": 2.7037671905036404,
+                "q3": 2.732272820747312,
                 "iqr_outliers": 0,
                 "stddev_outliers": 1,
                 "outliers": "1;0",
-                "ld15iqr": 2.6983959410063107,
-                "hd15iqr": 2.7058542290033074,
-                "ops": 0.37013388077533954,
-                "total": 8.105175332006183,
+                "ld15iqr": 2.7014218520052964,
+                "hd15iqr": 2.7394293589968584,
+                "ops": 0.36802345223851696,
+                "total": 8.151654417000827,
                 "data": [
-                    2.6983959410063107,
-                    2.7009251619965653,
-                    2.7058542290033074
+                    2.7394293589968584,
+                    2.7108032059986726,
+                    2.7014218520052964
                 ],
                 "iterations": 1
             }
         }
     ],
-    "datetime": "2026-08-30T19:19:02.878865+00:00",
+    "datetime": "2026-08-30T22:27:05.471867+00:00",
     "version": "5.3.0"
 }

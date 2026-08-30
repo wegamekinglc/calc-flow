@@ -9,7 +9,7 @@ covered separately by the symbolic optimizer tests.
 ## Frozen comparison
 
 The optimization benchmark commit is
-`c562d405f6117a474d9566641b23dcb571fedcee`. Both raw reports record that
+`9680d60ba81e45f6cc5f6eafbd6eef586c26f210`. Both raw reports record that
 exact clean commit and the same stable machine fingerprint. The standard-scale
 workload contains 99,968 deterministic quote rows across 64 entities and eight
 industries. It produces two 99,968-row outputs.
@@ -34,7 +34,7 @@ below the five-percent regression limit. An interval crossing five percent is
 
 | Scenario                       | Pairs | Geometric regression | 95% bootstrap interval     | Gate    | Decision |
 | ------------------------------ | ----: | -------------------: | -------------------------: | ------: | -------- |
-| `sce14_cross_domain_sharing`   |    60 |             -45.508% |       -45.696% to -45.315% | +5.000% | pass     |
+| `sce14_cross_domain_sharing`   |    60 |             -45.317% |       -45.517% to -45.112% | +5.000% | pass     |
 
 The optimized combined program is faster in this relative comparison. This is
 an execution-overhead claim for the frozen workload, not an absolute
@@ -50,23 +50,24 @@ two order-balanced ratios.
 
 | Scenario                                  | Base-first pair | Feature-first pair | Geometric regression | Gate    | Decision |
 | ----------------------------------------- | --------------: | -----------------: | -------------------: | ------: | -------- |
-| `symbolic_projection_20_columns`          |         -0.092% |            +1.450% |              +0.676% | +5.000% | pass     |
-| `symbolic_rolling_20_60_row_features`     |         +2.202% |            -0.221% |              +0.983% | +5.000% | pass     |
-| `symbolic_cross_section_rank_zscore`      |         +1.549% |            -0.891% |              +0.322% | +5.000% | pass     |
-| `symbolic_table_matmul_numpy`             |         -0.674% |            +1.562% |              +0.438% | +5.000% | pass     |
-| `symbolic_table_matmul_jax`               |         +1.692% |            +1.624% |              +1.658% | +5.000% | pass     |
-| `symbolic_stream_window_checkpoint`       |         +0.513% |            +1.425% |              +0.968% | +5.000% | pass     |
+| `symbolic_projection_20_columns`          |         -2.647% |            -2.541% |              -2.594% | +5.000% | pass     |
+| `symbolic_rolling_20_60_row_features`     |         -0.490% |            -0.314% |              -0.402% | +5.000% | pass     |
+| `symbolic_cross_section_rank_zscore`      |         +2.384% |            -0.279% |              +1.044% | +5.000% | pass     |
+| `symbolic_table_matmul_numpy`             |         -5.889% |            +0.375% |              -2.807% | +5.000% | pass     |
+| `symbolic_table_matmul_jax`               |         -2.487% |            -0.166% |              -1.333% | +5.000% | pass     |
+| `symbolic_stream_window_checkpoint`       |         +2.372% |            -2.172% |              +0.074% | +5.000% | pass     |
 
-An exploratory, unpaired warm-up was discarded before freezing these reports
-because the host entered a system-wide slower performance state between
-worktrees. The balanced evidence above was captured only after both base and
-feature reproduced that stable state; every accepted pair is preserved below.
+Exploratory reports were discarded before freezing this evidence when the host
+changed performance state and when a recapture used a PEP 517 release install
+instead of the documented default-debug `maturin develop` environment. The
+accepted reports above were captured only after both base and feature used the
+same stable build mode; every accepted pair records a clean exact commit.
 
 ## Artifacts and reproduction
 
-- `sce14-c562d40-paired1.json` and `sce14-c562d40-paired2.json` contain the 60
+- `sce14-9680d60-paired1.json` and `sce14-9680d60-paired2.json` contain the 60
   same-process alternating optimization pairs.
-- `sce14-c562d40-summary.json` contains the validated bootstrap decision,
+- `sce14-9680d60-summary.json` contains the validated bootstrap decision,
   report hashes, provenance, machine identity, and workload metadata.
 - The four `sce14-sce01-*.json` reports contain the two order-balanced SCE-01
   comparisons; `sce14-sce01-summary.json` records their hashes and decisions.

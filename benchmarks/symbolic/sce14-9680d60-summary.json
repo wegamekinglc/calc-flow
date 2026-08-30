@@ -1,5 +1,5 @@
 {
-  "benchmark_commit": "c562d405f6117a474d9566641b23dcb571fedcee",
+  "benchmark_commit": "9680d60ba81e45f6cc5f6eafbd6eef586c26f210",
   "bootstrap_resamples": 20000,
   "bootstrap_seed": 20260829,
   "decision": "pass",
@@ -12,29 +12,29 @@
     "machine": "x86_64",
     "node": "chengli-i9",
     "python_implementation": "CPython",
-    "python_version": "3.13.9",
+    "python_version": "3.13.13",
     "release": "5.15.167.4-microsoft-standard-WSL2",
     "system": "Linux"
   },
   "reports": [
     {
-      "path": "benchmarks/symbolic/sce14-c562d40-paired1.json",
-      "sha256": "640bc2438d5f777d1798690125fc63995b0d4f278ea85e13ce99a47cc2085e44"
+      "path": "benchmarks/symbolic/sce14-9680d60-paired1.json",
+      "sha256": "75c47f34f03bcd491d4ceb90d92b5fe42813e4a89ca1561278c9175c5453a390"
     },
     {
-      "path": "benchmarks/symbolic/sce14-c562d40-paired2.json",
-      "sha256": "346a635b2832b6678f8702ad92b47ae72bab30b5c6beb55b66f03517bd064dea"
+      "path": "benchmarks/symbolic/sce14-9680d60-paired2.json",
+      "sha256": "85bc8518e07a77a7915fabfefc8d4df70f417598b4eb1bda41c07f3eb179f161"
     }
   ],
   "scenarios": [
     {
       "decision": "pass",
-      "geometric_regression_percent": -45.50801368607308,
+      "geometric_regression_percent": -45.317441175599704,
       "hand_built_first_samples": 30,
       "paired_samples": 60,
       "regression_interval_percent": [
-        -45.696444932237526,
-        -45.31534715610774
+        -45.51661602035239,
+        -45.11230817510262
       ],
       "scenario": "sce14_cross_domain_sharing",
       "symbolic_first_samples": 30,
