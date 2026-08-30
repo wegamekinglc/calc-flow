@@ -500,6 +500,13 @@ fn place_static_input(
     let snapshot = batch.static_array_snapshot().ok_or_else(|| {
         pyo3::exceptions::PyTypeError::new_err("static array input is not an engine-latched value")
     })?;
+    validate_static_array_snapshot(&snapshot)?;
+    let object = provider_static_array(py, &snapshot)?;
+    let placement_bytes = static_array_copy_bytes(snapshot.dtype(), snapshot.shape())?;
+    static_array_batches(py, batch, &snapshot, object, placement_bytes)
+}
+
+fn validate_static_array_snapshot(snapshot: &calc_flow::StaticArraySnapshot) -> PyResult<()> {
     if snapshot
         .nulls()
         .is_some_and(|nulls| nulls.iter().any(|value| *value))
@@ -508,31 +515,58 @@ fn place_static_input(
             "static array inputs with null elements cannot be placed into Array API providers",
         ));
     }
-    let values = match snapshot.values() {
+    Ok(())
+}
+
+fn static_array_values<'py>(
+    py: Python<'py>,
+    snapshot: &calc_flow::StaticArraySnapshot,
+) -> PyResult<Bound<'py, PyAny>> {
+    Ok(match snapshot.values() {
         calc_flow::StaticArrayValues::Bool(values) => PyList::new(py, values)?.into_any(),
         calc_flow::StaticArrayValues::Int(values) => PyList::new(py, values)?.into_any(),
         calc_flow::StaticArrayValues::Uint(values) => PyList::new(py, values)?.into_any(),
         calc_flow::StaticArrayValues::Float(values) => PyList::new(py, values)?.into_any(),
-    };
+    })
+}
+
+fn host_static_array<'py>(
+    py: Python<'py>,
+    snapshot: &calc_flow::StaticArraySnapshot,
+) -> PyResult<Bound<'py, PyAny>> {
+    let values = static_array_values(py, snapshot)?;
     let numpy = py.import("numpy")?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", snapshot.dtype())?;
     let host = numpy.getattr("asarray")?.call((values,), Some(&kwargs))?;
-    let host = host.call_method1("reshape", (snapshot.shape(),))?;
-    let object = match snapshot.backend() {
-        "numpy" => host.unbind(),
-        "jax" => py
+    host.call_method1("reshape", (snapshot.shape(),))
+}
+
+fn provider_static_array(
+    py: Python<'_>,
+    snapshot: &calc_flow::StaticArraySnapshot,
+) -> PyResult<Py<PyAny>> {
+    let host = host_static_array(py, snapshot)?;
+    match snapshot.backend() {
+        "numpy" => Ok(host.unbind()),
+        "jax" => Ok(py
             .import("jax.numpy")?
             .getattr("asarray")?
             .call1((host,))?
-            .unbind(),
-        backend => {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "unsupported static array backend {backend:?}"
-            )));
-        }
-    };
-    let placement_bytes = static_array_copy_bytes(snapshot.dtype(), snapshot.shape())?;
+            .unbind()),
+        backend => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unsupported static array backend {backend:?}"
+        ))),
+    }
+}
+
+fn static_array_batches(
+    py: Python<'_>,
+    batch: &calc_flow::Batch,
+    snapshot: &calc_flow::StaticArraySnapshot,
+    object: Py<PyAny>,
+    placement_bytes: usize,
+) -> PyResult<(calc_flow::Batch, calc_flow::Batch)> {
     let placed = crate::batch::batch_from_python_array(
         py,
         object,

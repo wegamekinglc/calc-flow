@@ -469,7 +469,8 @@ output = program.compile_batch(runtime).execute({
 assert output.schema.field("score").type == pa.float64()
 assert output["score"].to_pylist() == [3.0, 5.0]
 """
-    completed = subprocess.run(
+    # Test-owned interpreter and fixed source; shell execution remains disabled.
+    completed = subprocess.run(  # nosemgrep
         [sys.executable, "-c", script],
         check=False,
         capture_output=True,

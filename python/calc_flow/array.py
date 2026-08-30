@@ -6,7 +6,7 @@ import operator
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Never
 
 from calc_flow import _native
 from calc_flow.capabilities import (
@@ -839,38 +839,88 @@ _SYMBOLIC_BINARY = {
 _SYMBOLIC_UNARY = {"neg": operator.neg, "not": operator.invert}
 
 
+def _raise_invalid_symbolic_node(node: Mapping[str, object]) -> Never:
+    raise ValueError(
+        f"invalid symbolic_matrix expression: unsupported node {node.get('op')!r}"
+    )
+
+
+def _validate_symbolic_leaf(node: dict[str, object], _depth: int) -> None:
+    if set(node) != {"op"}:
+        _raise_invalid_symbolic_node(node)
+
+
+def _validate_symbolic_literal(node: dict[str, object], _depth: int) -> None:
+    if set(node) != {"op", "value"}:
+        _raise_invalid_symbolic_node(node)
+    literal = node["value"]
+    if type(literal) not in (bool, int, float):
+        raise ValueError("invalid symbolic_matrix expression: literal must be finite")
+    if type(literal) is float and not math.isfinite(literal):
+        raise ValueError("invalid symbolic_matrix expression: literal must be finite")
+
+
+def _validate_symbolic_unary(node: dict[str, object], depth: int) -> None:
+    if set(node) != {"op", "value"}:
+        _raise_invalid_symbolic_node(node)
+    _validated_symbolic_tree(node["value"], depth=depth + 1)
+
+
+def _validate_symbolic_binary(node: dict[str, object], depth: int) -> None:
+    if set(node) != {"left", "op", "right"}:
+        _raise_invalid_symbolic_node(node)
+    _validated_symbolic_tree(node["left"], depth=depth + 1)
+    _validated_symbolic_tree(node["right"], depth=depth + 1)
+
+
+_SYMBOLIC_NODE_VALIDATORS: dict[str, Callable[[dict[str, object], int], None]] = {
+    "input": _validate_symbolic_leaf,
+    "literal": _validate_symbolic_literal,
+    "weights": _validate_symbolic_leaf,
+    **{
+        operation: _validate_symbolic_binary
+        for operation in (*_SYMBOLIC_BINARY, "matmul")
+    },
+    **{operation: _validate_symbolic_unary for operation in _SYMBOLIC_UNARY},
+}
+
+
 def _validated_symbolic_tree(value: object, *, depth: int = 0) -> dict[str, object]:
     if depth > _MAX_AST_DEPTH:
         raise ValueError("invalid symbolic_matrix expression: depth limit exceeded")
     if not isinstance(value, Mapping):
         raise ValueError("invalid symbolic_matrix expression: node must be a mapping")
     node = dict(value)
-    operation = node.get("op")
-    if operation in {"input", "weights"} and set(node) == {"op"}:
-        return node
-    if operation == "literal" and set(node) == {"op", "value"}:
-        literal = node["value"]
-        if type(literal) not in (bool, int, float) or (
-            type(literal) is float and not math.isfinite(literal)
-        ):
-            raise ValueError(
-                "invalid symbolic_matrix expression: literal must be finite"
-            )
-        return node
-    if operation in _SYMBOLIC_UNARY and set(node) == {"op", "value"}:
-        _validated_symbolic_tree(node["value"], depth=depth + 1)
-        return node
-    if operation in (*_SYMBOLIC_BINARY, "matmul") and set(node) == {
-        "left",
-        "op",
-        "right",
-    }:
-        _validated_symbolic_tree(node["left"], depth=depth + 1)
-        _validated_symbolic_tree(node["right"], depth=depth + 1)
-        return node
+    validator = _SYMBOLIC_NODE_VALIDATORS.get(node.get("op"))
+    if validator is None:
+        _raise_invalid_symbolic_node(node)
+    validator(node, depth)
+    return node
+
+
+def _raise_invalid_symbolic_names(field: str) -> Never:
     raise ValueError(
-        f"invalid symbolic_matrix expression: unsupported node {operation!r}"
+        f"invalid symbolic_matrix {field}: expected unique non-empty strings"
     )
+
+
+def _symbolic_name(value: object, field: str) -> str:
+    if type(value) is not str:
+        _raise_invalid_symbolic_names(field)
+    if not value:
+        _raise_invalid_symbolic_names(field)
+    return value
+
+
+def _symbolic_names(value: object, field: str) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        _raise_invalid_symbolic_names(field)
+    if not value:
+        _raise_invalid_symbolic_names(field)
+    names = tuple(_symbolic_name(name, field) for name in value)
+    if len(set(names)) != len(names):
+        _raise_invalid_symbolic_names(field)
+    return names
 
 
 def _symbolic_matrix_options(
@@ -880,27 +930,9 @@ def _symbolic_matrix_options(
         raise ValueError(
             "invalid symbolic_matrix options: expected columns, expression, and names"
         )
-    columns = options["columns"]
-    names = options["names"]
-    if (
-        not isinstance(columns, list)
-        or not columns
-        or any(type(name) is not str or not name for name in columns)
-        or len(set(columns)) != len(columns)
-    ):
-        raise ValueError(
-            "invalid symbolic_matrix columns: expected unique non-empty strings"
-        )
-    if (
-        not isinstance(names, list)
-        or not names
-        or any(type(name) is not str or not name for name in names)
-        or len(set(names)) != len(names)
-    ):
-        raise ValueError(
-            "invalid symbolic_matrix names: expected unique non-empty strings"
-        )
-    return tuple(columns), tuple(names), _validated_symbolic_tree(options["expression"])
+    columns = _symbolic_names(options["columns"], "columns")
+    names = _symbolic_names(options["names"], "names")
+    return columns, names, _validated_symbolic_tree(options["expression"])
 
 
 def _symbolic_matrix_inputs(

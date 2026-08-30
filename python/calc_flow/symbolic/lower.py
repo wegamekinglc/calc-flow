@@ -11,7 +11,7 @@ while a compiled plan executes.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Never
 
 from calc_flow.pipeline import (
     Runtime,
@@ -1013,24 +1013,42 @@ def _matrix_literal(node: Node, path: str, /) -> bool | int | float:
     )
 
 
-def _merge_matrix_expression(
+def _matrix_backend(
     left: _MatrixExpression,
     right: _MatrixExpression,
     path: str,
     /,
-) -> tuple[str, tuple[str, ...], Node | None]:
+) -> str:
     if left.backend and right.backend and left.backend != right.backend:
         errors.raise_compile(
             path,
             errors.CAPABILITY_MISMATCH,
             "symbolic matrix operands must use one provider backend",
         )
+    return left.backend or right.backend
+
+
+def _matrix_columns(
+    left: _MatrixExpression,
+    right: _MatrixExpression,
+    path: str,
+    /,
+) -> tuple[str, ...]:
     if left.columns and right.columns and left.columns != right.columns:
         errors.raise_compile(
             path,
             errors.SCHEMA_MISMATCH,
             "symbolic matrix operands must use one ordered column selection",
         )
+    return left.columns or right.columns
+
+
+def _matrix_parameter(
+    left: _MatrixExpression,
+    right: _MatrixExpression,
+    path: str,
+    /,
+) -> Node | None:
     if (
         left.parameter is not None
         and right.parameter is not None
@@ -1041,10 +1059,19 @@ def _merge_matrix_expression(
             errors.CAPABILITY_MISMATCH,
             "one symbolic matrix output supports exactly one static parameter",
         )
+    return left.parameter or right.parameter
+
+
+def _merge_matrix_expression(
+    left: _MatrixExpression,
+    right: _MatrixExpression,
+    path: str,
+    /,
+) -> tuple[str, tuple[str, ...], Node | None]:
     return (
-        left.backend or right.backend,
-        left.columns or right.columns,
-        left.parameter or right.parameter,
+        _matrix_backend(left, right, path),
+        _matrix_columns(left, right, path),
+        _matrix_parameter(left, right, path),
     )
 
 
@@ -1114,35 +1141,52 @@ def _static_array_declaration(node: Node, /) -> dict[str, object]:
     }
 
 
-def _lower_matrix_program(
+def _matrix_program_output(
     program: Program | _LoweringProgram,
-    mode: str,
-    allowed_lateness_micros: int,
-    late_policy: str,
     /,
-) -> dict[str, object] | None:
+) -> tuple[str, Node] | None:
     if len(program.outputs) != 1:
         return None
     output_name, value = program.outputs[0]
-    node = value._node
-    if node.op.name != "attach_columns":
+    if value._node.op.name != "attach_columns":
         return None
-    matrix = _matrix_expression(node.args[1], f"outputs.{output_name}.array")
+    return output_name, value._node
+
+
+def _required_matrix_expression(node: Node, output_name: str, /) -> _MatrixExpression:
+    path = f"outputs.{output_name}.array"
+    matrix = _matrix_expression(node.args[1], path)
     if not matrix.backend or not matrix.columns:
         errors.raise_compile(
-            f"outputs.{output_name}.array",
+            path,
             errors.UNRESOLVED_TYPE,
             "symbolic matrix output requires linalg.from_columns",
         )
-    parameter_name = (
-        "" if matrix.parameter is None else _cstr(matrix.parameter.attr("name"))
-    )
-    if parameter_name != "weights":
+    return matrix
+
+
+def _required_matrix_parameter(
+    matrix: _MatrixExpression,
+    output_name: str,
+    /,
+) -> Node:
+    parameter = matrix.parameter
+    if parameter is None:
         errors.raise_compile(
             f"outputs.{output_name}.array",
             errors.UNRESOLVED_TYPE,
             "symbolic matrix output requires one static array parameter",
         )
+    if _cstr(parameter.attr("name")) != "weights":
+        errors.raise_compile(
+            f"outputs.{output_name}.array",
+            errors.UNRESOLVED_TYPE,
+            "symbolic matrix output requires one static array parameter",
+        )
+    return parameter
+
+
+def _attached_matrix_input(node: Node, output_name: str, /) -> Node:
     attached_input = node.args[0]
     from_columns = next(
         (
@@ -1152,14 +1196,28 @@ def _lower_matrix_program(
         ),
         None,
     )
-    if from_columns is None or from_columns.args[0].digest != attached_input.digest:
+    if from_columns is None:
         errors.raise_compile(
             f"outputs.{output_name}.value",
             errors.LINEAGE_MISMATCH,
             "attached matrix columns must come from the attached table",
         )
-    names = _cstr_seq(node.attr("names"))
-    external = {
+    if from_columns.args[0].digest != attached_input.digest:
+        errors.raise_compile(
+            f"outputs.{output_name}.value",
+            errors.LINEAGE_MISMATCH,
+            "attached matrix columns must come from the attached table",
+        )
+    return attached_input
+
+
+def _matrix_external_node(
+    output_name: str,
+    node: Node,
+    matrix: _MatrixExpression,
+    /,
+) -> dict[str, object]:
+    return {
         "id": output_name,
         "input_ports": [
             {"kind": "table", "name": "input", "required": True},
@@ -1171,14 +1229,24 @@ def _lower_matrix_program(
             "options": {
                 "columns": list(matrix.columns),
                 "expression": matrix.tree,
-                "names": list(names),
+                "names": list(_cstr_seq(node.attr("names"))),
             },
             "provider": matrix.backend,
             "version": "1",
         },
         "output_ports": [{"kind": "table", "name": "output", "required": True}],
     }
-    upstream_id = f"{output_name}__cf_matrix_input"
+
+
+def _matrix_upstream_project(
+    program: Program | _LoweringProgram,
+    attached_input: Node,
+    upstream_id: str,
+    mode: str,
+    allowed_lateness_micros: int,
+    late_policy: str,
+    /,
+) -> dict[str, object]:
     upstream = _LoweringProgram(
         program.name,
         tuple(
@@ -1188,18 +1256,42 @@ def _lower_matrix_program(
         ),
         ((upstream_id, _LoweringValue(attached_input)),),
     )
-    project = _lower_program(
+    return _lower_program(
         upstream,
         mode,
         allowed_lateness_micros,
         late_policy,
     )
-    graph = project["graph"]
-    assert isinstance(graph, dict)
-    nodes = graph["nodes"]
-    edges = graph["edges"]
-    assert isinstance(nodes, list)
-    assert isinstance(edges, list)
+
+
+def _raise_matrix_invariant(message: str, /) -> Never:
+    raise RuntimeError(f"symbolic matrix lowering invariant violated: {message}")
+
+
+def _matrix_graph_lists(
+    project: dict[str, object],
+    /,
+) -> tuple[list[object], list[object]]:
+    graph = project.get("graph")
+    if not isinstance(graph, dict):
+        _raise_matrix_invariant("project.graph must be a mapping")
+    nodes = graph.get("nodes")
+    if not isinstance(nodes, list):
+        _raise_matrix_invariant("project.graph.nodes must be a list")
+    edges = graph.get("edges")
+    if not isinstance(edges, list):
+        _raise_matrix_invariant("project.graph.edges must be a list")
+    return nodes, edges
+
+
+def _wire_matrix_node(
+    project: dict[str, object],
+    external: dict[str, object],
+    upstream_id: str,
+    output_name: str,
+    /,
+) -> None:
+    nodes, edges = _matrix_graph_lists(project)
     nodes.append(external)
     edges.append(
         {
@@ -1209,9 +1301,35 @@ def _lower_matrix_program(
             "target_port": "input",
         }
     )
+
+
+def _lower_matrix_program(
+    program: Program | _LoweringProgram,
+    mode: str,
+    allowed_lateness_micros: int,
+    late_policy: str,
+    /,
+) -> dict[str, object] | None:
+    output = _matrix_program_output(program)
+    if output is None:
+        return None
+    output_name, node = output
+    matrix = _required_matrix_expression(node, output_name)
+    parameter = _required_matrix_parameter(matrix, output_name)
+    attached_input = _attached_matrix_input(node, output_name)
+    external = _matrix_external_node(output_name, node, matrix)
+    upstream_id = f"{output_name}__cf_matrix_input"
+    project = _matrix_upstream_project(
+        program,
+        attached_input,
+        upstream_id,
+        mode,
+        allowed_lateness_micros,
+        late_policy,
+    )
+    _wire_matrix_node(project, external, upstream_id, output_name)
     if mode == "stream":
-        assert matrix.parameter is not None
-        project["static_inputs"] = [_static_array_declaration(matrix.parameter)]
+        project["static_inputs"] = [_static_array_declaration(parameter)]
     else:
         project["data_sources"] = _data_sources(project)
     return project
