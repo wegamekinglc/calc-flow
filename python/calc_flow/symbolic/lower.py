@@ -1009,28 +1009,35 @@ def _plan_outputs(plan: _RollingPlan | _CrossSectionPlan, /) -> list[dict[str, o
     return plan.node["operator"]["spec"]["outputs"]  # type: ignore[index,return-value]
 
 
+def _required_state_plan[StatePlanT: (_RollingPlan, _CrossSectionPlan)](
+    plans: dict[str, StatePlanT | None], output_name: str, /
+) -> StatePlanT:
+    plan = plans[output_name]
+    if plan is None:
+        raise RuntimeError(f"missing shared-state plan for output {output_name!r}")
+    return plan
+
+
 def _merge_state_outputs[StatePlanT: (_RollingPlan, _CrossSectionPlan)](
     members: list[str],
     plans: dict[str, StatePlanT | None],
     prefix: str,
     /,
 ) -> tuple[StatePlanT, dict[str, str], list[dict[str, object]], tuple[Field, ...]]:
-    first = plans[members[0]]
-    assert first is not None
+    first = _required_state_plan(plans, members[0])
     base_count = len(first.output_fields) - len(first.replacements)
     base_fields = first.output_fields[:base_count]
     reserved = {
         field.name
         for output_name in members
-        for field in plans[output_name].output_fields  # type: ignore[union-attr]
+        for field in _required_state_plan(plans, output_name).output_fields
     }
     replacements: dict[str, str] = {}
     declarations: list[dict[str, object]] = []
     derived_fields: list[Field] = []
     counter = 0
     for output_name in members:
-        plan = plans[output_name]
-        assert plan is not None
+        plan = _required_state_plan(plans, output_name)
         declarations_by_name = {item["output"]: item for item in _plan_outputs(plan)}
         fields_by_name = {field.name: field for field in plan.output_fields}
         for digest, old_name in plan.replacements:
@@ -1083,6 +1090,49 @@ def _unique_shared_node_id(stem: str, reserved: set[str], /) -> str:
     return candidate
 
 
+def _reserved_state_node_ids[StatePlanT: (_RollingPlan, _CrossSectionPlan)](
+    segments: list[tuple[str, _Segment]],
+    plans: dict[str, StatePlanT | None],
+    /,
+) -> set[str]:
+    reserved = {output_name for output_name, _ in segments}
+    reserved.update(_cstr(segment.input_node.attr("name")) for _, segment in segments)
+    reserved.update(plan.node_id for plan in plans.values() if plan is not None)
+    return reserved
+
+
+def _shared_group_plans[StatePlanT: (_RollingPlan, _CrossSectionPlan)](
+    members: list[str],
+    by_name: dict[str, _Segment],
+    first: StatePlanT,
+    replacements: dict[str, str],
+    node_id: str,
+    node: dict[str, object],
+    output_fields: tuple[Field, ...],
+    /,
+) -> dict[str, StatePlanT]:
+    shared: dict[str, StatePlanT] = {}
+    for output_name in members:
+        segment = by_name[output_name]
+        post_predicate = segment.post_predicate
+        if post_predicate is not None:
+            post_predicate = _replace_rolling(post_predicate, replacements)
+        shared[output_name] = replace(
+            first,
+            node_id=node_id,
+            node=node,
+            env=tuple(
+                (name, _replace_rolling(tree, replacements))
+                for name, tree in segment.env
+            ),
+            post_predicate=post_predicate,
+            input_field_names=tuple(field.name for field in output_fields),
+            output_fields=output_fields,
+            replacements=tuple(replacements.items()),
+        )
+    return shared
+
+
 def _share_state_groups[StatePlanT: (_RollingPlan, _CrossSectionPlan)](
     groups: list[list[str]],
     segments: list[tuple[str, _Segment]],
@@ -1093,11 +1143,7 @@ def _share_state_groups[StatePlanT: (_RollingPlan, _CrossSectionPlan)](
 ) -> dict[str, StatePlanT | None]:
     shared = dict(plans)
     by_name = dict(segments)
-    reserved_ids = {
-        *(output_name for output_name, _ in segments),
-        *(_cstr(segment.input_node.attr("name")) for _, segment in segments),
-        *(plan.node_id for plan in plans.values() if plan is not None),
-    }
+    reserved_ids = _reserved_state_node_ids(segments, plans)
     for members in groups:
         if len(members) < 2:
             continue
@@ -1108,25 +1154,17 @@ def _share_state_groups[StatePlanT: (_RollingPlan, _CrossSectionPlan)](
             f"{members[0]}__cf_shared_{suffix}", reserved_ids
         )
         node = _shared_state_node(first, node_id, declarations, output_fields)
-        for output_name in members:
-            segment = by_name[output_name]
-            shared[output_name] = replace(
+        shared.update(
+            _shared_group_plans(
+                members,
+                by_name,
                 first,
-                node_id=node_id,
-                node=node,
-                env=tuple(
-                    (name, _replace_rolling(tree, replacements))
-                    for name, tree in segment.env
-                ),
-                post_predicate=(
-                    None
-                    if segment.post_predicate is None
-                    else _replace_rolling(segment.post_predicate, replacements)
-                ),
-                input_field_names=tuple(field.name for field in output_fields),
-                output_fields=output_fields,
-                replacements=tuple(replacements.items()),
+                replacements,
+                node_id,
+                node,
+                output_fields,
             )
+        )
     return shared
 
 
@@ -1617,6 +1655,15 @@ def _lower_matrix_program(
     return project
 
 
+def _required_segment_state_plan(
+    rolling: _RollingPlan | None, cross: _CrossSectionPlan | None, /
+) -> _RollingPlan | _CrossSectionPlan:
+    plan = rolling if rolling is not None else cross
+    if plan is None:
+        raise RuntimeError("missing state plan for a stateful symbolic segment")
+    return plan
+
+
 def _walk_nodes(root: Node, /) -> tuple[Node, ...]:
     nodes: list[Node] = []
 
@@ -1627,6 +1674,67 @@ def _walk_nodes(root: Node, /) -> tuple[Node, ...]:
 
     visit(root)
     return tuple(nodes)
+
+
+def _deduplicated_expression_signature(
+    node: dict[str, object],
+    incoming: dict[str, list[dict[str, object]]],
+    aliases: dict[str, str],
+    output_ids: frozenset[str],
+    /,
+) -> str | None:
+    node_id = str(node["id"])
+    operator = node["operator"]
+    if not isinstance(operator, dict):
+        return None
+    if operator.get("kind") != "expression" or node_id in output_ids:
+        return None
+    node_incoming = incoming.get(node_id, [])
+    if len(node_incoming) != 1:
+        return None
+    edge = node_incoming[0]
+    source_node = str(edge["source_node"])
+    source = aliases.get(source_node, source_node)
+    return _canonical(
+        {
+            "input_ports": node.get("input_ports", []),
+            "operator": operator,
+            "output_ports": node.get("output_ports", []),
+            "source_node": source,
+            "source_port": edge.get("source_port", "output"),
+            "target_port": edge.get("target_port", "input"),
+        }
+    )
+
+
+def _resolve_node_alias(node_id: str, aliases: dict[str, str], /) -> str:
+    while node_id in aliases:
+        node_id = aliases[node_id]
+    return node_id
+
+
+def _rewrite_deduplicated_edges(
+    edges: list[dict[str, object]], aliases: dict[str, str], /
+) -> list[dict[str, object]]:
+    rewritten: list[dict[str, object]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for edge in edges:
+        target = str(edge["target_node"])
+        if target in aliases:
+            continue
+        source = _resolve_node_alias(str(edge["source_node"]), aliases)
+        normalized = {**edge, "source_node": source, "target_node": target}
+        identity = (
+            source,
+            str(normalized.get("source_port", "output")),
+            target,
+            str(normalized.get("target_port", "input")),
+        )
+        if identity in seen:
+            continue
+        seen.add(identity)
+        rewritten.append(normalized)
+    return rewritten
 
 
 def _deduplicate_pure_expression_nodes(
@@ -1645,62 +1753,19 @@ def _deduplicate_pure_expression_nodes(
     kept: list[dict[str, object]] = []
     for node in nodes:
         node_id = str(node["id"])
-        operator = node["operator"]
-        node_incoming = incoming.get(node_id, [])
-        if (
-            not isinstance(operator, dict)
-            or operator.get("kind") != "expression"
-            or node_id in output_ids
-            or len(node_incoming) != 1
-        ):
+        signature = _deduplicated_expression_signature(
+            node, incoming, aliases, output_ids
+        )
+        if signature is None:
             kept.append(node)
             continue
-        edge = node_incoming[0]
-        source = aliases.get(str(edge["source_node"]), str(edge["source_node"]))
-        signature = _canonical(
-            {
-                "input_ports": node.get("input_ports", []),
-                "operator": operator,
-                "output_ports": node.get("output_ports", []),
-                "source_node": source,
-                "source_port": edge.get("source_port", "output"),
-                "target_port": edge.get("target_port", "input"),
-            }
-        )
         canonical = signatures.get(signature)
         if canonical is None:
             signatures[signature] = node_id
             kept.append(node)
         else:
             aliases[node_id] = canonical
-
-    def resolve(node_id: str) -> str:
-        while node_id in aliases:
-            node_id = aliases[node_id]
-        return node_id
-
-    rewritten: list[dict[str, object]] = []
-    seen_edges: set[tuple[str, str, str, str]] = set()
-    for edge in edges:
-        target = str(edge["target_node"])
-        if target in aliases:
-            continue
-        source = resolve(str(edge["source_node"]))
-        normalized = {
-            **edge,
-            "source_node": source,
-            "target_node": target,
-        }
-        identity = (
-            source,
-            str(normalized.get("source_port", "output")),
-            target,
-            str(normalized.get("target_port", "input")),
-        )
-        if identity not in seen_edges:
-            seen_edges.add(identity)
-            rewritten.append(normalized)
-    return kept, rewritten
+    return kept, _rewrite_deduplicated_edges(edges, aliases)
 
 
 def _deduplicate_node_ids(
@@ -1876,8 +1941,7 @@ def _lower_program(
         upstream_id: str | None = None
         final_predicate = segment.predicate
         if (rolling is not None or cross is not None) and segment.predicate is not None:
-            state_plan = rolling if rolling is not None else cross
-            assert state_plan is not None
+            state_plan = _required_segment_state_plan(rolling, cross)
             prefilter_id = (
                 f"{state_plan.node_id}__prefilter"
                 if shared_plan_counts[state_plan.node_id] > 1
@@ -2244,6 +2308,53 @@ def lower_program_document(
     return _lower_program(program, mode_value, allowed_lateness_micros, late_policy)
 
 
+def _cache_graph_nodes(document: dict[str, object], /) -> list[dict[str, object]]:
+    graph = document["graph"]
+    return graph["nodes"]  # type: ignore[index,return-value]
+
+
+def _cache_operator_versions(
+    nodes: list[dict[str, object]], capabilities: RuntimeCapabilities, /
+) -> tuple[tuple[str, str], ...]:
+    operator_kinds = {
+        node["operator"]["kind"]  # type: ignore[index]
+        for node in nodes
+        if node["operator"]["kind"] != "external"  # type: ignore[index]
+    }
+    return tuple(
+        sorted(
+            (operator.kind, operator.version)
+            for operator in capabilities.operators
+            if operator.kind in operator_kinds
+        )
+    )
+
+
+def _cache_provider_versions(
+    nodes: list[dict[str, object]], /
+) -> tuple[tuple[str, str, str], ...]:
+    versions: set[tuple[str, str, str]] = set()
+    for node in nodes:
+        operator = node["operator"]
+        if operator["kind"] == "external":  # type: ignore[index]
+            versions.add(  # type: ignore[arg-type]
+                (operator["provider"], operator["name"], operator["version"])  # type: ignore[index]
+            )
+    return tuple(sorted(versions))
+
+
+def _cache_udf_versions(
+    nodes: list[dict[str, object]], /
+) -> tuple[tuple[str, str, str], ...]:
+    versions: set[tuple[str, str, str]] = set()
+    for node in nodes:
+        operator = node["operator"]
+        for udf in operator.get("udfs", ()):  # type: ignore[union-attr]
+            if isinstance(udf, dict):
+                versions.add((udf["provider"], udf["name"], udf["version"]))  # type: ignore[arg-type]
+    return tuple(sorted(versions))
+
+
 def _compile_cache_key(
     program: Program,
     mode: str,
@@ -2253,43 +2364,7 @@ def _compile_cache_key(
     late_policy: str,
     /,
 ) -> _CompileCacheKey:
-    graph = document["graph"]
-    nodes = graph["nodes"]  # type: ignore[index]
-    operator_kinds = {
-        node["operator"]["kind"]  # type: ignore[index]
-        for node in nodes
-        if node["operator"]["kind"] != "external"  # type: ignore[index]
-    }
-    operator_versions = tuple(
-        sorted(
-            (operator.kind, operator.version)
-            for operator in capabilities.operators
-            if operator.kind in operator_kinds
-        )
-    )
-    provider_versions = tuple(
-        sorted(
-            {
-                (
-                    node["operator"]["provider"],  # type: ignore[index]
-                    node["operator"]["name"],  # type: ignore[index]
-                    node["operator"]["version"],  # type: ignore[index]
-                )
-                for node in nodes
-                if node["operator"]["kind"] == "external"  # type: ignore[index]
-            }
-        )
-    )
-    udf_versions = tuple(
-        sorted(
-            {
-                (udf["provider"], udf["name"], udf["version"])
-                for node in nodes
-                for udf in node["operator"].get("udfs", ())  # type: ignore[index]
-                if isinstance(udf, dict)
-            }
-        )
-    )
+    nodes = _cache_graph_nodes(document)
     return _CompileCacheKey(
         program_fingerprint=program.fingerprint,
         mode=mode,
@@ -2299,9 +2374,9 @@ def _compile_cache_key(
         capability_schema_version=capabilities.schema_version,
         capability_session_id=capabilities.scope.session_id,
         capability_revision=capabilities.scope.revision,
-        operator_versions=operator_versions,
-        provider_versions=provider_versions,
-        udf_versions=udf_versions,
+        operator_versions=_cache_operator_versions(nodes, capabilities),
+        provider_versions=_cache_provider_versions(nodes),
+        udf_versions=_cache_udf_versions(nodes),
         allowed_lateness_micros=allowed_lateness_micros,
         late_policy=late_policy,
     )

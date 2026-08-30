@@ -9,6 +9,7 @@ deterministic functions of the declaration.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from calc_flow.symbolic.nodes import CStr, Node, build
@@ -188,25 +189,28 @@ def _document_nodes(document: dict[str, object], /) -> list[dict[str, object]]:
     return nodes if isinstance(nodes, list) else []  # type: ignore[return-value]
 
 
-def _state_layout(node: dict[str, object], /) -> str:
+def _input_schema_fields(node: dict[str, object], /) -> list[dict[str, object]]:
     input_ports = node.get("input_ports")
-    schema = (
-        input_ports[0].get("schema")
-        if isinstance(input_ports, list)
-        and input_ports
-        and isinstance(input_ports[0], dict)
-        else None
-    )
-    fields = schema if isinstance(schema, list) else []
+    if not isinstance(input_ports, list):
+        return []
+    if not input_ports:
+        return []
+    first = input_ports[0]
+    if not isinstance(first, dict):
+        return []
+    schema = first.get("schema")
+    if not isinstance(schema, list):
+        return []
+    return [field for field in schema if isinstance(field, dict)]
+
+
+def _state_layout(node: dict[str, object], /) -> str:
+    fields = _input_schema_fields(node)
     fixed_bytes = sum(
-        _FIXED_TYPE_BYTES.get(field.get("data_type"), 0)
-        for field in fields
-        if isinstance(field, dict)
+        _FIXED_TYPE_BYTES.get(field.get("data_type"), 0) for field in fields
     )
     variable_columns = sum(
-        field.get("data_type") not in _FIXED_TYPE_BYTES
-        for field in fields
-        if isinstance(field, dict)
+        field.get("data_type") not in _FIXED_TYPE_BYTES for field in fields
     )
     layout = (
         f"retained_columns={len(fields)} fixed_bytes_per_row={fixed_bytes}"
@@ -215,22 +219,37 @@ def _state_layout(node: dict[str, object], /) -> str:
     return layout
 
 
+def _frame_bounds(frame: object, /) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    if not isinstance(frame, dict):
+        return (), ()
+    kind = frame.get("kind")
+    if kind == "rows":
+        size = frame.get("size")
+        return ((size,) if isinstance(size, int) else ()), ()
+    if kind == "duration":
+        micros = frame.get("micros")
+        return (), ((micros,) if isinstance(micros, int) else ())
+    return (), ()
+
+
+def _rolling_output_bounds(
+    output: object, /
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    if not isinstance(output, dict):
+        return (), ()
+    periods = output.get("periods")
+    row_bounds = (periods + 1,) if isinstance(periods, int) else ()
+    frame_rows, duration_bounds = _frame_bounds(output.get("frame"))
+    return (*row_bounds, *frame_rows), duration_bounds
+
+
 def _rolling_boundary(outputs: list[object], /) -> str:
     row_bounds: list[int] = []
     duration_bounds: list[int] = []
     for output in outputs:
-        if not isinstance(output, dict):
-            continue
-        periods = output.get("periods")
-        if isinstance(periods, int):
-            row_bounds.append(periods + 1)
-        frame = output.get("frame")
-        if not isinstance(frame, dict):
-            continue
-        if frame.get("kind") == "rows" and isinstance(frame.get("size"), int):
-            row_bounds.append(frame["size"])
-        if frame.get("kind") == "duration" and isinstance(frame.get("micros"), int):
-            duration_bounds.append(frame["micros"])
+        output_rows, output_durations = _rolling_output_bounds(output)
+        row_bounds.extend(output_rows)
+        duration_bounds.extend(output_durations)
     bounds = []
     if row_bounds:
         bounds.append(f"rows={max(row_bounds)}")
@@ -262,23 +281,33 @@ def _state_cost(node: dict[str, object], /) -> str | None:
     return None
 
 
+def _static_array_weight(declaration: object, /) -> tuple[bool, int | None]:
+    if not isinstance(declaration, dict):
+        return False, None
+    if declaration.get("kind") != "array":
+        return False, None
+    shape = declaration.get("shape")
+    width = _FIXED_TYPE_BYTES.get(declaration.get("dtype"))
+    if not isinstance(shape, list):
+        return False, None
+    if width is None:
+        return False, None
+    elements = 1
+    for dimension in shape:
+        if not isinstance(dimension, int):
+            return True, None
+        elements *= dimension
+    return True, elements * width
+
+
 def _static_weight_bytes(document: dict[str, object], /) -> int | None:
     static_inputs = document.get("static_inputs")
     if not isinstance(static_inputs, list):
         return None
     for declaration in static_inputs:
-        if not isinstance(declaration, dict) or declaration.get("kind") != "array":
-            continue
-        shape = declaration.get("shape")
-        width = _FIXED_TYPE_BYTES.get(declaration.get("dtype"))
-        if not isinstance(shape, list) or width is None:
-            continue
-        elements = 1
-        for dimension in shape:
-            if not isinstance(dimension, int):
-                return None
-            elements *= dimension
-        return elements * width
+        found, weight = _static_array_weight(declaration)
+        if found:
+            return weight
     return None
 
 
@@ -331,6 +360,19 @@ def _state_output_count(items: list[dict[str, object]], /) -> int:
     return count
 
 
+def _cost_lines(
+    nodes: list[dict[str, object]],
+    renderer: Callable[[dict[str, object]], str | None],
+    /,
+) -> tuple[str, ...]:
+    lines: list[str] = []
+    for node in nodes:
+        line = renderer(node)
+        if line is not None:
+            lines.append(line)
+    return tuple(lines)
+
+
 def explain_optimization(document: dict[str, object], /) -> tuple[str, ...]:
     """Render deterministic physical sharing and bounded cost facts."""
 
@@ -351,16 +393,10 @@ def explain_optimization(document: dict[str, object], /) -> tuple[str, ...]:
         f" {len(external)}",
         "  costs",
     )
-    state = tuple(cost for node in nodes if (cost := _state_cost(node)) is not None)
+    state = _cost_lines(nodes, _state_cost)
     static_weight_bytes = _static_weight_bytes(document)
-    copies = tuple(
-        cost
-        for node in nodes
-        if (cost := _copy_cost(node, static_weight_bytes)) is not None
-    )
-    providers = tuple(
-        cost for node in nodes if (cost := _provider_cost(node)) is not None
-    )
+    copies = _cost_lines(nodes, lambda node: _copy_cost(node, static_weight_bytes))
+    providers = _cost_lines(nodes, _provider_cost)
     return (
         *lines,
         *(state or ("    state none",)),
