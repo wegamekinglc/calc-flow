@@ -1118,7 +1118,23 @@ class _Analyzer:
     ) -> str | None:
         """Report dtype, backend, and row-lineage incompatibilities."""
 
-        dtype = self._safe_array_dtype(left.dtype, right.dtype, role)
+        dtype = self._safe_array_dtype(
+            left.backend or right.backend,
+            left.dtype,
+            right.dtype,
+            role,
+        )
+        self._array_pair_aspects(left, right, role, lineage_message)
+        return dtype
+
+    def _array_pair_aspects(
+        self,
+        left: ArrayFacts,
+        right: ArrayFacts,
+        role: str,
+        lineage_message: str,
+        /,
+    ) -> None:
         self._aspect_mismatch(
             left.backend,
             right.backend,
@@ -1131,10 +1147,10 @@ class _Analyzer:
             and left.lineage != right.lineage
         ):
             self.issue(f"{role}.right.lineage", "schema_mismatch", lineage_message)
-        return dtype
 
     def _safe_array_dtype(
         self,
+        backend: str | None,
         left: str | None,
         right: str | None,
         role: str,
@@ -1142,10 +1158,17 @@ class _Analyzer:
     ) -> str | None:
         if left is None:
             return right
-        if right is None or left == right:
+        if right is None:
             return left
-        if {left, right} == {"float32", "float64"}:
-            return "float64"
+        if backend is not None:
+            from calc_flow.array import _symbolic_result_dtype
+
+            try:
+                return _symbolic_result_dtype(backend, "matmul", left, right)
+            except (KeyError, TypeError, ValueError):
+                pass
+        elif left == right:
+            return left
         self.issue(
             f"{role}.right.dtype",
             "unsupported_type",
@@ -1197,9 +1220,20 @@ class _Analyzer:
                 f"matmul requires rank-2 operands; got rank {rank}",
             )
             return ArrayFacts(None, None, (), None, states)
+        domains_valid = self._array_numeric_domain(
+            left.dtype,
+            f"{role}.left",
+            "matmul",
+        ) and self._array_numeric_domain(
+            right.dtype,
+            f"{role}.right",
+            "matmul",
+        )
         dtype = self._array_pair_compat(
             left, right, role, "matmul operands carry different row-axis lineages"
         )
+        if not domains_valid:
+            dtype = None
         output_dims = self._matmul_inner_dims(left, right, role)
         shape = () if output_dims is None else output_dims
         return ArrayFacts(
@@ -1215,28 +1249,153 @@ class _Analyzer:
             return _array_literal_facts(node)
         return self.array(node, operand_path)
 
+    def _array_numeric_domain(
+        self,
+        data_type: str | None,
+        operand_path: str,
+        primitive: str,
+        /,
+    ) -> bool:
+        if data_type is None or data_type in _NUMERIC_TYPES:
+            return True
+        self.issue(
+            f"{operand_path}.dtype",
+            "unsupported_type",
+            f"{primitive} is only defined for numeric arrays",
+        )
+        return False
+
+    def _array_boolean_domain(
+        self,
+        data_type: str | None,
+        operand_path: str,
+        primitive: str,
+        /,
+    ) -> bool:
+        if data_type is None or data_type == "bool":
+            return True
+        self.issue(
+            f"{operand_path}.dtype",
+            "unsupported_type",
+            f"{primitive} is only defined for boolean arrays",
+        )
+        return False
+
+    @staticmethod
+    def _array_dtype_operand(
+        node: Node,
+        facts: ArrayFacts,
+        /,
+    ) -> str | bool | int | float | None:
+        if node.op.name != "literal":
+            return facts.dtype
+        value = node.attr("value")
+        if isinstance(value, (CBool, CInt, CFloat)):
+            return value.value
+        return None
+
+    def _array_binary_domain(
+        self,
+        primitive: str,
+        left: ArrayFacts,
+        right: ArrayFacts,
+        role: str,
+        /,
+    ) -> bool:
+        if primitive in _BOOLEANS:
+            left_valid = self._array_boolean_domain(
+                left.dtype,
+                f"{role}.left",
+                primitive,
+            )
+            right_valid = self._array_boolean_domain(
+                right.dtype,
+                f"{role}.right",
+                primitive,
+            )
+            return left_valid and right_valid
+        if primitive in _ARITHMETIC or primitive in {"lt", "le", "gt", "ge"}:
+            left_valid = self._array_numeric_domain(
+                left.dtype,
+                f"{role}.left",
+                primitive,
+            )
+            right_valid = self._array_numeric_domain(
+                right.dtype,
+                f"{role}.right",
+                primitive,
+            )
+            return left_valid and right_valid
+        return True
+
     def _elementwise(self, node: Node, path: str, /) -> ArrayFacts:
         role = f"{path}.{node.op.name}"
         primitive = node.op.name
         left = self._array_operand(node.args[0], f"{role}.left")
         if len(node.args) == 1:
-            dtype = "bool" if primitive == "not" else left.dtype
+            if primitive == "not":
+                domain_valid = self._array_boolean_domain(
+                    left.dtype,
+                    f"{role}.value",
+                    primitive,
+                )
+            else:
+                domain_valid = self._array_numeric_domain(
+                    left.dtype,
+                    f"{role}.value",
+                    primitive,
+                )
+            dtype: str | None = None
+            operand = self._array_dtype_operand(node.args[0], left)
+            if domain_valid and left.backend is not None and operand is not None:
+                from calc_flow.array import _symbolic_result_dtype
+
+                try:
+                    dtype = _symbolic_result_dtype(left.backend, primitive, operand)
+                except (KeyError, TypeError, ValueError):
+                    self.issue(
+                        f"{role}.value.dtype",
+                        "unsupported_type",
+                        f"the {left.backend!r} provider cannot prove {primitive} dtype",
+                    )
             return ArrayFacts(left.backend, dtype, left.shape, left.lineage, left.state)
         right = self._array_operand(node.args[1], f"{role}.right")
-        pair_dtype = self._array_pair_compat(
+        self._array_pair_aspects(
             left,
             right,
             role,
             "array operands carry different row-axis lineages",
         )
+        domain_valid = self._array_binary_domain(primitive, left, right, role)
         shape = _broadcast_shapes(left.shape, right.shape, role, self)
-        dtype: str | None = (
-            "bool"
-            if primitive in _COMPARISONS or primitive in _BOOLEANS
-            else pair_dtype
-        )
+        backend = left.backend or right.backend
+        dtype: str | None = None
+        left_operand = self._array_dtype_operand(node.args[0], left)
+        right_operand = self._array_dtype_operand(node.args[1], right)
+        if (
+            domain_valid
+            and backend is not None
+            and left_operand is not None
+            and right_operand is not None
+        ):
+            from calc_flow.array import _symbolic_result_dtype
+
+            try:
+                dtype = _symbolic_result_dtype(
+                    backend,
+                    primitive,
+                    left_operand,
+                    right_operand,
+                )
+            except (KeyError, TypeError, ValueError):
+                self.issue(
+                    f"{role}.right.dtype",
+                    "unsupported_type",
+                    "the selected provider cannot prove a safe result dtype for"
+                    f" {left.dtype!r} and {right.dtype!r}",
+                )
         return ArrayFacts(
-            left.backend,
+            backend,
             dtype,
             shape,
             left.lineage if left.lineage is not None else right.lineage,

@@ -189,18 +189,74 @@ enum LatchedArrayValues {
 }
 
 /// Engine-owned scalar values copied from one latched static array.
-#[doc(hidden)]
-#[derive(Clone, Debug)]
+///
+/// This enum is intentionally non-cloneable, non-debuggable, and open to
+/// future value families. External consumers must keep a wildcard arm:
+///
+/// ```compile_fail
+/// use calc_flow::StaticArrayValues;
+///
+/// fn exhaustive(values: &StaticArrayValues) {
+///     match values {
+///         StaticArrayValues::Bool(_) => {}
+///         StaticArrayValues::Int(_) => {}
+///         StaticArrayValues::Uint(_) => {}
+///         StaticArrayValues::Float(_) => {}
+///     }
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use calc_flow::StaticArrayValues;
+///
+/// let values = StaticArrayValues::Bool(vec![true]);
+/// let _copy = values.clone();
+/// ```
+///
+/// ```compile_fail
+/// use calc_flow::StaticArrayValues;
+///
+/// let values = StaticArrayValues::Bool(vec![true]);
+/// let _rendered = format!("{values:?}");
+/// ```
+#[non_exhaustive]
 pub enum StaticArrayValues {
+    /// Logical boolean values in compact non-null C order.
     Bool(Vec<bool>),
+    /// Logical signed-integer values carried at `i64` width.
     Int(Vec<i64>),
+    /// Logical unsigned-integer values carried at `u64` width.
     Uint(Vec<u64>),
+    /// Logical `float32` or `float64` values carried at `f64` width.
     Float(Vec<f64>),
 }
 
 /// Host-neutral snapshot used to place a latched static array into a provider.
-#[doc(hidden)]
-#[derive(Clone, Debug)]
+///
+/// Snapshot fields stay private and accessors are read-only:
+///
+/// ```compile_fail
+/// use calc_flow::{StaticArraySnapshot, StaticArrayValues};
+///
+/// let _snapshot = StaticArraySnapshot {
+///     backend: "numpy".into(),
+///     dtype: "float32".into(),
+///     shape: vec![1],
+///     nulls: None,
+///     values: StaticArrayValues::Float(vec![1.0]),
+/// };
+/// ```
+///
+/// ```compile_fail
+/// use calc_flow::Batch;
+///
+/// let batch = Batch::static_array_float("numpy", "float32", vec![1], None, vec![1.0])?;
+/// let snapshot = batch.static_array_snapshot().expect("latched array");
+/// snapshot.shape()[0] = 2;
+/// # Ok::<(), calc_flow::CalcFlowError>(())
+/// ```
+#[must_use = "the owned snapshot contains a complete static-array value copy"]
+#[non_exhaustive]
 pub struct StaticArraySnapshot {
     backend: String,
     dtype: String,
@@ -210,23 +266,36 @@ pub struct StaticArraySnapshot {
 }
 
 impl StaticArraySnapshot {
+    /// Returns the declared Array API provider backend.
+    #[must_use]
     pub fn backend(&self) -> &str {
         &self.backend
     }
 
+    /// Returns the exact declared dtype spelling.
+    #[must_use]
     pub fn dtype(&self) -> &str {
         &self.dtype
     }
 
+    /// Returns the logical array dimensions in C order.
+    #[must_use]
     pub fn shape(&self) -> &[u64] {
         &self.shape
     }
 
+    /// Returns the optional logical C-order null bitmap.
+    ///
+    /// `None` means no bitmap was supplied. `Some` preserves all positions,
+    /// including an all-false or zero-element bitmap.
+    #[must_use]
     pub fn nulls(&self) -> Option<&[bool]> {
         self.nulls.as_deref()
     }
 
-    pub const fn values(&self) -> &StaticArrayValues {
+    /// Returns compact non-null scalar carriers in logical C order.
+    #[must_use]
+    pub fn values(&self) -> &StaticArrayValues {
         &self.values
     }
 }
@@ -739,8 +808,44 @@ impl Batch {
             .downcast_ref::<LatchedArrayPayload>()
     }
 
-    /// Returns a host-neutral copy of an engine-latched static array.
-    #[doc(hidden)]
+    /// Copies an engine-latched static array into an owned host-neutral snapshot.
+    ///
+    /// The returned descriptor, bitmap, and scalar carriers are detached from
+    /// both this batch and caller-mutable host memory. The snapshot therefore
+    /// remains readable after the batch is dropped. Compact values omit null
+    /// positions while [`StaticArraySnapshot::nulls`] preserves the complete
+    /// logical bitmap. Tables and general external array payloads return
+    /// `None`.
+    ///
+    /// Each successful call allocates and copies `O(rank + bitmap length +
+    /// non-null value count)` storage plus descriptor strings. Python static
+    /// placement creates this snapshot once inside its blocking worker; the
+    /// engine latch, snapshot, Python host list, `NumPy` storage, and a provider
+    /// result may coexist transiently. The `static_placement_bytes` metric is
+    /// the logical provider-transfer count, not this peak memory use.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use calc_flow::{Batch, StaticArrayValues};
+    ///
+    /// let weights = Batch::static_array_float(
+    ///     "numpy",
+    ///     "float32",
+    ///     vec![2, 1],
+    ///     None,
+    ///     vec![0.25, 0.75],
+    /// )?;
+    /// let snapshot = weights.static_array_snapshot().expect("latched array");
+    /// assert_eq!(snapshot.backend(), "numpy");
+    /// assert_eq!(snapshot.dtype(), "float32");
+    /// assert_eq!(snapshot.shape(), &[2, 1]);
+    /// match snapshot.values() {
+    ///     StaticArrayValues::Float(values) => assert_eq!(values, &[0.25, 0.75]),
+    ///     _ => return Err("unsupported static-array value family".into()),
+    /// }
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     #[must_use]
     pub fn static_array_snapshot(&self) -> Option<StaticArraySnapshot> {
         let payload = self.latched_array_payload()?;
@@ -965,5 +1070,134 @@ mod tests {
             assert_eq!(batch.external_payload().unwrap().backend(), "numpy");
             assert_eq!(batch.estimated_bytes().unwrap(), expected_bytes);
         }
+    }
+
+    #[test]
+    fn static_array_snapshots_preserve_every_current_carrier_family_and_width() {
+        let signed = [
+            ("int8", i64::from(i8::MIN)),
+            ("int16", i64::from(i16::MIN)),
+            ("int32", i64::from(i32::MIN)),
+            ("int64", i64::MIN),
+        ];
+        for (dtype, value) in signed {
+            let snapshot = Batch::static_array_int("numpy", dtype, vec![1], None, vec![value])
+                .unwrap()
+                .static_array_snapshot()
+                .unwrap();
+            assert_eq!(snapshot.dtype(), dtype);
+            assert!(
+                matches!(snapshot.values(), StaticArrayValues::Int(values) if values == &[value])
+            );
+        }
+
+        let unsigned = [
+            ("uint8", u64::from(u8::MAX)),
+            ("uint16", u64::from(u16::MAX)),
+            ("uint32", u64::from(u32::MAX)),
+            ("uint64", u64::MAX),
+        ];
+        for (dtype, value) in unsigned {
+            let snapshot = Batch::static_array_uint("jax", dtype, vec![1], None, vec![value])
+                .unwrap()
+                .static_array_snapshot()
+                .unwrap();
+            assert_eq!(snapshot.backend(), "jax");
+            assert_eq!(snapshot.dtype(), dtype);
+            assert!(
+                matches!(snapshot.values(), StaticArrayValues::Uint(values) if values == &[value])
+            );
+        }
+
+        for dtype in ["float32", "float64"] {
+            let snapshot = Batch::static_array_float("numpy", dtype, vec![1], None, vec![1.25])
+                .unwrap()
+                .static_array_snapshot()
+                .unwrap();
+            assert_eq!(snapshot.dtype(), dtype);
+            assert!(
+                matches!(snapshot.values(), StaticArrayValues::Float(values) if values == &[1.25])
+            );
+        }
+
+        let boolean = Batch::static_array_bool("numpy", vec![1], None, vec![true])
+            .unwrap()
+            .static_array_snapshot()
+            .unwrap();
+        assert!(matches!(boolean.values(), StaticArrayValues::Bool(values) if values == &[true]));
+    }
+
+    #[test]
+    fn static_array_snapshots_preserve_empty_and_compact_null_semantics() {
+        let empty =
+            Batch::static_array_float("numpy", "float32", vec![0], Some(Vec::new()), Vec::new())
+                .unwrap()
+                .static_array_snapshot()
+                .unwrap();
+        assert_eq!(empty.shape(), &[0]);
+        assert_eq!(empty.nulls(), Some([].as_slice()));
+        assert!(matches!(empty.values(), StaticArrayValues::Float(values) if values.is_empty()));
+
+        let all_false = Batch::static_array_bool(
+            "numpy",
+            vec![2],
+            Some(vec![false, false]),
+            vec![true, false],
+        )
+        .unwrap()
+        .static_array_snapshot()
+        .unwrap();
+        assert_eq!(all_false.nulls(), Some([false, false].as_slice()));
+
+        let compact = Batch::static_array_int(
+            "numpy",
+            "int64",
+            vec![4],
+            Some(vec![false, true, false, true]),
+            vec![11, 33],
+        )
+        .unwrap()
+        .static_array_snapshot()
+        .unwrap();
+        assert_eq!(compact.nulls(), Some([false, true, false, true].as_slice()));
+        assert!(matches!(compact.values(), StaticArrayValues::Int(values) if values == &[11, 33]));
+    }
+
+    #[test]
+    fn static_array_snapshots_detach_all_owned_storage_and_reject_tables() {
+        let batch = Batch::static_array_float(
+            "numpy",
+            "float64",
+            vec![2],
+            Some(vec![false, false]),
+            vec![1.0, 2.0],
+        )
+        .unwrap();
+        let payload = batch.latched_array_payload().unwrap();
+        let snapshot = batch.static_array_snapshot().unwrap();
+
+        assert_ne!(payload.backend.as_ptr(), snapshot.backend.as_ptr());
+        assert_ne!(payload.dtype.as_ptr(), snapshot.dtype.as_ptr());
+        assert_ne!(payload.shape.as_ptr(), snapshot.shape.as_ptr());
+        assert_ne!(
+            payload.nulls.as_ref().unwrap().as_ptr(),
+            snapshot.nulls.as_ref().unwrap().as_ptr()
+        );
+        let LatchedArrayValues::Float(payload_values) = &payload.values else {
+            panic!("expected float payload");
+        };
+        let StaticArrayValues::Float(snapshot_values) = &snapshot.values else {
+            panic!("expected float snapshot");
+        };
+        assert_ne!(payload_values.as_ptr(), snapshot_values.as_ptr());
+
+        let table = Batch::table(
+            vec![RecordBatch::new_empty(Arc::new(
+                datafusion::arrow::datatypes::Schema::empty(),
+            ))],
+            BatchMetadata::default(),
+        )
+        .unwrap();
+        assert!(table.static_array_snapshot().is_none());
     }
 }

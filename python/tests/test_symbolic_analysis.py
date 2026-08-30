@@ -1390,6 +1390,87 @@ def test_elementwise_broadcast_expands_unit_dimensions() -> None:
     assert "output flags array backend numpy dtype bool" in explanation
 
 
+def test_array_elementwise_primitive_domains_are_checked_statically() -> None:
+    values = table_input(
+        "values",
+        schema=[
+            Field("flag", "bool", nullable=False),
+            Field("value", "float32", nullable=False),
+        ],
+    )
+    flags = linalg.from_columns(values, columns=("flag",), backend="numpy")
+    numbers = linalg.from_columns(values, columns=("value",), backend="numpy")
+    bool_weights = parameter(
+        "bool_weights",
+        kind="array",
+        backend="numpy",
+        dtype="bool",
+        shape=(1, 1),
+    )
+    valid = Program(
+        "valid-array-booleans",
+        inputs=(values,),
+        outputs=(("flags", (~flags) & flags),),
+    ).analyze(Runtime(), mode="batch")
+
+    assert valid.issues == ()
+
+    invalid = Program(
+        "invalid-array-domains",
+        inputs=(values, bool_weights),
+        outputs=(
+            ("not_numbers", ~numbers),
+            ("and_numbers", numbers & numbers),
+            ("bool_matmul", linalg.matmul(flags, bool_weights)),
+        ),
+    ).analyze(Runtime(), mode="batch")
+    paths = _issue_paths(invalid)
+
+    assert "outputs.not_numbers.not.value.dtype" in paths
+    assert "outputs.and_numbers.and.left.dtype" in paths
+    assert "outputs.bool_matmul.matmul.left.dtype" in paths
+
+
+def test_array_true_division_and_weak_scalars_follow_provider_dtypes() -> None:
+    values = table_input(
+        "values",
+        schema=[
+            Field("floating", "float32", nullable=False),
+            Field("integer", "int32", nullable=False),
+        ],
+    )
+    floating = linalg.from_columns(
+        values,
+        columns=("floating",),
+        backend="numpy",
+    )
+    numpy_integer = linalg.from_columns(
+        values,
+        columns=("integer",),
+        backend="numpy",
+    )
+    jax_integer = linalg.from_columns(
+        values,
+        columns=("integer",),
+        backend="jax",
+    )
+    program = Program(
+        "provider-array-dtypes",
+        inputs=(values,),
+        outputs=(
+            ("floating", floating * 2.0),
+            ("numpy_division", numpy_integer / 2),
+            ("jax_division", jax_integer / 2),
+        ),
+    )
+
+    assert program.analyze(Runtime(), mode="batch").issues == ()
+    explanation = program.explain(Runtime(), mode="batch")
+    assert "output floating array backend numpy dtype float32" in explanation
+    assert "output numpy_division array backend numpy dtype float64" in explanation
+    assert "output jax_division array backend jax dtype float32" in explanation
+
+
 def test_stream_ordering_checks_field_existence_and_nullability() -> None:
     quotes = table_input(
         "quotes",

@@ -48,7 +48,7 @@ The `calc_flow` crate re-exports its supported public types from
 
 | Area               | Primary APIs                                                                                                             |
 | ------------------ | ------------------------------------------------------------------------------------------------------------------------ |
-| Data               | `Batch`, `BatchKind`, `BatchMetadata`, `TableBatch`                                                                      |
+| Data               | `Batch`, `BatchKind`, `BatchMetadata`, `TableBatch`, `StaticArraySnapshot`, `StaticArrayValues`                          |
 | Batch graph        | `PipelineBuilder`, `Edge`, `PortEndpoint`, `BatchExecutionPlan`                                                          |
 | Stream plan        | `StreamExecutionPlan`, `StreamRequirements`, `DeliveryGuarantee`, `StreamRuntimeConfig`                                  |
 | Operator traits    | `Port`, `OperatorMetadata`, `NodeOperator`, `BatchOperator`, `StreamOperator`, `OperatorStateSnapshot`                   |
@@ -75,8 +75,13 @@ The `calc_flow` crate re-exports its supported public types from
 `StreamingRunner`. The runner owns source and sink bindings plus a
 `ManagedCheckpointRuntime`; `start(self)` consumes it and returns the sole
 `StreamingJob` lifecycle owner. The static-input exports also include the
-`STATIC_INPUT_DIGEST_VERSION` constant. The v2 source/sink traits, micro-batch
-runner, push runner, and public checkpoint-document store are not exported.
+`STATIC_INPUT_DIGEST_VERSION` constant. `Batch::static_array_snapshot()` is an
+explicit owned host-neutral copy for a latched static array: its backend,
+dtype, shape, optional full null bitmap, and compact scalar carrier are
+available through read-only accessors. The snapshot and value enum are
+non-exhaustive and intentionally provide no `Clone`, payload-bearing `Debug`,
+serde, or mutation surface. The v2 source/sink traits, micro-batch runner, push
+runner, and public checkpoint-document store are not exported.
 
 `EdgeBudget::new(R, B)` keeps its two-field public shape and caps queued
 envelopes and charged rows independently at `R`, plus charged bytes at `B`.

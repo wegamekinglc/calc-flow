@@ -436,6 +436,13 @@ capped at `B`. Direct callers must choose
 - `Batch::table(Vec<RecordBatch>, BatchMetadata)` creates an Arrow table batch.
 - `Batch::external(Arc<dyn ExternalPayload>, BatchMetadata)` creates an
   explicitly registered external-provider batch.
+- `Batch::static_array_snapshot()` returns `Some(StaticArraySnapshot)` only for
+  an engine-latched static array. It makes one detached `O(rank + bitmap +
+  non-null values)` copy with read-only backend, dtype, shape, null-bitmap, and
+  compact-value accessors; tables and general external arrays return `None`.
+  `StaticArraySnapshot` and `StaticArrayValues` are non-exhaustive, deliberately
+  non-`Clone`/non-`Debug`, and preserve `Send + Sync + Unpin` plus unwind-safe
+  auto traits.
 - `Batch::kind`, `num_rows`, `metadata`, `table_payload`, and
   `external_payload` expose immutable observations.
 - `Batch::with_metadata` returns a new envelope.
@@ -443,6 +450,13 @@ capped at `B`. Direct callers must choose
 `BatchMetadata::new(source, sequence, attributes)` validates the source and stores
 JSON-compatible attributes. Its sequence is descriptive batch metadata and is
 independent of continuous source cursors and checkpoint epochs.
+
+Python static placement creates this snapshot once per static input inside a
+blocking worker and caches only the provider-owned batch after successful
+placement and a post-worker cancellation check. The transient peak may include
+the engine latch, snapshot carriers, Python host list, NumPy storage, and JAX
+result simultaneously. `static_placement_bytes` counts only the logical
+provider transfer, not that peak memory or the internal snapshot copy.
 
 ## UDFs and external providers
 

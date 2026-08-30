@@ -13,7 +13,17 @@ engine or Studio capabilities.
   weights object across micro-batches, invokes one fused callback per segment,
   and exposes table/array and one-time weight-placement copy bytes in output
   metadata. Shape, width, backend, JAX x64, and provider output row-count checks
-  fail closed.
+  fail closed. Rust now exposes the manually approved, non-exhaustive owned
+  `StaticArraySnapshot`/`StaticArrayValues` seam and
+  `Batch::static_array_snapshot()` with five read-only accessors, without
+  `Clone`, value-bearing `Debug`, serde, construction, or mutation support.
+  Project compilation cross-checks both static declaration kinds against their
+  unconnected port kinds. Matrix lowering requires every `from_columns` source
+  to be the attached table and exactly one matmul whose RHS is the static
+  `weights` identity; analyzer/provider dtype promotion and primitive domains
+  agree. First placement, including the transient snapshot clone and provider
+  conversion, runs on a blocking worker and commits its cache atomically only
+  after success and a post-worker cancellation check.
 
 - 2026-08-29: Complete grouped cross-section features (SCE-10). The shared
   native `CrossSectionOperator` now evaluates winsorize, top/bottom selection,

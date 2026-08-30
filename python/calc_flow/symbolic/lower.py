@@ -986,7 +986,10 @@ def _check_declared_inputs(program: Program, /) -> None:
 class _MatrixExpression:
     backend: str
     columns: tuple[str, ...]
+    source_digests: frozenset[str]
     parameter: Node | None
+    matmul_count: int
+    matmul_rhs_is_weights: bool
     tree: dict[str, object]
 
 
@@ -1081,7 +1084,10 @@ def _matrix_expression(node: Node, path: str, /) -> _MatrixExpression:
         return _MatrixExpression(
             _cstr(node.attr("backend")),
             _cstr_seq(node.attr("columns")),
+            frozenset({node.args[0].digest}),
             None,
+            0,
+            True,
             {"op": "input"},
         )
     if operation == "parameter":
@@ -1094,13 +1100,22 @@ def _matrix_expression(node: Node, path: str, /) -> _MatrixExpression:
                 " parameter name 'weights'",
             )
         return _MatrixExpression(
-            _cstr(node.attr("backend")), (), node, {"op": "weights"}
+            _cstr(node.attr("backend")),
+            (),
+            frozenset(),
+            node,
+            0,
+            True,
+            {"op": "weights"},
         )
     if operation == "literal":
         return _MatrixExpression(
             "",
             (),
+            frozenset(),
             None,
+            0,
+            True,
             {"op": "literal", "value": _matrix_literal(node, path)},
         )
     if operation not in _MATRIX_PRIMITIVES:
@@ -1110,7 +1125,10 @@ def _matrix_expression(node: Node, path: str, /) -> _MatrixExpression:
         return _MatrixExpression(
             value.backend,
             value.columns,
+            value.source_digests,
             value.parameter,
+            value.matmul_count,
+            value.matmul_rhs_is_weights,
             {"op": operation, "value": value.tree},
         )
     left = _matrix_expression(node.args[0], f"{path}.{operation}.left")
@@ -1119,7 +1137,18 @@ def _matrix_expression(node: Node, path: str, /) -> _MatrixExpression:
     return _MatrixExpression(
         backend,
         columns,
+        left.source_digests | right.source_digests,
         parameter,
+        left.matmul_count + right.matmul_count + (operation == "matmul"),
+        left.matmul_rhs_is_weights
+        and right.matmul_rhs_is_weights
+        and (
+            operation != "matmul"
+            or (
+                node.args[1].op.name == "parameter"
+                and _cstr(node.args[1].attr("name")) == "weights"
+            )
+        ),
         {"left": left.tree, "op": operation, "right": right.tree},
     )
 
@@ -1186,26 +1215,31 @@ def _required_matrix_parameter(
     return parameter
 
 
-def _attached_matrix_input(node: Node, output_name: str, /) -> Node:
-    attached_input = node.args[0]
-    from_columns = next(
-        (
-            candidate
-            for candidate in _walk_nodes(node.args[1])
-            if candidate.op.name == "from_columns"
-        ),
-        None,
-    )
-    if from_columns is None:
+def _require_frozen_matrix_shape(
+    matrix: _MatrixExpression,
+    output_name: str,
+    /,
+) -> None:
+    if matrix.matmul_count != 1 or not matrix.matmul_rhs_is_weights:
         errors.raise_compile(
-            f"outputs.{output_name}.value",
-            errors.LINEAGE_MISMATCH,
-            "attached matrix columns must come from the attached table",
+            f"outputs.{output_name}.array",
+            errors.CAPABILITY_MISMATCH,
+            "symbolic matrix output requires exactly one matmul whose right"
+            " operand is the static 'weights' parameter",
         )
-    if from_columns.args[0].digest != attached_input.digest:
+
+
+def _attached_matrix_input(
+    node: Node,
+    matrix: _MatrixExpression,
+    output_name: str,
+    /,
+) -> Node:
+    attached_input = node.args[0]
+    if matrix.source_digests != frozenset({attached_input.digest}):
         errors.raise_compile(
             f"outputs.{output_name}.value",
-            errors.LINEAGE_MISMATCH,
+            errors.SCHEMA_MISMATCH,
             "attached matrix columns must come from the attached table",
         )
     return attached_input
@@ -1316,7 +1350,8 @@ def _lower_matrix_program(
     output_name, node = output
     matrix = _required_matrix_expression(node, output_name)
     parameter = _required_matrix_parameter(matrix, output_name)
-    attached_input = _attached_matrix_input(node, output_name)
+    _require_frozen_matrix_shape(matrix, output_name)
+    attached_input = _attached_matrix_input(node, matrix, output_name)
     external = _matrix_external_node(output_name, node, matrix)
     upstream_id = f"{output_name}__cf_matrix_input"
     project = _matrix_upstream_project(

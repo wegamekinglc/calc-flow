@@ -839,6 +839,86 @@ _SYMBOLIC_BINARY = {
 _SYMBOLIC_UNARY = {"neg": operator.neg, "not": operator.invert}
 
 
+def _symbolic_typed_operand(
+    backend: str,
+    data_type: str,
+    *,
+    matrix: bool,
+) -> object:
+    import numpy as np
+
+    if backend == "numpy":
+        namespace = np
+    elif backend == "jax":
+        import jax
+        import jax.numpy as jnp
+
+        if not jax.config.x64_enabled and np.dtype(data_type) in {
+            np.dtype("int64"),
+            np.dtype("uint64"),
+            np.dtype("float64"),
+            np.dtype("complex128"),
+        }:
+            raise TypeError(f"{backend} cannot represent dtype {data_type!r}")
+        namespace = jnp
+    else:
+        raise TypeError(f"unsupported symbolic array backend {backend!r}")
+    shape = (1, 1) if matrix else (1,)
+    value = namespace.ones(shape, dtype=data_type)
+    if np.dtype(value.dtype).name != data_type:
+        raise TypeError(f"{backend} cannot represent dtype {data_type!r}")
+    return value
+
+
+def _symbolic_result_dtype(
+    backend: str,
+    operation: str,
+    left: str | bool | int | float,
+    right: str | bool | int | float | None = None,
+) -> str:
+    """Return the selected provider's v1 dtype for one symbolic primitive."""
+
+    import numpy as np
+
+    matrix = operation == "matmul"
+    left_value = (
+        _symbolic_typed_operand(backend, left, matrix=matrix)
+        if isinstance(left, str)
+        else left
+    )
+    right_value = (
+        _symbolic_typed_operand(backend, right, matrix=matrix)
+        if isinstance(right, str)
+        else right
+    )
+    typed_values = tuple(
+        value for value in (left_value, right_value) if hasattr(value, "dtype")
+    )
+    if len(typed_values) == 2:
+        if backend == "numpy":
+            namespace = np
+        else:
+            import jax.numpy as jnp
+
+            namespace = jnp
+        common = namespace.result_type(
+            typed_values[0].dtype,
+            typed_values[1].dtype,
+        )
+        if not all(
+            namespace.can_cast(value.dtype, common, casting="safe")
+            for value in typed_values
+        ):
+            raise TypeError("the provider has no safe common dtype")
+    if operation in _SYMBOLIC_UNARY:
+        result = _SYMBOLIC_UNARY[operation](left_value)
+    elif operation == "matmul":
+        result = operator.matmul(left_value, right_value)
+    else:
+        result = _SYMBOLIC_BINARY[operation](left_value, right_value)
+    return np.dtype(result.dtype).name
+
+
 def _raise_invalid_symbolic_node(node: Mapping[str, object]) -> Never:
     raise ValueError(
         f"invalid symbolic_matrix expression: unsupported node {node.get('op')!r}"
@@ -979,6 +1059,42 @@ def _evaluate_symbolic_tree(
     return result
 
 
+def _symbolic_tree_dtype(
+    node: Mapping[str, object],
+    backend: str,
+    input_dtype: str,
+    weights_dtype: str,
+) -> str | bool | int | float:
+    operation = node["op"]
+    if operation == "input":
+        return input_dtype
+    if operation == "weights":
+        return weights_dtype
+    if operation == "literal":
+        literal = node["value"]
+        if type(literal) in (bool, int, float):
+            return literal
+        raise TypeError("invalid symbolic_matrix literal dtype")
+    child = "value" if operation in _SYMBOLIC_UNARY else "left"
+    left = _symbolic_tree_dtype(
+        node[child],
+        backend,
+        input_dtype,
+        weights_dtype,
+    )
+    right = (
+        None
+        if operation in _SYMBOLIC_UNARY
+        else _symbolic_tree_dtype(
+            node["right"],
+            backend,
+            input_dtype,
+            weights_dtype,
+        )
+    )
+    return _symbolic_result_dtype(backend, operation, left, right)
+
+
 @dataclass(frozen=True, slots=True)
 class _SymbolicMatrixProvider:
     backend: str
@@ -1006,6 +1122,14 @@ class _SymbolicMatrixProvider:
         result_dtype = _common_matrix_dtype(
             self.backend, self.namespace, table_dtypes, weights
         )
+        expected_dtype = _symbolic_tree_dtype(
+            expression,
+            self.backend,
+            np.dtype(result_dtype).name,
+            np.dtype(weights.dtype).name,
+        )
+        if not isinstance(expected_dtype, str):
+            raise TypeError("invalid symbolic_matrix output.dtype: unresolved dtype")
         host = _numpy_table_matrix(table, columns, result_dtype)
         if self.backend == "jax":
             import jax
@@ -1036,6 +1160,12 @@ class _SymbolicMatrixProvider:
                 f"{len(names)}, received {result_shape[1]}"
             )
         output_host = np.asarray(result)
+        actual_dtype = np.dtype(output_host.dtype).name
+        if actual_dtype != expected_dtype:
+            raise TypeError(
+                "invalid symbolic_matrix output.dtype: expected "
+                f"{expected_dtype}, received {actual_dtype}"
+            )
         attached = table
         for index, name in enumerate(names):
             attached = attached.append_column(name, pa.array(output_host[:, index]))

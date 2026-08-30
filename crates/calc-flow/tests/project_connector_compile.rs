@@ -460,12 +460,18 @@ mod static_input_declarations {
         record_batch::RecordBatch,
     };
 
-    fn static_project(static_inputs: serde_json::Value) -> ProjectSpec {
+    fn static_project_with_port_kind(
+        static_inputs: serde_json::Value,
+        port_kind: &str,
+    ) -> ProjectSpec {
         let mut value = serde_json::to_value(stream_project(true)).unwrap();
         value["graph"]["nodes"] = serde_json::json!([{
             "id": "merge",
             "operator": {"kind": "union"},
-            "input_ports": [{"name": "main", "kind": "table"}, {"name": "weights", "kind": "table"}]
+            "input_ports": [
+                {"name": "main", "kind": port_kind},
+                {"name": "weights", "kind": port_kind}
+            ]
         }]);
         value["sources"][0]["binding"] = serde_json::json!("main");
         if static_inputs.is_null() {
@@ -474,6 +480,10 @@ mod static_input_declarations {
             value["static_inputs"] = static_inputs;
         }
         serde_json::from_value(value).unwrap()
+    }
+
+    fn static_project(static_inputs: serde_json::Value) -> ProjectSpec {
+        static_project_with_port_kind(static_inputs, "table")
     }
 
     fn registered_connectors_with_opens(
@@ -517,6 +527,17 @@ mod static_input_declarations {
             "name": "weights",
             "mutability": "static",
             "schema": [{"name": "factor", "data_type": "float64", "nullable": false}]
+        }])
+    }
+
+    fn array_declaration() -> serde_json::Value {
+        serde_json::json!([{
+            "kind": "array",
+            "name": "weights",
+            "mutability": "static",
+            "backend": "numpy",
+            "dtype": "float32",
+            "shape": [1]
         }])
     }
 
@@ -593,6 +614,43 @@ mod static_input_declarations {
         );
     }
 
+    fn assert_kind_mismatch(project: &ProjectSpec, expected_message: &str) {
+        for error in [
+            compile(project).unwrap_err(),
+            compile_graph(project).unwrap_err(),
+        ] {
+            let message = error.to_string();
+            assert!(
+                message.contains("static_inputs[0].kind [incompatible_batch_kind]"),
+                "{message}"
+            );
+            assert!(message.contains(expected_message), "{message}");
+        }
+    }
+
+    #[test]
+    fn static_array_declaration_rejects_a_table_input_port_in_both_compile_paths() {
+        assert_kind_mismatch(
+            &static_project(array_declaration()),
+            "array static input \"weights\" requires an array port, found table",
+        );
+    }
+
+    #[test]
+    fn static_table_declaration_rejects_an_array_input_port_in_both_compile_paths() {
+        assert_kind_mismatch(
+            &static_project_with_port_kind(table_declaration(), "array"),
+            "table static input \"weights\" requires a table port, found array",
+        );
+    }
+
+    #[test]
+    fn static_array_declaration_accepts_an_array_input_port_in_both_compile_paths() {
+        let project = static_project_with_port_kind(array_declaration(), "array");
+        compile(&project).unwrap();
+        compile_graph(&project).unwrap();
+    }
+
     #[test]
     fn static_declarations_participate_in_the_semantic_fingerprint() {
         let float64_project = static_project(table_declaration());
@@ -636,12 +694,15 @@ mod static_input_declarations {
             "{conflict}"
         );
 
-        let duplicate = compile(&static_project(serde_json::json!([
-            {"kind": "array", "name": "weights", "mutability": "static",
-             "backend": "numpy", "dtype": "float32", "shape": [1]},
-            {"kind": "array", "name": "weights", "mutability": "static",
-             "backend": "numpy", "dtype": "float32", "shape": [1]}
-        ])))
+        let duplicate = compile(&static_project_with_port_kind(
+            serde_json::json!([
+                {"kind": "array", "name": "weights", "mutability": "static",
+                 "backend": "numpy", "dtype": "float32", "shape": [1]},
+                {"kind": "array", "name": "weights", "mutability": "static",
+                 "backend": "numpy", "dtype": "float32", "shape": [1]}
+            ]),
+            "array",
+        ))
         .unwrap_err();
         assert!(
             duplicate.to_string().contains("duplicate_name"),
