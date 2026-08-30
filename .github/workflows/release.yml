@@ -182,7 +182,7 @@ jobs:
       - name: Inspect wheel contents
         shell: bash
         run: |
-          python -m unittest scripts.test_run_rust_tests scripts.test_run_rust_coverage scripts.test_build_python_release scripts.test_inspect_wheel scripts.test_release_config scripts.test_verify_python_release scripts.test_verify_perf_gates scripts.test_verify_symbolic_milestone_perf scripts.test_verify_security_gates
+          python -m unittest scripts.test_run_rust_tests scripts.test_run_rust_coverage scripts.test_classify_ci_changes scripts.test_build_python_release scripts.test_inspect_wheel scripts.test_release_config scripts.test_verify_python_release scripts.test_verify_perf_gates scripts.test_verify_symbolic_milestone_perf scripts.test_verify_security_gates
           python scripts/inspect_wheel.py core-wheel dist/*.whl
       - name: Smoke native wheel
         if: matrix.smoke
