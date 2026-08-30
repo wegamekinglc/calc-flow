@@ -1,6 +1,6 @@
 # Calc Flow 4.0 examples
 
-These executable examples use the Rust-native 3.0 engine through the PyO3
+These executable examples use the Rust-native 4.0 engine through the PyO3
 Python package. Table batches contain PyArrow tables and every table expression
 or query runs in DataFusion. NumPy remains an explicit optional provider.
 DataFrame-style data means `pyarrow.Table`; pandas and Polars are not part of
@@ -59,7 +59,8 @@ and multiplies their dense matrix by an array weight matrix. After input
 `Batch` construction, execution makes no redundant copies: NumPy allocates one
 dense table matrix and one result; JAX permits one host staging buffer, one
 device table buffer, and one device result. Input `Batch` construction is
-outside these operator-execution ceilings. JAX performs no result-to-host round trip during operator execution.
+outside these operator-execution ceilings. JAX performs no result-to-host
+round trip during operator execution.
 
 The previous v1 notebook was removed because it taught the frozen Python v1
 operator API. Historical v1 behavior remains available at the
