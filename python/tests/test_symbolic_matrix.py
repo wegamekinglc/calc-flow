@@ -136,7 +136,20 @@ def _symbolic_matrix_project(options: dict[str, object]) -> str:
     )
 
 
-def _invalid_symbolic_matrix_options(case: str) -> dict[str, object]:
+_REMOVE_OPTION = object()
+
+
+def _deep_symbolic_not_expression() -> dict[str, object]:
+    expression: dict[str, object] = {"op": "input"}
+    for _ in range(25):
+        expression = {"op": "neg", "value": expression}
+    return expression
+
+
+def _invalid_symbolic_matrix_options(
+    field: str,
+    payload: object,
+) -> dict[str, object]:
     options: dict[str, object] = {
         "columns": ["x"],
         "expression": {
@@ -146,47 +159,9 @@ def _invalid_symbolic_matrix_options(case: str) -> dict[str, object]:
         },
         "names": ["score"],
     }
-    if case == "option-keys":
-        options.pop("names")
-    elif case == "columns-container":
-        options["columns"] = "x"
-    elif case == "columns-empty":
-        options["columns"] = []
-    elif case == "columns-type":
-        options["columns"] = [1]
-    elif case == "columns-empty-name":
-        options["columns"] = [""]
-    elif case == "columns-duplicate":
-        options["columns"] = ["x", "x"]
-    elif case == "tree-not-mapping":
-        options["expression"] = None
-    elif case == "tree-operation":
-        options["expression"] = {"op": "unsupported"}
-    elif case == "leaf-shape":
-        options["expression"] = {"extra": True, "op": "input"}
-    elif case == "literal-shape":
-        options["expression"] = {"op": "literal"}
-    elif case == "literal-type":
-        options["expression"] = {"op": "literal", "value": "secret"}
-    elif case == "unary-shape":
-        options["expression"] = {
-            "extra": True,
-            "op": "neg",
-            "value": {"op": "input"},
-        }
-    elif case == "binary-shape":
-        options["expression"] = {
-            "extra": True,
-            "left": {"op": "input"},
-            "op": "add",
-            "right": {"op": "weights"},
-        }
-    else:
-        expression: dict[str, object] = {"op": "input"}
-        for _ in range(25):
-            expression = {"op": "neg", "value": expression}
-        options["expression"] = expression
-    return options
+    if payload is _REMOVE_OPTION:
+        return {name: value for name, value in options.items() if name != field}
+    return {**options, field: payload}
 
 
 def test_symbolic_matrix_batch_attaches_selected_columns_in_order() -> None:
@@ -956,26 +931,102 @@ def test_symbolic_matrix_rejects_wrong_provider_row_count(
 
 
 @pytest.mark.parametrize(
-    ("case", "message"),
+    ("field", "payload", "message"),
     (
-        ("option-keys", "expected columns, expression, and names"),
-        ("columns-container", "columns: expected unique non-empty strings"),
-        ("columns-empty", "columns: expected unique non-empty strings"),
-        ("columns-type", "columns: expected unique non-empty strings"),
-        ("columns-empty-name", "columns: expected unique non-empty strings"),
-        ("columns-duplicate", "columns: expected unique non-empty strings"),
-        ("tree-not-mapping", "node must be a mapping"),
-        ("tree-operation", "unsupported node 'unsupported'"),
-        ("leaf-shape", "unsupported node 'input'"),
-        ("literal-shape", "unsupported node 'literal'"),
-        ("literal-type", "literal must be finite"),
-        ("unary-shape", "unsupported node 'neg'"),
-        ("binary-shape", "unsupported node 'add'"),
-        ("tree-depth", "depth limit exceeded"),
+        pytest.param(
+            "names",
+            _REMOVE_OPTION,
+            "expected columns, expression, and names",
+            id="option-keys",
+        ),
+        pytest.param(
+            "columns",
+            "x",
+            "columns: expected unique non-empty strings",
+            id="columns-container",
+        ),
+        pytest.param(
+            "columns",
+            [],
+            "columns: expected unique non-empty strings",
+            id="columns-empty",
+        ),
+        pytest.param(
+            "columns",
+            [1],
+            "columns: expected unique non-empty strings",
+            id="columns-type",
+        ),
+        pytest.param(
+            "columns",
+            [""],
+            "columns: expected unique non-empty strings",
+            id="columns-empty-name",
+        ),
+        pytest.param(
+            "columns",
+            ["x", "x"],
+            "columns: expected unique non-empty strings",
+            id="columns-duplicate",
+        ),
+        pytest.param(
+            "expression",
+            None,
+            "node must be a mapping",
+            id="tree-not-mapping",
+        ),
+        pytest.param(
+            "expression",
+            {"op": "unsupported"},
+            "unsupported node 'unsupported'",
+            id="tree-operation",
+        ),
+        pytest.param(
+            "expression",
+            {"extra": True, "op": "input"},
+            "unsupported node 'input'",
+            id="leaf-shape",
+        ),
+        pytest.param(
+            "expression",
+            {"op": "literal"},
+            "unsupported node 'literal'",
+            id="literal-shape",
+        ),
+        pytest.param(
+            "expression",
+            {"op": "literal", "value": "secret"},
+            "literal must be finite",
+            id="literal-type",
+        ),
+        pytest.param(
+            "expression",
+            {"extra": True, "op": "neg", "value": {"op": "input"}},
+            "unsupported node 'neg'",
+            id="unary-shape",
+        ),
+        pytest.param(
+            "expression",
+            {
+                "extra": True,
+                "left": {"op": "input"},
+                "op": "add",
+                "right": {"op": "weights"},
+            },
+            "unsupported node 'add'",
+            id="binary-shape",
+        ),
+        pytest.param(
+            "expression",
+            _deep_symbolic_not_expression(),
+            "depth limit exceeded",
+            id="tree-depth",
+        ),
     ),
 )
 def test_symbolic_matrix_public_compile_rejects_malformed_provider_options(
-    case: str,
+    field: str,
+    payload: object,
     message: str,
 ) -> None:
     runtime = Runtime()
@@ -983,7 +1034,7 @@ def test_symbolic_matrix_public_compile_rejects_malformed_provider_options(
 
     with pytest.raises(ConfigError, match=message):
         runtime.compile_batch_project(
-            _symbolic_matrix_project(_invalid_symbolic_matrix_options(case))
+            _symbolic_matrix_project(_invalid_symbolic_matrix_options(field, payload))
         )
 
 
