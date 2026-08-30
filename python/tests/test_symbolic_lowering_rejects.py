@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from calc_flow import Runtime
+from calc_flow import ConfigError, Runtime
 from calc_flow.errors import CompileError
 from calc_flow.symbolic import (
     FeatureSet,
@@ -206,7 +206,7 @@ def test_cast_to_non_portable_target_is_rejected() -> None:
     assert "unsupported_type" in message
 
 
-def test_attach_columns_is_rejected() -> None:
+def test_attach_columns_requires_registered_matrix_provider() -> None:
     quotes = _ordered()
     weights = parameter(
         "weights", kind="array", backend="numpy", dtype="float64", shape=(2, 1)
@@ -218,7 +218,7 @@ def test_attach_columns_is_rejected() -> None:
     attached = table.attach_columns(quotes, scores, names=["score"])
     program = Program("p", inputs=[quotes, weights], outputs=[("signals", attached)])
 
-    with pytest.raises(CompileError) as excinfo:
+    with pytest.raises(ConfigError) as excinfo:
         program.compile_batch(Runtime())
 
-    assert "unknown_primitive_version" in _reject_message(excinfo)
+    assert "provider numpy:symbolic_matrix@1 is unavailable" in _reject_message(excinfo)

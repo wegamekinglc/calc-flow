@@ -5,6 +5,16 @@ engine or Studio capabilities.
 
 ## 2026-08
 
+- 2026-08-30: Compile symbolic table/array matrix segments (SCE-13 / DAL-145)
+  through built-in NumPy and JAX `symbolic_matrix@1` providers. Explicit
+  selected-column order, row lineage, safe float32/float64 promotion, static
+  weight matmul, and named table attachment now lower for batch and stream.
+  Streaming latches and places weights once per job, reuses the same immutable
+  weights object across micro-batches, invokes one fused callback per segment,
+  and exposes table/array and one-time weight-placement copy bytes in output
+  metadata. Shape, width, backend, JAX x64, and provider output row-count checks
+  fail closed.
+
 - 2026-08-29: Complete grouped cross-section features (SCE-10). The shared
   native `CrossSectionOperator` now evaluates winsorize, top/bottom selection,
   and mean-fill alongside rank/percentile/demean/z-score without duplicating

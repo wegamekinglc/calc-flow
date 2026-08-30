@@ -565,8 +565,9 @@ declaration graph alone — no data object, source, sink, or runner is accepted 
 the analysis proves:
 
 - value types, proving only what the capability snapshot proves: identical
-  operand types, the frozen rolling/cross-section output-type table, and exact
-  field resolution; cross-type arithmetic needs an explicit `row.cast`;
+  operand types, the safe float32/float64 Array API promotion, the frozen
+  rolling/cross-section output-type table, and exact field resolution;
+  unsupported row-local cross-type arithmetic needs an explicit `row.cast`;
 - domains and row lineages, rejecting cross-input lineage mixing;
 - symbolic dimensions through `linalg.from_columns` and `linalg.matmul`,
   retaining the row axis of a table-derived array;
@@ -616,6 +617,37 @@ Programs with one input and one output bind the plan endpoints `input` and
 `output`, matching the `PipelineBuilder` convention; multi-branch graphs name
 endpoints `<node>.input` and `<node>.output` deterministically. Batches
 supplied at execution must match the declared input schema exactly.
+
+### Symbolic matrix compilation
+
+A single table output shaped as `table.attach_columns(table_value, array,
+names=...)` lowers the explicit table/array bridge to the selected
+`numpy:symbolic_matrix@1` or `jax:symbolic_matrix@1` provider. The array may
+contain `linalg.from_columns`, allowlisted elementwise arithmetic and boolean
+operations, finite literals, and one `linalg.matmul` whose right operand is the
+static array parameter named `weights`. The selected column order is semantic;
+the derived array keeps the source table's row lineage and may attach only to
+that same table lineage. Rank two, matching matmul inner dimensions, a known
+positive output width, and one attached name per result column are proved
+before lowering. Cross-backend composition fails closed.
+
+Batch plans bind the table and weights as `input` and `weights`. Stream plans
+instead declare `weights` as a project-v3 static array input, so only `input`
+is a source binding. The runner latches the caller value before opening a
+source, places it into NumPy or JAX once per job, retains that immutable
+provider array for every micro-batch, and invokes the fused provider once per
+accepted data micro-batch. Output metadata exposes `provider_calls: 1` and
+`copy_bytes` for table-to-array staging, array-to-table attachment, and the
+one-time static weight placement (zero after the first micro-batch). Results
+are row-axis independent and therefore invariant to source segmentation
+within the normal NumPy/JAX floating tolerance.
+
+Selected Arrow columns must be unique, non-null primitive numerics with one
+dtype. The provider chooses a lossless common backend dtype with the weights
+before staging; float32/float64 promotes to float64. JAX rejects a required
+float64 path when x64 is disabled and accepts it when `JAX_ENABLE_X64=true`.
+Runtime-dependent schema, null, weight backend/shape, and output row-count
+checks happen before attachment and report the failing provider field.
 
 `ts.lag`, `ts.delta`, and the rolling aggregates `ts.count`, `ts.sum`,
 `ts.mean`, `ts.min`, `ts.max`, `ts.variance`, `ts.stddev`,

@@ -1115,15 +1115,10 @@ class _Analyzer:
         role: str,
         lineage_message: str,
         /,
-    ) -> None:
+    ) -> str | None:
         """Report dtype, backend, and row-lineage incompatibilities."""
 
-        self._aspect_mismatch(
-            left.dtype,
-            right.dtype,
-            f"{role}.right.dtype",
-            "no provable result dtype for {!r} and {!r}",
-        )
+        dtype = self._safe_array_dtype(left.dtype, right.dtype, role)
         self._aspect_mismatch(
             left.backend,
             right.backend,
@@ -1136,6 +1131,27 @@ class _Analyzer:
             and left.lineage != right.lineage
         ):
             self.issue(f"{role}.right.lineage", "schema_mismatch", lineage_message)
+        return dtype
+
+    def _safe_array_dtype(
+        self,
+        left: str | None,
+        right: str | None,
+        role: str,
+        /,
+    ) -> str | None:
+        if left is None:
+            return right
+        if right is None or left == right:
+            return left
+        if {left, right} == {"float32", "float64"}:
+            return "float64"
+        self.issue(
+            f"{role}.right.dtype",
+            "unsupported_type",
+            f"no provable result dtype for {left!r} and {right!r}",
+        )
+        return None
 
     def _aspect_mismatch(
         self, left: object, right: object, path: str, template: str, /
@@ -1181,14 +1197,14 @@ class _Analyzer:
                 f"matmul requires rank-2 operands; got rank {rank}",
             )
             return ArrayFacts(None, None, (), None, states)
-        self._array_pair_compat(
+        dtype = self._array_pair_compat(
             left, right, role, "matmul operands carry different row-axis lineages"
         )
         output_dims = self._matmul_inner_dims(left, right, role)
         shape = () if output_dims is None else output_dims
         return ArrayFacts(
             left.backend,
-            left.dtype,
+            dtype,
             shape,
             left.lineage,
             states,
@@ -1207,7 +1223,7 @@ class _Analyzer:
             dtype = "bool" if primitive == "not" else left.dtype
             return ArrayFacts(left.backend, dtype, left.shape, left.lineage, left.state)
         right = self._array_operand(node.args[1], f"{role}.right")
-        self._array_pair_compat(
+        pair_dtype = self._array_pair_compat(
             left,
             right,
             role,
@@ -1217,7 +1233,7 @@ class _Analyzer:
         dtype: str | None = (
             "bool"
             if primitive in _COMPARISONS or primitive in _BOOLEANS
-            else left.dtype
+            else pair_dtype
         )
         return ArrayFacts(
             left.backend,

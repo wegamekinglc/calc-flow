@@ -304,7 +304,7 @@ def test_matmul_rejects_inner_dimension_mismatch_with_d12_path() -> None:
     assert issue.code == "schema_mismatch"
 
 
-def test_matmul_rejects_rank_dtype_and_backend_mismatch() -> None:
+def test_matmul_rejects_rank_and_backend_mismatch_but_promotes_safe_dtype() -> None:
     quotes = _quotes_ordered()
     flat = parameter(
         "flat",
@@ -329,7 +329,7 @@ def test_matmul_rejects_rank_dtype_and_backend_mismatch() -> None:
     )
     base = linalg.from_columns(quotes, columns=["x", "y"], backend="numpy")
 
-    for name, weights in (("flat", flat), ("float32", float32), ("jax", jax_weights)):
+    for name, weights in (("flat", flat), ("jax", jax_weights)):
         program = Program(
             "p",
             inputs=[quotes, weights],
@@ -339,6 +339,17 @@ def test_matmul_rejects_rank_dtype_and_backend_mismatch() -> None:
         paths = _issue_paths(result)
         assert paths, name
         assert all(path.startswith("outputs.scores.matmul.right") for path in paths)
+
+    promoted = Program(
+        "p",
+        inputs=[quotes, float32],
+        outputs=[("scores", linalg.matmul(base, float32))],
+    )
+    promoted_result = promoted.analyze(Runtime(), mode="batch")
+    assert promoted_result.issues == ()
+    assert "output scores array backend numpy dtype float64" in promoted.explain(
+        Runtime(), mode="batch"
+    )
 
 
 def test_attach_rejects_foreign_row_axis_lineage() -> None:

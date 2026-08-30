@@ -162,6 +162,19 @@ class Runtime:
         deterministic: bool,
         replay_safe: bool,
     ) -> None: ...
+    def _register_stateless_stream_mapping_provider(
+        self,
+        provider: str,
+        name: str,
+        version: str,
+        callback: object,
+        *,
+        input_ports: Sequence[tuple[str, str]],
+        output_ports: Sequence[tuple[str, str]],
+        microbatch_invariant: bool,
+        deterministic: bool,
+        replay_safe: bool,
+    ) -> None: ...
     def register_scalar_udf(
         self,
         *,

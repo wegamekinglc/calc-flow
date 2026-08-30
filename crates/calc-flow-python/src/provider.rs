@@ -5,7 +5,7 @@ use std::{
 
 use async_trait::async_trait;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyList};
 use serde_json::json;
 
 use crate::{
@@ -100,6 +100,35 @@ impl PythonOperatorFactory {
         }
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the factory retains the complete mapping and lifecycle contract"
+    )]
+    pub(crate) fn new_stateless_stream_mapping(
+        callback: Arc<PythonRoot>,
+        provider: &str,
+        name: &str,
+        version: &str,
+        inputs: Vec<PortContract>,
+        outputs: Vec<PortContract>,
+        deterministic: bool,
+        replay_safe: bool,
+    ) -> Self {
+        Self {
+            callback,
+            provider: provider.into(),
+            name: name.into(),
+            version: version.into(),
+            mode: PythonProviderMode::Mapping { inputs, outputs },
+            accepts_context: false,
+            stream_lifecycle: Some(calc_flow::StreamOperatorLifecycle::Stateless {
+                microbatch_invariant: true,
+                deterministic,
+                replay_safe,
+            }),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn new_mapping(
         callback: Arc<PythonRoot>,
@@ -164,6 +193,7 @@ impl calc_flow::BatchOperatorFactory for PythonOperatorFactory {
             inputs,
             outputs,
             stream_lifecycle: self.stream_lifecycle,
+            placed_static_inputs: BTreeMap::new(),
         }))
     }
 }
@@ -201,6 +231,7 @@ impl calc_flow::StreamOperatorFactory for PythonOperatorFactory {
             inputs,
             outputs,
             stream_lifecycle: Some(lifecycle),
+            placed_static_inputs: BTreeMap::new(),
         }))
     }
 }
@@ -293,6 +324,7 @@ struct PythonOperator {
     inputs: Vec<calc_flow::Port>,
     outputs: Vec<calc_flow::Port>,
     stream_lifecycle: Option<calc_flow::StreamOperatorLifecycle>,
+    placed_static_inputs: BTreeMap<String, calc_flow::Batch>,
 }
 
 impl PythonOperator {
@@ -343,6 +375,48 @@ impl calc_flow::StreamOperator for PythonOperator {
         output: &mut dyn calc_flow::StreamCollector,
     ) -> calc_flow::Result<()> {
         context.check_cancelled()?;
+        if let PythonProviderMode::Mapping {
+            inputs: input_contracts,
+            outputs: output_contracts,
+        } = &self.mode
+        {
+            let input_contracts = input_contracts.clone();
+            let output_contracts = output_contracts.clone();
+            let batches = stream_mapping_inputs(
+                ingress,
+                &batch,
+                context,
+                &input_contracts,
+                &mut self.placed_static_inputs,
+            )
+            .map_err(|message| self.provider_error(message))?;
+            let callback = Arc::clone(&self.callback);
+            let options_json = self.options_json.clone();
+            let output_ports = self.outputs.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                Python::attach(|py| {
+                    call_python_operator_mapping(
+                        py,
+                        &callback,
+                        &batches,
+                        &input_contracts,
+                        &output_contracts,
+                        &output_ports,
+                        &options_json,
+                        None,
+                    )
+                })
+                .map_err(|error| error.to_string())
+            })
+            .await
+            .map_err(|_| self.provider_error("stream callback worker terminated"))?
+            .map_err(|message| self.provider_error(message))?;
+            context.check_cancelled()?;
+            for (port, batch) in result {
+                output.emit(&port, batch).await?;
+            }
+            return Ok(());
+        }
         if ingress != "input" {
             return Err(
                 self.provider_error(format!("unexpected stream provider ingress {ingress:?}"))
@@ -380,6 +454,127 @@ impl calc_flow::StreamOperator for PythonOperator {
     ) -> calc_flow::Result<()> {
         context.check_cancelled()
     }
+}
+
+fn stream_mapping_inputs(
+    ingress: &str,
+    batch: &calc_flow::Batch,
+    context: &calc_flow::StreamOperatorContext<'_>,
+    contracts: &[PortContract],
+    placed_static_inputs: &mut BTreeMap<String, calc_flow::Batch>,
+) -> Result<BTreeMap<String, calc_flow::Batch>, String> {
+    if !contracts.iter().any(|contract| contract.name == ingress) {
+        return Err(format!("unexpected stream provider ingress {ingress:?}"));
+    }
+    let mut inputs = BTreeMap::new();
+    for contract in contracts {
+        if contract.name == ingress {
+            inputs.insert(contract.name.clone(), batch.clone());
+            continue;
+        }
+        if !placed_static_inputs.contains_key(&contract.name) {
+            let latched = context
+                .static_input(&contract.name)
+                .ok_or_else(|| format!("missing required static input {}", contract.name))?;
+            let (placed, cached) = Python::attach(|py| place_static_input(py, latched))
+                .map_err(|error| error.to_string())?;
+            placed_static_inputs.insert(contract.name.clone(), cached);
+            inputs.insert(contract.name.clone(), placed);
+            continue;
+        }
+        inputs.insert(
+            contract.name.clone(),
+            placed_static_inputs[&contract.name].clone(),
+        );
+    }
+    Ok(inputs)
+}
+
+fn place_static_input(
+    py: Python<'_>,
+    batch: &calc_flow::Batch,
+) -> PyResult<(calc_flow::Batch, calc_flow::Batch)> {
+    if batch.kind() == calc_flow::BatchKind::Table {
+        return Ok((batch.clone(), batch.clone()));
+    }
+    let snapshot = batch.static_array_snapshot().ok_or_else(|| {
+        pyo3::exceptions::PyTypeError::new_err("static array input is not an engine-latched value")
+    })?;
+    if snapshot
+        .nulls()
+        .is_some_and(|nulls| nulls.iter().any(|value| *value))
+    {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "static array inputs with null elements cannot be placed into Array API providers",
+        ));
+    }
+    let values = match snapshot.values() {
+        calc_flow::StaticArrayValues::Bool(values) => PyList::new(py, values)?.into_any(),
+        calc_flow::StaticArrayValues::Int(values) => PyList::new(py, values)?.into_any(),
+        calc_flow::StaticArrayValues::Uint(values) => PyList::new(py, values)?.into_any(),
+        calc_flow::StaticArrayValues::Float(values) => PyList::new(py, values)?.into_any(),
+    };
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", snapshot.dtype())?;
+    let host = numpy.getattr("asarray")?.call((values,), Some(&kwargs))?;
+    let host = host.call_method1("reshape", (snapshot.shape(),))?;
+    let object = match snapshot.backend() {
+        "numpy" => host.unbind(),
+        "jax" => py
+            .import("jax.numpy")?
+            .getattr("asarray")?
+            .call1((host,))?
+            .unbind(),
+        backend => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "unsupported static array backend {backend:?}"
+            )));
+        }
+    };
+    let placement_bytes = static_array_copy_bytes(snapshot.dtype(), snapshot.shape())?;
+    let placed = crate::batch::batch_from_python_array(
+        py,
+        object,
+        snapshot.backend().to_owned(),
+        static_placement_metadata(batch.metadata(), placement_bytes)?,
+    )?;
+    let cached = placed.with_metadata(static_placement_metadata(batch.metadata(), 0)?);
+    Ok((placed, cached))
+}
+
+fn static_array_copy_bytes(dtype: &str, shape: &[u64]) -> PyResult<usize> {
+    let width: usize = match dtype {
+        "bool" | "int8" | "uint8" => 1,
+        "int16" | "uint16" => 2,
+        "float32" | "int32" | "uint32" => 4,
+        "float64" | "int64" | "uint64" => 8,
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "unsupported static array dtype {other:?}"
+            )));
+        }
+    };
+    shape.iter().try_fold(width, |bytes, dimension| {
+        usize::try_from(*dimension)
+            .ok()
+            .and_then(|dimension| bytes.checked_mul(dimension))
+            .ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(
+                    "static array placement byte count overflowed usize",
+                )
+            })
+    })
+}
+
+fn static_placement_metadata(
+    metadata: &calc_flow::BatchMetadata,
+    bytes: usize,
+) -> PyResult<calc_flow::BatchMetadata> {
+    let mut attributes = metadata.attributes().clone();
+    attributes.insert("static_placement_bytes".into(), json!(bytes));
+    calc_flow::BatchMetadata::new(metadata.source(), metadata.sequence(), attributes)
+        .map_err(crate::error::to_py_err)
 }
 
 #[async_trait]
@@ -813,6 +1008,82 @@ mod tests {
                     .extract::<usize>()
                     .unwrap(),
                 2
+            );
+        });
+    }
+
+    #[tokio::test]
+    async fn stateless_stream_mapping_factory_supplies_latched_static_inputs() {
+        Python::initialize();
+        let (root, calls) = Python::attach(|py| {
+            let locals = PyDict::new(py);
+            py.run(
+                c"class Callback:\n    def __init__(self): self.calls = 0\n    def validate_stream(self, options): pass\n    def __call__(self, inputs, options):\n        assert sorted(inputs) == ['input', 'weights']\n        self.calls += 1\n        return {'output': inputs['input']}\ncallback = Callback()",
+                None,
+                Some(&locals),
+            )
+            .unwrap();
+            let callback = locals.get_item("callback").unwrap().unwrap();
+            (
+                Arc::new(PythonRoot::new(callback.clone().unbind())),
+                callback.unbind(),
+            )
+        });
+        let factory = PythonOperatorFactory::new_stateless_stream_mapping(
+            root,
+            "python",
+            "matrix",
+            "1",
+            vec![
+                PortContract::new("input", calc_flow::BatchKind::Table),
+                PortContract::new("weights", calc_flow::BatchKind::Table),
+            ],
+            vec![PortContract::new("output", calc_flow::BatchKind::Table)],
+            true,
+            true,
+        );
+        let spec =
+            calc_flow::ExternalOperatorSpec::new("python", "matrix", "1", BTreeMap::new()).unwrap();
+        let mut operator = calc_flow::StreamOperatorFactory::create(
+            &factory,
+            &spec,
+            vec![table_port("input"), table_port("weights")],
+            vec![table_port("output")],
+        )
+        .unwrap();
+        let table = calc_flow::Batch::table(
+            vec![datafusion::arrow::record_batch::RecordBatch::new_empty(
+                Arc::new(datafusion::arrow::datatypes::Schema::empty()),
+            )],
+            calc_flow::BatchMetadata::default(),
+        )
+        .unwrap();
+        let job = calc_flow::StreamJobContext::new(
+            1,
+            "fingerprint",
+            BTreeMap::new(),
+            None,
+            calc_flow::CancellationToken::new(),
+        )
+        .with_static_inputs(BTreeMap::from([("weights".into(), table.clone())]));
+        let context = calc_flow::StreamOperatorContext::new(&job, "matrix", None);
+        let mut output = calc_flow::EdgeCollector::new(vec![table_port("output")]);
+
+        operator
+            .process_data("input", table, &context, &mut output)
+            .await
+            .unwrap();
+
+        assert_eq!(output.drain("output").len(), 1);
+        Python::attach(|py| {
+            assert_eq!(
+                calls
+                    .bind(py)
+                    .getattr("calls")
+                    .unwrap()
+                    .extract::<usize>()
+                    .unwrap(),
+                1
             );
         });
     }

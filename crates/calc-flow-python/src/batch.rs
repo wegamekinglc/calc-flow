@@ -226,6 +226,27 @@ pub(crate) fn rehome_python_payload(
         .map_err(crate::error::to_py_err)
 }
 
+pub(crate) fn batch_from_python_array(
+    py: Python<'_>,
+    object: Py<PyAny>,
+    backend: String,
+    metadata: calc_flow::BatchMetadata,
+) -> PyResult<calc_flow::Batch> {
+    let shape: Vec<usize> = object.bind(py).getattr("shape")?.extract()?;
+    let len = shape.first().copied().unwrap_or(1);
+    let estimated_bytes = estimate_payload_bytes(object.bind(py), len);
+    calc_flow::Batch::external(
+        Arc::new(PythonPayload {
+            object,
+            backend,
+            len,
+            estimated_bytes,
+        }),
+        metadata,
+    )
+    .map_err(crate::error::to_py_err)
+}
+
 #[pymethods]
 impl PyBatch {
     #[staticmethod]

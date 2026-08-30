@@ -979,7 +979,8 @@ impl StreamingRunner {
             static_input_settings(&prepared_static_inputs),
             None,
             CancellationToken::new(),
-        );
+        )
+        .with_static_inputs(prepared_static_inputs.latched.clone());
         let sources = sources
             .into_iter()
             .map(|(binding_id, binding)| NamedSourceBinding {

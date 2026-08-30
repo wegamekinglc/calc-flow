@@ -275,6 +275,12 @@ impl<'a> StreamOperatorContext<'a> {
         self.job
     }
 
+    /// Returns one immutable job-static input by its declared port name.
+    #[must_use]
+    pub fn static_input(&self, name: &str) -> Option<&Batch> {
+        self.job.static_input(name)
+    }
+
     /// Returns the operator's node identity.
     pub const fn operator_id(&self) -> &str {
         self.operator_id
@@ -639,6 +645,29 @@ mod tests {
                 ..LateMetricDelta::default()
             }
         );
+    }
+
+    #[test]
+    fn stream_operator_context_exposes_latched_static_inputs() {
+        let weights = Batch::table(
+            vec![datafusion::arrow::record_batch::RecordBatch::new_empty(
+                Arc::new(datafusion::arrow::datatypes::Schema::empty()),
+            )],
+            crate::BatchMetadata::default(),
+        )
+        .unwrap();
+        let job = StreamJobContext::new(
+            7,
+            "fingerprint",
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        )
+        .with_static_inputs(BTreeMap::from([("weights".into(), weights)]));
+        let context = StreamOperatorContext::new(&job, "matrix", None);
+
+        assert_eq!(context.static_input("weights").unwrap().num_rows(), 0);
+        assert!(context.static_input("missing").is_none());
     }
 
     #[test]

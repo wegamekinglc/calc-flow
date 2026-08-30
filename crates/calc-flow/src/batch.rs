@@ -180,12 +180,55 @@ pub(crate) struct LatchedArrayPayload {
     values: LatchedArrayValues,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum LatchedArrayValues {
     Bool(Vec<bool>),
     Int(Vec<i64>),
     Uint(Vec<u64>),
     Float(Vec<f64>),
+}
+
+/// Engine-owned scalar values copied from one latched static array.
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub enum StaticArrayValues {
+    Bool(Vec<bool>),
+    Int(Vec<i64>),
+    Uint(Vec<u64>),
+    Float(Vec<f64>),
+}
+
+/// Host-neutral snapshot used to place a latched static array into a provider.
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct StaticArraySnapshot {
+    backend: String,
+    dtype: String,
+    shape: Vec<u64>,
+    nulls: Option<Vec<bool>>,
+    values: StaticArrayValues,
+}
+
+impl StaticArraySnapshot {
+    pub fn backend(&self) -> &str {
+        &self.backend
+    }
+
+    pub fn dtype(&self) -> &str {
+        &self.dtype
+    }
+
+    pub fn shape(&self) -> &[u64] {
+        &self.shape
+    }
+
+    pub fn nulls(&self) -> Option<&[bool]> {
+        self.nulls.as_deref()
+    }
+
+    pub const fn values(&self) -> &StaticArrayValues {
+        &self.values
+    }
 }
 
 impl LatchedArrayPayload {
@@ -694,6 +737,26 @@ impl Batch {
             .ok()?
             .as_any()
             .downcast_ref::<LatchedArrayPayload>()
+    }
+
+    /// Returns a host-neutral copy of an engine-latched static array.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn static_array_snapshot(&self) -> Option<StaticArraySnapshot> {
+        let payload = self.latched_array_payload()?;
+        let values = match &payload.values {
+            LatchedArrayValues::Bool(values) => StaticArrayValues::Bool(values.clone()),
+            LatchedArrayValues::Int(values) => StaticArrayValues::Int(values.clone()),
+            LatchedArrayValues::Uint(values) => StaticArrayValues::Uint(values.clone()),
+            LatchedArrayValues::Float(values) => StaticArrayValues::Float(values.clone()),
+        };
+        Some(StaticArraySnapshot {
+            backend: payload.backend.clone(),
+            dtype: payload.dtype.clone(),
+            shape: payload.shape.clone(),
+            nulls: payload.nulls.clone(),
+            values,
+        })
     }
 
     #[must_use]

@@ -6,7 +6,7 @@ import operator
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from calc_flow import _native
 from calc_flow.capabilities import (
@@ -30,6 +30,8 @@ _MAX_RESHAPE_ELEMENTS = 10_000_000
 _MAX_OPERATION_ELEMENTS = 10_000_000
 _TABLE_MATMUL_INPUT_PORTS = (("table", "table"), ("weights", "array"))
 _TABLE_MATMUL_OUTPUT_PORTS = (("output", "array"),)
+_SYMBOLIC_MATRIX_INPUT_PORTS = (("input", "table"), ("weights", "array"))
+_SYMBOLIC_MATRIX_OUTPUT_PORTS = (("output", "table"),)
 _EXPRESSION_OPTIONS_SCHEMA = ProviderOptionsSchema(
     fields=(ProviderOption("expression", "string", required=True),)
 )
@@ -66,6 +68,22 @@ _JAX_STREAM_ARRAY_RULES = ProviderArrayRules(
     ),
     safe_dtype_rule=CapabilityRule("array_api_safe_dtype", "1"),
     shape_rules=(CapabilityRule("elementwise_broadcast", "1"),),
+)
+_NUMPY_MATRIX_STREAM_ARRAY_RULES = ProviderArrayRules(
+    supported_dtypes=_NUMPY_STREAM_ARRAY_RULES.supported_dtypes,
+    safe_dtype_rule=_NUMPY_STREAM_ARRAY_RULES.safe_dtype_rule,
+    shape_rules=(
+        CapabilityRule("elementwise_broadcast", "1"),
+        CapabilityRule("table_matmul_static_rhs", "1"),
+    ),
+)
+_JAX_MATRIX_STREAM_ARRAY_RULES = ProviderArrayRules(
+    supported_dtypes=_JAX_STREAM_ARRAY_RULES.supported_dtypes,
+    safe_dtype_rule=_JAX_STREAM_ARRAY_RULES.safe_dtype_rule,
+    shape_rules=(
+        CapabilityRule("elementwise_broadcast", "1"),
+        CapabilityRule("table_matmul_static_rhs", "1"),
+    ),
 )
 
 _ALLOWED_BINARY = {
@@ -231,7 +249,7 @@ def _validate_reshape_result(value: object) -> None:
 def _evaluate(
     node: ast.AST,
     value: object,
-    namespace: object,
+    namespace: Any,
     validate_result: Callable[[object], None] | None = None,
 ) -> object:
     if isinstance(node, ast.Name):
@@ -804,6 +822,209 @@ class _TableMatmulProvider:
         }
 
 
+_SYMBOLIC_BINARY = {
+    "add": operator.add,
+    "and": operator.and_,
+    "eq": operator.eq,
+    "ge": operator.ge,
+    "gt": operator.gt,
+    "le": operator.le,
+    "lt": operator.lt,
+    "mul": operator.mul,
+    "ne": operator.ne,
+    "or": operator.or_,
+    "sub": operator.sub,
+    "truediv": operator.truediv,
+}
+_SYMBOLIC_UNARY = {"neg": operator.neg, "not": operator.invert}
+
+
+def _validated_symbolic_tree(value: object, *, depth: int = 0) -> dict[str, object]:
+    if depth > _MAX_AST_DEPTH:
+        raise ValueError("invalid symbolic_matrix expression: depth limit exceeded")
+    if not isinstance(value, Mapping):
+        raise ValueError("invalid symbolic_matrix expression: node must be a mapping")
+    node = dict(value)
+    operation = node.get("op")
+    if operation in {"input", "weights"} and set(node) == {"op"}:
+        return node
+    if operation == "literal" and set(node) == {"op", "value"}:
+        literal = node["value"]
+        if type(literal) not in (bool, int, float) or (
+            type(literal) is float and not math.isfinite(literal)
+        ):
+            raise ValueError(
+                "invalid symbolic_matrix expression: literal must be finite"
+            )
+        return node
+    if operation in _SYMBOLIC_UNARY and set(node) == {"op", "value"}:
+        _validated_symbolic_tree(node["value"], depth=depth + 1)
+        return node
+    if operation in (*_SYMBOLIC_BINARY, "matmul") and set(node) == {
+        "left",
+        "op",
+        "right",
+    }:
+        _validated_symbolic_tree(node["left"], depth=depth + 1)
+        _validated_symbolic_tree(node["right"], depth=depth + 1)
+        return node
+    raise ValueError(
+        f"invalid symbolic_matrix expression: unsupported node {operation!r}"
+    )
+
+
+def _symbolic_matrix_options(
+    options: Mapping[str, object],
+) -> tuple[tuple[str, ...], tuple[str, ...], dict[str, object]]:
+    if set(options) != {"columns", "expression", "names"}:
+        raise ValueError(
+            "invalid symbolic_matrix options: expected columns, expression, and names"
+        )
+    columns = options["columns"]
+    names = options["names"]
+    if (
+        not isinstance(columns, list)
+        or not columns
+        or any(type(name) is not str or not name for name in columns)
+        or len(set(columns)) != len(columns)
+    ):
+        raise ValueError(
+            "invalid symbolic_matrix columns: expected unique non-empty strings"
+        )
+    if (
+        not isinstance(names, list)
+        or not names
+        or any(type(name) is not str or not name for name in names)
+        or len(set(names)) != len(names)
+    ):
+        raise ValueError(
+            "invalid symbolic_matrix names: expected unique non-empty strings"
+        )
+    return tuple(columns), tuple(names), _validated_symbolic_tree(options["expression"])
+
+
+def _symbolic_matrix_inputs(
+    inputs: Mapping[str, _native.Batch], backend: str
+) -> tuple[_native.Batch, _native.Batch]:
+    if set(inputs) != {"input", "weights"}:
+        raise ValueError("invalid symbolic_matrix inputs: expected input and weights")
+    table_batch = inputs["input"]
+    weights_batch = inputs["weights"]
+    if table_batch.kind != "table":
+        raise ValueError("invalid symbolic_matrix input: expected a table batch")
+    if weights_batch.kind != "array" or weights_batch.backend != backend:
+        raise ValueError(f"invalid symbolic_matrix weights.backend: expected {backend}")
+    return table_batch, weights_batch
+
+
+def _evaluate_symbolic_tree(
+    node: Mapping[str, object],
+    namespace: object,
+    dense: object,
+    weights: object,
+) -> object:
+    operation = node["op"]
+    if operation == "input":
+        return dense
+    if operation == "weights":
+        return weights
+    if operation == "literal":
+        return node["value"]
+    if operation in _SYMBOLIC_UNARY:
+        result = _SYMBOLIC_UNARY[operation](
+            _evaluate_symbolic_tree(node["value"], namespace, dense, weights)
+        )
+    else:
+        left = _evaluate_symbolic_tree(node["left"], namespace, dense, weights)
+        right = _evaluate_symbolic_tree(node["right"], namespace, dense, weights)
+        if operation == "matmul":
+            _validate_matmul_output_size(left, right)
+            result = namespace.matmul(left, right)
+        else:
+            _validate_broadcast_output_size(left, right)
+            result = _SYMBOLIC_BINARY[operation](left, right)
+    _validate_operation_output_size(result)
+    return result
+
+
+@dataclass(frozen=True, slots=True)
+class _SymbolicMatrixProvider:
+    backend: str
+    namespace: object
+
+    def validate(self, options: Mapping[str, object]) -> None:
+        _symbolic_matrix_options(options)
+
+    def validate_stream(self, options: Mapping[str, object]) -> None:
+        _symbolic_matrix_options(options)
+
+    def __call__(
+        self,
+        inputs: Mapping[str, _native.Batch],
+        options: Mapping[str, object],
+    ) -> dict[str, _native.Batch]:
+        import numpy as np
+        import pyarrow as pa
+
+        columns, names, expression = _symbolic_matrix_options(options)
+        table_batch, weights_batch = _symbolic_matrix_inputs(inputs, self.backend)
+        table = table_batch.to_pyarrow()
+        table_dtypes = _validated_table_dtypes(table, columns)
+        weights = _validated_weights(weights_batch, self.backend, len(columns))
+        result_dtype = _common_matrix_dtype(
+            self.backend, self.namespace, table_dtypes, weights
+        )
+        host = _numpy_table_matrix(table, columns, result_dtype)
+        if self.backend == "jax":
+            import jax
+
+            dense = jax.device_put(host, device=weights.device)
+        else:
+            dense = host
+        result = _evaluate_symbolic_tree(
+            expression,
+            self.namespace,
+            dense,
+            weights,
+        )
+        result_shape = _result_shape(result)
+        if len(result_shape) != 2:
+            raise ValueError(
+                "invalid symbolic_matrix output.rank: expected rank two; "
+                f"received {len(result_shape)}"
+            )
+        if result_shape[0] != table.num_rows:
+            raise ValueError(
+                "invalid symbolic_matrix output.rows: expected "
+                f"{table.num_rows}, received {result_shape[0]}"
+            )
+        if result_shape[1] != len(names):
+            raise ValueError(
+                "invalid symbolic_matrix output.width: expected "
+                f"{len(names)}, received {result_shape[1]}"
+            )
+        output_host = np.asarray(result)
+        attached = table
+        for index, name in enumerate(names):
+            attached = attached.append_column(name, pa.array(output_host[:, index]))
+        metadata = table_batch.metadata
+        metadata.update(
+            {
+                "backend": self.backend,
+                "copy_bytes": {
+                    "array_to_table": int(output_host.nbytes),
+                    "table_to_array": int(host.nbytes),
+                    "weights": int(
+                        weights_batch.metadata.get("static_placement_bytes", 0)
+                    ),
+                },
+                "operation": "symbolic_matrix",
+                "provider_calls": 1,
+            }
+        )
+        return {"output": _native.Batch.from_pyarrow(attached, metadata)}
+
+
 def register_numpy(runtime: Runtime) -> None:
     import numpy as np
 
@@ -833,6 +1054,26 @@ def register_numpy(runtime: Runtime) -> None:
         _TableMatmulProvider("numpy", np),
         input_ports=_TABLE_MATMUL_INPUT_PORTS,
         output_ports=_TABLE_MATMUL_OUTPUT_PORTS,
+    )
+    symbolic_matrix = _SymbolicMatrixProvider("numpy", np)
+    runtime._register_mapping_provider(
+        "numpy",
+        "symbolic_matrix",
+        "1",
+        symbolic_matrix,
+        input_ports=_SYMBOLIC_MATRIX_INPUT_PORTS,
+        output_ports=_SYMBOLIC_MATRIX_OUTPUT_PORTS,
+    )
+    runtime._register_stateless_stream_mapping_provider(
+        "numpy",
+        "symbolic_matrix",
+        "1",
+        symbolic_matrix,
+        microbatch_invariant=True,
+        deterministic=True,
+        replay_safe=True,
+        supports_static_inputs=True,
+        array_rules=_NUMPY_MATRIX_STREAM_ARRAY_RULES,
     )
 
 
@@ -865,4 +1106,24 @@ def register_jax(runtime: Runtime) -> None:
         _TableMatmulProvider("jax", jnp),
         input_ports=_TABLE_MATMUL_INPUT_PORTS,
         output_ports=_TABLE_MATMUL_OUTPUT_PORTS,
+    )
+    symbolic_matrix = _SymbolicMatrixProvider("jax", jnp)
+    runtime._register_mapping_provider(
+        "jax",
+        "symbolic_matrix",
+        "1",
+        symbolic_matrix,
+        input_ports=_SYMBOLIC_MATRIX_INPUT_PORTS,
+        output_ports=_SYMBOLIC_MATRIX_OUTPUT_PORTS,
+    )
+    runtime._register_stateless_stream_mapping_provider(
+        "jax",
+        "symbolic_matrix",
+        "1",
+        symbolic_matrix,
+        microbatch_invariant=True,
+        deterministic=True,
+        replay_safe=True,
+        supports_static_inputs=True,
+        array_rules=_JAX_MATRIX_STREAM_ARRAY_RULES,
     )

@@ -199,7 +199,9 @@ row-local expressions, the `ts` rolling declarations — lag, delta, the
 count/sum/mean/min/max/variance/stddev aggregates, and the
 covariance/correlation pairs — and the `cs` cross-section declarations —
 rank, percentile, demean, z-score, winsorize, top/bottom selection, and
-mean-fill — into the same strict project-v3
+mean-fill — plus an explicit `linalg.from_columns` → fused elementwise →
+static-weight `linalg.matmul` → `table.attach_columns` matrix segment into the
+same strict project-v3
 execution plans, and execution remains owned by the execution plans and
 runners above.
 
@@ -294,9 +296,10 @@ does not expose callback objects.
 
 NumPy and JAX are Python-owned providers registered with `register_numpy` or
 `register_jax`. Where explicitly registered, each provides `expression@1` for
-bounded array expressions and mapped `table_matmul@1` for table-array matrix
-multiplication. An external v3 node selects provider `numpy` or `jax`, an
-operator, and version `1`.
+bounded array expressions, mapped `table_matmul@1` for table-array matrix
+multiplication, and `symbolic_matrix@1` for a fused symbolic
+table→array→table segment. An external v3 node selects provider `numpy` or
+`jax`, an operator, and version `1`.
 
 The mapped matrix operator receives a `table` batch and same-backend `weights`
 array batch and returns an `output` array batch. It borrows Arrow column
@@ -305,6 +308,15 @@ staging matrix from the selected ordered columns; this is not an end-to-end
 zero-copy path. NumPy writes the multiplication into a Rust-owned result.
 JAX performs one host-to-device transfer for the table matrix and keeps the
 result on the weights device.
+
+`symbolic_matrix@1` accepts table port `input`, same-backend array port
+`weights`, and emits the original table with the declared result columns
+appended. Its stream registration is stateless, deterministic, replay-safe,
+row-axis independent, and static-input aware. The runtime latches and places
+weights once per job, then reuses the same immutable weights object while the
+fused callback runs once per data micro-batch. Batch output metadata records
+the table/array copy bytes; stream metadata additionally records the one-time
+weight placement on the first micro-batch and zero thereafter.
 
 External operators receive an engine-neutral run context. They share graph
 validation, cancellation, rollback, node timing, runners, and checkpoints with

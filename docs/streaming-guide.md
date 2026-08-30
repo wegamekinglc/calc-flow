@@ -200,7 +200,11 @@ NumPy/JAX stream expressions must depend on `x` and contain neither function
 calls nor matrix multiplication, keeping the accepted subset conservatively
 row-axis-independent. Reductions, transpose, reshape, constant-only
 expressions, and `@` therefore remain batch-only. `table_matmul@1` is also
-batch-only; static-input matrix multiplication is deferred to SCE-13.
+batch-only. Symbolic programs that explicitly compose `linalg.from_columns`,
+allowlisted elementwise operations, one static-weight `linalg.matmul`, and
+`table.attach_columns` instead lower to the stateless `symbolic_matrix@1`
+stream provider. It receives the table once per micro-batch and reuses the
+job-latched weights across calls.
 
 ## Static inputs
 

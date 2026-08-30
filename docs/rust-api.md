@@ -87,7 +87,8 @@ Every operator implements `OperatorMetadata`. Custom finite operators implement
 `BatchOperator`, whose `BatchOperatorContext` carries the run-scoped context;
 custom continuous operators implement `StreamOperator`, whose
 `StreamOperatorContext` carries the stream-job context, operator identity,
-current input watermark, and late-row counters. External operators resolve
+current input watermark, late-row counters, and read-only access to declared
+job-static batches through `static_input(name)`. External operators resolve
 through `ProviderRegistry` and lifecycle-specific factories, covered below.
 
 `BatchExecutionPlan::datafusion_config()` returns `Option<DataFusionConfig>`:
