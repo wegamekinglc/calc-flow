@@ -38,7 +38,6 @@ jobs:
   docs-check:
     name: Documentation checks
     needs: changes
-    if: needs.changes.outputs.docs_only == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -789,8 +788,8 @@ jobs:
       - name: Require the selected CI path to pass
         run: |
           test "$CHANGES_RESULT" = success
+          test "$DOCS_RESULT" = success
           if [ "$DOCS_ONLY" = true ]; then
-            test "$DOCS_RESULT" = success
             exit 0
           fi
           for result in \
