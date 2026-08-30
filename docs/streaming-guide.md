@@ -201,10 +201,11 @@ calls nor matrix multiplication, keeping the accepted subset conservatively
 row-axis-independent. Reductions, transpose, reshape, constant-only
 expressions, and `@` therefore remain batch-only. `table_matmul@1` is also
 batch-only. Symbolic programs that explicitly compose `linalg.from_columns`,
-allowlisted elementwise operations, one static-weight `linalg.matmul`, and
+allowlisted elementwise operations, exactly one `linalg.matmul`, and
 `table.attach_columns` instead lower to the stateless `symbolic_matrix@1`
-stream provider. It receives the table once per micro-batch and reuses the
-job-latched weights across calls.
+stream provider. The static `weights` parameter occurs exactly once as that
+matmul's direct right operand. The provider receives the table once per
+micro-batch and reuses the job-latched weights across calls.
 
 ## Static inputs
 
@@ -277,12 +278,14 @@ is the checkpoint-mismatch error class. Checkpoint manifests record one digest
 entry per static input under the root field `static_inputs`; the field is
 omitted when the set is empty, so existing manifests keep their bytes. Status,
 metrics, and errors expose at most the input name, digest version, and digest
-— never payloads or backing memory. In this release no built-in operator
-consumes a static value; the surface carries preflight, digest, lineage, and
-checkpoint evidence. The follow-up work bound to the first consuming
-operators is recorded in the
-[SCE-11 review record](../.codex/artifacts/analysis/sce-11-static-stream-inputs-review-record.md).
-The [API reference](api-reference.md) lists the exported static-input types.
+— never payloads or backing memory. The built-in NumPy/JAX
+`symbolic_matrix@1` provider is the static-array consumer: the runner places
+each declared weight array once per job on a blocking worker, caches only the
+successfully placed immutable provider value after a cancellation check, and
+reuses it for every data micro-batch. Its `static_placement_bytes` metadata is
+logical provider transfer, not peak memory or process RSS. The
+[API reference](api-reference.md) lists the complete exported static-input
+surface.
 
 ## Bounded event-time Join
 

@@ -220,15 +220,17 @@ registration evidence establishes no output-finality contract; it is the
 truthful conservative value for a batch-only registration and does not narrow
 existing batch selectability.
 
-The trusted `register_numpy` and `register_jax` helpers additionally attach a
-process-local stateless stream proof to their `expression@1` registrations.
-Those provider entries report `modes=("batch", "stream")`,
+The trusted `register_numpy` and `register_jax` helpers additionally attach
+process-local stateless stream proofs to their `expression@1` and
+`symbolic_matrix@1` registrations. Those provider entries report
+`modes=("batch", "stream")`,
 `finality="per_row_final"`, `microbatch_invariant=True`,
-`deterministic=True`, `replay_safe=True`, and the
-`row_axis_independent`/`elementwise_broadcast@1` array contract. The public
-`Runtime.register_provider` signature has no lifecycle arguments, so an
-arbitrary Python callback remains batch-only rather than acquiring this proof
-from caller-supplied metadata.
+`deterministic=True`, `replay_safe=True`, and a `row_axis_independent` array
+contract. `expression@1` carries `elementwise_broadcast@1` and does not support
+static inputs; `symbolic_matrix@1` carries the matrix shape rules and does.
+The public `Runtime.register_provider` signature has no lifecycle arguments,
+so an arbitrary Python callback remains batch-only rather than acquiring this
+proof from caller-supplied metadata.
 
 Compiled-in connector registrations surface on the snapshot's `connectors`
 tuple as `ConnectorCapability` entries. Each entry pairs its
@@ -239,13 +241,13 @@ declared formats, and an options schema.
 
 The session ID is stable for one runtime. A successful registry entry advances
 the revision exactly once; rejected duplicates do not. NumPy/JAX helpers add
-`expression@1` and mapped `table_matmul@1` as separate entries, so one helper
-normally advances by two and can expose a real partial success if its second
-entry already exists. Previously returned snapshots remain isolated from
-later revisions. Snapshots are immutable and defensively copied: mutating a
-caller-owned sequence after registration cannot change a returned snapshot.
-Operators sort by `(kind, version)`; providers and UDFs sort by
-`(provider, name, version)`.
+`expression@1`, mapped `table_matmul@1`, and mapped `symbolic_matrix@1` as
+separate entries, so one helper normally advances by three and can expose a
+real partial success if a later entry already exists. Previously returned
+snapshots remain isolated from later revisions. Snapshots are immutable and
+defensively copied: mutating a caller-owned sequence after registration cannot
+change a returned snapshot. Operators sort by `(kind, version)`; providers and
+UDFs sort by `(provider, name, version)`.
 
 ## Execution options and provider context
 
@@ -462,9 +464,10 @@ def table_matmul(
 
 It selects `columns` in the supplied order, accepts a rank-two `weights` array
 with shape `(len(columns), output_width)`, and returns a same-backend array
-batch named `output`. `table_matmul@1` remains batch-only in this release;
-static-input matrix multiplication is follow-up work rather than part of the
-stateless stream-provider proof.
+batch named `output`. The direct `table_matmul@1` operator remains batch-only.
+Streaming static-weight multiplication uses the separately registered
+`symbolic_matrix@1` provider through the explicit symbolic compilation shape
+described below; `table_matmul@1` itself does not acquire a stream lifecycle.
 
 ```python
 import numpy as np
@@ -624,12 +627,14 @@ A single table output shaped as `table.attach_columns(table_value, array,
 names=...)` lowers the explicit table/array bridge to the selected
 `numpy:symbolic_matrix@1` or `jax:symbolic_matrix@1` provider. The array may
 contain `linalg.from_columns`, allowlisted elementwise arithmetic and boolean
-operations, finite literals, and one `linalg.matmul` whose right operand is the
-static array parameter named `weights`. The selected column order is semantic;
-the derived array keeps the source table's row lineage and may attach only to
-that same table lineage. Rank two, matching matmul inner dimensions, a known
-positive output width, and one attached name per result column are proved
-before lowering. Cross-backend composition fails closed.
+operations, finite literals, and exactly one `linalg.matmul`. The static array
+parameter named `weights` must occur exactly once in the entire array
+expression, as that matmul's direct right operand. The selected column order is
+semantic; every `linalg.from_columns` source must be the table being attached,
+and the derived array may attach only to that same table node and row lineage.
+Rank two, matching matmul inner dimensions, a known positive output width, and
+one attached name per result column are proved before lowering. Cross-backend
+composition fails closed.
 
 Batch plans bind the table and weights as `input` and `weights`. Stream plans
 instead declare `weights` as a project-v3 static array input, so only `input`
@@ -637,10 +642,13 @@ is a source binding. The runner latches the caller value before opening a
 source, places it into NumPy or JAX once per job, retains that immutable
 provider array for every micro-batch, and invokes the fused provider once per
 accepted data micro-batch. Output metadata exposes `provider_calls: 1` and
-`copy_bytes` for table-to-array staging, array-to-table attachment, and the
-one-time static weight placement (zero after the first micro-batch). Results
-are row-axis independent and therefore invariant to source segmentation
-within the normal NumPy/JAX floating tolerance.
+`copy_bytes` entries `table_to_array`, `array_to_table`, and `weights`. The
+`weights` entry mirrors `static_placement_bytes`: dtype width multiplied by
+logical element count on first placement and zero on cached later
+micro-batches. It is logical provider transfer, not peak memory, process RSS,
+or the transient internal snapshot clone. Results are row-axis independent and
+therefore invariant to source segmentation within the normal NumPy/JAX
+floating tolerance.
 
 Selected Arrow columns must be unique, non-null primitive numerics with one
 dtype. The provider chooses a lossless common backend dtype with the weights
@@ -723,13 +731,14 @@ output, the `allowed_lateness_micros` and `late_policy` values validated by
 `compile_stream`, and the `nan_exclude_preserve_v1` value policy.
 
 Analysis rejections surface as `CompileError` with the first issue's
-`{path}: {code}: {message}`. Declarations the lowerer does not implement —
-event `window` nodes, `linalg` array bridges, and `parameter` static inputs
-— fail with the eighth issue code `unknown_primitive_version` rooted at the
-output or `static_inputs.<name>`, in both batch and stream modes; a stream
-aggregate or SQL window is never silently made batch-local. Array outputs
-fail with `unknown_primitive_version` in batch mode; stream mode rejects
-them earlier, at the analysis phase, with `unbounded_state` rooted at
+`{path}: {code}: {message}`. Declarations outside the implemented lowerers —
+including event `window` nodes and `linalg`/`parameter` uses that do not form
+the exact symbolic matrix compilation shape above — fail with the eighth issue
+code `unknown_primitive_version` rooted at the output or
+`static_inputs.<name>`, in both batch and stream modes; a stream aggregate or
+SQL window is never silently made batch-local. Standalone array outputs fail
+with `unknown_primitive_version` in batch mode; stream mode rejects them
+earlier, at the analysis phase, with `unbounded_state` rooted at
 `outputs.<name>` — the stream-safety rule for an array output with row-axis
 lineage described above. Casts to non-portable targets fail with
 `unsupported_type` at `outputs.<name>.cast.data_type`.

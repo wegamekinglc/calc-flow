@@ -377,11 +377,14 @@ let runner = StreamingRunner::new(plan, sources, sinks, checkpoints)?
 
 `with_static_inputs` copies the mapping and is `#[must_use]`; validation,
 latching, and digest computation are deferred to `start`, where they happen
-exactly once before any source or operator lifecycle runs. The static-input
-crate-root exports are `StaticInputSpec`, `StaticInputDigest`,
-`StaticMutability`, and `STATIC_INPUT_DIGEST_VERSION`. Declarations join the
-plan fingerprint; `CheckpointManifest` records one `StaticInputDigest` per
-name under its `static_inputs` field, omitted when empty. See
+exactly once before any source or operator lifecycle runs. The complete frozen
+static-input crate-root export set is `StaticInputSpec`, `StaticInputDigest`,
+`StaticMutability`, `STATIC_INPUT_DIGEST_VERSION`, `StaticArraySnapshot`, and
+`StaticArrayValues`. The complete SCE-13 export delta is exactly the last two
+types; `Batch::static_array_snapshot()` and its five read-only accessors are
+the associated inherent API. Declarations join the plan fingerprint;
+`CheckpointManifest` records one `StaticInputDigest` per name under its
+`static_inputs` field, omitted when empty. See
 [static inputs](streaming-guide.md#static-inputs) for the full per-job,
 digest, and recovery contract.
 

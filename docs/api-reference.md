@@ -48,7 +48,7 @@ The `calc_flow` crate re-exports its supported public types from
 
 | Area                | Primary APIs                                                                                                                                           |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Data                | `Batch`, `BatchKind`, `BatchMetadata`, `TableBatch`, `StaticArraySnapshot`, `StaticArrayValues`                                                        |
+| Data                | `Batch`, `BatchKind`, `BatchMetadata`, `TableBatch`                                                                                                    |
 | Batch graph         | `PipelineBuilder`, `Edge`, `PortEndpoint`, `BatchExecutionPlan`                                                                                        |
 | Stream plan         | `StreamExecutionPlan`, `StreamRequirements`, `DeliveryGuarantee`, `StreamRuntimeConfig`                                                                |
 | Operator traits     | `Port`, `OperatorMetadata`, `NodeOperator`, `BatchOperator`, `StreamOperator`, `StreamOperatorLifecycle`, `OperatorStateSnapshot`                      |
@@ -65,7 +65,7 @@ The `calc_flow` crate re-exports its supported public types from
 | UDF/providers       | `UdfRegistry`, `UdfReference`, `ProviderRegistry`, `BatchOperatorFactory`, `StreamOperatorFactory`                                                     |
 | Sources and sinks   | `StreamSource`, `StreamSink`, `TransactionalStreamSink`, `SourceBinding`, `SinkBinding`                                                                |
 | Continuous runtime  | `StreamingRunner`, `StreamingJob`, `ManagedCheckpointRuntime`, `Cursor`, `SourceEvent`, `JobStatus`, `JobOutcome`                                      |
-| Static inputs       | `StaticInputSpec`, `StaticInputDigest`, `StaticMutability`                                                                                             |
+| Static inputs       | `StaticInputSpec`, `StaticInputDigest`, `StaticMutability`, `STATIC_INPUT_DIGEST_VERSION`, `StaticArraySnapshot`, `StaticArrayValues`                  |
 | Projects            | `ProjectSpec`, `compile_project`, `validate_project`                                                                                                   |
 | Persistence         | `FileProjectStore`, `LocalStateBackend`, `CheckpointManifest`                                                                                          |
 | Errors              | `CalcFlowError`, `Result<T>`                                                                                                                           |
@@ -75,14 +75,23 @@ The `calc_flow` crate re-exports its supported public types from
 `StreamExecutionPlan` is consumed by the public source-driven
 `StreamingRunner`. The runner owns source and sink bindings plus a
 `ManagedCheckpointRuntime`; `start(self)` consumes it and returns the sole
-`StreamingJob` lifecycle owner. The static-input exports also include the
-`STATIC_INPUT_DIGEST_VERSION` constant. `Batch::static_array_snapshot()` is an
-explicit owned host-neutral copy for a latched static array: its backend,
-dtype, shape, optional full null bitmap, and compact scalar carrier are
-available through read-only accessors. The snapshot and value enum are
-non-exhaustive and intentionally provide no `Clone`, payload-bearing `Debug`,
-serde, or mutation surface. The v2 source/sink traits, micro-batch runner, push
-runner, and public checkpoint-document store are not exported.
+`StreamingJob` lifecycle owner. The complete SCE-13 crate-root export delta is
+exactly `StaticArraySnapshot` and `StaticArrayValues`.
+`Batch::static_array_snapshot()` is an explicit owned host-neutral copy for a
+latched static array: its backend, dtype, shape, optional full null bitmap, and
+compact scalar carrier are available through read-only accessors. The snapshot
+and value enum are non-exhaustive and intentionally provide no `Clone`,
+payload-bearing `Debug`, serde, or mutation surface.
+
+Python static placement creates one transient `O(n)` snapshot clone per placed
+static input inside a blocking worker. `static_placement_bytes` is the logical
+provider-transfer count — dtype width multiplied by logical element count —
+reported on first placement and zero for cached later micro-batches. It does
+not measure peak memory, process RSS, or the internal snapshot clone; the
+engine latch, snapshot carriers, Python host list, NumPy storage, and a
+provider-owned JAX result may coexist during first placement. The v2
+source/sink traits, micro-batch runner, push runner, and public
+checkpoint-document store are not exported.
 
 `EdgeBudget::new(R, B)` keeps its two-field public shape and caps queued
 envelopes and charged rows independently at `R`, plus charged bytes at `B`.
@@ -230,20 +239,23 @@ support and state version, determinism, and replay safety — validated
 fail-closed against closed vocabularies; see the
 [Python API guide](python-api.md) for the full contract. Its session ID is
 stable for one `Runtime`; its revision advances once for each successful
-registry entry. Failed duplicates do not advance it, while the two-entry
+registry entry. Failed duplicates do not advance it, while the three-entry
 NumPy and JAX helpers can expose a real partial success. Snapshots already
 returned to callers do not change when later registrations advance the
 revision.
 
-`register_numpy(runtime)` installs `numpy:expression@1` and
-`numpy:table_matmul@1`; `register_jax(runtime)` installs `jax:expression@1`
-and `jax:table_matmul@1`. The matrix providers accept an Arrow table input
-named `table` and same-backend array weights named `weights`, then produce an
-array output. After input `Batch` construction they make no redundant
-execution copies: NumPy uses one dense table allocation and one result; JAX
-permits one host staging buffer, one device table buffer, and one device
-result. JAX performs no result-to-host round trip during operator execution.
-These are execution ceilings, not end-to-end zero-copy claims.
+`register_numpy(runtime)` installs `numpy:expression@1`,
+`numpy:table_matmul@1`, and `numpy:symbolic_matrix@1`;
+`register_jax(runtime)` installs the same three identities under `jax`.
+`table_matmul@1` accepts an Arrow table named `table` and same-backend array
+weights named `weights`, then produces an array output. After input `Batch`
+construction it makes no redundant execution copies: NumPy uses one dense
+table allocation and one result; JAX permits one host staging buffer, one
+device table buffer, and one device result. JAX performs no result-to-host
+round trip during operator execution. These are execution ceilings, not
+end-to-end zero-copy claims. `symbolic_matrix@1` is the fused
+table-to-array-to-table provider described in the
+[symbolic matrix compilation guide](python-api.md#symbolic-matrix-compilation).
 
 ### Projects and stores
 
@@ -305,7 +317,7 @@ constructors copy caller-owned sequences and mappings.
 | `TableExpr.with_columns(features)`                                            | Append a feature set as derived columns                                                                              |
 | `Program(name, *, inputs=(), outputs=())`                                     | Declared inputs and outputs with the runtime-independent v1 fingerprint                                              |
 | `Program.analyze(runtime, *, mode)` / `.explain(runtime, *, mode)`            | Static analysis and deterministic fact rendering                                                                     |
-| `Program.compile_batch(runtime)` / `.compile_stream(runtime, *, ...)`         | Lower row-local, rolling (lag/delta/aggregate), and cross-section declarations to a strict project-v3 execution plan |
+| `Program.compile_batch(runtime)` / `.compile_stream(runtime, *, ...)`         | Lower supported row-local, rolling, cross-section, and symbolic matrix declarations to a strict project-v3 plan      |
 | `AnalysisIssue` / `AnalysisResult`                                            | Immutable findings with stable output/input-rooted paths                                                             |
 
 Structural identity uses `identical()`; public comparison operators build
