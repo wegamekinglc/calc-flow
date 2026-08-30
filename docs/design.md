@@ -172,11 +172,11 @@ reproduces the same ordered output.
 `CrossSectionOperator` evaluates complete-group rank, percentile, z-score,
 demean, winsorize, top/bottom selection, and mean-fill outputs over exact-time
 or fixed-bucket groups and runs in both batch and stream graphs. Its
-`CrossSectionSpec` declares the event-time
-column, ordered entity and sequence keys, an optional partition key, the
-grouping, per-output ordering choices with minimum samples, allowed
-lateness, and a late-row policy; row identity is the event time, entity key,
-and sequence key, and duplicates are rejected transactionally.
+`CrossSectionSpec` declares the event-time column, ordered entity and sequence
+keys, optional ordered partition-key columns, the grouping, per-output choices
+with minimum samples, allowed lateness, and a late-row policy; row identity is
+the event time, entity key, and sequence key, and duplicates are rejected
+transactionally.
 
 One micro-batch is never evidence of completeness: groups accumulate across
 envelopes and close only when the input watermark reaches the group's

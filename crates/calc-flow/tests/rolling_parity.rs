@@ -20,9 +20,10 @@ use datafusion::arrow::{
     datatypes::{DataType, Field, Schema, TimeUnit},
     record_batch::RecordBatch,
 };
-use proptest::{collection::vec, prelude::*};
+use proptest::{collection::vec, prelude::*, test_runner::RngSeed};
 
 const FINGERPRINT: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const PARITY_RNG_SEED: u64 = 0xCA1C_F10A_0213;
 
 fn input_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
@@ -450,6 +451,7 @@ proptest! {
     #![proptest_config(ProptestConfig {
         cases: 32,
         failure_persistence: None,
+        rng_seed: RngSeed::Fixed(PARITY_RNG_SEED),
         ..ProptestConfig::default()
     })]
     #[test]

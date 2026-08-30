@@ -6076,6 +6076,18 @@ mod tests {
     }
 
     #[test]
+    fn negative_infinity_departure_restores_finite_window_outputs() {
+        let spec = kernel_spec(json!([aggregate_output("mean", "price", "price_mean", 2)]));
+        let rows = entity_prices("a", &[Some(f64::NEG_INFINITY), Some(2.0), Some(5.0)]);
+        let outputs = compute(&spec, &RollingHistories::default(), &rows).unwrap();
+
+        assert_eq!(
+            float_column(&outputs, 0),
+            vec![Some(f64::NEG_INFINITY), Some(f64::NEG_INFINITY), Some(3.5)]
+        );
+    }
+
+    #[test]
     fn a4_near_overflow_finite_window_keeps_the_west_mean() {
         let spec = kernel_spec(json!([aggregate_output("mean", "price", "price_mean", 2)]));
         let rows = entity_prices("a", &[Some(1e308), Some(1e308)]);

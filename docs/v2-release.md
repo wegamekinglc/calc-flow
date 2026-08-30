@@ -12,7 +12,8 @@ Calc Flow 2.0 does not load Calc Flow 1.x project documents or checkpoints.
 Recreate projects with the v2 schema and restart stateful processing from a
 chosen source boundary. No automated converter is provided.
 
-The `v1-python-final` tag preserves the final Python v1 implementation.
+[Commit `c87324e`](https://github.com/wegamekinglc/calc-flow/tree/c87324ecaee30d8b883d3c30ae03704dee45f593)
+preserves the final Python v1 implementation.
 `docs/v1-final-api.md` and `docs/migration-v0.2.md` remain historical references,
 and `tests/fixtures/v1/` remains immutable semantic evidence. None of those
 files is a v2 runtime path.

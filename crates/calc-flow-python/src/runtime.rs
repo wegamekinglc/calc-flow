@@ -435,3 +435,105 @@ pub(crate) fn python_json(
     calc_flow::canonical_json(&parsed).map_err(|error| provider_error(label, error))?;
     Ok(parsed)
 }
+
+#[cfg(test)]
+mod tests {
+    use pyo3::types::PyDict;
+
+    use super::*;
+
+    fn completion() -> Arc<PythonAwaitCompletion> {
+        let (sender, _receiver) = tokio::sync::oneshot::channel();
+        Arc::new(PythonAwaitCompletion {
+            sender: Mutex::new(Some(sender)),
+            lease: Mutex::new(None),
+        })
+    }
+
+    #[test]
+    fn gc_referents_keep_pending_await_resources_reachable() {
+        Python::initialize();
+        Python::attach(|py| {
+            let event_loop = PyDict::new(py).into_any().unbind();
+            let task = PyDict::new(py).into_any().unbind();
+            let awaitable = PyDict::new(py).into_any().unbind();
+            let context = PyDict::new(py).into_any().unbind();
+            let state = Arc::new(PythonAwaitState::new(event_loop.clone_ref(py)));
+            state.register_task(task.clone_ref(py));
+            let scheduler = Py::new(
+                py,
+                PythonAwaitScheduler {
+                    awaitable: Some(awaitable.clone_ref(py)),
+                    context: Some(context.clone_ref(py)),
+                    state: Some(Arc::clone(&state)),
+                    completion: completion(),
+                },
+            )
+            .unwrap();
+            let completer = Py::new(
+                py,
+                PythonAwaitCompleter {
+                    state: Some(state),
+                    completion: completion(),
+                },
+            )
+            .unwrap();
+            let locals = PyDict::new(py);
+            locals.set_item("scheduler", scheduler).unwrap();
+            locals.set_item("completer", completer).unwrap();
+            locals.set_item("event_loop", event_loop).unwrap();
+            locals.set_item("task", task).unwrap();
+            locals.set_item("awaitable", awaitable).unwrap();
+            locals.set_item("context", context).unwrap();
+            py.run(
+                c"import gc\ngc.collect()\nscheduler_referents = gc.get_referents(scheduler)\nassert any(value is awaitable for value in scheduler_referents)\nassert any(value is context for value in scheduler_referents)\nassert any(value is event_loop for value in scheduler_referents)\nassert any(value is task for value in scheduler_referents)\ncompleter_referents = gc.get_referents(completer)\nassert any(value is event_loop for value in completer_referents)\nassert any(value is task for value in completer_referents)",
+                Some(&locals),
+                None,
+            )
+            .unwrap();
+        });
+    }
+
+    #[test]
+    fn closed_completion_channel_cancels_the_await_and_reports_the_error() {
+        Python::initialize();
+        let state = Python::attach(|py| Arc::new(PythonAwaitState::new(py.None())));
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        drop(sender);
+        let mut cancellation = PythonAwaitCancelGuard {
+            state: Some(Arc::clone(&state)),
+        };
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let error = runtime
+            .block_on(await_python_result(receiver, &mut cancellation))
+            .unwrap_err();
+
+        assert!(state.cancel_requested.load(Ordering::Acquire));
+        assert!(cancellation.state.is_none());
+        Python::attach(|py| {
+            assert!(error.is_instance_of::<PyRuntimeError>(py));
+            assert_eq!(
+                error.value(py).str().unwrap().to_str().unwrap(),
+                "Python awaitable completion channel closed unexpectedly"
+            );
+        });
+    }
+
+    #[test]
+    fn provider_error_preserves_callback_identity_and_message() {
+        let error = provider_error("load_prices", "callback failed");
+
+        assert!(matches!(
+            error,
+            calc_flow::CalcFlowError::ExternalProvider {
+                provider,
+                name,
+                version,
+                message,
+            } if provider == "python"
+                && name == "load_prices"
+                && version == "1"
+                && message == "callback failed"
+        ));
+    }
+}

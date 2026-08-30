@@ -141,9 +141,10 @@ batch kind, required flag, and optional exact Arrow schema. Compilation checks:
 - deterministic graph inputs, outputs, order, and fingerprint.
 
 The Python `PipelineBuilder` is a functional projection of the same v3 project
-model. Its `expression`, `sql`, `external`, `table_matmul`, and `connect`
-methods return new builders. `compile_batch()` and `compile_stream()` serialize
-the strict graph project and ask the Rust `Runtime` to validate and compile it.
+model. Its `expression`, `sql`, `external`, `table_matmul`, `stream_join`, and
+`connect` methods return new builders. `compile_batch()` and
+`compile_stream()` serialize the strict graph project and ask the Rust
+`Runtime` to validate and compile it.
 
 Rust stream graphs can also contain `UnionOperator`,
 `WindowAggregateOperator`, and `StreamJoinOperator`. A `WindowSpec` declares
@@ -166,16 +167,17 @@ null gate and IEEE infinity semantics. `RollingOperator` compiles into both
 batch and stream graphs, emits the input fields followed by the declared
 rolling outputs, and checkpoints its stream state at the aligned epoch cut.
 
-A `CrossSectionSpec` declares native complete-group rank, percentile,
-z-score, and demean outputs over exact-time or fixed-bucket groups: a
-non-null UTC `timestamp[us]` event-time column, ordered entity and sequence
-keys, an optional partition key, the grouping, per-output ordering choices
-and minimum samples, allowed lateness, and a late-row policy. One micro-batch
-is never evidence of completeness — `CrossSectionOperator` accumulates groups
-across envelopes, closes each group when the input watermark reaches its
-finality coordinate (or at end of input), and emits it once in canonical
-order before releasing its state. It compiles into both batch and stream
-graphs and checkpoints its open groups at the aligned epoch cut.
+A `CrossSectionSpec` declares native complete-group rank, percentile, demean,
+z-score, winsorize, top/bottom selection, and mean-fill outputs over exact-time
+or fixed-bucket groups: a non-null UTC `timestamp[us]` event-time column,
+ordered entity and sequence keys, optional ordered partition-key columns, the
+grouping, per-output choices and minimum samples, allowed lateness, and a
+late-row policy. One micro-batch is never evidence of completeness —
+`CrossSectionOperator` accumulates groups across envelopes, closes each group
+when the input watermark reaches its finality coordinate (or at end of input),
+and emits it once in canonical order before releasing its state. It compiles
+into both batch and stream graphs and checkpoints its open groups at the
+aligned epoch cut.
 
 `table_matmul` creates a provider-backed `table_matmul@1` external node with
 the required mixed-kind inputs `table` (table) and `weights` (array), and the
@@ -412,7 +414,7 @@ The Python package lives under `python/calc_flow/`. The native extension is
 - NumPy/JAX provider registration and bounded array expressions;
 - stable Python exception classes that mirror native error categories.
 
-There is no `src/calc_flow/` execution path in v3.
+There is no `src/calc_flow/` execution path.
 
 ## Local Studio
 
@@ -443,6 +445,8 @@ source boundary. No automated converter is provided. See the
 
 The historical [v1 API](v1-final-api.md) and
 [v0.2 migration guide](migration-v0.2.md) are references only. The frozen v1
-implementation is available at the `v1-python-final` tag, while
+implementation is preserved in
+[commit `c87324e`](https://github.com/wegamekinglc/calc-flow/tree/c87324ecaee30d8b883d3c30ae03704dee45f593),
+while
 [`tests/fixtures/v1/`](../tests/fixtures/v1/) preserves the semantic corpus
 as historical parity evidence.

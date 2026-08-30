@@ -3674,6 +3674,36 @@ mod tests {
     }
 
     #[test]
+    fn replacement_checkpoint_without_prepared_segments_discards_old_inventory() {
+        let mut operator = checkpoint_segment_operator();
+        operator.state.operator_id = Some("window".into());
+        let segment_id = "delta-00000000000000000001-00000000";
+        let segment = crate::StateSegment::new(vec![1, 2, 3]);
+        let descriptor = operator
+            .snapshot_segment_descriptor(
+                crate::Epoch::INITIAL,
+                segment_id,
+                SegmentKind::Delta,
+                &segment,
+            )
+            .unwrap();
+        operator.state.retained_inventory = StateInventory::new(vec![descriptor]).unwrap();
+        operator
+            .state
+            .retained_segments
+            .insert(segment_id.into(), segment);
+        operator.state.replace_retained_on_checkpoint = true;
+
+        let snapshot = operator.checkpoint(crate::Epoch::INITIAL).unwrap();
+        let metadata = parse_snapshot_metadata(&snapshot).unwrap();
+
+        assert!(metadata.segment_inventory.is_empty());
+        assert!(snapshot.segments.is_empty());
+        assert!(operator.state.retained_inventory.segments().is_empty());
+        assert!(operator.state.retained_segments.is_empty());
+    }
+
+    #[test]
     fn output_chunking_preserves_rows_and_uses_consecutive_sequences() {
         let record = output_record(5);
         let chunks = chunk_output_record(
