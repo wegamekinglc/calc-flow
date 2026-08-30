@@ -1,0 +1,60 @@
+{
+  "benchmark_commit": "c562d405f6117a474d9566641b23dcb571fedcee",
+  "bootstrap_resamples": 20000,
+  "bootstrap_seed": 20260829,
+  "decision": "pass",
+  "format_version": 1,
+  "machine": {
+    "cpu_arch": "X86_64",
+    "cpu_bits": 64,
+    "cpu_brand": "13th Gen Intel(R) Core(TM) i9-13900HX",
+    "cpu_count": 32,
+    "machine": "x86_64",
+    "node": "chengli-i9",
+    "python_implementation": "CPython",
+    "python_version": "3.13.9",
+    "release": "5.15.167.4-microsoft-standard-WSL2",
+    "system": "Linux"
+  },
+  "reports": [
+    {
+      "path": "benchmarks/symbolic/sce14-c562d40-paired1.json",
+      "sha256": "640bc2438d5f777d1798690125fc63995b0d4f278ea85e13ce99a47cc2085e44"
+    },
+    {
+      "path": "benchmarks/symbolic/sce14-c562d40-paired2.json",
+      "sha256": "346a635b2832b6678f8702ad92b47ae72bab30b5c6beb55b66f03517bd064dea"
+    }
+  ],
+  "scenarios": [
+    {
+      "decision": "pass",
+      "geometric_regression_percent": -45.50801368607308,
+      "hand_built_first_samples": 30,
+      "paired_samples": 60,
+      "regression_interval_percent": [
+        -45.696444932237526,
+        -45.31534715610774
+      ],
+      "scenario": "sce14_cross_domain_sharing",
+      "symbolic_first_samples": 30,
+      "threshold_percent": 5.0,
+      "workload": {
+        "array_elements": 100000,
+        "comparison_contract": "same-process-alternating-v1",
+        "datafusion_query_count": 3,
+        "entities": 64,
+        "industries": 8,
+        "input_rows": 99968,
+        "matrix_dimension": 256,
+        "optimized_state_stages": 2,
+        "output_rows": 199936,
+        "reference_state_stages": 4,
+        "scale": "standard",
+        "scenario": "sce14_cross_domain_sharing",
+        "table_rows": 100000,
+        "workload_contract": "sce14-cross-domain-sharing-v1"
+      }
+    }
+  ]
+}
