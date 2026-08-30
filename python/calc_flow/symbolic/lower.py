@@ -10,9 +10,10 @@ while a compiled plan executes.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final, Never
 
+from calc_flow.capabilities import RuntimeCapabilities
 from calc_flow.pipeline import (
     Runtime,
     StreamRequirements,
@@ -47,6 +48,24 @@ from calc_flow.symbolic.types import Field
 if TYPE_CHECKING:
     from calc_flow.pipeline import BatchExecutionPlan, StreamExecutionPlan
     from calc_flow.symbolic.program import Program
+
+
+@dataclass(frozen=True, slots=True)
+class _CompileCacheKey:
+    """Deterministic, runtime-scoped identity for one symbolic compilation."""
+
+    program_fingerprint: str
+    mode: str
+    input_declarations: tuple[str, ...]
+    capability_schema_version: int
+    capability_session_id: str
+    capability_revision: int
+    operator_versions: tuple[tuple[str, str], ...]
+    provider_versions: tuple[tuple[str, str, str], ...]
+    udf_versions: tuple[tuple[str, str, str], ...]
+    allowed_lateness_micros: int
+    late_policy: str
+
 
 _COLUMN_PRIMITIVES: Final = frozenset(
     {
@@ -493,6 +512,7 @@ class _RollingPlan:
     post_predicate: Node | None
     input_field_names: tuple[str, ...]
     output_fields: tuple[Field, ...]
+    replacements: tuple[tuple[str, str], ...]
 
 
 def _rolling_frame(subtree: Node, path: str, kind: str, /) -> dict[str, object]:
@@ -693,6 +713,7 @@ def _plan_rolling(
         post_predicate,
         (*input_types, *(field.name for field in derived_fields)),
         (*input_fields, *derived_fields),
+        tuple(replacements.items()),
     )
 
 
@@ -707,6 +728,7 @@ class _CrossSectionPlan:
     post_predicate: Node | None
     input_field_names: tuple[str, ...]
     output_fields: tuple[Field, ...]
+    replacements: tuple[tuple[str, str], ...]
 
 
 def _cross_section_grouping(subtree: Node, path: str, /) -> dict[str, object]:
@@ -968,6 +990,190 @@ def _plan_cross_section(
         post_predicate,
         (*input_types, *(field.name for field in derived_fields)),
         (*input_fields, *derived_fields),
+        tuple(replacements.items()),
+    )
+
+
+def _shared_materialized_name(
+    prefix: str, counter: int, reserved: set[str], /
+) -> tuple[str, int]:
+    while True:
+        name = f"__cf_shared_{prefix}_{counter}"
+        counter += 1
+        if name not in reserved:
+            reserved.add(name)
+            return name, counter
+
+
+def _plan_outputs(plan: _RollingPlan | _CrossSectionPlan, /) -> list[dict[str, object]]:
+    return plan.node["operator"]["spec"]["outputs"]  # type: ignore[index,return-value]
+
+
+def _merge_state_outputs[StatePlanT: (_RollingPlan, _CrossSectionPlan)](
+    members: list[str],
+    plans: dict[str, StatePlanT | None],
+    prefix: str,
+    /,
+) -> tuple[StatePlanT, dict[str, str], list[dict[str, object]], tuple[Field, ...]]:
+    first = plans[members[0]]
+    assert first is not None
+    base_count = len(first.output_fields) - len(first.replacements)
+    base_fields = first.output_fields[:base_count]
+    reserved = {
+        field.name
+        for output_name in members
+        for field in plans[output_name].output_fields  # type: ignore[union-attr]
+    }
+    replacements: dict[str, str] = {}
+    declarations: list[dict[str, object]] = []
+    derived_fields: list[Field] = []
+    counter = 0
+    for output_name in members:
+        plan = plans[output_name]
+        assert plan is not None
+        declarations_by_name = {item["output"]: item for item in _plan_outputs(plan)}
+        fields_by_name = {field.name: field for field in plan.output_fields}
+        for digest, old_name in plan.replacements:
+            if digest in replacements:
+                continue
+            new_name, counter = _shared_materialized_name(prefix, counter, reserved)
+            replacements[digest] = new_name
+            declarations.append({**declarations_by_name[old_name], "output": new_name})
+            field = fields_by_name[old_name]
+            derived_fields.append(
+                Field(new_name, field.data_type, nullable=field.nullable)
+            )
+    return first, replacements, declarations, (*base_fields, *derived_fields)
+
+
+def _shared_state_node(
+    plan: _RollingPlan | _CrossSectionPlan,
+    node_id: str,
+    declarations: list[dict[str, object]],
+    output_fields: tuple[Field, ...],
+    /,
+) -> dict[str, object]:
+    operator = plan.node["operator"]
+    spec = operator["spec"]  # type: ignore[index]
+    return {
+        **plan.node,
+        "id": node_id,
+        "operator": {
+            **operator,  # type: ignore[arg-type]
+            "spec": {**spec, "outputs": declarations},  # type: ignore[arg-type]
+        },
+        "output_ports": [
+            {
+                "name": "output",
+                "kind": "table",
+                "required": True,
+                "schema": [_field_json(field) for field in output_fields],
+            }
+        ],
+    }
+
+
+def _unique_shared_node_id(stem: str, reserved: set[str], /) -> str:
+    candidate = stem
+    counter = 1
+    while candidate in reserved:
+        candidate = f"{stem}_{counter}"
+        counter += 1
+    reserved.add(candidate)
+    return candidate
+
+
+def _share_state_groups[StatePlanT: (_RollingPlan, _CrossSectionPlan)](
+    groups: list[list[str]],
+    segments: list[tuple[str, _Segment]],
+    plans: dict[str, StatePlanT | None],
+    prefix: str,
+    suffix: str,
+    /,
+) -> dict[str, StatePlanT | None]:
+    shared = dict(plans)
+    by_name = dict(segments)
+    reserved_ids = {
+        *(output_name for output_name, _ in segments),
+        *(_cstr(segment.input_node.attr("name")) for _, segment in segments),
+        *(plan.node_id for plan in plans.values() if plan is not None),
+    }
+    for members in groups:
+        if len(members) < 2:
+            continue
+        first, replacements, declarations, output_fields = _merge_state_outputs(
+            members, plans, prefix
+        )
+        node_id = _unique_shared_node_id(
+            f"{members[0]}__cf_shared_{suffix}", reserved_ids
+        )
+        node = _shared_state_node(first, node_id, declarations, output_fields)
+        for output_name in members:
+            segment = by_name[output_name]
+            shared[output_name] = replace(
+                first,
+                node_id=node_id,
+                node=node,
+                env=tuple(
+                    (name, _replace_rolling(tree, replacements))
+                    for name, tree in segment.env
+                ),
+                post_predicate=(
+                    None
+                    if segment.post_predicate is None
+                    else _replace_rolling(segment.post_predicate, replacements)
+                ),
+                input_field_names=tuple(field.name for field in output_fields),
+                output_fields=output_fields,
+                replacements=tuple(replacements.items()),
+            )
+    return shared
+
+
+def _share_rolling_plans(
+    segments: list[tuple[str, _Segment]],
+    plans: dict[str, _RollingPlan | None],
+    /,
+) -> dict[str, _RollingPlan | None]:
+    groups: dict[tuple[str, str | None], list[str]] = {}
+    for output_name, segment in segments:
+        if plans[output_name] is not None:
+            predicate = None if segment.predicate is None else segment.predicate.digest
+            groups.setdefault((segment.input_node.digest, predicate), []).append(
+                output_name
+            )
+    return _share_state_groups(
+        list(groups.values()), segments, plans, "roll", "rolling"
+    )
+
+
+def _cross_section_identity(plan: _CrossSectionPlan, /) -> str:
+    spec = plan.node["operator"]["spec"]  # type: ignore[index]
+    return _canonical(
+        {
+            "input_ports": plan.node["input_ports"],
+            "spec": {key: value for key, value in spec.items() if key != "outputs"},
+        }
+    )
+
+
+def _share_cross_section_plans(
+    segments: list[tuple[str, _Segment]],
+    upstream_ids: dict[str, str | None],
+    plans: dict[str, _CrossSectionPlan | None],
+    /,
+) -> dict[str, _CrossSectionPlan | None]:
+    groups: dict[tuple[str, str | None, str], list[str]] = {}
+    for output_name, segment in segments:
+        plan = plans[output_name]
+        if plan is not None:
+            upstream = upstream_ids[output_name] or segment.input_node.digest
+            predicate = None if segment.predicate is None else segment.predicate.digest
+            groups.setdefault(
+                (upstream, predicate, _cross_section_identity(plan)), []
+            ).append(output_name)
+    return _share_state_groups(
+        list(groups.values()), segments, plans, "cs", "cross_section"
     )
 
 
@@ -1423,6 +1629,113 @@ def _walk_nodes(root: Node, /) -> tuple[Node, ...]:
     return tuple(nodes)
 
 
+def _deduplicate_pure_expression_nodes(
+    nodes: list[dict[str, object]],
+    edges: list[dict[str, object]],
+    output_ids: frozenset[str],
+    /,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Share identical connected expression stages across output branches."""
+
+    incoming: dict[str, list[dict[str, object]]] = {}
+    for edge in edges:
+        incoming.setdefault(str(edge["target_node"]), []).append(edge)
+    aliases: dict[str, str] = {}
+    signatures: dict[str, str] = {}
+    kept: list[dict[str, object]] = []
+    for node in nodes:
+        node_id = str(node["id"])
+        operator = node["operator"]
+        node_incoming = incoming.get(node_id, [])
+        if (
+            not isinstance(operator, dict)
+            or operator.get("kind") != "expression"
+            or node_id in output_ids
+            or len(node_incoming) != 1
+        ):
+            kept.append(node)
+            continue
+        edge = node_incoming[0]
+        source = aliases.get(str(edge["source_node"]), str(edge["source_node"]))
+        signature = _canonical(
+            {
+                "input_ports": node.get("input_ports", []),
+                "operator": operator,
+                "output_ports": node.get("output_ports", []),
+                "source_node": source,
+                "source_port": edge.get("source_port", "output"),
+                "target_port": edge.get("target_port", "input"),
+            }
+        )
+        canonical = signatures.get(signature)
+        if canonical is None:
+            signatures[signature] = node_id
+            kept.append(node)
+        else:
+            aliases[node_id] = canonical
+
+    def resolve(node_id: str) -> str:
+        while node_id in aliases:
+            node_id = aliases[node_id]
+        return node_id
+
+    rewritten: list[dict[str, object]] = []
+    seen_edges: set[tuple[str, str, str, str]] = set()
+    for edge in edges:
+        target = str(edge["target_node"])
+        if target in aliases:
+            continue
+        source = resolve(str(edge["source_node"]))
+        normalized = {
+            **edge,
+            "source_node": source,
+            "target_node": target,
+        }
+        identity = (
+            source,
+            str(normalized.get("source_port", "output")),
+            target,
+            str(normalized.get("target_port", "input")),
+        )
+        if identity not in seen_edges:
+            seen_edges.add(identity)
+            rewritten.append(normalized)
+    return kept, rewritten
+
+
+def _deduplicate_node_ids(
+    nodes: list[dict[str, object]], edges: list[dict[str, object]], /
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Collapse repeated references to one already-shared physical stage."""
+
+    by_id: dict[str, str] = {}
+    unique_nodes: list[dict[str, object]] = []
+    for node in nodes:
+        node_id = str(node["id"])
+        canonical = _canonical(node)
+        existing = by_id.get(node_id)
+        if existing is None:
+            by_id[node_id] = canonical
+            unique_nodes.append(node)
+        elif existing != canonical:
+            raise RuntimeError(
+                f"symbolic optimizer emitted conflicting node id {node_id!r}"
+            )
+    unique_edges: list[dict[str, object]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for edge in edges:
+        identity = (
+            str(edge["source_node"]),
+            str(edge.get("source_port", "output")),
+            str(edge["target_node"]),
+            str(edge.get("target_port", "input")),
+        )
+        if identity not in seen:
+            seen.add(identity)
+            unique_edges.append(edge)
+    return unique_nodes, unique_edges
+
+
 # The lowerer keeps per-output segment staging in one deterministic pass:
 # stage order, edge wiring, and id assignment are semantic, so the rolling,
 # prefilter, and CSE stages stay in one place.
@@ -1467,12 +1780,14 @@ def _lower_program(
         )
         for output_name, segment in segments
     }
+    plans = _share_rolling_plans(segments, plans)
     rolling_digests = {
         segment.input_node.digest
         for (output_name, segment), plan in zip(segments, plans.values(), strict=True)
         if plan is not None
     }
     cross_plans: dict[str, _CrossSectionPlan | None] = {}
+    cross_segments: list[tuple[str, _Segment]] = []
     for (output_name, segment), rolling in zip(segments, plans.values(), strict=True):
         if rolling is not None:
             # Cross-section planning runs over the rolling-rewritten
@@ -1485,6 +1800,7 @@ def _lower_program(
                 None,
                 rolling.post_predicate,
             )
+            cross_segments.append((output_name, after_rolling))
             cross_plans[output_name] = _plan_cross_section(
                 output_name,
                 after_rolling,
@@ -1494,6 +1810,7 @@ def _lower_program(
                 rolling.output_fields,
             )
         else:
+            cross_segments.append((output_name, segment))
             cross_plans[output_name] = _plan_cross_section(
                 output_name,
                 segment,
@@ -1502,6 +1819,16 @@ def _lower_program(
                 late_policy,
                 None,
             )
+    cross_plans = _share_cross_section_plans(
+        cross_segments,
+        {
+            output_name: None
+            if plans[output_name] is None
+            else plans[output_name].node_id
+            for output_name, _ in segments
+        },
+        cross_plans,
+    )
     direct_cross_section_digests = {
         segment.input_node.digest
         for (output_name, segment), rolling, cross in zip(
@@ -1509,6 +1836,12 @@ def _lower_program(
         )
         if rolling is None and cross is not None
     }
+    shared_plan_counts: dict[str, int] = {}
+    for plan in (*plans.values(), *cross_plans.values()):
+        if plan is not None:
+            shared_plan_counts[plan.node_id] = (
+                shared_plan_counts.get(plan.node_id, 0) + 1
+            )
     nodes: list[dict[str, object]] = []
     edges: list[dict[str, object]] = []
     fanout_ids: dict[str, str] = {}
@@ -1543,7 +1876,13 @@ def _lower_program(
         upstream_id: str | None = None
         final_predicate = segment.predicate
         if (rolling is not None or cross is not None) and segment.predicate is not None:
-            prefilter_id = f"{output_name}__cf_prefilter"
+            state_plan = rolling if rolling is not None else cross
+            assert state_plan is not None
+            prefilter_id = (
+                f"{state_plan.node_id}__prefilter"
+                if shared_plan_counts[state_plan.node_id] > 1
+                else f"{output_name}__cf_prefilter"
+            )
             input_fields = _schema_fields(segment.input_node.attr("schema"))
             nodes.append(
                 _expression_node(
@@ -1704,6 +2043,12 @@ def _lower_program(
                 )
                 input_schema = None
             nodes.append(_expression_node(node_id, select, filter_sql, input_schema))
+    nodes, edges = _deduplicate_node_ids(nodes, edges)
+    nodes, edges = _deduplicate_pure_expression_nodes(
+        nodes,
+        edges,
+        frozenset(output_name for output_name, _ in program.outputs),
+    )
     project: dict[str, object] = {
         "data_sources": [],
         "format_version": 3,
@@ -1899,12 +2244,79 @@ def lower_program_document(
     return _lower_program(program, mode_value, allowed_lateness_micros, late_policy)
 
 
+def _compile_cache_key(
+    program: Program,
+    mode: str,
+    document: dict[str, object],
+    capabilities: RuntimeCapabilities,
+    allowed_lateness_micros: int,
+    late_policy: str,
+    /,
+) -> _CompileCacheKey:
+    graph = document["graph"]
+    nodes = graph["nodes"]  # type: ignore[index]
+    operator_kinds = {
+        node["operator"]["kind"]  # type: ignore[index]
+        for node in nodes
+        if node["operator"]["kind"] != "external"  # type: ignore[index]
+    }
+    operator_versions = tuple(
+        sorted(
+            (operator.kind, operator.version)
+            for operator in capabilities.operators
+            if operator.kind in operator_kinds
+        )
+    )
+    provider_versions = tuple(
+        sorted(
+            {
+                (
+                    node["operator"]["provider"],  # type: ignore[index]
+                    node["operator"]["name"],  # type: ignore[index]
+                    node["operator"]["version"],  # type: ignore[index]
+                )
+                for node in nodes
+                if node["operator"]["kind"] == "external"  # type: ignore[index]
+            }
+        )
+    )
+    udf_versions = tuple(
+        sorted(
+            {
+                (udf["provider"], udf["name"], udf["version"])
+                for node in nodes
+                for udf in node["operator"].get("udfs", ())  # type: ignore[index]
+                if isinstance(udf, dict)
+            }
+        )
+    )
+    return _CompileCacheKey(
+        program_fingerprint=program.fingerprint,
+        mode=mode,
+        input_declarations=tuple(
+            value._node.node_bytes.hex() for value in program.inputs
+        ),
+        capability_schema_version=capabilities.schema_version,
+        capability_session_id=capabilities.scope.session_id,
+        capability_revision=capabilities.scope.revision,
+        operator_versions=operator_versions,
+        provider_versions=provider_versions,
+        udf_versions=udf_versions,
+        allowed_lateness_micros=allowed_lateness_micros,
+        late_policy=late_policy,
+    )
+
+
 def compile_program_batch(program: Program, runtime: object, /) -> BatchExecutionPlan:
     """Lower one program to a strict project-v3 batch plan."""
 
     selected = _require_runtime(runtime, "compile_batch")
     document = lower_program_document(program, selected, "batch")
-    return selected.compile_batch_project(_canonical(document))
+    capabilities = selected.capabilities()
+    key = _compile_cache_key(program, "batch", document, capabilities, 0, "error")
+    return selected._cached_symbolic_compile(
+        key, lambda: selected.compile_batch_project(_canonical(document))
+    )  # type: ignore[return-value]
 
 
 def compile_program_stream(
@@ -1929,9 +2341,21 @@ def compile_program_stream(
         allowed_lateness_micros=allowed_lateness_micros,
         late_policy=late_policy,
     )
-    return selected._compile_stream_graph_project(
-        _canonical(document), requirements=StreamRequirements()
+    capabilities = selected.capabilities()
+    key = _compile_cache_key(
+        program,
+        "stream",
+        document,
+        capabilities,
+        allowed_lateness_micros,
+        late_policy,
     )
+    return selected._cached_symbolic_compile(
+        key,
+        lambda: selected._compile_stream_graph_project(
+            _canonical(document), requirements=StreamRequirements()
+        ),
+    )  # type: ignore[return-value]
 
 
 def _validate_lateness(allowed_lateness_micros: object, late_policy: object, /) -> None:

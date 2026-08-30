@@ -59,8 +59,11 @@ from calc_flow.symbolic import (
     FeatureSet,
     Field,
     Program,
+    cs,
     duration,
+    exact_time,
     row,
+    rows,
     table,
     table_input,
     ts,
@@ -256,6 +259,9 @@ _SCE08_SCENARIO = "sce08_temporal_catalog"
 _SCE08_WORKLOAD_CONTRACT = "sce08-temporal-v1"
 _SCE08_DURATION_MICROS = 60_000_000
 _SCE08_PAIRED_SAMPLES = 30
+_SCE14_SCENARIO = "sce14_cross_domain_sharing"
+_SCE14_WORKLOAD_CONTRACT = "sce14-cross-domain-sharing-v1"
+_SCE14_PAIRED_SAMPLES = 30
 
 
 def _sce08_input_schema() -> list[dict[str, object]]:
@@ -267,6 +273,73 @@ def _sce08_input_schema() -> list[dict[str, object]]:
         {"name": "close", "data_type": "float64", "nullable": True},
         {"name": "volume", "data_type": "float64", "nullable": True},
     ]
+
+
+def _utc_quote_batch() -> Batch:
+    input_table = quote_workload().batch.to_pyarrow()
+    event_time_index = input_table.schema.get_field_index("event_time")
+    return Batch.from_pyarrow(
+        input_table.set_column(
+            event_time_index,
+            pa.field("event_time", pa.timestamp("us", tz="UTC"), nullable=False),
+            input_table["event_time"].cast(pa.timestamp("us", tz="UTC")),
+        )
+    )
+
+
+def _sce14_programs() -> tuple[Program, Program, Program]:
+    quotes = table_input(
+        "quotes",
+        schema=[
+            Field("event_time", "timestamp[us, UTC]", nullable=False),
+            Field("sequence", "uint64", nullable=False),
+            Field("symbol", "string", nullable=False),
+            Field("industry", "string", nullable=False),
+            Field("close", "float64"),
+            Field("volume", "float64"),
+        ],
+        entity_by=("symbol",),
+        event_time="event_time",
+        sequence_by=("sequence",),
+    )
+    group = exact_time(quotes["event_time"], partition_by=(quotes["industry"],))
+    first = quotes.with_columns(
+        FeatureSet(
+            (
+                ("short_mean", ts.mean(quotes["close"], window=rows(20))),
+                ("rank", cs.rank(quotes["close"], group=group)),
+            )
+        )
+    )
+    second = quotes.with_columns(
+        FeatureSet(
+            (
+                ("long_max", ts.max(quotes["close"], window=rows(60))),
+                ("zscore", cs.zscore(quotes["close"], group=group)),
+            )
+        )
+    )
+    first_program = Program(
+        "sce14-first-reference", inputs=(quotes,), outputs=(("first", first),)
+    )
+    second_program = Program(
+        "sce14-second-reference", inputs=(quotes,), outputs=(("second", second),)
+    )
+    optimized = Program(
+        "sce14-optimized",
+        inputs=(quotes,),
+        outputs=(("first", first), ("second", second)),
+    )
+    return first_program, second_program, optimized
+
+
+class _ReferencePlans:
+    def __init__(self, first: Any, second: Any) -> None:
+        self._first = first
+        self._second = second
+
+    def execute(self, inputs: dict[str, Batch]) -> tuple[Any, Any]:
+        return self._first.execute(inputs), self._second.execute(inputs)
 
 
 def _sce08_output_schema() -> list[dict[str, object]]:
@@ -690,6 +763,69 @@ def test_sce08_temporal_milestone_pair(
     hand_built_result, symbolic_result = benchmark(execute_pair)
     assert hand_built_result.outputs["output"].num_rows == workload.rows
     assert symbolic_result.outputs["output"].num_rows == workload.rows
+
+
+@pytest.mark.benchmark(
+    group=benchmark_group("sce14-cross-domain-pair"), min_rounds=3, max_time=0.5
+)
+@pytest.mark.parametrize("_scale", [selected_scale().name])
+def test_sce14_cross_domain_sharing_pair(
+    benchmark: BenchmarkFixture, _scale: str
+) -> None:
+    workload = quote_workload()
+    first_program, second_program, optimized_program = _sce14_programs()
+    runtime = Runtime()
+    reference = _ReferencePlans(
+        first_program.compile_batch(runtime),
+        second_program.compile_batch(runtime),
+    )
+    optimized = optimized_program.compile_batch(runtime)
+    inputs = {"input": _utc_quote_batch()}
+
+    reference_first, reference_second = reference.execute(inputs)
+    optimized_warm = optimized.execute(inputs)
+    assert (
+        reference_first.outputs["output"]
+        .to_pyarrow()
+        .equals(optimized_warm.outputs["first.output"].to_pyarrow())
+    )
+    assert (
+        reference_second.outputs["output"]
+        .to_pyarrow()
+        .equals(optimized_warm.outputs["second.output"].to_pyarrow())
+    )
+    paired_samples = _alternating_plan_samples(
+        reference,
+        optimized,
+        inputs,
+        sample_count=_SCE14_PAIRED_SAMPLES,
+    )
+
+    record_symbolic_benchmark(
+        benchmark,
+        scenario=_SCE14_SCENARIO,
+        input_rows=workload.rows,
+        output_rows=workload.rows * 2,
+        metrics=optimized_warm.datafusion_metrics,
+        extra={
+            "comparison_contract": "same-process-alternating-v1",
+            "workload_contract": _SCE14_WORKLOAD_CONTRACT,
+            "entities": workload.entities,
+            "industries": workload.industries,
+            "reference_state_stages": 4,
+            "optimized_state_stages": 2,
+            "paired_samples": paired_samples,
+        },
+    )
+
+    def execute_pair() -> tuple[Any, Any]:
+        return reference.execute(inputs), optimized.execute(inputs)
+
+    reference_result, optimized_result = benchmark(execute_pair)
+    assert len(reference_result) == 2
+    assert sum(batch.num_rows for batch in optimized_result.outputs.values()) == (
+        workload.rows * 2
+    )
 
 
 @pytest.mark.benchmark(

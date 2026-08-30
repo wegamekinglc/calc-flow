@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Awaitable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
 from enum import StrEnum
@@ -24,6 +24,7 @@ from calc_flow.store import _copy_json_value, _run_blocking
 JSONValue = None | bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"]
 UdfReference = tuple[str, str, str]
 STREAM_JOIN_MAX_SAFE_JSON_INTEGER = 9_007_199_254_740_991
+_SYMBOLIC_COMPILE_CACHE_MAX_ENTRIES = 128
 
 
 def _canonical(value: Mapping[str, Any]) -> str:
@@ -135,6 +136,28 @@ class Runtime:
     _registrations: list[dict[str, Any]] = field(
         default_factory=list, repr=False, compare=False
     )
+    _symbolic_compile_cache: dict[object, object] = field(
+        default_factory=dict, repr=False, compare=False
+    )
+
+    def _cached_symbolic_compile(
+        self, key: object, factory: Callable[[], object], /
+    ) -> object:
+        """Return one immutable compiled plan for a deterministic cache key."""
+
+        with self._registration_lock:
+            cached = self._symbolic_compile_cache.get(key)
+            if cached is not None:
+                return cached
+            compiled = factory()
+            if len(self._symbolic_compile_cache) >= _SYMBOLIC_COMPILE_CACHE_MAX_ENTRIES:
+                oldest = next(iter(self._symbolic_compile_cache))
+                del self._symbolic_compile_cache[oldest]
+            self._symbolic_compile_cache[key] = compiled
+            return compiled
+
+    def _invalidate_symbolic_compile_cache(self) -> None:
+        self._symbolic_compile_cache.clear()
 
     def register_provider(
         self,
@@ -177,6 +200,7 @@ class Runtime:
             if accepts_context:
                 registration["accepts_context"] = True
             self._registrations.append(registration)
+            self._invalidate_symbolic_compile_cache()
 
     def _register_mapping_provider(
         self,
@@ -228,6 +252,7 @@ class Runtime:
             if accepts_context:
                 registration["accepts_context"] = True
             self._registrations.append(registration)
+            self._invalidate_symbolic_compile_cache()
 
     def _register_stateless_stream_provider(
         self,
@@ -274,6 +299,7 @@ class Runtime:
                 supports_static_inputs=supports_static_inputs,
                 array_rules=array_rules,
             )
+            self._invalidate_symbolic_compile_cache()
 
     def _register_stateless_stream_mapping_provider(
         self,
@@ -327,6 +353,7 @@ class Runtime:
                 supports_static_inputs=supports_static_inputs,
                 array_rules=array_rules,
             )
+            self._invalidate_symbolic_compile_cache()
 
     def register_scalar_udf(
         self,
@@ -364,6 +391,7 @@ class Runtime:
                     "function": function,
                 }
             )
+            self._invalidate_symbolic_compile_cache()
 
     def _copied_registrations(self) -> tuple[dict[str, Any], ...]:
         return tuple(

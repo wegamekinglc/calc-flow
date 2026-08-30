@@ -315,8 +315,8 @@ constructors copy caller-owned sequences and mappings.
 | `FeatureSet(features=())` / `.with_feature(name, value)`                      | Ordered uniquely named column expressions                                                                            |
 | `TableExpr.with_columns(features)`                                            | Append a feature set as derived columns                                                                              |
 | `Program(name, *, inputs=(), outputs=())`                                     | Declared inputs and outputs with the runtime-independent v1 fingerprint                                              |
-| `Program.analyze(runtime, *, mode)` / `.explain(runtime, *, mode)`            | Static analysis and deterministic fact rendering                                                                     |
-| `Program.compile_batch(runtime)` / `.compile_stream(runtime, *, ...)`         | Lower supported row-local, rolling, cross-section, and symbolic matrix declarations to a strict project-v3 plan      |
+| `Program.analyze(runtime, *, mode)` / `.explain(runtime, *, mode)`            | Static analysis plus deterministic optimization, state, copy-boundary, and provider-cost fact rendering              |
+| `Program.compile_batch(runtime)` / `.compile_stream(runtime, *, ...)`         | Optimize and cache supported row-local, rolling, cross-section, and symbolic matrix strict project-v3 plans          |
 | `AnalysisIssue` / `AnalysisResult`                                            | Immutable findings with stable output/input-rooted paths                                                             |
 
 Structural identity uses `identical()`; public comparison operators build
