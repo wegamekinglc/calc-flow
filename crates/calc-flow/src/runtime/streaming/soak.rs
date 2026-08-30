@@ -145,6 +145,9 @@ const CHECKPOINT_SOAK_SMOKE_GENERATION_TIMEOUT: Duration = Duration::from_secs(3
 const CHECKPOINT_SOAK_SETTLE_TIMEOUT: Duration = Duration::from_secs(60);
 const CHECKPOINT_SOAK_CHECKPOINT_TIMEOUT_MILLIS: u64 = 10_000;
 const CHECKPOINT_SOAK_SMOKE_TARGET_CHECKPOINTS: u64 = 12;
+// Process-level smoke runs compete for the same host CPU and filesystem budget,
+// so parallel test-harness execution can manufacture checkpoint timeouts.
+static CHECKPOINT_SOAK_SMOKE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 // Why: the engine legitimately allows one checkpoint to occupy up to the plan
 // timeout, so the smoke wait must dominate target x timeout (DAL-151).
 const _: () = assert!(
@@ -6140,6 +6143,7 @@ async fn run_checkpoint_restart_soak_smoke() -> CheckpointRestartSoakReport {
 async fn run_checkpoint_restart_soak_smoke_with_retention(
     retained_epochs: usize,
 ) -> CheckpointRestartSoakReport {
+    let _exclusive_smoke = CHECKPOINT_SOAK_SMOKE_LOCK.lock().await;
     let directory = tempfile::tempdir().unwrap();
     run_checkpoint_soak_processes_with_retention(
         directory.path(),
