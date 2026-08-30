@@ -1,0 +1,74 @@
+{
+  "base_commit": "bde42be38549e5a990ad1125adc2d108ff19f96e",
+  "decision": "pass",
+  "feature_commit": "9680d60ba81e45f6cc5f6eafbd6eef586c26f210",
+  "format_version": 1,
+  "order_contract": "report-level-balanced-v1",
+  "reports": [
+    {
+      "order": "base-first",
+      "path": "benchmarks/symbolic/sce14-sce01-main-bde42be-pair1.json",
+      "sha256": "08ab8b0c76969767a0e37f7a5b3e946425c0b55615dccf16baf1ff2e303186ce"
+    },
+    {
+      "order": "feature-second",
+      "path": "benchmarks/symbolic/sce14-sce01-feature-9680d60-pair1.json",
+      "sha256": "86d3c75b77362a23900cc98abf59266c3cf70f54a8f4fe47cdb62e0e9a4da2ef"
+    },
+    {
+      "order": "feature-first",
+      "path": "benchmarks/symbolic/sce14-sce01-feature-9680d60-pair2.json",
+      "sha256": "139f87f91383de231f85f4c91362d24ff940322f4f0917b3b6aee81f68dd64e6"
+    },
+    {
+      "order": "base-second",
+      "path": "benchmarks/symbolic/sce14-sce01-main-bde42be-pair2.json",
+      "sha256": "254c6e1e1aefaae7d3ae8c7ef03f95f1719efb554028e04d4da45d88ae892f8d"
+    }
+  ],
+  "scenarios": [
+    {
+      "decision": "pass",
+      "geometric_regression_percent": 1.044,
+      "pair_regression_percent": [2.384, -0.279],
+      "scenario": "symbolic_cross_section_rank_zscore",
+      "threshold_percent": 5.0
+    },
+    {
+      "decision": "pass",
+      "geometric_regression_percent": -2.594,
+      "pair_regression_percent": [-2.647, -2.541],
+      "scenario": "symbolic_projection_20_columns",
+      "threshold_percent": 5.0
+    },
+    {
+      "decision": "pass",
+      "geometric_regression_percent": -0.402,
+      "pair_regression_percent": [-0.490, -0.314],
+      "scenario": "symbolic_rolling_20_60_row_features",
+      "threshold_percent": 5.0
+    },
+    {
+      "decision": "pass",
+      "geometric_regression_percent": 0.074,
+      "pair_regression_percent": [2.372, -2.172],
+      "scenario": "symbolic_stream_window_checkpoint",
+      "threshold_percent": 5.0
+    },
+    {
+      "decision": "pass",
+      "geometric_regression_percent": -1.333,
+      "pair_regression_percent": [-2.487, -0.166],
+      "scenario": "symbolic_table_matmul_jax",
+      "threshold_percent": 5.0
+    },
+    {
+      "decision": "pass",
+      "geometric_regression_percent": -2.807,
+      "pair_regression_percent": [-5.889, 0.375],
+      "scenario": "symbolic_table_matmul_numpy",
+      "threshold_percent": 5.0
+    }
+  ],
+  "threshold_contract": "each-order-pair-at-or-below-five-percent-v1"
+}

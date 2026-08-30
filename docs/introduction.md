@@ -213,7 +213,12 @@ statically — value types, domains and lineages, symbolic dimensions,
 attachment compatibility, state requirements, and stream safety — from the
 declaration graph alone, reporting immutable issues on stable output- or
 input-rooted paths; `Program.explain(runtime, mode=...)` renders the same
-facts deterministically. Type inference proves only what the runtime
+facts plus deterministic physical sharing and bounded state/copy/provider
+cost facts. Complete-program lowering shares compatible expression,
+rolling-state, and cross-section grouping/sort stages without moving filters
+across finality boundaries, keeps array/backend materializations explicit,
+and reuses immutable plans through a capability- and version-sensitive
+runtime compile cache. Type inference proves only what the runtime
 capability snapshot proves, so cross-type arithmetic requires an explicit
 `row.cast`. The full contract is in the [Python API guide](python-api.md).
 

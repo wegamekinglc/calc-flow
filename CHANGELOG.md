@@ -5,6 +5,21 @@ engine or Studio capabilities.
 
 ## 2026-08
 
+- 2026-08-31: Optimize complete symbolic programs (SCE-14 / DAL-146).
+  Identical pure expression materializations now share one program-wide stage;
+  compatible rolling outputs share one history/partition index, and compatible
+  cross-section outputs share one grouping/sort stage across output branches.
+  Prefilter identity and exact group finality remain part of compatibility, so
+  filters are never moved across temporal or cross-section finality boundaries.
+  Consecutive array work remains one fused provider stage at the explicit
+  table/array boundary. Each `Runtime` caches immutable batch and stream plans
+  by program fingerprint, mode and lateness, exact input declarations,
+  capability schema/session/revision, and selected operator/provider/UDF
+  versions; every successful runtime registration invalidates the cache.
+  `Program.explain()` now appends deterministic physical sharing plus bounded
+  state, copy-boundary, static-weight, and provider-call cost facts without
+  exposing row values, static contents, or object identities.
+
 - 2026-08-30: Compile symbolic table/array matrix segments (SCE-13 / DAL-145)
   through built-in NumPy and JAX `symbolic_matrix@1` providers. Explicit
   selected-column order, row lineage, safe float32/float64 promotion, static

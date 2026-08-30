@@ -1627,6 +1627,17 @@ def explain_program(program: object, runtime: object, mode: object, /) -> str:
     for output_name, value in program.outputs:
         lines.extend(_explain_output(output_name, value, analyzer))
     issues = analyzer.issues
+    if not issues:
+        from calc_flow.errors import CompileError
+        from calc_flow.symbolic.lower import lower_program_document
+        from calc_flow.symbolic.optimizer import explain_optimization
+
+        try:
+            document = lower_program_document(program, runtime_value, mode_value)
+        except CompileError:
+            pass
+        else:
+            lines.extend(explain_optimization(document))
     if issues:
         lines.append("  issues")
         lines.extend(

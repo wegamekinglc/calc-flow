@@ -588,7 +588,16 @@ the analysis proves:
 for example `outputs.signals.score`, `outputs.scores.matmul.right.shape[0]`,
 `inputs.quotes.sequence_by[0]`, and `static_inputs.weights`. Analysis is
 deterministic: it never mutates a declaration node, and repeated runs return
-equal results. The analysis issue codes are `capability_mismatch`,
+equal results. For programs supported by lowering, `explain` also reports the
+physical CSE, rolling, cross-section, and array-fusion stage counts. Its cost
+section states bounded rolling rows or durations, cross-section group bounds,
+retained fixed/variable-width columns, explicit table-to-dense and
+host-to-device copy boundaries, static-weight bytes when known, and provider
+calls per micro-batch. These are compile-time estimates and shape facts;
+runtime resident-memory and measured copy metrics remain authoritative. The
+report never contains row payloads, static values, secrets, callable
+representations, or object addresses. The analysis issue codes are
+`capability_mismatch`,
 `duplicate_name`, `ordering_required`, `schema_mismatch`, `unbounded_state`,
 `unresolved_type`, and `unsupported_type`; construction errors raise
 `ValueError` or `TypeError` with the same path grammar. `explain` renders the
@@ -615,6 +624,26 @@ ahead of the fused node, so a 20-output `FeatureSet` with no shared
 subexpressions compiles to a single fused node. Node IDs and the plan
 fingerprint are deterministic, and the lowered project carries strict JSON
 only.
+
+Optimization runs over the complete program after analysis. Identical,
+connected pure expression materializations are emitted once and fan out to
+each consumer. Output branches over the same input and prefilter share one
+rolling operator, including its history and partition index; branches over
+the same upstream, partition keys, and exact-time or fixed-bucket finality
+share one cross-section grouping/sort stage. A different prefilter, grouping,
+bucket width, or upstream state stage is a hard materialization boundary, so
+the optimizer does not move a filter across temporal or cross-section
+finality. Table/array and backend transitions remain explicit boundaries, and
+the allowlisted array expression is fused into one provider call per accepted
+micro-batch.
+
+Each `Runtime` keeps a runtime-scoped compile cache of immutable plan values.
+The deterministic key contains the program fingerprint, batch/stream mode,
+stream lateness policy, exact input declaration bytes (including schemas),
+capability schema/session/revision, and selected operator, provider, and UDF
+versions. Python object identity is never a key input. Repeating a compile on
+the same runtime and key returns the cached plan; any successful provider,
+stream-lifecycle, or UDF registration invalidates that runtime's entries.
 
 Programs with one input and one output bind the plan endpoints `input` and
 `output`, matching the `PipelineBuilder` convention; multi-branch graphs name
