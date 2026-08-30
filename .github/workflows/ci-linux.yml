@@ -9,12 +9,48 @@ permissions:
   contents: read
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  # Never cancel default-branch runs: a cancelled latest run renders the
-  # README CI badge as failing even when every job was healthy.
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/master' }}
+  cancel-in-progress: true
 jobs:
+  changes:
+    name: Classify changes
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+      - name: Classify changed paths
+        id: classify
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: >-
+          python scripts/classify_ci_changes.py
+          --base "$BASE_SHA" --head "$HEAD_SHA"
+          --github-output "$GITHUB_OUTPUT"
+
+  docs-check:
+    name: Documentation checks
+    needs: changes
+    if: needs.changes.outputs.docs_only == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+      - name: Check whitespace
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: git diff --check "$BASE_SHA" "$HEAD_SHA"
+
   connector-containers:
     name: Connector containers (Kafka)
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     services:
@@ -71,6 +107,8 @@ jobs:
 
   connector-containers-pg:
     name: Connector containers (PostgreSQL)
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     services:
@@ -121,6 +159,8 @@ jobs:
 
   connector-containers-ch:
     name: Connector containers (ClickHouse)
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     services:
@@ -152,6 +192,10 @@ jobs:
           --test clickhouse_connector -- --ignored --test-threads=1
   lint-and-test:
     name: Ruff + unit tests
+    needs:
+      - changes
+      - package
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -164,15 +208,22 @@ jobs:
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           enable-cache: true
+      - name: Download core distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: python-distributions
+          path: dist
       - name: Install dependencies
-        run: uv sync --extra dev
+        run: |
+          uv sync --extra dev --no-install-workspace
+          uv pip install --python .venv/bin/python --no-deps dist/calc_flow-*.whl
       - name: Run Ruff
-        run: uv run ruff check .
+        run: uv run --no-sync ruff check .
       - name: Run unit, property, and coverage tests
         env:
           PYTEST_XDIST_AUTO_NUM_WORKERS: 2
         run: >-
-          uv run pytest -q -n auto --dist load -p no:benchmark
+          uv run --no-sync pytest -q -n auto --dist load -p no:benchmark
           --cov=calc_flow --cov-report=term-missing --cov-report=xml
       - name: Upload coverage report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -191,6 +242,8 @@ jobs:
           parallel: true
   frontend:
     name: Studio build + tests
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -214,6 +267,10 @@ jobs:
         run: npm audit --omit=dev
   studio-backend:
     name: Studio backend tests
+    needs:
+      - changes
+      - package
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -232,20 +289,28 @@ jobs:
           node-version: 20.20.0
           cache: npm
           cache-dependency-path: web-ui/package-lock.json
+      - name: Download core distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: python-distributions
+          path: dist
       - name: Install studio dependencies
         run: |
-          uv sync --package calc-flow-studio --extra dev
+          uv sync --package calc-flow-studio --extra dev --no-install-workspace
+          uv pip install --python .venv/bin/python --no-deps dist/calc_flow-*.whl
+          uv pip install --python .venv/bin/python --no-deps --editable web-ui/backend
           cd web-ui && npm ci
       - name: Run studio backend coverage
         working-directory: web-ui/backend
         run: >-
-          uv run --project . --extra dev pytest -q
+          uv run --no-sync --project . pytest -q
           --cov=calc_flow_studio --cov-report=term-missing --cov-report=xml
       - name: Verify generated API contract
         run: |
-          cd web-ui
-          npm run sync:api
-          git diff --exit-code -- openapi.json src/api/schema.d.ts
+          uv run --no-sync --project web-ui/backend \
+            python web-ui/scripts/export_openapi.py
+          npm --prefix web-ui run generate:api
+          git diff --exit-code -- web-ui/openapi.json web-ui/src/api/schema.d.ts
       - name: Upload studio coverage report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -263,6 +328,10 @@ jobs:
           parallel: true
   browser-e2e:
     name: Studio browser workflow
+    needs:
+      - changes
+      - package
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -278,9 +347,17 @@ jobs:
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           enable-cache: true
+      - name: Download core distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: python-distributions
+          path: dist
       - name: Install backend
         working-directory: .
-        run: uv sync --package calc-flow-studio
+        run: |
+          uv sync --package calc-flow-studio --no-install-workspace
+          uv pip install --python .venv/bin/python --no-deps dist/calc_flow-*.whl
+          uv pip install --python .venv/bin/python --no-deps --editable web-ui/backend
       - name: Set up Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
@@ -300,7 +377,8 @@ jobs:
         run: npm run test:e2e
   package:
     name: Build + isolated wheel smoke test
-    needs: lint-and-test
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -315,7 +393,7 @@ jobs:
           enable-cache: true
       - name: Build wheel and source distribution
         run: |
-          python -m unittest scripts.test_run_rust_tests scripts.test_run_rust_coverage scripts.test_build_python_release scripts.test_inspect_wheel scripts.test_release_config scripts.test_verify_python_release scripts.test_verify_perf_gates scripts.test_verify_symbolic_milestone_perf scripts.test_verify_security_gates
+          python -m unittest scripts.test_run_rust_tests scripts.test_run_rust_coverage scripts.test_classify_ci_changes scripts.test_build_python_release scripts.test_inspect_wheel scripts.test_release_config scripts.test_verify_python_release scripts.test_verify_perf_gates scripts.test_verify_symbolic_milestone_perf scripts.test_verify_security_gates
           uv build
           python scripts/inspect_wheel.py core-wheel dist/calc_flow-*.whl
           python scripts/inspect_wheel.py sdist dist/calc_flow-*.tar.gz
@@ -336,8 +414,11 @@ jobs:
   studio-package:
     name: Build + isolated studio wheel smoke test
     needs:
+      - changes
+      - package
       - frontend
       - studio-backend
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -356,12 +437,16 @@ jobs:
           node-version: 20.20.0
           cache: npm
           cache-dependency-path: web-ui/package-lock.json
-      - name: Build core and studio wheels
+      - name: Download core distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: python-distributions
+          path: dist
+      - name: Build studio wheel
         run: |
-          uv build
-          cd web-ui
-          npm ci
-          npm run build:wheel
+          npm --prefix web-ui ci
+          npm --prefix web-ui run build
+          uv build --project web-ui/backend --wheel --out-dir dist
       - name: Install and inspect studio wheels
         run: |
           uv venv /tmp/calc-flow-studio-wheel
@@ -398,20 +483,20 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: studio-python-distributions
-          path: dist/*
+          path: dist/calc_flow_studio-*.whl
           if-no-files-found: error
           retention-days: 30
   benchmark-smoke:
-    name: Informational ${{ matrix.scale }} benchmark smoke
-    needs: lint-and-test
+    name: Informational overhead benchmark smoke
+    needs:
+      - changes
+      - package
+      - lint-and-test
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        scale: [overhead, small, standard, nightly]
     env:
-      CALC_FLOW_BENCHMARK_SCALE: ${{ matrix.scale }}
+      CALC_FLOW_BENCHMARK_SCALE: overhead
       JAX_PLATFORMS: cpu
     steps:
       - name: Check out repository
@@ -424,22 +509,82 @@ jobs:
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           enable-cache: true
+      - name: Download core distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: python-distributions
+          path: dist
       - name: Install benchmark dependencies
-        run: uv sync --extra benchmark
+        run: |
+          uv sync --extra benchmark --no-install-workspace
+          uv pip install --python .venv/bin/python --no-deps dist/calc_flow-*.whl
       - name: Run benchmark scale
         run: |
           mkdir -p benchmark-results
-          uv run pytest benchmarks -q --benchmark-only \
-            --benchmark-json="benchmark-results/${CALC_FLOW_BENCHMARK_SCALE}.json"
+          uv run --no-sync pytest benchmarks -q --benchmark-only \
+            --benchmark-json="benchmark-results/overhead.json"
       - name: Upload benchmark report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: benchmark-smoke-${{ matrix.scale }}
-          path: benchmark-results/${{ matrix.scale }}.json
+          name: benchmark-smoke-overhead
+          path: benchmark-results/overhead.json
           if-no-files-found: error
           retention-days: 30
   rust-core:
     name: Rust core parity
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Ensure libcurl headers for vendored librdkafka
+        # librdkafka 2.12's cmake path includes curl/curl.h even with
+        # WITH_CURL=0 (rust-rdkafka#829); the headers satisfy the stale
+        # include without linking curl.
+        run: |
+          if dpkg-query -W -f='${Status}' libcurl4-openssl-dev 2>/dev/null \
+            | grep -qx 'install ok installed'; then
+            exit 0
+          fi
+          install_libcurl_headers() {
+            timeout 5m sudo apt-get \
+              -o Acquire::Retries=3 \
+              -o Acquire::http::Timeout=15 \
+              -o Acquire::https::Timeout=15 \
+              install --no-install-recommends -y libcurl4-openssl-dev
+          }
+          if ! install_libcurl_headers; then
+            timeout 2m sudo apt-get \
+              -o Acquire::Retries=3 \
+              -o Acquire::http::Timeout=15 \
+              -o Acquire::https::Timeout=15 \
+              update
+            install_libcurl_headers
+          fi
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+      - name: Install compatible Python test dependencies
+        run: python -m pip install "numpy>=2.0.0" "pyarrow==24.0.0"
+      - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
+        with:
+          components: clippy,rustfmt
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Run Rust tests
+        timeout-minutes: 30
+        run: python3.13 scripts/run_rust_tests.py --python-stress-runs 3
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
+  rust-coverage:
+    name: Rust combined coverage
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     services:
       kafka:
@@ -477,18 +622,9 @@ jobs:
       CALC_FLOW_KAFKA_BOOTSTRAP: localhost:9092
       CALC_FLOW_PG_TEST_URL: postgresql://postgres:postgres@localhost:5432/postgres
       CH_TEST_URL: http://localhost:8123
-      FROZEN_ALLOCATION_CANDIDATE_TARGET_DIR: ${{ github.workspace }}/target/frozen-allocation-candidate
-      FROZEN_ALLOCATION_HARNESS_SHA: "fe34d7dcd5bfd66c9e97c79d540380f58ee1a04d"
-      FROZEN_ALLOCATION_HARNESS_TARGET_DIR: ${{ github.workspace }}/target/frozen-allocation-harness
-      RUST_TEST_THREADS: 1
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-        with:
-          fetch-depth: 0
       - name: Ensure libcurl headers for vendored librdkafka
-        # librdkafka 2.12's cmake path includes curl/curl.h even with
-        # WITH_CURL=0 (rust-rdkafka#829); the headers satisfy the stale
-        # include without linking curl.
         run: |
           if dpkg-query -W -f='${Status}' libcurl4-openssl-dev 2>/dev/null \
             | grep -qx 'install ok installed'; then
@@ -547,94 +683,11 @@ jobs:
         run: python -m pip install "numpy>=2.0.0" "pyarrow==24.0.0"
       - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
         with:
-          components: clippy,llvm-tools-preview,rustfmt
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - name: Detect frozen allocation harness
-        id: frozen_allocation_harness
-        run: |
-          if git merge-base --is-ancestor "$FROZEN_ALLOCATION_HARNESS_SHA" HEAD; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Run Rust tests
-        timeout-minutes: 30
-        run: python3.13 scripts/run_rust_tests.py --python-stress-runs 3
-      - name: Verify frozen allocation harness
-        if: steps.frozen_allocation_harness.outputs.enabled == 'true'
-        env:
-          FROZEN_ALLOCATION_HARNESS_WORKTREE: ${{ runner.temp }}/frozen-allocation-harness
-        run: |
-          git worktree add --detach "$FROZEN_ALLOCATION_HARNESS_WORKTREE" "$FROZEN_ALLOCATION_HARNESS_SHA"
-          cd "$FROZEN_ALLOCATION_HARNESS_WORKTREE"
-          CARGO_TARGET_DIR="$FROZEN_ALLOCATION_HARNESS_TARGET_DIR" \
-            cargo test --locked -p calc-flow --bench allocation_regression --all-features
-      - name: Reclaim Rust test build disk before allocation comparison
-        if: >-
-          steps.frozen_allocation_harness.outputs.enabled == 'true' &&
-          github.event_name == 'pull_request' &&
-          github.event.pull_request.base.sha == env.FROZEN_ALLOCATION_HARNESS_SHA
-        run: cargo clean
-      - name: Compare candidate allocations
-        if: >-
-          steps.frozen_allocation_harness.outputs.enabled == 'true' &&
-          github.event_name == 'pull_request' &&
-          github.event.pull_request.base.sha == env.FROZEN_ALLOCATION_HARNESS_SHA
-        timeout-minutes: 120
-        env:
-          FROZEN_ALLOCATION_BASELINE_REPORT: ${{ runner.temp }}/frozen-allocation-harness/target/allocation-regression/baseline-2ac7e97.json
-          FROZEN_ALLOCATION_CANDIDATE_REPORT: ${{ runner.temp }}/frozen-allocation-candidate/target/allocation-regression/candidate.json
-          FROZEN_ALLOCATION_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
-          FROZEN_ALLOCATION_CANDIDATE_WORKTREE: ${{ runner.temp }}/frozen-allocation-candidate
-          FROZEN_ALLOCATION_HARNESS_WORKTREE: ${{ runner.temp }}/frozen-allocation-harness
-        run: |
-          git worktree add --detach "$FROZEN_ALLOCATION_CANDIDATE_WORKTREE" "$FROZEN_ALLOCATION_CANDIDATE_SHA"
-          cd "$FROZEN_ALLOCATION_HARNESS_WORKTREE"
-          CARGO_TARGET_DIR="$FROZEN_ALLOCATION_HARNESS_TARGET_DIR" CARGO_BUILD_JOBS=1 \
-            cargo bench --locked -p calc-flow --bench allocation_regression -- \
-            --warmup-dispatches 1000 \
-            --measured-dispatches 10000 \
-            --repetitions 10 \
-            --cases all-existing-data \
-            --role baseline \
-            --output "$FROZEN_ALLOCATION_BASELINE_REPORT"
-          cd "$FROZEN_ALLOCATION_CANDIDATE_WORKTREE"
-          CARGO_TARGET_DIR="$FROZEN_ALLOCATION_CANDIDATE_TARGET_DIR" CARGO_BUILD_JOBS=1 \
-            cargo bench --locked -p calc-flow --bench allocation_regression -- \
-            --warmup-dispatches 1000 \
-            --measured-dispatches 10000 \
-            --repetitions 10 \
-            --cases all-existing-data \
-            --role candidate \
-            --output "$FROZEN_ALLOCATION_CANDIDATE_REPORT"
-          CARGO_TARGET_DIR="$FROZEN_ALLOCATION_CANDIDATE_TARGET_DIR" CARGO_BUILD_JOBS=1 \
-            cargo bench --locked -p calc-flow --bench allocation_regression -- \
-            --compare "$FROZEN_ALLOCATION_BASELINE_REPORT" "$FROZEN_ALLOCATION_CANDIDATE_REPORT"
-      - name: Remove frozen allocation worktrees
-        if: always() && steps.frozen_allocation_harness.outputs.enabled == 'true'
-        env:
-          FROZEN_ALLOCATION_CANDIDATE_WORKTREE: ${{ runner.temp }}/frozen-allocation-candidate
-          FROZEN_ALLOCATION_HARNESS_WORKTREE: ${{ runner.temp }}/frozen-allocation-harness
-        run: |
-          if [ -e "$FROZEN_ALLOCATION_CANDIDATE_WORKTREE/.git" ]; then
-            git worktree remove --force "$FROZEN_ALLOCATION_CANDIDATE_WORKTREE"
-          fi
-          if [ -e "$FROZEN_ALLOCATION_HARNESS_WORKTREE/.git" ]; then
-            git worktree remove --force "$FROZEN_ALLOCATION_HARNESS_WORKTREE"
-          fi
-          git worktree prune
+          components: llvm-tools-preview
       - name: Install Rust coverage tool
         uses: taiki-e/install-action@537c30d2b45cc3aa3fb35e2bbcfb61ef93fd6f02 # v2.62.52
         with:
           tool: cargo-llvm-cov@0.8.7
-      - name: Reclaim Rust build disk before coverage
-        run: |
-          cargo clean
-          cargo clean --target-dir "$FROZEN_ALLOCATION_HARNESS_TARGET_DIR"
-          cargo clean --target-dir "$FROZEN_ALLOCATION_CANDIDATE_TARGET_DIR"
       - name: Enforce combined Rust and connector line coverage
         run: python3.13 scripts/run_rust_coverage.py
       - name: Upload Rust coverage report
@@ -652,11 +705,10 @@ jobs:
           flag-name: rust
           file: rust-lcov.info
           parallel: true
-      - name: Reclaim coverage build disk before docs
-        run: cargo llvm-cov clean --workspace
-      - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
   rust-supply-chain:
     name: Rust dependency policy
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -678,9 +730,11 @@ jobs:
   coveralls-finish:
     name: Coveralls finish
     needs:
+      - changes
       - lint-and-test
       - studio-backend
-      - rust-core
+      - rust-coverage
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Close the parallel Coveralls build
@@ -688,3 +742,67 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           parallel-finished: true
+  linux-gate:
+    name: Linux CI gate
+    if: always()
+    needs:
+      - changes
+      - docs-check
+      - connector-containers
+      - connector-containers-pg
+      - connector-containers-ch
+      - lint-and-test
+      - frontend
+      - studio-backend
+      - browser-e2e
+      - package
+      - studio-package
+      - benchmark-smoke
+      - rust-core
+      - rust-coverage
+      - rust-supply-chain
+      - coveralls-finish
+    runs-on: ubuntu-latest
+    env:
+      DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
+      CHANGES_RESULT: ${{ needs.changes.result }}
+      DOCS_RESULT: ${{ needs.docs-check.result }}
+      CONNECTOR_KAFKA_RESULT: ${{ needs.connector-containers.result }}
+      CONNECTOR_PG_RESULT: ${{ needs.connector-containers-pg.result }}
+      CONNECTOR_CH_RESULT: ${{ needs.connector-containers-ch.result }}
+      LINT_RESULT: ${{ needs.lint-and-test.result }}
+      FRONTEND_RESULT: ${{ needs.frontend.result }}
+      STUDIO_BACKEND_RESULT: ${{ needs.studio-backend.result }}
+      BROWSER_RESULT: ${{ needs.browser-e2e.result }}
+      PACKAGE_RESULT: ${{ needs.package.result }}
+      STUDIO_PACKAGE_RESULT: ${{ needs.studio-package.result }}
+      BENCHMARK_RESULT: ${{ needs.benchmark-smoke.result }}
+      RUST_CORE_RESULT: ${{ needs.rust-core.result }}
+      RUST_COVERAGE_RESULT: ${{ needs.rust-coverage.result }}
+      RUST_SUPPLY_CHAIN_RESULT: ${{ needs.rust-supply-chain.result }}
+      COVERALLS_RESULT: ${{ needs.coveralls-finish.result }}
+    steps:
+      - name: Require the selected CI path to pass
+        run: |
+          test "$CHANGES_RESULT" = success
+          if [ "$DOCS_ONLY" = true ]; then
+            test "$DOCS_RESULT" = success
+            exit 0
+          fi
+          for result in \
+            "$CONNECTOR_KAFKA_RESULT" \
+            "$CONNECTOR_PG_RESULT" \
+            "$CONNECTOR_CH_RESULT" \
+            "$LINT_RESULT" \
+            "$FRONTEND_RESULT" \
+            "$STUDIO_BACKEND_RESULT" \
+            "$BROWSER_RESULT" \
+            "$PACKAGE_RESULT" \
+            "$STUDIO_PACKAGE_RESULT" \
+            "$BENCHMARK_RESULT" \
+            "$RUST_CORE_RESULT" \
+            "$RUST_COVERAGE_RESULT" \
+            "$RUST_SUPPLY_CHAIN_RESULT" \
+            "$COVERALLS_RESULT"; do
+            test "$result" = success
+          done
