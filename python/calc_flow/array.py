@@ -836,7 +836,7 @@ _SYMBOLIC_BINARY = {
     "sub": operator.sub,
     "truediv": operator.truediv,
 }
-_SYMBOLIC_UNARY = {"neg": operator.neg, "not": operator.invert}
+_SYMBOLIC_UNARY = ("neg", "not")
 
 
 def _symbolic_typed_operand(
@@ -884,7 +884,12 @@ def _symbolic_result_dtype(
     left_value = _symbolic_operand(backend, left, matrix=matrix)
     right_value = _symbolic_operand(backend, right, matrix=matrix)
     _validate_symbolic_common_dtype(backend, left_value, right_value)
-    result = _apply_symbolic_primitive(operation, left_value, right_value)
+    result = _apply_symbolic_primitive(
+        _symbolic_dtype_namespace(backend),
+        operation,
+        left_value,
+        right_value,
+    )
     return np.dtype(result.dtype).name
 
 
@@ -930,12 +935,15 @@ def _validate_symbolic_common_dtype(
 
 
 def _apply_symbolic_primitive(
+    namespace: object,
     operation: str,
     left: object,
     right: object,
 ) -> object:
-    if operation in _SYMBOLIC_UNARY:
-        return _SYMBOLIC_UNARY[operation](left)
+    if operation == "not":
+        return namespace.logical_not(left)
+    if operation == "neg":
+        return operator.neg(left)
     if operation == "matmul":
         return operator.matmul(left, right)
     return _SYMBOLIC_BINARY[operation](left, right)
@@ -1065,8 +1073,11 @@ def _evaluate_symbolic_tree(
     if operation == "literal":
         return node["value"]
     if operation in _SYMBOLIC_UNARY:
-        result = _SYMBOLIC_UNARY[operation](
-            _evaluate_symbolic_tree(node["value"], namespace, dense, weights)
+        result = _apply_symbolic_primitive(
+            namespace,
+            operation,
+            _evaluate_symbolic_tree(node["value"], namespace, dense, weights),
+            None,
         )
     else:
         left = _evaluate_symbolic_tree(node["left"], namespace, dense, weights)

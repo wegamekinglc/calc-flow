@@ -39,6 +39,7 @@ from calc_flow.symbolic import (
     table,
     table_input,
 )
+from calc_flow.symbolic.nodes import CBool, build
 
 
 class _SegmentedSource:
@@ -407,6 +408,81 @@ def test_symbolic_matrix_stream_uses_latched_weights_per_microbatch(
         16,
         *([0] * (expected_calls - 1)),
     ]
+
+
+@pytest.mark.parametrize("mode", ("batch", "stream"))
+def test_symbolic_matrix_unary_not_bool_scalar_matches_analysis_and_provider(
+    mode: str,
+    tmp_path: Path,
+) -> None:
+    source = table_input(
+        "input",
+        schema=[Field("x", "float64", nullable=True)],
+    )
+    weights = parameter(
+        "weights",
+        kind="array",
+        backend="numpy",
+        dtype="float64",
+        shape=(1, 1),
+    )
+    matrix = linalg.from_columns(source, columns=("x",), backend="numpy")
+    bool_scalar = ArrayExpr(build("literal", (), {"value": CBool(True)}))
+    score = (linalg.matmul(matrix, weights) > 0.0) == ~bool_scalar
+    program = Program(
+        "symbolic-matrix-unary-not-bool-scalar",
+        inputs=(source, weights),
+        outputs=(
+            (
+                "signals",
+                table.attach_columns(source, score, names=("score",)),
+            ),
+        ),
+    )
+    runtime = Runtime()
+    register_numpy(runtime)
+    input_table = pa.table({"x": pa.array([-1.0, 2.0], type=pa.float64())})
+    static_inputs = {
+        "weights": Batch.from_array(
+            np.array([[2.0]], dtype=np.float64),
+            backend="numpy",
+        )
+    }
+
+    assert "field score bool" in program.explain(runtime, mode=mode)
+    if mode == "batch":
+        output = (
+            program.compile_batch(runtime)
+            .execute({"input": Batch.from_pyarrow(input_table), **static_inputs})
+            .outputs["output"]
+            .to_pyarrow()
+        )
+    else:
+        sink = _CollectSink()
+
+        async def exercise() -> None:
+            job = await StreamingRunner(
+                program.compile_stream(runtime),
+                {
+                    "input": SourceBinding(
+                        _SegmentedSource(input_table, 2),
+                        watermark_policy=DisabledWatermarks(),
+                    )
+                },
+                {"output": [SinkBinding.ordinary("archive", sink)]},
+                ManagedCheckpointRuntime(tmp_path),
+                static_inputs=static_inputs,
+            ).start_async()
+            outcome = await job.wait_async()
+            assert outcome.state == "completed"
+
+        asyncio.run(exercise())
+        output = pa.concat_tables([batch.to_pyarrow() for batch in sink.batches])
+
+    assert output.to_pydict() == {
+        "x": [-1.0, 2.0],
+        "score": [True, False],
+    }
 
 
 def test_symbolic_matrix_numpy_uses_safe_common_dtype() -> None:

@@ -1347,7 +1347,9 @@ class _Analyzer:
                 )
             dtype: str | None = None
             operand = self._array_dtype_operand(node.args[0], left)
-            if domain_valid and left.backend is not None and operand is not None:
+            if primitive == "not" and domain_valid and left.dtype == "bool":
+                dtype = "bool"
+            elif domain_valid and left.backend is not None and operand is not None:
                 from calc_flow.array import _symbolic_result_dtype
 
                 try:

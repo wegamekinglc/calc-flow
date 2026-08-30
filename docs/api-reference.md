@@ -251,8 +251,7 @@ revision.
 weights named `weights`, then produces an array output. After input `Batch`
 construction it makes no redundant execution copies: NumPy uses one dense
 table allocation and one result; JAX permits one host staging buffer, one
-device table buffer, and one device result. JAX performs no result-to-host
-round trip during operator execution. These are execution ceilings, not
+device table buffer, and one device result. JAX performs no result-to-host round trip during operator execution. These are execution ceilings, not
 end-to-end zero-copy claims. `symbolic_matrix@1` is the fused
 table-to-array-to-table provider described in the
 [symbolic matrix compilation guide](python-api.md#symbolic-matrix-compilation).
