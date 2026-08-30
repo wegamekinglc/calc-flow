@@ -79,13 +79,13 @@ class ReleaseConfigTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
         self.assertEqual(
             workflow.count("timeout 5m sudo apt-get"),
-            2,
+            3,
         )
         self.assertEqual(
             workflow.count("timeout 2m sudo apt-get"),
-            2,
+            3,
         )
-        self.assertEqual(workflow.count("if ! install_libcurl_headers; then"), 2)
+        self.assertEqual(workflow.count("if ! install_libcurl_headers; then"), 3)
 
     def test_rustsec_waivers_are_consistent_and_scoped(self) -> None:
         advisory = "RUSTSEC-2026-0235"
@@ -350,7 +350,7 @@ class ReleaseConfigTests(unittest.TestCase):
     def test_rust_core_ci_sets_python_313_before_all_features(self) -> None:
         workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
         rust_core = workflow.split("  rust-core:\n", 1)[1].split(
-            "  rust-supply-chain:\n", 1
+            "  rust-coverage:\n", 1
         )[0]
         rust_test_command = (
             "python3.13 scripts/run_rust_tests.py --python-stress-runs 3"
@@ -366,7 +366,7 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn("python-version-file: .python-version", rust_core)
         self.assertIn(install_test_dependencies, rust_core)
         rust_core_header = rust_core.split("    steps:\n", 1)[0]
-        self.assertIn("      RUST_TEST_THREADS: 1\n", rust_core_header)
+        self.assertNotIn("RUST_TEST_THREADS", rust_core_header)
         self.assertLess(
             rust_core.index(setup_python),
             rust_core.index("cargo clippy --workspace --all-targets --all-features"),
@@ -381,104 +381,83 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn("timeout-minutes: 30", rust_test_step)
         self.assertIn(f"run: {rust_test_command}", rust_test_step)
 
-    def test_rust_core_ci_reclaims_disk_around_coverage(self) -> None:
+    def test_rust_tests_and_coverage_run_in_parallel_jobs(self) -> None:
         workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
         rust_core = workflow.split("  rust-core:\n", 1)[1].split(
+            "  rust-coverage:\n", 1
+        )[0]
+        rust_coverage = workflow.split("  rust-coverage:\n", 1)[1].split(
             "  rust-supply-chain:\n", 1
         )[0]
 
         rust_tests = "python3.13 scripts/run_rust_tests.py --python-stress-runs 3"
-        clean_tests = "cargo clean"
         coverage = "python3.13 scripts/run_rust_coverage.py"
-        clean_coverage = "cargo llvm-cov clean --workspace"
         rustdoc = (
             'RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps'
         )
 
-        self.assertLess(rust_core.index(rust_tests), rust_core.index(clean_tests))
-        self.assertLess(rust_core.index(clean_tests), rust_core.index(coverage))
-        self.assertLess(
-            rust_core.index(coverage),
-            rust_core.index(clean_coverage),
-        )
-        self.assertLess(
-            rust_core.index(clean_coverage),
-            rust_core.index(rustdoc),
+        self.assertIn(rust_tests, rust_core)
+        self.assertIn(rustdoc, rust_core)
+        self.assertNotIn(coverage, rust_core)
+        self.assertNotIn("services:", rust_core)
+        self.assertIn("services:", rust_coverage)
+        self.assertIn(coverage, rust_coverage)
+        self.assertNotIn(rust_tests, rust_coverage)
+        self.assertNotIn("cargo clean", workflow)
+        self.assertNotIn("FROZEN_ALLOCATION", workflow)
+        self.assertNotIn("RUST_TEST_THREADS", workflow)
+
+    def test_ci_uses_docs_only_classification_and_stable_gates(self) -> None:
+        linux = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
+        windows = (ROOT / ".github/workflows/ci-windows.yml").read_text(
+            encoding="utf-8"
         )
 
-    def test_rust_core_ci_isolates_frozen_allocation_harness(self) -> None:
+        for workflow, gate, next_job in (
+            (linux, "linux-gate", "docs-check"),
+            (windows, "windows-gate", "process-tree"),
+        ):
+            with self.subTest(gate=gate):
+                changes = workflow.split("  changes:\n", 1)[1].split(
+                    f"  {next_job}:\n", 1
+                )[0]
+                self.assertIn("  changes:\n", workflow)
+                self.assertIn("scripts/classify_ci_changes.py", workflow)
+                self.assertIn(
+                    "docs_only: ${{ steps.classify.outputs.docs_only }}", workflow
+                )
+                self.assertIn("uses: actions/setup-python@", changes)
+                self.assertIn("python-version-file: .python-version", changes)
+                self.assertIn("cancel-in-progress: true", workflow)
+                self.assertIn(f"  {gate}:\n", workflow)
+                self.assertIn("if: always()", workflow.split(f"  {gate}:\n", 1)[1])
+
+        self.assertIn("  docs-check:\n", linux)
+        self.assertIn('run: git diff --check "$BASE_SHA" "$HEAD_SHA"', linux)
+
+    def test_linux_ci_builds_the_core_wheel_once_for_consumers(self) -> None:
         workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
-        rust_core = workflow.split("  rust-core:\n", 1)[1].split(
-            "  rust-supply-chain:\n", 1
+        package = workflow.split("  package:\n", 1)[1].split("  studio-package:\n", 1)[
+            0
+        ]
+        studio_package = workflow.split("  studio-package:\n", 1)[1].split(
+            "  benchmark-smoke:\n", 1
         )[0]
 
-        harness_sha = "fe34d7dcd5bfd66c9e97c79d540380f58ee1a04d"
-        rust_test_harness = (
-            "python3.13 scripts/run_rust_tests.py --python-stress-runs 3"
-        )
-        harness_self_test = (
-            "cargo test --locked -p calc-flow --bench "
-            "allocation_regression --all-features"
-        )
-
-        self.assertIn("fetch-depth: 0", rust_core)
-        self.assertIn(f'FROZEN_ALLOCATION_HARNESS_SHA: "{harness_sha}"', rust_core)
-        self.assertIn("id: frozen_allocation_harness", rust_core)
-        self.assertIn(
-            'git merge-base --is-ancestor "$FROZEN_ALLOCATION_HARNESS_SHA" HEAD',
-            rust_core,
-        )
-        self.assertIn(
-            "if: steps.frozen_allocation_harness.outputs.enabled == 'true'",
-            rust_core,
-        )
-        self.assertIn(rust_test_harness, rust_core)
-        self.assertIn(
-            'git worktree add --detach "$FROZEN_ALLOCATION_HARNESS_WORKTREE" '
-            '"$FROZEN_ALLOCATION_HARNESS_SHA"',
-            rust_core,
-        )
-        self.assertIn(harness_self_test, rust_core)
-        self.assertIn(
-            "if: always() && steps.frozen_allocation_harness.outputs.enabled == 'true'",
-            rust_core,
-        )
-        self.assertIn(
-            'git worktree remove --force "$FROZEN_ALLOCATION_CANDIDATE_WORKTREE"',
-            rust_core,
-        )
-        self.assertIn(
-            'git worktree remove --force "$FROZEN_ALLOCATION_HARNESS_WORKTREE"',
-            rust_core,
-        )
-        self.assertIn("git worktree prune", rust_core)
-        self.assertIn(
-            "github.event.pull_request.base.sha == env.FROZEN_ALLOCATION_HARNESS_SHA",
-            rust_core,
-        )
-        self.assertIn(
-            "FROZEN_ALLOCATION_CANDIDATE_SHA: "
-            "${{ github.event.pull_request.head.sha }}",
-            rust_core,
-        )
-        self.assertIn("--role baseline", rust_core)
-        self.assertIn("--role candidate", rust_core)
-        self.assertIn(
-            '--compare "$FROZEN_ALLOCATION_BASELINE_REPORT" '
-            '"$FROZEN_ALLOCATION_CANDIDATE_REPORT"',
-            rust_core,
-        )
-        self.assertLess(
-            rust_core.index(rust_test_harness), rust_core.index(harness_self_test)
-        )
-        self.assertLess(
-            rust_core.index(harness_self_test), rust_core.index("--role baseline")
-        )
+        self.assertIn("needs: changes", package)
+        self.assertNotIn("needs: lint-and-test", package)
+        self.assertIn("name: python-distributions", package)
+        self.assertGreaterEqual(workflow.count("name: Download core distributions"), 5)
+        self.assertGreaterEqual(workflow.count("--no-install-workspace"), 4)
+        self.assertGreaterEqual(workflow.count("uv run --no-sync"), 5)
+        self.assertIn("name: Download core distributions", studio_package)
+        self.assertNotIn("\n          uv build\n", studio_package)
 
     def test_ci_and_release_execute_rust_test_harness_unit_tests(self) -> None:
         command = (
             "python -m unittest scripts.test_run_rust_tests "
             "scripts.test_run_rust_coverage "
+            "scripts.test_classify_ci_changes "
             "scripts.test_build_python_release scripts.test_inspect_wheel "
             "scripts.test_release_config scripts.test_verify_python_release "
             "scripts.test_verify_perf_gates "
@@ -538,7 +517,9 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn(runner, agents)
         self.assertLess(agents.index(sync), agents.index(runner))
 
-    def test_benchmark_smoke_runs_every_supported_scale(self) -> None:
+    def test_pr_benchmark_smoke_uses_overhead_and_schedule_runs_all_scales(
+        self,
+    ) -> None:
         support_tree = ast.parse(
             (ROOT / "benchmarks/support.py").read_text(encoding="utf-8")
         )
@@ -558,18 +539,22 @@ class ReleaseConfigTests(unittest.TestCase):
         benchmark_job = workflow.split("  benchmark-smoke:\n", 1)[1].split(
             "  rust-core:\n", 1
         )[0]
+        scheduled = (ROOT / ".github/workflows/benchmarks.yml").read_text(
+            encoding="utf-8"
+        )
+        scheduled_job = scheduled.split("  benchmark:\n", 1)[1]
 
         self.assertEqual(scales, ["overhead", "small", "standard", "nightly"])
-        self.assertIn("fail-fast: false", benchmark_job)
-        self.assertIn(f"scale: [{', '.join(scales)}]", benchmark_job)
-        self.assertIn("CALC_FLOW_BENCHMARK_SCALE: ${{ matrix.scale }}", benchmark_job)
+        self.assertNotIn("matrix:", benchmark_job)
+        self.assertIn("CALC_FLOW_BENCHMARK_SCALE: overhead", benchmark_job)
         self.assertIn("JAX_PLATFORMS: cpu", benchmark_job)
         self.assertIn(
-            '--benchmark-json="benchmark-results/${CALC_FLOW_BENCHMARK_SCALE}.json"',
+            '--benchmark-json="benchmark-results/overhead.json"',
             benchmark_job,
         )
-        self.assertIn("name: benchmark-smoke-${{ matrix.scale }}", benchmark_job)
-        self.assertIn("path: benchmark-results/${{ matrix.scale }}.json", benchmark_job)
+        self.assertIn("name: benchmark-smoke-overhead", benchmark_job)
+        self.assertIn("path: benchmark-results/overhead.json", benchmark_job)
+        self.assertIn(f"scale: [{', '.join(scales)}]", scheduled_job)
 
     def test_linux_ci_reports_parallel_coverage_to_coveralls(self) -> None:
         workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
@@ -589,7 +574,11 @@ class ReleaseConfigTests(unittest.TestCase):
         finish = workflow.split("  coveralls-finish:\n", 1)[1]
         self.assertIn("- lint-and-test", finish)
         self.assertIn("- studio-backend", finish)
-        self.assertIn("- rust-core", finish)
+        self.assertIn("- rust-coverage", finish)
+        self.assertIn(
+            "if: always() && needs.changes.outputs.docs_only != 'true'",
+            finish,
+        )
         self.assertIn("parallel-finished: true", finish)
 
     def test_scheduled_rust_benchmark_targets_only_core_harness(self) -> None:
@@ -608,6 +597,11 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertEqual(
             cargo_bench_commands,
             ["run: cargo bench --locked -p calc-flow --bench core"],
+        )
+        self.assertIn(
+            "cargo test --locked -p calc-flow --bench allocation_regression\n"
+            "          --all-features",
+            rust_benchmark,
         )
 
     def test_python_package_excludes_unsupported_pyarrow_25(self) -> None:
