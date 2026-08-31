@@ -79,8 +79,8 @@ describe('lowered ProjectDocument inspection', () => {
       sourceExpressions: [
         '{"left":{"op":"input"},"op":"matmul","right":{"op":"weights"}}',
       ],
-      state: 'stateless',
-      watermark: 'not required',
+      state: 'unknown · provider lifecycle not encoded',
+      watermark: 'unknown · provider watermark contract not encoded',
       staticInputs: ['weights · array · jax · float64 · [2, 1]'],
       providerIdentity: 'jax:symbolic_matrix@1',
       copyBoundaries: [
@@ -90,6 +90,33 @@ describe('lowered ProjectDocument inspection', () => {
         'array → table · rows preserved',
       ],
     });
+  });
+
+  it('does not invent lifecycle or copy facts for an arbitrary external provider', () => {
+    const node: NodeConfig = {
+      id: 'custom_jax_provider',
+      input_ports: [
+        { name: 'input', kind: 'table', required: true, schema: [] },
+      ],
+      output_ports: [
+        { name: 'output', kind: 'table', required: true, schema: [] },
+      ],
+      operator: {
+        kind: 'external',
+        provider: 'jax',
+        name: 'stateful_features',
+        version: '9',
+        options: { columns: ['price'] },
+      },
+    };
+
+    const inspection = inspectLoweredNode(projectWith(node), node);
+
+    expect(inspection.state).toBe('unknown · provider lifecycle not encoded');
+    expect(inspection.watermark).toBe(
+      'unknown · provider watermark contract not encoded',
+    );
+    expect(inspection.copyBoundaries).toEqual([]);
   });
 
   it('explains rolling state and watermark bounds from the lowered node', () => {
@@ -147,7 +174,8 @@ describe('lowered ProjectDocument inspection', () => {
       'mean(price, duration=60000000µs, min_periods=2) → mean_1m',
     ]);
     expect(inspection.state).toBe(
-      'bounded · rows≤5 · duration≤60000000µs · fixed≥16 B/row · variable=1',
+      'bounded · row-frame history≤4 rows · duration-frame history≤60000000µs'
+      + ' · fixed≥16 B/retained row · variable=1',
     );
     expect(inspection.watermark).toBe(
       'required · event_time=ts · lateness=5000000µs · policy=drop',

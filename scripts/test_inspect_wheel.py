@@ -136,6 +136,17 @@ class InspectWheelTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "forbidden wheel entry"):
             inspect_wheel(wheel)
 
+    def test_rejects_repository_guidance_hidden_in_wheel_metadata(self) -> None:
+        wheel = self._wheel_with(
+            "calc_flow/__init__.py",
+            "calc_flow/_native.abi3.so",
+            "calc_flow-2.0.0.dist-info/licenses/LICENSE",
+            "calc_flow-2.0.0.dist-info/docs/superpowers/plans/private.md",
+        )
+
+        with self.assertRaisesRegex(ValueError, "forbidden wheel entry"):
+            inspect_wheel(wheel)
+
     def test_requires_native_module(self) -> None:
         wheel = self._wheel_with(
             "calc_flow/__init__.py",
@@ -184,6 +195,17 @@ class InspectWheelTests(unittest.TestCase):
             "calc_flow_studio/static/index.html",
             "calc_flow_studio-2.0.0.dist-info/licenses/LICENSE",
             "calc_flow_studio/docs/superpowers/specs/symbolic-engine.md",
+        )
+
+        with self.assertRaisesRegex(ValueError, "forbidden Studio wheel entry"):
+            inspect_studio_wheel(wheel)
+
+    def test_rejects_repository_guidance_from_studio_wheel(self) -> None:
+        wheel = self._wheel_with(
+            "calc_flow_studio/__init__.py",
+            "calc_flow_studio/static/index.html",
+            "calc_flow_studio-2.0.0.dist-info/licenses/LICENSE",
+            "calc_flow_studio/AGENTS.md",
         )
 
         with self.assertRaisesRegex(ValueError, "forbidden Studio wheel entry"):
@@ -272,6 +294,18 @@ class InspectWheelTests(unittest.TestCase):
             "calc-flow-2.0.0/Cargo.toml",
             "calc-flow-2.0.0/src/lib.rs",
             "calc-flow-2.0.0/docs/superpowers/plans/symbolic-engine.md",
+        )
+
+        with self.assertRaisesRegex(ValueError, "forbidden crate entry"):
+            inspect_crate(crate)
+
+    def test_rejects_repository_guidance_from_crate(self) -> None:
+        crate = self._archive_with(
+            "calc-flow-2.0.0.crate",
+            "calc-flow-2.0.0/LICENSE",
+            "calc-flow-2.0.0/Cargo.toml",
+            "calc-flow-2.0.0/src/lib.rs",
+            "calc-flow-2.0.0/CLAUDE.md",
         )
 
         with self.assertRaisesRegex(ValueError, "forbidden crate entry"):

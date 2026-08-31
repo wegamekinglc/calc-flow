@@ -1,11 +1,14 @@
 # Symbolic computation workflows
 
 Calc Flow's symbolic API declares immutable calculations and lowers them into
-the same strict project-v3 graph that the native engine and Studio use. Python
-does not execute while a lowered plan runs, and Studio does not contain a
-second symbolic compiler. This guide connects the public declarations to
-batch, continuous, recovery, array-provider, inspection, and performance
-workflows that are implemented in Calc Flow 4.0.
+the same strict project-v3 graph that the native engine and Studio use. No
+Python callback or expression object captured by a symbolic declaration runs
+while a lowered native operator executes. Explicitly registered runtime
+providers and application-owned Python sources and sinks can still invoke
+Python through their normal interfaces. Studio does not contain a second
+symbolic compiler. This guide connects the public declarations to batch,
+continuous, recovery, array-provider, inspection, and performance workflows
+implemented in Calc Flow 4.0.
 
 The complete declaration reference is in the [Python API guide](python-api.md).
 Use this guide to choose an executable example and understand the boundary
@@ -121,10 +124,16 @@ shows a **Lowered project inspection** section derived from that document:
 
 - serialized source expressions or lowered rolling/cross-section operations;
 - node kind and exact external provider identity;
-- bounded state and watermark requirements;
+- bounded state and watermark requirements for native nodes, or `unknown` for
+  external-provider lifecycle facts not encoded by `ProjectDocument`;
 - static input declarations and known byte sizes; and
 - table/array, host/device, static-placement, and result-attachment copy
   boundaries.
+
+Copy-boundary facts are shown only for the built-in
+`numpy:symbolic_matrix@1` and `jax:symbolic_matrix@1` document shape. Arbitrary
+external providers can attach different semantics to similarly named options,
+so Studio does not infer lifecycle or copy facts for them.
 
 The section is an inspector, not a compiler. It does not reconstruct the
 original Python expression objects, execute Python callables, or infer facts

@@ -12,26 +12,26 @@ export interface LoweredNodeInspection {
   copyBoundaries: string[];
 }
 
-const FIXED_TYPE_BYTES: Readonly<Record<string, number>> = {
-  bool: 1,
-  int8: 1,
-  uint8: 1,
-  int16: 2,
-  uint16: 2,
-  int32: 4,
-  uint32: 4,
-  float32: 4,
-  'date32': 4,
-  'time32[s]': 4,
-  int64: 8,
-  uint64: 8,
-  float64: 8,
-  'date64': 8,
-  'time64[us]': 8,
-  'timestamp[ms]': 8,
-  'timestamp[us]': 8,
-  'timestamp[us, UTC]': 8,
-};
+const FIXED_TYPE_BYTES: ReadonlyMap<string, number> = new Map([
+  ['bool', 1],
+  ['int8', 1],
+  ['uint8', 1],
+  ['int16', 2],
+  ['uint16', 2],
+  ['int32', 4],
+  ['uint32', 4],
+  ['float32', 4],
+  ['date32', 4],
+  ['time32[s]', 4],
+  ['int64', 8],
+  ['uint64', 8],
+  ['float64', 8],
+  ['date64', 8],
+  ['time64[us]', 8],
+  ['timestamp[ms]', 8],
+  ['timestamp[us]', 8],
+  ['timestamp[us, UTC]', 8],
+]);
 
 const record = (value: unknown): Record<string, unknown> | null =>
   value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -42,39 +42,60 @@ const sortedJsonValue = (value: unknown): unknown => {
   if (Array.isArray(value)) return value.map(sortedJsonValue);
   const mapping = record(value);
   if (!mapping) return value;
+  const entries = Object.entries(mapping).sort(([left], [right]) =>
+    left.localeCompare(right));
   return Object.fromEntries(
-    Object.keys(mapping)
-      .sort()
-      .map((key) => [key, sortedJsonValue(mapping[key])]),
+    entries.map(([key, item]) => [key, sortedJsonValue(item)]),
   );
 };
 
 const stableJson = (value: unknown): string => JSON.stringify(sortedJsonValue(value));
 
+const isString = (value: string | null): value is string => value !== null;
+
 const outputName = (output: Record<string, unknown>): string =>
   typeof output.output === 'string' ? output.output : '?';
+
+const rollingArguments = (output: Record<string, unknown>): string => {
+  if (typeof output.input === 'string') return output.input;
+  return [output.left, output.right]
+    .filter((item): item is string => typeof item === 'string')
+    .join(', ');
+};
+
+const numberDetail = (
+  label: string,
+  value: unknown,
+  suffix = '',
+): string | null => typeof value === 'number'
+  ? `${label}=${value}${suffix}`
+  : null;
+
+const frameDetails = (value: unknown): string[] => {
+  const frame = record(value);
+  if (frame?.kind === 'rows') {
+    return [numberDetail('rows', frame.size)].filter(isString);
+  }
+  if (frame?.kind === 'duration') {
+    return [numberDetail('duration', frame.micros, 'µs')].filter(isString);
+  }
+  return [];
+};
+
+const detailSuffix = (details: readonly string[]): string =>
+  details.length === 0 ? '' : `, ${details.join(', ')}`;
 
 const rollingSource = (value: unknown): string => {
   const output = record(value) ?? {};
   const kind = typeof output.kind === 'string' ? output.kind : 'rolling';
-  const arguments_ = typeof output.input === 'string'
-    ? output.input
-    : [output.left, output.right].filter((item) => typeof item === 'string').join(', ');
-  const details: string[] = [];
-  if (typeof output.periods === 'number') details.push(`periods=${output.periods}`);
-  const frame = record(output.frame);
-  if (frame?.kind === 'rows' && typeof frame.size === 'number') {
-    details.push(`rows=${frame.size}`);
-  }
-  if (frame?.kind === 'duration' && typeof frame.micros === 'number') {
-    details.push(`duration=${frame.micros}µs`);
-  }
-  if (typeof output.min_periods === 'number') {
-    details.push(`min_periods=${output.min_periods}`);
-  }
-  if (typeof output.ddof === 'number') details.push(`ddof=${output.ddof}`);
-  const detailText = details.length ? `, ${details.join(', ')}` : '';
-  return `${kind}(${arguments_}${detailText}) → ${outputName(output)}`;
+  const details = [
+    numberDetail('periods', output.periods),
+    ...frameDetails(output.frame),
+    numberDetail('min_periods', output.min_periods),
+    numberDetail('ddof', output.ddof),
+  ].filter(isString);
+  return `${kind}(${rollingArguments(output)}${detailSuffix(details)})`
+    + ` → ${outputName(output)}`;
 };
 
 const crossSectionSource = (value: unknown): string => {
@@ -84,42 +105,46 @@ const crossSectionSource = (value: unknown): string => {
   const details = Object.entries(output)
     .filter(([key]) => !['kind', 'primitive_version', 'input', 'output'].includes(key))
     .map(([key, item]) => `${key}=${stableJson(item)}`);
-  const detailText = details.length ? `, ${details.join(', ')}` : '';
-  return `${kind}(${input}${detailText}) → ${outputName(output)}`;
+  return `${kind}(${input}${detailSuffix(details)}) → ${outputName(output)}`;
 };
 
-const sourceExpressions = (node: NodeConfig): string[] => {
+const expressionSources = (
+  operator: Extract<NodeConfig['operator'], { kind: 'expression' }>,
+): string[] => [
+  ...(operator.expression ? [operator.expression] : operator.select),
+  ...(operator.filter ? [`filter ${operator.filter}`] : []),
+];
+
+const directSourceExpressions = (node: NodeConfig): string[] | null => {
   const operator = node.operator;
-  switch (operator.kind) {
-    case 'expression':
-      return [
-        ...(operator.expression ? [operator.expression] : operator.select),
-        ...(operator.filter ? [`filter ${operator.filter}`] : []),
-      ];
-    case 'sql':
-      return [operator.query];
-    case 'rolling':
-      return operator.spec.outputs.map(rollingSource);
-    case 'cross_section':
-      return operator.spec.outputs.map(crossSectionSource);
-    case 'external':
-      return operator.options.expression === undefined
-        ? []
-        : [stableJson(operator.options.expression)];
-    case 'window':
-      return [stableJson(operator.spec)];
-    case 'stream_join':
-      return [stableJson(operator.spec)];
-    default:
-      return [];
-  }
+  if (operator.kind === 'expression') return expressionSources(operator);
+  if (operator.kind === 'sql') return [operator.query];
+  if (operator.kind !== 'external') return null;
+  return operator.options.expression === undefined
+    ? []
+    : [stableJson(operator.options.expression)];
 };
+
+const structuredSourceExpressions = (node: NodeConfig): string[] => {
+  const operator = node.operator;
+  if (operator.kind === 'rolling') return operator.spec.outputs.map(rollingSource);
+  if (operator.kind === 'cross_section') {
+    return operator.spec.outputs.map(crossSectionSource);
+  }
+  if (operator.kind === 'window' || operator.kind === 'stream_join') {
+    return [stableJson(operator.spec)];
+  }
+  return [];
+};
+
+const sourceExpressions = (node: NodeConfig): string[] =>
+  directSourceExpressions(node) ?? structuredSourceExpressions(node);
 
 const inputSchemaCost = (node: NodeConfig): { fixed: number; variable: number } => {
   const fields = node.input_ports.find((port) => port.kind === 'table')?.schema ?? [];
   return fields.reduce(
     (cost, field) => {
-      const width = FIXED_TYPE_BYTES[field.data_type];
+      const width = FIXED_TYPE_BYTES.get(field.data_type);
       return width === undefined
         ? { ...cost, variable: cost.variable + 1 }
         : { ...cost, fixed: cost.fixed + width };
@@ -128,43 +153,68 @@ const inputSchemaCost = (node: NodeConfig): { fixed: number; variable: number } 
   );
 };
 
-const rollingBounds = (outputs: readonly unknown[]): { rows?: number; duration?: number } =>
-  outputs.reduce<{ rows?: number; duration?: number }>((bounds, value) => {
-    const output = record(value);
-    if (!output) return bounds;
-    const lagRows = typeof output.periods === 'number' ? output.periods + 1 : undefined;
-    const frame = record(output.frame);
-    const frameRows = frame?.kind === 'rows' && typeof frame.size === 'number'
-      ? frame.size
-      : undefined;
-    const duration = frame?.kind === 'duration' && typeof frame.micros === 'number'
-      ? frame.micros
-      : undefined;
-    return {
-      rows: Math.max(bounds.rows ?? 0, lagRows ?? 0, frameRows ?? 0) || undefined,
-      duration: Math.max(bounds.duration ?? 0, duration ?? 0) || undefined,
-    };
-  }, {});
+const rowHistoryBound = (value: unknown): number | null => {
+  const output = record(value);
+  if (!output) return null;
+  const frame = record(output.frame);
+  const candidates = [
+    typeof output.periods === 'number' ? output.periods : null,
+    frame?.kind === 'rows' && typeof frame.size === 'number' ? frame.size : null,
+  ].filter((item): item is number => item !== null);
+  return candidates.length === 0 ? null : Math.max(...candidates);
+};
+
+const durationHistoryBound = (value: unknown): number | null => {
+  const output = record(value);
+  const frame = record(output?.frame);
+  return frame?.kind === 'duration' && typeof frame.micros === 'number'
+    ? frame.micros
+    : null;
+};
+
+const maximum = (values: readonly (number | null)[]): number | null => {
+  const present = values.filter((value): value is number => value !== null);
+  return present.length === 0 ? null : Math.max(...present);
+};
+
+interface RollingBounds {
+  rows: number | null;
+  duration: number | null;
+}
+
+const rollingBounds = (outputs: readonly unknown[]): RollingBounds => ({
+  rows: maximum(outputs.map(rowHistoryBound)),
+  duration: maximum(outputs.map(durationHistoryBound)),
+});
+
+const rollingHistoryFacts = (bounds: RollingBounds): string[] => [
+  bounds.rows === null ? null : `row-frame history≤${bounds.rows} rows`,
+  bounds.duration === null
+    ? null
+    : `duration-frame history≤${bounds.duration}µs`,
+].filter(isString);
+
+const rollingStateFact = (node: NodeConfig): string => {
+  if (node.operator.kind !== 'rolling') return 'unknown';
+  const bounds = rollingBounds(node.operator.spec.outputs);
+  const cost = inputSchemaCost(node);
+  return [
+    'bounded',
+    ...rollingHistoryFacts(bounds),
+    `fixed≥${cost.fixed} B/retained row`,
+    `variable=${cost.variable}`,
+  ].join(' · ');
+};
 
 const stateFact = (node: NodeConfig): string => {
   const operator = node.operator;
-  if (operator.kind === 'rolling') {
-    const bounds = rollingBounds(operator.spec.outputs);
-    const cost = inputSchemaCost(node);
-    return [
-      'bounded',
-      ...(bounds.rows === undefined ? [] : [`rows≤${bounds.rows}`]),
-      ...(bounds.duration === undefined ? [] : [`duration≤${bounds.duration}µs`]),
-      `fixed≥${cost.fixed} B/row`,
-      `variable=${cost.variable}`,
-    ].join(' · ');
-  }
+  if (operator.kind === 'rolling') return rollingStateFact(node);
   if (operator.kind === 'cross_section') {
     const cost = inputSchemaCost(node);
     return [
       'bounded by watermark-final groups',
       'active_groups=runtime',
-      `fixed≥${cost.fixed} B/row`,
+      `fixed≥${cost.fixed} B/retained row`,
       `variable=${cost.variable}`,
     ].join(' · ');
   }
@@ -174,6 +224,7 @@ const stateFact = (node: NodeConfig): string => {
     return `bounded · rows≤${rows} per side · bytes≤${bytes} per side`;
   }
   if (operator.kind === 'window') return 'bounded by declared window';
+  if (operator.kind === 'external') return 'unknown · provider lifecycle not encoded';
   return 'stateless';
 };
 
@@ -200,10 +251,15 @@ const watermarkFact = (node: NodeConfig): string => {
     ].join(' · ');
   }
   if (operator.kind === 'window') return 'required by window finality';
+  if (operator.kind === 'external') {
+    return 'unknown · provider watermark contract not encoded';
+  }
   return 'not required';
 };
 
 type StaticInput = NonNullable<ProjectDocument['static_inputs']>[number];
+type ExternalOperator = Extract<NodeConfig['operator'], { kind: 'external' }>;
+type MatrixBackend = 'numpy' | 'jax';
 
 const staticInputDescription = (input: StaticInput): string => input.kind === 'array'
   ? `${input.name} · array · ${input.backend} · ${input.dtype} · [${input.shape.join(', ')}]`
@@ -219,7 +275,7 @@ const nodeStaticInputs = (project: ProjectDocument, node: NodeConfig): StaticInp
 
 const safeStaticBytes = (input: StaticInput): number | null => {
   if (input.kind !== 'array') return null;
-  const width = FIXED_TYPE_BYTES[input.dtype];
+  const width = FIXED_TYPE_BYTES.get(input.dtype);
   if (width === undefined) return null;
   let bytes = width;
   for (const dimension of input.shape) {
@@ -229,32 +285,76 @@ const safeStaticBytes = (input: StaticInput): number | null => {
   return bytes;
 };
 
+const matrixBackend = (operator: ExternalOperator): MatrixBackend | null => {
+  if (operator.name !== 'symbolic_matrix' || operator.version !== '1') return null;
+  if (operator.provider === 'numpy' || operator.provider === 'jax') {
+    return operator.provider;
+  }
+  return null;
+};
+
+const isNonEmptyStringArray = (value: unknown): value is string[] =>
+  Array.isArray(value)
+  && value.length > 0
+  && value.every((item) => typeof item === 'string' && item.length > 0);
+
+const hasMatrixPorts = (node: NodeConfig): boolean => {
+  const tableInput = node.input_ports.some(
+    (port) => port.kind === 'table' && port.required,
+  );
+  const weightsInput = node.input_ports.some(
+    (port) => port.name === 'weights' && port.kind === 'array' && port.required,
+  );
+  const tableOutput = node.output_ports.some((port) => port.kind === 'table');
+  return tableInput && weightsInput && tableOutput;
+};
+
+const hasMatchingWeights = (
+  staticInputs: readonly StaticInput[],
+  backend: MatrixBackend,
+): boolean => staticInputs.some((input) =>
+  input.name === 'weights'
+  && input.kind === 'array'
+  && input.backend === backend);
+
+interface SymbolicMatrixFacts {
+  backend: MatrixBackend;
+  columnCount: number;
+}
+
+const symbolicMatrixFacts = (
+  node: NodeConfig,
+  staticInputs: readonly StaticInput[],
+): SymbolicMatrixFacts | null => {
+  if (node.operator.kind !== 'external') return null;
+  const backend = matrixBackend(node.operator);
+  if (backend === null || !hasMatrixPorts(node)) return null;
+  const options = node.operator.options;
+  if (!isNonEmptyStringArray(options.columns)) return null;
+  if (!isNonEmptyStringArray(options.names) || record(options.expression) === null) {
+    return null;
+  }
+  return hasMatchingWeights(staticInputs, backend)
+    ? { backend, columnCount: options.columns.length }
+    : null;
+};
+
 const copyBoundaries = (
   node: NodeConfig,
   staticInputs: readonly StaticInput[],
 ): string[] => {
-  const operator = node.operator;
-  if (operator.kind !== 'external') return [];
-  const columns = Array.isArray(operator.options.columns)
-    ? operator.options.columns.length
-    : null;
-  const hasTableInput = node.input_ports.some((port) => port.kind === 'table');
-  const hasTableOutput = node.output_ports.some((port) => port.kind === 'table');
-  const facts: string[] = [];
-  if (hasTableInput && (columns !== null || operator.name === 'symbolic_matrix')) {
-    facts.push(`table → dense array · columns=${columns ?? 'runtime'} · rows=runtime`);
-  }
-  if (operator.provider === 'jax') facts.push('host → device · backend=jax');
-  for (const input of staticInputs) {
+  const matrix = symbolicMatrixFacts(node, staticInputs);
+  if (matrix === null) return [];
+  const staticFacts = staticInputs.map((input) => {
     const bytes = safeStaticBytes(input);
-    facts.push(
-      `static ${input.name} → provider · bytes=${bytes === null ? 'runtime' : bytes}`,
-    );
-  }
-  if (hasTableOutput && operator.name === 'symbolic_matrix') {
-    facts.push('array → table · rows preserved');
-  }
-  return facts;
+    return `static ${input.name} → provider · bytes=${bytes ?? 'runtime'}`;
+  });
+  return [
+    `table → dense array · columns=${matrix.columnCount} · rows=runtime`,
+    ...(matrix.backend === 'jax' ? ['host → device · backend=jax'] : []),
+    ...staticFacts,
+    'array → table · rows preserved',
+  ];
 };
 
 export const inspectLoweredNode = (
