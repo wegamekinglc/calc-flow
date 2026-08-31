@@ -351,18 +351,20 @@ const isRecognizedMatrixExpression = (value: unknown): boolean => {
 };
 
 const hasStaticWeightIdentity = (
-  input: StaticInput,
+  input: unknown,
   backend: MatrixBackend,
 ): boolean => {
-  if (input.kind !== 'array') return false;
+  const rawInput = record(input);
+  if (rawInput === null) return false;
   if (!hasExactKeys(
-    input,
+    rawInput,
     ['backend', 'dtype', 'kind', 'mutability', 'name', 'shape'],
   )) return false;
-  if (input.name !== 'weights') return false;
-  if (input.mutability !== 'static') return false;
-  if (input.backend !== backend) return false;
-  return input.dtype === 'float32' || input.dtype === 'float64';
+  if (rawInput.kind !== 'array') return false;
+  if (rawInput.name !== 'weights') return false;
+  if (rawInput.mutability !== 'static') return false;
+  if (rawInput.backend !== backend) return false;
+  return rawInput.dtype === 'float32' || rawInput.dtype === 'float64';
 };
 
 const hasStaticWeightShape = (
