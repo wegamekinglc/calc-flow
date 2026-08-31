@@ -84,33 +84,55 @@ def _temporal_reference(
     }
     for _, symbol, _, price in rows_:
         prices = history.setdefault(symbol, [])
-        previous = prices[-1] if prices else None
-        previous_2 = prices[-2] if len(prices) >= 2 else None
-        sample = [*prices[-2:], price]
-        mean = math.fsum(sample) / len(sample)
-        stddev = None
-        if len(sample) >= 2:
-            variance = math.fsum((value - mean) ** 2 for value in sample) / len(sample)
-            stddev = math.sqrt(variance)
-        expected["simple_return"].append(
-            None if previous is None else price / previous - 1.0
-        )
-        expected["log_return_2"].append(
-            None if previous_2 is None else math.log(price / previous_2)
-        )
-        expected["momentum_2"].append(
-            None if previous_2 is None else price / previous_2 - 1.0
-        )
-        expected["mean_3"].append(mean)
-        expected["stddev_3"].append(stddev)
-        expected["bollinger_upper"].append(
-            None if stddev is None else mean + 2.0 * stddev
-        )
-        expected["bollinger_lower"].append(
-            None if stddev is None else mean - 2.0 * stddev
-        )
+        values = _temporal_row(prices, price)
+        for name, value in values.items():
+            expected[name].append(value)
         prices.append(price)
     return expected
+
+
+def _temporal_row(prices: list[float], price: float) -> dict[str, float | None]:
+    previous = prices[-1] if prices else None
+    previous_2 = prices[-2] if len(prices) >= 2 else None
+    mean, stddev = _rolling_mean_std((*prices[-2:], price))
+    upper, lower = _bollinger_bounds(mean, stddev)
+    return {
+        "simple_return": _optional_return(price, previous),
+        "log_return_2": _optional_return(price, previous_2, logarithmic=True),
+        "momentum_2": _optional_return(price, previous_2),
+        "mean_3": mean,
+        "stddev_3": stddev,
+        "bollinger_upper": upper,
+        "bollinger_lower": lower,
+    }
+
+
+def _optional_return(
+    price: float,
+    previous: float | None,
+    *,
+    logarithmic: bool = False,
+) -> float | None:
+    if previous is None:
+        return None
+    ratio = price / previous
+    return math.log(ratio) if logarithmic else ratio - 1.0
+
+
+def _rolling_mean_std(sample: tuple[float, ...]) -> tuple[float, float | None]:
+    mean = math.fsum(sample) / len(sample)
+    if len(sample) < 2:
+        return mean, None
+    variance = math.fsum((value - mean) ** 2 for value in sample) / len(sample)
+    return mean, math.sqrt(variance)
+
+
+def _bollinger_bounds(
+    mean: float, stddev: float | None
+) -> tuple[float | None, float | None]:
+    if stddev is None:
+        return None, None
+    return mean + 2.0 * stddev, mean - 2.0 * stddev
 
 
 def test_finance_style_returns_momentum_and_bollinger_match_reference() -> None:
