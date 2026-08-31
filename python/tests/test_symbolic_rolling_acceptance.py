@@ -681,13 +681,13 @@ def test_multi_stage_symbolic_checkpoint_recovery_matches_batch(tmp_path: Path) 
     recovered = pa.concat_tables(sink.tables)
     assert recovered.schema == expected.schema
     for field in recovered.schema:
-        actual = recovered[field.name].to_pylist()
-        reference = expected[field.name].to_pylist()
         if pa.types.is_floating(field.type):
+            actual = recovered[field.name].to_pylist()
+            reference = expected[field.name].to_pylist()
             for observed, wanted in zip(actual, reference, strict=True):
                 _assert_classified_value(observed, wanted, 1e-12)
         else:
-            assert actual == reference
+            assert recovered[field.name].equals(expected[field.name])
     assert opened_offsets == [0, 5]
 
 
