@@ -338,20 +338,25 @@ def _inline(node: Node, env: dict[str, Node], path: str, /) -> Node:
     )
 
 
-def _find_rolling(node: Node, /):
-    """Yield every rolling temporal subtree in first-appearance order."""
-    if node.op.name in _ROLLING_PRIMITIVES:
+def _find_primitives(node: Node, primitives: frozenset[str], /):
+    """Yield matching subtrees in deterministic first-appearance order."""
+
+    if node.op.name in primitives:
         yield node
     for argument in node.args:
-        yield from _find_rolling(argument)
+        yield from _find_primitives(argument, primitives)
+
+
+def _find_rolling(node: Node, /):
+    """Yield every rolling temporal subtree in first-appearance order."""
+
+    yield from _find_primitives(node, _ROLLING_PRIMITIVES)
 
 
 def _find_cross_section(node: Node, /):
     """Yield every cross-section subtree in first-appearance order."""
-    if node.op.name in _CROSS_SECTION_PRIMITIVES:
-        yield node
-    for argument in node.args:
-        yield from _find_cross_section(argument)
+
+    yield from _find_primitives(node, _CROSS_SECTION_PRIMITIVES)
 
 
 def _cast_target(node: Node, path: str, /) -> str:
@@ -489,13 +494,13 @@ def _cbool(value: CValue | None, /) -> bool | None:
     return value.value if isinstance(value, CBool) else None
 
 
-def _replace_rolling(node: Node, replacements: dict[str, str], /) -> Node:
+def _replace_materialized(node: Node, replacements: dict[str, str], /) -> Node:
     replacement = replacements.get(node.digest)
     if replacement is not None:
         return _base_ref(replacement)
     return build(
         node.op.name,
-        tuple(_replace_rolling(argument, replacements) for argument in node.args),
+        tuple(_replace_materialized(argument, replacements) for argument in node.args),
         dict(node.attrs.entries),
         version=node.op.version,
     )
@@ -699,12 +704,12 @@ def _plan_rolling(
         ],
     }
     env = tuple(
-        (name, _replace_rolling(tree, replacements)) for name, tree in segment.env
+        (name, _replace_materialized(tree, replacements)) for name, tree in segment.env
     )
     post_predicate = (
         None
         if segment.post_predicate is None
-        else _replace_rolling(segment.post_predicate, replacements)
+        else _replace_materialized(segment.post_predicate, replacements)
     )
     return _RollingPlan(
         node_id,
@@ -976,12 +981,12 @@ def _plan_cross_section(
         ],
     }
     env = tuple(
-        (name, _replace_rolling(tree, replacements)) for name, tree in segment.env
+        (name, _replace_materialized(tree, replacements)) for name, tree in segment.env
     )
     post_predicate = (
         None
         if segment.post_predicate is None
-        else _replace_rolling(segment.post_predicate, replacements)
+        else _replace_materialized(segment.post_predicate, replacements)
     )
     return _CrossSectionPlan(
         node_id,
@@ -1116,13 +1121,13 @@ def _shared_group_plans[StatePlanT: (_RollingPlan, _CrossSectionPlan)](
         segment = by_name[output_name]
         post_predicate = segment.post_predicate
         if post_predicate is not None:
-            post_predicate = _replace_rolling(post_predicate, replacements)
+            post_predicate = _replace_materialized(post_predicate, replacements)
         shared[output_name] = replace(
             first,
             node_id=node_id,
             node=node,
             env=tuple(
-                (name, _replace_rolling(tree, replacements))
+                (name, _replace_materialized(tree, replacements))
                 for name, tree in segment.env
             ),
             post_predicate=post_predicate,

@@ -588,10 +588,19 @@ The first supported catalog is deliberately compositional:
 - batch/stream compilation with watermarks, late-event policy, checkpoints,
   recovery, CSE, projection fusion, and state sharing.
 
-RSI, MACD, Bollinger bands, momentum, volatility, and comparable factor
-families are expressed as compositions. A new primitive is justified only by
-an unavailable algorithm, materially better native state structure, or a
-measured fusion/performance requirement.
+Momentum, fixed-horizon log returns, Bollinger bands, and price-level
+volatility are expressed by the delivered compiler as compositions over plain
+input-column rolling values and row-local arithmetic. A new primitive remains
+justified only by an unavailable algorithm, materially better native state
+structure, or a measured fusion/performance requirement.
+
+The current v4 lowerer does not yet materialize row-local expressions before a
+stateful stage or feed one rolling stage into another. RSI therefore requires
+the planned multi-stage lowering work (`delta` followed by positive/negative
+projection and rolling means), while MACD additionally requires a separately
+frozen EMA/EWMA algorithm and durable-state contract. These indicators must
+not be presented as executable until those changes and their recovery tests
+land.
 
 ## Deferred Work at the Initial Freeze
 

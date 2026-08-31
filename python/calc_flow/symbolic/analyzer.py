@@ -226,6 +226,32 @@ def _schema_fields(value: CValue, /) -> tuple[Field, ...]:
     return tuple(fields)
 
 
+def _resolves_to_input_column(node: Node, /) -> bool:
+    """Whether the row-local lowerer resolves ``node`` to one source column."""
+
+    if node.op.name != "column_ref" or not node.args:
+        return False
+    return _table_field_resolves_to_input(
+        node.args[0],
+        _cstr(node.attr("name")) or "",
+    )
+
+
+def _table_field_resolves_to_input(table: Node, field_name: str, /) -> bool:
+    operation = table.op.name
+    if operation == "table_input":
+        return True
+    if operation in ("project", "filter"):
+        return _table_field_resolves_to_input(table.args[0], field_name)
+    if operation != "with_columns":
+        return False
+    names = _cstr_seq(table.attr("names"))
+    if field_name not in names:
+        return _table_field_resolves_to_input(table.args[0], field_name)
+    index = names.index(field_name)
+    return _resolves_to_input_column(table.args[index + 1])
+
+
 class _Analyzer:
     """One analysis pass over one program, mode, and capability snapshot."""
 
@@ -889,6 +915,11 @@ class _Analyzer:
     def _lag_like(self, node: Node, path: str, /) -> ColumnFacts:
         role = f"{path}.{node.op.name}"
         operand = self._operand(node.args[0], f"{role}.value", None)
+        self._require_stateful_input_column(
+            node.args[0],
+            f"{role}.value",
+            f"rolling {node.op.name} argument must be an input column in this release",
+        )
         if operand.lineage is not None:
             self._temporal_lineages.add(operand.lineage)
         periods = _cint(node.attr("periods")) or 1
@@ -929,6 +960,11 @@ class _Analyzer:
 
     def _rolling_aggregate(self, node: Node, path: str, /) -> ColumnFacts:
         operand = self._operand(node.args[0], f"{path}.{node.op.name}.value", None)
+        self._require_stateful_input_column(
+            node.args[0],
+            f"{path}.{node.op.name}.value",
+            f"rolling {node.op.name} argument must be an input column in this release",
+        )
         if operand.lineage is not None:
             self._temporal_lineages.add(operand.lineage)
         state = self._frame_state(node)
@@ -952,6 +988,11 @@ class _Analyzer:
         role = f"{path}.{node.op.name}"
         left = self._operand(node.args[0], f"{role}.left", None)
         right = self._operand(node.args[1], f"{role}.right", left.lineage)
+        message = (
+            f"rolling {node.op.name} argument must be an input column in this release"
+        )
+        self._require_stateful_input_column(node.args[0], f"{role}.left", message)
+        self._require_stateful_input_column(node.args[1], f"{role}.right", message)
         if left.lineage is not None:
             self._temporal_lineages.add(left.lineage)
         state = self._frame_state(node)
@@ -970,6 +1011,12 @@ class _Analyzer:
     def _cross_section(self, node: Node, path: str, /) -> ColumnFacts:
         role = f"{path}.{node.op.name}"
         operand = self._operand(node.args[0], f"{role}.value", None)
+        self._require_stateful_input_column(
+            node.args[0],
+            f"{role}.value",
+            f"cross-section {node.op.name} argument must be an input column"
+            " in this release",
+        )
         if operand.lineage is not None:
             self._temporal_lineages.add(operand.lineage)
         group_paths = (
@@ -977,10 +1024,39 @@ class _Analyzer:
             *(f"{role}.partition_by[{index}]" for index in range(len(node.args) - 2)),
         )
         group = self._anchored_operands(node.args[1:], group_paths, operand.lineage)
+        grouping_messages = (
+            "cross-section grouping event time must be an input column in this release",
+            *(
+                "cross-section group columns must be input columns in this release"
+                for _ in node.args[2:]
+            ),
+        )
+        for group_node, group_path, message in zip(
+            node.args[1:], group_paths, grouping_messages, strict=True
+        ):
+            self._require_stateful_input_column(
+                group_node,
+                group_path,
+                message,
+            )
         states = (
             operand.state | _column_state_union(group) | frozenset({"cross_section"})
         )
         return self._cross_section_output(node.op.name, operand, role, states)
+
+    def _require_stateful_input_column(
+        self,
+        node: Node,
+        path: str,
+        message: str,
+        /,
+    ) -> None:
+        if not _resolves_to_input_column(node):
+            self.issue(
+                path,
+                "unsupported_type",
+                message,
+            )
 
     def _cross_section_output(
         self,

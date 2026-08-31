@@ -520,6 +520,23 @@ analysis over the declaration graph. It has no data execution path — there is
 no `eval`, `push`, `value`, `transform`, preview evaluator, or formula parser —
 and execution stays owned by the existing execution plans and runners.
 
+The declaration catalog is intentionally wider than the implemented project
+lowerers. Use this availability matrix when constructing user-facing formula
+editors or validating stored declarations:
+
+| Domain                    | Construct/analyze | Batch/stream compile | Current lowering boundary                                      |
+| ------------------------- | ----------------- | -------------------- | -------------------------------------------------------------- |
+| row-local columns         | yes               | yes                  | portable scalar types and the documented SQL allowlist         |
+| rolling `ts`              | yes               | yes                  | every operand resolves to a source input column or direct alias |
+| cross-section `cs`        | yes               | yes                  | value, event time, and partitions resolve to input columns      |
+| symbolic matrix           | yes               | exact supported shape | one static `weights` parameter and one allowlisted matmul       |
+| event `window`            | yes               | no                   | declaration-only; compilation fails closed                     |
+| standalone array outputs  | yes               | no                   | arrays compile only through the supported table attachment      |
+
+`Program.analyze` reports `unsupported_type` for stateful operands outside
+the current input-column boundary, so a clean analysis does not advertise an
+expression that the lowerer will reject for that reason.
+
 ```python
 from calc_flow import Runtime
 from calc_flow.symbolic import FeatureSet, Field, Program, table_input
@@ -607,7 +624,7 @@ representations, or object addresses. The analysis issue codes are
 `ValueError` or `TypeError` with the same path grammar. `explain` renders the
 same facts as a deterministic multi-line report.
 
-### Row-local compilation
+### Symbolic compilation
 
 `Program.compile_batch(runtime)` and `Program.compile_stream(runtime, *,
 allowed_lateness_micros=0, late_policy="error")` lower a program to the
@@ -696,10 +713,12 @@ checks happen before attachment and report the failing provider field.
 per program output, placed ahead of the fused row-local stages. Rolling
 requires the input table to declare its `entity_by`, `event_time`, and
 `sequence_by` ordering keys; a program missing them fails with
-`ordering_required`. In this release every rolling argument must be a plain
-input column: a computed operand such as `ts.lag(quotes["x"] + 1.0)`, either
+`ordering_required`. In this release every rolling argument must resolve to a
+plain input column or a direct alias: a computed operand such as
+`ts.lag(quotes["x"] + 1.0)`, either
 operand of a pair aggregate, or a rolling aggregate over a derived column,
-fails with `unsupported_type` rooted at the output feature. `periods` is a
+is reported by analysis and fails compilation with `unsupported_type` rooted
+at the output feature. `periods` is a
 positive integer defaulting to `1`; an aggregate declares `rows(size)` or
 `duration(micros)` as its window with `min_periods` (default `1`, capped at
 the frame size for `rows` windows only) and — for `variance`, `stddev`,
@@ -733,8 +752,8 @@ declarations is unaffected by the lateness arguments.
 `cs.top`, `cs.bottom`, and `cs.mean_fill` lower to one shared native
 `cross_section` node per program output, placed ahead of the fused row-local
 stages. They use the same `ordering_required` key requirement as rolling and
-the same plain-input-column rule for the measured value, grouping event time,
-and every group column. A group is declared with
+the same input-column-or-direct-alias rule for the measured value, grouping
+event time, and every group column. A group is declared with
 `exact_time(event_time, *, partition_by=())` or
 `event_time_bucket(event_time, *, width_micros, partition_by=())`, and every
 cross-section occurrence in one output must share one grouping declaration:

@@ -299,9 +299,10 @@ over cancellation that arrives while the thread is being reclaimed.
 ### Symbolic declarations
 
 `calc_flow.symbolic` is the pure declaration surface: immutable expressions,
-programs, static analysis, and row-local compilation with no data execution
-path. Every expression, feature, program, and analysis result is immutable;
-constructors copy caller-owned sequences and mappings.
+programs, static analysis, and supported row-local, rolling, cross-section,
+and matrix compilation with no separate data execution path. Every expression,
+feature, program, and analysis result is immutable; constructors copy
+caller-owned sequences and mappings.
 
 | Member                                                                        | Contract                                                                                                             |
 | ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |

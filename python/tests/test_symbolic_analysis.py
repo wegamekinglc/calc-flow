@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Callable
 
 import pytest
 
@@ -775,6 +776,86 @@ def test_stream_mode_requires_ordering_for_lag_and_delta() -> None:
     assert all(issue.code == "ordering_required" for issue in stream_result.issues)
 
     assert program.analyze(Runtime(), mode="batch").issues == ()
+
+
+@pytest.mark.parametrize(
+    ("feature_name", "feature"),
+    (
+        (
+            "logged_previous",
+            lambda quotes: ts.lag(row.log(quotes["x"])),
+        ),
+        (
+            "mean_change",
+            lambda quotes: ts.mean(
+                ts.delta(quotes["x"]),
+                window=rows(3),
+            ),
+        ),
+        (
+            "adjusted_rank",
+            lambda quotes: cs.rank(
+                quotes["x"] + 1.0,
+                group=exact_time(quotes["ts"]),
+            ),
+        ),
+    ),
+)
+def test_analysis_reports_stateful_operands_the_lowerer_cannot_materialize(
+    feature_name: str,
+    feature: Callable[[TableExpr], object],
+) -> None:
+    quotes = _quotes_ordered()
+    program = _feature_program(quotes, feature_name, feature(quotes))
+
+    result = program.analyze(Runtime(), mode="batch")
+
+    assert len(result.issues) == 1
+    issue = result.issues[0]
+    assert issue.path.startswith(f"outputs.signals.{feature_name}.")
+    assert issue.code == "unsupported_type"
+    assert "must be an input column in this release" in issue.message
+
+
+def test_analysis_distinguishes_derived_columns_from_input_aliases() -> None:
+    quotes = _quotes_ordered()
+    derived = quotes.with_columns(
+        FeatureSet(
+            (
+                ("adjusted", quotes["x"] + 1.0),
+                ("price", quotes["x"]),
+            )
+        )
+    )
+    signals = derived.with_columns(
+        FeatureSet(
+            (
+                ("adjusted_previous", ts.lag(derived["adjusted"])),
+                ("price_previous", ts.lag(derived["price"])),
+            )
+        )
+    )
+    program = Program("p", inputs=(quotes,), outputs=(("signals", signals),))
+
+    result = program.analyze(Runtime(), mode="batch")
+
+    assert len(result.issues) == 1
+    issue = result.issues[0]
+    assert issue.path == "outputs.signals.adjusted_previous.lag.value"
+    assert issue.code == "unsupported_type"
+    assert "must be an input column in this release" in issue.message
+
+
+def test_direct_input_alias_remains_analyzable_and_compilable() -> None:
+    quotes = _quotes_ordered()
+    aliased = quotes.with_columns(FeatureSet((("price", quotes["x"]),)))
+    signals = aliased.with_columns(
+        FeatureSet((("price_previous", ts.lag(aliased["price"])),))
+    )
+    program = Program("p", inputs=(quotes,), outputs=(("signals", signals),))
+
+    assert program.analyze(Runtime(), mode="batch").issues == ()
+    program.compile_batch(Runtime())
 
 
 def test_where_condition_and_coalesce_operands_respect_lineage() -> None:

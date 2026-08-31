@@ -17,8 +17,9 @@ between compile-time facts and runtime measurements.
 ## Compose and run financial features
 
 [`09_symbolic_financial_features.py`](../examples/09_symbolic_financial_features.py)
-builds one reusable `FeatureSet` containing lagged momentum, an exact-time
-cross-section volume z-score, and a composed liquidity-adjusted metric. The
+builds one reusable `FeatureSet` containing one-period simple and log returns,
+a three-row price mean and standard deviation, Bollinger bands, an exact-time
+cross-section volume z-score, and a composed liquidity-adjusted momentum. The
 example:
 
 1. declares the input schema and its entity, event-time, and sequence keys;
@@ -31,6 +32,16 @@ Declarations only capture names, types, shapes, and expression structure.
 They never read the Arrow rows used later by `BatchExecutionPlan.execute`.
 Structurally identical expressions can therefore be shared by the complete
 program without changing the result or mutating the declaration graph.
+
+The independently derived Finance-Python-inspired acceptance vectors live in
+[`test_symbolic_finance_reference.py`](../python/tests/test_symbolic_finance_reference.py).
+Their provenance is pinned to the upstream
+[rolling and cross-section tests](https://github.com/alpha-miner/Finance-Python/tree/3e33d3e70c3458b4c6dcf76b88df6148229b402c/PyFin/tests/Analysis).
+They intentionally apply Calc Flow's frozen percentile, tie, Arrow-null, and
+NaN rules rather than importing Finance-Python or treating its mutable holder
+semantics as an oracle. The current compiler requires stateful operands to
+resolve to source columns: RSI awaits multi-stage row-to-rolling lowering, and
+MACD additionally awaits a frozen EMA/EWMA state contract.
 
 Run it from a source checkout with:
 
@@ -46,6 +57,11 @@ application-owned replayable source and sink, and uses
 `ManagedCheckpointRuntime`. A second process-lifecycle run against the same
 checkpoint root proves that terminal recovery neither reopens the ended source
 nor duplicates sink output.
+
+This executable example isolates runner lineage and terminal recovery with a
+row-local program. Stateful rolling and cross-section checkpoint/recovery are
+covered by their native acceptance suites; a public symbolic mid-checkpoint
+example remains follow-up work.
 
 ```bash
 uv run python examples/10_symbolic_streaming_recovery.py
