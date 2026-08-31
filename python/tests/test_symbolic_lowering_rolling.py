@@ -215,6 +215,19 @@ def test_rolling_features_mix_with_row_local_expressions() -> None:
     assert '"prev"' in select
 
 
+def test_materialized_rolling_column_collision_is_rejected() -> None:
+    quotes = _ordered()
+    program = _program(
+        [
+            ("signals__cf_roll_0", quotes["x"]),
+            ("momentum", ts.delta(quotes["x"]) + 1.0),
+        ]
+    )
+
+    with pytest.raises(CompileError, match="duplicate_name"):
+        lower_program_document(program, Runtime(), "batch")
+
+
 def test_composed_lag_argument_is_rejected_loudly() -> None:
     quotes = _ordered()
     program = _program([("prev", ts.lag(quotes["x"] + 1.0))])

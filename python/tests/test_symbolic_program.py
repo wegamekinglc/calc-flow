@@ -72,6 +72,8 @@ def test_feature_set_rejects_duplicate_names_with_stable_path() -> None:
 
 
 def test_feature_set_rejects_non_column_values_and_non_string_names() -> None:
+    with pytest.raises(TypeError, match=r"^features\[0\]:"):
+        FeatureSet([("score",)])  # type: ignore[list-item]
     with pytest.raises(TypeError, match=r"^features\[0\].value:"):
         FeatureSet([("score", _quotes())])
     with pytest.raises(TypeError, match=r"^features\[0\].name:"):
@@ -141,6 +143,8 @@ def test_program_copies_inputs_and_outputs_at_construction() -> None:
 
 
 def test_program_rejects_wrong_host_types() -> None:
+    with pytest.raises(TypeError, match=r"^Program.name"):
+        Program(1)  # type: ignore[arg-type]
     with pytest.raises(TypeError):
         Program("p", inputs=[object()])  # type: ignore[list-item]
     with pytest.raises(TypeError):

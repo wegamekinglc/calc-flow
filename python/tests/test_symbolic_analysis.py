@@ -849,8 +849,10 @@ def test_analysis_distinguishes_derived_columns_from_input_aliases() -> None:
 def test_direct_input_alias_remains_analyzable_and_compilable() -> None:
     quotes = _quotes_ordered()
     aliased = quotes.with_columns(FeatureSet((("price", quotes["x"]),)))
-    signals = aliased.with_columns(
-        FeatureSet((("price_previous", ts.lag(aliased["price"])),))
+    projected = table.project(aliased, ("ts", "symbol", "seq", "x", "price"))
+    filtered = table.filter(projected, projected["x"] > 0.0)
+    signals = filtered.with_columns(
+        FeatureSet((("price_previous", ts.lag(filtered["price"])),))
     )
     program = Program("p", inputs=(quotes,), outputs=(("signals", signals),))
 
