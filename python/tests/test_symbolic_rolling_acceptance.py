@@ -30,7 +30,6 @@ from calc_flow import (
     SourceDeliveryCapability,
     StreamingRunner,
 )
-from calc_flow.errors import CompileError
 from calc_flow.symbolic import (
     FeatureSet,
     Field,
@@ -65,16 +64,6 @@ def _program(features: list[tuple[str, object]]) -> Program:
     quotes = _ordered()
     signals = quotes.with_columns(FeatureSet(features))
     return Program("p", inputs=[quotes], outputs=[("signals", signals)])
-
-
-def _rejected(features: list[tuple[str, object]], mode: str = "batch") -> str:
-    program = _program(features)
-    with pytest.raises(CompileError) as excinfo:
-        if mode == "batch":
-            program.compile_batch(Runtime())
-        else:
-            program.compile_stream(Runtime())
-    return str(excinfo.value)
 
 
 def test_min_max_covariance_and_correlation_execute_with_reference_values() -> None:
@@ -192,19 +181,18 @@ def test_cross_section_primitives_lower_in_both_modes() -> None:
             assert "cross_section" in kinds, (mode, kinds)
 
 
-def test_composite_lag_delta_arguments_stay_rejected() -> None:
+def test_composite_lag_delta_arguments_compile_through_materialization() -> None:
     quotes = _ordered()
-    message = _rejected([("prev", ts.lag(quotes["x"] + 1.0))])
-    assert "must be an input column" in message
-    message = _rejected([("change", ts.delta(quotes["x"] * 2.0))])
-    assert "must be an input column" in message
+    for feature in (
+        ("prev", ts.lag(quotes["x"] + 1.0)),
+        ("change", ts.delta(quotes["x"] * 2.0)),
+    ):
+        _program([feature]).compile_batch(Runtime())
 
     derived = quotes.with_columns(FeatureSet([("y", quotes["x"] + 1.0)]))
     signals = derived.with_columns(FeatureSet([("prev", ts.lag(derived["y"]))]))
     program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
-    with pytest.raises(CompileError) as excinfo:
-        program.compile_batch(Runtime())
-    assert "must be an input column" in str(excinfo.value)
+    program.compile_batch(Runtime())
 
 
 def test_probe_lowering_shape_with_periods_and_lateness() -> None:

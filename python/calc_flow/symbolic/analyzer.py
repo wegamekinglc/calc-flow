@@ -103,6 +103,34 @@ _ARITHMETIC: Final = frozenset({"add", "sub", "mul", "truediv"})
 _COMPARISONS: Final = frozenset({"eq", "ne", "lt", "le", "gt", "ge"})
 _BOOLEANS: Final = frozenset({"and", "or"})
 _UNARY_NUMERIC: Final = frozenset({"log", "exp", "sqrt"})
+_ROW_LOCAL_PRIMITIVES: Final = frozenset(
+    {
+        "column_ref",
+        "literal",
+        "add",
+        "sub",
+        "mul",
+        "truediv",
+        "neg",
+        "eq",
+        "ne",
+        "lt",
+        "le",
+        "gt",
+        "ge",
+        "and",
+        "or",
+        "not",
+        "where",
+        "coalesce",
+        "log",
+        "exp",
+        "sqrt",
+        "abs",
+        "clip",
+        "cast",
+    }
+)
 _ROLLING_AGGREGATES: Final = frozenset(
     {"count", "sum", "mean", "min", "max", "variance", "stddev"}
 )
@@ -250,6 +278,39 @@ def _table_field_resolves_to_input(table: Node, field_name: str, /) -> bool:
         return _table_field_resolves_to_input(table.args[0], field_name)
     index = names.index(field_name)
     return _resolves_to_input_column(table.args[index + 1])
+
+
+def _rolling_operand_is_materializable(node: Node, /) -> bool:
+    """Whether rolling input can be produced by a pure expression stage."""
+
+    operation = node.op.name
+    if operation == "column_ref":
+        if not node.args:
+            return True
+        return _table_field_is_materializable(
+            node.args[0],
+            _cstr(node.attr("name")) or "",
+        )
+    if operation == "literal":
+        return True
+    return operation in _ROW_LOCAL_PRIMITIVES and all(
+        _rolling_operand_is_materializable(argument) for argument in node.args
+    )
+
+
+def _table_field_is_materializable(table: Node, field_name: str, /) -> bool:
+    operation = table.op.name
+    if operation == "table_input":
+        return True
+    if operation in ("project", "filter"):
+        return _table_field_is_materializable(table.args[0], field_name)
+    if operation != "with_columns":
+        return False
+    names = _cstr_seq(table.attr("names"))
+    if field_name not in names:
+        return _table_field_is_materializable(table.args[0], field_name)
+    index = names.index(field_name)
+    return _rolling_operand_is_materializable(table.args[index + 1])
 
 
 class _Analyzer:
@@ -915,10 +976,11 @@ class _Analyzer:
     def _lag_like(self, node: Node, path: str, /) -> ColumnFacts:
         role = f"{path}.{node.op.name}"
         operand = self._operand(node.args[0], f"{role}.value", None)
-        self._require_stateful_input_column(
+        self._require_rolling_operand(
             node.args[0],
             f"{role}.value",
-            f"rolling {node.op.name} argument must be an input column in this release",
+            f"rolling {node.op.name} argument must be an input column or"
+            " row-local expression in this release",
         )
         if operand.lineage is not None:
             self._temporal_lineages.add(operand.lineage)
@@ -960,10 +1022,11 @@ class _Analyzer:
 
     def _rolling_aggregate(self, node: Node, path: str, /) -> ColumnFacts:
         operand = self._operand(node.args[0], f"{path}.{node.op.name}.value", None)
-        self._require_stateful_input_column(
+        self._require_rolling_operand(
             node.args[0],
             f"{path}.{node.op.name}.value",
-            f"rolling {node.op.name} argument must be an input column in this release",
+            f"rolling {node.op.name} argument must be an input column or"
+            " row-local expression in this release",
         )
         if operand.lineage is not None:
             self._temporal_lineages.add(operand.lineage)
@@ -989,10 +1052,11 @@ class _Analyzer:
         left = self._operand(node.args[0], f"{role}.left", None)
         right = self._operand(node.args[1], f"{role}.right", left.lineage)
         message = (
-            f"rolling {node.op.name} argument must be an input column in this release"
+            f"rolling {node.op.name} argument must be an input column or"
+            " row-local expression in this release"
         )
-        self._require_stateful_input_column(node.args[0], f"{role}.left", message)
-        self._require_stateful_input_column(node.args[1], f"{role}.right", message)
+        self._require_rolling_operand(node.args[0], f"{role}.left", message)
+        self._require_rolling_operand(node.args[1], f"{role}.right", message)
         if left.lineage is not None:
             self._temporal_lineages.add(left.lineage)
         state = self._frame_state(node)
@@ -1057,6 +1121,16 @@ class _Analyzer:
                 "unsupported_type",
                 message,
             )
+
+    def _require_rolling_operand(
+        self,
+        node: Node,
+        path: str,
+        message: str,
+        /,
+    ) -> None:
+        if not _rolling_operand_is_materializable(node):
+            self.issue(path, "unsupported_type", message)
 
     def _cross_section_output(
         self,

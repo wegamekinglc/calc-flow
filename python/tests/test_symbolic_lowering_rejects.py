@@ -51,7 +51,7 @@ def _reject_message(error: pytest.ExceptionInfo[CompileError]) -> str:
     return str(error.value)
 
 
-def test_stream_rolling_pair_arguments_must_be_input_columns() -> None:
+def test_stream_rolling_pair_row_local_argument_is_materialized() -> None:
     quotes = _ordered()
     signals = quotes.with_columns(
         FeatureSet(
@@ -65,15 +65,10 @@ def test_stream_rolling_pair_arguments_must_be_input_columns() -> None:
     )
     program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
 
-    with pytest.raises(CompileError) as excinfo:
-        program.compile_stream(Runtime())
-
-    message = _reject_message(excinfo)
-    assert "outputs.signals.corr" in message
-    assert "must be an input column" in message
+    program.compile_stream(Runtime())
 
 
-def test_batch_rolling_pair_arguments_must_be_input_columns() -> None:
+def test_batch_rolling_pair_row_local_argument_is_materialized() -> None:
     quotes = _ordered()
     signals = quotes.with_columns(
         FeatureSet(
@@ -87,8 +82,7 @@ def test_batch_rolling_pair_arguments_must_be_input_columns() -> None:
     )
     program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
 
-    with pytest.raises(CompileError, match="must be an input column"):
-        program.compile_batch(Runtime())
+    program.compile_batch(Runtime())
 
 
 def test_cross_section_winsorize_compiles_in_both_modes() -> None:

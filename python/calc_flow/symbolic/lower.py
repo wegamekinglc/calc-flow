@@ -22,6 +22,8 @@ from calc_flow.pipeline import (
 )
 from calc_flow.symbolic import errors
 from calc_flow.symbolic.analyzer import (
+    _ROW_LOCAL_PRIMITIVES,
+    _literal_dtype,
     _require_mode,
     _rolling_output_type,
     _run,
@@ -66,35 +68,6 @@ class _CompileCacheKey:
     allowed_lateness_micros: int
     late_policy: str
 
-
-_COLUMN_PRIMITIVES: Final = frozenset(
-    {
-        "column_ref",
-        "literal",
-        "add",
-        "sub",
-        "mul",
-        "truediv",
-        "neg",
-        "eq",
-        "ne",
-        "lt",
-        "le",
-        "gt",
-        "ge",
-        "and",
-        "or",
-        "not",
-        "where",
-        "coalesce",
-        "log",
-        "exp",
-        "sqrt",
-        "abs",
-        "clip",
-        "cast",
-    }
-)
 
 _TABLE_OUTPUT_PRIMITIVES: Final = frozenset(
     {"table_input", "project", "filter", "with_columns"}
@@ -323,7 +296,7 @@ def _inline(node: Node, env: dict[str, Node], path: str, /) -> Node:
     if name == "literal":
         return node
     if (
-        name not in _COLUMN_PRIMITIVES
+        name not in _ROW_LOCAL_PRIMITIVES
         and name not in _ROLLING_PRIMITIVES
         and name not in _CROSS_SECTION_PRIMITIVES
     ):
@@ -513,11 +486,96 @@ class _RollingPlan:
 
     node_id: str
     node: dict[str, object]
+    materialization_node_id: str | None
+    materialization_node: dict[str, object] | None
     env: tuple[tuple[str, Node], ...]
     post_predicate: Node | None
     input_field_names: tuple[str, ...]
     output_fields: tuple[Field, ...]
     replacements: tuple[tuple[str, str], ...]
+
+
+def _row_local_field(
+    node: Node,
+    name: str,
+    input_types: dict[str, Field],
+    /,
+) -> Field:
+    """Infer a validated row-local expression field for stateful staging."""
+
+    leaf = _row_local_leaf_field(node, name, input_types)
+    if leaf is not None:
+        return leaf
+    children = [_row_local_field(argument, name, input_types) for argument in node.args]
+    return _row_local_composite_field(node, name, children)
+
+
+def _row_local_leaf_field(
+    node: Node,
+    name: str,
+    input_types: dict[str, Field],
+    /,
+) -> Field | None:
+    operation = node.op.name
+    if operation == "column_ref":
+        source = input_types[_cstr(node.attr("name"))]
+        return Field(name, source.data_type, nullable=source.nullable)
+    if operation != "literal":
+        return None
+    value = node.attr("value")
+    data_type = None if value is None else _literal_dtype(value)
+    if data_type is None:
+        raise RuntimeError("validated rolling literal has no data type")
+    return Field(name, data_type, nullable=isinstance(value, CNull))
+
+
+def _row_local_composite_field(
+    node: Node,
+    name: str,
+    children: list[Field],
+    /,
+) -> Field:
+    operation = node.op.name
+    nullable = _any_nullable(children)
+    if operation in {"eq", "ne", "lt", "le", "gt", "ge", "and", "or", "not"}:
+        return Field(name, "bool", nullable=nullable)
+    if operation in _FUNCTION_SQL:
+        return Field(name, "float64", nullable=True)
+    if operation == "cast":
+        return Field(name, _cast_type_name(node), nullable=nullable)
+    return _row_local_conditional_field(operation, name, children, nullable)
+
+
+def _any_nullable(fields: list[Field], /) -> bool:
+    return any(field.nullable for field in fields)
+
+
+def _row_local_conditional_field(
+    operation: str,
+    name: str,
+    children: list[Field],
+    nullable: bool,
+    /,
+) -> Field:
+    if operation == "where":
+        return Field(
+            name,
+            children[1].data_type,
+            nullable=children[1].nullable or children[2].nullable,
+        )
+    if operation == "coalesce":
+        return Field(
+            name,
+            children[0].data_type,
+            nullable=all(field.nullable for field in children),
+        )
+    return Field(name, children[0].data_type, nullable=nullable)
+
+
+def _rolling_argument_is_row_local(node: Node, /) -> bool:
+    return node.op.name in _ROW_LOCAL_PRIMITIVES and all(
+        _rolling_argument_is_row_local(argument) for argument in node.args
+    )
 
 
 def _rolling_frame(subtree: Node, path: str, kind: str, /) -> dict[str, object]:
@@ -587,6 +645,52 @@ def _plan_rolling(
         if tree.op.name in _ROLLING_PRIMITIVES
     }
     used_names = set(input_types) | {name for name, _ in segment.env}
+    materializations: dict[str, str] = {}
+    materialized_fields: list[Field] = []
+    materialized_selects = [_quote_identifier(field.name) for field in input_fields]
+    for subtree in occurrences:
+        for argument in subtree.args:
+            if argument.op.name == "column_ref":
+                continue
+            if not _rolling_argument_is_row_local(argument):
+                errors.raise_compile(
+                    path,
+                    errors.UNSUPPORTED_TYPE,
+                    f"rolling {subtree.op.name} argument must be an input column"
+                    " or row-local expression in this release",
+                )
+            if argument.digest in materializations:
+                continue
+            materialized_name = f"{output_name}__cf_roll_input_{len(materializations)}"
+            if materialized_name in used_names:
+                errors.raise_compile(
+                    f"{path}.{materialized_name}",
+                    errors.DUPLICATE_NAME,
+                    f"materialized rolling input {materialized_name!r} collides"
+                    " with a declared field",
+                )
+            used_names.add(materialized_name)
+            materializations[argument.digest] = materialized_name
+            materialized_fields.append(
+                _row_local_field(argument, materialized_name, input_types)
+            )
+            materialized_selects.append(_select_item(materialized_name, argument))
+    state_input_fields = (*input_fields, *materialized_fields)
+    input_types = {field.name: field for field in state_input_fields}
+    materialization_node_id = (
+        f"{output_name}__cf_rolling_input" if materialized_fields else None
+    )
+    materialization_node = (
+        _expression_node(
+            materialization_node_id,
+            materialized_selects,
+            None,
+            input_fields,
+            state_input_fields,
+        )
+        if materialization_node_id is not None
+        else None
+    )
     replacements: dict[str, str] = {}
     declarations: list[dict[str, object]] = []
     derived_fields: list[Field] = []
@@ -604,17 +708,15 @@ def _plan_rolling(
                 )
             used_names.add(name)
         replacements[subtree.digest] = name
-        operands: list[tuple[str, str]] = []
+        operands: list[tuple[str, str, Field]] = []
         for role, argument in zip(
             ("input", "left", "right"), subtree.args, strict=False
         ):
-            if argument.op.name != "column_ref":
-                errors.raise_compile(
-                    f"{path}.{name}",
-                    errors.UNSUPPORTED_TYPE,
-                    f"rolling {kind} argument must be an input column in this release",
-                )
-            input_name = _cstr(argument.attr("name"))
+            input_name = (
+                _cstr(argument.attr("name"))
+                if argument.op.name == "column_ref"
+                else materializations[argument.digest]
+            )
             field = input_types.get(input_name)
             if field is None:
                 errors.raise_compile(
@@ -623,7 +725,7 @@ def _plan_rolling(
                     f"rolling {kind} argument column {input_name!r} is not in the"
                     " input schema",
                 )
-            operands.append((role, input_name))
+            operands.append((role, input_name, field))
         periods = _cint(subtree.attr("periods"))
         if periods is not None:
             declarations.append(
@@ -635,7 +737,7 @@ def _plan_rolling(
                     "periods": periods,
                 }
             )
-            derived_fields.append(Field(name, field.data_type, nullable=True))
+            derived_fields.append(Field(name, operands[0][2].data_type, nullable=True))
             continue
         frame = _rolling_frame(subtree, f"{path}.{name}", kind)
         declaration: dict[str, object] = {
@@ -657,7 +759,7 @@ def _plan_rolling(
         derived_fields.append(
             Field(
                 name,
-                _rolling_output_type(kind, field.data_type) or "float64",
+                _rolling_output_type(kind, operands[0][2].data_type) or "float64",
                 nullable=True,
             )
         )
@@ -688,7 +790,7 @@ def _plan_rolling(
                 "name": "input",
                 "kind": "table",
                 "required": True,
-                "schema": [_field_json(field) for field in input_fields],
+                "schema": [_field_json(field) for field in state_input_fields],
             }
         ],
         "output_ports": [
@@ -697,7 +799,7 @@ def _plan_rolling(
                 "kind": "table",
                 "required": True,
                 "schema": [
-                    *(_field_json(field) for field in input_fields),
+                    *(_field_json(field) for field in state_input_fields),
                     *(_field_json(field) for field in derived_fields),
                 ],
             }
@@ -712,13 +814,15 @@ def _plan_rolling(
         else _replace_materialized(segment.post_predicate, replacements)
     )
     return _RollingPlan(
-        node_id,
-        node,
-        env,
-        post_predicate,
-        (*input_types, *(field.name for field in derived_fields)),
-        (*input_fields, *derived_fields),
-        tuple(replacements.items()),
+        node_id=node_id,
+        node=node,
+        materialization_node_id=materialization_node_id,
+        materialization_node=materialization_node,
+        env=env,
+        post_predicate=post_predicate,
+        input_field_names=(*input_types, *(field.name for field in derived_fields)),
+        output_fields=(*state_input_fields, *derived_fields),
+        replacements=tuple(replacements.items()),
     )
 
 
@@ -1178,13 +1282,19 @@ def _share_rolling_plans(
     plans: dict[str, _RollingPlan | None],
     /,
 ) -> dict[str, _RollingPlan | None]:
-    groups: dict[tuple[str, str | None], list[str]] = {}
+    groups: dict[tuple[str, str | None, str | None], list[str]] = {}
     for output_name, segment in segments:
-        if plans[output_name] is not None:
+        plan = plans[output_name]
+        if plan is not None:
             predicate = None if segment.predicate is None else segment.predicate.digest
-            groups.setdefault((segment.input_node.digest, predicate), []).append(
-                output_name
+            materialization = (
+                None
+                if plan.materialization_node is None
+                else _canonical(plan.materialization_node)
             )
+            groups.setdefault(
+                (segment.input_node.digest, predicate, materialization), []
+            ).append(output_name)
     return _share_state_groups(
         list(groups.values()), segments, plans, "roll", "rolling"
     )
@@ -1973,6 +2083,30 @@ def _lower_program(
                 )
             upstream_id = prefilter_id
         if rolling is not None:
+            if rolling.materialization_node is not None:
+                nodes.append(rolling.materialization_node)
+                materialization_id = rolling.materialization_node_id
+                if materialization_id is None:
+                    raise RuntimeError("rolling materialization node has no id")
+                if upstream_id is not None:
+                    edges.append(
+                        {
+                            "source_node": upstream_id,
+                            "source_port": "output",
+                            "target_node": materialization_id,
+                            "target_port": "input",
+                        }
+                    )
+                elif fanout:
+                    edges.append(
+                        {
+                            "source_node": fanout_ids[segment.input_node.digest],
+                            "source_port": "output",
+                            "target_node": materialization_id,
+                            "target_port": "input",
+                        }
+                    )
+                upstream_id = materialization_id
             nodes.append(rolling.node)
             if upstream_id is not None:
                 edges.append(

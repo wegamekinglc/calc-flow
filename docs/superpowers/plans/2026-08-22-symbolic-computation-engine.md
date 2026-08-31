@@ -9,9 +9,10 @@
 >
 > **Implementation snapshot:** The SCE-01 through SCE-15 milestone changes are
 > merged through `main@94b9f6e191b91f8e4c9a6722846ce227e1dabcd3` on
-> 2026-09-01. The current v4 lowerer still requires rolling and cross-section
-> operands to resolve to source input columns; multi-stage derived-stateful
-> composition remains follow-up work and is reported by static analysis.
+> 2026-09-01. Follow-up hardening adds a deterministic expression stage when a
+> rolling operand is row-local. Rolling-over-rolling and row-local
+> cross-section operands remain follow-up work and are reported by static
+> analysis.
 >
 > **Design contract:**
 > [Symbolic Computation Engine Design](../specs/2026-08-22-symbolic-computation-engine-design.md),

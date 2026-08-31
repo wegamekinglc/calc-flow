@@ -22,6 +22,7 @@ from calc_flow.symbolic import (
 def financial_features(quotes: TableExpr) -> FeatureSet:
     """Build reusable declarations without reading or mutating any row data."""
     previous = ts.lag(quotes["price"])
+    previous_log_price = ts.lag(row.log(quotes["price"]))
     momentum_1 = quotes["price"] / previous - 1.0
     log_return_1 = row.log(quotes["price"] / previous)
     price_mean_3 = ts.mean(quotes["price"], window=rows(3))
@@ -39,6 +40,7 @@ def financial_features(quotes: TableExpr) -> FeatureSet:
     return FeatureSet(
         (
             ("momentum_1", momentum_1),
+            ("previous_log_price", previous_log_price),
             ("log_return_1", log_return_1),
             ("price_mean_3", price_mean_3),
             ("price_stddev_3", price_stddev_3),
@@ -109,9 +111,10 @@ def main() -> None:
 
     require(output.num_rows == 4, f"unexpected output rows: {output.num_rows}")
     require(
-        output.column_names[-8:]
+        output.column_names[-9:]
         == [
             "momentum_1",
+            "previous_log_price",
             "log_return_1",
             "price_mean_3",
             "price_stddev_3",
@@ -122,7 +125,7 @@ def main() -> None:
         ],
         f"unexpected output columns: {output.column_names}",
     )
-    print(output.select(output.column_names[-8:]).to_pydict())
+    print(output.select(output.column_names[-9:]).to_pydict())
 
 
 if __name__ == "__main__":

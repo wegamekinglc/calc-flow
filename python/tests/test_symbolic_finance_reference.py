@@ -74,6 +74,7 @@ def _temporal_reference(
 ) -> dict[str, list[float | None]]:
     history: dict[str, list[float]] = {}
     expected = {
+        "previous_log_price": [],
         "simple_return": [],
         "log_return_2": [],
         "momentum_2": [],
@@ -97,6 +98,7 @@ def _temporal_row(prices: list[float], price: float) -> dict[str, float | None]:
     mean, stddev = _rolling_mean_std((*prices[-2:], price))
     upper, lower = _bollinger_bounds(mean, stddev)
     return {
+        "previous_log_price": None if previous is None else math.log(previous),
         "simple_return": _optional_return(price, previous),
         "log_return_2": _optional_return(price, previous_2, logarithmic=True),
         "momentum_2": _optional_return(price, previous_2),
@@ -145,6 +147,7 @@ def test_finance_style_returns_momentum_and_bollinger_match_reference() -> None:
     features = FeatureSet(
         (
             ("simple_return", price / previous - 1.0),
+            ("previous_log_price", ts.lag(row.log(price))),
             ("log_return_2", row.log(price / previous_2)),
             ("momentum_2", price / previous_2 - 1.0),
             ("mean_3", mean_3),

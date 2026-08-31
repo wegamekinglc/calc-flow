@@ -39,9 +39,10 @@ Their provenance is pinned to the upstream
 [rolling and cross-section tests](https://github.com/alpha-miner/Finance-Python/tree/3e33d3e70c3458b4c6dcf76b88df6148229b402c/PyFin/tests/Analysis).
 They intentionally apply Calc Flow's frozen percentile, tie, Arrow-null, and
 NaN rules rather than importing Finance-Python or treating its mutable holder
-semantics as an oracle. The current compiler requires stateful operands to
-resolve to source columns: RSI awaits multi-stage row-to-rolling lowering, and
-MACD additionally awaits a frozen EMA/EWMA state contract.
+semantics as an oracle. Rolling operands may be source columns, aliases, or
+pure row-local expressions; the compiler inserts an expression stage before
+the state boundary when needed. RSI still awaits rolling-over-rolling DAG
+lowering, and MACD additionally awaits a frozen EMA/EWMA state contract.
 
 Run it from a source checkout with:
 

@@ -527,15 +527,15 @@ editors or validating stored declarations:
 | Domain                    | Construct/analyze | Batch/stream compile | Current lowering boundary                                      |
 | ------------------------- | ----------------- | -------------------- | -------------------------------------------------------------- |
 | row-local columns         | yes               | yes                  | portable scalar types and the documented SQL allowlist         |
-| rolling `ts`              | yes               | yes                  | every operand resolves to a source input column or direct alias |
+| rolling `ts`              | yes               | yes                  | operands are source columns, aliases, or row-local expressions  |
 | cross-section `cs`        | yes               | yes                  | value, event time, and partitions resolve to input columns      |
 | symbolic matrix           | yes               | exact supported shape | one static `weights` parameter and one allowlisted matmul       |
 | event `window`            | yes               | no                   | declaration-only; compilation fails closed                     |
 | standalone array outputs  | yes               | no                   | arrays compile only through the supported table attachment      |
 
 `Program.analyze` reports `unsupported_type` for stateful operands outside
-the current input-column boundary, so a clean analysis does not advertise an
-expression that the lowerer will reject for that reason.
+the current materialization boundary, so a clean analysis does not advertise
+an expression that the lowerer will reject for that reason.
 
 ```python
 from calc_flow import Runtime
@@ -713,12 +713,13 @@ checks happen before attachment and report the failing provider field.
 per program output, placed ahead of the fused row-local stages. Rolling
 requires the input table to declare its `entity_by`, `event_time`, and
 `sequence_by` ordering keys; a program missing them fails with
-`ordering_required`. In this release every rolling argument must resolve to a
-plain input column or a direct alias: a computed operand such as
-`ts.lag(quotes["x"] + 1.0)`, either
-operand of a pair aggregate, or a rolling aggregate over a derived column,
-is reported by analysis and fails compilation with `unsupported_type` rooted
-at the output feature. `periods` is a
+`ordering_required`. A rolling argument may resolve to a plain input column,
+a direct or derived row-local alias, or a pure row-local expression such as
+`ts.lag(row.log(quotes["x"]))`. The lowerer materializes each distinct
+computed operand once in a deterministic `<output>__cf_rolling_input`
+expression node before the rolling state boundary. A stateful operand such as
+`ts.mean(ts.delta(quotes["x"]), window=rows(3))` remains unsupported until
+multi-stage rolling DAG lowering lands. `periods` is a
 positive integer defaulting to `1`; an aggregate declares `rows(size)` or
 `duration(micros)` as its window with `min_periods` (default `1`, capped at
 the frame size for `rows` windows only) and — for `variance`, `stddev`,
