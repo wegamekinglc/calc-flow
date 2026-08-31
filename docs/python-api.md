@@ -524,14 +524,14 @@ The declaration catalog is intentionally wider than the implemented project
 lowerers. Use this availability matrix when constructing user-facing formula
 editors or validating stored declarations:
 
-| Domain                    | Construct/analyze | Batch/stream compile | Current lowering boundary                                      |
-| ------------------------- | ----------------- | -------------------- | -------------------------------------------------------------- |
-| row-local columns         | yes               | yes                  | portable scalar types and the documented SQL allowlist         |
-| rolling `ts`              | yes               | yes                  | operands are source columns, aliases, or row-local expressions  |
-| cross-section `cs`        | yes               | yes                  | value, event time, and partitions resolve to input columns      |
-| symbolic matrix           | yes               | exact supported shape | one static `weights` parameter and one allowlisted matmul       |
-| event `window`            | yes               | no                   | declaration-only; compilation fails closed                     |
-| standalone array outputs  | yes               | no                   | arrays compile only through the supported table attachment      |
+| Domain                   | Construct/analyze | Batch/stream compile | Current lowering boundary                                               |
+| ------------------------ | ----------------- | -------------------- | ----------------------------------------------------------------------- |
+| row-local columns        | yes               | yes                  | portable scalar types and the documented SQL allowlist                  |
+| rolling `ts`             | yes               | yes                  | source/alias/row-local operands and earlier rolling results              |
+| cross-section `cs`       | yes               | yes                  | staged values; event time and partitions resolve to inputs or aliases   |
+| symbolic matrix          | yes               | exact supported shape | one static `weights` parameter and one allowlisted matmul                |
+| event `window`           | yes               | no                   | declaration-only; compilation fails closed                              |
+| standalone array outputs | yes               | no                   | arrays compile only through the supported table attachment               |
 
 `Program.analyze` reports `unsupported_type` for stateful operands outside
 the current materialization boundary, so a clean analysis does not advertise
@@ -709,26 +709,31 @@ checks happen before attachment and report the failing provider field.
 
 `ts.lag`, `ts.delta`, and the rolling aggregates `ts.count`, `ts.sum`,
 `ts.mean`, `ts.min`, `ts.max`, `ts.variance`, `ts.stddev`,
-`ts.covariance`, and `ts.correlation` lower to one native `rolling` node
-per program output, placed ahead of the fused row-local stages. Rolling
+`ts.covariance`, and `ts.correlation` lower to one or more native `rolling`
+stages per program output, placed ahead of the fused row-local stages. Rolling
 requires the input table to declare its `entity_by`, `event_time`, and
 `sequence_by` ordering keys; a program missing them fails with
 `ordering_required`. A rolling argument may resolve to a plain input column,
-a direct or derived row-local alias, or a pure row-local expression such as
-`ts.lag(row.log(quotes["x"]))`. The lowerer materializes each distinct
-computed operand once in a deterministic `<output>__cf_rolling_input`
-expression node before the rolling state boundary. A stateful operand such as
-`ts.mean(ts.delta(quotes["x"]), window=rows(3))` remains unsupported until
-multi-stage rolling DAG lowering lands. `periods` is a
+a direct or derived row-local alias, a pure row-local expression such as
+`ts.lag(row.log(quotes["x"]))`, or an earlier rolling result. The lowerer
+schedules nested state as an innermost-first DAG and materializes each distinct
+row-local bridge once before its consuming state stage. Single-stage programs
+retain the deterministic `<output>__cf_rolling_input` and
+`<output>__cf_rolling` identifiers; multi-stage programs number both stage
+kinds from one. Thus `ts.mean(ts.delta(quotes["x"]), window=rows(3))` lowers
+to two rolling stages, while an RSI composition inserts its positive/negative
+row-local projection between the delta and mean stages. `periods` is a
 positive integer defaulting to `1`; an aggregate declares `rows(size)` or
 `duration(micros)` as its window with `min_periods` (default `1`, capped at
 the frame size for `rows` windows only) and — for `variance`, `stddev`,
 `covariance`, and `correlation` — `ddof` of `0` or `1` (default `1`), and
 construction rejects other values with `ValueError`. Every rolling
-occurrence in one output shares that output's rolling node: a whole-feature
+occurrence in one output shares its compatible rolling stage: a whole-feature
 occurrence keeps its feature name as the output column, while an occurrence
 nested inside a larger expression materializes as a deterministically named
-`<output>__cf_roll_<index>` column that the fused stages then reference. A
+internal column that the next state or fused row-local stage references.
+Identical multi-stage pipelines across output branches share the same physical
+state nodes. A
 lag, delta, `min`, or `max` column keeps the input column's type; the
 remaining aggregate columns take the frozen output type — `uint64` for
 `count`, `int64` or `uint64` for an integer `sum`, `float64` otherwise —
@@ -751,10 +756,13 @@ declarations is unaffected by the lateness arguments.
 
 `cs.rank`, `cs.percentile`, `cs.demean`, `cs.zscore`, `cs.winsorize`,
 `cs.top`, `cs.bottom`, and `cs.mean_fill` lower to one shared native
-`cross_section` node per program output, placed ahead of the fused row-local
-stages. They use the same `ordering_required` key requirement as rolling and
-the same input-column-or-direct-alias rule for the measured value, grouping
-event time, and every group column. A group is declared with
+`cross_section` node per compatible grouping, placed ahead of the fused
+row-local stages. The measured value may be a source column, alias, row-local
+expression, or rolling result; row-local values materialize once immediately
+before grouping. Event time and every group column must still resolve to a
+source input column or direct alias. Compatible output branches share the
+row-local materialization plus native grouping/sort state. They use the same
+`ordering_required` key requirement as rolling. A group is declared with
 `exact_time(event_time, *, partition_by=())` or
 `event_time_bucket(event_time, *, width_micros, partition_by=())`, and every
 cross-section occurrence in one output must share one grouping declaration:
