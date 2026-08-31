@@ -510,6 +510,10 @@ optional JAX paths are in
 
 ## Symbolic declarations and static analysis
 
+For end-to-end batch, continuous, recovery, static NumPy/JAX matrix, Studio
+inspection, and performance workflows, see the
+[symbolic workflow guide](symbolic-workflows.md).
+
 `calc_flow.symbolic` is the pure declaration surface: typed immutable
 expressions, feature sets, and programs with canonical identities plus static
 analysis over the declaration graph. It has no data execution path — there is
@@ -919,3 +923,5 @@ Every file under [`examples/`](../examples/README.md) is executable against the
 installed 4.0 wheel. See the [cross-language inventory](examples.md) or run
 all user examples with
 `JAX_PLATFORMS=cpu uv run python scripts/run_examples.py`.
+The [symbolic workflow guide](symbolic-workflows.md) maps the symbolic examples
+to analysis, lowering, checkpoint recovery, static inputs, and Studio.
