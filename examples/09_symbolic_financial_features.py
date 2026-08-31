@@ -32,6 +32,16 @@ def financial_features(quotes: TableExpr) -> FeatureSet:
         min_periods=2,
         ddof=0,
     )
+    price_change = ts.delta(quotes["price"])
+    average_gain_3 = ts.mean(
+        row.clip(price_change, lower=0.0, upper=1.0e100),
+        window=rows(3),
+    )
+    average_loss_3 = ts.mean(
+        row.clip(-price_change, lower=0.0, upper=1.0e100),
+        window=rows(3),
+    )
+    rsi_3 = 100.0 - 100.0 / (1.0 + average_gain_3 / average_loss_3)
     volume_z = cs.zscore(
         quotes["volume"],
         group=exact_time(quotes["ts"]),
@@ -46,6 +56,7 @@ def financial_features(quotes: TableExpr) -> FeatureSet:
             ("price_stddev_3", price_stddev_3),
             ("bollinger_upper_3", price_mean_3 + 2.0 * price_stddev_3),
             ("bollinger_lower_3", price_mean_3 - 2.0 * price_stddev_3),
+            ("rsi_3", rsi_3),
             ("volume_z", volume_z),
             (
                 "liquidity_adjusted_momentum",
@@ -111,7 +122,7 @@ def main() -> None:
 
     require(output.num_rows == 4, f"unexpected output rows: {output.num_rows}")
     require(
-        output.column_names[-9:]
+        output.column_names[-10:]
         == [
             "momentum_1",
             "previous_log_price",
@@ -120,12 +131,13 @@ def main() -> None:
             "price_stddev_3",
             "bollinger_upper_3",
             "bollinger_lower_3",
+            "rsi_3",
             "volume_z",
             "liquidity_adjusted_momentum",
         ],
         f"unexpected output columns: {output.column_names}",
     )
-    print(output.select(output.column_names[-9:]).to_pydict())
+    print(output.select(output.column_names[-10:]).to_pydict())
 
 
 if __name__ == "__main__":

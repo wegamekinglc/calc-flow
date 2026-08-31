@@ -6,6 +6,7 @@ from collections.abc import Callable
 import pytest
 
 from calc_flow.capabilities import RuntimeCapabilities
+from calc_flow.errors import CompileError
 from calc_flow.pipeline import Runtime
 from calc_flow.symbolic import (
     AnalysisResult,
@@ -797,7 +798,7 @@ def test_stream_mode_requires_ordering_for_lag_and_delta() -> None:
         ),
     ),
 )
-def test_analysis_reports_stateful_operands_the_lowerer_cannot_materialize(
+def test_analysis_accepts_stageable_stateful_operands(
     feature_name: str,
     feature: Callable[[TableExpr], object],
 ) -> None:
@@ -806,11 +807,28 @@ def test_analysis_reports_stateful_operands_the_lowerer_cannot_materialize(
 
     result = program.analyze(Runtime(), mode="batch")
 
-    assert len(result.issues) == 1
-    issue = result.issues[0]
-    assert issue.path.startswith(f"outputs.signals.{feature_name}.")
-    assert issue.code == "unsupported_type"
-    assert "must be an input column" in issue.message
+    assert result.issues == ()
+    program.compile_batch(Runtime())
+
+
+def test_analysis_rejects_cross_section_output_inside_rolling_state() -> None:
+    quotes = _quotes_ordered()
+    ranked = cs.rank(quotes["x"], group=exact_time(quotes["ts"]))
+    program = _feature_program(
+        quotes,
+        "rank_mean",
+        ts.mean(ranked, window=rows(3)),
+    )
+
+    result = program.analyze(Runtime(), mode="batch")
+
+    assert any(
+        issue.path == "outputs.signals.rank_mean.mean.value"
+        and issue.code == "unsupported_type"
+        for issue in result.issues
+    )
+    with pytest.raises(CompileError, match="rolling mean argument"):
+        program.compile_batch(Runtime())
 
 
 def test_analysis_accepts_row_local_derived_columns_and_input_aliases() -> None:

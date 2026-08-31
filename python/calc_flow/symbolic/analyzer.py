@@ -135,6 +135,9 @@ _ROLLING_AGGREGATES: Final = frozenset(
     {"count", "sum", "mean", "min", "max", "variance", "stddev"}
 )
 _ROLLING_DDOF: Final = frozenset({"variance", "stddev"})
+_ROLLING_PRIMITIVES: Final = _ROLLING_AGGREGATES | frozenset(
+    {"lag", "delta", "covariance", "correlation"}
+)
 _CROSS_SECTION: Final = frozenset(
     {
         "rank",
@@ -280,37 +283,37 @@ def _table_field_resolves_to_input(table: Node, field_name: str, /) -> bool:
     return _resolves_to_input_column(table.args[index + 1])
 
 
-def _rolling_operand_is_materializable(node: Node, /) -> bool:
-    """Whether rolling input can be produced by a pure expression stage."""
+def _stateful_operand_is_stageable(node: Node, /) -> bool:
+    """Whether an operand can be scheduled before its stateful consumer."""
 
     operation = node.op.name
     if operation == "column_ref":
         if not node.args:
             return True
-        return _table_field_is_materializable(
+        return _table_field_is_stageable(
             node.args[0],
             _cstr(node.attr("name")) or "",
         )
     if operation == "literal":
         return True
-    return operation in _ROW_LOCAL_PRIMITIVES and all(
-        _rolling_operand_is_materializable(argument) for argument in node.args
-    )
+    if operation not in _ROW_LOCAL_PRIMITIVES and operation not in _ROLLING_PRIMITIVES:
+        return False
+    return all(_stateful_operand_is_stageable(argument) for argument in node.args)
 
 
-def _table_field_is_materializable(table: Node, field_name: str, /) -> bool:
+def _table_field_is_stageable(table: Node, field_name: str, /) -> bool:
     operation = table.op.name
     if operation == "table_input":
         return True
     if operation in ("project", "filter"):
-        return _table_field_is_materializable(table.args[0], field_name)
+        return _table_field_is_stageable(table.args[0], field_name)
     if operation != "with_columns":
         return False
     names = _cstr_seq(table.attr("names"))
     if field_name not in names:
-        return _table_field_is_materializable(table.args[0], field_name)
+        return _table_field_is_stageable(table.args[0], field_name)
     index = names.index(field_name)
-    return _rolling_operand_is_materializable(table.args[index + 1])
+    return _stateful_operand_is_stageable(table.args[index + 1])
 
 
 class _Analyzer:
@@ -1075,11 +1078,11 @@ class _Analyzer:
     def _cross_section(self, node: Node, path: str, /) -> ColumnFacts:
         role = f"{path}.{node.op.name}"
         operand = self._operand(node.args[0], f"{role}.value", None)
-        self._require_stateful_input_column(
+        self._require_stageable_stateful_operand(
             node.args[0],
             f"{role}.value",
-            f"cross-section {node.op.name} argument must be an input column"
-            " in this release",
+            f"cross-section {node.op.name} argument must be an input column,"
+            " row-local expression, or rolling result in this release",
         )
         if operand.lineage is not None:
             self._temporal_lineages.add(operand.lineage)
@@ -1129,7 +1132,16 @@ class _Analyzer:
         message: str,
         /,
     ) -> None:
-        if not _rolling_operand_is_materializable(node):
+        self._require_stageable_stateful_operand(node, path, message)
+
+    def _require_stageable_stateful_operand(
+        self,
+        node: Node,
+        path: str,
+        message: str,
+        /,
+    ) -> None:
+        if not _stateful_operand_is_stageable(node):
             self.issue(path, "unsupported_type", message)
 
     def _cross_section_output(

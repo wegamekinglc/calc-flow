@@ -594,14 +594,14 @@ input-column rolling values and row-local arithmetic. A new primitive remains
 justified only by an unavailable algorithm, materially better native state
 structure, or a measured fusion/performance requirement.
 
-The current v4 lowerer materializes pure row-local expressions before rolling
-state through a deterministic expression node. It does not yet feed one
-rolling stage into another or materialize row-local cross-section values. RSI
-therefore still requires multi-stage lowering (`delta` followed by
-positive/negative projection and rolling means), while MACD additionally
-requires a separately frozen EMA/EWMA algorithm and durable-state contract.
-These indicators must not be presented as executable until those changes and
-their recovery tests land.
+The v4 lowerer materializes pure row-local expressions before rolling and
+cross-section state and schedules nested rolling expressions as a
+deterministic innermost-first DAG. RSI is executable as `delta`, row-local
+positive/negative projections, rolling means, and final row-local arithmetic;
+its Finance-Python-inspired vectors and symbolic mid-checkpoint recovery are
+covered by the public test suite. MACD still requires a separately frozen
+EMA/EWMA algorithm and durable-state contract and must not be presented as
+executable before that design and its recovery tests land.
 
 ## Deferred Work at the Initial Freeze
 

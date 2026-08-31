@@ -45,8 +45,8 @@ the [Rust example inventory](../crates/calc-flow/examples/README.md).
 | [`06_numpy_array.py`](../examples/06_numpy_array.py)                                      | Explicit NumPy registration and bounded array expression              |
 | [`07_array_and_dataframe.py`](../examples/07_array_and_dataframe.py)                      | Arrow-table to NumPy/JAX matrix multiplication without input mutation |
 | [`08_streaming_recovery.py`](../examples/08_streaming_recovery.py)                        | Durable terminal recovery without source reopen or duplicate output   |
-| [`09_symbolic_financial_features.py`](../examples/09_symbolic_financial_features.py)      | Composed rolling and cross-section financial features                 |
-| [`10_symbolic_streaming_recovery.py`](../examples/10_symbolic_streaming_recovery.py)      | Symbolic continuous execution and terminal recovery                   |
+| [`09_symbolic_financial_features.py`](../examples/09_symbolic_financial_features.py)      | Composed rolling, RSI, and cross-section financial features           |
+| [`10_symbolic_streaming_recovery.py`](../examples/10_symbolic_streaming_recovery.py)      | Multi-stage symbolic checkpoint, recovery, and terminal restart       |
 | [`11_symbolic_static_matrix.py`](../examples/11_symbolic_static_matrix.py)                | Batch/stream static weights, copy facts, and provider failure         |
 
 The Python continuous examples use application-owned in-memory connectors.

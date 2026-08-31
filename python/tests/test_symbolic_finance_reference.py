@@ -197,6 +197,63 @@ def test_finance_style_returns_momentum_and_bollinger_match_reference() -> None:
         _assert_optional_floats(output[name].to_pylist(), values)
 
 
+def test_finance_style_rsi_composition_matches_independent_reference() -> None:
+    quotes = _ordered_quotes()
+    change = ts.delta(quotes["price"])
+    gain = row.where(change > 0.0, change, 0.0)
+    loss = row.where(change < 0.0, -change, 0.0)
+    average_gain = ts.mean(gain, window=rows(3))
+    average_loss = ts.mean(loss, window=rows(3))
+    rsi = 100.0 - 100.0 / (1.0 + average_gain / average_loss)
+    features = FeatureSet(
+        (
+            ("change", change),
+            ("average_gain", average_gain),
+            ("average_loss", average_loss),
+            ("rsi_3", rsi),
+        )
+    )
+    program = Program(
+        "finance-rsi-reference",
+        inputs=(quotes,),
+        outputs=(("signals", quotes.with_columns(features)),),
+    )
+    prices = [100.0, 110.0, 105.0, 115.0, 100.0, 105.0]
+    schema = pa.schema(
+        (
+            pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
+            pa.field("symbol", pa.string(), nullable=False),
+            pa.field("seq", pa.uint64(), nullable=False),
+            pa.field("price", pa.float64(), nullable=True),
+        )
+    )
+    table = pa.table(
+        {
+            "ts": [index * 1_000_000 for index in range(1, len(prices) + 1)],
+            "symbol": ["AAA"] * len(prices),
+            "seq": list(range(1, len(prices) + 1)),
+            "price": prices,
+        },
+        schema=schema,
+    )
+
+    output = _execute(program, table)
+
+    assert output["change"].to_pylist() == [None, 10.0, -5.0, 10.0, -15.0, 5.0]
+    _assert_optional_floats(
+        output["average_gain"].to_pylist(),
+        [0.0, 5.0, 10.0 / 3.0, 20.0 / 3.0, 10.0 / 3.0, 5.0],
+    )
+    _assert_optional_floats(
+        output["average_loss"].to_pylist(),
+        [0.0, 0.0, 5.0 / 3.0, 5.0 / 3.0, 20.0 / 3.0, 5.0],
+    )
+    _assert_optional_floats(
+        output["rsi_3"].to_pylist(),
+        [math.nan, 100.0, 200.0 / 3.0, 80.0, 100.0 / 3.0, 50.0],
+    )
+
+
 def test_finance_style_cross_section_uses_calc_flow_frozen_semantics() -> None:
     quotes = _ordered_quotes(with_sector=True)
     group = exact_time(quotes["ts"], partition_by=(quotes["sector"],))

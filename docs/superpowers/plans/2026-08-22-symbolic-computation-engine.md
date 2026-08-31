@@ -9,10 +9,13 @@
 >
 > **Implementation snapshot:** The SCE-01 through SCE-15 milestone changes are
 > merged through `main@94b9f6e191b91f8e4c9a6722846ce227e1dabcd3` on
-> 2026-09-01. Follow-up hardening adds a deterministic expression stage when a
-> rolling operand is row-local. Rolling-over-rolling and row-local
-> cross-section operands remain follow-up work and are reported by static
-> analysis.
+> 2026-09-01. Follow-up hardening now lowers stateful expressions as a
+> deterministic innermost-first DAG: row-local operands materialize before
+> rolling or cross-section state, rolling output may feed a later rolling
+> stage, and compatible multi-stage branches share physical state. Symbolic
+> mid-checkpoint recovery and Finance-Python-inspired RSI composition cover
+> the new boundary. EMA/EWMA remains deferred pending a separately frozen
+> algorithm and durable-state contract.
 >
 > **Design contract:**
 > [Symbolic Computation Engine Design](../specs/2026-08-22-symbolic-computation-engine-design.md),

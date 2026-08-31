@@ -101,15 +101,17 @@ accepted milestone gates and their raw evidence are documented in
 [symbolic/SCE05.md](symbolic/SCE05.md) and
 [symbolic/SCE08.md](symbolic/SCE08.md).
 
-| Scenario                                | Timed boundary                                        |
-| --------------------------------------- | ----------------------------------------------------- |
-| `symbolic_projection_20_columns`        | one DataFusion execute of a 20-column row-local SQL   |
-| `symbolic_rolling_20_60_row_features`   | one DataFusion execute of rolling window SQL          |
-| `symbolic_cross_section_rank_zscore`    | one DataFusion execute of complete-group rank/z-score |
-| `symbolic_table_matmul_numpy`/`_jax`    | SQL features plus one counting table_matmul call      |
-| `symbolic_stream_window_checkpoint`     | full stream lifecycle (see below)                     |
-| `sce05_row_local_20_columns`            | alternating hand-built/symbolic single projections    |
-| `sce08_temporal_catalog`                | alternating native/symbolic duration rolling runs     |
+| Scenario                                  | Timed boundary                                             |
+| ----------------------------------------- | ---------------------------------------------------------- |
+| `symbolic_projection_20_columns`          | one DataFusion execute of a 20-column row-local SQL        |
+| `symbolic_rolling_20_60_row_features`     | one DataFusion execute of rolling window SQL               |
+| `symbolic_cross_section_rank_zscore`      | one DataFusion execute of complete-group rank/z-score      |
+| `symbolic_table_matmul_numpy`/`_jax`      | SQL features plus one counting table_matmul call           |
+| `symbolic_stream_window_checkpoint`       | full stream lifecycle (see below)                          |
+| `sce05_row_local_20_columns`              | alternating hand-built/symbolic single projections         |
+| `sce08_temporal_catalog`                  | alternating native/symbolic duration rolling runs          |
+| `sce14_cross_domain_sharing`              | separate versus shared rolling and cross-section branches  |
+| `symbolic_multistage_rolling_sharing`     | separate versus shared two-stage rolling output branches   |
 
 Every scenario records rows, batches, peak RSS (`VmHWM`), provider or
 DataFusion query counts, and Arrow/dense copy bytes in `extra_info`. The

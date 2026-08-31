@@ -495,6 +495,101 @@ class _RollingPlan:
     replacements: tuple[tuple[str, str], ...]
 
 
+@dataclass(frozen=True, slots=True)
+class _RollingPipeline:
+    """Ordered rolling stages and their final rewritten environment."""
+
+    stages: tuple[_RollingPlan, ...]
+    env: tuple[tuple[str, Node], ...]
+    post_predicate: Node | None
+    input_field_names: tuple[str, ...]
+    output_fields: tuple[Field, ...]
+
+    @property
+    def node_id(self) -> str:
+        """Return the final state stage identifier."""
+
+        return self.stages[-1].node_id
+
+
+@dataclass(frozen=True, slots=True)
+class _StatefulInputPlan:
+    """One deterministic row-local materialization before native state."""
+
+    names: tuple[tuple[str, str], ...]
+    fields: tuple[Field, ...]
+    node_id: str | None
+    node: dict[str, object] | None
+    input_fields: tuple[Field, ...]
+    used_names: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
+class _StatefulInputRequest:
+    output_name: str
+    path: str
+    column_stem: str
+    node_id: str
+    domain: str
+
+
+def _plan_stateful_inputs(
+    request: _StatefulInputRequest,
+    input_fields: tuple[Field, ...],
+    used_names: set[str],
+    arguments: tuple[tuple[str, Node], ...],
+    /,
+) -> _StatefulInputPlan:
+    input_types = {field.name: field for field in input_fields}
+    reserved = set(used_names)
+    names: dict[str, str] = {}
+    fields: list[Field] = []
+    selects = [_quote_identifier(field.name) for field in input_fields]
+    for primitive, argument in arguments:
+        if argument.op.name == "column_ref" or argument.digest in names:
+            continue
+        if not _rolling_argument_is_row_local(argument):
+            errors.raise_compile(
+                request.path,
+                errors.UNSUPPORTED_TYPE,
+                f"{request.domain} {primitive} argument must be an input column"
+                " or row-local expression after earlier state staging",
+            )
+        name = f"{request.output_name}__cf_{request.column_stem}_{len(names)}"
+        if name in reserved:
+            errors.raise_compile(
+                f"{request.path}.{name}",
+                errors.DUPLICATE_NAME,
+                f"materialized {request.domain} input {name!r} collides"
+                " with a declared field",
+            )
+        reserved.add(name)
+        names[argument.digest] = name
+        fields.append(_row_local_field(argument, name, input_types))
+        selects.append(_select_item(name, argument))
+    state_input_fields = (*input_fields, *fields)
+    materialization_id = request.node_id if fields else None
+    materialization = (
+        _expression_node(
+            request.node_id,
+            selects,
+            None,
+            input_fields,
+            state_input_fields,
+        )
+        if fields
+        else None
+    )
+    return _StatefulInputPlan(
+        tuple(names.items()),
+        tuple(fields),
+        materialization_id,
+        materialization,
+        state_input_fields,
+        frozenset(reserved),
+    )
+
+
 def _row_local_field(
     node: Node,
     name: str,
@@ -543,7 +638,7 @@ def _row_local_composite_field(
         return Field(name, "float64", nullable=True)
     if operation == "cast":
         return Field(name, _cast_type_name(node), nullable=nullable)
-    return _row_local_conditional_field(operation, name, children, nullable)
+    return _row_local_conditional_field(node, name, children, nullable)
 
 
 def _any_nullable(fields: list[Field], /) -> bool:
@@ -551,17 +646,18 @@ def _any_nullable(fields: list[Field], /) -> bool:
 
 
 def _row_local_conditional_field(
-    operation: str,
+    node: Node,
     name: str,
     children: list[Field],
     nullable: bool,
     /,
 ) -> Field:
+    operation = node.op.name
     if operation == "where":
         return Field(
             name,
             children[1].data_type,
-            nullable=children[1].nullable or children[2].nullable,
+            nullable=_where_result_is_nullable(node, children),
         )
     if operation == "coalesce":
         return Field(
@@ -572,10 +668,36 @@ def _row_local_conditional_field(
     return Field(name, children[0].data_type, nullable=nullable)
 
 
+def _where_result_is_nullable(node: Node, children: list[Field], /) -> bool:
+    """Mirror DataFusion's non-null proof for a directly guarded column."""
+
+    if children[2].nullable:
+        return True
+    selected = node.args[1]
+    condition = node.args[0]
+    if selected.op.name == "column_ref" and any(
+        argument.digest == selected.digest for argument in condition.args
+    ):
+        return False
+    return children[1].nullable
+
+
 def _rolling_argument_is_row_local(node: Node, /) -> bool:
     return node.op.name in _ROW_LOCAL_PRIMITIVES and all(
         _rolling_argument_is_row_local(argument) for argument in node.args
     )
+
+
+def _find_ready_rolling(node: Node, /):
+    """Yield innermost rolling subtrees ready for one physical stage."""
+
+    if node.op.name in _ROLLING_PRIMITIVES:
+        nested = any(True for argument in node.args for _ in _find_rolling(argument))
+        if not nested:
+            yield node
+            return
+    for argument in node.args:
+        yield from _find_ready_rolling(argument)
 
 
 def _rolling_frame(subtree: Node, path: str, kind: str, /) -> dict[str, object]:
@@ -603,30 +725,19 @@ def _rolling_frame(subtree: Node, path: str, kind: str, /) -> dict[str, object]:
 # Rolling planning validates every lag/delta/aggregate occurrence with
 # stable, declaration-ordered error paths before emitting the frozen node
 # shape.
-def _plan_rolling(
+def _plan_rolling_stage(
     output_name: str,
     segment: _Segment,
     path: str,
     allowed_lateness_micros: int,
     late_policy: str,
+    occurrences: tuple[Node, ...],
+    input_fields: tuple[Field, ...],
+    stage_number: int,
+    stage_count: int,
     /,
-) -> _RollingPlan | None:
+) -> _RollingPlan:
     # #lizard forgives
-    occurrences: list[Node] = []
-    seen: set[str] = set()
-    ordered_trees = [tree for _, tree in segment.env]
-    ordered_trees += [
-        tree for tree in (segment.predicate, segment.post_predicate) if tree is not None
-    ]
-    for tree in ordered_trees:
-        for subtree in _find_rolling(tree):
-            if subtree.digest not in seen:
-                seen.add(subtree.digest)
-                occurrences.append(subtree)
-    if not occurrences:
-        return None
-
-    input_fields = _schema_fields(segment.input_node.attr("schema"))
     input_types = {field.name: field for field in input_fields}
     entity_by = _cstr_seq(segment.input_node.attr("entity_by"))
     sequence_by = _cstr_seq(segment.input_node.attr("sequence_by"))
@@ -645,52 +756,28 @@ def _plan_rolling(
         if tree.op.name in _ROLLING_PRIMITIVES
     }
     used_names = set(input_types) | {name for name, _ in segment.env}
-    materializations: dict[str, str] = {}
-    materialized_fields: list[Field] = []
-    materialized_selects = [_quote_identifier(field.name) for field in input_fields]
-    for subtree in occurrences:
-        for argument in subtree.args:
-            if argument.op.name == "column_ref":
-                continue
-            if not _rolling_argument_is_row_local(argument):
-                errors.raise_compile(
-                    path,
-                    errors.UNSUPPORTED_TYPE,
-                    f"rolling {subtree.op.name} argument must be an input column"
-                    " or row-local expression in this release",
-                )
-            if argument.digest in materializations:
-                continue
-            materialized_name = f"{output_name}__cf_roll_input_{len(materializations)}"
-            if materialized_name in used_names:
-                errors.raise_compile(
-                    f"{path}.{materialized_name}",
-                    errors.DUPLICATE_NAME,
-                    f"materialized rolling input {materialized_name!r} collides"
-                    " with a declared field",
-                )
-            used_names.add(materialized_name)
-            materializations[argument.digest] = materialized_name
-            materialized_fields.append(
-                _row_local_field(argument, materialized_name, input_types)
-            )
-            materialized_selects.append(_select_item(materialized_name, argument))
-    state_input_fields = (*input_fields, *materialized_fields)
+    stage_fragment = "" if stage_count == 1 else f"{stage_number}_"
+    stage_suffix = "" if stage_count == 1 else f"_{stage_number}"
+    materialization = _plan_stateful_inputs(
+        _StatefulInputRequest(
+            output_name,
+            path,
+            f"roll_input_{stage_fragment}".removesuffix("_"),
+            f"{output_name}__cf_rolling_input{stage_suffix}",
+            "rolling",
+        ),
+        input_fields,
+        used_names,
+        tuple(
+            (subtree.op.name, argument)
+            for subtree in occurrences
+            for argument in subtree.args
+        ),
+    )
+    materializations = dict(materialization.names)
+    state_input_fields = materialization.input_fields
     input_types = {field.name: field for field in state_input_fields}
-    materialization_node_id = (
-        f"{output_name}__cf_rolling_input" if materialized_fields else None
-    )
-    materialization_node = (
-        _expression_node(
-            materialization_node_id,
-            materialized_selects,
-            None,
-            input_fields,
-            state_input_fields,
-        )
-        if materialization_node_id is not None
-        else None
-    )
+    used_names = set(materialization.used_names)
     replacements: dict[str, str] = {}
     declarations: list[dict[str, object]] = []
     derived_fields: list[Field] = []
@@ -698,7 +785,7 @@ def _plan_rolling(
         kind = subtree.op.name
         name = whole_feature.get(subtree.digest)
         if name is None:
-            name = f"{output_name}__cf_roll_{index}"
+            name = f"{output_name}__cf_roll_{stage_fragment}{index}"
             if name in used_names:
                 errors.raise_compile(
                     f"{path}.{name}",
@@ -764,7 +851,7 @@ def _plan_rolling(
             )
         )
 
-    node_id = f"{output_name}__cf_rolling"
+    node_id = f"{output_name}__cf_rolling{stage_suffix}"
     node: dict[str, object] = {
         "id": node_id,
         "operator": {
@@ -816,13 +903,91 @@ def _plan_rolling(
     return _RollingPlan(
         node_id=node_id,
         node=node,
-        materialization_node_id=materialization_node_id,
-        materialization_node=materialization_node,
+        materialization_node_id=materialization.node_id,
+        materialization_node=materialization.node,
         env=env,
         post_predicate=post_predicate,
         input_field_names=(*input_types, *(field.name for field in derived_fields)),
         output_fields=(*state_input_fields, *derived_fields),
         replacements=tuple(replacements.items()),
+    )
+
+
+def _ready_rolling_occurrences(segment: _Segment, /) -> tuple[Node, ...]:
+    ordered_trees = [tree for _, tree in segment.env]
+    ordered_trees += [
+        tree for tree in (segment.predicate, segment.post_predicate) if tree is not None
+    ]
+    occurrences: list[Node] = []
+    seen: set[str] = set()
+    for tree in ordered_trees:
+        for subtree in _find_ready_rolling(tree):
+            if subtree.digest not in seen:
+                seen.add(subtree.digest)
+                occurrences.append(subtree)
+    return tuple(occurrences)
+
+
+def _rolling_depth(node: Node, /) -> int:
+    child_depth = max((_rolling_depth(argument) for argument in node.args), default=0)
+    return child_depth + 1 if node.op.name in _ROLLING_PRIMITIVES else child_depth
+
+
+def _rolling_stage_count(segment: _Segment, /) -> int:
+    """Count the deterministic innermost-first rolling layers."""
+
+    trees = [tree for _, tree in segment.env]
+    trees += [
+        tree for tree in (segment.predicate, segment.post_predicate) if tree is not None
+    ]
+    return max((_rolling_depth(tree) for tree in trees), default=0)
+
+
+def _plan_rolling(
+    output_name: str,
+    segment: _Segment,
+    path: str,
+    allowed_lateness_micros: int,
+    late_policy: str,
+    /,
+) -> _RollingPipeline | None:
+    """Plan every innermost-first rolling layer for one output branch."""
+
+    stage_count = _rolling_stage_count(segment)
+    if stage_count == 0:
+        return None
+    stages: list[_RollingPlan] = []
+    current = segment
+    input_fields = _schema_fields(segment.input_node.attr("schema"))
+    for stage_number in range(1, stage_count + 1):
+        occurrences = _ready_rolling_occurrences(current)
+        if not occurrences:
+            raise RuntimeError("rolling stage count diverged during lowering")
+        stage = _plan_rolling_stage(
+            output_name,
+            current,
+            path,
+            allowed_lateness_micros,
+            late_policy,
+            occurrences,
+            input_fields,
+            stage_number,
+            stage_count,
+        )
+        stages.append(stage)
+        current = replace(
+            current,
+            env=stage.env,
+            post_predicate=stage.post_predicate,
+        )
+        input_fields = stage.output_fields
+    final = stages[-1]
+    return _RollingPipeline(
+        tuple(stages),
+        final.env,
+        final.post_predicate,
+        final.input_field_names,
+        final.output_fields,
     )
 
 
@@ -833,10 +998,13 @@ class _CrossSectionPlan:
 
     node_id: str
     node: dict[str, object]
+    materialization_node_id: str | None
+    materialization_node: dict[str, object] | None
     env: tuple[tuple[str, Node], ...]
     post_predicate: Node | None
     input_field_names: tuple[str, ...]
     output_fields: tuple[Field, ...]
+    materializations: tuple[tuple[str, str], ...]
     replacements: tuple[tuple[str, str], ...]
 
 
@@ -928,6 +1096,22 @@ def _plan_cross_section(
         if tree.op.name in _CROSS_SECTION_PRIMITIVES
     }
     used_names = set(input_types) | {name for name, _ in segment.env}
+    materialization = _plan_stateful_inputs(
+        _StatefulInputRequest(
+            output_name,
+            path,
+            "cs_input",
+            f"{output_name}__cf_cross_section_input",
+            "cross-section",
+        ),
+        input_fields,
+        used_names,
+        tuple((subtree.op.name, subtree.args[0]) for subtree in occurrences),
+    )
+    materializations = dict(materialization.names)
+    state_input_fields = materialization.input_fields
+    input_types = {field.name: field for field in state_input_fields}
+    used_names = set(materialization.used_names)
     replacements: dict[str, str] = {}
     declarations: list[dict[str, object]] = []
     partition_columns: list[str] = []
@@ -947,14 +1131,11 @@ def _plan_cross_section(
             used_names.add(name)
         replacements[subtree.digest] = name
         argument = subtree.args[0]
-        if argument.op.name != "column_ref":
-            errors.raise_compile(
-                f"{path}.{name}",
-                errors.UNSUPPORTED_TYPE,
-                f"cross-section {kind} argument must be an input column in this"
-                " release",
-            )
-        input_name = _cstr(argument.attr("name"))
+        input_name = (
+            _cstr(argument.attr("name"))
+            if argument.op.name == "column_ref"
+            else materializations[argument.digest]
+        )
         if input_name not in input_types:
             errors.raise_compile(
                 f"{path}.{name}",
@@ -1069,7 +1250,7 @@ def _plan_cross_section(
                 "name": "input",
                 "kind": "table",
                 "required": True,
-                "schema": [_field_json(field) for field in input_fields],
+                "schema": [_field_json(field) for field in state_input_fields],
             }
         ],
         "output_ports": [
@@ -1078,7 +1259,7 @@ def _plan_cross_section(
                 "kind": "table",
                 "required": True,
                 "schema": [
-                    *(_field_json(field) for field in input_fields),
+                    *(_field_json(field) for field in state_input_fields),
                     *(_field_json(field) for field in derived_fields),
                 ],
             }
@@ -1095,10 +1276,13 @@ def _plan_cross_section(
     return _CrossSectionPlan(
         node_id,
         node,
+        materialization.node_id,
+        materialization.node,
         env,
         post_predicate,
         (*input_types, *(field.name for field in derived_fields)),
-        (*input_fields, *derived_fields),
+        (*state_input_fields, *derived_fields),
+        materialization.names,
         tuple(replacements.items()),
     )
 
@@ -1277,7 +1461,7 @@ def _share_state_groups[StatePlanT: (_RollingPlan, _CrossSectionPlan)](
     return shared
 
 
-def _share_rolling_plans(
+def _share_single_rolling_stages(
     segments: list[tuple[str, _Segment]],
     plans: dict[str, _RollingPlan | None],
     /,
@@ -1300,14 +1484,302 @@ def _share_rolling_plans(
     )
 
 
-def _cross_section_identity(plan: _CrossSectionPlan, /) -> str:
+def _share_rolling_plans(
+    segments: list[tuple[str, _Segment]],
+    plans: dict[str, _RollingPipeline | None],
+    /,
+) -> dict[str, _RollingPipeline | None]:
+    """Preserve existing cross-output sharing for one-stage pipelines."""
+
+    stages = {
+        output_name: (
+            None
+            if pipeline is None or len(pipeline.stages) != 1
+            else pipeline.stages[0]
+        )
+        for output_name, pipeline in plans.items()
+    }
+    shared_stages = _share_single_rolling_stages(segments, stages)
+    shared = dict(plans)
+    for output_name, stage in shared_stages.items():
+        pipeline = plans[output_name]
+        if pipeline is None or stage is None:
+            continue
+        shared[output_name] = _RollingPipeline(
+            (stage,),
+            stage.env,
+            stage.post_predicate,
+            stage.input_field_names,
+            stage.output_fields,
+        )
+    return _share_identical_multi_stage_pipelines(segments, shared)
+
+
+def _rolling_pipeline_identity(
+    segment: _Segment, /
+) -> tuple[str, str | None, tuple[str, ...]]:
+    predicate = None if segment.predicate is None else segment.predicate.digest
+    seen: set[str] = set()
+    digests: list[str] = []
+    trees = [tree for _, tree in segment.env]
+    trees += [tree for tree in (segment.post_predicate,) if tree is not None]
+    for tree in trees:
+        for subtree in _find_rolling(tree):
+            if subtree.digest not in seen:
+                seen.add(subtree.digest)
+                digests.append(subtree.digest)
+    return segment.input_node.digest, predicate, tuple(digests)
+
+
+def _shared_pipeline_stages(
+    first_name: str,
+    pipeline: _RollingPipeline,
+    reserved_ids: set[str],
+    /,
+) -> tuple[_RollingPlan, ...]:
+    stages: list[_RollingPlan] = []
+    for index, stage in enumerate(pipeline.stages, start=1):
+        node_id = _unique_shared_node_id(
+            f"{first_name}__cf_shared_rolling_{index}", reserved_ids
+        )
+        materialization_id = None
+        materialization = None
+        if stage.materialization_node is not None:
+            materialization_id = _unique_shared_node_id(
+                f"{first_name}__cf_shared_rolling_input_{index}", reserved_ids
+            )
+            materialization = {
+                **stage.materialization_node,
+                "id": materialization_id,
+            }
+        stages.append(
+            replace(
+                stage,
+                node_id=node_id,
+                node={**stage.node, "id": node_id},
+                materialization_node_id=materialization_id,
+                materialization_node=materialization,
+            )
+        )
+    return tuple(stages)
+
+
+def _rewrite_pipeline_environment(
+    segment: _Segment,
+    stages: tuple[_RollingPlan, ...],
+    /,
+) -> tuple[tuple[tuple[str, Node], ...], Node | None]:
+    env = segment.env
+    post_predicate = segment.post_predicate
+    for stage in stages:
+        replacements = dict(stage.replacements)
+        env = tuple(
+            (name, _replace_materialized(tree, replacements)) for name, tree in env
+        )
+        if post_predicate is not None:
+            post_predicate = _replace_materialized(post_predicate, replacements)
+    return env, post_predicate
+
+
+def _share_identical_multi_stage_pipelines(
+    segments: list[tuple[str, _Segment]],
+    plans: dict[str, _RollingPipeline | None],
+    /,
+) -> dict[str, _RollingPipeline | None]:
+    groups: dict[tuple[str, str | None, tuple[str, ...]], list[str]] = {}
+    by_name = dict(segments)
+    for output_name, segment in segments:
+        pipeline = plans[output_name]
+        if pipeline is not None and len(pipeline.stages) > 1:
+            groups.setdefault(_rolling_pipeline_identity(segment), []).append(
+                output_name
+            )
+    reserved_ids = {output_name for output_name, _ in segments}
+    for pipeline in plans.values():
+        if pipeline is None:
+            continue
+        for stage in pipeline.stages:
+            reserved_ids.add(stage.node_id)
+            if stage.materialization_node_id is not None:
+                reserved_ids.add(stage.materialization_node_id)
+    shared = dict(plans)
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        first = plans[members[0]]
+        if first is None:
+            raise RuntimeError("missing multi-stage rolling pipeline")
+        stages = _shared_pipeline_stages(members[0], first, reserved_ids)
+        for output_name in members:
+            env, post_predicate = _rewrite_pipeline_environment(
+                by_name[output_name], stages
+            )
+            shared[output_name] = _RollingPipeline(
+                stages,
+                env,
+                post_predicate,
+                first.input_field_names,
+                first.output_fields,
+            )
+    return shared
+
+
+def _cross_section_group_identity(plan: _CrossSectionPlan, /) -> str:
     spec = plan.node["operator"]["spec"]  # type: ignore[index]
-    return _canonical(
-        {
-            "input_ports": plan.node["input_ports"],
-            "spec": {key: value for key, value in spec.items() if key != "outputs"},
-        }
+    return _canonical({key: value for key, value in spec.items() if key != "outputs"})
+
+
+def _materialized_select_expression(plan: _CrossSectionPlan, name: str, /) -> str:
+    node = plan.materialization_node
+    if node is None:
+        raise RuntimeError(f"missing cross-section materialization for {name!r}")
+    suffix = f" AS {_quote_identifier(name)}"
+    selects = node["operator"]["select"]  # type: ignore[index]
+    for item in selects:
+        if item.endswith(suffix):
+            return item[: -len(suffix)]
+    raise RuntimeError(f"missing materialized select for {name!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class _SharedCrossInputs:
+    base_fields: tuple[Field, ...]
+    fields: tuple[Field, ...]
+    expressions: tuple[str, ...]
+    names: tuple[tuple[str, str], ...]
+
+    @property
+    def input_fields(self) -> tuple[Field, ...]:
+        return (*self.base_fields, *self.fields)
+
+
+def _collect_shared_cross_inputs(
+    members: list[str],
+    plans: dict[str, _CrossSectionPlan | None],
+    /,
+) -> _SharedCrossInputs:
+    first = _required_state_plan(plans, members[0])
+    base_count = (
+        len(first.output_fields) - len(first.replacements) - len(first.materializations)
     )
+    reserved = {
+        field.name
+        for output_name in members
+        for field in _required_state_plan(plans, output_name).output_fields
+    }
+    names: dict[str, str] = {}
+    fields: list[Field] = []
+    expressions: list[str] = []
+    counter = 0
+    for output_name in members:
+        plan = _required_state_plan(plans, output_name)
+        fields_by_name = {field.name: field for field in plan.output_fields}
+        for digest, old_name in plan.materializations:
+            if digest in names:
+                continue
+            name, counter = _shared_materialized_name("cs_input", counter, reserved)
+            names[digest] = name
+            field = fields_by_name[old_name]
+            fields.append(Field(name, field.data_type, nullable=field.nullable))
+            expressions.append(_materialized_select_expression(plan, old_name))
+    return _SharedCrossInputs(
+        first.output_fields[:base_count],
+        tuple(fields),
+        tuple(expressions),
+        tuple(names.items()),
+    )
+
+
+def _shared_cross_materialization(
+    shared: _SharedCrossInputs, node_id: str, /
+) -> dict[str, object] | None:
+    if not shared.fields:
+        return None
+    return _expression_node(
+        node_id,
+        [
+            *(_quote_identifier(field.name) for field in shared.base_fields),
+            *(
+                f"{expression} AS {_quote_identifier(field.name)}"
+                for expression, field in zip(
+                    shared.expressions, shared.fields, strict=True
+                )
+            ),
+        ],
+        None,
+        shared.base_fields,
+        shared.input_fields,
+    )
+
+
+def _aligned_cross_section_plan(
+    plan: _CrossSectionPlan,
+    shared: _SharedCrossInputs,
+    node_id: str,
+    materialization: dict[str, object] | None,
+    /,
+) -> _CrossSectionPlan:
+    names = dict(shared.names)
+    old_to_new = {old_name: names[digest] for digest, old_name in plan.materializations}
+    outputs = [
+        {**item, "input": old_to_new.get(item["input"], item["input"])}
+        for item in _plan_outputs(plan)
+    ]
+    derived_fields = plan.output_fields[-len(plan.replacements) :]
+    output_fields = (*shared.input_fields, *derived_fields)
+    return replace(
+        plan,
+        node={
+            **plan.node,
+            "operator": {
+                **plan.node["operator"],  # type: ignore[dict-item]
+                "spec": {
+                    **plan.node["operator"]["spec"],  # type: ignore[index]
+                    "outputs": outputs,
+                },
+            },
+            "input_ports": [
+                {
+                    "name": "input",
+                    "kind": "table",
+                    "required": True,
+                    "schema": [_field_json(field) for field in shared.input_fields],
+                }
+            ],
+            "output_ports": [
+                {
+                    "name": "output",
+                    "kind": "table",
+                    "required": True,
+                    "schema": [_field_json(field) for field in output_fields],
+                }
+            ],
+        },
+        materialization_node_id=node_id if shared.fields else None,
+        materialization_node=materialization,
+        input_field_names=tuple(field.name for field in output_fields),
+        output_fields=output_fields,
+        materializations=shared.names,
+    )
+
+
+def _combined_cross_section_inputs(
+    members: list[str],
+    plans: dict[str, _CrossSectionPlan | None],
+    node_id: str,
+    /,
+) -> dict[str, _CrossSectionPlan]:
+    shared = _collect_shared_cross_inputs(members, plans)
+    materialization = _shared_cross_materialization(shared, node_id)
+    return {
+        output_name: _aligned_cross_section_plan(
+            _required_state_plan(plans, output_name),
+            shared,
+            node_id,
+            materialization,
+        )
+        for output_name in members
+    }
 
 
 def _share_cross_section_plans(
@@ -1323,10 +1795,19 @@ def _share_cross_section_plans(
             upstream = upstream_ids[output_name] or segment.input_node.digest
             predicate = None if segment.predicate is None else segment.predicate.digest
             groups.setdefault(
-                (upstream, predicate, _cross_section_identity(plan)), []
+                (upstream, predicate, _cross_section_group_identity(plan)), []
             ).append(output_name)
+    aligned = dict(plans)
+    reserved_ids = _reserved_state_node_ids(segments, plans)
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        materialization_id = _unique_shared_node_id(
+            f"{group[0]}__cf_shared_cross_section_input", reserved_ids
+        )
+        aligned.update(_combined_cross_section_inputs(group, plans, materialization_id))
     return _share_state_groups(
-        list(groups.values()), segments, plans, "cs", "cross_section"
+        list(groups.values()), segments, aligned, "cs", "cross_section"
     )
 
 
@@ -1771,8 +2252,8 @@ def _lower_matrix_program(
 
 
 def _required_segment_state_plan(
-    rolling: _RollingPlan | None, cross: _CrossSectionPlan | None, /
-) -> _RollingPlan | _CrossSectionPlan:
+    rolling: _RollingPipeline | None, cross: _CrossSectionPlan | None, /
+) -> _RollingPipeline | _CrossSectionPlan:
     plan = rolling if rolling is not None else cross
     if plan is None:
         raise RuntimeError("missing state plan for a stateful symbolic segment")
@@ -2083,11 +2564,60 @@ def _lower_program(
                 )
             upstream_id = prefilter_id
         if rolling is not None:
-            if rolling.materialization_node is not None:
-                nodes.append(rolling.materialization_node)
-                materialization_id = rolling.materialization_node_id
+            for stage in rolling.stages:
+                if stage.materialization_node is not None:
+                    nodes.append(stage.materialization_node)
+                    materialization_id = stage.materialization_node_id
+                    if materialization_id is None:
+                        raise RuntimeError("rolling materialization node has no id")
+                    if upstream_id is not None:
+                        edges.append(
+                            {
+                                "source_node": upstream_id,
+                                "source_port": "output",
+                                "target_node": materialization_id,
+                                "target_port": "input",
+                            }
+                        )
+                    elif fanout:
+                        edges.append(
+                            {
+                                "source_node": fanout_ids[segment.input_node.digest],
+                                "source_port": "output",
+                                "target_node": materialization_id,
+                                "target_port": "input",
+                            }
+                        )
+                    upstream_id = materialization_id
+                nodes.append(stage.node)
+                if upstream_id is not None:
+                    edges.append(
+                        {
+                            "source_node": upstream_id,
+                            "source_port": "output",
+                            "target_node": stage.node_id,
+                            "target_port": "input",
+                        }
+                    )
+                elif fanout:
+                    edges.append(
+                        {
+                            "source_node": fanout_ids[segment.input_node.digest],
+                            "source_port": "output",
+                            "target_node": stage.node_id,
+                            "target_port": "input",
+                        }
+                    )
+                upstream_id = stage.node_id
+            env = dict(rolling.env)
+            input_field_names = list(rolling.input_field_names)
+            final_predicate = rolling.post_predicate
+        if cross is not None:
+            if cross.materialization_node is not None:
+                nodes.append(cross.materialization_node)
+                materialization_id = cross.materialization_node_id
                 if materialization_id is None:
-                    raise RuntimeError("rolling materialization node has no id")
+                    raise RuntimeError("cross-section materialization node has no id")
                 if upstream_id is not None:
                     edges.append(
                         {
@@ -2107,30 +2637,6 @@ def _lower_program(
                         }
                     )
                 upstream_id = materialization_id
-            nodes.append(rolling.node)
-            if upstream_id is not None:
-                edges.append(
-                    {
-                        "source_node": upstream_id,
-                        "source_port": "output",
-                        "target_node": rolling.node_id,
-                        "target_port": "input",
-                    }
-                )
-            elif fanout:
-                edges.append(
-                    {
-                        "source_node": fanout_ids[segment.input_node.digest],
-                        "source_port": "output",
-                        "target_node": rolling.node_id,
-                        "target_port": "input",
-                    }
-                )
-            upstream_id = rolling.node_id
-            env = dict(rolling.env)
-            input_field_names = list(rolling.input_field_names)
-            final_predicate = rolling.post_predicate
-        if cross is not None:
             nodes.append(cross.node)
             if upstream_id is not None:
                 edges.append(
