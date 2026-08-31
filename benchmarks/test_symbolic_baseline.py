@@ -262,6 +262,9 @@ _SCE08_PAIRED_SAMPLES = 30
 _SCE14_SCENARIO = "sce14_cross_domain_sharing"
 _SCE14_WORKLOAD_CONTRACT = "sce14-cross-domain-sharing-v1"
 _SCE14_PAIRED_SAMPLES = 30
+_MULTISTAGE_SCENARIO = "symbolic_multistage_rolling_sharing"
+_MULTISTAGE_WORKLOAD_CONTRACT = "symbolic-multistage-rolling-v1"
+_MULTISTAGE_PAIRED_SAMPLES = 30
 
 
 def _sce08_input_schema() -> list[dict[str, object]]:
@@ -331,6 +334,39 @@ def _sce14_programs() -> tuple[Program, Program, Program]:
         outputs=(("first", first), ("second", second)),
     )
     return first_program, second_program, optimized
+
+
+def _multistage_programs() -> tuple[Program, Program, Program]:
+    quotes = table_input(
+        "quotes",
+        schema=[
+            Field("event_time", "timestamp[us, UTC]", nullable=False),
+            Field("sequence", "uint64", nullable=False),
+            Field("symbol", "string", nullable=False),
+            Field("industry", "string", nullable=False),
+            Field("close", "float64"),
+            Field("volume", "float64"),
+        ],
+        entity_by=("symbol",),
+        event_time="event_time",
+        sequence_by=("sequence",),
+    )
+    change = ts.delta(quotes["close"])
+    average_gain = ts.mean(
+        row.clip(change, lower=0.0, upper=1.0e100),
+        window=rows(20),
+    )
+    first = quotes.with_columns(FeatureSet((("first_gain", average_gain),)))
+    second = quotes.with_columns(FeatureSet((("second_gain", average_gain),)))
+    return (
+        Program("multistage-first", inputs=(quotes,), outputs=(("first", first),)),
+        Program("multistage-second", inputs=(quotes,), outputs=(("second", second),)),
+        Program(
+            "multistage-shared",
+            inputs=(quotes,),
+            outputs=(("first", first), ("second", second)),
+        ),
+    )
 
 
 class _ReferencePlans:
@@ -812,6 +848,72 @@ def test_sce14_cross_domain_sharing_pair(
             "workload_contract": _SCE14_WORKLOAD_CONTRACT,
             "entities": workload.entities,
             "industries": workload.industries,
+            "reference_state_stages": 4,
+            "optimized_state_stages": 2,
+            "paired_samples": paired_samples,
+        },
+    )
+
+    def execute_pair() -> tuple[Any, Any]:
+        return reference.execute(inputs), optimized.execute(inputs)
+
+    reference_result, optimized_result = benchmark(execute_pair)
+    assert len(reference_result) == 2
+    assert sum(batch.num_rows for batch in optimized_result.outputs.values()) == (
+        workload.rows * 2
+    )
+
+
+@pytest.mark.benchmark(
+    group=benchmark_group("symbolic-multistage-pair"), min_rounds=3, max_time=0.5
+)
+@pytest.mark.parametrize("_scale", [selected_scale().name])
+def test_multi_stage_rolling_sharing_pair(
+    benchmark: BenchmarkFixture, _scale: str
+) -> None:
+    workload = quote_workload()
+    first_program, second_program, optimized_program = _multistage_programs()
+    runtime = Runtime()
+    reference = _ReferencePlans(
+        first_program.compile_batch(runtime),
+        second_program.compile_batch(runtime),
+    )
+    optimized = optimized_program.compile_batch(runtime)
+    inputs = {"input": _utc_quote_batch()}
+
+    reference_first, reference_second = reference.execute(inputs)
+    optimized_warm = optimized.execute(inputs)
+    np.testing.assert_allclose(
+        reference_first.outputs["output"].to_pyarrow()["first_gain"].to_numpy(),
+        optimized_warm.outputs["first.output"].to_pyarrow()["first_gain"].to_numpy(),
+        rtol=1e-12,
+        atol=1e-12,
+        equal_nan=True,
+    )
+    np.testing.assert_allclose(
+        reference_second.outputs["output"].to_pyarrow()["second_gain"].to_numpy(),
+        optimized_warm.outputs["second.output"].to_pyarrow()["second_gain"].to_numpy(),
+        rtol=1e-12,
+        atol=1e-12,
+        equal_nan=True,
+    )
+    paired_samples = _alternating_plan_samples(
+        reference,
+        optimized,
+        inputs,
+        sample_count=_MULTISTAGE_PAIRED_SAMPLES,
+    )
+
+    record_symbolic_benchmark(
+        benchmark,
+        scenario=_MULTISTAGE_SCENARIO,
+        input_rows=workload.rows,
+        output_rows=workload.rows * 2,
+        metrics=optimized_warm.datafusion_metrics,
+        extra={
+            "comparison_contract": "same-process-alternating-v1",
+            "workload_contract": _MULTISTAGE_WORKLOAD_CONTRACT,
+            "entities": workload.entities,
             "reference_state_stages": 4,
             "optimized_state_stages": 2,
             "paired_samples": paired_samples,

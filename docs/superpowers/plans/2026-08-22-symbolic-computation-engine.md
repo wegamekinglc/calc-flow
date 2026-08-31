@@ -1,9 +1,21 @@
 # Symbolic Computation Engine Implementation Plan
 
-> **Status:** SCE-00 approved on 2026-08-22. No downstream implementation task
-> is complete merely because its contract is frozen here.
+> **Historical status:** SCE-00 was approved on 2026-08-22. No downstream
+> implementation task became complete merely because its contract was frozen
+> here.
 >
-> **Baseline:** `main@f6b8a6f90b7a978de1976f5a163ea689b989caee` after PR #166.
+> **Historical baseline:** `main@f6b8a6f90b7a978de1976f5a163ea689b989caee`
+> after PR #166.
+>
+> **Implementation snapshot:** The SCE-01 through SCE-15 milestone changes are
+> merged through `main@94b9f6e191b91f8e4c9a6722846ce227e1dabcd3` on
+> 2026-09-01. Follow-up hardening now lowers stateful expressions as a
+> deterministic innermost-first DAG: row-local operands materialize before
+> rolling or cross-section state, rolling output may feed a later rolling
+> stage, and compatible multi-stage branches share physical state. Symbolic
+> mid-checkpoint recovery and Finance-Python-inspired RSI composition cover
+> the new boundary. EMA/EWMA remains deferred pending a separately frozen
+> algorithm and durable-state contract.
 >
 > **Design contract:**
 > [Symbolic Computation Engine Design](../specs/2026-08-22-symbolic-computation-engine-design.md),
@@ -80,6 +92,21 @@ is deleted after the atomic cutover; it is not a permanent release branch.
 | [SCE-13] | P5    | symbolic table/array bridges and matmul   | SCE-03, SCE-12         | 1.5                |
 | [SCE-14] | P6    | cross-domain CSE, fusion, explain, cache  | SCE-08, SCE-10, SCE-13 | 2.0                |
 | [SCE-15] | P6    | Studio, docs, hardening, release checks   | SCE-14                 | 2.0                |
+
+### Current Delivery Snapshot
+
+| Tasks                 | State  | Merged evidence                                                     |
+| --------------------- | ------ | ------------------------------------------------------------------- |
+| SCE-00–SCE-04         | merged | contract `b9deff7`, IR `72f8ab0`, analysis/runtime through `fab89de` |
+| SCE-05–SCE-08         | merged | row/rolling through `b53b8e9`; paired gates `b39208f`, `7d9a2b8`    |
+| SCE-09–SCE-10         | merged | cross-section `9affe0a`, grouped additions `7389c6f`                 |
+| SCE-11–SCE-13         | merged | static/provider/matrix through `bde42be`                             |
+| SCE-14                | merged | optimizer, explain, and cache `5fd256d`                              |
+| SCE-15                | merged | Studio, docs, and release integration `94b9f6e`                      |
+
+This table records implementation history rather than changing the frozen
+semantics below. Later correctness or composability follow-ups receive their
+own RED tests and review evidence.
 
 The single-track median is about 23.5 engineer-weeks. Two engineers split
 between native streaming/state work and Python/compiler/provider work can
@@ -646,9 +673,12 @@ These items require separate approved designs after the initial release:
 - arbitrary user-defined stateful providers;
 - sparse arrays and distributed device placement;
 - cross-row array reductions without explicit windows;
-- cross-section top/bottom selection and mean fill;
 - a portable serialized formula document; and
 - compatibility aliases for external symbolic libraries.
+
+Cross-section top/bottom selection and mean fill were originally deferred but
+were subsequently approved and delivered by SCE-10; they are no longer
+deferred work.
 
 The absence of these features does not justify a Python execution fallback.
 Unsupported compositions fail during symbolic analysis or native compilation.

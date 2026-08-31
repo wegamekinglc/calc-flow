@@ -103,10 +103,41 @@ _ARITHMETIC: Final = frozenset({"add", "sub", "mul", "truediv"})
 _COMPARISONS: Final = frozenset({"eq", "ne", "lt", "le", "gt", "ge"})
 _BOOLEANS: Final = frozenset({"and", "or"})
 _UNARY_NUMERIC: Final = frozenset({"log", "exp", "sqrt"})
+_ROW_LOCAL_PRIMITIVES: Final = frozenset(
+    {
+        "column_ref",
+        "literal",
+        "add",
+        "sub",
+        "mul",
+        "truediv",
+        "neg",
+        "eq",
+        "ne",
+        "lt",
+        "le",
+        "gt",
+        "ge",
+        "and",
+        "or",
+        "not",
+        "where",
+        "coalesce",
+        "log",
+        "exp",
+        "sqrt",
+        "abs",
+        "clip",
+        "cast",
+    }
+)
 _ROLLING_AGGREGATES: Final = frozenset(
     {"count", "sum", "mean", "min", "max", "variance", "stddev"}
 )
 _ROLLING_DDOF: Final = frozenset({"variance", "stddev"})
+_ROLLING_PRIMITIVES: Final = _ROLLING_AGGREGATES | frozenset(
+    {"lag", "delta", "covariance", "correlation"}
+)
 _CROSS_SECTION: Final = frozenset(
     {
         "rank",
@@ -224,6 +255,65 @@ def _schema_fields(value: CValue, /) -> tuple[Field, ...]:
         field for item in value.items if (field := _declared_field(item)) is not None
     ]
     return tuple(fields)
+
+
+def _resolves_to_input_column(node: Node, /) -> bool:
+    """Whether the row-local lowerer resolves ``node`` to one source column."""
+
+    if node.op.name != "column_ref" or not node.args:
+        return False
+    return _table_field_resolves_to_input(
+        node.args[0],
+        _cstr(node.attr("name")) or "",
+    )
+
+
+def _table_field_resolves_to_input(table: Node, field_name: str, /) -> bool:
+    operation = table.op.name
+    if operation == "table_input":
+        return True
+    if operation in ("project", "filter"):
+        return _table_field_resolves_to_input(table.args[0], field_name)
+    if operation != "with_columns":
+        return False
+    names = _cstr_seq(table.attr("names"))
+    if field_name not in names:
+        return _table_field_resolves_to_input(table.args[0], field_name)
+    index = names.index(field_name)
+    return _resolves_to_input_column(table.args[index + 1])
+
+
+def _stateful_operand_is_stageable(node: Node, /) -> bool:
+    """Whether an operand can be scheduled before its stateful consumer."""
+
+    operation = node.op.name
+    if operation == "column_ref":
+        if not node.args:
+            return True
+        return _table_field_is_stageable(
+            node.args[0],
+            _cstr(node.attr("name")) or "",
+        )
+    if operation == "literal":
+        return True
+    if operation not in _ROW_LOCAL_PRIMITIVES and operation not in _ROLLING_PRIMITIVES:
+        return False
+    return all(_stateful_operand_is_stageable(argument) for argument in node.args)
+
+
+def _table_field_is_stageable(table: Node, field_name: str, /) -> bool:
+    operation = table.op.name
+    if operation == "table_input":
+        return True
+    if operation in ("project", "filter"):
+        return _table_field_is_stageable(table.args[0], field_name)
+    if operation != "with_columns":
+        return False
+    names = _cstr_seq(table.attr("names"))
+    if field_name not in names:
+        return _table_field_is_stageable(table.args[0], field_name)
+    index = names.index(field_name)
+    return _stateful_operand_is_stageable(table.args[index + 1])
 
 
 class _Analyzer:
@@ -889,6 +979,12 @@ class _Analyzer:
     def _lag_like(self, node: Node, path: str, /) -> ColumnFacts:
         role = f"{path}.{node.op.name}"
         operand = self._operand(node.args[0], f"{role}.value", None)
+        self._require_rolling_operand(
+            node.args[0],
+            f"{role}.value",
+            f"rolling {node.op.name} argument must be an input column or"
+            " row-local expression in this release",
+        )
         if operand.lineage is not None:
             self._temporal_lineages.add(operand.lineage)
         periods = _cint(node.attr("periods")) or 1
@@ -929,6 +1025,12 @@ class _Analyzer:
 
     def _rolling_aggregate(self, node: Node, path: str, /) -> ColumnFacts:
         operand = self._operand(node.args[0], f"{path}.{node.op.name}.value", None)
+        self._require_rolling_operand(
+            node.args[0],
+            f"{path}.{node.op.name}.value",
+            f"rolling {node.op.name} argument must be an input column or"
+            " row-local expression in this release",
+        )
         if operand.lineage is not None:
             self._temporal_lineages.add(operand.lineage)
         state = self._frame_state(node)
@@ -952,6 +1054,12 @@ class _Analyzer:
         role = f"{path}.{node.op.name}"
         left = self._operand(node.args[0], f"{role}.left", None)
         right = self._operand(node.args[1], f"{role}.right", left.lineage)
+        message = (
+            f"rolling {node.op.name} argument must be an input column or"
+            " row-local expression in this release"
+        )
+        self._require_rolling_operand(node.args[0], f"{role}.left", message)
+        self._require_rolling_operand(node.args[1], f"{role}.right", message)
         if left.lineage is not None:
             self._temporal_lineages.add(left.lineage)
         state = self._frame_state(node)
@@ -970,6 +1078,12 @@ class _Analyzer:
     def _cross_section(self, node: Node, path: str, /) -> ColumnFacts:
         role = f"{path}.{node.op.name}"
         operand = self._operand(node.args[0], f"{role}.value", None)
+        self._require_stageable_stateful_operand(
+            node.args[0],
+            f"{role}.value",
+            f"cross-section {node.op.name} argument must be an input column,"
+            " row-local expression, or rolling result in this release",
+        )
         if operand.lineage is not None:
             self._temporal_lineages.add(operand.lineage)
         group_paths = (
@@ -977,10 +1091,58 @@ class _Analyzer:
             *(f"{role}.partition_by[{index}]" for index in range(len(node.args) - 2)),
         )
         group = self._anchored_operands(node.args[1:], group_paths, operand.lineage)
+        grouping_messages = (
+            "cross-section grouping event time must be an input column in this release",
+            *(
+                "cross-section group columns must be input columns in this release"
+                for _ in node.args[2:]
+            ),
+        )
+        for group_node, group_path, message in zip(
+            node.args[1:], group_paths, grouping_messages, strict=True
+        ):
+            self._require_stateful_input_column(
+                group_node,
+                group_path,
+                message,
+            )
         states = (
             operand.state | _column_state_union(group) | frozenset({"cross_section"})
         )
         return self._cross_section_output(node.op.name, operand, role, states)
+
+    def _require_stateful_input_column(
+        self,
+        node: Node,
+        path: str,
+        message: str,
+        /,
+    ) -> None:
+        if not _resolves_to_input_column(node):
+            self.issue(
+                path,
+                "unsupported_type",
+                message,
+            )
+
+    def _require_rolling_operand(
+        self,
+        node: Node,
+        path: str,
+        message: str,
+        /,
+    ) -> None:
+        self._require_stageable_stateful_operand(node, path, message)
+
+    def _require_stageable_stateful_operand(
+        self,
+        node: Node,
+        path: str,
+        message: str,
+        /,
+    ) -> None:
+        if not _stateful_operand_is_stageable(node):
+            self.issue(path, "unsupported_type", message)
 
     def _cross_section_output(
         self,

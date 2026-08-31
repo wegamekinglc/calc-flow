@@ -16,6 +16,7 @@ from calc_flow.symbolic import (
     cs,
     event_time_bucket,
     exact_time,
+    row,
     rows,
     table_input,
     ts,
@@ -185,6 +186,134 @@ def test_nested_cross_section_materializes_before_final_rewrite() -> None:
     )
 
 
+def test_row_local_cross_section_operand_materializes_before_grouping() -> None:
+    quotes = _ordered()
+    adjusted = row.coalesce(quotes["x"], 0.0) + 1.0
+    program = _program([("adjusted_rank", cs.rank(adjusted, group=_group(quotes)))])
+
+    document = lower_program_document(program, Runtime(), "stream")
+
+    nodes = document["graph"]["nodes"]  # type: ignore[index]
+    assert [node["id"] for node in nodes] == [
+        "signals__cf_cross_section_input",
+        "signals__cf_cross_section",
+        "signals",
+    ]
+    select = nodes[0]["operator"]["select"]  # type: ignore[index]
+    assert select[-1].endswith('AS "signals__cf_cs_input_0"')
+    output = nodes[1]["operator"]["spec"]["outputs"][0]  # type: ignore[index]
+    assert output["input"] == "signals__cf_cs_input_0"
+    program.compile_stream(Runtime())
+
+
+def test_multi_stage_rolling_result_materializes_before_cross_section() -> None:
+    quotes = _ordered()
+    momentum = ts.mean(ts.delta(quotes["x"]), window=rows(2))
+    adjusted = row.coalesce(momentum, 0.0) + 1.0
+    program = _program([("momentum_rank", cs.rank(adjusted, group=_group(quotes)))])
+
+    document = lower_program_document(program, Runtime(), "stream")
+
+    nodes = document["graph"]["nodes"]  # type: ignore[index]
+    assert [node["id"] for node in nodes] == [
+        "signals__cf_rolling_1",
+        "signals__cf_rolling_2",
+        "signals__cf_cross_section_input",
+        "signals__cf_cross_section",
+        "signals",
+    ]
+    edges = document["graph"]["edges"]  # type: ignore[index]
+    assert [(edge["source_node"], edge["target_node"]) for edge in edges] == [
+        ("signals__cf_rolling_1", "signals__cf_rolling_2"),
+        ("signals__cf_rolling_2", "signals__cf_cross_section_input"),
+        ("signals__cf_cross_section_input", "signals__cf_cross_section"),
+        ("signals__cf_cross_section", "signals"),
+    ]
+    program.compile_stream(Runtime())
+
+
+def test_identical_row_local_cross_section_operands_materialize_once() -> None:
+    quotes = _ordered()
+    adjusted = row.coalesce(quotes["x"], 0.0) + 1.0
+    program = _program(
+        [
+            ("adjusted_rank", cs.rank(adjusted, group=_group(quotes))),
+            ("adjusted_zscore", cs.zscore(adjusted, group=_group(quotes))),
+        ]
+    )
+
+    document = lower_program_document(program, Runtime(), "batch")
+
+    nodes = document["graph"]["nodes"]  # type: ignore[index]
+    select = nodes[0]["operator"]["select"]  # type: ignore[index]
+    assert len([item for item in select if "signals__cf_cs_input_0" in item]) == 1
+    outputs = nodes[1]["operator"]["spec"]["outputs"]  # type: ignore[index]
+    assert [output["input"] for output in outputs] == [
+        "signals__cf_cs_input_0",
+        "signals__cf_cs_input_0",
+    ]
+
+
+def test_row_local_cross_section_branches_share_materialization_and_state() -> None:
+    quotes = _ordered()
+    first = quotes.with_columns(
+        FeatureSet((("rank", cs.rank(quotes["x"] + 1.0, group=_group(quotes))),))
+    )
+    second = quotes.with_columns(
+        FeatureSet(
+            (
+                (
+                    "zscore",
+                    cs.zscore(
+                        row.coalesce(quotes["x"], 0.0),
+                        group=_group(quotes),
+                    ),
+                ),
+            )
+        )
+    )
+    program = Program(
+        "p",
+        inputs=(quotes,),
+        outputs=(("first", first), ("second", second)),
+    )
+
+    document = lower_program_document(program, Runtime(), "batch")
+
+    nodes = document["graph"]["nodes"]  # type: ignore[index]
+    shared_input = next(
+        node for node in nodes if node["id"] == "first__cf_shared_cross_section_input"
+    )
+    assert len(shared_input["operator"]["select"]) == 7  # type: ignore[index]
+    cross = _cross_section_nodes(document)
+    assert [node["id"] for node in cross] == ["first__cf_shared_cross_section"]
+    assert len(cross[0]["operator"]["spec"]["outputs"]) == 2  # type: ignore[index]
+    schema = pa.schema(
+        [
+            pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
+            pa.field("symbol", pa.string(), nullable=False),
+            pa.field("industry", pa.string(), nullable=True),
+            pa.field("seq", pa.uint64(), nullable=False),
+            pa.field("x", pa.float64(), nullable=True),
+        ]
+    )
+    table = pa.table(
+        {
+            "ts": [100, 100, 100],
+            "symbol": ["a", "b", "c"],
+            "industry": ["tech", "tech", "tech"],
+            "seq": [1, 2, 3],
+            "x": [1.0, 2.0, None],
+        },
+        schema=schema,
+    )
+    result = program.compile_batch(Runtime()).execute(
+        {"input": Batch.from_pyarrow(table)}
+    )
+    assert result.outputs["first.output"].to_pyarrow().num_rows == 3
+    assert result.outputs["second.output"].to_pyarrow().num_rows == 3
+
+
 def test_bucketed_grouping_writes_the_fixed_width_shape() -> None:
     quotes = _ordered()
     bucketed = event_time_bucket(
@@ -346,7 +475,7 @@ def test_missing_ordering_keys_are_rejected() -> None:
     assert "ordering" in str(error.value).lower()
 
 
-def test_non_input_column_argument_is_rejected() -> None:
+def test_derived_row_local_column_argument_is_materialized() -> None:
     quotes = _ordered()
     derived = quotes.with_columns(FeatureSet([("y", quotes["x"] + 1.0)]))
     group = exact_time(derived["ts"], partition_by=[derived["industry"]])
@@ -355,9 +484,17 @@ def test_non_input_column_argument_is_rejected() -> None:
     )
     program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
 
-    with pytest.raises(CompileError) as error:
-        lower_program_document(program, Runtime(), "batch")
-    assert "input column" in str(error.value)
+    document = lower_program_document(program, Runtime(), "batch")
+
+    nodes = document["graph"]["nodes"]  # type: ignore[index]
+    assert [node["id"] for node in nodes] == [
+        "signals__cf_cross_section_input",
+        "signals__cf_cross_section",
+        "signals",
+    ]
+    select = nodes[0]["operator"]["select"]  # type: ignore[index]
+    assert select[-1] == '("x" + 1.0) AS "signals__cf_cs_input_0"'
+    program.compile_batch(Runtime())
 
 
 def test_non_input_group_expression_is_rejected() -> None:
@@ -369,6 +506,22 @@ def test_non_input_group_expression_is_rejected() -> None:
     program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
 
     with pytest.raises(CompileError, match="group columns must be input columns"):
+        lower_program_document(program, Runtime(), "batch")
+
+
+def test_materialized_cross_section_input_collision_is_rejected() -> None:
+    quotes = _ordered()
+    program = _program(
+        [
+            ("signals__cf_cs_input_0", quotes["x"]),
+            (
+                "rank",
+                cs.rank(quotes["x"] + 1.0, group=_group(quotes)),
+            ),
+        ]
+    )
+
+    with pytest.raises(CompileError, match="duplicate_name"):
         lower_program_document(program, Runtime(), "batch")
 
 

@@ -12,6 +12,7 @@ from calc_flow.symbolic import (
     Program,
     TableExpr,
     duration,
+    row,
     rows,
     table,
     table_input,
@@ -195,6 +196,150 @@ def test_nested_rolling_arguments_lower_through_a_materialized_column() -> None:
     assert any(materialized in item and "momentum" in item for item in select)
 
 
+def test_row_local_rolling_operand_materializes_before_state() -> None:
+    quotes = _ordered()
+    program = _program([("previous_log", ts.lag(row.log(quotes["x"])))])
+
+    document = lower_program_document(program, Runtime(), "batch")
+
+    nodes = document["graph"]["nodes"]  # type: ignore[index]
+    assert [node["id"] for node in nodes] == [
+        "signals__cf_rolling_input",
+        "signals__cf_rolling",
+        "signals",
+    ]
+    materialized = nodes[0]
+    select = materialized["operator"]["select"]  # type: ignore[index]
+    assert select[-1] == 'ln("x") AS "signals__cf_roll_input_0"'
+    rolling = nodes[1]
+    outputs = rolling["operator"]["spec"]["outputs"]  # type: ignore[index]
+    assert outputs == [
+        {
+            "kind": "lag",
+            "primitive_version": 1,
+            "input": "signals__cf_roll_input_0",
+            "output": "previous_log",
+            "periods": 1,
+        }
+    ]
+
+    result = program.compile_batch(Runtime()).execute(
+        {"input": Batch.from_pyarrow(_quotes_batch())}
+    )
+    values = result.outputs["output"].to_pyarrow().drop_columns(["ts"]).to_pydict()
+    assert values["symbol"] == ["a", "b", "a", "a"]
+    assert values["previous_log"] == pytest.approx(
+        [None, None, 0.0, 1.0986122886681098], nan_ok=True
+    )
+
+
+def test_identical_row_local_rolling_operands_materialize_once() -> None:
+    quotes = _ordered()
+    logged = row.log(quotes["x"])
+    program = _program(
+        [
+            ("previous_log", ts.lag(logged)),
+            ("mean_log", ts.mean(logged, window=rows(2))),
+        ]
+    )
+
+    document = lower_program_document(program, Runtime(), "batch")
+
+    nodes = document["graph"]["nodes"]  # type: ignore[index]
+    select = nodes[0]["operator"]["select"]  # type: ignore[index]
+    assert select.count('ln("x") AS "signals__cf_roll_input_0"') == 1
+    outputs = nodes[1]["operator"]["spec"]["outputs"]  # type: ignore[index]
+    assert [output["input"] for output in outputs] == [
+        "signals__cf_roll_input_0",
+        "signals__cf_roll_input_0",
+    ]
+
+
+def test_nested_rolling_operand_builds_two_state_stages_and_executes() -> None:
+    quotes = _ordered()
+    mean_change = ts.mean(ts.delta(quotes["x"]), window=rows(2))
+    program = _program([("mean_change", mean_change)])
+
+    document = lower_program_document(program, Runtime(), "batch")
+
+    rolling = _rolling_nodes(document)
+    assert [node["id"] for node in rolling] == [
+        "signals__cf_rolling_1",
+        "signals__cf_rolling_2",
+    ]
+    first_output = rolling[0]["operator"]["spec"]["outputs"][0]  # type: ignore[index]
+    second_output = rolling[1]["operator"]["spec"]["outputs"][0]  # type: ignore[index]
+    assert first_output["kind"] == "delta"
+    assert second_output == {
+        "kind": "mean",
+        "primitive_version": 1,
+        "input": first_output["output"],
+        "output": "mean_change",
+        "frame": {"kind": "rows", "size": 2},
+        "min_periods": 1,
+    }
+
+    result = program.compile_batch(Runtime()).execute(
+        {"input": Batch.from_pyarrow(_quotes_batch())}
+    )
+    values = result.outputs["output"].to_pyarrow().drop_columns(["ts"]).to_pydict()
+    assert values["mean_change"] == [None, None, 2.0, 0.5]
+
+
+def test_row_local_bridge_materializes_between_rolling_stages() -> None:
+    quotes = _ordered()
+    change = ts.delta(quotes["x"])
+    gain = row.where(change > 0.0, change, 0.0)
+    program = _program([("average_gain", ts.mean(gain, window=rows(2)))])
+
+    document = lower_program_document(program, Runtime(), "stream")
+
+    ids = [
+        node["id"]
+        for node in document["graph"]["nodes"]  # type: ignore[index]
+    ]
+    assert ids == [
+        "signals__cf_rolling_1",
+        "signals__cf_rolling_input_2",
+        "signals__cf_rolling_2",
+        "signals",
+    ]
+    program.compile_stream(Runtime())
+
+
+def test_row_local_rolling_operands_execute_across_scalar_shapes() -> None:
+    quotes = _ordered()
+    conditional = row.where(quotes["x"] > 1.0, quotes["x"], 0.0)
+    filled = row.coalesce(row.cast(quotes["v"], "float64"), 0.0)
+    program = _program(
+        [
+            ("previous_conditional", ts.lag(conditional)),
+            ("previous_filled", ts.lag(filled)),
+        ]
+    )
+
+    result = program.compile_batch(Runtime()).execute(
+        {"input": Batch.from_pyarrow(_quotes_batch())}
+    )
+
+    values = result.outputs["output"].to_pyarrow().drop_columns(["ts"]).to_pydict()
+    assert values["previous_conditional"] == [None, None, 0.0, 3.0]
+    assert values["previous_filled"] == [None, None, 10.0, 30.0]
+
+
+def test_materialized_rolling_input_collision_is_rejected() -> None:
+    quotes = _ordered()
+    program = _program(
+        [
+            ("signals__cf_roll_input_0", quotes["x"]),
+            ("previous_adjusted", ts.lag(quotes["x"] + 1.0)),
+        ]
+    )
+
+    with pytest.raises(CompileError, match="duplicate_name"):
+        lower_program_document(program, Runtime(), "batch")
+
+
 def test_rolling_features_mix_with_row_local_expressions() -> None:
     quotes = _ordered()
     program = _program([("double", quotes["x"] * 2.0), ("prev", ts.lag(quotes["x"]))])
@@ -215,15 +360,31 @@ def test_rolling_features_mix_with_row_local_expressions() -> None:
     assert '"prev"' in select
 
 
-def test_composed_lag_argument_is_rejected_loudly() -> None:
+def test_materialized_rolling_column_collision_is_rejected() -> None:
+    quotes = _ordered()
+    program = _program(
+        [
+            ("signals__cf_roll_0", quotes["x"]),
+            ("momentum", ts.delta(quotes["x"]) + 1.0),
+        ]
+    )
+
+    with pytest.raises(CompileError, match="duplicate_name"):
+        lower_program_document(program, Runtime(), "batch")
+
+
+def test_composed_lag_argument_is_materialized() -> None:
     quotes = _ordered()
     program = _program([("prev", ts.lag(quotes["x"] + 1.0))])
 
-    with pytest.raises(CompileError) as excinfo:
-        lower_program_document(program, Runtime(), "batch")
+    document = lower_program_document(program, Runtime(), "batch")
 
-    message = str(excinfo.value)
-    assert "outputs.prev" in message or "outputs.signals" in message
+    nodes = document["graph"]["nodes"]  # type: ignore[index]
+    assert [node["id"] for node in nodes[:2]] == [
+        "signals__cf_rolling_input",
+        "signals__cf_rolling",
+    ]
+    program.compile_batch(Runtime())
 
 
 def test_lag_requires_declared_ordering() -> None:
@@ -297,6 +458,92 @@ def test_filter_below_rolling_feeds_a_prefilter_stage() -> None:
     values = result.outputs["output"].to_pyarrow().drop_columns(["ts"]).to_pydict()
     assert values["symbol"] == ["b", "a", "a"]
     assert values["prev"] == [None, None, 3.0]
+
+
+def test_filter_below_materialized_rolling_preserves_stage_order() -> None:
+    quotes = _ordered()
+    filtered = table.filter(quotes, quotes["x"] > 1.0)
+    signals = filtered.with_columns(
+        FeatureSet((("previous_log", ts.lag(row.log(quotes["x"]))),))
+    )
+    program = Program("p", inputs=(quotes,), outputs=(("signals", signals),))
+
+    document = lower_program_document(program, Runtime(), "batch")
+
+    ids = [
+        node["id"]
+        for node in document["graph"]["nodes"]  # type: ignore[index]
+    ]
+    assert ids == [
+        "signals__cf_prefilter",
+        "signals__cf_rolling_input",
+        "signals__cf_rolling",
+        "signals",
+    ]
+
+
+def test_materialized_rolling_outputs_connect_through_input_fanout() -> None:
+    quotes = _ordered()
+    first = quotes.with_columns(
+        FeatureSet((("previous_log", ts.lag(row.log(quotes["x"]))),))
+    )
+    second = quotes.with_columns(
+        FeatureSet((("previous_adjusted", ts.lag(quotes["x"] + 1.0)),))
+    )
+    program = Program(
+        "p",
+        inputs=(quotes,),
+        outputs=(("first", first), ("second", second)),
+    )
+
+    document = lower_program_document(program, Runtime(), "batch")
+
+    edges = document["graph"]["edges"]  # type: ignore[index]
+    targets = {edge["target_node"] for edge in edges if edge["source_node"] == "quotes"}
+    assert targets == {"first__cf_rolling_input", "second__cf_rolling_input"}
+
+
+def test_identical_multi_stage_rolling_pipelines_share_physical_state() -> None:
+    quotes = _ordered()
+    first_value = ts.mean(ts.delta(quotes["x"]), window=rows(2))
+    second_value = ts.mean(ts.delta(quotes["x"]), window=rows(2))
+    first = quotes.with_columns(FeatureSet((("first_mean", first_value),)))
+    second = quotes.with_columns(FeatureSet((("second_mean", second_value),)))
+    program = Program(
+        "p",
+        inputs=(quotes,),
+        outputs=(("first", first), ("second", second)),
+    )
+
+    document = lower_program_document(program, Runtime(), "batch")
+
+    rolling = _rolling_nodes(document)
+    assert [node["id"] for node in rolling] == [
+        "first__cf_shared_rolling_1",
+        "first__cf_shared_rolling_2",
+    ]
+    targets = {
+        edge["target_node"]
+        for edge in document["graph"]["edges"]  # type: ignore[index]
+        if edge["source_node"] == "first__cf_shared_rolling_2"
+    }
+    assert targets == {"first", "second"}
+
+    result = program.compile_batch(Runtime()).execute(
+        {"input": Batch.from_pyarrow(_quotes_batch())}
+    )
+    assert result.outputs["first.output"].to_pyarrow()["first_mean"].to_pylist() == [
+        None,
+        None,
+        2.0,
+        0.5,
+    ]
+    assert result.outputs["second.output"].to_pyarrow()["second_mean"].to_pylist() == [
+        None,
+        None,
+        2.0,
+        0.5,
+    ]
 
 
 def test_filter_above_rolling_applies_after_the_rolling_stage() -> None:

@@ -12,6 +12,8 @@ from calc_flow.symbolic import (
     TableExpr,
     cs,
     exact_time,
+    row,
+    rows,
     table_input,
     ts,
 )
@@ -20,7 +22,26 @@ from calc_flow.symbolic import (
 def financial_features(quotes: TableExpr) -> FeatureSet:
     """Build reusable declarations without reading or mutating any row data."""
     previous = ts.lag(quotes["price"])
-    momentum = quotes["price"] / previous - 1.0
+    previous_log_price = ts.lag(row.log(quotes["price"]))
+    momentum_1 = quotes["price"] / previous - 1.0
+    log_return_1 = row.log(quotes["price"] / previous)
+    price_mean_3 = ts.mean(quotes["price"], window=rows(3))
+    price_stddev_3 = ts.stddev(
+        quotes["price"],
+        window=rows(3),
+        min_periods=2,
+        ddof=0,
+    )
+    price_change = ts.delta(quotes["price"])
+    average_gain_3 = ts.mean(
+        row.clip(price_change, lower=0.0, upper=1.0e100),
+        window=rows(3),
+    )
+    average_loss_3 = ts.mean(
+        row.clip(-price_change, lower=0.0, upper=1.0e100),
+        window=rows(3),
+    )
+    rsi_3 = 100.0 - 100.0 / (1.0 + average_gain_3 / average_loss_3)
     volume_z = cs.zscore(
         quotes["volume"],
         group=exact_time(quotes["ts"]),
@@ -28,9 +49,19 @@ def financial_features(quotes: TableExpr) -> FeatureSet:
     )
     return FeatureSet(
         (
-            ("momentum", momentum),
+            ("momentum_1", momentum_1),
+            ("previous_log_price", previous_log_price),
+            ("log_return_1", log_return_1),
+            ("price_mean_3", price_mean_3),
+            ("price_stddev_3", price_stddev_3),
+            ("bollinger_upper_3", price_mean_3 + 2.0 * price_stddev_3),
+            ("bollinger_lower_3", price_mean_3 - 2.0 * price_stddev_3),
+            ("rsi_3", rsi_3),
             ("volume_z", volume_z),
-            ("liquidity_adjusted_momentum", momentum - volume_z * 0.01),
+            (
+                "liquidity_adjusted_momentum",
+                momentum_1 - volume_z * 0.01,
+            ),
         )
     )
 
@@ -91,11 +122,22 @@ def main() -> None:
 
     require(output.num_rows == 4, f"unexpected output rows: {output.num_rows}")
     require(
-        output.column_names[-3:]
-        == ["momentum", "volume_z", "liquidity_adjusted_momentum"],
+        output.column_names[-10:]
+        == [
+            "momentum_1",
+            "previous_log_price",
+            "log_return_1",
+            "price_mean_3",
+            "price_stddev_3",
+            "bollinger_upper_3",
+            "bollinger_lower_3",
+            "rsi_3",
+            "volume_z",
+            "liquidity_adjusted_momentum",
+        ],
         f"unexpected output columns: {output.column_names}",
     )
-    print(output.select(output.column_names[-3:]).to_pydict())
+    print(output.select(output.column_names[-10:]).to_pydict())
 
 
 if __name__ == "__main__":

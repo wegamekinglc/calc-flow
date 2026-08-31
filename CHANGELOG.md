@@ -3,6 +3,20 @@
 This file records fundamental changes to Calc Flow's public surfaces and
 engine or Studio capabilities.
 
+## 2026-09
+
+- 2026-09-01: Extend symbolic stateful composition without adding a second
+  execution engine. The lowerer now schedules nested rolling expressions as
+  deterministic innermost-first project-v3 stages, materializes row-local
+  inputs before rolling and cross-section state, and shares identical
+  multi-stage rolling pipelines across output branches. Existing one-stage
+  node identifiers and serialized shapes remain stable. Finance-inspired
+  acceptance vectors now include composed RSI, and the public streaming
+  example checkpoints a two-stage rolling program mid-stream, restores both
+  native states from the replay cursor, and verifies terminal restart without
+  duplicate output. EMA/EWMA and MACD remain deferred until their algorithm
+  and durable-state contract are frozen.
+
 ## 2026-08
 
 - 2026-08-31: Integrate symbolic computation across Studio, public examples,

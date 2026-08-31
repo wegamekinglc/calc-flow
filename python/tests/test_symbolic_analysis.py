@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Callable
 
 import pytest
 
 from calc_flow.capabilities import RuntimeCapabilities
+from calc_flow.errors import CompileError
 from calc_flow.pipeline import Runtime
 from calc_flow.symbolic import (
     AnalysisResult,
@@ -775,6 +777,131 @@ def test_stream_mode_requires_ordering_for_lag_and_delta() -> None:
     assert all(issue.code == "ordering_required" for issue in stream_result.issues)
 
     assert program.analyze(Runtime(), mode="batch").issues == ()
+
+
+@pytest.mark.parametrize(
+    ("feature_name", "feature"),
+    (
+        (
+            "mean_change",
+            lambda quotes: ts.mean(
+                ts.delta(quotes["x"]),
+                window=rows(3),
+            ),
+        ),
+        (
+            "adjusted_rank",
+            lambda quotes: cs.rank(
+                quotes["x"] + 1.0,
+                group=exact_time(quotes["ts"]),
+            ),
+        ),
+    ),
+)
+def test_analysis_accepts_stageable_stateful_operands(
+    feature_name: str,
+    feature: Callable[[TableExpr], object],
+) -> None:
+    quotes = _quotes_ordered()
+    program = _feature_program(quotes, feature_name, feature(quotes))
+
+    result = program.analyze(Runtime(), mode="batch")
+
+    assert result.issues == ()
+    program.compile_batch(Runtime())
+
+
+def test_analysis_rejects_cross_section_output_inside_rolling_state() -> None:
+    quotes = _quotes_ordered()
+    ranked = cs.rank(quotes["x"], group=exact_time(quotes["ts"]))
+    program = _feature_program(
+        quotes,
+        "rank_mean",
+        ts.mean(ranked, window=rows(3)),
+    )
+
+    result = program.analyze(Runtime(), mode="batch")
+
+    assert any(
+        issue.path == "outputs.signals.rank_mean.mean.value"
+        and issue.code == "unsupported_type"
+        for issue in result.issues
+    )
+    with pytest.raises(CompileError, match="rolling mean argument"):
+        program.compile_batch(Runtime())
+
+
+def test_analysis_accepts_row_local_derived_columns_and_input_aliases() -> None:
+    quotes = _quotes_ordered()
+    derived = quotes.with_columns(
+        FeatureSet(
+            (
+                ("adjusted", quotes["x"] + 1.0),
+                ("price", quotes["x"]),
+            )
+        )
+    )
+    signals = derived.with_columns(
+        FeatureSet(
+            (
+                ("adjusted_previous", ts.lag(derived["adjusted"])),
+                ("price_previous", ts.lag(derived["price"])),
+            )
+        )
+    )
+    program = Program("p", inputs=(quotes,), outputs=(("signals", signals),))
+
+    result = program.analyze(Runtime(), mode="batch")
+
+    assert result.issues == ()
+    program.compile_batch(Runtime())
+
+
+def test_direct_input_alias_remains_analyzable_and_compilable() -> None:
+    quotes = _quotes_ordered()
+    aliased = quotes.with_columns(FeatureSet((("price", quotes["x"]),)))
+    projected = table.project(aliased, ("ts", "symbol", "seq", "x", "price"))
+    filtered = table.filter(projected, projected["x"] > 0.0)
+    signals = filtered.with_columns(
+        FeatureSet((("price_previous", ts.lag(filtered["price"])),))
+    )
+    program = Program("p", inputs=(quotes,), outputs=(("signals", signals),))
+
+    assert program.analyze(Runtime(), mode="batch").issues == ()
+    program.compile_batch(Runtime())
+
+
+def test_original_column_after_row_local_derivation_remains_materializable() -> None:
+    quotes = _quotes_ordered()
+    derived = quotes.with_columns(FeatureSet((("adjusted", quotes["x"] + 1.0),)))
+    signals = derived.with_columns(FeatureSet((("previous", ts.lag(derived["x"])),)))
+    program = Program("p", inputs=(quotes,), outputs=(("signals", signals),))
+
+    assert program.analyze(Runtime(), mode="batch").issues == ()
+    program.compile_batch(Runtime())
+
+
+def test_non_row_local_table_boundary_is_not_a_rolling_operand() -> None:
+    quotes = _quotes_ordered()
+    scores = linalg.matmul(
+        linalg.from_columns(quotes, columns=("x", "y"), backend="numpy"),
+        _weights(),
+    )
+    attached = table.attach_columns(quotes, scores, names=("score",))
+    signals = attached.with_columns(FeatureSet((("previous", ts.lag(attached["x"])),)))
+    program = Program(
+        "p",
+        inputs=(quotes, _weights()),
+        outputs=(("signals", signals),),
+    )
+
+    result = program.analyze(Runtime(), mode="batch")
+
+    assert any(
+        issue.path == "outputs.signals.previous.lag.value"
+        and issue.code == "unsupported_type"
+        for issue in result.issues
+    )
 
 
 def test_where_condition_and_coalesce_operands_respect_lineage() -> None:

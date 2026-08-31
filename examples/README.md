@@ -56,10 +56,10 @@ The files cover:
 - `08_streaming_recovery.py` — a second process-lifecycle run over the same
   managed checkpoint root, proving terminal recovery does not reopen an ended
   source or duplicate sink output.
-- `09_symbolic_financial_features.py` — composed rolling momentum and
-  cross-section features, static analysis, lowering, and batch execution.
-- `10_symbolic_streaming_recovery.py` — symbolic stream lowering with a
-  replayable source, managed checkpoint, and terminal recovery.
+- `09_symbolic_financial_features.py` — composed rolling momentum, Bollinger,
+  RSI, and cross-section features with analysis and batch execution.
+- `10_symbolic_streaming_recovery.py` — two-stage symbolic rolling with a
+  replayable source, mid-stream checkpoint recovery, and terminal recovery.
 - `11_symbolic_static_matrix.py` — an immutable NumPy weight matrix used by the
   same symbolic program in batch and stream modes, including provider failure
   and one-time static placement evidence.

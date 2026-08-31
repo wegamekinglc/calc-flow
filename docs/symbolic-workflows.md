@@ -17,9 +17,10 @@ between compile-time facts and runtime measurements.
 ## Compose and run financial features
 
 [`09_symbolic_financial_features.py`](../examples/09_symbolic_financial_features.py)
-builds one reusable `FeatureSet` containing lagged momentum, an exact-time
-cross-section volume z-score, and a composed liquidity-adjusted metric. The
-example:
+builds one reusable `FeatureSet` containing one-period simple and log returns,
+a three-row price mean and standard deviation, Bollinger bands, a composed
+three-row RSI, an exact-time cross-section volume z-score, and a
+liquidity-adjusted momentum. The example:
 
 1. declares the input schema and its entity, event-time, and sequence keys;
 2. calls `Program.analyze(runtime, mode="batch")` before compilation;
@@ -32,6 +33,20 @@ They never read the Arrow rows used later by `BatchExecutionPlan.execute`.
 Structurally identical expressions can therefore be shared by the complete
 program without changing the result or mutating the declaration graph.
 
+The independently derived Finance-Python-inspired acceptance vectors live in
+[`test_symbolic_finance_reference.py`](../python/tests/test_symbolic_finance_reference.py).
+Their provenance is pinned to the upstream
+[rolling and cross-section tests](https://github.com/alpha-miner/Finance-Python/tree/3e33d3e70c3458b4c6dcf76b88df6148229b402c/PyFin/tests/Analysis).
+They intentionally apply Calc Flow's frozen percentile, tie, Arrow-null, and
+NaN rules rather than importing Finance-Python or treating its mutable holder
+semantics as an oracle. Rolling operands may be source columns, aliases, pure
+row-local expressions, or earlier rolling results. The compiler schedules an
+innermost-first DAG and inserts deterministic row-local stages before rolling
+and cross-section state when needed. The reference suite includes RSI's delta,
+positive/negative projection, rolling means, and final ratio. MACD remains
+deferred because EMA/EWMA still lacks a frozen algorithm and durable-state
+contract.
+
 Run it from a source checkout with:
 
 ```bash
@@ -41,11 +56,13 @@ uv run python examples/09_symbolic_financial_features.py
 ## Run continuously and recover
 
 [`10_symbolic_streaming_recovery.py`](../examples/10_symbolic_streaming_recovery.py)
-lowers a row-local symbolic program with `compile_stream`, binds an
+lowers a two-stage rolling program with `compile_stream`, binds an
 application-owned replayable source and sink, and uses
-`ManagedCheckpointRuntime`. A second process-lifecycle run against the same
-checkpoint root proves that terminal recovery neither reopens the ended source
-nor duplicates sink output.
+`ManagedCheckpointRuntime`. It pauses after three rows, requests an aligned
+checkpoint, cancels, and resumes from the stored cursor with both rolling
+states restored. A final process-lifecycle run against the terminal checkpoint
+also proves that recovery neither reopens the ended source nor duplicates sink
+output.
 
 ```bash
 uv run python examples/10_symbolic_streaming_recovery.py

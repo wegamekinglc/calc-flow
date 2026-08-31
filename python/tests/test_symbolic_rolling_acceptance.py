@@ -20,6 +20,7 @@ from calc_flow import (
     Cursor,
     Data,
     DisabledWatermarks,
+    Idle,
     ManagedCheckpointRuntime,
     NativeWatermarkCapability,
     ReplayPositioning,
@@ -30,7 +31,6 @@ from calc_flow import (
     SourceDeliveryCapability,
     StreamingRunner,
 )
-from calc_flow.errors import CompileError
 from calc_flow.symbolic import (
     FeatureSet,
     Field,
@@ -42,6 +42,7 @@ from calc_flow.symbolic import (
     table_input,
     ts,
 )
+from calc_flow.symbolic import row as row_ops
 from calc_flow.symbolic.lower import lower_program_document
 
 
@@ -65,16 +66,6 @@ def _program(features: list[tuple[str, object]]) -> Program:
     quotes = _ordered()
     signals = quotes.with_columns(FeatureSet(features))
     return Program("p", inputs=[quotes], outputs=[("signals", signals)])
-
-
-def _rejected(features: list[tuple[str, object]], mode: str = "batch") -> str:
-    program = _program(features)
-    with pytest.raises(CompileError) as excinfo:
-        if mode == "batch":
-            program.compile_batch(Runtime())
-        else:
-            program.compile_stream(Runtime())
-    return str(excinfo.value)
 
 
 def test_min_max_covariance_and_correlation_execute_with_reference_values() -> None:
@@ -192,19 +183,18 @@ def test_cross_section_primitives_lower_in_both_modes() -> None:
             assert "cross_section" in kinds, (mode, kinds)
 
 
-def test_composite_lag_delta_arguments_stay_rejected() -> None:
+def test_composite_lag_delta_arguments_compile_through_materialization() -> None:
     quotes = _ordered()
-    message = _rejected([("prev", ts.lag(quotes["x"] + 1.0))])
-    assert "must be an input column" in message
-    message = _rejected([("change", ts.delta(quotes["x"] * 2.0))])
-    assert "must be an input column" in message
+    for feature in (
+        ("prev", ts.lag(quotes["x"] + 1.0)),
+        ("change", ts.delta(quotes["x"] * 2.0)),
+    ):
+        _program([feature]).compile_batch(Runtime())
 
     derived = quotes.with_columns(FeatureSet([("y", quotes["x"] + 1.0)]))
     signals = derived.with_columns(FeatureSet([("prev", ts.lag(derived["y"]))]))
     program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
-    with pytest.raises(CompileError) as excinfo:
-        program.compile_batch(Runtime())
-    assert "must be an input column" in str(excinfo.value)
+    program.compile_batch(Runtime())
 
 
 def test_probe_lowering_shape_with_periods_and_lateness() -> None:
@@ -589,6 +579,116 @@ class _CollectSink:
 
     async def close(self) -> None:
         return None
+
+
+class _ReplayPauseSource:
+    def __init__(
+        self,
+        table: pa.Table,
+        pause_at: int | None,
+        opened_offsets: list[int],
+    ) -> None:
+        self._table = table
+        self._pause_at = pause_at
+        self._opened_offsets = opened_offsets
+        self._offset = 0
+        self.paused = asyncio.Event()
+
+    def capabilities(self) -> SourceCapabilities:
+        return SourceCapabilities(
+            ReplayPositioning.EXACT_PAUSE_REPORT_AND_SEEK,
+            SourceDeliveryCapability.LOSSLESS,
+            max_batch_rows=1,
+            max_batch_bytes=16 * 1024 * 1024,
+            native_watermarks=NativeWatermarkCapability.NEVER_EMITS,
+        )
+
+    async def open(self, cursor: Cursor | None) -> None:
+        self._offset = 0 if cursor is None else int(cursor.payload["offset"])
+        self._opened_offsets.append(self._offset)
+
+    async def next(self) -> Data | Idle | None:
+        if self._pause_at == self._offset:
+            self.paused.set()
+            await asyncio.sleep(0)
+            return Idle()
+        if self._offset >= self._table.num_rows:
+            return None
+        chunk = self._table.slice(self._offset, 1)
+        self._offset += 1
+        return Data(
+            Batch.from_pyarrow(chunk),
+            Cursor(
+                self._offset.to_bytes(8, "big"),
+                {"offset": self._offset},
+            ),
+        )
+
+    async def close(self) -> None:
+        return None
+
+
+def _multi_stage_program() -> Program:
+    quotes = _ordered()
+    change = ts.delta(quotes["x"])
+    gain = row_ops.clip(change, lower=0.0, upper=1.0e100)
+    return _program(
+        [
+            ("change", change),
+            ("average_gain", ts.mean(gain, window=rows(3))),
+        ]
+    )
+
+
+def test_multi_stage_symbolic_checkpoint_recovery_matches_batch(tmp_path: Path) -> None:
+    table = _probe_table()
+    expected = (
+        _multi_stage_program()
+        .compile_batch(Runtime())
+        .execute({"input": Batch.from_pyarrow(table)})
+        .outputs["output"]
+        .to_pyarrow()
+    )
+    sink = _CollectSink()
+    opened_offsets: list[int] = []
+
+    async def runner(source: _ReplayPauseSource) -> StreamingRunner:
+        return StreamingRunner(
+            _multi_stage_program().compile_stream(Runtime()),
+            {
+                "input": SourceBinding(
+                    source,
+                    watermark_policy=DisabledWatermarks(),
+                )
+            },
+            {"output": [SinkBinding.ordinary("archive", sink)]},
+            ManagedCheckpointRuntime(tmp_path),
+        )
+
+    async def exercise() -> None:
+        first_source = _ReplayPauseSource(table, 5, opened_offsets)
+        first = await (await runner(first_source)).start_async()
+        await asyncio.wait_for(first_source.paused.wait(), timeout=2)
+        assert await first.trigger_checkpoint_async() == 1
+        assert (await first.cancel_async()).state == "cancelled"
+
+        second_source = _ReplayPauseSource(table, None, opened_offsets)
+        second = await (await runner(second_source)).start_async()
+        assert (await second.wait_async()).state == "completed"
+
+    asyncio.run(exercise())
+
+    recovered = pa.concat_tables(sink.tables)
+    assert recovered.schema == expected.schema
+    for field in recovered.schema:
+        if pa.types.is_floating(field.type):
+            actual = recovered[field.name].to_pylist()
+            reference = expected[field.name].to_pylist()
+            for observed, wanted in zip(actual, reference, strict=True):
+                _assert_classified_value(observed, wanted, 1e-12)
+        else:
+            assert recovered[field.name].equals(expected[field.name])
+    assert opened_offsets == [0, 5]
 
 
 @pytest.mark.parametrize("segmentation", (1, 3, 1000))
