@@ -35,16 +35,19 @@ the [Rust example inventory](../crates/calc-flow/examples/README.md).
 
 ## Python examples
 
-| File                                                                 | What it proves                                                        |
-| -------------------------------------------------------------------- | --------------------------------------------------------------------- |
-| [`01_datafusion_pipeline.py`](../examples/01_datafusion_pipeline.py) | Immutable Arrow input, expressions, projection, filtering, timings    |
-| [`02_sql_join.py`](../examples/02_sql_join.py)                       | Named inputs and one read-only DataFusion SQL join                    |
-| [`03_registered_udf.py`](../examples/03_registered_udf.py)           | Trusted, versioned, explicitly selected scalar UDF                    |
-| [`04_continuous_runtime.py`](../examples/04_continuous_runtime.py)   | One-shot runner, replay cursor, managed checkpoint, terminal wait     |
-| [`05_async_execution.py`](../examples/05_async_execution.py)         | Async batch execution, settings, absolute deadline                    |
-| [`06_numpy_array.py`](../examples/06_numpy_array.py)                 | Explicit NumPy registration and bounded array expression              |
-| [`07_array_and_dataframe.py`](../examples/07_array_and_dataframe.py) | Arrow-table to NumPy/JAX matrix multiplication without input mutation |
-| [`08_streaming_recovery.py`](../examples/08_streaming_recovery.py)   | Durable terminal recovery without source reopen or duplicate output   |
+| File                                                                                      | What it proves                                                        |
+| ----------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| [`01_datafusion_pipeline.py`](../examples/01_datafusion_pipeline.py)                      | Immutable Arrow input, expressions, projection, filtering, timings    |
+| [`02_sql_join.py`](../examples/02_sql_join.py)                                            | Named inputs and one read-only DataFusion SQL join                    |
+| [`03_registered_udf.py`](../examples/03_registered_udf.py)                                | Trusted, versioned, explicitly selected scalar UDF                    |
+| [`04_continuous_runtime.py`](../examples/04_continuous_runtime.py)                        | One-shot runner, replay cursor, managed checkpoint, terminal wait     |
+| [`05_async_execution.py`](../examples/05_async_execution.py)                              | Async batch execution, settings, absolute deadline                    |
+| [`06_numpy_array.py`](../examples/06_numpy_array.py)                                      | Explicit NumPy registration and bounded array expression              |
+| [`07_array_and_dataframe.py`](../examples/07_array_and_dataframe.py)                      | Arrow-table to NumPy/JAX matrix multiplication without input mutation |
+| [`08_streaming_recovery.py`](../examples/08_streaming_recovery.py)                        | Durable terminal recovery without source reopen or duplicate output   |
+| [`09_symbolic_financial_features.py`](../examples/09_symbolic_financial_features.py)      | Composed rolling and cross-section financial features                 |
+| [`10_symbolic_streaming_recovery.py`](../examples/10_symbolic_streaming_recovery.py)      | Symbolic continuous execution and terminal recovery                   |
+| [`11_symbolic_static_matrix.py`](../examples/11_symbolic_static_matrix.py)                | Batch/stream static weights, copy facts, and provider failure         |
 
 The Python continuous examples use application-owned in-memory connectors.
 Production transport configuration is data-only and covered by the
@@ -71,10 +74,18 @@ The sink asserts both deterministic aggregates before printing them.
 - For an asyncio service, start with `05_async_execution.py`.
 - For an application-owned live source, start with
   `04_continuous_runtime.py` and then read `08_streaming_recovery.py`.
+- For symbolic financial calculations, start with
+  `09_symbolic_financial_features.py`, then use
+  `10_symbolic_streaming_recovery.py` for continuous recovery or
+  `11_symbolic_static_matrix.py` for immutable model weights.
 - For event-time aggregation in Rust, start with `windowed_streaming.rs`.
 - For Kafka, PostgreSQL, ClickHouse, HTTP, WebSocket, files, or Parquet, use a
   project-v3 connector binding from the [connector guide](connectors.md).
 - For a browser-managed local job, use [Calc Flow Studio](../web-ui/README.md).
+
+The [symbolic workflow guide](symbolic-workflows.md) connects the three
+symbolic examples to Studio inspection, NumPy/JAX selection, failure handling,
+and compile-time performance facts.
 
 ## Verification contract
 

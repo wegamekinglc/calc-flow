@@ -68,6 +68,9 @@ means empty settings.
 See [the Python API guide](docs/python-api.md) and the executable
 [examples](examples/README.md) for SQL, Python scalar UDFs, continuous
 execution and recovery, asyncio, and NumPy/JAX.
+The [symbolic workflow guide](docs/symbolic-workflows.md) covers composed
+financial features, checkpoint recovery, static matrices, capability errors,
+Studio inspection, and performance output.
 
 ## Rust quickstart
 
@@ -314,6 +317,8 @@ repository commands and constraints.
 - **[Continuous streaming](docs/streaming-guide.md)** — source-to-recovery tutorial
 - **[Connectors](docs/connectors.md)** — transport configuration and guarantees
 - **[Python API](docs/python-api.md)** — Python surface and examples
+- **[Symbolic workflows](docs/symbolic-workflows.md)** — declaration-to-Studio
+  batch, stream, recovery, static matrix, and performance workflows
 - **[Rust API](docs/rust-api.md)** — native surface and examples
 - **[API reference](docs/api-reference.md)** — supported surfaces at a glance
 - **[Python release guide](docs/python-release.md)** — packaging, verification,

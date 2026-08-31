@@ -9,9 +9,11 @@ import type {
   UdfCatalogEntry,
   UdfReference,
 } from '../types';
+import type { LoweredNodeInspection } from './projectInspectionModel';
 
 interface NodeInspectorProps {
   node: NodeConfig;
+  inspection?: LoweredNodeInspection;
   arrowTypes: readonly string[];
   udfs: UdfCatalogEntry[];
   onChange: (node: NodeConfig) => void;
@@ -72,6 +74,7 @@ const withLimit = (
 
 export function NodeInspector({
   node,
+  inspection,
   arrowTypes,
   udfs,
   onChange,
@@ -391,6 +394,58 @@ export function NodeInspector({
               />
             </div>
           ))}
+        </section>
+      )}
+
+      {inspection && (
+        <section
+          aria-label="Lowered project inspection"
+          className="inspector-section project-inspection"
+        >
+          <div className="inspection-heading">
+            <h3>Lowered project inspection</h3>
+            <span>{inspection.contract}</span>
+          </div>
+          <dl className="inspection-facts">
+            <div>
+              <dt>Lowered node</dt>
+              <dd>{inspection.nodeId} · {inspection.nodeKind}</dd>
+            </div>
+            <div>
+              <dt>State estimate</dt>
+              <dd>{inspection.state}</dd>
+            </div>
+            <div>
+              <dt>Watermark</dt>
+              <dd>{inspection.watermark}</dd>
+            </div>
+            <div>
+              <dt>Provider identity</dt>
+              <dd>{inspection.providerIdentity}</dd>
+            </div>
+          </dl>
+          <h4>Source expressions</h4>
+          {inspection.sourceExpressions.length ? (
+            <ul className="inspection-list source-expression-list">
+              {inspection.sourceExpressions.map((expression, index) => (
+                <li key={`${index}-${expression}`}><code>{expression}</code></li>
+              ))}
+            </ul>
+          ) : <p className="inspection-empty">none recorded by this node</p>}
+          <h4>Static inputs</h4>
+          {inspection.staticInputs.length ? (
+            <ul className="inspection-list">
+              {inspection.staticInputs.map((input) => <li key={input}>{input}</li>)}
+            </ul>
+          ) : <p className="muted">none declared</p>}
+          <h4>Copy boundaries</h4>
+          {inspection.copyBoundaries.length ? (
+            <ol className="inspection-list">
+              {inspection.copyBoundaries.map((boundary) => (
+                <li key={boundary}>{boundary}</li>
+              ))}
+            </ol>
+          ) : <p className="inspection-empty">none</p>}
         </section>
       )}
 

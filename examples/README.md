@@ -24,6 +24,9 @@ uv run python examples/05_async_execution.py
 JAX_PLATFORMS=cpu uv run python examples/06_numpy_array.py
 JAX_PLATFORMS=cpu uv run python examples/07_array_and_dataframe.py
 uv run python examples/08_streaming_recovery.py
+uv run python examples/09_symbolic_financial_features.py
+uv run python examples/10_symbolic_streaming_recovery.py
+uv run python examples/11_symbolic_static_matrix.py
 ```
 
 Or run the entire Python and Rust user-example inventory:
@@ -53,6 +56,13 @@ The files cover:
 - `08_streaming_recovery.py` — a second process-lifecycle run over the same
   managed checkpoint root, proving terminal recovery does not reopen an ended
   source or duplicate sink output.
+- `09_symbolic_financial_features.py` — composed rolling momentum and
+  cross-section features, static analysis, lowering, and batch execution.
+- `10_symbolic_streaming_recovery.py` — symbolic stream lowering with a
+  replayable source, managed checkpoint, and terminal recovery.
+- `11_symbolic_static_matrix.py` — an immutable NumPy weight matrix used by the
+  same symbolic program in batch and stream modes, including provider failure
+  and one-time static placement evidence.
 
 `07_array_and_dataframe.py` selects ordered numeric `pyarrow.Table` columns
 and multiplies their dense matrix by an array weight matrix. After input
@@ -81,3 +91,6 @@ the same source-driven lifecycle on the Python and Rust surfaces. Rust's
 See the [executable example guide](../docs/examples.md) for the cross-language
 matrix and the [continuous streaming guide](../docs/streaming-guide.md) for the
 runtime contracts behind these programs.
+The [symbolic workflow guide](../docs/symbolic-workflows.md) covers the
+declaration-to-Studio path, NumPy/JAX providers, capability failures, and
+performance interpretation.

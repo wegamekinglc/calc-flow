@@ -28,6 +28,9 @@ below.
 - **[Python API guide](python-api.md)** — `PipelineBuilder`, batches, UDFs,
   async execution, NumPy/JAX, symbolic declarations and static analysis,
   projects, and runners
+- **[Symbolic workflows](symbolic-workflows.md)** — composed financial
+  features, batch/continuous execution, checkpoint recovery, static NumPy/JAX
+  matrices, capability failures, Studio inspection, and performance output
 - **[Rust API guide](rust-api.md)** — native batches, operators, graph
   compiler, UDF/provider registries, and recovery, with paired examples
 - **[API reference](api-reference.md)** — the supported surfaces at a glance:

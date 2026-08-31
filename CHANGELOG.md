@@ -5,6 +5,19 @@ engine or Studio capabilities.
 
 ## 2026-08
 
+- 2026-08-31: Integrate symbolic computation across Studio, public examples,
+  documentation, and release gates (SCE-15 / DAL-147). Studio's node inspector
+  now derives serialized source expressions, lowered node/provider identity,
+  state and watermark bounds, static-input declarations, and copy boundaries
+  exclusively from strict project-v3 documents; it remains an inspector, not
+  a second symbolic compiler. Executable examples cover composed financial
+  features, symbolic stream checkpoint recovery, and static NumPy matrices in
+  batch and stream modes, alongside the existing NumPy/JAX provider example.
+  The public symbolic workflow guide documents capability failures and the
+  distinction between compile-time cost facts and measured runtime metrics.
+  Artifact inspection now rejects repository-only symbolic plans/specs from
+  wheels, sdists, and crates while retaining current public documentation.
+
 - 2026-08-31: Optimize complete symbolic programs (SCE-14 / DAL-146).
   Identical pure expression materializations now share one program-wide stage;
   compatible rolling outputs share one history/partition index, and compatible

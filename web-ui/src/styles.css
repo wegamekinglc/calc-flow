@@ -227,6 +227,16 @@ label { display: grid; gap: 6px; color: var(--muted); font-size: 11px; font-weig
 .input-alias-editor > .text-button { justify-self: start; }
 .inspector-section { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line); }
 .inspector-section h3 { margin: 0 0 10px; font-size: 11px; }
+.project-inspection h4 { margin: 14px 0 7px; color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: .08em; }
+.inspection-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.inspection-heading > span { color: var(--orange); font: 500 8px 'SFMono-Regular', Consolas, ui-monospace, monospace; text-align: right; }
+.inspection-facts { display: grid; gap: 7px; margin: 0; }
+.inspection-facts > div { display: grid; grid-template-columns: 82px minmax(0, 1fr); gap: 8px; padding: 7px 8px; border: 1px solid var(--line); border-radius: 7px; background: #091815; }
+.inspection-facts dt { color: var(--muted); font-size: 8px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
+.inspection-facts dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: #dceae5; font: 500 9px/1.45 'SFMono-Regular', Consolas, ui-monospace, monospace; }
+.inspection-list { display: grid; gap: 5px; margin: 0; padding-left: 18px; color: #dceae5; font-size: 9px; line-height: 1.45; }
+.source-expression-list code { overflow-wrap: anywhere; color: var(--mint); font: 500 9px/1.45 'SFMono-Regular', Consolas, ui-monospace, monospace; }
+.inspection-empty { margin: 0; color: var(--muted); font-size: 9px; }
 .muted { color: var(--muted); font-size: 10px; }
 .udf-option { display: flex; grid-template-columns: auto 1fr; align-items: flex-start; gap: 8px; margin-bottom: 8px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: #0a1a17; }
 .udf-option input { width: auto; margin-top: 2px; }

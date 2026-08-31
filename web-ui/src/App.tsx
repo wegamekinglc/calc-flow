@@ -30,6 +30,7 @@ import {
 import { BenchmarkComparison } from './components/BenchmarkComparison';
 import { DataSourceEditor } from './components/DataSourceEditor';
 import { NodeInspector } from './components/NodeInspector';
+import { inspectLoweredNode } from './components/projectInspectionModel';
 import { PanelResizeHandle } from './components/PanelResizeHandle';
 import { ProjectActions } from './components/ProjectActions';
 import { ResultsPanel } from './components/ResultsPanel';
@@ -957,6 +958,7 @@ export default function App() {
         {selectedNode ? (
           <NodeInspector
             node={selectedNode}
+            inspection={inspectLoweredNode(project, selectedNode)}
             arrowTypes={ARROW_TYPES}
             udfs={catalog ?? []}
             onChange={updateNode}

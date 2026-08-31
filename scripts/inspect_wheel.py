@@ -11,6 +11,18 @@ _PROJECT_DATA_SUFFIXES = {".json", ".yaml", ".yml"}
 _LICENSE_MARKERS = (b"Apache License", b"Version 2.0, January 2004")
 
 
+def _is_repository_guidance(path: PurePosixPath) -> bool:
+    parts = tuple(part.lower() for part in path.parts)
+    return (
+        any(part in {".claude", ".codex"} for part in parts)
+        or any(
+            parts[index : index + 2] == ("docs", "superpowers")
+            for index in range(len(parts) - 1)
+        )
+        or "design" in parts
+    )
+
+
 def _validate_license(content: bytes, artifact: Path) -> None:
     if any(marker not in content for marker in _LICENSE_MARKERS):
         raise ValueError(f"{artifact}: invalid Apache-2.0 license")
@@ -52,6 +64,7 @@ def inspect_wheel(wheel: Path) -> int:
             _FORBIDDEN_PARTS.intersection(part.lower() for part in path.parts)
             or path.name.lower() in _FORBIDDEN_NAMES
             or path.suffix.lower() in _PROJECT_DATA_SUFFIXES
+            or _is_repository_guidance(path)
         ):
             raise ValueError(f"{wheel}: forbidden wheel entry: {name}")
 
@@ -79,8 +92,9 @@ def inspect_studio_wheel(wheel: Path) -> int:
         ].endswith(".dist-info")
         if not (in_package or in_metadata):
             raise ValueError(f"{wheel}: unexpected Studio wheel entry: {name}")
-        if in_package and _FORBIDDEN_PARTS.intersection(
-            part.lower() for part in path.parts
+        if in_package and (
+            _FORBIDDEN_PARTS.intersection(part.lower() for part in path.parts)
+            or _is_repository_guidance(path)
         ):
             raise ValueError(f"{wheel}: forbidden Studio wheel entry: {name}")
 
@@ -142,7 +156,7 @@ def inspect_sdist(sdist: Path) -> int:
             or path.parts[:1] == ("web-ui",)
             or path.parts[:2] == ("tests", "fixtures")
             or path.name.lower() in _FORBIDDEN_NAMES
-            or any(part in {".claude", ".codex"} for part in path.parts)
+            or _is_repository_guidance(path)
         )
         if forbidden:
             raise ValueError(f"{sdist}: forbidden sdist entry: {path}")
@@ -157,7 +171,9 @@ def inspect_crate(crate: Path) -> int:
     if missing:
         raise ValueError(f"{crate}: missing crate entries: {sorted(map(str, missing))}")
     for path in relative:
-        if "tests" in (part.lower() for part in path.parts):
+        if "tests" in (part.lower() for part in path.parts) or _is_repository_guidance(
+            path
+        ):
             raise ValueError(f"{crate}: forbidden crate entry: {path}")
     return len(names)
 

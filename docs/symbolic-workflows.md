@@ -1,0 +1,146 @@
+# Symbolic computation workflows
+
+Calc Flow's symbolic API declares immutable calculations and lowers them into
+the same strict project-v3 graph that the native engine and Studio use. Python
+does not execute while a lowered plan runs, and Studio does not contain a
+second symbolic compiler. This guide connects the public declarations to
+batch, continuous, recovery, array-provider, inspection, and performance
+workflows that are implemented in Calc Flow 4.0.
+
+The complete declaration reference is in the [Python API guide](python-api.md).
+Use this guide to choose an executable example and understand the boundary
+between compile-time facts and runtime measurements.
+
+## Compose and run financial features
+
+[`09_symbolic_financial_features.py`](../examples/09_symbolic_financial_features.py)
+builds one reusable `FeatureSet` containing lagged momentum, an exact-time
+cross-section volume z-score, and a composed liquidity-adjusted metric. The
+example:
+
+1. declares the input schema and its entity, event-time, and sequence keys;
+2. calls `Program.analyze(runtime, mode="batch")` before compilation;
+3. prints `Program.explain(...)`, including physical sharing and bounded-state
+   estimates; and
+4. lowers and executes the program with `compile_batch`.
+
+Declarations only capture names, types, shapes, and expression structure.
+They never read the Arrow rows used later by `BatchExecutionPlan.execute`.
+Structurally identical expressions can therefore be shared by the complete
+program without changing the result or mutating the declaration graph.
+
+Run it from a source checkout with:
+
+```bash
+uv run python examples/09_symbolic_financial_features.py
+```
+
+## Run continuously and recover
+
+[`10_symbolic_streaming_recovery.py`](../examples/10_symbolic_streaming_recovery.py)
+lowers a row-local symbolic program with `compile_stream`, binds an
+application-owned replayable source and sink, and uses
+`ManagedCheckpointRuntime`. A second process-lifecycle run against the same
+checkpoint root proves that terminal recovery neither reopens the ended source
+nor duplicates sink output.
+
+```bash
+uv run python examples/10_symbolic_streaming_recovery.py
+```
+
+Temporal rolling and cross-section declarations add event-time finality. Their
+input must declare the required event-time, entity, and sequence keys. The
+lowered rolling or cross-section node remains the only implementation of its
+state and watermark rules; the streaming runner checkpoints that native state
+using the ordinary project-v3 recovery contract.
+
+## Use static matrices with NumPy or JAX
+
+[`11_symbolic_static_matrix.py`](../examples/11_symbolic_static_matrix.py)
+declares a NumPy `weights` parameter, turns selected table columns into a dense
+matrix, multiplies them, and attaches the named result column to the table. It
+executes the same program in batch and segmented stream modes and verifies that
+the immutable weights are placed once for the whole stream job.
+
+```bash
+uv run python examples/11_symbolic_static_matrix.py
+```
+
+Provider selection is explicit. Register the provider on the exact `Runtime`
+used for analysis, explanation, and compilation:
+
+```python
+runtime = Runtime()
+register_numpy(runtime)  # declarations use backend="numpy"
+
+# Or install calc-flow[jax], use backend="jax", and register JAX.
+register_jax(runtime)
+```
+
+[`07_array_and_dataframe.py`](../examples/07_array_and_dataframe.py) runs the
+equivalent public NumPy and JAX table-to-matrix boundary. A JAX float64
+declaration additionally requires JAX x64 support; Calc Flow fails closed
+rather than silently narrowing it. In a stream, pass declared values through
+`StreamingRunner(..., static_inputs={"weights": weights})`. Static values are
+latched and digested before any source opens, and a restart with different
+bytes is rejected against the checkpoint lineage.
+
+## Read capability failures
+
+Call `Program.analyze` before compile when displaying several declaration
+issues at once. Each `AnalysisIssue` has a stable path, code, and message;
+common codes include `capability_mismatch`, `ordering_required`,
+`schema_mismatch`, and `unbounded_state`. Compilation raises `CompileError` for
+the first unsupported declaration or lowering rule.
+
+The native project compiler performs a final provider gate. For example,
+`11_symbolic_static_matrix.py` first compiles without NumPy registration and
+shows the strict `missing_provider` `ConfigError`, then registers NumPy and
+continues. Do not catch a generic exception and continue with a different
+backend: provider identity is part of the compiled plan and its fingerprint.
+
+## Interpret performance output
+
+`Program.explain(runtime, mode=...)` reports deterministic compile-time facts:
+
+- shared expression, rolling, cross-section, and array stages;
+- bounded row or duration retention and watermark finality;
+- selected provider identity and calls per micro-batch;
+- table-to-dense, host-to-device, and result-attachment copy boundaries; and
+- known static-weight bytes.
+
+These are plan estimates and shape facts, not sampled runtime telemetry. Use
+execution timings, stream status, provider metadata, and process metrics for
+measured latency, resident memory, and copy volume. A plan estimate can explain
+where work must occur; it cannot promise a device transfer time or peak RSS.
+
+## Inspect a lowered project in Studio
+
+Studio accepts and saves only a strict `ProjectDocument` v3. Selecting a node
+shows a **Lowered project inspection** section derived from that document:
+
+- serialized source expressions or lowered rolling/cross-section operations;
+- node kind and exact external provider identity;
+- bounded state and watermark requirements;
+- static input declarations and known byte sizes; and
+- table/array, host/device, static-placement, and result-attachment copy
+  boundaries.
+
+The section is an inspector, not a compiler. It does not reconstruct the
+original Python expression objects, execute Python callables, or infer facts
+from live row values. Its state sizes are lower bounds or declared limits;
+runtime status and metrics remain authoritative.
+
+Studio can inspect a project that declares static inputs, but `POST /jobs`
+rejects that project with `422` because the REST contract intentionally has no
+field for live static values. Execute such a document through the Python
+stream runner, where `static_inputs` is an explicit application-owned mapping.
+
+## Artifact boundary
+
+Published wheels, sdists, and crates contain public runtime code, generated
+contracts, examples, and current documentation. Repository-only agent files,
+dated implementation plans/specifications under `docs/superpowers`, and design
+workspaces are not public package content. The release inspector enforces this
+boundary for every artifact; see the [Python release guide](python-release.md)
+for the complete build and isolated-install smoke procedure.

@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { blankProject } from '../types';
 import { NodeInspector } from './NodeInspector';
+import { inspectLoweredNode } from './projectInspectionModel';
 
 describe('NodeInspector', () => {
   it('updates a nested v2 expression operator with a trusted UDF reference', () => {
@@ -245,5 +246,31 @@ describe('NodeInspector', () => {
         },
       },
     });
+  });
+
+  it('shows read-only facts from the strict lowered project', () => {
+    const project = blankProject();
+    const node = project.graph.nodes[0];
+
+    render(
+      <NodeInspector
+        node={node}
+        inspection={inspectLoweredNode(project, node)}
+        arrowTypes={['int64']}
+        udfs={[]}
+        onChange={vi.fn()}
+        onSqlAliasEdit={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole('region', { name: 'Lowered project inspection' }),
+    ).toHaveTextContent('strict ProjectDocument v3');
+    expect(screen.getByText('total = a + b', { selector: 'code' })).toBeInTheDocument();
+    expect(screen.getByText('stateless')).toBeInTheDocument();
+    expect(screen.getByText('not required')).toBeInTheDocument();
+    expect(screen.getByText('native calc-flow operator')).toBeInTheDocument();
+    expect(screen.getByText('none', { selector: '.inspection-empty' })).toBeInTheDocument();
   });
 });

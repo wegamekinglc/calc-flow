@@ -11,6 +11,19 @@ export interface FlowNodeData extends Record<string, unknown> {
 
 export type CalculationFlowNode = Node<FlowNodeData, 'calculation'>;
 
+const nodeKindLabel = (kind: FlowNodeData['kind']): string => {
+  switch (kind) {
+    case 'expression': return 'ƒx';
+    case 'sql': return 'SQL';
+    case 'rolling': return 'ROLL';
+    case 'cross_section': return 'CS';
+    case 'stream_join': return 'JOIN';
+    case 'window': return 'WIN';
+    case 'union': return 'UNION';
+    default: return 'EXT';
+  }
+};
+
 export function CalculationNode({ data, selected }: NodeProps<CalculationFlowNode>) {
   return (
     <div className={`calculation-node ${data.kind} ${selected ? 'selected' : ''}`}>
@@ -24,7 +37,7 @@ export function CalculationNode({ data, selected }: NodeProps<CalculationFlowNod
         />
       ))}
       <span className="node-kind">
-        {data.kind === 'expression' ? 'ƒx' : data.kind === 'sql' ? 'SQL' : 'EXT'}
+        {nodeKindLabel(data.kind)}
       </span>
       <strong>{data.label}</strong>
       <small>{data.inputPorts.join(' · ')} → {data.outputPorts.join(' · ')}</small>

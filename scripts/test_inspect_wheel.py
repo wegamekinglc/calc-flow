@@ -125,6 +125,17 @@ class InspectWheelTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "forbidden wheel entry"):
                     inspect_wheel(wheel)
 
+    def test_rejects_repository_only_symbolic_plans_from_core_wheel(self) -> None:
+        wheel = self._wheel_with(
+            "calc_flow/__init__.py",
+            "calc_flow/_native.abi3.so",
+            "calc_flow-2.0.0.dist-info/licenses/LICENSE",
+            "calc_flow/docs/superpowers/plans/symbolic-engine.md",
+        )
+
+        with self.assertRaisesRegex(ValueError, "forbidden wheel entry"):
+            inspect_wheel(wheel)
+
     def test_requires_native_module(self) -> None:
         wheel = self._wheel_with(
             "calc_flow/__init__.py",
@@ -167,6 +178,17 @@ class InspectWheelTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "missing Apache-2.0 license"):
             inspect_studio_wheel(wheel)
 
+    def test_rejects_repository_only_symbolic_plans_from_studio_wheel(self) -> None:
+        wheel = self._wheel_with(
+            "calc_flow_studio/__init__.py",
+            "calc_flow_studio/static/index.html",
+            "calc_flow_studio-2.0.0.dist-info/licenses/LICENSE",
+            "calc_flow_studio/docs/superpowers/specs/symbolic-engine.md",
+        )
+
+        with self.assertRaisesRegex(ValueError, "forbidden Studio wheel entry"):
+            inspect_studio_wheel(wheel)
+
     def test_accepts_sdist_with_license_and_no_frozen_python(self) -> None:
         sdist = self._archive_with(
             "calc_flow-2.0.0.tar.gz",
@@ -205,6 +227,22 @@ class InspectWheelTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "missing sdist entries"):
             inspect_sdist(sdist)
 
+    def test_rejects_repository_only_symbolic_plans_from_sdist(self) -> None:
+        sdist = self._archive_with(
+            "calc_flow-2.0.0.tar.gz",
+            "calc_flow-2.0.0/LICENSE",
+            "calc_flow-2.0.0/Cargo.lock",
+            "calc_flow-2.0.0/pyproject.toml",
+            "calc_flow-2.0.0/crates/calc-flow/Cargo.toml",
+            "calc_flow-2.0.0/crates/calc-flow/src/lib.rs",
+            "calc_flow-2.0.0/crates/calc-flow-python/Cargo.toml",
+            "calc_flow-2.0.0/python/calc_flow/__init__.py",
+            "calc_flow-2.0.0/docs/superpowers/plans/symbolic-engine.md",
+        )
+
+        with self.assertRaisesRegex(ValueError, "forbidden sdist entry"):
+            inspect_sdist(sdist)
+
     def test_accepts_crate_with_license_and_no_tests(self) -> None:
         crate = self._archive_with(
             "calc-flow-2.0.0.crate",
@@ -222,6 +260,18 @@ class InspectWheelTests(unittest.TestCase):
             "calc-flow-2.0.0/Cargo.toml",
             "calc-flow-2.0.0/src/lib.rs",
             "calc-flow-2.0.0/tests/config.rs",
+        )
+
+        with self.assertRaisesRegex(ValueError, "forbidden crate entry"):
+            inspect_crate(crate)
+
+    def test_rejects_repository_only_symbolic_plans_from_crate(self) -> None:
+        crate = self._archive_with(
+            "calc-flow-2.0.0.crate",
+            "calc-flow-2.0.0/LICENSE",
+            "calc-flow-2.0.0/Cargo.toml",
+            "calc-flow-2.0.0/src/lib.rs",
+            "calc-flow-2.0.0/docs/superpowers/plans/symbolic-engine.md",
         )
 
         with self.assertRaisesRegex(ValueError, "forbidden crate entry"):
