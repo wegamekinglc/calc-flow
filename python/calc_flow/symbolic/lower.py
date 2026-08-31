@@ -533,6 +533,37 @@ class _StatefulInputRequest:
     domain: str
 
 
+def _required_stateful_input(
+    request: _StatefulInputRequest,
+    primitive: str,
+    argument: Node,
+    index: int,
+    input_types: dict[str, Field],
+    reserved: set[str],
+    /,
+) -> tuple[str, Field, str]:
+    if not _rolling_argument_is_row_local(argument):
+        errors.raise_compile(
+            request.path,
+            errors.UNSUPPORTED_TYPE,
+            f"{request.domain} {primitive} argument must be an input column"
+            " or row-local expression after earlier state staging",
+        )
+    name = f"{request.output_name}__cf_{request.column_stem}_{index}"
+    if name in reserved:
+        errors.raise_compile(
+            f"{request.path}.{name}",
+            errors.DUPLICATE_NAME,
+            f"materialized {request.domain} input {name!r} collides"
+            " with a declared field",
+        )
+    return (
+        name,
+        _row_local_field(argument, name, input_types),
+        _select_item(name, argument),
+    )
+
+
 def _plan_stateful_inputs(
     request: _StatefulInputRequest,
     input_fields: tuple[Field, ...],
@@ -548,25 +579,18 @@ def _plan_stateful_inputs(
     for primitive, argument in arguments:
         if argument.op.name == "column_ref" or argument.digest in names:
             continue
-        if not _rolling_argument_is_row_local(argument):
-            errors.raise_compile(
-                request.path,
-                errors.UNSUPPORTED_TYPE,
-                f"{request.domain} {primitive} argument must be an input column"
-                " or row-local expression after earlier state staging",
-            )
-        name = f"{request.output_name}__cf_{request.column_stem}_{len(names)}"
-        if name in reserved:
-            errors.raise_compile(
-                f"{request.path}.{name}",
-                errors.DUPLICATE_NAME,
-                f"materialized {request.domain} input {name!r} collides"
-                " with a declared field",
-            )
+        name, field, select = _required_stateful_input(
+            request,
+            primitive,
+            argument,
+            len(names),
+            input_types,
+            reserved,
+        )
         reserved.add(name)
         names[argument.digest] = name
-        fields.append(_row_local_field(argument, name, input_types))
-        selects.append(_select_item(name, argument))
+        fields.append(field)
+        selects.append(select)
     state_input_fields = (*input_fields, *fields)
     materialization_id = request.node_id if fields else None
     materialization = (
@@ -1581,19 +1605,26 @@ def _rewrite_pipeline_environment(
     return env, post_predicate
 
 
-def _share_identical_multi_stage_pipelines(
+def _multi_stage_pipeline_groups(
     segments: list[tuple[str, _Segment]],
     plans: dict[str, _RollingPipeline | None],
     /,
-) -> dict[str, _RollingPipeline | None]:
+) -> tuple[tuple[str, ...], ...]:
     groups: dict[tuple[str, str | None, tuple[str, ...]], list[str]] = {}
-    by_name = dict(segments)
     for output_name, segment in segments:
         pipeline = plans[output_name]
         if pipeline is not None and len(pipeline.stages) > 1:
             groups.setdefault(_rolling_pipeline_identity(segment), []).append(
                 output_name
             )
+    return tuple(tuple(members) for members in groups.values() if len(members) > 1)
+
+
+def _reserved_rolling_pipeline_ids(
+    segments: list[tuple[str, _Segment]],
+    plans: dict[str, _RollingPipeline | None],
+    /,
+) -> set[str]:
     reserved_ids = {output_name for output_name, _ in segments}
     for pipeline in plans.values():
         if pipeline is None:
@@ -1602,25 +1633,53 @@ def _share_identical_multi_stage_pipelines(
             reserved_ids.add(stage.node_id)
             if stage.materialization_node_id is not None:
                 reserved_ids.add(stage.materialization_node_id)
+    return reserved_ids
+
+
+def _shared_multi_stage_group(
+    members: tuple[str, ...],
+    segments: dict[str, _Segment],
+    plans: dict[str, _RollingPipeline | None],
+    reserved_ids: set[str],
+    /,
+) -> dict[str, _RollingPipeline]:
+    first = plans[members[0]]
+    if first is None:
+        raise RuntimeError("missing multi-stage rolling pipeline")
+    stages = _shared_pipeline_stages(members[0], first, reserved_ids)
+    shared: dict[str, _RollingPipeline] = {}
+    for output_name in members:
+        env, post_predicate = _rewrite_pipeline_environment(
+            segments[output_name], stages
+        )
+        shared[output_name] = _RollingPipeline(
+            stages,
+            env,
+            post_predicate,
+            first.input_field_names,
+            first.output_fields,
+        )
+    return shared
+
+
+def _share_identical_multi_stage_pipelines(
+    segments: list[tuple[str, _Segment]],
+    plans: dict[str, _RollingPipeline | None],
+    /,
+) -> dict[str, _RollingPipeline | None]:
+    groups = _multi_stage_pipeline_groups(segments, plans)
+    reserved_ids = _reserved_rolling_pipeline_ids(segments, plans)
+    segments_by_name = dict(segments)
     shared = dict(plans)
-    for members in groups.values():
-        if len(members) < 2:
-            continue
-        first = plans[members[0]]
-        if first is None:
-            raise RuntimeError("missing multi-stage rolling pipeline")
-        stages = _shared_pipeline_stages(members[0], first, reserved_ids)
-        for output_name in members:
-            env, post_predicate = _rewrite_pipeline_environment(
-                by_name[output_name], stages
+    for members in groups:
+        shared.update(
+            _shared_multi_stage_group(
+                members,
+                segments_by_name,
+                plans,
+                reserved_ids,
             )
-            shared[output_name] = _RollingPipeline(
-                stages,
-                env,
-                post_predicate,
-                first.input_field_names,
-                first.output_fields,
-            )
+        )
     return shared
 
 
