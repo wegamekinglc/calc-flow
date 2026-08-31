@@ -38,12 +38,17 @@ const record = (value: unknown): Record<string, unknown> | null =>
     ? value as Record<string, unknown>
     : null;
 
+const compareCanonicalKeys = (left: string, right: string): number => {
+  if (left === right) return 0;
+  return left < right ? -1 : 1;
+};
+
 const sortedJsonValue = (value: unknown): unknown => {
   if (Array.isArray(value)) return value.map(sortedJsonValue);
   const mapping = record(value);
   if (!mapping) return value;
   const entries = Object.entries(mapping).sort(([left], [right]) =>
-    left.localeCompare(right));
+    compareCanonicalKeys(left, right));
   return Object.fromEntries(
     entries.map(([key, item]) => [key, sortedJsonValue(item)]),
   );
@@ -298,24 +303,104 @@ const isNonEmptyStringArray = (value: unknown): value is string[] =>
   && value.length > 0
   && value.every((item) => typeof item === 'string' && item.length > 0);
 
-const hasMatrixPorts = (node: NodeConfig): boolean => {
-  const tableInput = node.input_ports.some(
-    (port) => port.kind === 'table' && port.required,
-  );
-  const weightsInput = node.input_ports.some(
-    (port) => port.name === 'weights' && port.kind === 'array' && port.required,
-  );
-  const tableOutput = node.output_ports.some((port) => port.kind === 'table');
-  return tableInput && weightsInput && tableOutput;
+const hasUniqueItems = (values: readonly string[]): boolean =>
+  new Set(values).size === values.length;
+
+const isUniqueStringArray = (value: unknown): value is string[] =>
+  isNonEmptyStringArray(value) && hasUniqueItems(value);
+
+const hasExactKeys = (
+  value: Record<string, unknown>,
+  expected: readonly string[],
+): boolean => JSON.stringify(Object.keys(value).sort(compareCanonicalKeys))
+  === JSON.stringify(expected);
+
+const isExactPort = (
+  port: NodeConfig['input_ports'][number],
+  name: string,
+  kind: 'table' | 'array',
+): boolean => hasExactKeys(port, ['kind', 'name', 'required', 'schema'])
+  && port.name === name
+  && port.kind === kind
+  && port.required
+  && port.schema.length === 0;
+
+const hasExactMatrixPorts = (node: NodeConfig): boolean => {
+  if (node.input_ports.length !== 2 || node.output_ports.length !== 1) return false;
+  const [tableInput, weightsInput] = node.input_ports;
+  const [tableOutput] = node.output_ports;
+  return isExactPort(tableInput, 'input', 'table')
+    && isExactPort(weightsInput, 'weights', 'array')
+    && isExactPort(tableOutput, 'output', 'table');
 };
 
-const hasMatchingWeights = (
+const isExpressionLeaf = (value: unknown, operation: string): boolean => {
+  const expression = record(value);
+  return expression !== null
+    && hasExactKeys(expression, ['op'])
+    && expression.op === operation;
+};
+
+const isRecognizedMatrixExpression = (value: unknown): boolean => {
+  const expression = record(value);
+  return expression !== null
+    && hasExactKeys(expression, ['left', 'op', 'right'])
+    && expression.op === 'matmul'
+    && isExpressionLeaf(expression.left, 'input')
+    && isExpressionLeaf(expression.right, 'weights');
+};
+
+const hasStaticWeightIdentity = (
+  input: StaticInput,
+  backend: MatrixBackend,
+): boolean => {
+  if (input.kind !== 'array') return false;
+  if (!hasExactKeys(
+    input,
+    ['backend', 'dtype', 'kind', 'mutability', 'name', 'shape'],
+  )) return false;
+  if (input.name !== 'weights') return false;
+  if (input.mutability !== 'static') return false;
+  if (input.backend !== backend) return false;
+  return input.dtype === 'float32' || input.dtype === 'float64';
+};
+
+const hasStaticWeightShape = (
+  input: StaticInput,
+  columns: readonly string[],
+  names: readonly string[],
+): boolean => input.kind === 'array'
+  && input.shape.length === 2
+  && input.shape[0] === columns.length
+  && input.shape[1] === names.length;
+
+const hasExactStaticWeights = (
   staticInputs: readonly StaticInput[],
   backend: MatrixBackend,
-): boolean => staticInputs.some((input) =>
-  input.name === 'weights'
-  && input.kind === 'array'
-  && input.backend === backend);
+  columns: readonly string[],
+  names: readonly string[],
+): boolean => {
+  if (staticInputs.length !== 1) return false;
+  const [input] = staticInputs;
+  return hasStaticWeightIdentity(input, backend)
+    && hasStaticWeightShape(input, columns, names);
+};
+
+interface MatrixOptions {
+  columns: string[];
+  names: string[];
+}
+
+const recognizedMatrixOptions = (
+  options: Record<string, unknown>,
+): MatrixOptions | null => {
+  if (!hasExactKeys(options, ['columns', 'expression', 'names'])) return null;
+  if (!isUniqueStringArray(options.columns)) return null;
+  if (!isUniqueStringArray(options.names)) return null;
+  return isRecognizedMatrixExpression(options.expression)
+    ? { columns: options.columns, names: options.names }
+    : null;
+};
 
 interface SymbolicMatrixFacts {
   backend: MatrixBackend;
@@ -328,13 +413,14 @@ const symbolicMatrixFacts = (
 ): SymbolicMatrixFacts | null => {
   if (node.operator.kind !== 'external') return null;
   const backend = matrixBackend(node.operator);
-  if (backend === null || !hasMatrixPorts(node)) return null;
-  const options = node.operator.options;
-  if (!isNonEmptyStringArray(options.columns)) return null;
-  if (!isNonEmptyStringArray(options.names) || record(options.expression) === null) {
-    return null;
-  }
-  return hasMatchingWeights(staticInputs, backend)
+  if (backend === null || !hasExactMatrixPorts(node)) return null;
+  if (!hasExactKeys(
+    node.operator,
+    ['kind', 'name', 'options', 'provider', 'version'],
+  )) return null;
+  const options = recognizedMatrixOptions(node.operator.options);
+  if (options === null) return null;
+  return hasExactStaticWeights(staticInputs, backend, options.columns, options.names)
     ? { backend, columnCount: options.columns.length }
     : null;
 };

@@ -32,44 +32,56 @@ const projectWith = (
   ...change,
 });
 
+const validMatrixOptions = (): Record<string, unknown> => ({
+  names: ['score'],
+  expression: {
+    right: { op: 'weights' },
+    op: 'matmul',
+    left: { op: 'input' },
+  },
+  columns: ['return', 'volatility'],
+});
+
+interface MatrixNodeChange {
+  options?: Record<string, unknown>;
+  inputPorts?: NodeConfig['input_ports'];
+  outputPorts?: NodeConfig['output_ports'];
+}
+
+const symbolicMatrixNode = (change: MatrixNodeChange = {}): NodeConfig => ({
+  id: 'signals',
+  input_ports: change.inputPorts ?? [
+    { name: 'input', kind: 'table', required: true, schema: [] },
+    { name: 'weights', kind: 'array', required: true, schema: [] },
+  ],
+  output_ports: change.outputPorts ?? [
+    { name: 'output', kind: 'table', required: true, schema: [] },
+  ],
+  operator: {
+    kind: 'external',
+    provider: 'jax',
+    name: 'symbolic_matrix',
+    version: '1',
+    options: change.options ?? validMatrixOptions(),
+  },
+});
+
+const staticWeights = (
+  shape: number[] = [2, 1],
+): NonNullable<ProjectDocument['static_inputs']>[number] => ({
+  name: 'weights',
+  kind: 'array',
+  mutability: 'static',
+  backend: 'jax',
+  dtype: 'float64',
+  shape,
+});
+
 describe('lowered ProjectDocument inspection', () => {
   it('renders deterministic symbolic matrix provenance and copy facts', () => {
-    const node: NodeConfig = {
-      id: 'signals',
-      input_ports: [
-        { name: 'input', kind: 'table', required: true, schema: [] },
-        { name: 'weights', kind: 'array', required: true, schema: [] },
-      ],
-      output_ports: [
-        { name: 'output', kind: 'table', required: true, schema: [] },
-      ],
-      operator: {
-        kind: 'external',
-        provider: 'jax',
-        name: 'symbolic_matrix',
-        version: '1',
-        options: {
-          names: ['score'],
-          expression: {
-            right: { op: 'weights' },
-            op: 'matmul',
-            left: { op: 'input' },
-          },
-          columns: ['return', 'volatility'],
-        },
-      },
-    };
+    const node = symbolicMatrixNode();
     const project = projectWith(node, {
-      static_inputs: [
-        {
-          name: 'weights',
-          kind: 'array',
-          mutability: 'static',
-          backend: 'jax',
-          dtype: 'float64',
-          shape: [2, 1],
-        },
-      ],
+      static_inputs: [staticWeights()],
     });
 
     expect(inspectLoweredNode(project, node)).toEqual({
@@ -90,6 +102,77 @@ describe('lowered ProjectDocument inspection', () => {
         'array → table · rows preserved',
       ],
     });
+  });
+
+  it.each([
+    {
+      case: 'an extra option',
+      node: symbolicMatrixNode({
+        options: { ...validMatrixOptions(), extra: true },
+      }),
+      weights: staticWeights(),
+    },
+    {
+      case: 'an arbitrary expression tree',
+      node: symbolicMatrixNode({
+        options: {
+          ...validMatrixOptions(),
+          expression: { op: 'literal', value: true },
+        },
+      }),
+      weights: staticWeights(),
+    },
+    {
+      case: 'duplicate selected columns',
+      node: symbolicMatrixNode({
+        options: {
+          ...validMatrixOptions(),
+          columns: ['return', 'return'],
+        },
+      }),
+      weights: staticWeights(),
+    },
+    {
+      case: 'names and static-weight width that disagree',
+      node: symbolicMatrixNode({
+        options: { ...validMatrixOptions(), names: ['score', 'hedge'] },
+      }),
+      weights: staticWeights(),
+    },
+    {
+      case: 'the wrong table input name',
+      node: symbolicMatrixNode({
+        inputPorts: [
+          { name: 'table', kind: 'table', required: true, schema: [] },
+          { name: 'weights', kind: 'array', required: true, schema: [] },
+        ],
+      }),
+      weights: staticWeights(),
+    },
+    {
+      case: 'an optional output with the wrong name',
+      node: symbolicMatrixNode({
+        outputPorts: [
+          { name: 'result', kind: 'table', required: false, schema: [] },
+        ],
+      }),
+      weights: staticWeights(),
+    },
+    {
+      case: 'an extra input port',
+      node: symbolicMatrixNode({
+        inputPorts: [
+          { name: 'input', kind: 'table', required: true, schema: [] },
+          { name: 'weights', kind: 'array', required: true, schema: [] },
+          { name: 'side', kind: 'table', required: false, schema: [] },
+        ],
+      }),
+      weights: staticWeights(),
+    },
+  ])('does not infer copy facts for $case', ({ node, weights }) => {
+    const project = projectWith(node, { static_inputs: [weights] });
+
+    expect(inspectLoweredNode(project, node).copyBoundaries).toEqual([]);
   });
 
   it('does not invent lifecycle or copy facts for an arbitrary external provider', () => {
@@ -117,6 +200,27 @@ describe('lowered ProjectDocument inspection', () => {
       'unknown · provider watermark contract not encoded',
     );
     expect(inspection.copyBoundaries).toEqual([]);
+  });
+
+  it('sorts serialized expression keys by locale-independent code points', () => {
+    const node: NodeConfig = {
+      id: 'serialized_expression',
+      input_ports: [],
+      output_ports: [],
+      operator: {
+        kind: 'external',
+        provider: 'custom',
+        name: 'serialized',
+        version: '1',
+        options: {
+          expression: { 'é': 4, z: 2, A: 1, 'ä': 3 },
+        },
+      },
+    };
+
+    expect(inspectLoweredNode(projectWith(node), node).sourceExpressions).toEqual([
+      '{"A":1,"z":2,"ä":3,"é":4}',
+    ]);
   });
 
   it('explains rolling state and watermark bounds from the lowered node', () => {

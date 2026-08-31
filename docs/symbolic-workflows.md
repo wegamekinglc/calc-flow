@@ -130,10 +130,11 @@ shows a **Lowered project inspection** section derived from that document:
 - table/array, host/device, static-placement, and result-attachment copy
   boundaries.
 
-Copy-boundary facts are shown only for the built-in
-`numpy:symbolic_matrix@1` and `jax:symbolic_matrix@1` document shape. Arbitrary
-external providers can attach different semantics to similarly named options,
-so Studio does not infer lifecycle or copy facts for them.
+Copy-boundary facts are shown only for the recognized direct-matmul document
+shape emitted for the built-in `numpy:symbolic_matrix@1` and
+`jax:symbolic_matrix@1` providers. Arbitrary external providers and unrecognized
+or extended option shapes can attach different semantics to similarly named
+fields, so Studio does not infer lifecycle or copy facts for them.
 
 The section is an inspector, not a compiler. It does not reconstruct the
 original Python expression objects, execute Python callables, or infer facts
