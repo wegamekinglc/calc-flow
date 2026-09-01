@@ -76,6 +76,31 @@ lowered rolling or cross-section node remains the only implementation of its
 state and watermark rules; the streaming runner checkpoints that native state
 using the ordinary project-v3 recovery contract.
 
+## Join two symbolic streams
+
+[`12_symbolic_stream_join.py`](../examples/12_symbolic_stream_join.py)
+declares authorization and payment inputs, joins equal account keys inside
+inclusive event-time bounds, and derives a row-local amount check from the
+prefixed output fields. It analyzes and compiles in stream mode, then runs the
+same immutable plan with two independently segmented sources:
+
+```bash
+uv run python examples/12_symbolic_stream_join.py
+```
+
+`table.stream_join` requires the existing public `JoinTimeBounds` and
+`JoinStateLimits`; no symbolic copy of those configuration types exists. Both
+inputs declare exact schemas plus event-time, entity, and sequence ordering.
+The compiler lowers one native `stream_join@1`, so its watermarks, state
+eviction, match ordering, metrics, checkpoint v1 state, and recovery rules are
+the same ones used by `PipelineBuilder.stream_join`.
+
+One SCE-17 program may share one join across several stateless downstream
+table branches. Batch compilation, multiple or nested joins, unrelated output
+branches, and stateful post-join work fail during analysis or lowering. This
+keeps the joined output from silently acquiring invented entity, sequence, or
+event-time facts.
+
 ## Use static matrices with NumPy or JAX
 
 [`11_symbolic_static_matrix.py`](../examples/11_symbolic_static_matrix.py)

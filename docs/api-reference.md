@@ -312,12 +312,12 @@ caller-owned sequences and mappings.
 | `Field(name, data_type, nullable=True)`                                       | One exact table field declaration                                                                                    |
 | `rows(size)` / `duration(micros)`                                             | Row-count and exact-microsecond rolling frames                                                                       |
 | `exact_time(...)` / `event_time_bucket(...)`                                  | Cross-section group declarations                                                                                     |
-| `row` / `ts` / `cs` / `table` / `linalg` / `window`                           | Namespace functions over expressions; `ts` includes durable EWMA/EMA and composed MACD                               |
+| `row` / `ts` / `cs` / `table` / `linalg` / `window`                           | Namespace functions; `ts` includes durable EWMA/EMA and MACD, while `table` includes bounded stream join             |
 | `FeatureSet(features=())` / `.with_feature(name, value)`                      | Ordered uniquely named column expressions                                                                            |
 | `TableExpr.with_columns(features)`                                            | Append a feature set as derived columns                                                                              |
 | `Program(name, *, inputs=(), outputs=())`                                     | Declared inputs and outputs with the runtime-independent v1 fingerprint                                              |
 | `Program.analyze(runtime, *, mode)` / `.explain(runtime, *, mode)`            | Static analysis plus deterministic optimization, state, copy-boundary, and provider-cost fact rendering              |
-| `Program.compile_batch(runtime)` / `.compile_stream(runtime, *, ...)`         | Optimize and cache supported row-local, rolling, cross-section, and symbolic matrix strict project-v3 plans          |
+| `Program.compile_batch(runtime)` / `.compile_stream(runtime, *, ...)`         | Optimize and cache supported row-local, stateful, matrix, and bounded join strict project-v3 plans                   |
 | `AnalysisIssue` / `AnalysisResult`                                            | Immutable findings with stable output/input-rooted paths                                                             |
 
 Structural identity uses `identical()`; public comparison operators build

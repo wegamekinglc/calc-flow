@@ -206,9 +206,10 @@ covariance/correlation pairs — and the `cs` cross-section declarations —
 rank, percentile, demean, z-score, winsorize, top/bottom selection, and
 mean-fill — plus an explicit `linalg.from_columns` → fused elementwise →
 static-weight `linalg.matmul` → `table.attach_columns` matrix segment into the
-same strict project-v3
-execution plans, and execution remains owned by the execution plans and
-runners above.
+same strict project-v3 execution plans. In stream mode, one
+`table.stream_join` may also lower to the existing bounded native inner join
+and fan out into stateless table branches. Execution remains owned by the
+execution plans and runners above.
 
 Every `Program` carries a runtime-independent v1 fingerprint over its
 declaration graph. `Program.analyze(runtime, mode=...)` verifies the program

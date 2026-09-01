@@ -467,6 +467,8 @@ class _Analyzer:
             return self._with_columns_table(node, path)
         if name == "attach_columns":
             return self._attach_columns_table(node, path)
+        if name == "stream_join":
+            return self._stream_join_table(node, path)
         if name in ("window_tumbling", "window_hopping"):
             return self._window_table(node, path)
         self.issue(
@@ -594,6 +596,157 @@ class _Analyzer:
             child.sequence_by,
         )
 
+    def _stream_join_table(self, node: Node, path: str, /) -> TableFacts:
+        role = f"{path}.stream_join"
+        left = self.table(node.args[0], f"{role}.left")
+        right = self.table(node.args[1], f"{role}.right")
+        if self._mode != "stream":
+            self.issue(
+                role,
+                "unsupported_mode",
+                "symbolic stream_join is available only in stream mode",
+            )
+        self._stream_join_side(left, "left", role)
+        self._stream_join_side(right, "right", role)
+        self._stream_join_event_time(
+            left,
+            _cstr(node.attr("left_event_time")),
+            f"{role}.left_event_time",
+        )
+        self._stream_join_event_time(
+            right,
+            _cstr(node.attr("right_event_time")),
+            f"{role}.right_event_time",
+        )
+        self._stream_join_keys(node, left, right, role)
+        left_prefix = _cstr(node.attr("left_prefix")) or "left"
+        right_prefix = _cstr(node.attr("right_prefix")) or "right"
+        output_schema = self._stream_join_schema(
+            left,
+            right,
+            left_prefix,
+            right_prefix,
+        )
+        return TableFacts(
+            output_schema,
+            node.digest,
+            left.state | right.state | frozenset({"stream_join"}),
+            None,
+            (),
+            (),
+        )
+
+    def _stream_join_side(
+        self, facts: TableFacts, side_name: str, role: str, /
+    ) -> None:
+        if "stream_join" in facts.state:
+            self.issue(
+                f"{role}.{side_name}",
+                "capability_mismatch",
+                "nested symbolic stream joins are not supported in SCE-17",
+            )
+        if facts.lineage is not None:
+            self._temporal_lineages.add(facts.lineage)
+
+    @staticmethod
+    def _stream_join_schema(
+        left: TableFacts,
+        right: TableFacts,
+        left_prefix: str,
+        right_prefix: str,
+        /,
+    ) -> tuple[Field, ...]:
+        left_fields = tuple(
+            Field(f"{left_prefix}__{field.name}", field.data_type, field.nullable)
+            for field in left.schema
+        )
+        right_fields = tuple(
+            Field(f"{right_prefix}__{field.name}", field.data_type, field.nullable)
+            for field in right.schema
+        )
+        return left_fields + right_fields
+
+    def _stream_join_event_time(
+        self,
+        table: TableFacts,
+        field_name: str | None,
+        path: str,
+        /,
+    ) -> None:
+        field = next(
+            (field for field in table.schema if field.name == field_name),
+            None,
+        )
+        if field is None:
+            self.issue(
+                path,
+                "unresolved_type",
+                f"unknown event-time field {field_name!r} in the joined input schema",
+            )
+        elif field.data_type != _EVENT_TIME_TYPE or field.nullable:
+            self.issue(
+                path,
+                "ordering_required",
+                "join event time must be a non-null timestamp[us, UTC] field",
+            )
+
+    def _stream_join_keys(
+        self,
+        node: Node,
+        left: TableFacts,
+        right: TableFacts,
+        role: str,
+        /,
+    ) -> None:
+        left_by_name = {field.name: field for field in left.schema}
+        right_by_name = {field.name: field for field in right.schema}
+        left_keys = _cstr_seq(node.attr("left_keys"))
+        right_keys = _cstr_seq(node.attr("right_keys"))
+        for index, (left_name, right_name) in enumerate(
+            zip(left_keys, right_keys, strict=True)
+        ):
+            self._stream_join_key_pair(
+                index,
+                left_name,
+                right_name,
+                left_by_name.get(left_name),
+                right_by_name.get(right_name),
+                role,
+            )
+
+    def _stream_join_key_pair(
+        self,
+        index: int,
+        left_name: str,
+        right_name: str,
+        left_field: Field | None,
+        right_field: Field | None,
+        role: str,
+        /,
+    ) -> None:
+        if left_field is None:
+            self.issue(
+                f"{role}.left_keys[{index}]",
+                "unresolved_type",
+                f"unknown join key {left_name!r} in the left schema",
+            )
+        if right_field is None:
+            self.issue(
+                f"{role}.right_keys[{index}]",
+                "unresolved_type",
+                f"unknown join key {right_name!r} in the right schema",
+            )
+        if any((left_field is None, right_field is None)):
+            return
+        if left_field.data_type == right_field.data_type:
+            return
+        self.issue(
+            f"{role}.right_keys[{index}]",
+            "schema_mismatch",
+            f"right join key type {right_field.data_type!r} does not match"
+            f" left type {left_field.data_type!r}",
+        )
+
     def _attach_lineage_check(
         self, array: ArrayFacts, child: TableFacts, path: str, /
     ) -> None:
@@ -650,6 +803,13 @@ class _Analyzer:
 
     def _window_table(self, node: Node, path: str, /) -> TableFacts:
         child = self.table(node.args[0], f"{path}.{node.op.name}.value")
+        if "stream_join" in child.state:
+            self.issue(
+                f"{path}.{node.op.name}.value",
+                "capability_mismatch",
+                "event windows after a symbolic stream join require an explicit"
+                " post-join ordering contract",
+            )
         if child.lineage is not None:
             self._temporal_lineages.add(child.lineage)
         by_name = {field.name: field for field in child.schema}
