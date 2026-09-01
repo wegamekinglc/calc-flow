@@ -78,7 +78,7 @@ existing shape:
     "right_keys": ["account_id"],
     "left_event_time": "authorized_at",
     "right_event_time": "paid_at",
-    "bounds": {"before_micros": 300000000, "after_micros": 30000000},
+    "bounds": {"before_micros": 5000000, "after_micros": 2000000},
     "limits": {
       "max_state_rows_per_side": 100000,
       "max_state_bytes_per_side": 134217728,
