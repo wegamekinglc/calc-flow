@@ -1165,6 +1165,28 @@ export interface components {
                      */
                     primitive_version: number;
                 } | {
+                    /** @description Numeric input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "ewma";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_periods: number;
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                    /**
+                     * Format: uint64
+                     * @description Positive exponential span.
+                     */
+                    span: number;
+                } | {
                     /** @description Row-count frame. */
                     frame: components["schemas"]["ProjectCreateRequest"]["$defs"]["RollingFrameSpec"];
                     /** @description Input column name. */
@@ -1385,8 +1407,9 @@ export interface components {
                     sequence_by: string[];
                     /**
                      * Format: uint32
-                     * @description Durable state-layout version; must equal
-                     *     [`ROLLING_STATE_LAYOUT_VERSION`].
+                     * @description Durable state-layout version. Existing primitives use
+                     *     [`ROLLING_STATE_LAYOUT_VERSION`]; EWMA requires
+                     *     [`ROLLING_EWMA_STATE_LAYOUT_VERSION`].
                      */
                     state_layout_version: number;
                     /** @description Frozen null/NaN value policy. */
@@ -2138,6 +2161,28 @@ export interface components {
                      */
                     primitive_version: number;
                 } | {
+                    /** @description Numeric input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "ewma";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_periods: number;
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                    /**
+                     * Format: uint64
+                     * @description Positive exponential span.
+                     */
+                    span: number;
+                } | {
                     /** @description Row-count frame. */
                     frame: components["schemas"]["ProjectDocument"]["$defs"]["RollingFrameSpec"];
                     /** @description Input column name. */
@@ -2358,8 +2403,9 @@ export interface components {
                     sequence_by: string[];
                     /**
                      * Format: uint32
-                     * @description Durable state-layout version; must equal
-                     *     [`ROLLING_STATE_LAYOUT_VERSION`].
+                     * @description Durable state-layout version. Existing primitives use
+                     *     [`ROLLING_STATE_LAYOUT_VERSION`]; EWMA requires
+                     *     [`ROLLING_EWMA_STATE_LAYOUT_VERSION`].
                      */
                     state_layout_version: number;
                     /** @description Frozen null/NaN value policy. */
