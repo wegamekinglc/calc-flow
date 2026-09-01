@@ -7,8 +7,8 @@
 > **Historical baseline:** `main@f6b8a6f90b7a978de1976f5a163ea689b989caee`
 > after PR #166.
 >
-> **Implementation snapshot:** The SCE-01 through SCE-15 milestone changes are
-> merged through `main@94b9f6e191b91f8e4c9a6722846ce227e1dabcd3` on
+> **Implementation snapshot:** The SCE-01 through SCE-16 milestone changes are
+> merged through `main@0bac2b01cf4ea9793859976bfe4ecfe8074581af` on
 > 2026-09-01. Follow-up hardening now lowers stateful expressions as a
 > deterministic innermost-first DAG: row-local operands materialize before
 > rolling or cross-section state, rolling output may feed a later rolling
@@ -104,7 +104,7 @@ is deleted after the atomic cutover; it is not a permanent release branch.
 | SCE-11–SCE-13         | merged      | static/provider/matrix through `bde42be`                             |
 | SCE-14                | merged      | optimizer, explain, and cache `5fd256d`                              |
 | SCE-15                | merged      | Studio, docs, and release integration `94b9f6e`                      |
-| SCE-16                | implemented | EWMA contract, rolling layout v2, and MACD composition               |
+| SCE-16                | merged      | EWMA contract, layout v2, and MACD `0bac2b0` (#221)                   |
 
 This table records implementation history rather than changing the frozen
 semantics below. Later correctness or composability follow-ups receive their
