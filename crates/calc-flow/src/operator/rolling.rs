@@ -15,7 +15,7 @@ use std::{
 
 use async_trait::async_trait;
 use datafusion::arrow::{
-    array::{ArrayRef, Float64Array, UInt8Array, UInt64Array, new_null_array},
+    array::{Array, ArrayRef, Float64Array, UInt8Array, UInt64Array, new_null_array},
     datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit},
     ipc::{
         convert::IpcSchemaEncoder,
@@ -1412,12 +1412,12 @@ fn decode_state_segment(
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        let position = positions.iter().nth(row_index).flatten();
+        let position = (!positions.is_null(row_index)).then(|| positions.value(row_index));
         let ewma = match (ewma_groups, ewma_counts, ewma_values) {
             (Some(groups), Some(counts), Some(values)) => match (
-                groups.iter().nth(row_index).flatten(),
-                counts.iter().nth(row_index).flatten(),
-                values.iter().nth(row_index).flatten(),
+                (!groups.is_null(row_index)).then(|| groups.value(row_index)),
+                (!counts.is_null(row_index)).then(|| counts.value(row_index)),
+                (!values.is_null(row_index)).then(|| values.value(row_index)),
             ) {
                 (Some(group), Some(count), Some(value)) => Some((group, count, value)),
                 (None, None, None) => None,
