@@ -15,7 +15,7 @@ use std::{
 
 use async_trait::async_trait;
 use datafusion::arrow::{
-    array::{ArrayRef, UInt8Array, UInt64Array, new_null_array},
+    array::{ArrayRef, Float64Array, UInt8Array, UInt64Array, new_null_array},
     datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit},
     ipc::{
         convert::IpcSchemaEncoder,
@@ -46,6 +46,8 @@ use super::{
 pub const ROLLING_CONFIGURATION_VERSION: u32 = 1;
 /// Durable state-layout version of the first rolling operator release.
 pub const ROLLING_STATE_LAYOUT_VERSION: u32 = 1;
+/// Durable state-layout version that persists exponential accumulators.
+pub const ROLLING_EWMA_STATE_LAYOUT_VERSION: u32 = 2;
 
 /// Transaction scope of the `error` late-row policy (API note section 3.2).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -154,6 +156,22 @@ pub enum RollingOutputSpec {
         /// Positive lag distance in rows.
         #[schemars(range(min = 1))]
         periods: u64,
+    },
+    /// Unadjusted exponentially weighted moving average with
+    /// `alpha = 2 / (span + 1)`.
+    Ewma {
+        /// Primitive version; must equal `1`.
+        primitive_version: u32,
+        /// Numeric input column name.
+        input: String,
+        /// Output column name.
+        output: String,
+        /// Positive exponential span.
+        #[schemars(range(min = 1))]
+        span: u64,
+        /// Minimum valid samples for a non-null result.
+        #[schemars(range(min = 1))]
+        min_periods: u64,
     },
     /// Valid (non-null, non-NaN) sample count over the frame (SCE-00 D3.2).
     Count {
@@ -312,6 +330,9 @@ impl RollingOutputSpec {
             | Self::Delta {
                 primitive_version, ..
             }
+            | Self::Ewma {
+                primitive_version, ..
+            }
             | Self::Count {
                 primitive_version, ..
             }
@@ -347,6 +368,7 @@ impl RollingOutputSpec {
         match self {
             Self::Lag { input, .. }
             | Self::Delta { input, .. }
+            | Self::Ewma { input, .. }
             | Self::Count { input, .. }
             | Self::Sum { input, .. }
             | Self::Mean { input, .. }
@@ -370,6 +392,7 @@ impl RollingOutputSpec {
         match self {
             Self::Lag { output, .. }
             | Self::Delta { output, .. }
+            | Self::Ewma { output, .. }
             | Self::Count { output, .. }
             | Self::Sum { output, .. }
             | Self::Mean { output, .. }
@@ -387,6 +410,7 @@ impl RollingOutputSpec {
     const fn retained_rows(&self) -> u64 {
         match self {
             Self::Lag { periods, .. } | Self::Delta { periods, .. } => *periods,
+            Self::Ewma { .. } => 0,
             Self::Count { frame, .. }
             | Self::Sum { frame, .. }
             | Self::Mean { frame, .. }
@@ -403,7 +427,7 @@ impl RollingOutputSpec {
     /// retention.
     const fn retained_micros(&self) -> Option<u64> {
         match self {
-            Self::Lag { .. } | Self::Delta { .. } => None,
+            Self::Lag { .. } | Self::Delta { .. } | Self::Ewma { .. } => None,
             Self::Count { frame, .. }
             | Self::Sum { frame, .. }
             | Self::Mean { frame, .. }
@@ -424,7 +448,7 @@ impl RollingOutputSpec {
 
     const fn frame(&self) -> Option<RollingFrameSpec> {
         match self {
-            Self::Lag { .. } | Self::Delta { .. } => None,
+            Self::Lag { .. } | Self::Delta { .. } | Self::Ewma { .. } => None,
             Self::Count { frame, .. }
             | Self::Sum { frame, .. }
             | Self::Mean { frame, .. }
@@ -440,7 +464,8 @@ impl RollingOutputSpec {
     const fn min_periods(&self) -> Option<u64> {
         match self {
             Self::Lag { .. } | Self::Delta { .. } => None,
-            Self::Count { min_periods, .. }
+            Self::Ewma { min_periods, .. }
+            | Self::Count { min_periods, .. }
             | Self::Sum { min_periods, .. }
             | Self::Mean { min_periods, .. }
             | Self::Variance { min_periods, .. }
@@ -461,6 +486,13 @@ impl RollingOutputSpec {
             _ => None,
         }
     }
+
+    const fn span(&self) -> Option<u64> {
+        match self {
+            Self::Ewma { span, .. } => Some(*span),
+            _ => None,
+        }
+    }
 }
 
 /// Data-only declaration of one native row-window rolling operation.
@@ -470,8 +502,9 @@ pub struct RollingSpec {
     /// Semantic configuration version; must equal
     /// [`ROLLING_CONFIGURATION_VERSION`].
     pub configuration_version: u32,
-    /// Durable state-layout version; must equal
-    /// [`ROLLING_STATE_LAYOUT_VERSION`].
+    /// Durable state-layout version. Existing primitives use
+    /// [`ROLLING_STATE_LAYOUT_VERSION`]; EWMA requires
+    /// [`ROLLING_EWMA_STATE_LAYOUT_VERSION`].
     pub state_layout_version: u32,
     /// Ordered non-empty entity partition key.
     pub partition_by: Vec<String>,
@@ -802,7 +835,7 @@ impl StreamOperator for RollingOperator {
         let inventory = StateInventory::new(descriptor.into_iter().collect())
             .map_err(|error| checkpoint_mismatch(error.to_string()))?;
         let metadata = RollingSnapshotMetadata {
-            state_layout_version: ROLLING_STATE_LAYOUT_VERSION,
+            state_layout_version: self.compiled.state_layout_version,
             configuration_hash: self.compiled.configuration_hash.clone(),
             state_schema_fingerprint: self.compiled.state_schema_fingerprint.clone(),
             epoch,
@@ -1037,7 +1070,22 @@ impl RollingOperator {
             .values()
             .map(|state| state.rows.len())
             .sum::<usize>()
-            + self.state.buffer.len();
+            + self.state.buffer.len()
+            + self
+                .state
+                .histories
+                .by_entity
+                .values()
+                .map(|state| {
+                    state
+                        .windows
+                        .iter()
+                        .filter(|window| {
+                            matches!(window, WindowState::Ewma(state) if state.valid_count > 0)
+                        })
+                        .count()
+                })
+                .sum::<usize>();
         if row_count == 0 {
             return Ok(None);
         }
@@ -1081,7 +1129,7 @@ impl RollingOperator {
             .map_err(|_| internal_error("rolling segment length does not fit u64"))?;
         Ok(SegmentDescriptor {
             kind: SegmentKind::Base,
-            state_layout_version: ROLLING_STATE_LAYOUT_VERSION,
+            state_layout_version: self.compiled.state_layout_version,
             schema_fingerprint: self.compiled.state_schema_fingerprint.clone(),
             handle: StateHandle::new(
                 operator_id,
@@ -1124,7 +1172,7 @@ struct DecodedRollingState {
 /// per-entity history position.
 type StateRowOrderKey = (u8, Vec<Option<KeyValue>>, RowIdentity, Option<u64>);
 
-fn state_fields(input_schema: &Schema) -> Vec<Field> {
+fn state_fields(input_schema: &Schema, state_layout_version: u32) -> Vec<Field> {
     let mut fields = vec![
         Field::new("_state_kind", DataType::UInt8, false),
         Field::new("_entity_position", DataType::UInt64, true),
@@ -1135,11 +1183,18 @@ fn state_fields(input_schema: &Schema) -> Vec<Field> {
             .iter()
             .map(|field| Field::new(field.name(), field.data_type().clone(), true)),
     );
+    if state_layout_version == ROLLING_EWMA_STATE_LAYOUT_VERSION {
+        fields.extend([
+            Field::new("_ewma_group", DataType::UInt64, true),
+            Field::new("_ewma_valid_count", DataType::UInt64, true),
+            Field::new("_ewma_value", DataType::Float64, true),
+        ]);
+    }
     fields
 }
 
-fn state_schema_fingerprint(input_schema: &Schema) -> String {
-    let schema = Schema::new(state_fields(input_schema));
+fn state_schema_fingerprint(input_schema: &Schema, state_layout_version: u32) -> String {
+    let schema = Schema::new(state_fields(input_schema, state_layout_version));
     let mut dictionary_tracker = DictionaryTracker::new(true);
     let encoded = IpcSchemaEncoder::new()
         .with_dictionary_tracker(&mut dictionary_tracker)
@@ -1154,11 +1209,11 @@ fn state_schema(
     operator_id: &str,
 ) -> Schema {
     Schema::new_with_metadata(
-        state_fields(input_schema),
+        state_fields(input_schema, compiled.state_layout_version),
         HashMap::from([
             (
                 "calc_flow.state_layout_version".into(),
-                ROLLING_STATE_LAYOUT_VERSION.to_string(),
+                compiled.state_layout_version.to_string(),
             ),
             (
                 "calc_flow.pipeline_fingerprint".into(),
@@ -1192,22 +1247,52 @@ fn encode_state_segment(
     let mut kinds = Vec::new();
     let mut positions: Vec<Option<u64>> = Vec::new();
     let mut columns: Vec<Vec<Option<ScalarValue>>> = vec![Vec::new(); width];
-    let mut push_row = |kind: u8, position: Option<u64>, values: &[ScalarValue]| {
-        kinds.push(kind);
-        positions.push(position);
-        for (index, column) in columns.iter_mut().enumerate() {
-            column.push(values.get(index).cloned());
-        }
-    };
+    let mut ewma_groups = Vec::new();
+    let mut ewma_counts = Vec::new();
+    let mut ewma_values = Vec::new();
+    let mut push_row =
+        |kind: u8, position: Option<u64>, values: &[ScalarValue], ewma: Option<(u64, u64, f64)>| {
+            kinds.push(kind);
+            positions.push(position);
+            for (index, column) in columns.iter_mut().enumerate() {
+                column.push(values.get(index).cloned());
+            }
+            if compiled.state_layout_version == ROLLING_EWMA_STATE_LAYOUT_VERSION {
+                ewma_groups.push(ewma.map(|state| state.0));
+                ewma_counts.push(ewma.map(|state| state.1));
+                ewma_values.push(ewma.map(|state| state.2));
+            }
+        };
     for state in histories.by_entity.values() {
         for (position, values) in state.rows.iter().enumerate() {
             let position = u64::try_from(position)
                 .map_err(|_| internal_error("rolling history position does not fit u64"))?;
-            push_row(0, Some(position), values);
+            push_row(0, Some(position), values, None);
         }
     }
     for row in buffer.values() {
-        push_row(1, None, &row.values);
+        push_row(1, None, &row.values, None);
+    }
+    if compiled.state_layout_version == ROLLING_EWMA_STATE_LAYOUT_VERSION {
+        for (entity, state) in &histories.by_entity {
+            let values = ewma_entity_values(entity, input_schema, compiled)?;
+            for (group, window) in state.windows.iter().enumerate() {
+                let WindowState::Ewma(accumulator) = window else {
+                    continue;
+                };
+                if accumulator.valid_count == 0 {
+                    continue;
+                }
+                let group = u64::try_from(group)
+                    .map_err(|_| internal_error("rolling EWMA group does not fit u64"))?;
+                push_row(
+                    2,
+                    None,
+                    &values,
+                    Some((group, accumulator.valid_count, accumulator.value)),
+                );
+            }
+        }
     }
     let schema = state_schema(input_schema, compiled, pipeline_fingerprint, operator_id);
     let mut arrays: Vec<ArrayRef> = vec![
@@ -1223,6 +1308,13 @@ fn encode_state_segment(
             )
             .map_err(|error| state_format(format!("rolling state array failed: {error}")))?,
         );
+    }
+    if compiled.state_layout_version == ROLLING_EWMA_STATE_LAYOUT_VERSION {
+        arrays.extend([
+            Arc::new(UInt64Array::from(ewma_groups)) as ArrayRef,
+            Arc::new(UInt64Array::from(ewma_counts)) as ArrayRef,
+            Arc::new(Float64Array::from(ewma_values)) as ArrayRef,
+        ]);
     }
     let record = RecordBatch::try_new(Arc::new(schema.clone()), arrays)
         .map_err(|error| state_format(format!("rolling state batch is invalid: {error}")))?;
@@ -1243,6 +1335,36 @@ fn encode_state_segment(
 // State decode intentionally validates header metadata, shape, deterministic
 // order, and per-row invariants before any state is installed.
 // #lizard forgives
+fn ewma_state_arrays(
+    record: &RecordBatch,
+    width: usize,
+    enabled: bool,
+) -> Result<(
+    Option<&UInt64Array>,
+    Option<&UInt64Array>,
+    Option<&Float64Array>,
+)> {
+    if !enabled {
+        return Ok((None, None, None));
+    }
+    let group = record
+        .column(width + 2)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .ok_or_else(|| state_format("rolling EWMA group column has the wrong type".to_owned()))?;
+    let count = record
+        .column(width + 3)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .ok_or_else(|| state_format("rolling EWMA count column has the wrong type".to_owned()))?;
+    let value = record
+        .column(width + 4)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .ok_or_else(|| state_format("rolling EWMA value column has the wrong type".to_owned()))?;
+    Ok((Some(group), Some(count), Some(value)))
+}
+
 fn decode_state_segment(
     bytes: &[u8],
     input_schema: &Schema,
@@ -1259,7 +1381,9 @@ fn decode_state_segment(
         state_format("rolling state segment must contain exactly one record batch".to_owned())
     })?;
     let width = input_schema.fields().len();
-    if record.num_columns() != width + 2 {
+    let exponential_width =
+        usize::from(compiled.state_layout_version == ROLLING_EWMA_STATE_LAYOUT_VERSION) * 3;
+    if record.num_columns() != width + 2 + exponential_width {
         return Err(state_format(
             "rolling state segment column count does not match the state schema".to_owned(),
         ));
@@ -1276,10 +1400,12 @@ fn decode_state_segment(
         .ok_or_else(|| {
             state_format("rolling state position column has the wrong type".to_owned())
         })?;
+    let (ewma_groups, ewma_counts, ewma_values) =
+        ewma_state_arrays(&record, width, exponential_width > 0)?;
     let mut decoded = DecodedRollingState::default();
     let mut previous: Option<StateRowOrderKey> = None;
     for row_index in 0..record.num_rows() {
-        let values = (2..record.num_columns())
+        let values = (2..width + 2)
             .map(|index| {
                 ScalarValue::try_from_array(record.column(index), row_index).map_err(|error| {
                     state_format(format!("rolling state row could not be read: {error}"))
@@ -1287,10 +1413,28 @@ fn decode_state_segment(
             })
             .collect::<Result<Vec<_>>>()?;
         let position = positions.iter().nth(row_index).flatten();
+        let ewma = match (ewma_groups, ewma_counts, ewma_values) {
+            (Some(groups), Some(counts), Some(values)) => match (
+                groups.iter().nth(row_index).flatten(),
+                counts.iter().nth(row_index).flatten(),
+                values.iter().nth(row_index).flatten(),
+            ) {
+                (Some(group), Some(count), Some(value)) => Some((group, count, value)),
+                (None, None, None) => None,
+                _ => {
+                    return Err(state_format(
+                        "rolling EWMA state columns are only partially populated".to_owned(),
+                    ));
+                }
+            },
+            (None, None, None) => None,
+            _ => unreachable!("EWMA state arrays are discovered together"),
+        };
         decode_state_row(
             kinds.value(row_index),
             position,
             values,
+            ewma,
             &mut decoded,
             compiled,
             &mut previous,
@@ -1309,7 +1453,7 @@ fn validate_segment_schema_metadata(
     let expected = [
         (
             "calc_flow.state_layout_version",
-            ROLLING_STATE_LAYOUT_VERSION.to_string(),
+            compiled.state_layout_version.to_string(),
         ),
         (
             "calc_flow.pipeline_fingerprint",
@@ -1342,10 +1486,19 @@ fn decode_state_row(
     kind: u8,
     position: Option<u64>,
     values: Vec<ScalarValue>,
+    ewma: Option<(u64, u64, f64)>,
     decoded: &mut DecodedRollingState,
     compiled: &CompiledRollingSpec,
     previous: &mut Option<StateRowOrderKey>,
 ) -> Result<()> {
+    if kind == 2 {
+        return decode_ewma_state_row(position, &values, ewma, decoded, compiled, previous);
+    }
+    if ewma.is_some() {
+        return Err(state_format(
+            "rolling history or buffer row carries EWMA state".to_owned(),
+        ));
+    }
     let row = buffered_row_from_values(values, compiled)?;
     let ordering_key = (
         kind,
@@ -1392,6 +1545,104 @@ fn decode_state_row(
     Ok(())
 }
 
+fn decode_ewma_state_row(
+    position: Option<u64>,
+    values: &[ScalarValue],
+    ewma: Option<(u64, u64, f64)>,
+    decoded: &mut DecodedRollingState,
+    compiled: &CompiledRollingSpec,
+    previous: &mut Option<StateRowOrderKey>,
+) -> Result<()> {
+    if compiled.state_layout_version != ROLLING_EWMA_STATE_LAYOUT_VERSION {
+        return Err(state_format(
+            "rolling layout v1 contains an EWMA state row".to_owned(),
+        ));
+    }
+    if position.is_some() {
+        return Err(state_format(
+            "rolling EWMA state row carries a history position".to_owned(),
+        ));
+    }
+    let (group, valid_count, value) = ewma.ok_or_else(|| {
+        state_format("rolling EWMA state row is missing its accumulator".to_owned())
+    })?;
+    if valid_count == 0 {
+        return Err(state_format(
+            "rolling EWMA state row has a zero valid count".to_owned(),
+        ));
+    }
+    let group_index = usize::try_from(group)
+        .map_err(|_| state_format("rolling EWMA group does not fit usize".to_owned()))?;
+    if !matches!(
+        compiled.window_groups.get(group_index),
+        Some(CompiledWindowGroup::Ewma { .. })
+    ) {
+        return Err(state_format(
+            "rolling EWMA state row references a non-EWMA group".to_owned(),
+        ));
+    }
+    let entity = ewma_entity_from_values(values, compiled)?;
+    let ordering_key = (
+        2,
+        entity.clone(),
+        RowIdentity {
+            event_time: 0,
+            entity: entity.clone(),
+            sequence: Vec::new(),
+        },
+        Some(group),
+    );
+    if let Some(prior) = previous.as_ref()
+        && !state_rows_in_order(prior, &ordering_key)
+    {
+        return Err(state_format(
+            "rolling state segment rows are not in deterministic key order".to_owned(),
+        ));
+    }
+    let state = decoded
+        .histories
+        .by_entity
+        .entry(entity)
+        .or_insert_with(|| EntityRollingState::fresh(compiled));
+    if state.windows.is_empty() {
+        state.windows = fresh_windows(compiled);
+    }
+    let WindowState::Ewma(accumulator) = &mut state.windows[group_index] else {
+        unreachable!("validated EWMA group has EWMA state")
+    };
+    if accumulator.valid_count != 0 {
+        return Err(state_format(
+            "rolling state segment contains a duplicate EWMA accumulator".to_owned(),
+        ));
+    }
+    *accumulator = EwmaAccumulator { valid_count, value };
+    *previous = Some(ordering_key);
+    Ok(())
+}
+
+fn ewma_entity_from_values(
+    values: &[ScalarValue],
+    compiled: &CompiledRollingSpec,
+) -> Result<Vec<Option<KeyValue>>> {
+    for (index, value) in values.iter().enumerate() {
+        if !compiled
+            .partition_columns
+            .iter()
+            .any(|column| column.index == index)
+            && !value.is_null()
+        {
+            return Err(state_format(
+                "rolling EWMA state row populates a non-entity field".to_owned(),
+            ));
+        }
+    }
+    compiled
+        .partition_columns
+        .iter()
+        .map(|column| KeyValue::from_nullable_scalar(&values[column.index], "rolling EWMA"))
+        .collect()
+}
+
 fn state_rows_in_order(prior: &StateRowOrderKey, current: &StateRowOrderKey) -> bool {
     if prior.0 != current.0 {
         return prior.0 < current.0;
@@ -1406,7 +1657,13 @@ fn state_rows_in_order(prior: &StateRowOrderKey, current: &StateRowOrderKey) -> 
                 _ => false,
             }
         }
-        _ => prior.2 < current.2,
+        1 => prior.2 < current.2,
+        2 => {
+            prior.1 < current.1
+                || (prior.1 == current.1
+                    && matches!((prior.3, current.3), (Some(left), Some(right)) if left < right))
+        }
+        _ => false,
     }
 }
 
@@ -1477,6 +1734,7 @@ fn rebuild_windows(
     node_id: &str,
 ) -> Result<()> {
     for state in histories.by_entity.values_mut() {
+        let persisted = std::mem::take(&mut state.windows);
         let mut windows = fresh_windows(compiled);
         let last_time = state
             .rows
@@ -1534,6 +1792,11 @@ fn rebuild_windows(
                     }
                     if let CompiledFrame::Duration(micros) = frame {
                         accumulator.expired_through = expired_through_bound(last_time, *micros);
+                    }
+                }
+                CompiledWindowGroup::Ewma { .. } => {
+                    if let Some(WindowState::Ewma(saved)) = persisted.get(group_index) {
+                        windows[group_index] = WindowState::Ewma(*saved);
                     }
                 }
             }
@@ -1665,10 +1928,10 @@ fn validate_snapshot_metadata(
     compiled: &CompiledRollingSpec,
     snapshot: &crate::OperatorStateSnapshot,
 ) -> Result<StateInventory> {
-    if metadata.state_layout_version != ROLLING_STATE_LAYOUT_VERSION {
+    if metadata.state_layout_version != compiled.state_layout_version {
         return Err(checkpoint_mismatch(format!(
             "rolling state layout version {} does not match expected {}",
-            metadata.state_layout_version, ROLLING_STATE_LAYOUT_VERSION
+            metadata.state_layout_version, compiled.state_layout_version
         )));
     }
     if metadata.configuration_hash != compiled.configuration_hash {
@@ -1684,7 +1947,7 @@ fn validate_snapshot_metadata(
     let inventory = StateInventory::new(metadata.segment_inventory.clone())
         .map_err(|error| checkpoint_mismatch(error.to_string()))?;
     for descriptor in inventory.segments() {
-        if descriptor.state_layout_version != ROLLING_STATE_LAYOUT_VERSION
+        if descriptor.state_layout_version != compiled.state_layout_version
             || descriptor.schema_fingerprint != compiled.state_schema_fingerprint
         {
             return Err(checkpoint_mismatch(
@@ -1995,6 +2258,7 @@ fn build_output_record(
 
 #[derive(Clone)]
 struct CompiledRollingSpec {
+    state_layout_version: u32,
     event_time_index: usize,
     partition_columns: Vec<CompiledKeyColumn>,
     sequence_columns: Vec<CompiledKeyColumn>,
@@ -2024,8 +2288,15 @@ struct CompiledRollingOutput {
 enum CompiledEvaluation {
     Lag { periods: u64 },
     Delta { periods: u64 },
+    Ewma(CompiledEwma),
     Aggregate(CompiledAggregate),
     Pair(CompiledPairAggregate),
+}
+
+#[derive(Clone)]
+struct CompiledEwma {
+    group: usize,
+    min_periods: u64,
 }
 
 #[derive(Clone)]
@@ -2094,6 +2365,13 @@ enum CompiledWindowGroup {
         left_index: usize,
         right_index: usize,
         frame: CompiledFrame,
+    },
+    /// Constant-state recursive average shared by outputs on one
+    /// `(input column, span)` key.
+    Ewma {
+        input_index: usize,
+        span: u64,
+        alpha: f64,
     },
 }
 
@@ -2236,6 +2514,71 @@ impl Ord for KeyValue {
     }
 }
 
+fn key_scalar(value: &KeyValue, data_type: &DataType) -> Result<ScalarValue> {
+    let mismatch = || {
+        state_format(format!(
+            "rolling EWMA entity key is incompatible with state type {data_type}"
+        ))
+    };
+    match (value, data_type) {
+        (KeyValue::Boolean(value), DataType::Boolean) => Ok(ScalarValue::Boolean(Some(*value))),
+        (KeyValue::Signed(value), DataType::Int8) => i8::try_from(*value)
+            .map(|value| ScalarValue::Int8(Some(value)))
+            .map_err(|_| mismatch()),
+        (KeyValue::Signed(value), DataType::Int16) => i16::try_from(*value)
+            .map(|value| ScalarValue::Int16(Some(value)))
+            .map_err(|_| mismatch()),
+        (KeyValue::Signed(value), DataType::Int32) => i32::try_from(*value)
+            .map(|value| ScalarValue::Int32(Some(value)))
+            .map_err(|_| mismatch()),
+        (KeyValue::Signed(value), DataType::Int64) => Ok(ScalarValue::Int64(Some(*value))),
+        (KeyValue::Unsigned(value), DataType::UInt8) => u8::try_from(*value)
+            .map(|value| ScalarValue::UInt8(Some(value)))
+            .map_err(|_| mismatch()),
+        (KeyValue::Unsigned(value), DataType::UInt16) => u16::try_from(*value)
+            .map(|value| ScalarValue::UInt16(Some(value)))
+            .map_err(|_| mismatch()),
+        (KeyValue::Unsigned(value), DataType::UInt32) => u32::try_from(*value)
+            .map(|value| ScalarValue::UInt32(Some(value)))
+            .map_err(|_| mismatch()),
+        (KeyValue::Unsigned(value), DataType::UInt64) => Ok(ScalarValue::UInt64(Some(*value))),
+        (KeyValue::Float32(value), DataType::Float32) => Ok(ScalarValue::Float32(Some(*value))),
+        (KeyValue::Float64(value), DataType::Float64) => Ok(ScalarValue::Float64(Some(*value))),
+        (KeyValue::String(value), DataType::Utf8) => Ok(ScalarValue::Utf8(Some(value.clone()))),
+        (KeyValue::String(value), DataType::LargeUtf8) => {
+            Ok(ScalarValue::LargeUtf8(Some(value.clone())))
+        }
+        (KeyValue::Date32(value), DataType::Date32) => Ok(ScalarValue::Date32(Some(*value))),
+        (KeyValue::Date64(value), DataType::Date64) => Ok(ScalarValue::Date64(Some(*value))),
+        (KeyValue::Timestamp(value), DataType::Timestamp(TimeUnit::Microsecond, timezone)) => Ok(
+            ScalarValue::TimestampMicrosecond(Some(*value), timezone.clone()),
+        ),
+        _ => Err(mismatch()),
+    }
+}
+
+fn ewma_entity_values(
+    entity: &[Option<KeyValue>],
+    input_schema: &Schema,
+    compiled: &CompiledRollingSpec,
+) -> Result<Vec<ScalarValue>> {
+    if entity.len() != compiled.partition_columns.len() {
+        return Err(internal_error("rolling EWMA entity key width mismatch"));
+    }
+    let mut values = input_schema
+        .fields()
+        .iter()
+        .map(|field| typed_null(field.data_type()))
+        .collect::<Vec<_>>();
+    for (value, column) in entity.iter().zip(&compiled.partition_columns) {
+        values[column.index] = match value {
+            Some(value) => key_scalar(value, input_schema.field(column.index).data_type())?,
+            None => typed_null(input_schema.field(column.index).data_type()),
+        };
+    }
+    Ok(values)
+}
+
 /// Canonical row identity `(event_time, entity_key..., sequence_key...)`
 /// (SCE-00 D4).
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -2292,6 +2635,7 @@ enum WindowState {
     Numeric(WindowAccumulator),
     Extrema(ExtremaAccumulator),
     Pair(PairAccumulator),
+    Ewma(EwmaAccumulator),
 }
 
 fn fresh_windows(compiled: &CompiledRollingSpec) -> Vec<WindowState> {
@@ -2306,6 +2650,7 @@ fn fresh_windows(compiled: &CompiledRollingSpec) -> Vec<WindowState> {
                 WindowState::Extrema(ExtremaAccumulator::new(*descending))
             }
             CompiledWindowGroup::Pair { .. } => WindowState::Pair(PairAccumulator::default()),
+            CompiledWindowGroup::Ewma { .. } => WindowState::Ewma(EwmaAccumulator::default()),
         })
         .collect()
 }
@@ -2347,6 +2692,30 @@ struct WindowAccumulator {
     /// accumulator has already expired, kept so each slide removes only the
     /// newly expired prefix (SCE-08). `i128::MIN` while nothing expired.
     expired_through: i128,
+}
+
+/// Constant-state unadjusted exponential average. A zero valid count is the
+/// only unseeded representation; once seeded, the exact IEEE value is durable.
+#[derive(Clone, Copy, Debug, Default)]
+struct EwmaAccumulator {
+    valid_count: u64,
+    value: f64,
+}
+
+impl EwmaAccumulator {
+    fn add(&mut self, sample: &ScalarValue, alpha: f64, node_id: &str) -> Result<()> {
+        let value = float_sample(sample);
+        self.value = if self.valid_count == 0 {
+            value
+        } else {
+            self.value + alpha * (value - self.value)
+        };
+        self.valid_count = self
+            .valid_count
+            .checked_add(1)
+            .ok_or_else(|| operator_error(node_id, "rolling EWMA sample count overflowed"))?;
+        Ok(())
+    }
 }
 
 /// Integer sums accumulate in the wide transient class so the
@@ -3115,34 +3484,15 @@ fn slide_windows(
                 if is_valid_sample(current) {
                     accumulator.add(view.extrema_key(combined, compiled), current.clone());
                 }
-                match frame {
-                    CompiledFrame::Rows(rows) => {
-                        let rows = usize::try_from(*rows).map_err(|_| {
-                            operator_error(node_id, "rolling frame rows do not fit usize")
-                        })?;
-                        if combined >= rows {
-                            let expiring = view.value(combined - rows, *input_index);
-                            if is_valid_sample(expiring) {
-                                accumulator.remove();
-                            }
-                            let leaving = view.extrema_key(combined - rows, compiled);
-                            accumulator.expire_through_key(&leaving);
-                        }
-                    }
-                    CompiledFrame::Duration(micros) => {
-                        let current_time = view.event_time(combined);
-                        let bound = duration_bound(current_time, *micros);
-                        let mut index = view.first_after_bound(accumulator.expired_through);
-                        while index < combined && i128::from(view.event_time(index)) <= bound {
-                            if is_valid_sample(view.value(index, *input_index)) {
-                                accumulator.remove();
-                            }
-                            index += 1;
-                        }
-                        accumulator.expired_through = accumulator.expired_through.max(bound);
-                        accumulator.expire_through_time(bound);
-                    }
-                }
+                expire_extrema(
+                    accumulator,
+                    view,
+                    combined,
+                    *input_index,
+                    *frame,
+                    compiled,
+                    node_id,
+                )?;
             }
             CompiledWindowGroup::Pair {
                 left_index,
@@ -3178,6 +3528,55 @@ fn slide_windows(
                     )?;
                 }
             }
+            CompiledWindowGroup::Ewma {
+                input_index, alpha, ..
+            } => {
+                let current = &view.rows[row_index].values[*input_index];
+                let WindowState::Ewma(accumulator) = &mut windows[group_index] else {
+                    return Err(internal_error("rolling EWMA group has the wrong state"));
+                };
+                if is_valid_sample(current) {
+                    accumulator.add(current, *alpha, node_id)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn expire_extrema(
+    accumulator: &mut ExtremaAccumulator,
+    view: &EntityRowView<'_>,
+    combined: usize,
+    input_index: usize,
+    frame: CompiledFrame,
+    compiled: &CompiledRollingSpec,
+    node_id: &str,
+) -> Result<()> {
+    match frame {
+        CompiledFrame::Rows(rows) => {
+            let rows = usize::try_from(rows)
+                .map_err(|_| operator_error(node_id, "rolling frame rows do not fit usize"))?;
+            if combined >= rows {
+                let expiring = view.value(combined - rows, input_index);
+                if is_valid_sample(expiring) {
+                    accumulator.remove();
+                }
+                let leaving = view.extrema_key(combined - rows, compiled);
+                accumulator.expire_through_key(&leaving);
+            }
+        }
+        CompiledFrame::Duration(micros) => {
+            let bound = duration_bound(view.event_time(combined), micros);
+            let mut index = view.first_after_bound(accumulator.expired_through);
+            while index < combined && i128::from(view.event_time(index)) <= bound {
+                if is_valid_sample(view.value(index, input_index)) {
+                    accumulator.remove();
+                }
+                index += 1;
+            }
+            accumulator.expired_through = accumulator.expired_through.max(bound);
+            accumulator.expire_through_time(bound);
         }
     }
     Ok(())
@@ -3358,6 +3757,9 @@ fn compute_output_value(
         CompiledEvaluation::Aggregate(aggregate) => {
             return evaluate_aggregate(aggregate, windows, output, node_id);
         }
+        CompiledEvaluation::Ewma(ewma) => {
+            return evaluate_ewma(ewma, windows, output);
+        }
         CompiledEvaluation::Pair(aggregate) => {
             return evaluate_pair_aggregate(aggregate, windows, output);
         }
@@ -3385,6 +3787,20 @@ fn compute_output_value(
             &format!("rolling delta failed with checked arithmetic: {error}"),
         )
     })
+}
+
+fn evaluate_ewma(
+    ewma: &CompiledEwma,
+    windows: &[WindowState],
+    output: &CompiledRollingOutput,
+) -> Result<ScalarValue> {
+    let WindowState::Ewma(accumulator) = &windows[ewma.group] else {
+        return Err(internal_error("rolling EWMA output reads a non-EWMA group"));
+    };
+    if accumulator.valid_count < ewma.min_periods {
+        return Ok(typed_null(&output.output_type));
+    }
+    Ok(ScalarValue::Float64(Some(accumulator.value)))
 }
 
 /// Reads one aggregate output from its shared window accumulator: the
@@ -3420,6 +3836,11 @@ fn evaluate_aggregate(
         WindowState::Pair(_) => {
             return Err(internal_error(
                 "rolling pair group serves a numeric aggregate output",
+            ));
+        }
+        WindowState::Ewma(_) => {
+            return Err(internal_error(
+                "rolling EWMA group serves a numeric aggregate output",
             ));
         }
     };
@@ -3540,10 +3961,24 @@ fn validate_arguments(spec: &RollingSpec) -> Result<()> {
             "unsupported rolling configuration version",
         ));
     }
-    if spec.state_layout_version != ROLLING_STATE_LAYOUT_VERSION {
+    if !matches!(
+        spec.state_layout_version,
+        ROLLING_STATE_LAYOUT_VERSION | ROLLING_EWMA_STATE_LAYOUT_VERSION
+    ) {
         return Err(invalid_argument(
             "rolling.state_layout_version",
             "unsupported rolling state layout version",
+        ));
+    }
+    if spec
+        .outputs
+        .iter()
+        .any(|output| matches!(output, RollingOutputSpec::Ewma { .. }))
+        && spec.state_layout_version != ROLLING_EWMA_STATE_LAYOUT_VERSION
+    {
+        return Err(invalid_argument(
+            "rolling.state_layout_version",
+            "EWMA outputs require rolling state layout version 2",
         ));
     }
     validate_key_names("rolling.partition_by", &spec.partition_by)?;
@@ -3591,6 +4026,12 @@ fn validate_outputs(outputs: &[RollingOutputSpec]) -> Result<()> {
                 "unsupported rolling primitive version",
             ));
         }
+        if output.span().is_some_and(|span| span == 0) {
+            return Err(invalid_argument(
+                &format!("{base}.span"),
+                "must be greater than zero",
+            ));
+        }
         if let Some(frame) = output.frame() {
             let zero = match frame {
                 RollingFrameSpec::Rows { size } => size == 0,
@@ -3603,7 +4044,7 @@ fn validate_outputs(outputs: &[RollingOutputSpec]) -> Result<()> {
                 };
                 return Err(invalid_argument(&field, "must be greater than zero"));
             }
-        } else if output.retained_rows() == 0 {
+        } else if output.span().is_none() && output.retained_rows() == 0 {
             return Err(invalid_argument(
                 &format!("{base}.periods"),
                 "must be greater than zero",
@@ -3715,6 +4156,7 @@ fn compile_spec_against_schema(
         .filter_map(RollingOutputSpec::retained_micros)
         .max();
     Ok(CompiledRollingSpec {
+        state_layout_version: spec.state_layout_version,
         event_time_index,
         partition_columns,
         sequence_columns,
@@ -3723,7 +4165,7 @@ fn compile_spec_against_schema(
         max_row_retention,
         max_duration_micros,
         configuration_hash,
-        state_schema_fingerprint: state_schema_fingerprint(input_schema),
+        state_schema_fingerprint: state_schema_fingerprint(input_schema, spec.state_layout_version),
     })
 }
 
@@ -3794,6 +4236,16 @@ fn compile_output(
             require_numeric(output.input(), &input_type, "delta")?;
             CompiledEvaluation::Delta { periods: *periods }
         }
+        RollingOutputSpec::Ewma {
+            span, min_periods, ..
+        } => {
+            require_numeric(output.input(), &input_type, "ewma")?;
+            let group = compile_ewma_group(input_index, *span, window_groups);
+            CompiledEvaluation::Ewma(CompiledEwma {
+                group,
+                min_periods: *min_periods,
+            })
+        }
         RollingOutputSpec::Covariance {
             left,
             right,
@@ -3829,6 +4281,7 @@ fn compile_output(
     };
     let output_type = match &evaluation {
         CompiledEvaluation::Lag { .. } | CompiledEvaluation::Delta { .. } => input_type.clone(),
+        CompiledEvaluation::Ewma(_) => DataType::Float64,
         CompiledEvaluation::Pair(aggregate) => {
             let _ = aggregate;
             DataType::Float64
@@ -3852,6 +4305,37 @@ fn compile_output(
         input_type,
         evaluation,
     })
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "the frozen EWMA recurrence uses IEEE binary64"
+)]
+fn compile_ewma_group(
+    input_index: usize,
+    span: u64,
+    window_groups: &mut Vec<CompiledWindowGroup>,
+) -> usize {
+    window_groups
+        .iter()
+        .position(|group| {
+            matches!(
+                group,
+                CompiledWindowGroup::Ewma {
+                    input_index: existing_input,
+                    span: existing_span,
+                    ..
+                } if *existing_input == input_index && *existing_span == span
+            )
+        })
+        .unwrap_or_else(|| {
+            window_groups.push(CompiledWindowGroup::Ewma {
+                input_index,
+                span,
+                alpha: 2.0 / (span as f64 + 1.0),
+            });
+            window_groups.len() - 1
+        })
 }
 
 fn compile_pair_group(
@@ -3928,6 +4412,7 @@ fn compile_aggregate_output(
         } => (*frame, *min_periods, 0, Statistic::Max),
         RollingOutputSpec::Lag { .. }
         | RollingOutputSpec::Delta { .. }
+        | RollingOutputSpec::Ewma { .. }
         | RollingOutputSpec::Covariance { .. }
         | RollingOutputSpec::Correlation { .. } => {
             unreachable!("lag, delta, and pair outputs compile before aggregates")
@@ -4173,6 +4658,9 @@ mod tests {
     use super::*;
     use crate::{CalcFlowError, OperatorMetadata};
 
+    const TEST_FINGERPRINT: &str =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
     fn input_schema() -> Schema {
         Schema::new(vec![
             Field::new(
@@ -4271,7 +4759,7 @@ mod tests {
 
     #[test]
     fn unsupported_output_kind_is_rejected() {
-        for kind in ["std", "median", "ewma"] {
+        for kind in ["std", "median", "skew"] {
             let mut document = valid_spec_json();
             document["outputs"][0] = json!({
                 "kind": kind,
@@ -4286,6 +4774,41 @@ mod tests {
                 "unsupported kind {kind} was accepted"
             );
         }
+    }
+
+    #[test]
+    fn ewma_requires_layout_two_and_has_float64_output() {
+        let mut document = valid_spec_json();
+        document["state_layout_version"] = json!(2);
+        document["outputs"] = json!([{
+            "kind": "ewma",
+            "primitive_version": 1,
+            "input": "volume",
+            "output": "volume_ema",
+            "span": 3,
+            "min_periods": 7
+        }]);
+        let spec: RollingSpec = serde_json::from_value(document).unwrap();
+        let schema = spec.validate(&input_schema()).unwrap();
+        assert_eq!(
+            schema.field_with_name("volume_ema").unwrap().data_type(),
+            &DataType::Float64
+        );
+
+        let mut layout_one = serde_json::to_value(spec).unwrap();
+        layout_one["state_layout_version"] = json!(1);
+        let error = serde_json::from_value::<RollingSpec>(layout_one)
+            .unwrap()
+            .validate(&input_schema())
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                CalcFlowError::InvalidArgument { ref field, .. }
+                    if field == "rolling.state_layout_version"
+            ),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -5256,6 +5779,27 @@ mod tests {
         serde_json::from_value(document).unwrap()
     }
 
+    fn exponential_kernel_spec(outputs: Value) -> RollingSpec {
+        let mut document = valid_spec_json();
+        document["state_layout_version"] = json!(2);
+        document["partition_by"] = json!(["symbol"]);
+        document["event_time"] = json!("ts");
+        document["sequence_by"] = json!(["sequence"]);
+        document["outputs"] = outputs;
+        serde_json::from_value(document).unwrap()
+    }
+
+    fn ewma_price(span: u64, min_periods: u64, output: &str) -> Value {
+        json!({
+            "kind": "ewma",
+            "primitive_version": 1,
+            "input": "price",
+            "output": output,
+            "span": span,
+            "min_periods": min_periods
+        })
+    }
+
     fn lag_price(periods: u64) -> Value {
         json!({
             "kind": "lag",
@@ -5298,7 +5842,7 @@ mod tests {
     fn float_column(outputs: &ComputedOutputs, index: usize) -> Vec<Option<f64>> {
         outputs.columns[index]
             .as_any()
-            .downcast_ref::<datafusion::arrow::array::Float64Array>()
+            .downcast_ref::<Float64Array>()
             .unwrap()
             .iter()
             .collect()
@@ -5311,6 +5855,157 @@ mod tests {
             .unwrap()
             .iter()
             .collect()
+    }
+
+    #[test]
+    fn ewma_uses_first_sample_seeding_and_ignores_null_and_nan() {
+        let spec = exponential_kernel_spec(json!([ewma_price(3, 2, "ema")]));
+        let rows = vec![
+            full_row(1, "a", 1, vec![ScalarValue::Float64(Some(10.0))]),
+            full_row(2, "a", 2, vec![ScalarValue::Float64(None)]),
+            full_row(3, "a", 3, vec![ScalarValue::Float64(Some(14.0))]),
+            full_row(4, "a", 4, vec![ScalarValue::Float64(Some(f64::NAN))]),
+            full_row(5, "a", 5, vec![ScalarValue::Float64(Some(18.0))]),
+            full_row(6, "a", 6, vec![ScalarValue::Float64(Some(10.0))]),
+        ];
+        let outputs = compute(&spec, &RollingHistories::default(), &rows).unwrap();
+        assert_eq!(
+            float_column(&outputs, 0),
+            vec![None, None, Some(12.0), Some(12.0), Some(15.0), Some(12.5)]
+        );
+    }
+
+    #[test]
+    fn ewma_shares_state_and_is_segmentation_invariant() {
+        let spec = exponential_kernel_spec(json!([
+            ewma_price(3, 1, "ema_ready"),
+            ewma_price(3, 3, "ema_warm")
+        ]));
+        let compiled = compile_spec(&spec, &kernel_schema()).unwrap();
+        assert_eq!(compiled.window_groups.len(), 1);
+        let rows = vec![
+            full_row(1, "a", 1, vec![ScalarValue::Float64(Some(10.0))]),
+            full_row(2, "a", 2, vec![ScalarValue::Float64(Some(14.0))]),
+            full_row(3, "a", 3, vec![ScalarValue::Float64(Some(18.0))]),
+            full_row(4, "a", 4, vec![ScalarValue::Float64(Some(10.0))]),
+        ];
+        let all = compute_output_columns(&rows, &RollingHistories::default(), &compiled, "rolling")
+            .unwrap();
+        let first = compute_output_columns(
+            &rows[..2],
+            &RollingHistories::default(),
+            &compiled,
+            "rolling",
+        )
+        .unwrap();
+        let mut histories = RollingHistories::default();
+        histories.apply(first.touched.clone());
+        let second = compute_output_columns(&rows[2..], &histories, &compiled, "rolling").unwrap();
+        for column in 0..2 {
+            let segmented = float_column(&first, column)
+                .into_iter()
+                .chain(float_column(&second, column))
+                .collect::<Vec<_>>();
+            assert_eq!(segmented, float_column(&all, column));
+        }
+    }
+
+    #[test]
+    fn ewma_layout_two_restores_without_retained_history() {
+        let spec = exponential_kernel_spec(json!([ewma_price(3, 1, "ema")]));
+        let compiled = compile_spec(&spec, &kernel_schema()).unwrap();
+        let rows = vec![
+            full_row(1, "a", 1, vec![ScalarValue::Float64(Some(10.0))]),
+            full_row(2, "a", 2, vec![ScalarValue::Float64(Some(14.0))]),
+        ];
+        let first =
+            compute_output_columns(&rows, &RollingHistories::default(), &compiled, "rolling")
+                .unwrap();
+        let mut histories = RollingHistories::default();
+        histories.apply(first.touched);
+        assert!(
+            histories
+                .by_entity
+                .values()
+                .all(|state| state.rows.is_empty())
+        );
+        let bytes = encode_state_segment(
+            &histories,
+            &BTreeMap::new(),
+            &kernel_schema(),
+            &compiled,
+            TEST_FINGERPRINT,
+            "rolling",
+        )
+        .unwrap();
+        let metadata = RollingSnapshotMetadata {
+            state_layout_version: 2,
+            configuration_hash: compiled.configuration_hash.clone(),
+            state_schema_fingerprint: compiled.state_schema_fingerprint.clone(),
+            epoch: Epoch::new(1).unwrap(),
+            pipeline_fingerprint: Some(TEST_FINGERPRINT.into()),
+            operator_id: Some("rolling".into()),
+            last_input_watermark: None,
+            next_output_sequence: 0,
+            ended: false,
+            metrics: LateMetricDelta::default(),
+            segment_inventory: Vec::new(),
+        };
+        let restored =
+            decode_state_segment(&bytes, &kernel_schema(), &compiled, &metadata).unwrap();
+        let continuation = vec![full_row(3, "a", 3, vec![ScalarValue::Float64(Some(18.0))])];
+        let expected =
+            compute_output_columns(&continuation, &histories, &compiled, "rolling").unwrap();
+        let actual =
+            compute_output_columns(&continuation, &restored.histories, &compiled, "rolling")
+                .unwrap();
+        assert_eq!(float_column(&actual, 0), float_column(&expected, 0));
+        assert_eq!(float_column(&actual, 0), vec![Some(15.0)]);
+    }
+
+    #[test]
+    fn ewma_restore_rejects_noncanonical_accumulator_rows() {
+        let spec = exponential_kernel_spec(json!([ewma_price(3, 1, "ema")]));
+        let compiled = compile_spec(&spec, &kernel_schema()).unwrap();
+        let entity = vec![Some(KeyValue::String("a".into()))];
+        let values = ewma_entity_values(&entity, &kernel_schema(), &compiled).unwrap();
+
+        let mut decoded = DecodedRollingState::default();
+        let mut previous = None;
+        let error = decode_ewma_state_row(
+            None,
+            &values,
+            Some((0, 0, 10.0)),
+            &mut decoded,
+            &compiled,
+            &mut previous,
+        )
+        .unwrap_err();
+        assert!(matches!(error, CalcFlowError::Format { .. }));
+
+        let mut populated = values.clone();
+        populated[3] = ScalarValue::Float64(Some(10.0));
+        let error = decode_ewma_state_row(
+            None,
+            &populated,
+            Some((0, 1, 10.0)),
+            &mut DecodedRollingState::default(),
+            &compiled,
+            &mut None,
+        )
+        .unwrap_err();
+        assert!(matches!(error, CalcFlowError::Format { .. }));
+
+        let error = decode_ewma_state_row(
+            Some(0),
+            &values,
+            Some((0, 1, 10.0)),
+            &mut DecodedRollingState::default(),
+            &compiled,
+            &mut None,
+        )
+        .unwrap_err();
+        assert!(matches!(error, CalcFlowError::Format { .. }));
     }
 
     #[test]
@@ -5366,7 +6061,7 @@ mod tests {
         let outputs = compute(&spec, &RollingHistories::default(), &rows).unwrap();
         let values = outputs.columns[0]
             .as_any()
-            .downcast_ref::<datafusion::arrow::array::Float64Array>()
+            .downcast_ref::<Float64Array>()
             .unwrap();
         assert!(values.is_null(0));
         assert!(values.is_null(1));
@@ -5482,7 +6177,7 @@ mod tests {
         let outputs = compute(&spec, &RollingHistories::default(), &rows).unwrap();
         let values = outputs.columns[0]
             .as_any()
-            .downcast_ref::<datafusion::arrow::array::Float64Array>()
+            .downcast_ref::<Float64Array>()
             .unwrap();
         assert!(values.is_null(0));
         assert!(values.is_null(1));
@@ -6219,7 +6914,7 @@ mod tests {
             for (index, column) in outputs.columns.iter().enumerate() {
                 let values = column
                     .as_any()
-                    .downcast_ref::<datafusion::arrow::array::Float64Array>()
+                    .downcast_ref::<Float64Array>()
                     .unwrap()
                     .iter()
                     .collect::<Vec<_>>();
@@ -6229,7 +6924,7 @@ mod tests {
         for (index, column) in one_shot.columns.iter().enumerate() {
             let expected = column
                 .as_any()
-                .downcast_ref::<datafusion::arrow::array::Float64Array>()
+                .downcast_ref::<Float64Array>()
                 .unwrap()
                 .iter()
                 .collect::<Vec<_>>();
@@ -6331,7 +7026,7 @@ mod tests {
                     Arc::new(datafusion::arrow::array::StringArray::from(vec!["a"; len]))
                         as ArrayRef,
                     Arc::new(UInt64Array::from((1..=len as u64).collect::<Vec<_>>())),
-                    Arc::new(datafusion::arrow::array::Float64Array::from(prices)),
+                    Arc::new(Float64Array::from(prices)),
                     Arc::new(datafusion::arrow::array::Int64Array::from(
                         (1..=len as u64)
                             .map(|v| Some(i64::try_from(v).unwrap() * 10))

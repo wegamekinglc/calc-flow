@@ -447,6 +447,9 @@ means `RowFrame | DurationFrame`; it never means an event-time aggregate.
 ```text
 ts.lag(value: ColumnExpr, /, *, periods: int = 1) -> ColumnExpr
 ts.delta(value: ColumnExpr, /, *, periods: int = 1) -> ColumnExpr
+ts.ewma(value: ColumnExpr, /, *, span: int, min_periods: int = 1) -> ColumnExpr
+ts.ema(value: ColumnExpr, /, *, span: int, min_periods: int = 1) -> ColumnExpr
+ts.macd(value: ColumnExpr, /, *, fast_span: int = 12, slow_span: int = 26, min_periods: int = 1) -> ColumnExpr
 ts.count(value: ColumnExpr, /, *, window: RowFrame | DurationFrame, min_periods: int = 1) -> ColumnExpr
 ts.sum(value: ColumnExpr, /, *, window: RowFrame | DurationFrame, min_periods: int = 1) -> ColumnExpr
 ts.mean(value: ColumnExpr, /, *, window: RowFrame | DurationFrame, min_periods: int = 1) -> ColumnExpr
@@ -928,9 +931,10 @@ For both operators:
   unknown versions, and non-applicable fields are rejected; and
 - `position` remains the only non-semantic node field and may be omitted.
 
-The symbolic lowerer always writes
-`configuration_version: 1`, `state_layout_version: 1`, and
-`primitive_version: 1`. There are no string/numeric version aliases.
+The symbolic lowerer always writes `configuration_version: 1` and
+`primitive_version: 1`. Existing rolling and cross-section stages write
+`state_layout_version: 1`; an SCE-16 rolling stage containing EWMA writes
+version 2. There are no string/numeric version aliases.
 
 ### 5.2 Rolling
 
@@ -1010,6 +1014,12 @@ from another variant is unknown and rejected. In particular lag/delta cannot
 carry `frame`, `min_periods`, or `ddof`, and non-statistical aggregates cannot
 carry `ddof`. `partition_by`, `sequence_by`, and `outputs` are semantic arrays
 and are never sorted by the serializer.
+
+SCE-16 adds the strict EWMA variant (`input`, `output`, positive `span`, and
+positive `min_periods`) under state layout v2. `ema` does not serialize as a
+second variant, and MACD does not serialize as a native output kind. Its full
+API and recovery shape are frozen in
+`.codex/artifacts/api-notes/symbolic-exponential-indicators.md`.
 
 `value_policy: "stateful_numeric_v1"` means exactly D3: aggregate samples
 exclude null and NaN, lag/delta preserve either missing value at the current or
@@ -1546,8 +1556,9 @@ and are never duplicated into a checkpoint.
   additive builder and Python uses the new keyword-only argument.
 - Manifest format remains v3. Empty static evidence is backward compatible;
   non-empty evidence is understood only by runtimes implementing this gate.
-- The first rolling/cross-section state layout has no migration. Any config,
-  schema, primitive, operator, or layout mismatch fails before source open.
+- Rolling layout v1 has no implicit migration. EWMA declarations explicitly
+  select layout v2; any config, schema, primitive, operator, or layout mismatch
+  still fails before source open.
 - Static payload changes are never a request for a fresh lineage. Starting a
   genuinely fresh lineage requires an explicit operational action outside this
   API contract (new pipeline identity/state root or deliberate state removal).

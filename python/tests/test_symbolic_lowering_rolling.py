@@ -154,6 +154,31 @@ def test_lag_delta_lower_to_one_rolling_node_with_the_frozen_shape() -> None:
     ) in graph["edges"]  # type: ignore[index]
 
 
+def test_ewma_and_macd_lower_to_shared_layout_two_state() -> None:
+    quotes = _ordered()
+    ema = ts.ema(quotes["x"], span=3, min_periods=2)
+    program = _program(
+        [
+            ("ema", ema),
+            ("same_ema", ts.ewma(quotes["x"], span=3, min_periods=2)),
+            ("macd", ts.macd(quotes["x"], fast_span=2, slow_span=4)),
+        ]
+    )
+
+    document = lower_program_document(program, Runtime(), "stream")
+
+    rolling = _rolling_nodes(document)
+    assert len(rolling) == 1
+    spec = rolling[0]["operator"]["spec"]  # type: ignore[index]
+    assert spec["state_layout_version"] == 2
+    outputs = spec["outputs"]
+    assert [output["kind"] for output in outputs] == ["ewma", "ewma", "ewma"]
+    assert [output["span"] for output in outputs] == [3, 2, 4]
+    assert outputs[0]["output"] in {"ema", "same_ema"}
+    assert all("frame" not in output for output in outputs)
+    assert all(output["min_periods"] > 0 for output in outputs)
+
+
 def test_stream_lowering_carries_the_lateness_arguments() -> None:
     quotes = _ordered()
     program = _program([("prev", ts.lag(quotes["x"]))])

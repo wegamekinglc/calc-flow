@@ -18,9 +18,9 @@ between compile-time facts and runtime measurements.
 
 [`09_symbolic_financial_features.py`](../examples/09_symbolic_financial_features.py)
 builds one reusable `FeatureSet` containing one-period simple and log returns,
-a three-row price mean and standard deviation, Bollinger bands, a composed
-three-row RSI, an exact-time cross-section volume z-score, and a
-liquidity-adjusted momentum. The example:
+a three-row price mean, EMA, and standard deviation, a fast/slow MACD,
+Bollinger bands, a composed three-row RSI, an exact-time cross-section volume
+z-score, and a liquidity-adjusted momentum. The example:
 
 1. declares the input schema and its entity, event-time, and sequence keys;
 2. calls `Program.analyze(runtime, mode="batch")` before compilation;
@@ -43,9 +43,11 @@ semantics as an oracle. Rolling operands may be source columns, aliases, pure
 row-local expressions, or earlier rolling results. The compiler schedules an
 innermost-first DAG and inserts deterministic row-local stages before rolling
 and cross-section state when needed. The reference suite includes RSI's delta,
-positive/negative projection, rolling means, and final ratio. MACD remains
-deferred because EMA/EWMA still lacks a frozen algorithm and durable-state
-contract.
+positive/negative projection, rolling means, and final ratio, plus
+independently derived EMA and MACD vectors. EWMA uses exact first-valid-sample seeding and the
+unadjusted `alpha = 2 / (span + 1)` recurrence. Stream checkpoints persist its
+constant accumulator in rolling state layout v2 rather than approximating it
+from a retained row window.
 
 Run it from a source checkout with:
 

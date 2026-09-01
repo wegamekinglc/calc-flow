@@ -632,10 +632,14 @@ def _multi_stage_program() -> Program:
     quotes = _ordered()
     change = ts.delta(quotes["x"])
     gain = row_ops.clip(change, lower=0.0, upper=1.0e100)
+    macd = ts.macd(quotes["x"], fast_span=2, slow_span=4)
     return _program(
         [
             ("change", change),
             ("average_gain", ts.mean(gain, window=rows(3))),
+            ("ema_3", ts.ewma(quotes["x"], span=3, min_periods=2)),
+            ("macd_2_4", macd),
+            ("ema_macd_3", ts.ema(macd, span=3)),
         ]
     )
 

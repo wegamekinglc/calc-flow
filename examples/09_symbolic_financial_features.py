@@ -26,6 +26,8 @@ def financial_features(quotes: TableExpr) -> FeatureSet:
     momentum_1 = quotes["price"] / previous - 1.0
     log_return_1 = row.log(quotes["price"] / previous)
     price_mean_3 = ts.mean(quotes["price"], window=rows(3))
+    price_ema_3 = ts.ema(quotes["price"], span=3)
+    price_macd_2_4 = ts.macd(quotes["price"], fast_span=2, slow_span=4)
     price_stddev_3 = ts.stddev(
         quotes["price"],
         window=rows(3),
@@ -53,6 +55,8 @@ def financial_features(quotes: TableExpr) -> FeatureSet:
             ("previous_log_price", previous_log_price),
             ("log_return_1", log_return_1),
             ("price_mean_3", price_mean_3),
+            ("price_ema_3", price_ema_3),
+            ("price_macd_2_4", price_macd_2_4),
             ("price_stddev_3", price_stddev_3),
             ("bollinger_upper_3", price_mean_3 + 2.0 * price_stddev_3),
             ("bollinger_lower_3", price_mean_3 - 2.0 * price_stddev_3),
@@ -122,12 +126,14 @@ def main() -> None:
 
     require(output.num_rows == 4, f"unexpected output rows: {output.num_rows}")
     require(
-        output.column_names[-10:]
+        output.column_names[-12:]
         == [
             "momentum_1",
             "previous_log_price",
             "log_return_1",
             "price_mean_3",
+            "price_ema_3",
+            "price_macd_2_4",
             "price_stddev_3",
             "bollinger_upper_3",
             "bollinger_lower_3",
@@ -137,7 +143,7 @@ def main() -> None:
         ],
         f"unexpected output columns: {output.column_names}",
     )
-    print(output.select(output.column_names[-10:]).to_pydict())
+    print(output.select(output.column_names[-12:]).to_pydict())
 
 
 if __name__ == "__main__":

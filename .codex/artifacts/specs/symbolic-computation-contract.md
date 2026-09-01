@@ -443,6 +443,12 @@ and stream lifecycles MUST call the same calculation kernels over the same
 canonical row order. A rolling operator MUST NOT be lowered to one
 micro-batch-local SQL/window expression.
 
+SCE-16 extends this list with `ewma@1`. Its unadjusted recurrence, missing-value
+rules, constant sharing key, layout-v2 persistence, `ema` identity alias, and
+composed MACD API are controlled by
+`.codex/artifacts/specs/symbolic-exponential-indicators.md`. This extension does
+not revise the row- or duration-frame rules above.
+
 ## 8. D6 — Cross-section groups and statistics
 
 A cross-section group is either:

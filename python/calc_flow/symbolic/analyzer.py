@@ -136,7 +136,7 @@ _ROLLING_AGGREGATES: Final = frozenset(
 )
 _ROLLING_DDOF: Final = frozenset({"variance", "stddev"})
 _ROLLING_PRIMITIVES: Final = _ROLLING_AGGREGATES | frozenset(
-    {"lag", "delta", "covariance", "correlation"}
+    {"lag", "delta", "ewma", "covariance", "correlation"}
 )
 _CROSS_SECTION: Final = frozenset(
     {
@@ -1050,6 +1050,25 @@ class _Analyzer:
             states,
         )
 
+    def _ewma(self, node: Node, path: str, /) -> ColumnFacts:
+        role = f"{path}.ewma"
+        operand = self._operand(node.args[0], f"{role}.value", None)
+        self._require_rolling_operand(
+            node.args[0],
+            f"{role}.value",
+            "rolling ewma argument must be an input column or row-local"
+            " expression in this release",
+        )
+        if operand.lineage is not None:
+            self._temporal_lineages.add(operand.lineage)
+        span = _cint(node.attr("span"))
+        states = operand.state | (
+            frozenset({f"constant(span={span})"}) if span is not None else frozenset()
+        )
+        if not self._numeric_or_issue(operand.data_type, f"{role}.value", "ewma"):
+            return ColumnFacts(None, True, operand.lineage, states)
+        return ColumnFacts("float64", True, operand.lineage, states)
+
     def _rolling_pair(self, node: Node, path: str, /) -> ColumnFacts:
         role = f"{path}.{node.op.name}"
         left = self._operand(node.args[0], f"{role}.left", None)
@@ -1596,6 +1615,7 @@ _COLUMN_HANDLERS: Final[dict[str, Callable[[_Analyzer, Node, str], ColumnFacts]]
     "clip": _Analyzer._clip,
     "cast": _Analyzer._cast,
     **dict.fromkeys(("lag", "delta"), _Analyzer._lag_like),
+    "ewma": _Analyzer._ewma,
     **dict.fromkeys(_ROLLING_AGGREGATES, _Analyzer._rolling_aggregate),
     **dict.fromkeys(("covariance", "correlation"), _Analyzer._rolling_pair),
     **dict.fromkeys(_CROSS_SECTION, _Analyzer._cross_section),

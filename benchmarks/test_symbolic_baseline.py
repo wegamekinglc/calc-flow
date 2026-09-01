@@ -259,6 +259,9 @@ _SCE08_SCENARIO = "sce08_temporal_catalog"
 _SCE08_WORKLOAD_CONTRACT = "sce08-temporal-v1"
 _SCE08_DURATION_MICROS = 60_000_000
 _SCE08_PAIRED_SAMPLES = 30
+_SCE16_SCENARIO = "sce16_exponential_indicators"
+_SCE16_WORKLOAD_CONTRACT = "sce16-exponential-v1"
+_SCE16_PAIRED_SAMPLES = 30
 _SCE14_SCENARIO = "sce14_cross_domain_sharing"
 _SCE14_WORKLOAD_CONTRACT = "sce14-cross-domain-sharing-v1"
 _SCE14_PAIRED_SAMPLES = 30
@@ -599,6 +602,140 @@ def _assert_sce08_outputs_equal(hand_built: pa.Table, symbolic: pa.Table) -> Non
         )
 
 
+def _sce16_rolling_output_schema() -> list[dict[str, object]]:
+    return [
+        *_sce08_input_schema(),
+        {"name": "ema_12", "data_type": "float64", "nullable": True},
+        {"name": "ema_26", "data_type": "float64", "nullable": True},
+    ]
+
+
+def _sce16_hand_built_project_json() -> str:
+    input_schema = _sce08_input_schema()
+    rolling_schema = _sce16_rolling_output_schema()
+    select = [
+        *(f'"{field["name"]}"' for field in rolling_schema),
+        '("ema_12" - "ema_26") AS "macd_12_26"',
+    ]
+    project = {
+        "data_sources": [
+            {"data": [], "format": "inline_json", "id": "source_1", "input": "input"}
+        ],
+        "format_version": 3,
+        "graph": {
+            "edges": [
+                {
+                    "source_node": "features__cf_rolling",
+                    "source_port": "output",
+                    "target_node": "features",
+                    "target_port": "input",
+                }
+            ],
+            "name": "sce16-exponential-pair",
+            "nodes": [
+                {
+                    "id": "features__cf_rolling",
+                    "input_ports": [
+                        {
+                            "kind": "table",
+                            "name": "input",
+                            "required": True,
+                            "schema": input_schema,
+                        }
+                    ],
+                    "operator": {
+                        "kind": "rolling",
+                        "spec": {
+                            "allowed_lateness_micros": 0,
+                            "configuration_version": 1,
+                            "event_time": "event_time",
+                            "late_policy": {"kind": "error", "scope": "envelope"},
+                            "outputs": [
+                                {
+                                    "kind": "ewma",
+                                    "primitive_version": 1,
+                                    "input": "close",
+                                    "output": "ema_12",
+                                    "span": 12,
+                                    "min_periods": 1,
+                                },
+                                {
+                                    "kind": "ewma",
+                                    "primitive_version": 1,
+                                    "input": "close",
+                                    "output": "ema_26",
+                                    "span": 26,
+                                    "min_periods": 1,
+                                },
+                            ],
+                            "partition_by": ["symbol"],
+                            "sequence_by": ["sequence"],
+                            "state_layout_version": 2,
+                            "value_policy": "stateful_numeric_v1",
+                        },
+                    },
+                    "output_ports": [
+                        {
+                            "kind": "table",
+                            "name": "output",
+                            "required": True,
+                            "schema": rolling_schema,
+                        }
+                    ],
+                },
+                {
+                    "id": "features",
+                    "input_ports": [
+                        {
+                            "kind": "table",
+                            "name": "input",
+                            "required": True,
+                            "schema": rolling_schema,
+                        }
+                    ],
+                    "operator": {
+                        "expression": "",
+                        "filter": None,
+                        "kind": "expression",
+                        "select": select,
+                        "udfs": [],
+                    },
+                },
+            ],
+        },
+        "id": "sce16-exponential-pair",
+        "name": "sce16-exponential-pair",
+        "runtime": {"mode": "batch", "options": {}},
+    }
+    return json.dumps(project, sort_keys=True, separators=(",", ":"))
+
+
+def _sce16_symbolic_program() -> Program:
+    quotes = table_input(
+        "quotes",
+        schema=[Field(**field) for field in _sce08_input_schema()],
+        entity_by=("symbol",),
+        event_time="event_time",
+        sequence_by=("sequence",),
+    )
+    ema_12 = ts.ewma(quotes["close"], span=12)
+    ema_26 = ts.ewma(quotes["close"], span=26)
+    enriched = quotes.with_columns(
+        FeatureSet(
+            (
+                ("ema_12", ema_12),
+                ("ema_26", ema_26),
+                ("macd_12_26", ema_12 - ema_26),
+            )
+        )
+    )
+    return Program(
+        "sce16-exponential-pair",
+        inputs=(quotes,),
+        outputs=(("features", enriched),),
+    )
+
+
 CROSS_SECTION_QUERY = """
 WITH bucketed AS (
   SELECT
@@ -789,6 +926,56 @@ def test_sce08_temporal_milestone_pair(
             "entities": workload.entities,
             "maximum_retained_rows_per_entity": 60,
             "temporal_outputs": 4,
+            "paired_samples": paired_samples,
+        },
+    )
+
+    def execute_pair() -> tuple[Any, Any]:
+        return hand_built_plan.execute(inputs), symbolic_plan.execute(inputs)
+
+    hand_built_result, symbolic_result = benchmark(execute_pair)
+    assert hand_built_result.outputs["output"].num_rows == workload.rows
+    assert symbolic_result.outputs["output"].num_rows == workload.rows
+
+
+@pytest.mark.benchmark(
+    group=benchmark_group("sce16-exponential-pair"), min_rounds=3, max_time=0.5
+)
+@pytest.mark.parametrize("_scale", [selected_scale().name])
+def test_sce16_exponential_indicator_pair(
+    benchmark: BenchmarkFixture, _scale: str
+) -> None:
+    workload = quote_workload()
+    hand_built_plan = PipelineBuilder._from_json(
+        _sce16_hand_built_project_json()
+    ).compile_batch()
+    symbolic_plan = _sce16_symbolic_program().compile_batch(Runtime())
+    assert hand_built_plan.fingerprint == symbolic_plan.fingerprint
+    inputs = {"input": _utc_quote_batch()}
+
+    hand_built_output = hand_built_plan.execute(inputs).outputs["output"].to_pyarrow()
+    symbolic_warm_result = symbolic_plan.execute(inputs)
+    symbolic_output = symbolic_warm_result.outputs["output"].to_pyarrow()
+    assert hand_built_output.equals(symbolic_output)
+    paired_samples = _alternating_plan_samples(
+        hand_built_plan,
+        symbolic_plan,
+        inputs,
+        sample_count=_SCE16_PAIRED_SAMPLES,
+    )
+
+    record_symbolic_benchmark(
+        benchmark,
+        scenario=_SCE16_SCENARIO,
+        input_rows=workload.rows,
+        output_rows=symbolic_output.num_rows,
+        metrics=symbolic_warm_result.datafusion_metrics,
+        extra={
+            "comparison_contract": "same-process-alternating-v1",
+            "workload_contract": _SCE16_WORKLOAD_CONTRACT,
+            "entities": workload.entities,
+            "ewma_spans": [12, 26],
+            "native_accumulators": 2,
             "paired_samples": paired_samples,
         },
     )

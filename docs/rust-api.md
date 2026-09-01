@@ -174,7 +174,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Rolling windows
 
-`RollingOperator` evaluates native lag, delta, and aggregate outputs over
+`RollingOperator` evaluates native lag, delta, EWMA, and aggregate outputs over
 entity-partitioned, event-time-ordered rows. Its data-only `RollingSpec`
 declares ordered `partition_by` and `sequence_by` keys, a non-null UTC
 `timestamp[us]` `event_time` column, and one `RollingOutputSpec` per rolling
@@ -184,23 +184,31 @@ column names, and a positive `periods` distance; kind `count`, `sum`, `mean`,
 output column names, a positive frame, and `min_periods`, with `variance` and
 `stddev` adding `ddof`; or the pair kinds `covariance` and `correlation` —
 `primitive_version` 1, left and right input column names, an output column
-name, a positive frame, `min_periods`, and `ddof`. A frame is `rows(size)` —
+name, a positive frame, `min_periods`, and `ddof`. Kind `ewma` carries
+input/output names, a positive `span`, and positive `min_periods`; it emits nullable `float64` from the
+unadjusted `alpha = 2 / (span + 1)` recurrence and shares constant state by
+`(input, span)`.
+
+A frame is `rows(size)` —
 the `size` rows through the current row of the entity total order — or
 `duration(micros)`: the exact-width event-time interval `(t − micros, t]`,
 open at the lower bound and closed at the upper bound, with equal-time rows
 ordered by `sequence_by`. `configuration_version` and `state_layout_version`
-must equal `ROLLING_CONFIGURATION_VERSION` and `ROLLING_STATE_LAYOUT_VERSION`
-(both 1 in this release), `allowed_lateness_micros` and a `LatePolicySpec` of
-`Error` (envelope scope) or `Drop` (metrics version 1) classify late rows
+must equal `ROLLING_CONFIGURATION_VERSION` (1). Existing rolling declarations
+use `ROLLING_STATE_LAYOUT_VERSION` (1), while any EWMA declaration requires
+`ROLLING_EWMA_STATE_LAYOUT_VERSION` (2) so checkpoint segments persist the
+valid count and exact binary64 accumulator. `allowed_lateness_micros` and a
+`LatePolicySpec` of `Error` (envelope scope) or `Drop` (metrics version 1)
+classify late rows
 against the input watermark, and `RollingValuePolicy` is the frozen
 `stateful_numeric_v1`, which preserves a null or NaN current or referenced
 value. Validation rejects unknown fields, empty or duplicate keys, duplicate
 or input-colliding output names, nullable or floating sequence columns,
-non-numeric `delta`, `sum`, `mean`, `variance`, `stddev`, `covariance`, and
-`correlation` inputs, `min` and `max` inputs outside the total-order types
+non-numeric `delta`, `ewma`, `sum`, `mean`, `variance`, `stddev`, `covariance`,
+and `correlation` inputs, `min` and `max` inputs outside the total-order types
 (booleans, integers, floats, strings, dates, and `timestamp[us]` with no
-timezone or UTC), a
-`min_periods` below one or — for `rows` frames only — above the frame size,
+timezone or UTC), a `min_periods` below one or — for `rows` frames only — above
+the frame size,
 a `ddof` outside 0 or 1, and ambiguous column references; `count` accepts any
 input column. The output schema is the input schema followed by the declared
 outputs in declaration order, each nullable. Lag, delta, `min`, and `max`
@@ -209,6 +217,7 @@ table:
 
 | Kind                           | Input            | Output type       |
 | ------------------------------ | ---------------- | ----------------- |
+| `ewma`                         | numeric          | `float64`         |
 | `count`                        | any column       | `uint64`          |
 | `sum`                          | signed integer   | `int64`, checked  |
 | `sum`                          | unsigned integer | `uint64`, checked |

@@ -135,13 +135,16 @@ status surface.
 
 ## Rolling windows
 
-`RollingOperator` evaluates native lag, delta, and aggregate outputs over
+`RollingOperator` evaluates native lag, delta, EWMA, and aggregate outputs over
 entity-partitioned, event-time-ordered rows and runs in both batch and
 stream graphs. Its `RollingSpec` declares ordered partition and sequence
 keys, a non-null UTC `timestamp[us]` event-time column, lag/delta outputs
 with positive row distances or count/sum/mean/min/max/variance/stddev and
 covariance/correlation outputs over row-count or duration frames with
-minimum-period gates, allowed lateness, and an envelope-scoped `error` or
+minimum-period gates, plus constant-state unadjusted EWMA outputs with a
+positive span. Existing outputs use durable layout v1; EWMA uses layout v2 to
+persist its shared valid count and exact binary64 accumulator. The declaration
+also carries allowed lateness and an envelope-scoped `error` or
 metrics-recorded `drop` late-row policy.
 
 Aggregates count valid samples — non-null, non-NaN values, with infinities

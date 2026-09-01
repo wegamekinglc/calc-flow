@@ -642,7 +642,7 @@ fn probe_non_goal_output_kinds_and_frames_are_rejected() {
     });
     // SCE-08 delivered min/max/covariance/correlation; unknown catalog
     // kinds stay rejected.
-    for kind in ["std", "ewma", "skew"] {
+    for kind in ["std", "median", "skew"] {
         let mut document = base.clone();
         document["outputs"] = serde_json::json!([{
             "kind": kind,

@@ -1479,6 +1479,51 @@
         },
         {
           "additionalProperties": false,
+          "description": "Unadjusted exponentially weighted moving average with\n`alpha = 2 / (span + 1)`.",
+          "properties": {
+            "input": {
+              "description": "Numeric input column name.",
+              "type": "string"
+            },
+            "kind": {
+              "const": "ewma",
+              "type": "string"
+            },
+            "min_periods": {
+              "description": "Minimum valid samples for a non-null result.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "output": {
+              "description": "Output column name.",
+              "type": "string"
+            },
+            "primitive_version": {
+              "description": "Primitive version; must equal `1`.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "span": {
+              "description": "Positive exponential span.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "primitive_version",
+            "input",
+            "output",
+            "span",
+            "min_periods"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
           "description": "Valid (non-null, non-NaN) sample count over the frame (SCE-00 D3.2).",
           "properties": {
             "frame": {
@@ -1954,7 +1999,7 @@
           "type": "array"
         },
         "state_layout_version": {
-          "description": "Durable state-layout version; must equal\n[`ROLLING_STATE_LAYOUT_VERSION`].",
+          "description": "Durable state-layout version. Existing primitives use\n[`ROLLING_STATE_LAYOUT_VERSION`]; EWMA requires\n[`ROLLING_EWMA_STATE_LAYOUT_VERSION`].",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"

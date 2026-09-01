@@ -380,6 +380,12 @@ The initial functions are:
 - variance and standard deviation; and
 - covariance and correlation.
 
+The later SCE-16 extension adds unadjusted EWMA as the one temporal primitive
+that needs constant recursive state rather than a retained frame. `ema` is an
+identity alias and MACD is the row-local difference of two EWMA declarations;
+the exact algorithm and durable layout v2 are frozen in
+`.codex/artifacts/specs/symbolic-exponential-indicators.md`.
+
 Row windows use bounded shared history. Duration windows use event time and
 evict values that have left the declared interval. Implementations use compact
 per-entity rows, reversible accumulators, numerically stable variance state,
@@ -580,7 +586,8 @@ The first supported catalog is deliberately compositional:
 - row: arithmetic, comparison, boolean, `where`, coalesce, log, exp, sqrt,
   abs, clip, and cast;
 - temporal: lag, delta, count, sum, mean, min, max, variance, standard
-  deviation, covariance, and correlation;
+  deviation, covariance, and correlation, extended by SCE-16 with EWMA/EMA and
+  composed MACD;
 - cross section: rank, percentile, z-score, demean, and winsorization;
 - matrix: explicit column projection, elementwise expressions, static-weight
   matrix multiplication, and explicit attachment to the originating table;
