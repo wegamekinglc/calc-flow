@@ -606,15 +606,8 @@ class _Analyzer:
                 "unsupported_mode",
                 "symbolic stream_join is available only in stream mode",
             )
-        for side_name, facts in (("left", left), ("right", right)):
-            if "stream_join" in facts.state:
-                self.issue(
-                    f"{role}.{side_name}",
-                    "capability_mismatch",
-                    "nested symbolic stream joins are not supported in SCE-17",
-                )
-            if facts.lineage is not None:
-                self._temporal_lineages.add(facts.lineage)
+        self._stream_join_side(left, "left", role)
+        self._stream_join_side(right, "right", role)
         self._stream_join_event_time(
             left,
             _cstr(node.attr("left_event_time")),
@@ -628,15 +621,11 @@ class _Analyzer:
         self._stream_join_keys(node, left, right, role)
         left_prefix = _cstr(node.attr("left_prefix")) or "left"
         right_prefix = _cstr(node.attr("right_prefix")) or "right"
-        output_schema = tuple(
-            [
-                Field(f"{left_prefix}__{field.name}", field.data_type, field.nullable)
-                for field in left.schema
-            ]
-            + [
-                Field(f"{right_prefix}__{field.name}", field.data_type, field.nullable)
-                for field in right.schema
-            ]
+        output_schema = self._stream_join_schema(
+            left,
+            right,
+            left_prefix,
+            right_prefix,
         )
         return TableFacts(
             output_schema,
@@ -646,6 +635,36 @@ class _Analyzer:
             (),
             (),
         )
+
+    def _stream_join_side(
+        self, facts: TableFacts, side_name: str, role: str, /
+    ) -> None:
+        if "stream_join" in facts.state:
+            self.issue(
+                f"{role}.{side_name}",
+                "capability_mismatch",
+                "nested symbolic stream joins are not supported in SCE-17",
+            )
+        if facts.lineage is not None:
+            self._temporal_lineages.add(facts.lineage)
+
+    @staticmethod
+    def _stream_join_schema(
+        left: TableFacts,
+        right: TableFacts,
+        left_prefix: str,
+        right_prefix: str,
+        /,
+    ) -> tuple[Field, ...]:
+        left_fields = tuple(
+            Field(f"{left_prefix}__{field.name}", field.data_type, field.nullable)
+            for field in left.schema
+        )
+        right_fields = tuple(
+            Field(f"{right_prefix}__{field.name}", field.data_type, field.nullable)
+            for field in right.schema
+        )
+        return left_fields + right_fields
 
     def _stream_join_event_time(
         self,
@@ -686,31 +705,47 @@ class _Analyzer:
         for index, (left_name, right_name) in enumerate(
             zip(left_keys, right_keys, strict=True)
         ):
-            left_field = left_by_name.get(left_name)
-            right_field = right_by_name.get(right_name)
-            if left_field is None:
-                self.issue(
-                    f"{role}.left_keys[{index}]",
-                    "unresolved_type",
-                    f"unknown join key {left_name!r} in the left schema",
-                )
-            if right_field is None:
-                self.issue(
-                    f"{role}.right_keys[{index}]",
-                    "unresolved_type",
-                    f"unknown join key {right_name!r} in the right schema",
-                )
-            if (
-                left_field is not None
-                and right_field is not None
-                and left_field.data_type != right_field.data_type
-            ):
-                self.issue(
-                    f"{role}.right_keys[{index}]",
-                    "schema_mismatch",
-                    f"right join key type {right_field.data_type!r} does not match"
-                    f" left type {left_field.data_type!r}",
-                )
+            self._stream_join_key_pair(
+                index,
+                left_name,
+                right_name,
+                left_by_name.get(left_name),
+                right_by_name.get(right_name),
+                role,
+            )
+
+    def _stream_join_key_pair(
+        self,
+        index: int,
+        left_name: str,
+        right_name: str,
+        left_field: Field | None,
+        right_field: Field | None,
+        role: str,
+        /,
+    ) -> None:
+        if left_field is None:
+            self.issue(
+                f"{role}.left_keys[{index}]",
+                "unresolved_type",
+                f"unknown join key {left_name!r} in the left schema",
+            )
+        if right_field is None:
+            self.issue(
+                f"{role}.right_keys[{index}]",
+                "unresolved_type",
+                f"unknown join key {right_name!r} in the right schema",
+            )
+        if any((left_field is None, right_field is None)):
+            return
+        if left_field.data_type == right_field.data_type:
+            return
+        self.issue(
+            f"{role}.right_keys[{index}]",
+            "schema_mismatch",
+            f"right join key type {right_field.data_type!r} does not match"
+            f" left type {left_field.data_type!r}",
+        )
 
     def _attach_lineage_check(
         self, array: ArrayFacts, child: TableFacts, path: str, /
