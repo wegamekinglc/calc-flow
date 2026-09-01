@@ -143,18 +143,34 @@ def _right_table() -> pa.Table:
 
 def _reference(left: pa.Table, right: pa.Table) -> list[tuple[int, int, int, float]]:
     matches: list[tuple[int, int, int, float]] = []
-    for left_row in left.to_pylist():
-        for right_row in right.to_pylist():
-            if left_row["key"] != right_row["key"]:
+    left_rows = zip(
+        left["key"].to_pylist(),
+        left["left_ts"].cast(pa.int64()).to_pylist(),
+        left["sequence"].to_pylist(),
+        left["left_value"].to_pylist(),
+        strict=True,
+    )
+    right_rows = tuple(
+        zip(
+            right["key"].to_pylist(),
+            right["right_ts"].cast(pa.int64()).to_pylist(),
+            right["sequence"].to_pylist(),
+            right["right_value"].to_pylist(),
+            strict=True,
+        )
+    )
+    for left_key, left_time, left_sequence, left_value in left_rows:
+        for right_key, right_time, right_sequence, right_value in right_rows:
+            if left_key != right_key:
                 continue
-            delta = right_row["right_ts"] - left_row["left_ts"]
-            if -timedelta(seconds=5) <= delta <= timedelta(seconds=2):
+            delta_micros = right_time - left_time
+            if -5_000_000 <= delta_micros <= 2_000_000:
                 matches.append(
                     (
-                        left_row["key"],
-                        left_row["sequence"],
-                        right_row["sequence"],
-                        left_row["left_value"] - right_row["right_value"],
+                        left_key,
+                        left_sequence,
+                        right_sequence,
+                        left_value - right_value,
                     )
                 )
     return sorted(matches)
@@ -267,7 +283,9 @@ class _CollectSink:
 
 
 def _rows(tables: list[pa.Table]) -> list[tuple[int, int, int, float]]:
-    output = pa.concat_tables(tables).to_pylist()
+    output = pa.concat_tables(tables).select(
+        ["left__key", "left__sequence", "right__sequence", "spread"]
+    )
     return sorted(
         (
             row["left__key"],
@@ -275,7 +293,7 @@ def _rows(tables: list[pa.Table]) -> list[tuple[int, int, int, float]]:
             row["right__sequence"],
             row["spread"],
         )
-        for row in output
+        for row in output.to_pylist()
     )
 
 
