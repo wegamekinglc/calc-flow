@@ -23,6 +23,7 @@ from calc_flow.pipeline import (
 from calc_flow.symbolic import errors
 from calc_flow.symbolic.analyzer import (
     _ROW_LOCAL_PRIMITIVES,
+    _Analyzer,
     _literal_dtype,
     _require_mode,
     _rolling_output_type,
@@ -2254,24 +2255,43 @@ def _matrix_upstream_project(
     )
 
 
-def _raise_matrix_invariant(message: str, /) -> Never:
-    raise RuntimeError(f"symbolic matrix lowering invariant violated: {message}")
+def _raise_lowering_invariant(message: str, /) -> Never:
+    raise RuntimeError(f"symbolic lowering invariant violated: {message}")
 
 
-def _matrix_graph_lists(
+def _project_graph_lists(
     project: dict[str, object],
     /,
 ) -> tuple[list[object], list[object]]:
     graph = project.get("graph")
     if not isinstance(graph, dict):
-        _raise_matrix_invariant("project.graph must be a mapping")
+        _raise_lowering_invariant("project.graph must be a mapping")
     nodes = graph.get("nodes")
     if not isinstance(nodes, list):
-        _raise_matrix_invariant("project.graph.nodes must be a list")
+        _raise_lowering_invariant("project.graph.nodes must be a list")
     edges = graph.get("edges")
     if not isinstance(edges, list):
-        _raise_matrix_invariant("project.graph.edges must be a list")
+        _raise_lowering_invariant("project.graph.edges must be a list")
     return nodes, edges
+
+
+def _project_document(
+    name: str,
+    mode: str,
+    nodes: list[object],
+    edges: list[object],
+    /,
+) -> dict[str, object]:
+    project: dict[str, object] = {
+        "data_sources": [],
+        "format_version": 3,
+        "id": name,
+        "name": name,
+        "runtime": {"mode": mode, "options": {}},
+        "graph": {"edges": edges, "name": name, "nodes": nodes},
+    }
+    project["data_sources"] = [] if mode == "stream" else _data_sources(project)
+    return project
 
 
 def _wire_matrix_node(
@@ -2281,7 +2301,7 @@ def _wire_matrix_node(
     output_name: str,
     /,
 ) -> None:
-    nodes, edges = _matrix_graph_lists(project)
+    nodes, edges = _project_graph_lists(project)
     nodes.append(external)
     edges.append(
         {
@@ -2324,6 +2344,262 @@ def _lower_matrix_program(
     else:
         project["data_sources"] = _data_sources(project)
     return project
+
+
+def _stream_join_nodes(program: Program, /) -> tuple[Node, ...]:
+    joins: dict[str, Node] = {}
+    for _, value in program.outputs:
+        for node in _walk_nodes(value._node):
+            if node.op.name == "stream_join":
+                joins[node.digest] = node
+    return tuple(joins[digest] for digest in sorted(joins))
+
+
+def _contains_node(root: Node, digest: str, /) -> bool:
+    return any(node.digest == digest for node in _walk_nodes(root))
+
+
+def _contains_primitive(root: Node, primitive: str, /) -> bool:
+    return any(node.op.name == primitive for node in _walk_nodes(root))
+
+
+def _replace_node(root: Node, digest: str, replacement: Node, /) -> Node:
+    if root.digest == digest:
+        return replacement
+    return build(
+        root.op.name,
+        tuple(_replace_node(child, digest, replacement) for child in root.args),
+        dict(root.attrs.entries),
+        version=root.op.version,
+    )
+
+
+def _stream_join_node(
+    node: Node,
+    node_id: str,
+    left_schema: tuple[Field, ...],
+    right_schema: tuple[Field, ...],
+    /,
+) -> dict[str, object]:
+    return {
+        "id": node_id,
+        "input_ports": [
+            {
+                "kind": "table",
+                "name": "left",
+                "required": True,
+                "schema": [_field_json(field) for field in left_schema],
+            },
+            {
+                "kind": "table",
+                "name": "right",
+                "required": True,
+                "schema": [_field_json(field) for field in right_schema],
+            },
+        ],
+        "operator": {
+            "kind": "stream_join",
+            "spec": {
+                "join_type": "inner",
+                "left_keys": list(_cstr_seq(node.attr("left_keys"))),
+                "right_keys": list(_cstr_seq(node.attr("right_keys"))),
+                "left_event_time": _cstr(node.attr("left_event_time")),
+                "right_event_time": _cstr(node.attr("right_event_time")),
+                "bounds": {
+                    "before_micros": _cint(node.attr("before_micros")),
+                    "after_micros": _cint(node.attr("after_micros")),
+                },
+                "limits": {
+                    "max_state_rows_per_side": _cint(
+                        node.attr("max_state_rows_per_side")
+                    ),
+                    "max_state_bytes_per_side": _cint(
+                        node.attr("max_state_bytes_per_side")
+                    ),
+                    "max_matches_per_input_batch": _cint(
+                        node.attr("max_matches_per_input_batch")
+                    ),
+                },
+                "left_prefix": _cstr(node.attr("left_prefix")),
+                "right_prefix": _cstr(node.attr("right_prefix")),
+            },
+        },
+        "output_ports": [],
+    }
+
+
+def _downstream_input_endpoints(
+    nodes: list[object], edges: list[object], /
+) -> tuple[tuple[str, str], ...]:
+    connected = {
+        (str(edge["target_node"]), str(edge.get("target_port", "input")))
+        for edge in edges
+        if isinstance(edge, dict)
+    }
+    endpoints: list[tuple[str, str]] = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            _raise_lowering_invariant("graph node must be a mapping")
+        node_id = str(node["id"])
+        ports = node.get("input_ports")
+        names = (
+            tuple(
+                str(port["name"])
+                for port in ports
+                if isinstance(port, dict) and port.get("required") is True
+            )
+            if isinstance(ports, list) and ports
+            else ("input",)
+        )
+        endpoints.extend(
+            (node_id, name) for name in names if (node_id, name) not in connected
+        )
+    return tuple(sorted(endpoints))
+
+
+def _pin_table_output(
+    nodes: list[object], node_id: str, schema: tuple[Field, ...], /
+) -> None:
+    for node in nodes:
+        if isinstance(node, dict) and node.get("id") == node_id:
+            node["output_ports"] = [
+                {
+                    "kind": "table",
+                    "name": "output",
+                    "required": True,
+                    "schema": [_field_json(field) for field in schema],
+                }
+            ]
+            return
+    _raise_lowering_invariant(f"missing stream join input stage {node_id!r}")
+
+
+def _lower_stream_join_program(
+    program: Program,
+    analyzer: _Analyzer,
+    mode: str,
+    allowed_lateness_micros: int,
+    late_policy: str,
+    /,
+) -> dict[str, object] | None:
+    joins = _stream_join_nodes(program)
+    if not joins:
+        return None
+    if len(joins) != 1:
+        errors.raise_compile(
+            program.name,
+            errors.CAPABILITY_MISMATCH,
+            "SCE-17 supports exactly one unique symbolic stream join per program",
+        )
+    join = joins[0]
+    for output_name, value in program.outputs:
+        if not _contains_node(value._node, join.digest):
+            errors.raise_compile(
+                f"outputs.{output_name}",
+                errors.CAPABILITY_MISMATCH,
+                "every output in a symbolic stream-join program must descend"
+                " from its one shared join",
+            )
+    for side_name, side in zip(("left", "right"), join.args, strict=True):
+        if _contains_primitive(side, "attach_columns"):
+            errors.raise_compile(
+                f"{program.name}.stream_join.{side_name}",
+                errors.CAPABILITY_MISMATCH,
+                "matrix attachment around a symbolic stream join is not supported",
+            )
+
+    left_facts = analyzer.table(join.args[0], f"{program.name}.stream_join.left")
+    right_facts = analyzer.table(join.args[1], f"{program.name}.stream_join.right")
+    join_facts = analyzer.table(join, f"{program.name}.stream_join")
+    join_id = f"cf_stream_join_{join.digest[:16]}"
+    left_id = f"{join_id}__left"
+    right_id = f"{join_id}__right"
+    virtual_id = f"{join_id}__output"
+    side_plans = (
+        ("left", left_id, join.args[0], left_facts.schema),
+        ("right", right_id, join.args[1], right_facts.schema),
+    )
+    upstream_outputs = tuple(
+        (side_id, _LoweringValue(side))
+        for _, side_id, side, _ in side_plans
+        if side.op.name != "table_input"
+    )
+    if upstream_outputs:
+        upstream_sides = tuple(value._node for _, value in upstream_outputs)
+        table_inputs = tuple(
+            _LoweringValue(value._node)
+            for value in program.inputs
+            if value._node.op.name == "table_input"
+            and any(_contains_node(side, value._node.digest) for side in upstream_sides)
+        )
+        upstream_project = _lower_program(
+            _LoweringProgram(program.name, table_inputs, upstream_outputs),
+            mode,
+            allowed_lateness_micros,
+            late_policy,
+        )
+    else:
+        upstream_project = _project_document(program.name, mode, [], [])
+    upstream_nodes, upstream_edges = _project_graph_lists(upstream_project)
+    for port, side_id, side, schema in side_plans:
+        if side.op.name == "table_input":
+            continue
+        _pin_table_output(upstream_nodes, side_id, schema)
+        upstream_edges.append(
+            {
+                "source_node": side_id,
+                "source_port": "output",
+                "target_node": join_id,
+                "target_port": port,
+            }
+        )
+    upstream_nodes.append(
+        _stream_join_node(
+            join,
+            join_id,
+            left_facts.schema,
+            right_facts.schema,
+        )
+    )
+    if len(program.outputs) == 1 and program.outputs[0][1]._node.digest == join.digest:
+        return upstream_project
+
+    from calc_flow.symbolic.expr import table_input
+
+    virtual = table_input(virtual_id, schema=join_facts.schema)
+    downstream = _LoweringProgram(
+        program.name,
+        (_LoweringValue(virtual._node),),
+        tuple(
+            (
+                output_name,
+                _LoweringValue(_replace_node(value._node, join.digest, virtual._node)),
+            )
+            for output_name, value in program.outputs
+        ),
+    )
+    downstream_project = _lower_program(
+        downstream,
+        mode,
+        allowed_lateness_micros,
+        late_policy,
+    )
+    downstream_nodes, downstream_edges = _project_graph_lists(downstream_project)
+    endpoints = _downstream_input_endpoints(downstream_nodes, downstream_edges)
+    if not endpoints:
+        _raise_lowering_invariant("stream join downstream has no input endpoint")
+    upstream_nodes.extend(downstream_nodes)
+    upstream_edges.extend(downstream_edges)
+    upstream_edges.extend(
+        {
+            "source_node": join_id,
+            "source_port": "output",
+            "target_node": target_node,
+            "target_port": target_port,
+        }
+        for target_node, target_port in endpoints
+    )
+    return upstream_project
 
 
 def _required_segment_state_plan(
@@ -2833,16 +3109,7 @@ def _lower_program(
         edges,
         frozenset(output_name for output_name, _ in program.outputs),
     )
-    project: dict[str, object] = {
-        "data_sources": [],
-        "format_version": 3,
-        "id": program.name,
-        "name": program.name,
-        "runtime": {"mode": mode, "options": {}},
-        "graph": {"edges": edges, "name": program.name, "nodes": nodes},
-    }
-    project["data_sources"] = [] if mode == "stream" else _data_sources(project)
-    return project
+    return _project_document(program.name, mode, nodes, edges)
 
 
 def _require_runtime(runtime: object, entry: str, /) -> Runtime:
@@ -2858,7 +3125,7 @@ def _check_expression_capability(
     runtime: Runtime,
     mode: str,
     /,
-) -> None:
+) -> tuple[_Analyzer, RuntimeCapabilities]:
     analyzer, capabilities = _run(program, runtime, mode)
     issues = analyzer.issues
     if issues:
@@ -2886,7 +3153,7 @@ def _check_expression_capability(
                 "the expression operator does not prove stream lifecycle facts"
                 " in the selected capability snapshot",
             )
-        return
+        return analyzer, capabilities
     errors.raise_compile(
         program.name,
         errors.CAPABILITY_MISMATCH,
@@ -2901,6 +3168,58 @@ def _program_needs_rolling(program: Program, /) -> bool:
 def _program_needs_cross_section(program: Program, /) -> bool:
     return any(
         True for _, value in program.outputs for _ in _find_cross_section(value._node)
+    )
+
+
+def _program_needs_stream_join(program: Program, /) -> bool:
+    return bool(_stream_join_nodes(program))
+
+
+def _stream_join_ports(operator: object, /) -> bool:
+    inputs = tuple(
+        (port.name, port.kind, port.required) for port in operator.input_ports
+    )
+    outputs = tuple(
+        (port.name, port.kind, port.required) for port in operator.output_ports
+    )
+    return inputs == (("left", "table", True), ("right", "table", True)) and (
+        outputs == (("output", "table", True),)
+    )
+
+
+def _check_stream_join_capability(
+    program: Program,
+    capabilities: RuntimeCapabilities,
+    mode: str,
+    /,
+) -> None:
+    for operator in capabilities.operators:
+        if operator.kind != "stream_join":
+            continue
+        valid = (
+            operator.version == "1"
+            and mode in operator.modes
+            and _stream_join_ports(operator)
+            and operator.requires_watermark
+            and operator.stateful
+            and operator.checkpoint_support == "checkpointed_stateful"
+            and isinstance(operator.state_version, int)
+            and operator.state_version > 0
+            and operator.deterministic
+            and operator.replay_safe
+        )
+        if not valid:
+            errors.raise_compile(
+                program.name,
+                errors.CAPABILITY_MISMATCH,
+                "the stream_join operator does not prove the required stream"
+                " ports, watermark, checkpoint, determinism, and replay facts",
+            )
+        return
+    errors.raise_compile(
+        program.name,
+        errors.CAPABILITY_MISMATCH,
+        "the capability snapshot does not offer stream_join@1",
     )
 
 
@@ -3017,14 +3336,24 @@ def lower_program_document(
 
     selected = _require_runtime(runtime, "lower_program_document")
     mode_value = _require_mode(mode)
-    _check_expression_capability(program, selected, mode_value)
+    analyzer, capabilities = _check_expression_capability(program, selected, mode_value)
+    if _program_needs_stream_join(program):
+        _check_stream_join_capability(program, capabilities, mode_value)
     if _program_needs_rolling(program) or _program_needs_cross_section(program):
         _validate_lateness(allowed_lateness_micros, late_policy)
-        _, capabilities = _run(program, selected, mode_value)
         if _program_needs_rolling(program):
             _check_rolling_capability(program, capabilities, mode_value)
         if _program_needs_cross_section(program):
             _check_cross_section_capability(program, capabilities, mode_value)
+    join_project = _lower_stream_join_program(
+        program,
+        analyzer,
+        mode_value,
+        allowed_lateness_micros,
+        late_policy,
+    )
+    if join_project is not None:
+        return join_project
     return _lower_program(program, mode_value, allowed_lateness_micros, late_policy)
 
 

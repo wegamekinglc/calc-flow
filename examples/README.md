@@ -27,6 +27,7 @@ uv run python examples/08_streaming_recovery.py
 uv run python examples/09_symbolic_financial_features.py
 uv run python examples/10_symbolic_streaming_recovery.py
 uv run python examples/11_symbolic_static_matrix.py
+uv run python examples/12_symbolic_stream_join.py
 ```
 
 Or run the entire Python and Rust user-example inventory:
@@ -63,6 +64,8 @@ The files cover:
 - `11_symbolic_static_matrix.py` — an immutable NumPy weight matrix used by the
   same symbolic program in batch and stream modes, including provider failure
   and one-time static placement evidence.
+- `12_symbolic_stream_join.py` — two ordered symbolic inputs lowered to one
+  bounded native stream join and executed across independent segmentations.
 
 `07_array_and_dataframe.py` selects ordered numeric `pyarrow.Table` columns
 and multiplies their dense matrix by an array weight matrix. After input

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from calc_flow.symbolic.domains import (
     is_strict_scalar_type,
@@ -47,6 +47,9 @@ from calc_flow.symbolic.windows import (
     DurationFrame,
     RowFrame,
 )
+
+if TYPE_CHECKING:
+    from calc_flow.pipeline import JoinStateLimits, JoinTimeBounds
 
 
 def _column(value: object, function: str, parameter: str, /) -> ColumnExpr:
@@ -909,6 +912,72 @@ class TableNamespace:
                     _array(array, function, "array")._node,
                 ),
                 {"names": _str_sequence(names, function, "names")},
+            )
+        )
+
+    def stream_join(
+        self,
+        left: TableExpr,
+        right: TableExpr,
+        /,
+        *,
+        left_keys: Sequence[str],
+        right_keys: Sequence[str],
+        left_event_time: str,
+        right_event_time: str,
+        bounds: JoinTimeBounds,
+        limits: JoinStateLimits,
+        left_prefix: str = "left",
+        right_prefix: str = "right",
+    ) -> TableExpr:
+        """Declare one bounded native inner join between two stream tables."""
+
+        from calc_flow.pipeline import (
+            _require_distinct_prefixes,
+            _require_equal_key_counts,
+            _require_event_time_columns,
+            _require_join_bounds,
+            _require_join_limits,
+            _timedelta_micros,
+        )
+
+        function = "table.stream_join"
+        left_value = _table(left, function, "left")
+        right_value = _table(right, function, "right")
+        left_key_values = _str_sequence(left_keys, function, "left_keys")
+        right_key_values = _str_sequence(right_keys, function, "right_keys")
+        if not left_key_values.items or not right_key_values.items:
+            raise ValueError(
+                "calc_flow.symbolic.table.stream_join.keys: invalid_literal:"
+                " key sequences must be non-empty"
+            )
+        _require_equal_key_counts(
+            tuple(item.value for item in left_key_values.items),
+            tuple(item.value for item in right_key_values.items),
+        )
+        _require_event_time_columns(left_event_time, right_event_time)
+        _require_join_bounds(bounds)
+        _require_join_limits(limits)
+        _require_distinct_prefixes(left_prefix, right_prefix)
+        return TableExpr(
+            build(
+                "stream_join",
+                (left_value._node, right_value._node),
+                {
+                    "left_keys": left_key_values,
+                    "right_keys": right_key_values,
+                    "left_event_time": CStr(left_event_time),
+                    "right_event_time": CStr(right_event_time),
+                    "before_micros": CInt(_timedelta_micros(bounds.before, "before")),
+                    "after_micros": CInt(_timedelta_micros(bounds.after, "after")),
+                    "max_state_rows_per_side": CInt(limits.max_state_rows_per_side),
+                    "max_state_bytes_per_side": CInt(limits.max_state_bytes_per_side),
+                    "max_matches_per_input_batch": CInt(
+                        limits.max_matches_per_input_batch
+                    ),
+                    "left_prefix": CStr(left_prefix),
+                    "right_prefix": CStr(right_prefix),
+                },
             )
         )
 

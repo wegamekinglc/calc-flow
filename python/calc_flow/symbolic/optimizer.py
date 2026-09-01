@@ -189,23 +189,27 @@ def _document_nodes(document: dict[str, object], /) -> list[dict[str, object]]:
     return nodes if isinstance(nodes, list) else []  # type: ignore[return-value]
 
 
-def _input_schema_fields(node: dict[str, object], /) -> list[dict[str, object]]:
+def _input_schema_fields(
+    node: dict[str, object], index: int = 0, /
+) -> list[dict[str, object]]:
     input_ports = node.get("input_ports")
     if not isinstance(input_ports, list):
         return []
     if not input_ports:
         return []
-    first = input_ports[0]
-    if not isinstance(first, dict):
+    if index >= len(input_ports):
         return []
-    schema = first.get("schema")
+    port = input_ports[index]
+    if not isinstance(port, dict):
+        return []
+    schema = port.get("schema")
     if not isinstance(schema, list):
         return []
     return [field for field in schema if isinstance(field, dict)]
 
 
-def _state_layout(node: dict[str, object], /) -> str:
-    fields = _input_schema_fields(node)
+def _state_layout(node: dict[str, object], index: int = 0, /) -> str:
+    fields = _input_schema_fields(node, index)
     fixed_bytes = sum(
         _FIXED_TYPE_BYTES.get(field.get("data_type"), 0) for field in fields
     )
@@ -268,11 +272,23 @@ def _cross_section_boundary(spec: dict[str, object], /) -> str:
 def _state_cost(node: dict[str, object], /) -> str | None:
     operator = node.get("operator")
     spec = operator.get("spec") if isinstance(operator, dict) else None
+    kind = operator.get("kind") if isinstance(operator, dict) else None
+    if kind == "stream_join" and isinstance(spec, dict):
+        limits = spec.get("limits")
+        if not isinstance(limits, dict):
+            return None
+        return (
+            f"    state {node['id']}"
+            f" max_state_rows_per_side={limits.get('max_state_rows_per_side')}"
+            f" max_state_bytes_per_side={limits.get('max_state_bytes_per_side')}"
+            " max_matches_per_input_batch="
+            f"{limits.get('max_matches_per_input_batch')}"
+            f" left_{_state_layout(node, 0)} right_{_state_layout(node, 1)}"
+        )
     outputs = spec.get("outputs") if isinstance(spec, dict) else None
     if not isinstance(outputs, list):
         return None
     layout = _state_layout(node)
-    kind = operator.get("kind")
     if kind == "rolling":
         return f"    state {node['id']} {_rolling_boundary(outputs)} {layout}"
     if kind == "cross_section":
@@ -380,6 +396,7 @@ def explain_optimization(document: dict[str, object], /) -> tuple[str, ...]:
     cse_count = sum("__cf_cse_" in str(node.get("id")) for node in nodes)
     rolling = _nodes_of_kind(nodes, "rolling")
     cross_section = _nodes_of_kind(nodes, "cross_section")
+    stream_join = _nodes_of_kind(nodes, "stream_join")
     external = _nodes_of_kind(nodes, "external")
 
     lines = (
@@ -389,6 +406,7 @@ def explain_optimization(document: dict[str, object], /) -> tuple[str, ...]:
         f" {len(rolling)} shared_outputs {_state_output_count(rolling)}",
         "    cross_section grouping_stages"
         f" {len(cross_section)} shared_outputs {_state_output_count(cross_section)}",
+        f"    stream_join state_stages {len(stream_join)}",
         f"    array fused_stages {len(external)} provider_calls_per_microbatch"
         f" {len(external)}",
         "  costs",

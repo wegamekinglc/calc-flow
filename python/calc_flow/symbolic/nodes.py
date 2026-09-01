@@ -348,6 +348,29 @@ _PRIMITIVES: dict[str, PrimitiveSpec] = {
         ),
         CMap(()),
     ),
+    "stream_join": PrimitiveSpec(
+        frozenset(
+            {
+                "left_keys",
+                "right_keys",
+                "left_event_time",
+                "right_event_time",
+                "before_micros",
+                "after_micros",
+                "max_state_rows_per_side",
+                "max_state_bytes_per_side",
+                "max_matches_per_input_batch",
+                "left_prefix",
+                "right_prefix",
+            }
+        ),
+        CMap.from_mapping(
+            {
+                "left_prefix": CStr("left"),
+                "right_prefix": CStr("right"),
+            }
+        ),
+    ),
     "column_ref": PrimitiveSpec(frozenset({"name"}), CMap(())),
     "literal": PrimitiveSpec(frozenset({"value"}), CMap(())),
     "clip": PrimitiveSpec(frozenset({"lower", "upper"}), CMap(())),

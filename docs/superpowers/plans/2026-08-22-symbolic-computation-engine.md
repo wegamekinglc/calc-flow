@@ -608,6 +608,37 @@ no retained-history reconstruction.
 native project-v3 rolling declaration in alternating paired order. Report the
 distribution and provenance; do not treat an unpaired timing as acceptance.
 
+### [SCE-17] Add Symbolic Bounded Stream Joins
+
+**Branch:** `feature/symbolic-stream-joins`
+
+**PR title:** `feat: add symbolic stream joins`
+
+**Goal:** Expose the existing native bounded inner `stream_join@1` through the
+declaration-only symbolic API without creating another join implementation,
+project variant, or checkpoint layout.
+
+**Semantic contract:** `table.stream_join` reuses `JoinTimeBounds` and
+`JoinStateLimits`, accepts two ordered table expressions, validates exact key
+and event-time schemas, and produces all prefixed left fields followed by all
+prefixed right fields. It is stream-only and lowers to the existing native
+join specification verbatim.
+
+**Composition boundary:** One program owns one unique join, which may be
+shared by multiple row-local output branches. Nested or independent joins,
+unrelated outputs, matrix attachment around a join, and stateful work after a
+join require a later explicit relational-DAG and post-join ordering contract.
+
+**RED and recovery tests:** Cover immutable declarations, deterministic
+identity, schema and ordering diagnostics, batch/capability/composition
+rejection, one-node fan-out lowering, bounded reference vectors across
+micro-batch segmentations, watermark completion, state-limit propagation, and
+mid-checkpoint recovery.
+
+**Native consistency repair:** Project-v3 validation accepts both
+timezone-naive and UTC Arrow timestamps, matching its documented diagnostic
+and the native join constructor.
+
 ## 11. Cross-Cutting Test Matrix
 
 Every supported stateful primitive is exercised over:
@@ -699,7 +730,7 @@ their schema/OpenAPI/generated TypeScript changes in the same commit.
 
 These items require separate approved designs after the initial release:
 
-- streaming relational or temporal joins;
+- multi-join relational DAGs and explicit post-join ordering metadata;
 - update/retraction/changelog outputs;
 - epoch-aligned dynamic matrix weights;
 - arbitrary user-defined stateful providers;

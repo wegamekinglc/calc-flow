@@ -2416,8 +2416,11 @@ fn validate_join_event_time(
         ));
         return;
     };
-    let timestamp = arrow_data_type(&field.data_type)
-        .is_some_and(|data_type| matches!(data_type, DataType::Timestamp(_, None)));
+    let timestamp = arrow_data_type(&field.data_type).is_some_and(|data_type| match data_type {
+        DataType::Timestamp(_, None) => true,
+        DataType::Timestamp(_, Some(timezone)) => timezone.as_ref() == "UTC",
+        _ => false,
+    });
     if timestamp {
         return;
     }
@@ -3089,7 +3092,28 @@ fn default_output() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ArrowFieldSpec, canonical_arrow_field_type, field_from_spec};
+    use super::{
+        ArrowFieldSpec, canonical_arrow_field_type, field_from_spec, validate_join_event_time,
+    };
+
+    #[test]
+    fn stream_join_event_time_accepts_naive_and_utc_timestamps() {
+        for data_type in ["timestamp[us]", "timestamp[us, UTC]"] {
+            let mut issues = Vec::new();
+            validate_join_event_time(
+                "left",
+                "ts",
+                &[ArrowFieldSpec {
+                    name: "ts".into(),
+                    data_type: data_type.into(),
+                    nullable: false,
+                }],
+                "graph.nodes[0].operator.spec",
+                &mut issues,
+            );
+            assert!(issues.is_empty(), "{data_type}: {issues:?}");
+        }
+    }
 
     #[test]
     fn dictionary_type_spellings_round_trip_all_frozen_combinations() {

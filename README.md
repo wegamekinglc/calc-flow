@@ -69,8 +69,8 @@ See [the Python API guide](docs/python-api.md) and the executable
 [examples](examples/README.md) for SQL, Python scalar UDFs, continuous
 execution and recovery, asyncio, and NumPy/JAX.
 The [symbolic workflow guide](docs/symbolic-workflows.md) covers composed
-financial features, checkpoint recovery, static matrices, capability errors,
-Studio inspection, and performance output.
+financial features, checkpoint recovery, static matrices, bounded stream
+joins, capability errors, Studio inspection, and performance output.
 
 ## Rust quickstart
 

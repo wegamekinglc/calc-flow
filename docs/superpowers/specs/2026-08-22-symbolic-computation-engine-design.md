@@ -606,9 +606,9 @@ cross-section state and schedules nested rolling expressions as a
 deterministic innermost-first DAG. RSI is executable as `delta`, row-local
 positive/negative projections, rolling means, and final row-local arithmetic;
 its Finance-Python-inspired vectors and symbolic mid-checkpoint recovery are
-covered by the public test suite. MACD still requires a separately frozen
-EMA/EWMA algorithm and durable-state contract and must not be presented as
-executable before that design and its recovery tests land.
+covered by the public test suite. SCE-16 subsequently froze and delivered the
+EWMA/EMA algorithm, durable state v2, composed MACD, reference vectors, and
+checkpoint-recovery coverage, so MACD is now executable through `ts.macd`.
 
 ## Deferred Work at the Initial Freeze
 
@@ -624,6 +624,11 @@ and canonical-identity tie breaking; `cs.mean_fill` fills null floating values
 from the complete valid sample while preserving NaN and the input floating
 type. They share the native cross-section grouping, sort, finality, and
 checkpoint state rather than lowering through separate primitives.
+
+SCE-17 subsequently approves one bounded native inner stream join per
+symbolic program through the normative `symbolic-stream-joins` contract and
+API note. Multiple relational joins and post-join stateful ordering remain
+deferred.
 
 ## Frozen Decision Gates
 
