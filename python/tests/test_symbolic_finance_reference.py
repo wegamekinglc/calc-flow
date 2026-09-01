@@ -197,6 +197,66 @@ def test_finance_style_returns_momentum_and_bollinger_match_reference() -> None:
         _assert_optional_floats(output[name].to_pylist(), values)
 
 
+def test_finance_style_ewma_and_macd_match_independent_reference() -> None:
+    quotes = _ordered_quotes()
+    price = quotes["price"]
+    ema = ts.ema(price, span=3, min_periods=2)
+    assert ema.digest == ts.ewma(price, span=3, min_periods=2).digest
+    macd = ts.macd(price, fast_span=2, slow_span=4)
+    features = FeatureSet(
+        (
+            ("ema_3", ema),
+            ("macd_2_4", macd),
+            ("ema_macd_3", ts.ema(macd, span=3)),
+        )
+    )
+    program = Program(
+        "finance-exponential-reference",
+        inputs=(quotes,),
+        outputs=(("signals", quotes.with_columns(features)),),
+    )
+    prices = [10.0, None, 14.0, math.nan, 18.0, 10.0]
+    schema = pa.schema(
+        (
+            pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
+            pa.field("symbol", pa.string(), nullable=False),
+            pa.field("seq", pa.uint64(), nullable=False),
+            pa.field("price", pa.float64(), nullable=True),
+        )
+    )
+    table = pa.table(
+        {
+            "ts": [index * 1_000_000 for index in range(1, len(prices) + 1)],
+            "symbol": ["AAA"] * len(prices),
+            "seq": list(range(1, len(prices) + 1)),
+            "price": prices,
+        },
+        schema=schema,
+    )
+
+    output = _execute(program, table)
+
+    _assert_optional_floats(
+        output["ema_3"].to_pylist(),
+        [None, None, 12.0, 12.0, 15.0, 12.5],
+    )
+    _assert_optional_floats(
+        output["macd_2_4"].to_pylist(),
+        [
+            0.0,
+            0.0,
+            16.0 / 15.0,
+            16.0 / 15.0,
+            464.0 / 225.0,
+            -1424.0 / 3375.0,
+        ],
+    )
+    _assert_optional_floats(
+        output["ema_macd_3"].to_pylist(),
+        [0.0, 0.0, 8.0 / 15.0, 4.0 / 5.0, 322.0 / 225.0, 1703.0 / 3375.0],
+    )
+
+
 def test_finance_style_rsi_composition_matches_independent_reference() -> None:
     quotes = _ordered_quotes()
     change = ts.delta(quotes["price"])

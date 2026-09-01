@@ -264,6 +264,25 @@ def test_ts_primitives_validate_their_declarations() -> None:
         ts.count(x, window=rows(5), min_periods=0)
 
 
+def test_exponential_primitives_validate_spans_and_macd_ordering() -> None:
+    x = _column()
+    for value in (0, -1, True, 1.5):
+        with pytest.raises((TypeError, ValueError)):
+            ts.ewma(x, span=value)  # type: ignore[arg-type]
+        with pytest.raises((TypeError, ValueError)):
+            ts.macd(x, fast_span=value)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        ts.ema(x, span=3, min_periods=0)
+    with pytest.raises(ValueError):
+        ts.macd(x, min_periods=0)
+    with pytest.raises(ValueError, match="fast_span must be less than slow_span"):
+        ts.macd(x, fast_span=26, slow_span=12)
+    assert (
+        ts.macd(x, fast_span=2, slow_span=4).digest
+        == (ts.ewma(x, span=2) - ts.ewma(x, span=4)).digest
+    )
+
+
 def test_cs_primitives_validate_bounds() -> None:
     x = _column()
     group = exact_time(x)

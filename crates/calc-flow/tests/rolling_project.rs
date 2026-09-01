@@ -347,7 +347,7 @@ fn rolling_project_accepts_aggregate_output_kinds() {
 fn rolling_project_still_rejects_unsupported_output_kinds() {
     // SCE-08 delivered min/max/covariance/correlation; unknown catalog
     // kinds stay rejected.
-    for kind in ["std", "ewma", "skew"] {
+    for kind in ["std", "median", "skew"] {
         let mut node = rolling_node_json();
         node["operator"]["spec"]["outputs"][0] = json!({
             "kind": kind,

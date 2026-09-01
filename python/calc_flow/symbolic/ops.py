@@ -306,6 +306,80 @@ class TsNamespace:
             )
         )
 
+    def ewma(
+        self,
+        value: ColumnExpr,
+        /,
+        *,
+        span: int,
+        min_periods: int = 1,
+    ) -> ColumnExpr:
+        """Declare an unadjusted exponentially weighted moving average."""
+
+        function = "ts.ewma"
+        return ColumnExpr(
+            build(
+                "ewma",
+                (_column(value, function, "value")._node,),
+                {
+                    "span": CInt(
+                        require_positive_int(
+                            span, f"calc_flow.symbolic.{function}.span"
+                        )
+                    ),
+                    "min_periods": CInt(
+                        require_positive_int(
+                            min_periods,
+                            f"calc_flow.symbolic.{function}.min_periods",
+                        )
+                    ),
+                },
+            )
+        )
+
+    def ema(
+        self,
+        value: ColumnExpr,
+        /,
+        *,
+        span: int,
+        min_periods: int = 1,
+    ) -> ColumnExpr:
+        """Alias :meth:`ewma` without introducing a second primitive."""
+
+        return self.ewma(value, span=span, min_periods=min_periods)
+
+    def macd(
+        self,
+        value: ColumnExpr,
+        /,
+        *,
+        fast_span: int = 12,
+        slow_span: int = 26,
+        min_periods: int = 1,
+    ) -> ColumnExpr:
+        """Declare MACD as the difference of two shared EWMA nodes."""
+
+        function = "ts.macd"
+        column = _column(value, function, "value")
+        fast = require_positive_int(
+            fast_span, f"calc_flow.symbolic.{function}.fast_span"
+        )
+        slow = require_positive_int(
+            slow_span, f"calc_flow.symbolic.{function}.slow_span"
+        )
+        periods = require_positive_int(
+            min_periods, f"calc_flow.symbolic.{function}.min_periods"
+        )
+        if fast >= slow:
+            raise ValueError(
+                f"calc_flow.symbolic.{function}.fast_span: invalid_literal:"
+                " fast_span must be less than slow_span"
+            )
+        return self.ewma(column, span=fast, min_periods=periods) - self.ewma(
+            column, span=slow, min_periods=periods
+        )
+
     def _rolling(
         self,
         primitive: str,

@@ -111,6 +111,7 @@ accepted milestone gates and their raw evidence are documented in
 | `sce05_row_local_20_columns`              | alternating hand-built/symbolic single projections         |
 | `sce08_temporal_catalog`                  | alternating native/symbolic duration rolling runs          |
 | `sce14_cross_domain_sharing`              | separate versus shared rolling and cross-section branches  |
+| `sce16_exponential_indicators`            | alternating hand-built/symbolic EWMA and MACD runs          |
 | `symbolic_multistage_rolling_sharing`     | separate versus shared two-stage rolling output branches   |
 
 Every scenario records rows, batches, peak RSS (`VmHWM`), provider or

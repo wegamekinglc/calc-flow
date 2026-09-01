@@ -14,8 +14,8 @@
 > rolling or cross-section state, rolling output may feed a later rolling
 > stage, and compatible multi-stage branches share physical state. Symbolic
 > mid-checkpoint recovery and Finance-Python-inspired RSI composition cover
-> the new boundary. EMA/EWMA remains deferred pending a separately frozen
-> algorithm and durable-state contract.
+> the new boundary. SCE-16 subsequently freezes and implements unadjusted
+> EMA/EWMA, durable rolling state layout v2, and MACD composition.
 >
 > **Design contract:**
 > [Symbolic Computation Engine Design](../specs/2026-08-22-symbolic-computation-engine-design.md),
@@ -92,23 +92,25 @@ is deleted after the atomic cutover; it is not a permanent release branch.
 | [SCE-13] | P5    | symbolic table/array bridges and matmul   | SCE-03, SCE-12         | 1.5                |
 | [SCE-14] | P6    | cross-domain CSE, fusion, explain, cache  | SCE-08, SCE-10, SCE-13 | 2.0                |
 | [SCE-15] | P6    | Studio, docs, hardening, release checks   | SCE-14                 | 2.0                |
+| [SCE-16] | P7    | durable EWMA and composed MACD            | SCE-08, SCE-14         | 1.0                |
 
 ### Current Delivery Snapshot
 
-| Tasks                 | State  | Merged evidence                                                     |
-| --------------------- | ------ | ------------------------------------------------------------------- |
-| SCE-00–SCE-04         | merged | contract `b9deff7`, IR `72f8ab0`, analysis/runtime through `fab89de` |
-| SCE-05–SCE-08         | merged | row/rolling through `b53b8e9`; paired gates `b39208f`, `7d9a2b8`    |
-| SCE-09–SCE-10         | merged | cross-section `9affe0a`, grouped additions `7389c6f`                 |
-| SCE-11–SCE-13         | merged | static/provider/matrix through `bde42be`                             |
-| SCE-14                | merged | optimizer, explain, and cache `5fd256d`                              |
-| SCE-15                | merged | Studio, docs, and release integration `94b9f6e`                      |
+| Tasks                 | State       | Merged evidence                                                     |
+| --------------------- | ----------- | ------------------------------------------------------------------- |
+| SCE-00–SCE-04         | merged      | contract `b9deff7`, IR `72f8ab0`, analysis/runtime through `fab89de` |
+| SCE-05–SCE-08         | merged      | row/rolling through `b53b8e9`; paired gates `b39208f`, `7d9a2b8`    |
+| SCE-09–SCE-10         | merged      | cross-section `9affe0a`, grouped additions `7389c6f`                 |
+| SCE-11–SCE-13         | merged      | static/provider/matrix through `bde42be`                             |
+| SCE-14                | merged      | optimizer, explain, and cache `5fd256d`                              |
+| SCE-15                | merged      | Studio, docs, and release integration `94b9f6e`                      |
+| SCE-16                | implemented | EWMA contract, rolling layout v2, and MACD composition               |
 
 This table records implementation history rather than changing the frozen
 semantics below. Later correctness or composability follow-ups receive their
 own RED tests and review evidence.
 
-The single-track median is about 23.5 engineer-weeks. Two engineers split
+The single-track median is about 24.5 engineer-weeks. Two engineers split
 between native streaming/state work and Python/compiler/provider work can
 target 11 to 14 calendar weeks after SCE-00, subject to review and CI latency.
 These are planning estimates, not delivery promises.
@@ -575,6 +577,36 @@ smoke checks required by `AGENTS.md`.
 **Milestone gate E:** Public documentation describes only implemented
 behavior; no proposed member is advertised early; all generated contracts are
 clean; package contents contain no repository-only plan/spec guidance.
+
+### [SCE-16] Add Durable EWMA and Composed MACD
+
+**Branch:** `feature/symbolic-exponential-indicators`
+
+**PR title:** `feat: add symbolic exponential indicators`
+
+**Goal:** Add the deferred exponential primitive without creating a Python
+execution path or a separate MACD accumulator.
+
+**Semantic contract:** `ewma@1` uses the unadjusted recurrence with
+`alpha = 2 / (span + 1)`, exact first-valid-sample seeding, ignored null/NaN
+inputs, and a valid-sample `min_periods` gate. `ts.ema` is an identity alias;
+`ts.macd` expands to the difference between fast and slow EWMA nodes.
+
+**Durable state:** Existing rolling declarations retain state layout v1.
+Declarations containing EWMA use layout v2 and persist one valid count and
+exact IEEE binary64 accumulator per shared `(entity, input, span)` group.
+Restore validates layout, schema, configuration, entity ordering, group kind,
+ordinal uniqueness, and state row completeness before installation.
+
+**RED and reference tests:** Cover declaration rejection, type analysis,
+project lowering, first-sample and missing-value vectors independently derived
+from Finance-Python commit `3e33d3e`, entity isolation, shared state,
+segmentation invariance, batch/stream parity, and mid-checkpoint recovery with
+no retained-history reconstruction.
+
+**Performance gate:** Compare the public symbolic EWMA/MACD plan with the same
+native project-v3 rolling declaration in alternating paired order. Report the
+distribution and provenance; do not treat an unpaired timing as acceptance.
 
 ## 11. Cross-Cutting Test Matrix
 

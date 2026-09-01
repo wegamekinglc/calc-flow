@@ -360,6 +360,10 @@ _PRIMITIVES: dict[str, PrimitiveSpec] = {
         frozenset({"periods"}),
         CMap.from_mapping({"periods": CInt(1)}),
     ),
+    "ewma": PrimitiveSpec(
+        frozenset({"span", "min_periods"}),
+        CMap.from_mapping({"min_periods": CInt(1)}),
+    ),
     **{
         name: PrimitiveSpec(
             frozenset({"frame", "min_periods"}),

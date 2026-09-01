@@ -97,6 +97,7 @@ _ROLLING_PRIMITIVES: Final = frozenset(
     {
         "lag",
         "delta",
+        "ewma",
         "count",
         "sum",
         "mean",
@@ -850,6 +851,19 @@ def _plan_rolling_stage(
             )
             derived_fields.append(Field(name, operands[0][2].data_type, nullable=True))
             continue
+        if kind == "ewma":
+            declarations.append(
+                {
+                    "kind": kind,
+                    "primitive_version": 1,
+                    "input": operands[0][1],
+                    "output": name,
+                    "span": _cint(subtree.attr("span")),
+                    "min_periods": _cint(subtree.attr("min_periods")) or 1,
+                }
+            )
+            derived_fields.append(Field(name, "float64", nullable=True))
+            continue
         frame = _rolling_frame(subtree, f"{path}.{name}", kind)
         declaration: dict[str, object] = {
             "kind": kind,
@@ -882,7 +896,9 @@ def _plan_rolling_stage(
             "kind": "rolling",
             "spec": {
                 "configuration_version": 1,
-                "state_layout_version": 1,
+                "state_layout_version": (
+                    2 if any(item["kind"] == "ewma" for item in declarations) else 1
+                ),
                 "partition_by": list(entity_by),
                 "event_time": event_time,
                 "sequence_by": list(sequence_by),

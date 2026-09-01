@@ -707,12 +707,12 @@ float64 path when x64 is disabled and accepts it when `JAX_ENABLE_X64=true`.
 Runtime-dependent schema, null, weight backend/shape, and output row-count
 checks happen before attachment and report the failing provider field.
 
-`ts.lag`, `ts.delta`, and the rolling aggregates `ts.count`, `ts.sum`,
-`ts.mean`, `ts.min`, `ts.max`, `ts.variance`, `ts.stddev`,
-`ts.covariance`, and `ts.correlation` lower to one or more native `rolling`
-stages per program output, placed ahead of the fused row-local stages. Rolling
-requires the input table to declare its `entity_by`, `event_time`, and
-`sequence_by` ordering keys; a program missing them fails with
+`ts.lag`, `ts.delta`, `ts.ewma` (with identity alias `ts.ema`), and the
+rolling aggregates `ts.count`, `ts.sum`, `ts.mean`, `ts.min`, `ts.max`,
+`ts.variance`, `ts.stddev`, `ts.covariance`, and `ts.correlation` lower to one
+or more native `rolling` stages per program output, placed ahead of the fused
+row-local stages. Rolling requires the input table to declare its `entity_by`,
+`event_time`, and `sequence_by` ordering keys; a program missing them fails with
 `ordering_required`. A rolling argument may resolve to a plain input column,
 a direct or derived row-local alias, a pure row-local expression such as
 `ts.lag(row.log(quotes["x"]))`, or an earlier rolling result. The lowerer
@@ -733,26 +733,37 @@ occurrence keeps its feature name as the output column, while an occurrence
 nested inside a larger expression materializes as a deterministically named
 internal column that the next state or fused row-local stage references.
 Identical multi-stage pipelines across output branches share the same physical
-state nodes. A
-lag, delta, `min`, or `max` column keeps the input column's type; the
+state nodes. A lag, delta, `min`, or `max` column keeps the input column's type; the
 remaining aggregate columns take the frozen output type — `uint64` for
 `count`, `int64` or `uint64` for an integer `sum`, `float64` otherwise —
 and the engine evaluates the frozen window semantics described in the
-[Rust API guide](rust-api.md). A
-filter declared below every rolling feature becomes a deterministic
+[Rust API guide](rust-api.md).
+`ts.ewma(value, span=n, min_periods=m)` instead declares constant exponential
+state: `n` and `m` are positive, the first valid value seeds the unadjusted
+average exactly, and later valid values apply
+`average += 2 / (n + 1) * (value - average)`. Null and NaN inputs leave both
+the valid count and average unchanged; infinity participates through ordinary
+IEEE arithmetic. The result is nullable `float64`. `ts.macd` defaults to
+`fast_span=12` and `slow_span=26`, requires the fast span to be smaller, and
+is only the row-local difference of those two EWMA declarations, so ordinary
+CSE and native state sharing apply.
+
+A filter declared below every rolling feature becomes a deterministic
 `<output>__cf_prefilter` expression node feeding the rolling node; a filter
 declared above them applies after it. The lowered node's frozen spec carries
-`configuration_version` and `state_layout_version` 1, the declared ordering
+`configuration_version` 1 and the declared ordering
 keys, one entry per rolling output (`kind`, `primitive_version` 1, `input`,
-`output`, and `periods`, or `frame`, `min_periods`, and — for the
-statistical kinds — `ddof`; the pair kinds carry `left` and `right` in place
-of `input`), the `allowed_lateness_micros` and `late_policy`
+`output`, and `periods`, or `frame`, `min_periods`, and — for the statistical
+kinds — `ddof`; the pair kinds carry `left` and `right` in place of `input`;
+EWMA carries `span` and `min_periods`), the `allowed_lateness_micros` and `late_policy`
 values validated by `compile_stream` — `error` lowers to an envelope-scoped
 rejection and `drop` to a metrics-recorded drop — and the
 `stateful_numeric_v1` value policy, which preserves a null or NaN current or
 referenced value. Batch lowering writes the default lateness values, batch
 evaluation classifies no late rows, and a program without rolling
-declarations is unaffected by the lateness arguments.
+declarations is unaffected by the lateness arguments. Existing rolling stages
+use `state_layout_version` 1; any stage containing EWMA uses version 2 and
+persists its shared exponential accumulators for exact checkpoint recovery.
 
 `cs.rank`, `cs.percentile`, `cs.demean`, `cs.zscore`, `cs.winsorize`,
 `cs.top`, `cs.bottom`, and `cs.mean_fill` lower to one shared native

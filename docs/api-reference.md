@@ -312,7 +312,7 @@ caller-owned sequences and mappings.
 | `Field(name, data_type, nullable=True)`                                       | One exact table field declaration                                                                                    |
 | `rows(size)` / `duration(micros)`                                             | Row-count and exact-microsecond rolling frames                                                                       |
 | `exact_time(...)` / `event_time_bucket(...)`                                  | Cross-section group declarations                                                                                     |
-| `row` / `ts` / `cs` / `table` / `linalg` / `window`                           | Namespace functions over expressions                                                                                 |
+| `row` / `ts` / `cs` / `table` / `linalg` / `window`                           | Namespace functions over expressions; `ts` includes durable EWMA/EMA and composed MACD                               |
 | `FeatureSet(features=())` / `.with_feature(name, value)`                      | Ordered uniquely named column expressions                                                                            |
 | `TableExpr.with_columns(features)`                                            | Append a feature set as derived columns                                                                              |
 | `Program(name, *, inputs=(), outputs=())`                                     | Declared inputs and outputs with the runtime-independent v1 fingerprint                                              |

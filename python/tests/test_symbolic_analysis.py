@@ -680,6 +680,26 @@ def test_explain_reports_state_requirements_per_output() -> None:
     assert "state cross_section, duration(60000000)" in explanation
 
 
+def test_explain_reports_constant_exponential_state() -> None:
+    quotes = _quotes_ordered()
+    program = Program(
+        "p",
+        inputs=[quotes],
+        outputs=[
+            (
+                "signals",
+                quotes.with_columns(
+                    FeatureSet([("ema", ts.ewma(quotes["x"], span=12))])
+                ),
+            )
+        ],
+    )
+
+    explanation = program.explain(Runtime(), mode="stream")
+
+    assert "state constant(span=12)" in explanation
+
+
 def test_analysis_is_deterministic_and_never_mutates_declarations() -> None:
     program = _row_local_program()
     runtime = Runtime()

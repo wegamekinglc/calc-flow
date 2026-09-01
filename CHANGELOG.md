@@ -5,6 +5,16 @@ engine or Studio capabilities.
 
 ## 2026-09
 
+- 2026-09-01: Add durable unadjusted EWMA and composed MACD to the symbolic
+  temporal catalog (SCE-16). `ts.ewma` and its exact-node alias `ts.ema` share
+  native state by entity, input, and span while retaining independent
+  `min_periods` gates; `ts.macd` remains a pure fast-minus-slow composition.
+  Rolling checkpoints use layout v2 only when exponential accumulators are
+  present and restore those accumulators without requiring retained row
+  history. Finance-Python-derived reference vectors, segmentation and
+  recovery coverage, public examples, and a same-process paired benchmark
+  freeze missing-value and restart behavior.
+
 - 2026-09-01: Extend symbolic stateful composition without adding a second
   execution engine. The lowerer now schedules nested rolling expressions as
   deterministic innermost-first project-v3 stages, materializes row-local
@@ -14,8 +24,8 @@ engine or Studio capabilities.
   acceptance vectors now include composed RSI, and the public streaming
   example checkpoints a two-stage rolling program mid-stream, restores both
   native states from the replay cursor, and verifies terminal restart without
-  duplicate output. EMA/EWMA and MACD remain deferred until their algorithm
-  and durable-state contract are frozen.
+  duplicate output. EMA/EWMA and MACD were deferred here and subsequently
+  delivered by SCE-16 after their algorithm and durable-state contract froze.
 
 ## 2026-08
 
