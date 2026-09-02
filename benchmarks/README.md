@@ -98,8 +98,10 @@ least 20 comparable main-branch samples exist on stable runners.
 same-process hand-built/symbolic pairs as later milestones land. The baseline
 method is documented in [symbolic/BASELINE.md](symbolic/BASELINE.md); the
 accepted milestone gates and their raw evidence are documented in
-[symbolic/SCE05.md](symbolic/SCE05.md) and
-[symbolic/SCE08.md](symbolic/SCE08.md).
+[symbolic/SCE05.md](symbolic/SCE05.md),
+[symbolic/SCE08.md](symbolic/SCE08.md),
+[symbolic/SCE14.md](symbolic/SCE14.md), and
+[symbolic/SCE16.md](symbolic/SCE16.md).
 
 | Scenario                                  | Timed boundary                                             |
 | ----------------------------------------- | ---------------------------------------------------------- |

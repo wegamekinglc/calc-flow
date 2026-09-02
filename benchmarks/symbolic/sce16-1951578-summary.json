@@ -1,0 +1,93 @@
+{
+ "benchmark_commit": "195157889a27241bc5c498a858cb6dace9b5fef9",
+ "bootstrap_resamples": 20000,
+ "bootstrap_seed": 20260829,
+ "decision": "pass",
+ "format_version": 1,
+ "machine": {
+  "cpu_arch": "X86_64",
+  "cpu_bits": 64,
+  "cpu_brand": "13th Gen Intel(R) Core(TM) i9-13900HX",
+  "cpu_count": 32,
+  "machine": "x86_64",
+  "node": "chengli-i9",
+  "python_implementation": "CPython",
+  "python_version": "3.13.13",
+  "release": "5.15.167.4-microsoft-standard-WSL2",
+  "system": "Linux"
+ },
+ "reports": [
+  {
+   "path": "benchmarks/symbolic/sce16-1951578-paired1.json",
+   "sha256": "e460d06e40299ad5148e03a06e1510625e455c98766989688283a10680754213"
+  },
+  {
+   "path": "benchmarks/symbolic/sce16-1951578-paired2.json",
+   "sha256": "04c4de1737de1c75b499176effb04c716f60df5bfe768511587e79c76e59fe41"
+  }
+ ],
+ "scenarios": [
+  {
+   "decision": "pass",
+   "geometric_regression_percent": 0.024422012703606555,
+   "hand_built_first_samples": 30,
+   "paired_samples": 60,
+   "regression_interval_percent": [
+    -0.7329081533462197,
+    0.7121828714978654
+   ],
+   "scenario": "sce16_exponential_indicators",
+   "symbolic_first_samples": 30,
+   "threshold_percent": 5.0,
+   "workload": {
+    "array_elements": 100000,
+    "comparison_contract": "same-process-alternating-v1",
+    "datafusion_query_count": 1,
+    "dependency_fingerprint": "e345c2b8404656c07d5353cec67110b29008cb1739f35004c59b26d57754625a",
+    "dependency_identity": {
+     "numpy_version": "2.5.2",
+     "pyarrow_version": "24.0.0",
+     "python_version": "3.13.13"
+    },
+    "entities": 64,
+    "ewma_spans": [
+     12,
+     26
+    ],
+    "input_rows": 99968,
+    "machine_fingerprint": "e726a15dd7f1bc7caa5242ed8a6e79a83de42c1cca2a3304dce4afe7fc8631fc",
+    "machine_identity": {
+     "architecture": "x86_64",
+     "cpu_brand": "13th gen intel(r) core(tm) i9-13900hx",
+     "logical_cpu_count": 32,
+     "operating_system": "linux",
+     "python_implementation": "cpython",
+     "runner_arch": "",
+     "runner_name": "",
+     "runner_os": ""
+    },
+    "matrix_dimension": 256,
+    "native_accumulators": 2,
+    "output_rows": 99968,
+    "scale": "standard",
+    "scenario": "sce16_exponential_indicators",
+    "table_rows": 100000,
+    "workload_contract": "sce16-exponential-v1",
+    "workload_fingerprint": "04010437765fafcd334a14ab8725284b24336b101e3cc13fe61e8101b02f5aea",
+    "workload_identity": {
+     "array_elements": 100000,
+     "backend": null,
+     "input_rows": 99968,
+     "matrix_dimension": 256,
+     "output_rows": 99968,
+     "scale": "standard",
+     "scenario": "sce16_exponential_indicators",
+     "stream_configuration": null,
+     "suite": "symbolic",
+     "table_rows": 100000,
+     "workload_version": 1
+    }
+   }
+  }
+ ]
+}
