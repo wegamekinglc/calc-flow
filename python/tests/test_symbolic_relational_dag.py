@@ -427,6 +427,39 @@ def test_relational_source_id_avoids_generated_stage_collision() -> None:
     assert "right_events.input" in source_ids
 
 
+def test_relational_source_id_avoids_join_side_stage_collision() -> None:
+    left = _input("left_events", "left_value")
+    right = _input("right_events", "right_value")
+    left_with_lag = left.with_columns(
+        FeatureSet([("previous", ts.lag(left["left_value"]))])
+    )
+    joined = _join(
+        left_with_lag,
+        right,
+        left_prefix="left",
+        right_prefix="right",
+    )
+    unrelated = _input(
+        f"cf_stream_join_{joined._node.digest[:16]}__left__cf_rolling",
+        "unrelated_value",
+    )
+    program = Program(
+        "source-join-side-stage-collision",
+        inputs=[left, right, unrelated],
+        outputs=[
+            ("matches", joined),
+            ("unrelated", table.project(unrelated, ["key", "unrelated_value"])),
+        ],
+    )
+
+    assert program.analyze(Runtime(), mode="stream").issues == ()
+    source_ids = program.compile_stream(Runtime()).source_binding_ids
+    assert len(source_ids) == 3
+    assert any(name.startswith("cf_source_") for name in source_ids)
+    assert "left_events.input" in source_ids
+    assert "right_events.input" in source_ids
+
+
 def test_post_join_rolling_requires_and_uses_explicit_output_ordering() -> None:
     left = _input("left_events", "left_value")
     right = _input("right_events", "right_value")
