@@ -2,10 +2,12 @@
 
 ## Status
 
-The SCE-00 contract was approved on 2026-08-22 after one blocker-only
-correction round. This document remains a point-in-time design record, not
-current API guidance and not evidence that the described symbolic surface or
-native operators have been implemented. The controlling semantic freeze is
+The SCE-00 through SCE-18 roadmap is complete as of 2026-09-02 at
+`main@752760c5d139fcbd1952b51b3026556b135f863d`. This document remains a
+point-in-time design record rather than current API guidance; the completion
+status does not make this original design authoritative over later normative
+milestone contracts or the implemented public documentation. The controlling
+semantic freeze is
 [Symbolic Computation Contract Freeze](../../../.codex/artifacts/specs/symbolic-computation-contract.md),
 the exact public and serialized shape is
 [Symbolic Computation Engine API Contract](../../../.codex/artifacts/api-notes/symbolic-computation-engine.md),
