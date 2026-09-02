@@ -8,6 +8,7 @@ from pydantic import TypeAdapter, ValidationError
 from calc_flow_studio.models import (
     CapabilitiesResponse,
     InputPayload,
+    OperatorCapabilityResponse,
     ProjectCreateRequest,
     ProjectSummary,
     RunOptions,
@@ -274,6 +275,47 @@ def test_capabilities_response_is_a_closed_camel_case_v2_contract() -> None:
                 },
             }
         )
+
+
+def test_operator_state_layouts_fail_closed_on_hostile_values() -> None:
+    base = {
+        "kind": "rolling",
+        "version": "1",
+        "inputPorts": [{"name": "input", "kind": "table", "required": True}],
+        "outputPorts": [{"name": "output", "kind": "table", "required": True}],
+        "modes": ["batch", "stream"],
+        "finality": "per_row_final",
+        "requiresDatafusion": False,
+        "stateful": True,
+        "microbatchInvariant": True,
+        "requiresWatermark": True,
+        "checkpointSupport": "checkpointed_stateful",
+        "stateVersion": 1,
+        "deterministic": True,
+        "replaySafe": True,
+        "stateLayouts": [1, 2],
+    }
+
+    def operator_document(overrides: dict[str, object]) -> dict[str, object]:
+        return {**base, **overrides}
+
+    TypeAdapter(OperatorCapabilityResponse).validate_python(operator_document({}))
+
+    for overrides, message in (
+        ({"stateLayouts": []}, "checkpointed_stateful stateLayouts"),
+        ({"stateLayouts": [2]}, "contain stateVersion"),
+        ({"stateLayouts": [2, 1]}, "strictly ascending"),
+        ({"stateLayouts": [1, 1]}, "strictly ascending"),
+        ({"stateLayouts": [0, 1]}, "positive integers"),
+        (
+            {"checkpointSupport": "stateless", "stateful": False, "stateVersion": None},
+            "must be empty unless checkpointed_stateful",
+        ),
+    ):
+        with pytest.raises(ValidationError, match=message):
+            TypeAdapter(OperatorCapabilityResponse).validate_python(
+                operator_document(overrides)
+            )
 
 
 def test_validation_report_discriminator_enforces_status_invariants() -> None:
