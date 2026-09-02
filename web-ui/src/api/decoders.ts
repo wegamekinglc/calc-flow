@@ -206,19 +206,21 @@ const operatorStateLayoutsAt = (
   if (items.length === 0) {
     fail(`${path}.stateLayouts`, 'checkpointed_stateful requires at least one state layout');
   }
-  items.forEach((layout, index) => {
-    integerAt(layout, `${path}.stateLayouts[${index}]`);
+  let previousLayout: unknown = null;
+  items.forEach((layout) => {
+    integerAt(layout, `${path}.stateLayouts`);
     if (typeof layout === 'number' && layout < 1) {
-      fail(`${path}.stateLayouts[${index}]`, 'expected a positive state layout');
+      fail(`${path}.stateLayouts`, 'expected a positive state layout');
     }
-  });
-  for (let index = 1; index < items.length; index += 1) {
-    const previous = items[index - 1];
-    const current = items[index];
-    if (typeof previous === 'number' && typeof current === 'number' && previous >= current) {
+    if (
+      typeof previousLayout === 'number'
+      && typeof layout === 'number'
+      && previousLayout >= layout
+    ) {
       fail(`${path}.stateLayouts`, 'must be strictly ascending without duplicates');
     }
-  }
+    previousLayout = layout;
+  });
   if (typeof stateVersion === 'number' && !items.includes(stateVersion)) {
     fail(`${path}.stateLayouts`, 'must contain stateVersion');
   }
