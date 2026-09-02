@@ -238,7 +238,15 @@ class _CollectSink:
 
 
 def _rows(tables: list[pa.Table]) -> list[tuple[int, int, int, int, float]]:
-    output = pa.concat_tables(tables)
+    output = pa.concat_tables(tables).select(
+        [
+            "matched__left__key",
+            "matched__left__sequence",
+            "matched__middle__sequence",
+            "right__sequence",
+            "total",
+        ]
+    )
     return sorted(
         (
             row["matched__left__key"],
