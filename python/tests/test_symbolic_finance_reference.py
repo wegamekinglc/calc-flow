@@ -257,6 +257,84 @@ def test_finance_style_ewma_and_macd_match_independent_reference() -> None:
     )
 
 
+def _column_for_symbol(output: pa.Table, column: str, symbol: str) -> list[object]:
+    return [
+        output[column][index].as_py()
+        for index, candidate in enumerate(output["symbol"].to_pylist())
+        if candidate == symbol
+    ]
+
+
+def _ewma_reference(
+    prices: list[float | None], span: int, min_periods: int
+) -> list[float | None]:
+    # Independent unadjusted recurrence: alpha = 2 / (span + 1), the first
+    # valid sample seeds the accumulator, null/NaN inputs are ignored, and
+    # outputs stay null until min_periods valid samples exist.
+    alpha = 2.0 / (span + 1.0)
+    valid_seen = 0
+    accumulator: float | None = None
+    expected: list[float | None] = []
+    for price in prices:
+        if price is not None and not math.isnan(price):
+            valid_seen += 1
+            accumulator = (
+                price
+                if accumulator is None
+                else accumulator + alpha * (price - accumulator)
+            )
+        expected.append(accumulator if valid_seen >= min_periods else None)
+    return expected
+
+
+def test_finance_style_ewma_isolates_entities_under_interleaving() -> None:
+    quotes = _ordered_quotes()
+    features = FeatureSet((("ema_3", ts.ewma(quotes["price"], span=3, min_periods=2)),))
+    program = Program(
+        "finance-ewma-entity-isolation",
+        inputs=(quotes,),
+        outputs=(("signals", quotes.with_columns(features)),),
+    )
+    # Three entities with distinct price paths (including null and NaN gaps)
+    # arrive round-robin so any shared-accumulator leak crosses entities.
+    paths = {
+        "AAA": [10.0, None, 14.0, math.nan, 18.0],
+        "BBB": [100.0, 90.0, 95.0, 105.0, None],
+        "CCC": [-5.0, 5.0, None, None, 7.0],
+    }
+    input_rows = []
+    for index in range(5):
+        for symbol, prices in paths.items():
+            input_rows.append(
+                ((index + 1) * 1_000_000, symbol, index + 1, prices[index])
+            )
+    schema = pa.schema(
+        (
+            pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
+            pa.field("symbol", pa.string(), nullable=False),
+            pa.field("seq", pa.uint64(), nullable=False),
+            pa.field("price", pa.float64(), nullable=True),
+        )
+    )
+    table = pa.table(
+        {
+            "ts": [row[0] for row in input_rows],
+            "symbol": [row[1] for row in input_rows],
+            "seq": [row[2] for row in input_rows],
+            "price": [row[3] for row in input_rows],
+        },
+        schema=schema,
+    )
+
+    output = _execute(program, table)
+
+    for symbol, prices in paths.items():
+        _assert_optional_floats(
+            _column_for_symbol(output, "ema_3", symbol),  # type: ignore[arg-type]
+            _ewma_reference(prices, 3, 2),
+        )
+
+
 def test_finance_style_rsi_composition_matches_independent_reference() -> None:
     quotes = _ordered_quotes()
     change = ts.delta(quotes["price"])
