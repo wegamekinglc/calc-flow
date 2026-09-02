@@ -2785,29 +2785,35 @@ def _virtual_relational_input(node_id: str, facts: TableFacts, /) -> Node:
     )._node
 
 
-def _relational_source_nodes(
-    program: Program, reserved_ids: frozenset[str], /
-) -> tuple[dict[str, str], list[dict[str, object]]]:
-    reachable = {
+def _reachable_relational_sources(program: Program, /) -> frozenset[str]:
+    return frozenset(
         node.digest
         for _, value in program.outputs
         for node in _walk_nodes(value._node)
         if node.op.name == "table_input"
-    }
+    )
+
+
+def _relational_source_name(node: Node, reserved_ids: frozenset[str], /) -> str:
+    declared_name = _cstr(node.attr("name"))
+    if declared_name is None:
+        _raise_lowering_invariant("relational source is missing its declared name")
+    if declared_name in reserved_ids:
+        return f"cf_source_{node.digest[:16]}"
+    return declared_name
+
+
+def _relational_source_nodes(
+    program: Program, reserved_ids: frozenset[str], /
+) -> tuple[dict[str, str], list[dict[str, object]]]:
+    reachable = _reachable_relational_sources(program)
     by_digest: dict[str, str] = {}
     nodes: list[dict[str, object]] = []
     for value in program.inputs:
         node = value._node
         if node.op.name != "table_input" or node.digest not in reachable:
             continue
-        declared_name = _cstr(node.attr("name"))
-        if declared_name is None:
-            _raise_lowering_invariant("relational source is missing its declared name")
-        name = (
-            declared_name
-            if declared_name not in reserved_ids
-            else f"cf_source_{node.digest[:16]}"
-        )
+        name = _relational_source_name(node, reserved_ids)
         schema = _schema_fields(node.attr("schema"))
         by_digest[node.digest] = name
         nodes.append(
@@ -3001,30 +3007,44 @@ def _wire_relational_output(
     )
 
 
-def _lower_relational_dag_program(
+def _relational_join_plans(
     program: Program,
     analyzer: _Analyzer,
-    mode: str,
-    allowed_lateness_micros: int,
-    late_policy: str,
     join_nodes: tuple[Node, ...],
     /,
-) -> dict[str, object]:
+) -> dict[str, _StreamJoinPlan]:
     for join in join_nodes:
         _check_stream_join_inputs(program, join)
-    plans = {
+    return {
         join.digest: _stream_join_plan(program, analyzer, join) for join in join_nodes
     }
-    reserved_ids = frozenset(
+
+
+def _relational_reserved_ids(
+    program: Program, plans: dict[str, _StreamJoinPlan], /
+) -> frozenset[str]:
+    return frozenset(
         (
             *(output_name for output_name, _ in program.outputs),
             *(plan.node_id for plan in plans.values()),
             *(side.node_id for plan in plans.values() for side in plan.sides),
         )
     )
-    sources, source_nodes = _relational_source_nodes(program, reserved_ids)
-    nodes: list[object] = list(source_nodes)
-    edges: list[object] = []
+
+
+def _append_relational_joins(
+    program: Program,
+    analyzer: _Analyzer,
+    join_nodes: tuple[Node, ...],
+    sources: dict[str, str],
+    plans: dict[str, _StreamJoinPlan],
+    nodes: list[object],
+    edges: list[object],
+    mode: str,
+    allowed_lateness_micros: int,
+    late_policy: str,
+    /,
+) -> None:
     for join in join_nodes:
         plan = plans[join.digest]
         nodes.append(
@@ -3049,6 +3069,20 @@ def _lower_relational_dag_program(
                 allowed_lateness_micros,
                 late_policy,
             )
+
+
+def _append_relational_outputs(
+    program: Program,
+    analyzer: _Analyzer,
+    sources: dict[str, str],
+    plans: dict[str, _StreamJoinPlan],
+    nodes: list[object],
+    edges: list[object],
+    mode: str,
+    allowed_lateness_micros: int,
+    late_policy: str,
+    /,
+) -> None:
     for output_name, value in program.outputs:
         _wire_relational_output(
             program,
@@ -3063,6 +3097,45 @@ def _lower_relational_dag_program(
             allowed_lateness_micros,
             late_policy,
         )
+
+
+def _lower_relational_dag_program(
+    program: Program,
+    analyzer: _Analyzer,
+    mode: str,
+    allowed_lateness_micros: int,
+    late_policy: str,
+    join_nodes: tuple[Node, ...],
+    /,
+) -> dict[str, object]:
+    plans = _relational_join_plans(program, analyzer, join_nodes)
+    reserved_ids = _relational_reserved_ids(program, plans)
+    sources, source_nodes = _relational_source_nodes(program, reserved_ids)
+    nodes: list[object] = list(source_nodes)
+    edges: list[object] = []
+    _append_relational_joins(
+        program,
+        analyzer,
+        join_nodes,
+        sources,
+        plans,
+        nodes,
+        edges,
+        mode,
+        allowed_lateness_micros,
+        late_policy,
+    )
+    _append_relational_outputs(
+        program,
+        analyzer,
+        sources,
+        plans,
+        nodes,
+        edges,
+        mode,
+        allowed_lateness_micros,
+        late_policy,
+    )
     typed_nodes = [_graph_node(node) for node in nodes]
     typed_edges = [_graph_node(edge) for edge in edges]
     typed_nodes, typed_edges = _deduplicate_node_ids(typed_nodes, typed_edges)

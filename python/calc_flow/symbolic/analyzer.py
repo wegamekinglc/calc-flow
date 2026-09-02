@@ -738,6 +738,41 @@ class _Analyzer:
         fields = {field.name: field for field in schema}
         left_prefix = _cstr(node.attr("left_prefix")) or "left"
         right_prefix = _cstr(node.attr("right_prefix")) or "right"
+        self._check_join_output_event_time(
+            node,
+            fields,
+            event_time,
+            left_prefix,
+            right_prefix,
+            role,
+        )
+        self._check_join_output_entities(
+            node,
+            fields,
+            entity_by,
+            left_prefix,
+            role,
+        )
+        self._check_join_output_sequences(
+            left,
+            right,
+            fields,
+            sequence_by,
+            left_prefix,
+            right_prefix,
+            role,
+        )
+
+    def _check_join_output_event_time(
+        self,
+        node: Node,
+        fields: dict[str, Field],
+        event_time: str | None,
+        left_prefix: str,
+        right_prefix: str,
+        role: str,
+        /,
+    ) -> None:
         allowed_event_times = {
             f"{left_prefix}__{_cstr(node.attr('left_event_time'))}",
             f"{right_prefix}__{_cstr(node.attr('right_event_time'))}",
@@ -754,6 +789,16 @@ class _Analyzer:
                 "ordering_required",
                 "post-join event time must be a non-null timestamp[us, UTC] field",
             )
+
+    def _check_join_output_entities(
+        self,
+        node: Node,
+        fields: dict[str, Field],
+        entity_by: tuple[str, ...],
+        left_prefix: str,
+        role: str,
+        /,
+    ) -> None:
         self._ordering_key_fields(
             CSeq(tuple(CStr(name) for name in entity_by)),
             fields,
@@ -772,6 +817,18 @@ class _Analyzer:
                 "post-join entity keys must be the prefixed left join keys"
                 f" {expected_entities!r}",
             )
+
+    def _check_join_output_sequences(
+        self,
+        left: TableFacts,
+        right: TableFacts,
+        fields: dict[str, Field],
+        sequence_by: tuple[str, ...],
+        left_prefix: str,
+        right_prefix: str,
+        role: str,
+        /,
+    ) -> None:
         self._ordering_key_fields(
             CSeq(tuple(CStr(name) for name in sequence_by)),
             fields,

@@ -29,6 +29,11 @@ from calc_flow import (
 from calc_flow.symbolic import FeatureSet, Field, Program, table, table_input
 
 
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise RuntimeError(message)
+
+
 def _ordered_input(name: str, event_time: str, value_name: str):
     return table_input(
         name,
@@ -210,7 +215,8 @@ async def run() -> None:
             raise RuntimeError(outcome)
 
     output = pa.concat_tables(sink.tables)
-    assert output["net_amount"].to_pylist() == [97.5]
+    net_amounts = output["net_amount"].to_pylist()
+    require(net_amounts == [97.5], f"unexpected net amounts: {net_amounts}")
     print(output.select(["matched__authorization__account_id", "net_amount"]))
 
 
