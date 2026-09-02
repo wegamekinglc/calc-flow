@@ -126,7 +126,7 @@ def test_run_options_enforce_preview_limits() -> None:
 
 def test_capabilities_response_is_a_closed_camel_case_v2_contract() -> None:
     document = {
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "runtime": {
             "scope": {
                 "kind": "runtimeSession",
@@ -157,6 +157,7 @@ def test_capabilities_response_is_a_closed_camel_case_v2_contract() -> None:
                     "stateVersion": None,
                     "deterministic": True,
                     "replaySafe": True,
+                    "stateLayouts": [],
                 }
             ],
             "udfs": [],

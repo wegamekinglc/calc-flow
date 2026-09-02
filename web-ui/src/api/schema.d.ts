@@ -305,7 +305,7 @@ export interface components {
              * Schemaversion
              * @constant
              */
-            schemaVersion: 2;
+            schemaVersion: 3;
         };
         /** CapabilityRuleResponse */
         CapabilityRuleResponse: {
@@ -519,6 +519,11 @@ export interface components {
             requiresDatafusion: boolean;
             /** Requireswatermark */
             requiresWatermark: boolean;
+            /**
+             * Statelayouts
+             * @default []
+             */
+            stateLayouts: number[];
             /** Stateversion */
             stateVersion: number | null;
             /** Stateful */

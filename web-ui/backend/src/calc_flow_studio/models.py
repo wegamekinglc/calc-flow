@@ -82,11 +82,16 @@ def _validate_lifecycle_invariants(
     checkpoint_support: CheckpointSupportValue,
     state_version: int | None,
     stateful: bool,
+    state_layouts: tuple[int, ...],
 ) -> None:
     if checkpoint_support == "checkpointed_stateful":
         if state_version is None or state_version <= 0:
             raise ValueError(
                 "checkpointed_stateful requires a positive stateVersion",
+            )
+        if not state_layouts or state_version not in state_layouts:
+            raise ValueError(
+                "checkpointed_stateful stateLayouts must contain stateVersion",
             )
     elif state_version is not None:
         raise ValueError("stateVersion must be null unless checkpointed_stateful")
@@ -109,11 +114,29 @@ class OperatorCapabilityResponse(CapabilityModel):
     state_version: int | None = Field(ge=1)
     deterministic: bool
     replay_safe: bool
+    state_layouts: tuple[int, ...] = ()
 
     @model_validator(mode="after")
     def _lifecycle_is_self_consistent(self) -> Self:
+        for layout in self.state_layouts:
+            if type(layout) is not int or layout <= 0:
+                raise ValueError("stateLayouts must be positive integers")
+        if any(
+            left >= right
+            for left, right in zip(
+                self.state_layouts[:-1], self.state_layouts[1:], strict=True
+            )
+        ):
+            raise ValueError(
+                "stateLayouts must be strictly ascending without duplicates"
+            )
+        if self.state_layouts and self.checkpoint_support != "checkpointed_stateful":
+            raise ValueError("stateLayouts must be empty unless checkpointed_stateful")
         _validate_lifecycle_invariants(
-            self.checkpoint_support, self.state_version, self.stateful
+            self.checkpoint_support,
+            self.state_version,
+            self.stateful,
+            self.state_layouts,
         )
         return self
 
@@ -195,7 +218,7 @@ class ProviderCapabilityResponse(CapabilityModel):
     @model_validator(mode="after")
     def _lifecycle_is_self_consistent(self) -> Self:
         _validate_lifecycle_invariants(
-            self.checkpoint_support, self.state_version, self.stateful
+            self.checkpoint_support, self.state_version, self.stateful, ()
         )
         return self
 
@@ -293,7 +316,7 @@ class PreviewCapabilitiesResponse(CapabilityModel):
 
 
 class CapabilitiesResponse(CapabilityModel):
-    schema_version: Literal[2]
+    schema_version: Literal[3]
     runtime: RuntimeCapabilitiesResponse
     preview: PreviewCapabilitiesResponse
 

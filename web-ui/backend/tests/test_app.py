@@ -269,7 +269,7 @@ def test_capabilities_route_exposes_the_typed_runtime_session_snapshot(
 
     assert response.status_code == 200
     document = response.json()
-    assert document["schemaVersion"] == 2
+    assert document["schemaVersion"] == 3
     assert document["runtime"]["scope"]["kind"] == "runtimeSession"
     assert document["runtime"]["scope"]["revision"] == 1
     assert document["runtime"]["providers"][0]["name"] == "identity"
