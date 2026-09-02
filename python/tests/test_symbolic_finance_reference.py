@@ -257,6 +257,14 @@ def test_finance_style_ewma_and_macd_match_independent_reference() -> None:
     )
 
 
+def _column_for_symbol(output: pa.Table, column: str, symbol: str) -> list[object]:
+    return [
+        output[column][index].as_py()
+        for index, candidate in enumerate(output["symbol"].to_pylist())
+        if candidate == symbol
+    ]
+
+
 def _ewma_reference(
     prices: list[float | None], span: int, min_periods: int
 ) -> list[float | None]:
@@ -321,12 +329,10 @@ def test_finance_style_ewma_isolates_entities_under_interleaving() -> None:
     output = _execute(program, table)
 
     for symbol, prices in paths.items():
-        rows_ = [
-            output["ema_3"][index].as_py()
-            for index, candidate in enumerate(output["symbol"].to_pylist())
-            if candidate == symbol
-        ]
-        _assert_optional_floats(rows_, _ewma_reference(prices, 3, 2))
+        _assert_optional_floats(
+            _column_for_symbol(output, "ema_3", symbol),  # type: ignore[arg-type]
+            _ewma_reference(prices, 3, 2),
+        )
 
 
 def test_finance_style_rsi_composition_matches_independent_reference() -> None:
