@@ -228,6 +228,12 @@ def _require_state_layouts(
                 f"{owner} state_layouts must be empty unless checkpointed_stateful"
             )
         return
+    _require_stateful_layout_inventory(owner, state_version, state_layouts)
+
+
+def _require_stateful_layout_inventory(
+    owner: str, state_version: int | None, state_layouts: tuple[int, ...]
+) -> None:
     if not state_layouts:
         raise ValueError(
             f"{owner} checkpointed_stateful requires at least one state layout"
@@ -240,6 +246,12 @@ def _require_state_layouts(
             )
         if layout <= 0:
             raise ValueError(f"{owner} state layouts must be positive integers")
+    _require_ascending_layouts(owner, state_layouts)
+    if state_version not in state_layouts:
+        raise ValueError(f"{owner} state_layouts must contain state_version")
+
+
+def _require_ascending_layouts(owner: str, state_layouts: tuple[int, ...]) -> None:
     if any(
         left >= right
         for left, right in zip(state_layouts[:-1], state_layouts[1:], strict=True)
@@ -247,8 +259,6 @@ def _require_state_layouts(
         raise ValueError(
             f"{owner} state_layouts must be strictly ascending without duplicates"
         )
-    if state_version not in state_layouts:
-        raise ValueError(f"{owner} state_layouts must contain state_version")
 
 
 @dataclass(frozen=True, slots=True)
