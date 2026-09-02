@@ -401,6 +401,32 @@ def test_relational_source_id_avoids_output_name_collision() -> None:
     assert "right_events.input" in source_ids
 
 
+def test_relational_source_id_avoids_generated_stage_collision() -> None:
+    left = _input("features__cf_rolling", "left_value")
+    right = _input("right_events", "right_value")
+    joined = _join(
+        left,
+        right,
+        left_prefix="left",
+        right_prefix="right",
+        ordered_output=True,
+    )
+    output = joined.with_columns(
+        FeatureSet([("previous", ts.lag(joined["left__left_value"]))])
+    )
+    program = Program(
+        "source-generated-stage-collision",
+        inputs=[left, right],
+        outputs=[("features", output)],
+    )
+
+    assert program.analyze(Runtime(), mode="stream").issues == ()
+    source_ids = program.compile_stream(Runtime()).source_binding_ids
+    assert len(source_ids) == 2
+    assert any(name.startswith("cf_source_") for name in source_ids)
+    assert "right_events.input" in source_ids
+
+
 def test_post_join_rolling_requires_and_uses_explicit_output_ordering() -> None:
     left = _input("left_events", "left_value")
     right = _input("right_events", "right_value")
