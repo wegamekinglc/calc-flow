@@ -1,6 +1,14 @@
 name: Release artifacts
 on:
   workflow_dispatch:
+    inputs:
+      allow-dependency-drift:
+        description: >-
+          Acknowledge an intended benchmark dependency change so the
+          exact-ref stream lifecycle gate records the drift instead of
+          failing on the dependency fingerprint mismatch
+        type: boolean
+        default: false
   push:
     tags:
       - "v4.*"
@@ -111,13 +119,18 @@ jobs:
           uv run python scripts/verify_stream_lifecycle_evidence.py \
             "${RUNNER_TEMP}/benchmark-candidate/stream-lifecycle.json" \
             --minimum-rounds 20
+          perf_gate_extra_args=()
+          if [[ "${{ inputs['allow-dependency-drift'] }}" == "true" ]]; then
+            perf_gate_extra_args+=(--allow-dependency-drift)
+          fi
           uv run python scripts/verify_perf_gates.py \
             --baseline-dir "${RUNNER_TEMP}/benchmark-baseline" \
             --candidate-dir "${RUNNER_TEMP}/benchmark-candidate" \
             --criterion-dir "${RUNNER_TEMP}/criterion-target/criterion" \
             --criterion-baseline exact-baseline \
             --criterion-candidate exact-candidate \
-            --require-stream-lifecycle
+            --require-stream-lifecycle \
+            "${perf_gate_extra_args[@]}"
       - name: Run security and supply-chain gate
         run: |
           npm ci --prefix web-ui

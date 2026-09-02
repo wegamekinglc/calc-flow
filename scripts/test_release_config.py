@@ -701,6 +701,10 @@ class ReleaseConfigTests(unittest.TestCase):
             2,
         )
         self.assertIn("--require-stream-lifecycle", exact_gate)
+        self.assertIn("allow-dependency-drift:", release)
+        self.assertIn("inputs['allow-dependency-drift']", exact_gate)
+        self.assertIn("--allow-dependency-drift", exact_gate)
+        self.assertIn('"${perf_gate_extra_args[@]}"', exact_gate)
 
     def test_python_package_excludes_unsupported_pyarrow_25(self) -> None:
         for project in (ROOT, ROOT / "web-ui/backend"):

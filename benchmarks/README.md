@@ -131,9 +131,10 @@ across scales, which keeps paired comparisons valid. The matmul scenarios
 likewise cap rows at 400,000 so the dense 20-column feature matrix stays
 under the runtime's owned-NumPy 10,000,000-element conversion limit.
 
-Run the stream lifecycle in its own process. The PR smoke and scheduled
-workflow use this exact node selection so symbolic compilation cases cannot
-retain allocator or memory-pool state before the stream measurement:
+Run the stream lifecycle in its own process. The PR smoke runs the same
+node selection at `overhead` scale and the scheduled workflow uses
+`standard`; either way symbolic compilation cases cannot retain allocator or
+memory-pool state before the stream measurement:
 
 ```bash
 CALC_FLOW_BENCHMARK_SCALE=standard \
@@ -165,9 +166,11 @@ measures checkpoint-directory scans for 1x100, 10x100, and 100x10 job/file
 shapes plus 10,000-row JSON and chunked Arrow IPC decode/`combine_chunks`
 paths. The frontend benchmark exercises report matching at 100 and 1,000
 cases and records the exact commit, Node/npm versions, package lock, and
-benchmark source hashes in its artifact. These scheduled results remain informational until 20 comparable
-stable-runner samples exist; their workflow-presence tests fail closed if a
-scenario is silently removed.
+benchmark source hashes in its artifact. These scheduled Studio and
+frontend results remain informational: no automated threshold consumes them,
+and their workflow-presence tests fail closed if a scenario is silently
+removed. The only timing gates are the release exact-ref comparison above and
+the isolated stream lifecycle evidence contract.
 
 Reproduce a recorded run with:
 

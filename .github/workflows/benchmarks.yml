@@ -16,6 +16,10 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
       - name: Cache Rust build artifacts
@@ -100,7 +104,7 @@ jobs:
       - name: Install core and Studio benchmark dependencies
         run: |
           uv sync --extra benchmark
-          uv pip install --python .venv/bin/python -e web-ui/backend
+          uv pip install --python .venv/bin/python --no-deps -e web-ui/backend
       - name: Run Studio observability benchmarks
         run: |
           mkdir -p benchmark-results
