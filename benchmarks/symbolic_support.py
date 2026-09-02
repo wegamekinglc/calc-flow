@@ -21,7 +21,12 @@ import numpy as np
 import psutil
 import pyarrow as pa
 
-from benchmarks.support import BenchmarkFixture, record_benchmark, selected_scale
+from benchmarks.support import (
+    BenchmarkFixture,
+    record_benchmark,
+    record_comparable_identity,
+    selected_scale,
+)
 from calc_flow import Batch, Runtime
 
 SYMBOLIC_SEED = 20_260_822
@@ -343,6 +348,44 @@ def record_symbolic_benchmark(
         output_rows=output_rows,
         metrics=metrics,
         backend=backend,
+    )
+    scale = selected_scale()
+    # The package under test is intentionally excluded: its source revision is
+    # the candidate variable, while this identity captures only the runtime
+    # dependencies that must remain fixed across a paired comparison.
+    dependency_packages = ["numpy", "pyarrow"]
+    if backend == "jax":
+        dependency_packages.extend(("jax", "jaxlib"))
+    record_comparable_identity(
+        benchmark,
+        workload_identity={
+            "suite": "symbolic",
+            "workload_version": 1,
+            "scenario": scenario,
+            "scale": scale.name,
+            "table_rows": scale.table_rows,
+            "array_elements": scale.array_elements,
+            "matrix_dimension": scale.matrix_dimension,
+            "input_rows": input_rows,
+            "output_rows": output_rows,
+            "backend": backend,
+            "stream_configuration": (
+                {
+                    name: extra[name]
+                    for name in (
+                        "stream_batches",
+                        "stream_batch_rows",
+                        "stream_entities",
+                        "stream_window_seconds",
+                        "checkpoint_batches",
+                        "consumed_rows",
+                    )
+                    if extra is not None and name in extra
+                }
+                or None
+            ),
+        },
+        dependency_packages=dependency_packages,
     )
     additions = {
         "peak_rss_bytes": peak_rss_bytes(),

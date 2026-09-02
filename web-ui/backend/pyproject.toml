@@ -41,6 +41,9 @@ artifacts = ["src/calc_flow_studio/static/**"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "studio_performance: Studio resource and decoding performance evidence",
+]
 
 [tool.coverage.run]
 source = ["calc_flow_studio"]

@@ -55,6 +55,9 @@ members = ["web-ui/backend"]
 
 [tool.pytest.ini_options]
 testpaths = ["python/tests"]
+markers = [
+    "stream_lifecycle: isolated stateful stream lifecycle performance evidence",
+]
 
 [tool.coverage.run]
 source = ["calc_flow"]

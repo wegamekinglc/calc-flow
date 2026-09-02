@@ -181,7 +181,7 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn('assert "/api/v3/catalog"', release_workflow)
         self.assertIn('and ">=4.0.0" in requirement', release_workflow)
         self.assertIn('and "<5" in requirement', release_workflow)
-        self.assertEqual(release_workflow.count("--save-baseline exact-"), 2)
+        self.assertEqual(release_workflow.count("--save-baseline exact-"), 4)
         self.assertIn("--criterion-dir", release_workflow)
         self.assertIn("--criterion-baseline exact-baseline", release_workflow)
         self.assertIn("--criterion-candidate exact-candidate", release_workflow)
@@ -465,7 +465,7 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn("name: Download core distributions", studio_package)
         self.assertNotIn("\n          uv build\n", studio_package)
 
-    def test_ci_and_release_execute_rust_test_harness_unit_tests(self) -> None:
+    def test_ci_and_release_execute_script_unit_tests(self) -> None:
         command = (
             "python -m unittest scripts.test_run_rust_tests "
             "scripts.test_run_rust_coverage "
@@ -473,7 +473,9 @@ class ReleaseConfigTests(unittest.TestCase):
             "scripts.test_build_python_release scripts.test_inspect_wheel "
             "scripts.test_release_config scripts.test_verify_python_release "
             "scripts.test_verify_perf_gates "
+            "scripts.test_verify_stream_lifecycle_evidence "
             "scripts.test_verify_symbolic_milestone_perf "
+            "scripts.test_write_criterion_provenance "
             "scripts.test_verify_security_gates"
         )
         windows_test = (
@@ -593,12 +595,12 @@ class ReleaseConfigTests(unittest.TestCase):
         )
         self.assertIn("parallel-finished: true", finish)
 
-    def test_scheduled_rust_benchmark_targets_only_core_harness(self) -> None:
+    def test_performance_workflows_cover_p1_and_p2_evidence(self) -> None:
         workflow = (ROOT / ".github/workflows/benchmarks.yml").read_text(
             encoding="utf-8"
         )
         rust_benchmark = workflow.split("  rust-benchmark:\n", 1)[1].split(
-            "  benchmark:\n", 1
+            "  stream-lifecycle:\n", 1
         )[0]
 
         cargo_bench_commands = [
@@ -608,13 +610,97 @@ class ReleaseConfigTests(unittest.TestCase):
         ]
         self.assertEqual(
             cargo_bench_commands,
-            ["run: cargo bench --locked -p calc-flow --bench core"],
+            [
+                "run: cargo bench --locked -p calc-flow --bench core",
+                "run: cargo bench --locked -p calc-flow --bench stream_join_perf",
+            ],
         )
         self.assertIn(
             "cargo test --locked -p calc-flow --bench allocation_regression\n"
             "          --all-features",
             rust_benchmark,
         )
+        self.assertIn("scripts/write_criterion_provenance.py", rust_benchmark)
+        self.assertIn("target/criterion/benchmark-provenance.json", rust_benchmark)
+
+        stream_lifecycle = workflow.split("  stream-lifecycle:\n", 1)[1].split(
+            "  studio-benchmark:\n", 1
+        )[0]
+        self.assertIn("CALC_FLOW_BENCHMARK_SCALE: standard", stream_lifecycle)
+        self.assertIn(
+            "benchmarks/test_symbolic_baseline.py::"
+            "test_stream_window_checkpoint_and_recovery",
+            stream_lifecycle,
+        )
+        self.assertIn("scripts/verify_stream_lifecycle_evidence.py", stream_lifecycle)
+        self.assertIn("name: benchmark-stream-lifecycle-", stream_lifecycle)
+
+        studio = workflow.split("  studio-benchmark:\n", 1)[1].split(
+            "  frontend-benchmark:\n", 1
+        )[0]
+        self.assertIn("web-ui/backend/benchmarks/test_performance.py", studio)
+        self.assertIn("PYTHONPATH: .:web-ui/backend/src", studio)
+        frontend = workflow.split("  frontend-benchmark:\n", 1)[1].split(
+            "  benchmark:\n", 1
+        )[0]
+        self.assertIn("npm run benchmark", frontend)
+        self.assertIn("benchmark-results/frontend.txt", frontend)
+        self.assertIn('echo "git_sha=$(git rev-parse HEAD^{commit})"', frontend)
+        self.assertIn("sha256sum", frontend)
+
+        benchmark = workflow.split("  benchmark:\n", 1)[1]
+        self.assertIn('-m "not stream_lifecycle"', benchmark)
+
+        core = (ROOT / "crates/calc-flow/benches/core.rs").read_text(encoding="utf-8")
+        for case in (
+            "stream/channel_fanin_2",
+            "stream/channel_fanin_4",
+            "stream/channel_fanin_8",
+            "stream/backpressure_saturated",
+        ):
+            with self.subTest(case=case):
+                self.assertIn(case, core)
+
+    def test_pr_and_release_isolate_stream_lifecycle_evidence(self) -> None:
+        linux = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
+        benchmark = linux.split("  benchmark-smoke:\n", 1)[1].split(
+            "  stream-lifecycle-smoke:\n", 1
+        )[0]
+        self.assertIn('-m "not stream_lifecycle"', benchmark)
+        stream = linux.split("  stream-lifecycle-smoke:\n", 1)[1].split(
+            "  rust-core:\n", 1
+        )[0]
+        self.assertIn(
+            "benchmarks/test_symbolic_baseline.py::"
+            "test_stream_window_checkpoint_and_recovery",
+            stream,
+        )
+        self.assertIn("scripts/verify_stream_lifecycle_evidence.py", stream)
+        linux_gate = linux.split("  linux-gate:\n", 1)[1]
+        self.assertIn("- stream-lifecycle-smoke", linux_gate)
+        self.assertIn(
+            "STREAM_LIFECYCLE_RESULT: ${{ needs.stream-lifecycle-smoke.result }}",
+            linux_gate,
+        )
+        self.assertIn('"$STREAM_LIFECYCLE_RESULT"', linux_gate)
+
+        release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        exact_gate = release.split(
+            "      - name: Run paired exact-ref Rust and Python performance gate\n", 1
+        )[1].split("      - name:", 1)[0]
+        self.assertEqual(exact_gate.count("--bench stream_join_perf"), 2)
+        self.assertEqual(
+            exact_gate.count(
+                "benchmarks/test_symbolic_baseline.py::"
+                "test_stream_window_checkpoint_and_recovery"
+            ),
+            2,
+        )
+        self.assertEqual(
+            exact_gate.count('-k "not test_stream_window_checkpoint_and_recovery"'),
+            2,
+        )
+        self.assertIn("--require-stream-lifecycle", exact_gate)
 
     def test_python_package_excludes_unsupported_pyarrow_25(self) -> None:
         for project in (ROOT, ROOT / "web-ui/backend"):

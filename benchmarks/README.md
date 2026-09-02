@@ -129,6 +129,44 @@ across scales, which keeps paired comparisons valid. The matmul scenarios
 likewise cap rows at 400,000 so the dense 20-column feature matrix stays
 under the runtime's owned-NumPy 10,000,000-element conversion limit.
 
+Run the stream lifecycle in its own process. The PR smoke and scheduled
+workflow use this exact node selection so symbolic compilation cases cannot
+retain allocator or memory-pool state before the stream measurement:
+
+```bash
+CALC_FLOW_BENCHMARK_SCALE=standard \
+  JAX_PLATFORMS=cpu \
+  uv run pytest \
+  benchmarks/test_symbolic_baseline.py::test_stream_window_checkpoint_and_recovery \
+  --benchmark-only --benchmark-json=<stream-output>.json
+uv run python scripts/verify_stream_lifecycle_evidence.py \
+  <stream-output>.json --minimum-rounds 20
+```
+
+The evidence contract requires at least 20 lifecycle rounds and 20 diagnostic
+samples. It records startup, steady processing, checkpoint, cancellation,
+restore, and shutdown durations; checkpoint-byte and checkpoint/restore
+p50/p95 values; RSS before and after; peak RSS; and matching machine,
+dependency, and workload fingerprints. Release exact-ref comparison fails when
+the candidate p50 exceeds the baseline p95 plus 5%, or when checkpoint-byte
+p50 crosses the equivalent bound.
+
+Scheduled Rust evidence runs both `core` and `stream_join_perf`. The core
+harness includes two-, four-, and eight-channel fan-in, four-way fan-out, and
+saturated backpressure cases. `benchmark-provenance.json` binds the artifact to
+the exact commit, Rust toolchain, Cargo lock, runner identity, CPU identity, and
+benchmark source hashes. Release gates compare both Rust harnesses at exact
+baseline and candidate refs; scheduled timing remains informational.
+
+Studio observability coverage runs separately with `standard` inputs. It
+measures checkpoint-directory scans for 1x100, 10x100, and 100x10 job/file
+shapes plus 10,000-row JSON and chunked Arrow IPC decode/`combine_chunks`
+paths. The frontend benchmark exercises report matching at 100 and 1,000
+cases and records the exact commit, Node/npm versions, package lock, and
+benchmark source hashes in its artifact. These scheduled results remain informational until 20 comparable
+stable-runner samples exist; their workflow-presence tests fail closed if a
+scenario is silently removed.
+
 Reproduce a recorded run with:
 
 ```bash

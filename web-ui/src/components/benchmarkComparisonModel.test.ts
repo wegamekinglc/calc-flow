@@ -441,6 +441,26 @@ describe('benchmark report compatibility', () => {
       'improved',
     ]);
   });
+
+  it('matches 1,000 compatible cases without changing report order', () => {
+    const cases = Array.from({ length: 1_000 }, (_, index) => {
+      const scenario = `large_case_${index}`;
+      const workloadFingerprint = index.toString(16).padStart(64, '0');
+      const baseline = contractEntry({ scenario, workloadFingerprint });
+      return [baseline, cloneEntry(baseline)] as const;
+    });
+
+    const result = compareBenchmarkReports(
+      parsedReport(...cases.map(([baseline]) => baseline)),
+      parsedReport(...cases.map(([, current]) => current)),
+    );
+
+    expect(result.status).toBe('compatible');
+    expect(result.rows).toHaveLength(1_000);
+    expect(result.rows.map((row) => row.scenario)).toEqual(
+      cases.map(([baseline]) => baseline.extra_info.scenario),
+    );
+  });
 });
 
 describe('benchmark report parsing', () => {

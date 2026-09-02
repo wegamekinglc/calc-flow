@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import psutil
 import pyarrow as pa
 import pytest
 
@@ -68,6 +69,8 @@ from calc_flow.symbolic import (
     table_input,
     ts,
 )
+
+_STREAM_DIAGNOSTIC_SAMPLES = 20
 
 PROJECTION_QUERY = """
 SELECT
@@ -1292,10 +1295,11 @@ class _BaselineSource:
         self._batches = batches
         self._pause_at = pause_at
         self._index = 0
+        self._delivered_batches = 0
 
     @property
     def delivered_batches(self) -> int:
-        return self._index
+        return self._delivered_batches
 
     def capabilities(self) -> SourceCapabilities:
         return SourceCapabilities(
@@ -1308,6 +1312,7 @@ class _BaselineSource:
 
     async def open(self, cursor: Cursor | None) -> None:
         self._index = 0 if cursor is None else int(cursor.payload["batches"])
+        self._delivered_batches = 0
 
     async def next(self) -> Data | Idle | None:
         if self._pause_at is not None and self._index >= self._pause_at:
@@ -1316,6 +1321,7 @@ class _BaselineSource:
             return None
         table, max_micros = self._batches[self._index]
         self._index += 1
+        self._delivered_batches += 1
         return Data(
             Batch.from_pyarrow(table),
             Cursor(
@@ -1367,14 +1373,20 @@ def _run_stream_lifecycle(
     consumed_rows = sum(table.num_rows for table, _micros in batches[:pause_at])
 
     async def lifecycle() -> dict[str, Any]:
+        lifecycle_start = time.perf_counter()
+        process = psutil.Process()
+        rss_before = process.memory_info().rss
         source = _BaselineSource(batches, pause_at)
         sink = _BaselineSink()
+        startup_start = time.perf_counter()
         job = await StreamingRunner(
             PipelineBuilder._from_json(graph_json).compile_stream(),
             {"input": SourceBinding(source, watermark_policy=DisabledWatermarks())},
             {"output": [SinkBinding.ordinary("baseline", sink)]},
             ManagedCheckpointRuntime(state_root),
         ).start_async()
+        startup_seconds = time.perf_counter() - startup_start
+        steady_start = time.perf_counter()
         status = job.status()
         deadline = asyncio.get_running_loop().time() + 30
         # Wait until the window operator itself reports consuming the paused
@@ -1393,10 +1405,13 @@ def _run_stream_lifecycle(
                     f"after {source.delivered_batches} batches: {outcome.errors}"
                 )
             await asyncio.sleep(0.001)
+        steady_processing_seconds = time.perf_counter() - steady_start
         checkpoint_start = time.perf_counter()
         epoch = await job.trigger_checkpoint_async()
         checkpoint_seconds = time.perf_counter() - checkpoint_start
+        cancel_start = time.perf_counter()
         await job.cancel_async()
+        cancel_seconds = time.perf_counter() - cancel_start
         checkpoint_bytes = directory_bytes(state_root)
 
         # Bound the recovery source at the pause point so it idles at the
@@ -1416,13 +1431,23 @@ def _run_stream_lifecycle(
             ManagedCheckpointRuntime(state_root),
         ).start_async()
         recovery_seconds = time.perf_counter() - recovery_start
+        shutdown_start = time.perf_counter()
         outcome = await recovery_job.shutdown_async()
+        shutdown_seconds = time.perf_counter() - shutdown_start
+        total_seconds = time.perf_counter() - lifecycle_start
         return {
             "state": outcome.state,
+            "startup_duration_seconds": startup_seconds,
+            "steady_processing_duration_seconds": steady_processing_seconds,
             "checkpoint_epoch": epoch,
             "checkpoint_duration_seconds": checkpoint_seconds,
             "checkpoint_bytes": checkpoint_bytes,
+            "cancel_duration_seconds": cancel_seconds,
             "recovery_duration_seconds": recovery_seconds,
+            "shutdown_duration_seconds": shutdown_seconds,
+            "total_duration_seconds": total_seconds,
+            "rss_before_bytes": rss_before,
+            "rss_after_bytes": process.memory_info().rss,
             "checkpoint_batches": pause_at,
             "consumed_rows": consumed_rows,
             "resumed_batches": recovery_source.delivered_batches,
@@ -1435,8 +1460,9 @@ def _run_stream_lifecycle(
 
 
 @pytest.mark.benchmark(
-    group=benchmark_group("symbolic-stream"), min_rounds=3, max_time=0.5
+    group=benchmark_group("symbolic-stream"), min_rounds=20, max_time=2.0
 )
+@pytest.mark.stream_lifecycle
 @pytest.mark.parametrize("_scale", [selected_scale().name])
 def test_stream_window_checkpoint_and_recovery(
     benchmark: BenchmarkFixture, _scale: str, tmp_path: Path
@@ -1446,9 +1472,25 @@ def test_stream_window_checkpoint_and_recovery(
     consumed_rows = sum(table.num_rows for table, _micros in batches[:pause_at])
     expected_rows = _expected_stream_window_rows(consumed_rows)
 
-    measured = _run_stream_lifecycle(tmp_path / "measured", batches)
-    assert measured["state"] == "completed"
-    assert measured["sink_rows"] == expected_rows
+    diagnostics = [
+        _run_stream_lifecycle(tmp_path / f"diagnostic-{index}", batches)
+        for index in range(_STREAM_DIAGNOSTIC_SAMPLES)
+    ]
+    assert all(measured["state"] == "completed" for measured in diagnostics)
+    assert all(measured["sink_rows"] == expected_rows for measured in diagnostics)
+    measured = diagnostics[-1]
+
+    def percentile(field: str, quantile: float) -> float:
+        return float(np.quantile([sample[field] for sample in diagnostics], quantile))
+
+    checkpoint_bytes_p50 = int(
+        np.quantile([sample["checkpoint_bytes"] for sample in diagnostics], 0.50)
+    )
+    checkpoint_bytes_p95 = int(
+        np.ceil(
+            np.quantile([sample["checkpoint_bytes"] for sample in diagnostics], 0.95)
+        )
+    )
 
     record_symbolic_benchmark(
         benchmark,
@@ -1463,10 +1505,34 @@ def test_stream_window_checkpoint_and_recovery(
             "checkpoint_batches": measured["checkpoint_batches"],
             "consumed_rows": measured["consumed_rows"],
             "checkpoint_epoch": measured["checkpoint_epoch"],
+            "startup_duration_seconds": measured["startup_duration_seconds"],
+            "steady_processing_duration_seconds": measured[
+                "steady_processing_duration_seconds"
+            ],
             "checkpoint_duration_seconds": measured["checkpoint_duration_seconds"],
-            "checkpoint_bytes": measured["checkpoint_bytes"],
+            "checkpoint_duration_p50_seconds": percentile(
+                "checkpoint_duration_seconds", 0.50
+            ),
+            "checkpoint_duration_p95_seconds": percentile(
+                "checkpoint_duration_seconds", 0.95
+            ),
+            "checkpoint_bytes": checkpoint_bytes_p50,
+            "checkpoint_bytes_p50": checkpoint_bytes_p50,
+            "checkpoint_bytes_p95": checkpoint_bytes_p95,
+            "cancel_duration_seconds": measured["cancel_duration_seconds"],
             "recovery_duration_seconds": measured["recovery_duration_seconds"],
+            "recovery_duration_p50_seconds": percentile(
+                "recovery_duration_seconds", 0.50
+            ),
+            "recovery_duration_p95_seconds": percentile(
+                "recovery_duration_seconds", 0.95
+            ),
+            "shutdown_duration_seconds": measured["shutdown_duration_seconds"],
+            "total_duration_seconds": measured["total_duration_seconds"],
+            "rss_before_bytes": measured["rss_before_bytes"],
+            "rss_after_bytes": measured["rss_after_bytes"],
             "recovery_resumed_batches": measured["resumed_batches"],
+            "diagnostic_samples": _STREAM_DIAGNOSTIC_SAMPLES,
         },
     )
 
