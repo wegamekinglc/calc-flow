@@ -2445,6 +2445,12 @@ class _StreamJoinPlan:
     output_schema: tuple[Field, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class _RelationalFragment:
+    boundary: Node
+    project: dict[str, object] | None
+
+
 def _connected_input_endpoints(edges: list[object], /) -> set[tuple[str, str]]:
     connected: set[tuple[str, str]] = set()
     for edge in edges:
@@ -2883,6 +2889,69 @@ def _relational_fragment(
     )
 
 
+def _relational_output_fragments(
+    program: Program,
+    analyzer: _Analyzer,
+    mode: str,
+    allowed_lateness_micros: int,
+    late_policy: str,
+    /,
+) -> dict[str, _RelationalFragment]:
+    fragments: dict[str, _RelationalFragment] = {}
+    for output_name, value in program.outputs:
+        path = f"outputs.{output_name}"
+        boundary = _relational_boundary(value._node, path)
+        fragments[output_name] = _RelationalFragment(
+            boundary,
+            _relational_fragment(
+                program,
+                analyzer,
+                value._node,
+                boundary,
+                output_name,
+                path,
+                mode,
+                allowed_lateness_micros,
+                late_policy,
+            ),
+        )
+    return fragments
+
+
+def _relational_join_fragments(
+    program: Program,
+    analyzer: _Analyzer,
+    plans: dict[str, _StreamJoinPlan],
+    mode: str,
+    allowed_lateness_micros: int,
+    late_policy: str,
+    /,
+) -> dict[tuple[str, str], _RelationalFragment]:
+    fragments: dict[tuple[str, str], _RelationalFragment] = {}
+    for plan in plans.values():
+        for side in plan.sides:
+            path = f"{program.name}.{plan.node_id}.{side.port}"
+            boundary = _relational_boundary(side.node, path)
+            project = None
+            if side.node.digest != boundary.digest:
+                project = _relational_fragment(
+                    program,
+                    analyzer,
+                    side.node,
+                    boundary,
+                    side.node_id,
+                    path,
+                    mode,
+                    allowed_lateness_micros,
+                    late_policy,
+                )
+            fragments[(plan.node.digest, side.port)] = _RelationalFragment(
+                boundary,
+                project,
+            )
+    return fragments
+
+
 def _wire_relational_fragment(
     nodes: list[object],
     edges: list[object],
@@ -2915,22 +2984,18 @@ def _wire_relational_fragment(
 
 def _wire_relational_join_side(
     program: Program,
-    analyzer: _Analyzer,
     plan: _StreamJoinPlan,
     side: _StreamJoinSide,
+    fragment: _RelationalFragment,
     sources: dict[str, str],
     joins: dict[str, _StreamJoinPlan],
     nodes: list[object],
     edges: list[object],
-    mode: str,
-    allowed_lateness_micros: int,
-    late_policy: str,
     /,
 ) -> None:
     path = f"{program.name}.{plan.node_id}.{side.port}"
-    boundary = _relational_boundary(side.node, path)
-    upstream_id = _relational_upstream_id(boundary, sources, joins, path)
-    if side.node.digest == boundary.digest:
+    upstream_id = _relational_upstream_id(fragment.boundary, sources, joins, path)
+    if fragment.project is None:
         edges.append(
             {
                 "source_node": upstream_id,
@@ -2940,21 +3005,10 @@ def _wire_relational_join_side(
             }
         )
         return
-    fragment = _relational_fragment(
-        program,
-        analyzer,
-        side.node,
-        boundary,
-        side.node_id,
-        path,
-        mode,
-        allowed_lateness_micros,
-        late_policy,
-    )
     _wire_relational_fragment(
         nodes,
         edges,
-        fragment,
+        fragment.project,
         upstream_id,
         side.node_id,
         side.schema,
@@ -2970,37 +3024,22 @@ def _wire_relational_join_side(
 
 
 def _wire_relational_output(
-    program: Program,
-    analyzer: _Analyzer,
     output_name: str,
-    expression: Node,
+    fragment: _RelationalFragment,
     sources: dict[str, str],
     joins: dict[str, _StreamJoinPlan],
     nodes: list[object],
     edges: list[object],
-    mode: str,
-    allowed_lateness_micros: int,
-    late_policy: str,
     /,
 ) -> None:
     path = f"outputs.{output_name}"
-    boundary = _relational_boundary(expression, path)
-    upstream_id = _relational_upstream_id(boundary, sources, joins, path)
-    fragment = _relational_fragment(
-        program,
-        analyzer,
-        expression,
-        boundary,
-        output_name,
-        path,
-        mode,
-        allowed_lateness_micros,
-        late_policy,
-    )
+    upstream_id = _relational_upstream_id(fragment.boundary, sources, joins, path)
+    if fragment.project is None:
+        _raise_lowering_invariant(f"relational output {output_name!r} has no fragment")
     _wire_relational_fragment(
         nodes,
         edges,
-        fragment,
+        fragment.project,
         upstream_id,
         output_name,
         None,
@@ -3021,28 +3060,33 @@ def _relational_join_plans(
 
 
 def _relational_reserved_ids(
-    program: Program, plans: dict[str, _StreamJoinPlan], /
+    program: Program,
+    plans: dict[str, _StreamJoinPlan],
+    join_fragments: dict[tuple[str, str], _RelationalFragment],
+    output_fragments: dict[str, _RelationalFragment],
+    /,
 ) -> frozenset[str]:
-    return frozenset(
-        (
-            *(output_name for output_name, _ in program.outputs),
-            *(plan.node_id for plan in plans.values()),
-            *(side.node_id for plan in plans.values() for side in plan.sides),
-        )
-    )
+    reserved = {
+        *(output_name for output_name, _ in program.outputs),
+        *(plan.node_id for plan in plans.values()),
+        *(side.node_id for plan in plans.values() for side in plan.sides),
+    }
+    for fragment in (*join_fragments.values(), *output_fragments.values()):
+        if fragment.project is None:
+            continue
+        nodes, _ = _project_graph_lists(fragment.project)
+        reserved.update(str(_graph_node(node)["id"]) for node in nodes)
+    return frozenset(reserved)
 
 
 def _append_relational_joins(
     program: Program,
-    analyzer: _Analyzer,
     join_nodes: tuple[Node, ...],
     sources: dict[str, str],
     plans: dict[str, _StreamJoinPlan],
+    fragments: dict[tuple[str, str], _RelationalFragment],
     nodes: list[object],
     edges: list[object],
-    mode: str,
-    allowed_lateness_micros: int,
-    late_policy: str,
     /,
 ) -> None:
     for join in join_nodes:
@@ -3058,44 +3102,33 @@ def _append_relational_joins(
         for side in plan.sides:
             _wire_relational_join_side(
                 program,
-                analyzer,
                 plan,
                 side,
+                fragments[(plan.node.digest, side.port)],
                 sources,
                 plans,
                 nodes,
                 edges,
-                mode,
-                allowed_lateness_micros,
-                late_policy,
             )
 
 
 def _append_relational_outputs(
     program: Program,
-    analyzer: _Analyzer,
     sources: dict[str, str],
     plans: dict[str, _StreamJoinPlan],
+    fragments: dict[str, _RelationalFragment],
     nodes: list[object],
     edges: list[object],
-    mode: str,
-    allowed_lateness_micros: int,
-    late_policy: str,
     /,
 ) -> None:
-    for output_name, value in program.outputs:
+    for output_name, _ in program.outputs:
         _wire_relational_output(
-            program,
-            analyzer,
             output_name,
-            value._node,
+            fragments[output_name],
             sources,
             plans,
             nodes,
             edges,
-            mode,
-            allowed_lateness_micros,
-            late_policy,
         )
 
 
@@ -3109,32 +3142,46 @@ def _lower_relational_dag_program(
     /,
 ) -> dict[str, object]:
     plans = _relational_join_plans(program, analyzer, join_nodes)
-    reserved_ids = _relational_reserved_ids(program, plans)
+    join_fragments = _relational_join_fragments(
+        program,
+        analyzer,
+        plans,
+        mode,
+        allowed_lateness_micros,
+        late_policy,
+    )
+    output_fragments = _relational_output_fragments(
+        program,
+        analyzer,
+        mode,
+        allowed_lateness_micros,
+        late_policy,
+    )
+    reserved_ids = _relational_reserved_ids(
+        program,
+        plans,
+        join_fragments,
+        output_fragments,
+    )
     sources, source_nodes = _relational_source_nodes(program, reserved_ids)
     nodes: list[object] = list(source_nodes)
     edges: list[object] = []
     _append_relational_joins(
         program,
-        analyzer,
         join_nodes,
         sources,
         plans,
+        join_fragments,
         nodes,
         edges,
-        mode,
-        allowed_lateness_micros,
-        late_policy,
     )
     _append_relational_outputs(
         program,
-        analyzer,
         sources,
         plans,
+        output_fragments,
         nodes,
         edges,
-        mode,
-        allowed_lateness_micros,
-        late_policy,
     )
     typed_nodes = [_graph_node(node) for node in nodes]
     typed_edges = [_graph_node(edge) for edge in edges]
