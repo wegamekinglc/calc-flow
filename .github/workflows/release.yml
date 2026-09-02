@@ -120,7 +120,7 @@ jobs:
             "${RUNNER_TEMP}/benchmark-candidate/stream-lifecycle.json" \
             --minimum-rounds 20
           perf_gate_extra_args=()
-          if [[ "${{ inputs.allow-dependency-drift }}" == "true" ]]; then
+          if [[ "${{ inputs['allow-dependency-drift'] }}" == "true" ]]; then
             perf_gate_extra_args+=(--allow-dependency-drift)
           fi
           uv run python scripts/verify_perf_gates.py \

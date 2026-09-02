@@ -702,6 +702,7 @@ class ReleaseConfigTests(unittest.TestCase):
         )
         self.assertIn("--require-stream-lifecycle", exact_gate)
         self.assertIn("allow-dependency-drift:", release)
+        self.assertIn("inputs['allow-dependency-drift']", exact_gate)
         self.assertIn("--allow-dependency-drift", exact_gate)
         self.assertIn('"${perf_gate_extra_args[@]}"', exact_gate)
 
