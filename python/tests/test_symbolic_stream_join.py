@@ -208,7 +208,7 @@ def test_stream_join_analysis_rejects_schema_mismatches() -> None:
     )
 
 
-def test_stream_join_rejects_nested_join_and_post_join_state() -> None:
+def test_stream_join_requires_ordering_for_nested_and_post_join_state() -> None:
     first = _join()
     nested = table.stream_join(
         first,
@@ -226,7 +226,7 @@ def test_stream_join_rejects_nested_join_and_post_join_state() -> None:
         outputs=[("matches", nested)],
     )
     assert any(
-        issue.code == "capability_mismatch"
+        issue.code == "ordering_required"
         for issue in nested_program.analyze(Runtime(), mode="stream").issues
     )
 
@@ -235,7 +235,7 @@ def test_stream_join_rejects_nested_join_and_post_join_state() -> None:
         FeatureSet([("previous", ts.lag(joined["authorization__amount"]))])
     )
     stateful_result = _program(stateful).analyze(Runtime(), mode="stream")
-    assert any(issue.code == "unsupported_type" for issue in stateful_result.issues)
+    assert any(issue.code == "ordering_required" for issue in stateful_result.issues)
 
     windowed = window.tumbling(
         joined,
@@ -243,10 +243,10 @@ def test_stream_join_rejects_nested_join_and_post_join_state() -> None:
         size_micros=1_000_000,
     )
     windowed_result = _program(windowed).analyze(Runtime(), mode="stream")
-    assert any(issue.code == "capability_mismatch" for issue in windowed_result.issues)
+    assert any(issue.code == "ordering_required" for issue in windowed_result.issues)
 
 
-def test_stream_join_lowering_rejects_multiple_or_unrelated_outputs() -> None:
+def test_stream_join_lowering_supports_multiple_and_unrelated_outputs() -> None:
     left = _left()
     right = _right()
     first = _join(left, right)
@@ -265,16 +265,33 @@ def test_stream_join_lowering_rejects_multiple_or_unrelated_outputs() -> None:
         inputs=[left, right],
         outputs=[("first", first), ("second", second)],
     )
-    with pytest.raises(CompileError, match="exactly one unique"):
-        multiple.compile_stream(Runtime())
+    multiple_document = lower_program_document(multiple, Runtime(), "stream")
+    assert (
+        sum(
+            node["operator"]["kind"] == "stream_join"
+            for node in multiple_document["graph"]["nodes"]
+        )
+        == 2
+    )
+    assert multiple.compile_stream(Runtime()).source_binding_ids == (
+        "authorizations.input",
+        "payments.input",
+    )
 
     unrelated = Program(
         "unrelated",
         inputs=[left, right],
         outputs=[("matches", first), ("left", left)],
     )
-    with pytest.raises(CompileError, match="every output"):
-        unrelated.compile_stream(Runtime())
+    unrelated_document = lower_program_document(unrelated, Runtime(), "stream")
+    assert (
+        sum(
+            node["operator"]["kind"] == "stream_join"
+            for node in unrelated_document["graph"]["nodes"]
+        )
+        == 1
+    )
+    unrelated.compile_stream(Runtime())
 
 
 def test_stream_join_direct_root_uses_one_native_node() -> None:

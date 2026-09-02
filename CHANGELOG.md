@@ -5,6 +5,17 @@ engine or Studio capabilities.
 
 ## 2026-09
 
+- 2026-09-02: Add symbolic relational stream-join DAGs and explicit post-join
+  ordering (SCE-18). Independent and nested bounded joins, unrelated outputs,
+  and ordered post-join rolling/cross-section stages now lower to one existing
+  native `stream_join@1` state owner per unique declaration. Calls without
+  output ordering retain byte-identical symbolic `stream_join@1` identity;
+  complete canonical entity, event-time, and sequence metadata uses symbolic
+  `stream_join@2` and lowers away before project-v3 compilation. Three-source
+  reference vectors cover segmentation invariance and checkpoint recovery
+  with both nested join states retained. No Python execution path, native join
+  checkpoint layout, or project format changes.
+
 - 2026-09-01: Add durable unadjusted EWMA and composed MACD to the symbolic
   temporal catalog (SCE-16). `ts.ewma` and its exact-node alias `ts.ema` share
   native state by entity, input, and span while retaining independent

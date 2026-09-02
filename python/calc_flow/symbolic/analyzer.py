@@ -270,7 +270,7 @@ def _resolves_to_input_column(node: Node, /) -> bool:
 
 def _table_field_resolves_to_input(table: Node, field_name: str, /) -> bool:
     operation = table.op.name
-    if operation == "table_input":
+    if operation in ("table_input", "stream_join"):
         return True
     if operation in ("project", "filter"):
         return _table_field_resolves_to_input(table.args[0], field_name)
@@ -303,7 +303,7 @@ def _stateful_operand_is_stageable(node: Node, /) -> bool:
 
 def _table_field_is_stageable(table: Node, field_name: str, /) -> bool:
     operation = table.op.name
-    if operation == "table_input":
+    if operation in ("table_input", "stream_join"):
         return True
     if operation in ("project", "filter"):
         return _table_field_is_stageable(table.args[0], field_name)
@@ -314,6 +314,12 @@ def _table_field_is_stageable(table: Node, field_name: str, /) -> bool:
         return _table_field_is_stageable(table.args[0], field_name)
     index = names.index(field_name)
     return _stateful_operand_is_stageable(table.args[index + 1])
+
+
+def _contains_stateful_primitive(node: Node, /) -> bool:
+    if node.op.name in _ROLLING_PRIMITIVES or node.op.name in _CROSS_SECTION:
+        return True
+    return any(_contains_stateful_primitive(argument) for argument in node.args)
 
 
 class _Analyzer:
@@ -518,18 +524,25 @@ class _Analyzer:
                 )
             else:
                 projected.append(field)
+        retained = frozenset(columns)
         return TableFacts(
             tuple(projected),
             child.lineage,
             child.state,
-            child.event_time,
-            child.entity_by,
-            child.sequence_by,
+            child.event_time if child.event_time in retained else None,
+            child.entity_by if set(child.entity_by) <= retained else (),
+            child.sequence_by if set(child.sequence_by) <= retained else (),
         )
 
     def _filter_table(self, node: Node, path: str, /) -> TableFacts:
         child = self.table(node.args[0], f"{path}.filter.value")
         predicate = self.column(node.args[1], f"{path}.filter.predicate")
+        if "stream_join" in child.state and _contains_stateful_primitive(node.args[1]):
+            self._require_post_join_ordering(
+                child,
+                f"{path}.filter.value",
+                "stateful work after a symbolic stream join",
+            )
         if predicate.lineage is not None and predicate.lineage != child.lineage:
             self.issue(
                 f"{path}.filter.predicate.lineage",
@@ -571,6 +584,14 @@ class _Analyzer:
             elif facts.data_type is not None:
                 fields.append(Field(name, facts.data_type, facts.nullable))
                 existing.add(name)
+        if "stream_join" in child.state and any(
+            _contains_stateful_primitive(expression) for expression in node.args[1:]
+        ):
+            self._require_post_join_ordering(
+                child,
+                f"{path}.with_columns.value",
+                "stateful work after a symbolic stream join",
+            )
         return TableFacts(
             tuple(fields),
             child.lineage,
@@ -606,8 +627,18 @@ class _Analyzer:
                 "unsupported_mode",
                 "symbolic stream_join is available only in stream mode",
             )
-        self._stream_join_side(left, "left", role)
-        self._stream_join_side(right, "right", role)
+        self._stream_join_side(
+            left,
+            "left",
+            role,
+            _cstr(node.attr("left_event_time")),
+        )
+        self._stream_join_side(
+            right,
+            "right",
+            role,
+            _cstr(node.attr("right_event_time")),
+        )
         self._stream_join_event_time(
             left,
             _cstr(node.attr("left_event_time")),
@@ -627,26 +658,139 @@ class _Analyzer:
             left_prefix,
             right_prefix,
         )
+        output_event_time = _cstr(node.attr("output_event_time"))
+        output_entity_by = _cstr_seq(node.attr("output_entity_by"))
+        output_sequence_by = _cstr_seq(node.attr("output_sequence_by"))
+        if node.op.version >= 2 or any(
+            (output_event_time, output_entity_by, output_sequence_by)
+        ):
+            self._check_join_output_ordering(
+                node,
+                left,
+                right,
+                output_schema,
+                output_event_time,
+                output_entity_by,
+                output_sequence_by,
+                role,
+            )
         return TableFacts(
             output_schema,
             node.digest,
             left.state | right.state | frozenset({"stream_join"}),
-            None,
-            (),
-            (),
+            output_event_time,
+            output_entity_by,
+            output_sequence_by,
         )
 
     def _stream_join_side(
-        self, facts: TableFacts, side_name: str, role: str, /
+        self,
+        facts: TableFacts,
+        side_name: str,
+        role: str,
+        selected_event_time: str | None,
+        /,
     ) -> None:
         if "stream_join" in facts.state:
-            self.issue(
+            self._require_post_join_ordering(
+                facts,
                 f"{role}.{side_name}",
-                "capability_mismatch",
-                "nested symbolic stream joins are not supported in SCE-17",
+                "a joined result used by another symbolic stream join",
             )
+            if facts.event_time is not None and selected_event_time != facts.event_time:
+                self.issue(
+                    f"{role}.{side_name}_event_time",
+                    "ordering_required",
+                    "nested join event time must match the declared post-join"
+                    f" event time {facts.event_time!r}",
+                )
         if facts.lineage is not None:
             self._temporal_lineages.add(facts.lineage)
+
+    def _require_post_join_ordering(
+        self,
+        facts: TableFacts,
+        path: str,
+        purpose: str,
+        /,
+    ) -> None:
+        if facts.event_time and facts.entity_by and facts.sequence_by:
+            return
+        self.issue(
+            path,
+            "ordering_required",
+            f"{purpose} requires explicit output_entity_by,"
+            " output_event_time, and output_sequence_by metadata",
+        )
+
+    def _check_join_output_ordering(
+        self,
+        node: Node,
+        left: TableFacts,
+        right: TableFacts,
+        schema: tuple[Field, ...],
+        event_time: str | None,
+        entity_by: tuple[str, ...],
+        sequence_by: tuple[str, ...],
+        role: str,
+        /,
+    ) -> None:
+        fields = {field.name: field for field in schema}
+        left_prefix = _cstr(node.attr("left_prefix")) or "left"
+        right_prefix = _cstr(node.attr("right_prefix")) or "right"
+        allowed_event_times = {
+            f"{left_prefix}__{_cstr(node.attr('left_event_time'))}",
+            f"{right_prefix}__{_cstr(node.attr('right_event_time'))}",
+        }
+        event_field = None if event_time is None else fields.get(event_time)
+        if (
+            event_field is None
+            or event_field.data_type != _EVENT_TIME_TYPE
+            or event_field.nullable
+            or event_time not in allowed_event_times
+        ):
+            self.issue(
+                f"{role}.output_event_time",
+                "ordering_required",
+                "post-join event time must be a non-null timestamp[us, UTC] field",
+            )
+        self._ordering_key_fields(
+            CSeq(tuple(CStr(name) for name in entity_by)),
+            fields,
+            f"{role}.output_entity_by",
+            "post-join ordering requires a non-empty entity key",
+            _entity_field_is_valid,
+            _entity_field_message,
+        )
+        expected_entities = tuple(
+            f"{left_prefix}__{name}" for name in _cstr_seq(node.attr("left_keys"))
+        )
+        if entity_by and entity_by != expected_entities:
+            self.issue(
+                f"{role}.output_entity_by",
+                "ordering_required",
+                "post-join entity keys must be the prefixed left join keys"
+                f" {expected_entities!r}",
+            )
+        self._ordering_key_fields(
+            CSeq(tuple(CStr(name) for name in sequence_by)),
+            fields,
+            f"{role}.output_sequence_by",
+            "post-join ordering requires a non-empty sequence key",
+            _sequence_field_is_valid,
+            _sequence_field_message,
+        )
+        expected_sequences = (
+            *(f"{left_prefix}__{name}" for name in left.sequence_by),
+            *(f"{right_prefix}__{name}" for name in right.sequence_by),
+        )
+        if sequence_by and sequence_by != expected_sequences:
+            self.issue(
+                f"{role}.output_sequence_by",
+                "ordering_required",
+                "post-join sequence keys must concatenate the prefixed left"
+                f" and right input sequence keys {expected_sequences!r}",
+            )
 
     @staticmethod
     def _stream_join_schema(
@@ -804,11 +948,10 @@ class _Analyzer:
     def _window_table(self, node: Node, path: str, /) -> TableFacts:
         child = self.table(node.args[0], f"{path}.{node.op.name}.value")
         if "stream_join" in child.state:
-            self.issue(
+            self._require_post_join_ordering(
+                child,
                 f"{path}.{node.op.name}.value",
-                "capability_mismatch",
-                "event windows after a symbolic stream join require an explicit"
-                " post-join ordering contract",
+                "event windows after a symbolic stream join",
             )
         if child.lineage is not None:
             self._temporal_lineages.add(child.lineage)

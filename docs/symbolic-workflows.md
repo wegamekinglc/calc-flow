@@ -95,11 +95,19 @@ The compiler lowers one native `stream_join@1`, so its watermarks, state
 eviction, match ordering, metrics, checkpoint v1 state, and recovery rules are
 the same ones used by `PipelineBuilder.stream_join`.
 
-One SCE-17 program may share one join across several stateless downstream
-table branches. Batch compilation, multiple or nested joins, unrelated output
-branches, and stateful post-join work fail during analysis or lowering. This
-keeps the joined output from silently acquiring invented entity, sequence, or
-event-time facts.
+Calls that omit output ordering preserve the SCE-17 terminal-join contract.
+For nested joins or downstream rolling/cross-section state, declare all of
+`output_entity_by`, `output_event_time`, and `output_sequence_by`. Analysis
+requires the prefixed left join keys, either prefixed join event time, and the
+concatenated prefixed left/right input sequence keys. Missing or projected-away
+facts fail with `ordering_required`; metadata never sorts data or runs Python.
+
+[`13_symbolic_relational_dag.py`](../examples/13_symbolic_relational_dag.py)
+uses that proof to feed an authorization/payment match into a settlement join.
+Independent joins and unrelated output branches may coexist, while each unique
+join digest retains one native state owner and checkpoint entry. Matrix
+attachment around a join and symbolic event-window execution remain outside
+this contract.
 
 ## Use static matrices with NumPy or JAX
 

@@ -49,6 +49,7 @@ the [Rust example inventory](../crates/calc-flow/examples/README.md).
 | [`10_symbolic_streaming_recovery.py`](../examples/10_symbolic_streaming_recovery.py)      | Multi-stage symbolic checkpoint, recovery, and terminal restart       |
 | [`11_symbolic_static_matrix.py`](../examples/11_symbolic_static_matrix.py)                | Batch/stream static weights, copy facts, and provider failure         |
 | [`12_symbolic_stream_join.py`](../examples/12_symbolic_stream_join.py)                    | Two ordered symbolic inputs and one bounded native stream join        |
+| [`13_symbolic_relational_dag.py`](../examples/13_symbolic_relational_dag.py)              | Ordered nested joins lowered to two durable native state owners       |
 
 The Python continuous examples use application-owned in-memory connectors.
 Production transport configuration is data-only and covered by the
@@ -80,13 +81,14 @@ The sink asserts both deterministic aggregates before printing them.
   `10_symbolic_streaming_recovery.py` for continuous recovery or
   `11_symbolic_static_matrix.py` for immutable model weights.
 - For a bounded match over two ordered symbolic streams, use
-  `12_symbolic_stream_join.py`.
+  `12_symbolic_stream_join.py`; for independent or nested joins and explicit
+  post-join ordering, continue with `13_symbolic_relational_dag.py`.
 - For event-time aggregation in Rust, start with `windowed_streaming.rs`.
 - For Kafka, PostgreSQL, ClickHouse, HTTP, WebSocket, files, or Parquet, use a
   project-v3 connector binding from the [connector guide](connectors.md).
 - For a browser-managed local job, use [Calc Flow Studio](../web-ui/README.md).
 
-The [symbolic workflow guide](symbolic-workflows.md) connects the four
+The [symbolic workflow guide](symbolic-workflows.md) connects the five
 symbolic examples to Studio inspection, NumPy/JAX selection, failure handling,
 and compile-time performance facts.
 

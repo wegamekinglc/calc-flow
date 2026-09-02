@@ -93,26 +93,30 @@ is deleted after the atomic cutover; it is not a permanent release branch.
 | [SCE-14] | P6    | cross-domain CSE, fusion, explain, cache  | SCE-08, SCE-10, SCE-13 | 2.0                |
 | [SCE-15] | P6    | Studio, docs, hardening, release checks   | SCE-14                 | 2.0                |
 | [SCE-16] | P7    | durable EWMA and composed MACD            | SCE-08, SCE-14         | 1.0                |
+| [SCE-17] | P7    | symbolic bounded stream joins             | SCE-04, SCE-14         | 1.5                |
+| [SCE-18] | P8    | relational DAG and post-join ordering     | SCE-17                 | 2.0                |
 
 ### Current Delivery Snapshot
 
-| Tasks                 | State       | Merged evidence                                                     |
-| --------------------- | ----------- | ------------------------------------------------------------------- |
-| SCE-00–SCE-04         | merged      | contract `b9deff7`, IR `72f8ab0`, analysis/runtime through `fab89de` |
-| SCE-05–SCE-08         | merged      | row/rolling through `b53b8e9`; paired gates `b39208f`, `7d9a2b8`    |
-| SCE-09–SCE-10         | merged      | cross-section `9affe0a`, grouped additions `7389c6f`                 |
-| SCE-11–SCE-13         | merged      | static/provider/matrix through `bde42be`                             |
-| SCE-14                | merged      | optimizer, explain, and cache `5fd256d`                              |
-| SCE-15                | merged      | Studio, docs, and release integration `94b9f6e`                      |
-| SCE-16                | merged      | EWMA contract, layout v2, and MACD `0bac2b0` (#221)                   |
+| Tasks                 | State       | Delivery evidence                                                      |
+| --------------------- | ----------- | ---------------------------------------------------------------------- |
+| SCE-00–SCE-04         | merged      | contract `b9deff7`, IR `72f8ab0`, analysis/runtime through `fab89de`   |
+| SCE-05–SCE-08         | merged      | row/rolling through `b53b8e9`; paired gates `b39208f`, `7d9a2b8`       |
+| SCE-09–SCE-10         | merged      | cross-section `9affe0a`, grouped additions `7389c6f`                   |
+| SCE-11–SCE-13         | merged      | static/provider/matrix through `bde42be`                               |
+| SCE-14                | merged      | optimizer, explain, and cache `5fd256d`                                |
+| SCE-15                | merged      | Studio, docs, and release integration `94b9f6e`                        |
+| SCE-16                | merged      | EWMA contract, layout v2, and MACD `0bac2b0` (#221)                    |
+| SCE-17                | merged      | bounded symbolic stream joins `e502e71` (#224)                         |
+| SCE-18                | delivered   | relational DAG contract, execution, and recovery (#225)                |
 
 This table records implementation history rather than changing the frozen
 semantics below. Later correctness or composability follow-ups receive their
 own RED tests and review evidence.
 
-The single-track median is about 24.5 engineer-weeks. Two engineers split
+The single-track median is about 28 engineer-weeks. Two engineers split
 between native streaming/state work and Python/compiler/provider work can
-target 11 to 14 calendar weeks after SCE-00, subject to review and CI latency.
+target 13 to 16 calendar weeks after SCE-00, subject to review and CI latency.
 These are planning estimates, not delivery promises.
 
 ## 4. Phase P0: Semantic Freeze and Baselines
@@ -528,7 +532,7 @@ once, and segmentation-invariant results.
 micro-batch, weights are transferred once per job, and matrix outputs retain
 the approved batch/stream tolerance contract.
 
-## 10. Phase P6: Optimization, Studio, and Release
+## 10. Phases P6-P8: Optimization, Release, and Relational Composition
 
 ### [SCE-14] Add Cross-Domain Optimization and Explain
 
@@ -639,6 +643,39 @@ mid-checkpoint recovery.
 timezone-naive and UTC Arrow timestamps, matching its documented diagnostic
 and the native join constructor.
 
+### [SCE-18] Add Relational DAGs and Post-Join Ordering
+
+**Branch:** `feature/symbolic-relational-dag`
+
+**PR title:** `feat: add symbolic relational DAGs`
+
+**Goal:** Remove the SCE-17 single-join composition boundary while retaining
+one existing native `stream_join@1` state owner per unique declaration.
+
+**Semantic contract:** Calls without output ordering remain byte-identical
+symbolic `stream_join@1` declarations. Supplying complete
+`output_entity_by`, `output_event_time`, and `output_sequence_by` metadata
+builds symbolic `stream_join@2`. Analysis proves canonical prefixed join keys,
+one bounded join event-time field, and the concatenated left/right input
+sequence tuple. The metadata lowers away and never changes project format 3.
+
+**Relational lowering:** Programs may contain independent or nested joins,
+unrelated table outputs, and shared join fan-out. Deterministic typed source
+nodes own external bindings; unary expression, rolling, and cross-section
+segments are lowered between relational boundaries. Matrix attachment and
+analysis-only symbolic event windows remain outside this contract.
+
+**RED and recovery tests:** Record the previous missing-keyword,
+single-join, nested-join, and post-join-state failures. Cover invalid ordering,
+physical join sharing, independent/unrelated branches, nested three-source
+reference results across segmentations, post-join rolling/cross-section, and
+checkpoint recovery with state retained by both join owners.
+
+**Durability:** Native join state remains layout v1. Program and node
+fingerprints include symbolic v2 ordering metadata; project lowering contains
+only existing native v1 join specs, and recovery validates every physical
+operator before sources resume.
+
 ## 11. Cross-Cutting Test Matrix
 
 Every supported stateful primitive is exercised over:
@@ -665,6 +702,8 @@ Additional fixed properties are:
   null placement, and delivery status are exact.
 - Restore rejects incompatible operator versions, schemas, state layouts, and
   static-input digests before sources resume.
+- Relational DAG segmentation and recovery preserve the same match set while
+  every unique join digest owns one physical checkpoint entry.
 
 ## 12. Verification by Surface
 
@@ -730,7 +769,6 @@ their schema/OpenAPI/generated TypeScript changes in the same commit.
 
 These items require separate approved designs after the initial release:
 
-- multi-join relational DAGs and explicit post-join ordering metadata;
 - update/retraction/changelog outputs;
 - epoch-aligned dynamic matrix weights;
 - arbitrary user-defined stateful providers;
@@ -742,6 +780,10 @@ These items require separate approved designs after the initial release:
 Cross-section top/bottom selection and mean fill were originally deferred but
 were subsequently approved and delivered by SCE-10; they are no longer
 deferred work.
+
+Multi-join relational DAGs and explicit post-join ordering metadata were
+subsequently approved and delivered by SCE-18; they are no longer deferred
+work.
 
 The absence of these features does not justify a Python execution fallback.
 Unsupported compositions fail during symbolic analysis or native compilation.

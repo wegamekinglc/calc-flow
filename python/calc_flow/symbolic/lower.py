@@ -23,6 +23,7 @@ from calc_flow.pipeline import (
 from calc_flow.symbolic import errors
 from calc_flow.symbolic.analyzer import (
     _ROW_LOCAL_PRIMITIVES,
+    TableFacts,
     _Analyzer,
     _literal_dtype,
     _require_mode,
@@ -2702,6 +2703,15 @@ def _lower_stream_join_program(
     joins = _stream_join_nodes(program)
     if not joins:
         return None
+    if _requires_relational_dag_lowering(program, joins):
+        return _lower_relational_dag_program(
+            program,
+            analyzer,
+            mode,
+            allowed_lateness_micros,
+            late_policy,
+            joins,
+        )
     join = _required_stream_join(program, joins)
     _check_stream_join_outputs(program, join)
     _check_stream_join_inputs(program, join)
@@ -2735,6 +2745,328 @@ def _lower_stream_join_program(
         upstream_edges,
     )
     return upstream_project
+
+
+def _requires_relational_dag_lowering(
+    program: Program, joins: tuple[Node, ...], /
+) -> bool:
+    if len(joins) != 1 or joins[0].op.version >= 2:
+        return True
+    join = joins[0]
+    return any(
+        not _contains_node(value._node, join.digest) for _, value in program.outputs
+    )
+
+
+def _relational_boundary(node: Node, path: str, /) -> Node:
+    current = node
+    while current.op.name in ("project", "filter", "with_columns"):
+        current = current.args[0]
+    if current.op.name in ("table_input", "stream_join"):
+        return current
+    if _contains_primitive(current, "attach_columns"):
+        errors.raise_compile(
+            path,
+            errors.CAPABILITY_MISMATCH,
+            "matrix attachment around a symbolic stream join is not supported",
+        )
+    _reject_primitive(path, current)
+
+
+def _virtual_relational_input(node_id: str, facts: TableFacts, /) -> Node:
+    from calc_flow.symbolic.expr import table_input
+
+    return table_input(
+        node_id,
+        schema=facts.schema,
+        entity_by=facts.entity_by,
+        event_time=facts.event_time,
+        sequence_by=facts.sequence_by,
+    )._node
+
+
+def _relational_source_nodes(
+    program: Program, reserved_ids: frozenset[str], /
+) -> tuple[dict[str, str], list[dict[str, object]]]:
+    reachable = {
+        node.digest
+        for _, value in program.outputs
+        for node in _walk_nodes(value._node)
+        if node.op.name == "table_input"
+    }
+    by_digest: dict[str, str] = {}
+    nodes: list[dict[str, object]] = []
+    for value in program.inputs:
+        node = value._node
+        if node.op.name != "table_input" or node.digest not in reachable:
+            continue
+        declared_name = _cstr(node.attr("name"))
+        if declared_name is None:
+            _raise_lowering_invariant("relational source is missing its declared name")
+        name = (
+            declared_name
+            if declared_name not in reserved_ids
+            else f"cf_source_{node.digest[:16]}"
+        )
+        schema = _schema_fields(node.attr("schema"))
+        by_digest[node.digest] = name
+        nodes.append(
+            _expression_node(
+                name,
+                [_quote_identifier(field.name) for field in schema],
+                None,
+                schema,
+                schema,
+            )
+        )
+    return by_digest, nodes
+
+
+def _relational_upstream_id(
+    boundary: Node,
+    sources: dict[str, str],
+    joins: dict[str, _StreamJoinPlan],
+    path: str,
+    /,
+) -> str:
+    if boundary.op.name == "table_input":
+        source_id = sources.get(boundary.digest)
+        if source_id is None:
+            _raise_lowering_invariant(
+                f"missing declared source for relational boundary at {path}"
+            )
+        return source_id
+    plan = joins.get(boundary.digest)
+    if plan is None:
+        _raise_lowering_invariant(
+            f"missing physical join for relational boundary at {path}"
+        )
+    return plan.node_id
+
+
+def _relational_fragment(
+    program: Program,
+    analyzer: _Analyzer,
+    expression: Node,
+    boundary: Node,
+    output_id: str,
+    path: str,
+    mode: str,
+    allowed_lateness_micros: int,
+    late_policy: str,
+    /,
+) -> dict[str, object]:
+    if boundary.op.name == "stream_join":
+        facts = analyzer.table(boundary, f"{path}.boundary")
+        declared = _virtual_relational_input(
+            f"cf_join_output_{boundary.digest[:16]}", facts
+        )
+        lowered = _replace_node(expression, boundary.digest, declared)
+    else:
+        declared = boundary
+        lowered = expression
+    return _lower_program(
+        _LoweringProgram(
+            program.name,
+            (_LoweringValue(declared),),
+            ((output_id, _LoweringValue(lowered)),),
+        ),
+        mode,
+        allowed_lateness_micros,
+        late_policy,
+    )
+
+
+def _wire_relational_fragment(
+    nodes: list[object],
+    edges: list[object],
+    fragment: dict[str, object],
+    upstream_id: str,
+    output_id: str,
+    output_schema: tuple[Field, ...] | None,
+    /,
+) -> None:
+    fragment_nodes, fragment_edges = _project_graph_lists(fragment)
+    endpoints = _downstream_input_endpoints(fragment_nodes, fragment_edges)
+    if len(endpoints) != 1:
+        _raise_lowering_invariant(
+            f"relational fragment {output_id!r} has {len(endpoints)} input endpoints"
+        )
+    if output_schema is not None:
+        _pin_table_output(fragment_nodes, output_id, output_schema)
+    nodes.extend(fragment_nodes)
+    edges.extend(fragment_edges)
+    target_node, target_port = endpoints[0]
+    edges.append(
+        {
+            "source_node": upstream_id,
+            "source_port": "output",
+            "target_node": target_node,
+            "target_port": target_port,
+        }
+    )
+
+
+def _wire_relational_join_side(
+    program: Program,
+    analyzer: _Analyzer,
+    plan: _StreamJoinPlan,
+    side: _StreamJoinSide,
+    sources: dict[str, str],
+    joins: dict[str, _StreamJoinPlan],
+    nodes: list[object],
+    edges: list[object],
+    mode: str,
+    allowed_lateness_micros: int,
+    late_policy: str,
+    /,
+) -> None:
+    path = f"{program.name}.{plan.node_id}.{side.port}"
+    boundary = _relational_boundary(side.node, path)
+    upstream_id = _relational_upstream_id(boundary, sources, joins, path)
+    if side.node.digest == boundary.digest:
+        edges.append(
+            {
+                "source_node": upstream_id,
+                "source_port": "output",
+                "target_node": plan.node_id,
+                "target_port": side.port,
+            }
+        )
+        return
+    fragment = _relational_fragment(
+        program,
+        analyzer,
+        side.node,
+        boundary,
+        side.node_id,
+        path,
+        mode,
+        allowed_lateness_micros,
+        late_policy,
+    )
+    _wire_relational_fragment(
+        nodes,
+        edges,
+        fragment,
+        upstream_id,
+        side.node_id,
+        side.schema,
+    )
+    edges.append(
+        {
+            "source_node": side.node_id,
+            "source_port": "output",
+            "target_node": plan.node_id,
+            "target_port": side.port,
+        }
+    )
+
+
+def _wire_relational_output(
+    program: Program,
+    analyzer: _Analyzer,
+    output_name: str,
+    expression: Node,
+    sources: dict[str, str],
+    joins: dict[str, _StreamJoinPlan],
+    nodes: list[object],
+    edges: list[object],
+    mode: str,
+    allowed_lateness_micros: int,
+    late_policy: str,
+    /,
+) -> None:
+    path = f"outputs.{output_name}"
+    boundary = _relational_boundary(expression, path)
+    upstream_id = _relational_upstream_id(boundary, sources, joins, path)
+    fragment = _relational_fragment(
+        program,
+        analyzer,
+        expression,
+        boundary,
+        output_name,
+        path,
+        mode,
+        allowed_lateness_micros,
+        late_policy,
+    )
+    _wire_relational_fragment(
+        nodes,
+        edges,
+        fragment,
+        upstream_id,
+        output_name,
+        None,
+    )
+
+
+def _lower_relational_dag_program(
+    program: Program,
+    analyzer: _Analyzer,
+    mode: str,
+    allowed_lateness_micros: int,
+    late_policy: str,
+    join_nodes: tuple[Node, ...],
+    /,
+) -> dict[str, object]:
+    for join in join_nodes:
+        _check_stream_join_inputs(program, join)
+    plans = {
+        join.digest: _stream_join_plan(program, analyzer, join) for join in join_nodes
+    }
+    reserved_ids = frozenset(
+        (
+            *(output_name for output_name, _ in program.outputs),
+            *(plan.node_id for plan in plans.values()),
+            *(side.node_id for plan in plans.values() for side in plan.sides),
+        )
+    )
+    sources, source_nodes = _relational_source_nodes(program, reserved_ids)
+    nodes: list[object] = list(source_nodes)
+    edges: list[object] = []
+    for join in join_nodes:
+        plan = plans[join.digest]
+        nodes.append(
+            _stream_join_node(
+                plan.node,
+                plan.node_id,
+                plan.sides[0].schema,
+                plan.sides[1].schema,
+            )
+        )
+        for side in plan.sides:
+            _wire_relational_join_side(
+                program,
+                analyzer,
+                plan,
+                side,
+                sources,
+                plans,
+                nodes,
+                edges,
+                mode,
+                allowed_lateness_micros,
+                late_policy,
+            )
+    for output_name, value in program.outputs:
+        _wire_relational_output(
+            program,
+            analyzer,
+            output_name,
+            value._node,
+            sources,
+            plans,
+            nodes,
+            edges,
+            mode,
+            allowed_lateness_micros,
+            late_policy,
+        )
+    typed_nodes = [_graph_node(node) for node in nodes]
+    typed_edges = [_graph_node(edge) for edge in edges]
+    typed_nodes, typed_edges = _deduplicate_node_ids(typed_nodes, typed_edges)
+    return _project_document(program.name, mode, typed_nodes, typed_edges)
 
 
 def _required_segment_state_plan(
