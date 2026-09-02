@@ -53,6 +53,35 @@ class TestLoadBaseline(unittest.TestCase):
             results = load_baseline(Path(raw))
             self.assertEqual(results, {})
 
+    def test_excludes_isolated_stream_lifecycle_case(self) -> None:
+        with TemporaryDirectory() as raw:
+            directory = Path(raw)
+            _write_benchmark(directory, "generic", 1.0, 0.01)
+            directory.joinpath("stream-lifecycle.json").write_text(
+                json.dumps(
+                    {
+                        "benchmarks": [
+                            {
+                                "name": "stream_lifecycle",
+                                "stats": {
+                                    "mean": 2.0,
+                                    "stddev": 0.02,
+                                    "rounds": 20,
+                                },
+                                "extra_info": {
+                                    "scenario": "symbolic_stream_window_checkpoint"
+                                },
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            results = load_baseline(directory)
+
+        self.assertEqual(set(results), {"generic"})
+
 
 class TestExactRefProvenance(unittest.TestCase):
     def test_loads_exact_python_and_criterion_commits(self) -> None:

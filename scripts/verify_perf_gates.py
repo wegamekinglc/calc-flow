@@ -104,6 +104,12 @@ def load_baseline(path: Path) -> dict[str, BenchResult]:
     for json_file in sorted(path.glob("*.json")):
         data = json.loads(json_file.read_text(encoding="utf-8"))
         for bench in data.get("benchmarks", []):
+            extra = bench.get("extra_info")
+            if (
+                isinstance(extra, dict)
+                and extra.get("scenario") == "symbolic_stream_window_checkpoint"
+            ):
+                continue
             stats = bench.get("stats", {})
             results[bench["name"]] = BenchResult(
                 name=bench["name"],
