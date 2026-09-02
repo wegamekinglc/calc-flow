@@ -164,7 +164,9 @@ def _rolling_oracle(
     # Independent reference: per-entity row windows slide over every row
     # (validity gates the aggregates) while EWMA keeps one unbounded
     # valid-sample accumulator per entity (unadjusted recurrence, first valid
-    # sample seeds, null/NaN inputs are ignored).
+    # sample seeds, null/NaN inputs are ignored). The derivation stays in
+    # one flat loop for line-by-line auditability against the engine.
+    # #lizard forgives
     ordered = sorted(rows_, key=lambda row: (row[0], row[1], row[2]))
     by_entity: dict[str, list[tuple]] = {}
     for row in ordered:
@@ -228,7 +230,7 @@ def _execute_batch(program: Program, table: pa.Table) -> pa.Table:
     return result.outputs["output"].to_pyarrow()
 
 
-def _assert_optional_floats(
+def _assert_optional_values(
     actual: list[float | None], expected: list[float | None]
 ) -> None:
     assert len(actual) == len(expected)
@@ -246,9 +248,9 @@ def test_high_cardinality_rolling_matches_independent_reference() -> None:
     expected = _rolling_oracle(rows_)
     assert output.num_rows == len(expected)
     assert len({row[0] for row in expected}) == BATCH_ENTITIES
-    _assert_optional_floats(output["n3"].to_pylist(), [row[2] for row in expected])
-    _assert_optional_floats(output["avg3"].to_pylist(), [row[3] for row in expected])
-    _assert_optional_floats(output["ema3"].to_pylist(), [row[4] for row in expected])
+    _assert_optional_values(output["n3"].to_pylist(), [row[2] for row in expected])
+    _assert_optional_values(output["avg3"].to_pylist(), [row[3] for row in expected])
+    _assert_optional_values(output["ema3"].to_pylist(), [row[4] for row in expected])
 
 
 def test_high_cardinality_cross_section_matches_independent_reference() -> None:
@@ -260,10 +262,10 @@ def test_high_cardinality_cross_section_matches_independent_reference() -> None:
     assert len(expected) == len(rows_)
     assert len({row[0] for row in rows_}) == CROSS_SECTION_GROUPS
     symbols = output["symbol"].to_pylist()
-    _assert_optional_floats(
+    _assert_optional_values(
         output["rank"].to_pylist(), [expected[symbol][0] for symbol in symbols]
     )
-    _assert_optional_floats(
+    _assert_optional_values(
         output["zscore"].to_pylist(), [expected[symbol][1] for symbol in symbols]
     )
 
@@ -397,7 +399,7 @@ def test_high_cardinality_rolling_stream_matches_batch_across_segmentation(
     batch_output = _execute_batch(_rolling_program(), table)
     assert stream_output.num_rows == batch_output.num_rows
     for column in ("n3", "avg3", "ema3"):
-        _assert_optional_floats(
+        _assert_optional_values(
             stream_output[column].to_pylist(), batch_output[column].to_pylist()
         )
 
@@ -426,10 +428,10 @@ def test_high_cardinality_cross_section_stream_matches_batch(tmp_path: Path) -> 
     stream_output = pa.concat_tables(sink.tables)
     batch_output = _execute_batch(_cross_section_program(), table)
     assert stream_output.num_rows == batch_output.num_rows
-    _assert_optional_floats(
+    _assert_optional_values(
         stream_output["rank"].to_pylist(), batch_output["rank"].to_pylist()
     )
-    _assert_optional_floats(
+    _assert_optional_values(
         stream_output["zscore"].to_pylist(), batch_output["zscore"].to_pylist()
     )
 
@@ -443,7 +445,7 @@ def test_high_cardinality_rolling_checkpoint_recovery_matches_batch(
     opened_offsets: list[int] = []
     pause_at = table.num_rows // 2
 
-    async def runner(source: _ReplayPauseSource) -> StreamingRunner:
+    def runner(source: _ReplayPauseSource) -> StreamingRunner:
         return StreamingRunner(
             _rolling_program().compile_stream(Runtime()),
             {"input": SourceBinding(source, watermark_policy=DisabledWatermarks())},
@@ -453,13 +455,13 @@ def test_high_cardinality_rolling_checkpoint_recovery_matches_batch(
 
     async def exercise() -> None:
         first_source = _ReplayPauseSource(table, pause_at, opened_offsets)
-        first = await (await runner(first_source)).start_async()
+        first = await runner(first_source).start_async()
         await asyncio.wait_for(first_source.paused.wait(), timeout=30)
         assert await first.trigger_checkpoint_async() == 1
         assert (await first.cancel_async()).state == "cancelled"
 
         second_source = _ReplayPauseSource(table, None, opened_offsets)
-        second = await (await runner(second_source)).start_async()
+        second = await runner(second_source).start_async()
         assert (await second.wait_async()).state == "completed"
 
     asyncio.run(exercise())
@@ -467,7 +469,7 @@ def test_high_cardinality_rolling_checkpoint_recovery_matches_batch(
     recovered = pa.concat_tables(sink.tables)
     assert recovered.num_rows == expected.num_rows
     for column in ("n3", "avg3", "ema3"):
-        _assert_optional_floats(
+        _assert_optional_values(
             recovered[column].to_pylist(), expected[column].to_pylist()
         )
     assert opened_offsets == [0, pause_at]

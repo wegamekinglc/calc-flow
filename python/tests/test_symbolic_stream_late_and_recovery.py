@@ -75,8 +75,8 @@ def _rolling_program(window: int) -> Program:
     return Program("late-policy", inputs=[quotes], outputs=[("signals", signals)])
 
 
-def _row(ts_micros: int, value: float) -> pa.Table:
-    stamp = BASE + timedelta(microseconds=ts_micros)
+def _row(seconds: int, value: float) -> pa.Table:
+    stamp = BASE + timedelta(seconds=seconds)
     schema = pa.schema(
         [
             pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
@@ -89,7 +89,7 @@ def _row(ts_micros: int, value: float) -> pa.Table:
         {
             "ts": pa.array([stamp], type=pa.timestamp("us", tz="UTC")),
             "symbol": ["a"],
-            "seq": pa.array([ts_micros], type=pa.uint64()),
+            "seq": pa.array([seconds], type=pa.uint64()),
             "x": pa.array([value], type=pa.float64()),
         },
         schema=schema,
@@ -136,7 +136,7 @@ class _ScriptedSource:
         kind, payload = self._events[self._index]
         self._index += 1
         if kind == "watermark":
-            return Watermark(BASE + timedelta(microseconds=int(payload)))
+            return Watermark(BASE + timedelta(seconds=int(payload)))
         return Data(
             Batch.from_pyarrow(payload),
             Cursor(self._index.to_bytes(8, "big"), {"index": self._index}),
@@ -167,7 +167,7 @@ def _collected(sink: _CollectSink) -> list[tuple[int, float, float | None]]:
     return list(
         zip(
             (
-                micros - _BASE_MICROS
+                (micros - _BASE_MICROS) // 1_000_000
                 for micros in merged["ts"].cast(pa.int64()).to_pylist()
             ),
             merged["x"].to_pylist(),
@@ -199,15 +199,16 @@ async def _run_to_completion(runner: StreamingRunner) -> object:
 def test_out_of_order_rows_within_lateness_emit_in_canonical_order(
     tmp_path: Path,
 ) -> None:
-    # Rows arrive 12, 10, 11 before any watermark exists, so none can be
-    # classified late; allowed lateness of 5s lets the closing watermark at
-    # 18 finalize all three, which must emit in (event time, entity,
-    # sequence) order with window means over the accepted history.
+    # Rows arrive at event times +12s, +10s, +11s before any watermark
+    # exists, so none can be classified late; the 5s allowed lateness lets
+    # the closing watermark at +18s finalize all three, which must emit in
+    # (event time, entity, sequence) order with window means over the
+    # accepted history.
     events = [
         ("row", _row(12, 3.0)),
         ("row", _row(10, 1.0)),
         ("row", _row(11, 2.0)),
-        ("watermark", 18_000_000),
+        ("watermark", 18),
     ]
     sink = _CollectSink()
     plan = _rolling_program(3).compile_stream(
@@ -235,14 +236,15 @@ def test_out_of_order_rows_within_lateness_emit_in_canonical_order(
 def test_too_late_row_is_dropped_and_surviving_rows_match_reference(
     tmp_path: Path,
 ) -> None:
-    # The watermark at 20s closes rows 10..12 (emitted in order). The
-    # follow-up row at 10 is beyond the 5s allowed lateness (closing 15s)
-    # and is dropped instead of duplicating the buffered identity.
+    # The watermark at +20s closes rows +10s..+12s (emitted in order). The
+    # follow-up row at +10s is beyond the 5s allowed lateness (its closing
+    # coordinate is +15s) and is dropped instead of duplicating the buffered
+    # identity.
     events = [
         ("row", _row(10, 1.0)),
         ("row", _row(11, 2.0)),
         ("row", _row(12, 3.0)),
-        ("watermark", 20_000_000),
+        ("watermark", 20),
         ("row", _row(10, 99.0)),
     ]
     sink = _CollectSink()
@@ -275,7 +277,7 @@ def test_too_late_row_fails_the_job_under_the_error_policy(tmp_path: Path) -> No
         ("row", _row(10, 1.0)),
         ("row", _row(11, 2.0)),
         ("row", _row(12, 3.0)),
-        ("watermark", 20_000_000),
+        ("watermark", 20),
         ("row", _row(10, 99.0)),
     ]
     sink = _CollectSink()
@@ -456,7 +458,7 @@ def test_one_join_digest_owns_one_physical_checkpoint_entry(tmp_path: Path) -> N
     manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
     operators = manifest["operators"]
     join_id = join_nodes[0]
-    assert list(operators).count(join_id) == 1
+    assert join_id in operators
     join_entry = operators[join_id]
     assert join_entry["inline_metadata"]["layout_version"] == 1
     segment_owners = {
