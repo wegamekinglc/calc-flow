@@ -12,7 +12,7 @@ type OutputFinality = Literal["per_row_final", "group_final_append_only", "unpro
 type CheckpointSupport = Literal["stateless", "checkpointed_stateful", "unproven"]
 type PartitionContract = Literal["none", "row_axis_independent"]
 
-CAPABILITY_SCHEMA_VERSION = 2
+CAPABILITY_SCHEMA_VERSION = 3
 
 _EXECUTION_MODES = frozenset(("batch", "stream"))
 _OUTPUT_FINALITIES = frozenset(("per_row_final", "group_final_append_only", "unproven"))
@@ -207,6 +207,60 @@ def _require_checkpoint_support(
         raise ValueError(f"{owner} stateless capability must set stateful=False")
 
 
+def _require_state_layouts(
+    owner: str, support: str, state_version: int | None, state_layouts: object
+) -> None:
+    """Validate the durable layout inventory behind a state contract.
+
+    ``state_layouts`` enumerates every checkpoint layout the operator
+    version may install; a single ``state_version`` cannot express a
+    per-declaration layout split such as rolling's EWMA layout v2.
+    """
+
+    if type(state_layouts) is not tuple:
+        raise TypeError(
+            f"{owner} state_layouts must be an exact tuple; "
+            f"found {type(state_layouts).__name__}"
+        )
+    if support != "checkpointed_stateful":
+        if state_layouts:
+            raise ValueError(
+                f"{owner} state_layouts must be empty unless checkpointed_stateful"
+            )
+        return
+    _require_stateful_layout_inventory(owner, state_version, state_layouts)
+
+
+def _require_stateful_layout_inventory(
+    owner: str, state_version: int | None, state_layouts: tuple[int, ...]
+) -> None:
+    if not state_layouts:
+        raise ValueError(
+            f"{owner} checkpointed_stateful requires at least one state layout"
+        )
+    for layout in state_layouts:
+        if type(layout) is not int:
+            raise TypeError(
+                f"{owner} state layouts must be exact positive integers; "
+                f"found {type(layout).__name__}"
+            )
+        if layout <= 0:
+            raise ValueError(f"{owner} state layouts must be positive integers")
+    _require_ascending_layouts(owner, state_layouts)
+    if state_version not in state_layouts:
+        raise ValueError(f"{owner} state_layouts must contain state_version")
+
+
+def _require_ascending_layouts(owner: str, state_layouts: tuple[int, ...]) -> None:
+    if any(
+        left >= right
+        for left, right in zip(state_layouts[:-1], state_layouts[1:], strict=True)
+    ):
+        raise ValueError(
+            f"{owner} state_layouts must be strictly ascending without duplicates"
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class CapabilityRule:
     name: str
@@ -289,6 +343,7 @@ class OperatorCapability:
     state_version: int | None
     deterministic: bool
     replay_safe: bool
+    state_layouts: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         _require_exact_str("operator capability", "kind", self.kind)
@@ -314,6 +369,12 @@ class OperatorCapability:
             self.checkpoint_support,
             self.state_version,
             self.stateful,
+        )
+        _require_state_layouts(
+            "operator capability",
+            self.checkpoint_support,
+            self.state_version,
+            self.state_layouts,
         )
 
 
@@ -402,7 +463,7 @@ class ProviderCapability:
 
 @dataclass(frozen=True, slots=True)
 class RuntimeCapabilities:
-    schema_version: Literal[2]
+    schema_version: Literal[3]
     scope: RuntimeSessionScope
     package_version: str
     project_format_versions: tuple[int, ...]
@@ -526,6 +587,7 @@ def runtime_capabilities(
                 requires_watermark=True,
                 checkpoint_support="checkpointed_stateful",
                 state_version=1,
+                state_layouts=(1,),
                 deterministic=True,
                 replay_safe=True,
             ),
@@ -558,6 +620,7 @@ def runtime_capabilities(
                 requires_watermark=True,
                 checkpoint_support="checkpointed_stateful",
                 state_version=1,
+                state_layouts=(1, 2),
                 deterministic=True,
                 replay_safe=True,
             ),
@@ -593,6 +656,7 @@ def runtime_capabilities(
                 requires_watermark=True,
                 checkpoint_support="checkpointed_stateful",
                 state_version=1,
+                state_layouts=(1,),
                 deterministic=True,
                 replay_safe=True,
             ),

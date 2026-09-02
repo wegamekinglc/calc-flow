@@ -72,7 +72,7 @@
             "$ref": "#/components/schemas/RuntimeCapabilitiesResponse"
           },
           "schemaVersion": {
-            "const": 2,
+            "const": 3,
             "title": "Schemaversion",
             "type": "integer"
           }
@@ -614,6 +614,14 @@
           "requiresWatermark": {
             "title": "Requireswatermark",
             "type": "boolean"
+          },
+          "stateLayouts": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Statelayouts",
+            "type": "array"
           },
           "stateVersion": {
             "anyOf": [

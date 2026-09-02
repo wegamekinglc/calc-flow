@@ -43,7 +43,7 @@ def test_empty_runtime_capabilities_are_frozen_and_session_scoped() -> None:
     repeated = runtime.capabilities()
 
     assert isinstance(snapshot, RuntimeCapabilities)
-    assert snapshot.schema_version == 2
+    assert snapshot.schema_version == 3
     assert snapshot.scope.kind == "runtime_session"
     assert snapshot.scope.revision == 0
     assert snapshot.scope.session_id == repeated.scope.session_id
@@ -64,6 +64,7 @@ def test_empty_runtime_capabilities_are_frozen_and_session_scoped() -> None:
             requires_watermark=True,
             checkpoint_support="checkpointed_stateful",
             state_version=1,
+            state_layouts=(1,),
             deterministic=True,
             replay_safe=True,
         ),
@@ -96,6 +97,7 @@ def test_empty_runtime_capabilities_are_frozen_and_session_scoped() -> None:
             requires_watermark=True,
             checkpoint_support="checkpointed_stateful",
             state_version=1,
+            state_layouts=(1, 2),
             deterministic=True,
             replay_safe=True,
         ),
@@ -131,6 +133,7 @@ def test_empty_runtime_capabilities_are_frozen_and_session_scoped() -> None:
             requires_watermark=True,
             checkpoint_support="checkpointed_stateful",
             state_version=1,
+            state_layouts=(1,),
             deterministic=True,
             replay_safe=True,
         ),
@@ -879,6 +882,77 @@ def test_operator_capability_requires_strict_lifecycle_data() -> None:
         )
     with pytest.raises(TypeError, match="finality must be an exact str"):
         OperatorCapability(**{**base, "finality": b"per_row_final"})  # type: ignore[arg-type]
+
+
+def test_operator_capability_requires_strict_state_layout_data() -> None:
+    stateful = {
+        "kind": "rolling",
+        "version": "1",
+        "input_ports": (ProviderPort("input", "table", required=True),),
+        "output_ports": (ProviderPort("output", "table", required=True),),
+        "modes": ("batch", "stream"),
+        "finality": "per_row_final",
+        "requires_datafusion": False,
+        "stateful": True,
+        "microbatch_invariant": True,
+        "requires_watermark": True,
+        "checkpoint_support": "checkpointed_stateful",
+        "state_version": 1,
+        "state_layouts": (1, 2),
+        "deterministic": True,
+        "replay_safe": True,
+    }
+    stateless = {
+        "kind": "expression",
+        "version": "1",
+        "input_ports": (ProviderPort("input", "table", required=True),),
+        "output_ports": (ProviderPort("output", "table", required=True),),
+        "modes": ("batch", "stream"),
+        "finality": "per_row_final",
+        "requires_datafusion": True,
+        "stateful": False,
+        "microbatch_invariant": True,
+        "requires_watermark": False,
+        "checkpoint_support": "stateless",
+        "state_version": None,
+        "deterministic": True,
+        "replay_safe": True,
+    }
+
+    with pytest.raises(TypeError, match="state_layouts must be an exact tuple"):
+        OperatorCapability(**{**stateful, "state_layouts": [1, 2]})  # type: ignore[arg-type]
+    with pytest.raises(
+        TypeError, match="state layouts must be exact positive integers"
+    ):
+        OperatorCapability(**{**stateful, "state_layouts": (True, 2)})  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="state layouts must be positive integers"):
+        OperatorCapability(**{**stateful, "state_layouts": (0, 2)})  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="state_layouts must be strictly ascending"):
+        OperatorCapability(**{**stateful, "state_layouts": (2, 2)})
+    with pytest.raises(
+        ValueError, match="checkpointed_stateful requires at least one state layout"
+    ):
+        OperatorCapability(**{**stateful, "state_layouts": ()})
+    with pytest.raises(ValueError, match="state_layouts must contain state_version"):
+        OperatorCapability(**{**stateful, "state_layouts": (2,)})
+    with pytest.raises(
+        ValueError, match="state_layouts must be empty unless checkpointed_stateful"
+    ):
+        OperatorCapability(**{**stateless, "state_layouts": (1,)})  # type: ignore[arg-type]
+
+
+def test_capability_catalog_reports_every_durable_state_layout() -> None:
+    operators = {
+        operator.kind: operator for operator in Runtime().capabilities().operators
+    }
+
+    # rolling@1 persists layout v1 for retained-history declarations and
+    # layout v2 once an EWMA output selects the accumulator state (SCE-16).
+    assert operators["rolling"].state_layouts == (1, 2)
+    assert operators["cross_section"].state_layouts == (1,)
+    assert operators["stream_join"].state_layouts == (1,)
+    assert operators["expression"].state_layouts == ()
+    assert operators["sql"].state_layouts == ()
 
 
 def test_provider_capability_rejects_unprovable_lifecycle_combinations() -> None:

@@ -1220,6 +1220,7 @@ class OperatorCapability:
     state_version: int | None
     deterministic: bool
     replay_safe: bool
+    state_layouts: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1246,7 +1247,7 @@ class ProviderCapability:
 
 @dataclass(frozen=True, slots=True)
 class RuntimeCapabilities:
-    schema_version: Literal[2]
+    schema_version: Literal[3]
     scope: RuntimeSessionScope
     package_version: str
     project_format_versions: tuple[int, ...]
@@ -1275,7 +1276,33 @@ registration that supplied no finality contract. It is never stream safe:
 
 `partition_contract="row_axis_independent"` is required for a provider path
 selected by `compile_stream()`; `"none"` is the conservative batch-only
-value. `ProviderArrayRules` is present only for array-capable providers. Rule names
+value.
+
+### Follow-up amendment (2026-09-03): capability schema version 3
+
+Applying the frozen revision rule from D9 (adding capability facts changes
+the schema version), `OperatorCapability` gained one field and
+`RuntimeCapabilities.schema_version` moved from `Literal[2]` to `Literal[3]`:
+
+- `state_layouts: tuple[int, ...] = ()` enumerates every durable checkpoint
+  layout the operator version may install. A single `state_version` cannot
+  express a per-declaration layout split: `rolling@1` persists layout `1` for
+  retained-history declarations and layout `2` once an EWMA output selects
+  the accumulator state, so its catalog entry reports `state_layouts=(1, 2)`
+  with `state_version=1`. `cross_section@1` and `stream_join@1` report
+  `(1,)`.
+- Validation stays strict and fail-closed: `state_layouts` must be an exact
+  tuple of distinct positive integers in strictly ascending order, empty
+  unless `checkpoint_support="checkpointed_stateful"`, and it must contain
+  `state_version`. Non-tuple or non-integer data raises `TypeError`;
+  cross-field violations raise `ValueError`.
+- `ProviderCapability` keeps its frozen shape because every provider
+  registration in this catalog is stateless.
+
+No serialized project document, durable state layout, or native operator
+contract changes; the addition affects only the Python capability snapshot
+and its compile-cache key, which incorporates the schema version.
+ `ProviderArrayRules` is present only for array-capable providers. Rule names
 are closed, versioned identifiers understood by the symbolic analyzer. Initial
 rule names are `array_api_safe_dtype`, `elementwise_broadcast`,
 `feature_axis_reduction`, and `table_matmul_static_rhs`, all at version `1`.

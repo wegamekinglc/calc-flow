@@ -145,7 +145,7 @@ runtime.register_provider(
 )
 snapshot = runtime.capabilities()
 
-assert snapshot.schema_version == 2
+assert snapshot.schema_version == 3
 assert snapshot.scope.kind == "runtime_session"
 assert snapshot.scope.revision == 1
 assert snapshot.providers[0].name == "normalize"
@@ -161,18 +161,24 @@ fields. `options_schema=None` means no declarative editor is available; it
 does not mean every option is valid. The provider callback remains
 authoritative during compilation.
 
-Capability schema version 2 makes every operator and provider entry
+Capability schema version 3 makes every operator and provider entry
 lifecycle-aware. `OperatorCapability` and `ProviderCapability` report
 `modes`, `finality`, `stateful`, `microbatch_invariant`, `requires_watermark`,
 `checkpoint_support`, `state_version`, `deterministic`, and `replay_safe`;
-providers additionally report `supports_static_inputs`, `partition_contract`,
+operators additionally report `state_layouts`, the complete inventory of
+durable checkpoint layouts the operator version may install, because a single
+`state_version` cannot express a per-declaration layout split such as
+rolling's EWMA layout v2. Providers additionally report
+`supports_static_inputs`, `partition_contract`,
 and optional `array_rules`. The vocabularies are closed: execution modes are
 `batch` and `stream`; output finality is `per_row_final`,
 `group_final_append_only`, or `unproven`; checkpoint support is `stateless`,
 `checkpointed_stateful`, or `unproven`; and a provider partition contract is
 `none` or `row_axis_independent`. `state_version` is a positive integer
 exactly when `checkpoint_support` is `checkpointed_stateful` and `None`
-otherwise, and a `stateless` capability must set `stateful=False`.
+otherwise, a `stateless` capability must set `stateful=False`, and
+`state_layouts` is a strictly ascending tuple of positive integers that must
+be empty unless `checkpointed_stateful` and must contain `state_version`.
 Construction validates strictly and fails closed: closed-vocabulary and
 cross-field violations raise `ValueError`, while non-strict data (a `list`
 where a tuple is declared, a non-`bool` boolean field) raises `TypeError`.
@@ -188,13 +194,17 @@ The `operators` tuple contains exactly `cross_section@1`, `expression@1`,
 `rolling@1`, `sql@1`, and `stream_join@1`, with truths anchored in the
 engine implementation:
 
-| Operator          | Modes         | Finality                | Checkpoint support    | State version |
-| ----------------- | ------------- | ----------------------- | --------------------- | ------------- |
-| `cross_section@1` | batch, stream | group_final_append_only | checkpointed_stateful | 1             |
-| `expression@1`    | batch, stream | per_row_final           | stateless             | —             |
-| `rolling@1`       | batch, stream | per_row_final           | checkpointed_stateful | 1             |
-| `sql@1`           | batch, stream | unproven                | stateless             | —             |
-| `stream_join@1`   | stream        | unproven                | checkpointed_stateful | 1             |
+| Operator          | Modes         | Finality                | Checkpoint support    | State version | State layouts |
+| ----------------- | ------------- | ----------------------- | --------------------- | ------------- | ------------- |
+| `cross_section@1` | batch, stream | group_final_append_only | checkpointed_stateful | 1             | 1             |
+| `expression@1`    | batch, stream | per_row_final           | stateless             | —             | —             |
+| `rolling@1`       | batch, stream | per_row_final           | checkpointed_stateful | 1             | 1, 2          |
+| `sql@1`           | batch, stream | unproven                | stateless             | —             | —             |
+| `stream_join@1`   | stream        | unproven                | checkpointed_stateful | 1             | 1             |
+
+`rolling@1` persists layout `1` for retained-history declarations and layout
+`2` once an EWMA output selects the accumulator state, so its durable
+inventory reports both.
 
 `cross_section@1`, `rolling@1`, and `stream_join@1` are the stateful
 operators and the only ones that require a watermark; `cross_section@1`,

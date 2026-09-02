@@ -190,6 +190,42 @@ const capabilityLifecycleAt = (
   booleanAt(fields.replaySafe, `${path}.replaySafe`);
 };
 
+const operatorStateLayoutsAt = (
+  layouts: unknown,
+  checkpointSupport: unknown,
+  stateVersion: unknown,
+  path: string,
+): void => {
+  const items = arrayAt(layouts, `${path}.stateLayouts`);
+  if (checkpointSupport !== 'checkpointed_stateful') {
+    if (items.length > 0) {
+      fail(`${path}.stateLayouts`, 'must be empty unless checkpointSupport is checkpointed_stateful');
+    }
+    return;
+  }
+  if (items.length === 0) {
+    fail(`${path}.stateLayouts`, 'checkpointed_stateful requires at least one state layout');
+  }
+  let previousLayout: unknown = null;
+  items.forEach((layout) => {
+    integerAt(layout, `${path}.stateLayouts`);
+    if (typeof layout === 'number' && layout < 1) {
+      fail(`${path}.stateLayouts`, 'expected a positive state layout');
+    }
+    if (
+      typeof previousLayout === 'number'
+      && typeof layout === 'number'
+      && previousLayout >= layout
+    ) {
+      fail(`${path}.stateLayouts`, 'must be strictly ascending without duplicates');
+    }
+    previousLayout = layout;
+  });
+  if (typeof stateVersion === 'number' && !items.includes(stateVersion)) {
+    fail(`${path}.stateLayouts`, 'must contain stateVersion');
+  }
+};
+
 const CLOSED_CAPABILITY_RULES: ReadonlySet<string> = new Set([
   'array_api_safe_dtype@1',
   'elementwise_broadcast@1',
@@ -250,6 +286,7 @@ const runtimeCapabilitiesAt = (value: unknown, path: string): void => {
         'stateVersion',
         'deterministic',
         'replaySafe',
+        'stateLayouts',
       ],
       itemPath,
     );
@@ -271,6 +308,12 @@ const runtimeCapabilitiesAt = (value: unknown, path: string): void => {
       deterministic: operator.deterministic,
       replaySafe: operator.replaySafe,
     });
+    operatorStateLayoutsAt(
+      operator.stateLayouts,
+      operator.checkpointSupport,
+      operator.stateVersion,
+      itemPath,
+    );
   });
   arrayAt(runtime.udfs, `${path}.udfs`).forEach((item, index) => {
     const itemPath = `${path}.udfs[${index}]`;
@@ -468,9 +511,9 @@ const previewCapabilitiesAt = (value: unknown, path: string): void => {
 
 export const decodeCapabilitiesResponse = (value: unknown): CapabilitiesResponse => {
   const root = objectAt(value, 'capabilities');
-  if (root.schemaVersion !== 2) {
+  if (root.schemaVersion !== 3) {
     throw new ApiContractError(
-      `capabilities schema version ${String(root.schemaVersion)} is unsupported; expected 2`,
+      `capabilities schema version ${String(root.schemaVersion)} is unsupported; expected 3`,
     );
   }
   exactKeys(root, ['schemaVersion', 'runtime', 'preview'], 'capabilities');

@@ -611,7 +611,11 @@ def test_cross_section_capability_requires_the_operator_and_selected_mode() -> N
         {"finality": "unproven"},
         {"stateful": False},
         {"microbatch_invariant": False},
-        {"checkpoint_support": "unproven", "state_version": None},
+        {
+            "checkpoint_support": "unproven",
+            "state_version": None,
+            "state_layouts": (),
+        },
         {"deterministic": False},
         {"replay_safe": False},
     ],
