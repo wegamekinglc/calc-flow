@@ -1399,7 +1399,9 @@ def _run_stream_lifecycle(
                 outcome = await job.wait_async()
                 raise AssertionError(f"stream job failed early: {outcome.errors}")
             if asyncio.get_running_loop().time() > deadline:
-                outcome = await job.wait_async()
+                # The job idles at the pause point, so cancel it instead of
+                # awaiting a terminal state that never arrives.
+                outcome = await job.cancel_async()
                 raise AssertionError(
                     f"stream job stalled in state {status['state']!r} "
                     f"after {source.delivered_batches} batches: {outcome.errors}"

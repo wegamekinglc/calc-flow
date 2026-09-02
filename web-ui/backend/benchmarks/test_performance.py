@@ -128,7 +128,7 @@ def test_input_decode_and_combine_chunks(
 
     _record(
         benchmark,
-        scenario=f"studio_decode_{input_format}_10000",
+        scenario=f"studio_decode_{input_format}_{rows}",
         input_rows=rows,
         output_rows=rows,
         workload={"format": input_format, "rows": rows, "combine_chunks": True},

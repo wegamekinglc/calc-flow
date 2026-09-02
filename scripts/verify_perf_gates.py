@@ -103,20 +103,29 @@ def load_baseline(path: Path) -> dict[str, BenchResult]:
     results: dict[str, BenchResult] = {}
     for json_file in sorted(path.glob("*.json")):
         data = json.loads(json_file.read_text(encoding="utf-8"))
-        for bench in data.get("benchmarks", []):
-            extra = bench.get("extra_info")
+        benchmarks = data.get("benchmarks", []) if isinstance(data, dict) else None
+        if not isinstance(benchmarks, list):
+            raise ValueError(f"{json_file.name} has no benchmark entry list")
+        for bench in benchmarks:
+            extra = bench.get("extra_info") if isinstance(bench, dict) else None
             if (
                 isinstance(extra, dict)
                 and extra.get("scenario") == "symbolic_stream_window_checkpoint"
             ):
                 continue
-            stats = bench.get("stats", {})
-            results[bench["name"]] = BenchResult(
-                name=bench["name"],
-                mean_seconds=stats.get("mean", 0.0),
-                std_dev=stats.get("stddev", 0.0),
-                rounds=stats.get("rounds", 0),
-            )
+            try:
+                name = bench["name"]
+                stats = bench["stats"]
+                results[name] = BenchResult(
+                    name=name,
+                    mean_seconds=stats.get("mean", 0.0),
+                    std_dev=stats.get("stddev", 0.0),
+                    rounds=stats.get("rounds", 0),
+                )
+            except (KeyError, TypeError, AttributeError) as error:
+                raise ValueError(
+                    f"{json_file.name} contains a malformed benchmark entry"
+                ) from error
     return results
 
 
@@ -234,15 +243,38 @@ def check_stream_lifecycle_regression(
     baseline: StreamLifecycleResult,
     candidate: StreamLifecycleResult,
     threshold: float = REGRESSION_THRESHOLD,
+    *,
+    allow_dependency_drift: bool = False,
 ) -> list[tuple[str, float]]:
-    """Return phase/size regressions supported by the recorded quantiles."""
-    for field in (
-        "machine_fingerprint",
-        "dependency_fingerprint",
-        "workload_fingerprint",
-    ):
+    """Return phase/size regressions supported by the recorded quantiles.
+
+    Machine and workload fingerprints must match exactly; a dependency
+    fingerprint drift fails closed unless the caller explicitly acknowledges
+    an intended lockfile change, in which case the comparison continues with
+    a recorded warning because the paired timing evidence stays meaningful
+    for the checkpoint/recovery phases dominated by engine code.
+    """
+
+    for field in ("machine_fingerprint", "workload_fingerprint"):
         if baseline[field] != candidate[field]:
             raise ValueError(f"stream lifecycle {field} does not match")
+    if baseline["dependency_fingerprint"] != candidate["dependency_fingerprint"]:
+        if not allow_dependency_drift:
+            raise ValueError(
+                "stream lifecycle dependency_fingerprint does not match: the"
+                " paired refs resolved different benchmark dependencies"
+                " (baseline"
+                f" {baseline['dependency_fingerprint'][:12]}, candidate"
+                f" {candidate['dependency_fingerprint'][:12]}); rerun the"
+                " release workflow with the dependency-drift acknowledgement"
+                " after confirming the lockfile change is intended"
+            )
+        print(
+            "WARNING: comparing stream lifecycle evidence across drifted"
+            " benchmark dependencies (baseline"
+            f" {baseline['dependency_fingerprint'][:12]}, candidate"
+            f" {candidate['dependency_fingerprint'][:12]})"
+        )
     regressions = []
     byte_delta = (
         candidate["checkpoint_bytes_p50"] - baseline["checkpoint_bytes_p50"]
@@ -409,6 +441,15 @@ def _parse_options() -> argparse.Namespace:
         action="store_true",
         help="Require and compare isolated checkpoint/recovery phase evidence",
     )
+    parser.add_argument(
+        "--allow-dependency-drift",
+        action="store_true",
+        help=(
+            "Acknowledge an intended benchmark dependency change instead of"
+            " failing the stream lifecycle comparison on a dependency"
+            " fingerprint mismatch"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -450,6 +491,7 @@ def _load_python_regressions(
         check_stream_lifecycle_regression(
             load_stream_lifecycle(options.baseline_dir),
             load_stream_lifecycle(options.candidate_dir),
+            allow_dependency_drift=options.allow_dependency_drift,
         )
         if options.require_stream_lifecycle
         else []

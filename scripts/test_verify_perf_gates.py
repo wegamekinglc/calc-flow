@@ -38,6 +38,21 @@ def _write_benchmark(
     (directory / f"{name}.json").write_text(json.dumps(data), encoding="utf-8")
 
 
+def _comparable_lifecycle() -> dict[str, object]:
+    return {
+        "checkpoint_bytes": 100,
+        "checkpoint_bytes_p50": 100,
+        "checkpoint_bytes_p95": 101,
+        "checkpoint_duration_p50_seconds": 0.01,
+        "checkpoint_duration_p95_seconds": 0.02,
+        "recovery_duration_p50_seconds": 0.03,
+        "recovery_duration_p95_seconds": 0.04,
+        "machine_fingerprint": "a" * 64,
+        "dependency_fingerprint": "b" * 64,
+        "workload_fingerprint": "c" * 64,
+    }
+
+
 class TestLoadBaseline(unittest.TestCase):
     def test_loads_json_files_from_directory(self) -> None:
         with TemporaryDirectory() as raw:
@@ -386,6 +401,69 @@ class TestStreamLifecycleGate(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "machine_fingerprint"):
             check_stream_lifecycle_regression(baseline, candidate)
+
+    def test_dependency_drift_fails_closed_with_an_escape_hint(self) -> None:
+        baseline = _comparable_lifecycle()
+        candidate = {**baseline, "dependency_fingerprint": "e" * 64}
+
+        with self.assertRaisesRegex(ValueError, "dependency-drift acknowledgement"):
+            check_stream_lifecycle_regression(baseline, candidate)
+
+    def test_acknowledged_dependency_drift_still_gates_regressions(self) -> None:
+        baseline = _comparable_lifecycle()
+        drifted_stable = {
+            **baseline,
+            "dependency_fingerprint": "e" * 64,
+        }
+        drifted_regressed = {
+            **drifted_stable,
+            "checkpoint_bytes": 107,
+            "checkpoint_bytes_p50": 107,
+            "checkpoint_bytes_p95": 108,
+        }
+
+        self.assertEqual(
+            check_stream_lifecycle_regression(
+                baseline, drifted_stable, allow_dependency_drift=True
+            ),
+            [],
+        )
+        self.assertEqual(
+            [
+                name
+                for name, _delta in check_stream_lifecycle_regression(
+                    baseline, drifted_regressed, allow_dependency_drift=True
+                )
+            ],
+            ["checkpoint_bytes"],
+        )
+        with self.assertRaisesRegex(ValueError, "machine_fingerprint"):
+            check_stream_lifecycle_regression(
+                baseline,
+                {**drifted_stable, "machine_fingerprint": "f" * 64},
+                allow_dependency_drift=True,
+            )
+
+    def test_malformed_benchmark_entries_fail_with_file_context(self) -> None:
+        with TemporaryDirectory() as raw:
+            directory = Path(raw)
+            directory.joinpath("malformed.json").write_text(
+                json.dumps({"benchmarks": [{"stats": {"mean": 1.0}}]}),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "malformed.json"):
+                load_baseline(directory)
+
+        with TemporaryDirectory() as raw:
+            directory = Path(raw)
+            directory.joinpath("not_a_list.json").write_text(
+                json.dumps({"benchmarks": "nope"}),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "benchmark entry list"):
+                load_baseline(directory)
 
 
 if __name__ == "__main__":
