@@ -10,7 +10,8 @@
     "test": "vitest run",
     "test:e2e": "playwright test",
     "generate:api": "openapi-typescript openapi.json -o src/api/schema.d.ts",
-    "sync:api": "UV_CACHE_DIR=/tmp/calc-flow-web-uv-cache uv run --project backend python scripts/export_openapi.py && npm run generate:api"
+    "sync:api": "UV_CACHE_DIR=/tmp/calc-flow-web-uv-cache uv run --project backend python scripts/export_openapi.py && npm run generate:api",
+    "benchmark": "vitest bench --run"
   },
   "dependencies": {
     "@xyflow/react": "12.11.2",

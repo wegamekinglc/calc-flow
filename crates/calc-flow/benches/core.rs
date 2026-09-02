@@ -371,6 +371,61 @@ fn stream_fanout(c: &mut Criterion) {
     });
 }
 
+fn stream_channel_fanin(c: &mut Criterion) {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let budget = EdgeBudget {
+        max_rows: 1_024,
+        max_bytes: 1 << 20,
+    };
+    for (name, width) in [
+        ("stream/channel_fanin_2", 2),
+        ("stream/channel_fanin_4", 4),
+        ("stream/channel_fanin_8", 8),
+    ] {
+        let channels = (0..width)
+            .map(|index| edge_channel(format!("bench/fanin/{width}/{index}"), budget).unwrap())
+            .collect::<Vec<_>>();
+        let channels = tokio::sync::Mutex::new(channels);
+        let message = stream_message(128);
+        c.bench_function(name, |b| {
+            b.to_async(&runtime).iter(|| async {
+                let mut channels = channels.lock().await;
+                for (sender, _) in &mut *channels {
+                    sender.send(message.clone()).await.unwrap();
+                }
+                for (_, receiver) in &mut *channels {
+                    black_box(receiver.recv().await.unwrap().unwrap());
+                }
+            });
+        });
+    }
+}
+
+fn stream_saturated_backpressure(c: &mut Criterion) {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let budget = EdgeBudget {
+        max_rows: 128,
+        max_bytes: 1 << 20,
+    };
+    let channel = tokio::sync::Mutex::new(edge_channel("bench/backpressure", budget).unwrap());
+    let message = stream_message(128);
+    c.bench_function("stream/backpressure_saturated", |b| {
+        b.to_async(&runtime).iter(|| async {
+            let mut channel = channel.lock().await;
+            let (sender, receiver) = &mut *channel;
+            sender.send(message.clone()).await.unwrap();
+            let blocked_send = sender.send(message.clone());
+            let release_capacity = async {
+                tokio::task::yield_now().await;
+                black_box(receiver.recv().await.unwrap().unwrap());
+            };
+            let (result, ()) = tokio::join!(blocked_send, release_capacity);
+            result.unwrap();
+            black_box(receiver.recv().await.unwrap().unwrap());
+        });
+    });
+}
+
 criterion_group!(
     core_benchmarks,
     compile_expression,
@@ -380,6 +435,8 @@ criterion_group!(
     encode_canonical_json,
     stream_channel_roundtrip,
     stream_unary_operator_overhead,
-    stream_fanout
+    stream_fanout,
+    stream_channel_fanin,
+    stream_saturated_backpressure
 );
 criterion_main!(core_benchmarks);

@@ -75,7 +75,14 @@ jobs:
             cargo bench --manifest-path "${RUNNER_TEMP}/calc-flow-baseline/Cargo.toml" \
             --locked -p calc-flow --bench core -- --save-baseline exact-baseline
           CARGO_TARGET_DIR="${RUNNER_TEMP}/criterion-target" \
+            cargo bench --manifest-path "${RUNNER_TEMP}/calc-flow-baseline/Cargo.toml" \
+            --locked -p calc-flow --bench stream_join_perf -- \
+            --save-baseline exact-baseline
+          CARGO_TARGET_DIR="${RUNNER_TEMP}/criterion-target" \
             cargo bench --locked -p calc-flow --bench core -- \
+            --save-baseline exact-candidate
+          CARGO_TARGET_DIR="${RUNNER_TEMP}/criterion-target" \
+            cargo bench --locked -p calc-flow --bench stream_join_perf -- \
             --save-baseline exact-candidate
           python -c 'import json,pathlib,sys; pathlib.Path(sys.argv[1]).write_text(json.dumps({sys.argv[2]:sys.argv[3],sys.argv[4]:sys.argv[5]},sort_keys=True)+"\n",encoding="utf-8")' \
             "${RUNNER_TEMP}/criterion-target/criterion/criterion-provenance.json" \
@@ -83,17 +90,34 @@ jobs:
           cd "${RUNNER_TEMP}/calc-flow-baseline"
           uv sync --extra benchmark
           uv run pytest benchmarks -q --benchmark-only \
+            -k "not test_stream_window_checkpoint_and_recovery" \
             --benchmark-json="${RUNNER_TEMP}/benchmark-baseline/results.json"
+          PYTHONPATH="${GITHUB_WORKSPACE}" uv run pytest \
+            "${GITHUB_WORKSPACE}/benchmarks/test_symbolic_baseline.py::test_stream_window_checkpoint_and_recovery" \
+            -q --benchmark-only \
+            --benchmark-json="${RUNNER_TEMP}/benchmark-baseline/stream-lifecycle.json"
+          uv run python "${GITHUB_WORKSPACE}/scripts/verify_stream_lifecycle_evidence.py" \
+            "${RUNNER_TEMP}/benchmark-baseline/stream-lifecycle.json" \
+            --minimum-rounds 20
           cd "${GITHUB_WORKSPACE}"
           uv sync --extra benchmark
           uv run pytest benchmarks -q --benchmark-only \
+            -k "not test_stream_window_checkpoint_and_recovery" \
             --benchmark-json="${RUNNER_TEMP}/benchmark-candidate/results.json"
+          uv run pytest \
+            benchmarks/test_symbolic_baseline.py::test_stream_window_checkpoint_and_recovery \
+            -q --benchmark-only \
+            --benchmark-json="${RUNNER_TEMP}/benchmark-candidate/stream-lifecycle.json"
+          uv run python scripts/verify_stream_lifecycle_evidence.py \
+            "${RUNNER_TEMP}/benchmark-candidate/stream-lifecycle.json" \
+            --minimum-rounds 20
           uv run python scripts/verify_perf_gates.py \
             --baseline-dir "${RUNNER_TEMP}/benchmark-baseline" \
             --candidate-dir "${RUNNER_TEMP}/benchmark-candidate" \
             --criterion-dir "${RUNNER_TEMP}/criterion-target/criterion" \
             --criterion-baseline exact-baseline \
-            --criterion-candidate exact-candidate
+            --criterion-candidate exact-candidate \
+            --require-stream-lifecycle
       - name: Run security and supply-chain gate
         run: |
           npm ci --prefix web-ui
@@ -182,7 +206,7 @@ jobs:
       - name: Inspect wheel contents
         shell: bash
         run: |
-          python -m unittest scripts.test_run_rust_tests scripts.test_run_rust_coverage scripts.test_classify_ci_changes scripts.test_build_python_release scripts.test_inspect_wheel scripts.test_release_config scripts.test_verify_python_release scripts.test_verify_perf_gates scripts.test_verify_symbolic_milestone_perf scripts.test_verify_security_gates
+          python -m unittest scripts.test_run_rust_tests scripts.test_run_rust_coverage scripts.test_classify_ci_changes scripts.test_build_python_release scripts.test_inspect_wheel scripts.test_release_config scripts.test_verify_python_release scripts.test_verify_perf_gates scripts.test_verify_stream_lifecycle_evidence scripts.test_verify_symbolic_milestone_perf scripts.test_write_criterion_provenance scripts.test_verify_security_gates
           python scripts/inspect_wheel.py core-wheel dist/*.whl
       - name: Smoke native wheel
         if: matrix.smoke

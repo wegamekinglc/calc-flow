@@ -32,6 +32,7 @@ CONFIDENCE_Z = 1.96
 PROVENANCE_FILE = "provenance.json"
 CRITERION_PROVENANCE_FILE = "criterion-provenance.json"
 GIT_SHA = re.compile(r"[0-9a-f]{40}")
+FINGERPRINT = re.compile(r"[0-9a-f]{64}")
 
 
 class BenchResult(TypedDict):
@@ -51,6 +52,19 @@ class CriterionResult(TypedDict):
 class BenchmarkProvenance(TypedDict):
     role: str
     git_sha: str
+
+
+class StreamLifecycleResult(TypedDict):
+    checkpoint_bytes: int
+    checkpoint_bytes_p50: int
+    checkpoint_bytes_p95: int
+    checkpoint_duration_p50_seconds: float
+    checkpoint_duration_p95_seconds: float
+    recovery_duration_p50_seconds: float
+    recovery_duration_p95_seconds: float
+    machine_fingerprint: str
+    dependency_fingerprint: str
+    workload_fingerprint: str
 
 
 def load_provenance(path: Path, role: str) -> BenchmarkProvenance:
@@ -90,6 +104,12 @@ def load_baseline(path: Path) -> dict[str, BenchResult]:
     for json_file in sorted(path.glob("*.json")):
         data = json.loads(json_file.read_text(encoding="utf-8"))
         for bench in data.get("benchmarks", []):
+            extra = bench.get("extra_info")
+            if (
+                isinstance(extra, dict)
+                and extra.get("scenario") == "symbolic_stream_window_checkpoint"
+            ):
+                continue
             stats = bench.get("stats", {})
             results[bench["name"]] = BenchResult(
                 name=bench["name"],
@@ -98,6 +118,158 @@ def load_baseline(path: Path) -> dict[str, BenchResult]:
                 rounds=stats.get("rounds", 0),
             )
     return results
+
+
+def _stream_metadata(benchmark: object) -> dict[str, object] | None:
+    if not isinstance(benchmark, dict):
+        return None
+    extra = benchmark.get("extra_info")
+    if not isinstance(extra, dict):
+        return None
+    if extra.get("scenario") != "symbolic_stream_window_checkpoint":
+        return None
+    return extra
+
+
+def _stream_metadata_from_file(path: Path) -> list[dict[str, object]]:
+    document = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(document, dict):
+        return []
+    benchmarks = document.get("benchmarks", [])
+    if not isinstance(benchmarks, list):
+        return []
+    matching = []
+    for benchmark in benchmarks:
+        extra = _stream_metadata(benchmark)
+        if extra is not None:
+            matching.append(extra)
+    return matching
+
+
+def _stream_lifecycle_metadata(path: Path) -> dict[str, object]:
+    matching = []
+    for json_file in sorted(path.glob("*.json")):
+        matching.extend(_stream_metadata_from_file(json_file))
+    if len(matching) != 1:
+        raise ValueError("paired evidence requires one isolated stream lifecycle case")
+    return matching[0]
+
+
+def _stream_byte_values(extra: dict[str, object]) -> dict[str, int]:
+    byte_values: dict[str, int] = {}
+    for field in ("checkpoint_bytes", "checkpoint_bytes_p50", "checkpoint_bytes_p95"):
+        value = extra.get(field)
+        if type(value) is not int or value <= 0:
+            raise ValueError(f"stream lifecycle {field} must be positive")
+        byte_values[field] = value
+    if (
+        byte_values["checkpoint_bytes"] != byte_values["checkpoint_bytes_p50"]
+        or byte_values["checkpoint_bytes_p95"] < byte_values["checkpoint_bytes_p50"]
+    ):
+        raise ValueError("stream lifecycle checkpoint byte quantiles are inconsistent")
+    return byte_values
+
+
+def _positive_duration(extra: dict[str, object], field: str) -> float:
+    value = extra.get(field)
+    if isinstance(value, bool):
+        raise ValueError(f"stream lifecycle {field} must be positive")
+    if not isinstance(value, int | float):
+        raise ValueError(f"stream lifecycle {field} must be positive")
+    duration = float(value)
+    if not math.isfinite(duration):
+        raise ValueError(f"stream lifecycle {field} must be positive")
+    if duration <= 0:
+        raise ValueError(f"stream lifecycle {field} must be positive")
+    return duration
+
+
+def _duration_quantiles(
+    extra: dict[str, object], phase: str
+) -> tuple[str, float, str, float]:
+    p50_field = f"{phase}_duration_p50_seconds"
+    p95_field = f"{phase}_duration_p95_seconds"
+    p50 = _positive_duration(extra, p50_field)
+    p95 = _positive_duration(extra, p95_field)
+    if p95 < p50:
+        raise ValueError(f"stream lifecycle {p95_field} must be at least p50")
+    return p50_field, p50, p95_field, p95
+
+
+def _stream_duration_values(extra: dict[str, object]) -> dict[str, float]:
+    checkpoint = _duration_quantiles(extra, "checkpoint")
+    recovery = _duration_quantiles(extra, "recovery")
+    return {
+        checkpoint[0]: checkpoint[1],
+        checkpoint[2]: checkpoint[3],
+        recovery[0]: recovery[1],
+        recovery[2]: recovery[3],
+    }
+
+
+def _stream_fingerprints(extra: dict[str, object]) -> dict[str, str]:
+    fingerprints: dict[str, str] = {}
+    for field in (
+        "machine_fingerprint",
+        "dependency_fingerprint",
+        "workload_fingerprint",
+    ):
+        value = extra.get(field)
+        if not isinstance(value, str) or FINGERPRINT.fullmatch(value) is None:
+            raise ValueError(f"stream lifecycle {field} must be a SHA-256 digest")
+        fingerprints[field] = value
+    return fingerprints
+
+
+def load_stream_lifecycle(path: Path) -> StreamLifecycleResult:
+    """Load the one isolated stream lifecycle diagnostic result."""
+    extra = _stream_lifecycle_metadata(path)
+    byte_values = _stream_byte_values(extra)
+    durations = _stream_duration_values(extra)
+    fingerprints = _stream_fingerprints(extra)
+    return StreamLifecycleResult(**byte_values, **durations, **fingerprints)
+
+
+def check_stream_lifecycle_regression(
+    baseline: StreamLifecycleResult,
+    candidate: StreamLifecycleResult,
+    threshold: float = REGRESSION_THRESHOLD,
+) -> list[tuple[str, float]]:
+    """Return phase/size regressions supported by the recorded quantiles."""
+    for field in (
+        "machine_fingerprint",
+        "dependency_fingerprint",
+        "workload_fingerprint",
+    ):
+        if baseline[field] != candidate[field]:
+            raise ValueError(f"stream lifecycle {field} does not match")
+    regressions = []
+    byte_delta = (
+        candidate["checkpoint_bytes_p50"] - baseline["checkpoint_bytes_p50"]
+    ) / baseline["checkpoint_bytes_p50"]
+    if candidate["checkpoint_bytes_p50"] > baseline["checkpoint_bytes_p95"] * (
+        1.0 + threshold
+    ):
+        regressions.append(("checkpoint_bytes", byte_delta))
+    for phase, p50_field, p95_field in (
+        (
+            "checkpoint",
+            "checkpoint_duration_p50_seconds",
+            "checkpoint_duration_p95_seconds",
+        ),
+        (
+            "recovery",
+            "recovery_duration_p50_seconds",
+            "recovery_duration_p95_seconds",
+        ),
+    ):
+        baseline_p50 = baseline[p50_field]
+        baseline_p95 = baseline[p95_field]
+        candidate_p50 = candidate[p50_field]
+        delta = (candidate_p50 - baseline_p50) / baseline_p50
+        if candidate_p50 > baseline_p95 * (1.0 + threshold):
+            regressions.append((f"{phase}_duration", delta))
+    return regressions
 
 
 def check_regression(
@@ -210,7 +382,7 @@ def _confidence_bound(result: BenchResult, *, direction: int) -> float:
     return result["mean_seconds"] + direction * CONFIDENCE_Z * standard_error
 
 
-def main() -> int:
+def _parse_options() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--baseline-dir",
@@ -232,82 +404,86 @@ def main() -> int:
     )
     parser.add_argument("--criterion-baseline", required=True)
     parser.add_argument("--criterion-candidate", required=True)
-    options = parser.parse_args()
+    parser.add_argument(
+        "--require-stream-lifecycle",
+        action="store_true",
+        help="Require and compare isolated checkpoint/recovery phase evidence",
+    )
+    return parser.parse_args()
 
-    try:
-        baseline_provenance = load_provenance(options.baseline_dir, "baseline")
-        candidate_provenance = load_provenance(options.candidate_dir, "candidate")
-        criterion_shas = load_criterion_provenance(
-            options.criterion_dir,
-            options.criterion_baseline,
-            options.criterion_candidate,
-        )
-        benchmark_shas = (
-            baseline_provenance["git_sha"],
-            candidate_provenance["git_sha"],
-        )
-        if benchmark_shas[0] == benchmark_shas[1]:
-            raise ValueError("baseline and candidate git SHAs must be distinct")
-        if criterion_shas != benchmark_shas:
-            raise ValueError(
-                "Criterion provenance does not match the Python benchmark commits"
-            )
-    except (OSError, ValueError, json.JSONDecodeError) as error:
-        print(f"Invalid exact-ref provenance: {error}", file=sys.stderr)
-        return 1
 
+def _validate_exact_ref_provenance(options: argparse.Namespace) -> None:
+    baseline_provenance = load_provenance(options.baseline_dir, "baseline")
+    candidate_provenance = load_provenance(options.candidate_dir, "candidate")
+    criterion_shas = load_criterion_provenance(
+        options.criterion_dir,
+        options.criterion_baseline,
+        options.criterion_candidate,
+    )
+    benchmark_shas = (
+        baseline_provenance["git_sha"],
+        candidate_provenance["git_sha"],
+    )
+    if benchmark_shas[0] == benchmark_shas[1]:
+        raise ValueError("baseline and candidate git SHAs must be distinct")
+    if criterion_shas != benchmark_shas:
+        raise ValueError(
+            "Criterion provenance does not match the Python benchmark commits"
+        )
+
+
+def _load_python_regressions(
+    options: argparse.Namespace,
+) -> tuple[list[tuple[str, float]], list[tuple[str, float]], int]:
     baseline = load_baseline(options.baseline_dir)
     if not baseline:
-        print(
-            f"No baseline benchmarks found in {options.baseline_dir}", file=sys.stderr
+        raise ValueError(f"no baseline benchmarks found in {options.baseline_dir}")
+    if options.baseline_dir.resolve() == options.candidate_dir.resolve():
+        raise ValueError(
+            "baseline and candidate directories must be distinct paired artifacts"
         )
-        return 1
-
-    candidate_dir = options.candidate_dir
-    if options.baseline_dir.resolve() == candidate_dir.resolve():
-        print(
-            "Baseline and candidate directories must be distinct paired artifacts",
-            file=sys.stderr,
-        )
-        return 1
-    candidate = load_baseline(candidate_dir)
-
+    candidate = load_baseline(options.candidate_dir)
     if not candidate:
-        print(f"No candidate benchmarks found in {candidate_dir}", file=sys.stderr)
-        return 1
+        raise ValueError(f"no candidate benchmarks found in {options.candidate_dir}")
+    regressions = check_regression(baseline, candidate)
+    stream_regressions = (
+        check_stream_lifecycle_regression(
+            load_stream_lifecycle(options.baseline_dir),
+            load_stream_lifecycle(options.candidate_dir),
+        )
+        if options.require_stream_lifecycle
+        else []
+    )
+    return regressions, stream_regressions, len(baseline)
 
-    try:
-        regressions = check_regression(baseline, candidate)
-    except ValueError as error:
-        print(f"Invalid paired benchmark evidence: {error}", file=sys.stderr)
-        return 1
-    try:
-        criterion_baseline = load_criterion(
-            options.criterion_dir, options.criterion_baseline
-        )
-        criterion_candidate = load_criterion(
-            options.criterion_dir, options.criterion_candidate
-        )
-        if not criterion_baseline or not criterion_candidate:
-            raise ValueError("paired Criterion baseline artifacts are empty")
-        criterion_regressions = check_criterion_regression(
-            criterion_baseline, criterion_candidate
-        )
-    except (OSError, ValueError, json.JSONDecodeError) as error:
-        print(f"Invalid paired Criterion evidence: {error}", file=sys.stderr)
-        return 1
-    all_regressions = [(f"python/{name}", delta) for name, delta in regressions] + [
-        (f"rust/{name}", delta) for name, delta in criterion_regressions
-    ]
-    if all_regressions:
-        gate_pct = f"{REGRESSION_THRESHOLD:.0%}"
-        print(f"FAIL: {len(all_regressions)} benchmark(s) exceed the {gate_pct} gate:")
-        for name, delta in sorted(all_regressions):
+
+def _load_criterion_regressions(
+    options: argparse.Namespace,
+) -> tuple[list[tuple[str, float]], int]:
+    criterion_baseline = load_criterion(
+        options.criterion_dir, options.criterion_baseline
+    )
+    criterion_candidate = load_criterion(
+        options.criterion_dir, options.criterion_candidate
+    )
+    if not criterion_baseline or not criterion_candidate:
+        raise ValueError("paired Criterion baseline artifacts are empty")
+    return (
+        check_criterion_regression(criterion_baseline, criterion_candidate),
+        len(criterion_baseline),
+    )
+
+
+def _report_gate_result(
+    regressions: list[tuple[str, float]],
+    matched: int,
+) -> int:
+    gate_pct = f"{REGRESSION_THRESHOLD:.0%}"
+    if regressions:
+        print(f"FAIL: {len(regressions)} benchmark(s) exceed the {gate_pct} gate:")
+        for name, delta in sorted(regressions):
             print(f"  {name}: +{delta:.1%}")
         return 1
-
-    matched = len(baseline) + len(criterion_baseline)
-    gate_pct = f"{REGRESSION_THRESHOLD:.0%}"
     print(
         f"PASS: {matched} paired Python/Criterion benchmark(s) "
         f"within the {gate_pct} gate"
@@ -323,6 +499,37 @@ def main() -> int:
     print("       runtime::streaming::soak::twenty_minute_epoch_checkpoint_restart \\")
     print("       -- --ignored --exact --nocapture")
     return 0
+
+
+def _run_gate(options: argparse.Namespace) -> int:
+    try:
+        _validate_exact_ref_provenance(options)
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        print(f"Invalid exact-ref provenance: {error}", file=sys.stderr)
+        return 1
+    try:
+        python_regressions, stream_regressions, python_count = _load_python_regressions(
+            options
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        print(f"Invalid paired benchmark evidence: {error}", file=sys.stderr)
+        return 1
+    try:
+        criterion_regressions, criterion_count = _load_criterion_regressions(options)
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        print(f"Invalid paired Criterion evidence: {error}", file=sys.stderr)
+        return 1
+    regressions = (
+        [(f"python/{name}", delta) for name, delta in python_regressions]
+        + [(f"stream/{name}", delta) for name, delta in stream_regressions]
+        + [(f"rust/{name}", delta) for name, delta in criterion_regressions]
+    )
+    matched = python_count + criterion_count + int(options.require_stream_lifecycle)
+    return _report_gate_result(regressions, matched)
+
+
+def main() -> int:
+    return _run_gate(_parse_options())
 
 
 if __name__ == "__main__":

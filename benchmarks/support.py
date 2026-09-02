@@ -172,6 +172,43 @@ def record_benchmark(
     }
 
 
+def record_comparable_identity(
+    benchmark: BenchmarkFixture,
+    *,
+    workload_identity: Mapping[str, object],
+    dependency_packages: Sequence[str],
+) -> None:
+    """Attach stable identities and fingerprints to an informational case."""
+    if not workload_identity:
+        raise ValueError("benchmark workload identity must not be empty")
+    packages = tuple(sorted(set(dependency_packages)))
+    if not packages:
+        raise ValueError("benchmark dependency package set must not be empty")
+    machine_identity = {
+        **_machine_identity(),
+        "runner_name": os.environ.get("RUNNER_NAME", ""),
+        "runner_os": os.environ.get("RUNNER_OS", ""),
+        "runner_arch": os.environ.get("RUNNER_ARCH", ""),
+    }
+    dependency_identity = {
+        "python_version": platform.python_version(),
+        **{
+            f"{package.replace('-', '_')}_version": version(package)
+            for package in packages
+        },
+    }
+    workload = dict(workload_identity)
+    benchmark.extra_info = {
+        **benchmark.extra_info,
+        "machine_identity": machine_identity,
+        "dependency_identity": dependency_identity,
+        "workload_identity": workload,
+        "machine_fingerprint": _canonical_fingerprint(machine_identity),
+        "dependency_fingerprint": _canonical_fingerprint(dependency_identity),
+        "workload_fingerprint": _canonical_fingerprint(workload),
+    }
+
+
 def record_array_benchmark(
     benchmark: BenchmarkFixture,
     record: ArrayBenchmarkRecord,

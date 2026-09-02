@@ -26,11 +26,131 @@ jobs:
           --all-features
       - name: Run Rust core benchmarks
         run: cargo bench --locked -p calc-flow --bench core
+      - name: Run stream join benchmarks
+        run: cargo bench --locked -p calc-flow --bench stream_join_perf
+      - name: Record comparable Criterion provenance
+        run: >-
+          python scripts/write_criterion_provenance.py
+          --output target/criterion/benchmark-provenance.json
+          crates/calc-flow/benches/core.rs
+          crates/calc-flow/benches/stream_join_perf.rs
       - name: Upload Rust benchmark report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: benchmark-rust-${{ github.run_id }}
           path: target/criterion
+          if-no-files-found: error
+          retention-days: 90
+  stream-lifecycle:
+    name: Isolated stream lifecycle evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CALC_FLOW_BENCHMARK_SCALE: standard
+      JAX_PLATFORMS: cpu
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+      - name: Install benchmark dependencies
+        run: uv sync --extra benchmark
+      - name: Run isolated lifecycle benchmark
+        run: |
+          mkdir -p benchmark-results
+          uv run pytest \
+            benchmarks/test_symbolic_baseline.py::test_stream_window_checkpoint_and_recovery \
+            -q --benchmark-only \
+            --benchmark-json="benchmark-results/stream-lifecycle.json"
+      - name: Validate lifecycle evidence contract
+        run: >-
+          uv run python scripts/verify_stream_lifecycle_evidence.py
+          benchmark-results/stream-lifecycle.json --minimum-rounds 20
+      - name: Upload stream lifecycle report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: benchmark-stream-lifecycle-${{ github.run_id }}
+          path: benchmark-results/stream-lifecycle.json
+          if-no-files-found: error
+          retention-days: 90
+  studio-benchmark:
+    name: Informational Studio observability benchmarks
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CALC_FLOW_BENCHMARK_SCALE: standard
+      PYTHONPATH: .:web-ui/backend/src
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+      - name: Install core and Studio benchmark dependencies
+        run: |
+          uv sync --extra benchmark
+          uv pip install --python .venv/bin/python -e web-ui/backend
+      - name: Run Studio observability benchmarks
+        run: |
+          mkdir -p benchmark-results
+          uv run --no-sync pytest web-ui/backend/benchmarks/test_performance.py \
+            -q --benchmark-only \
+            --benchmark-json="benchmark-results/studio.json"
+      - name: Upload Studio benchmark report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: benchmark-studio-${{ github.run_id }}
+          path: benchmark-results/studio.json
+          if-no-files-found: error
+          retention-days: 90
+  frontend-benchmark:
+    name: Informational frontend comparison benchmarks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web-ui
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 20.20.0
+          cache: npm
+          cache-dependency-path: web-ui/package-lock.json
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Run 100 and 1,000 case comparison benchmarks
+        run: |
+          set -o pipefail
+          mkdir -p benchmark-results
+          {
+            echo "git_sha=$(git rev-parse HEAD^{commit})"
+            echo "node_version=$(node --version)"
+            echo "npm_version=$(npm --version)"
+            sha256sum \
+              package-lock.json \
+              src/components/benchmarkComparisonModel.ts \
+              src/components/benchmarkComparisonModel.bench.ts
+            npm run benchmark
+          } | tee benchmark-results/frontend.txt
+      - name: Upload frontend benchmark report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: benchmark-frontend-${{ github.run_id }}
+          path: web-ui/benchmark-results/frontend.txt
           if-no-files-found: error
           retention-days: 90
   benchmark:
@@ -61,6 +181,7 @@ jobs:
         run: |
           mkdir -p benchmark-results
           uv run pytest benchmarks -q --benchmark-only \
+            -m "not stream_lifecycle" \
             --benchmark-json="benchmark-results/${CALC_FLOW_BENCHMARK_SCALE}.json"
       - name: Upload benchmark report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

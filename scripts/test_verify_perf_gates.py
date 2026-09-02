@@ -10,10 +10,12 @@ from tempfile import TemporaryDirectory
 from scripts.verify_perf_gates import (
     check_criterion_regression,
     check_regression,
+    check_stream_lifecycle_regression,
     load_baseline,
     load_criterion,
     load_criterion_provenance,
     load_provenance,
+    load_stream_lifecycle,
 )
 
 
@@ -50,6 +52,35 @@ class TestLoadBaseline(unittest.TestCase):
         with TemporaryDirectory() as raw:
             results = load_baseline(Path(raw))
             self.assertEqual(results, {})
+
+    def test_excludes_isolated_stream_lifecycle_case(self) -> None:
+        with TemporaryDirectory() as raw:
+            directory = Path(raw)
+            _write_benchmark(directory, "generic", 1.0, 0.01)
+            directory.joinpath("stream-lifecycle.json").write_text(
+                json.dumps(
+                    {
+                        "benchmarks": [
+                            {
+                                "name": "stream_lifecycle",
+                                "stats": {
+                                    "mean": 2.0,
+                                    "stddev": 0.02,
+                                    "rounds": 20,
+                                },
+                                "extra_info": {
+                                    "scenario": "symbolic_stream_window_checkpoint"
+                                },
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            results = load_baseline(directory)
+
+        self.assertEqual(set(results), {"generic"})
 
 
 class TestExactRefProvenance(unittest.TestCase):
@@ -265,6 +296,96 @@ class TestCriterionGate(unittest.TestCase):
         }
         with self.assertRaisesRegex(ValueError, "missing candidate Criterion"):
             check_criterion_regression(baseline, {})
+
+
+class TestStreamLifecycleGate(unittest.TestCase):
+    def test_loads_phase_quantiles_and_checkpoint_bytes(self) -> None:
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            root.joinpath("stream.json").write_text(
+                json.dumps(
+                    {
+                        "benchmarks": [
+                            {
+                                "extra_info": {
+                                    "scenario": "symbolic_stream_window_checkpoint",
+                                    "checkpoint_bytes": 100,
+                                    "checkpoint_bytes_p50": 100,
+                                    "checkpoint_bytes_p95": 101,
+                                    "checkpoint_duration_p50_seconds": 0.01,
+                                    "checkpoint_duration_p95_seconds": 0.02,
+                                    "recovery_duration_p50_seconds": 0.03,
+                                    "recovery_duration_p95_seconds": 0.04,
+                                    "machine_fingerprint": "a" * 64,
+                                    "dependency_fingerprint": "b" * 64,
+                                    "workload_fingerprint": "c" * 64,
+                                }
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = load_stream_lifecycle(root)
+
+        self.assertEqual(result["checkpoint_bytes"], 100)
+
+    def test_fails_only_on_supported_phase_or_size_regression(self) -> None:
+        baseline = {
+            "checkpoint_bytes": 100,
+            "checkpoint_bytes_p50": 100,
+            "checkpoint_bytes_p95": 101,
+            "checkpoint_duration_p50_seconds": 0.01,
+            "checkpoint_duration_p95_seconds": 0.02,
+            "recovery_duration_p50_seconds": 0.03,
+            "recovery_duration_p95_seconds": 0.04,
+            "machine_fingerprint": "a" * 64,
+            "dependency_fingerprint": "b" * 64,
+            "workload_fingerprint": "c" * 64,
+        }
+        stable = {
+            **baseline,
+            "checkpoint_duration_p50_seconds": 0.02,
+            "recovery_duration_p50_seconds": 0.04,
+        }
+        regressed = {
+            **baseline,
+            "checkpoint_bytes": 107,
+            "checkpoint_bytes_p50": 107,
+            "checkpoint_bytes_p95": 108,
+            "checkpoint_duration_p50_seconds": 0.022,
+            "recovery_duration_p50_seconds": 0.045,
+        }
+
+        self.assertEqual(check_stream_lifecycle_regression(baseline, stable), [])
+        self.assertEqual(
+            {
+                name
+                for name, _delta in check_stream_lifecycle_regression(
+                    baseline, regressed
+                )
+            },
+            {"checkpoint_bytes", "checkpoint_duration", "recovery_duration"},
+        )
+
+    def test_rejects_incomparable_stream_lifecycle_identity(self) -> None:
+        baseline = {
+            "checkpoint_bytes": 100,
+            "checkpoint_bytes_p50": 100,
+            "checkpoint_bytes_p95": 101,
+            "checkpoint_duration_p50_seconds": 0.01,
+            "checkpoint_duration_p95_seconds": 0.02,
+            "recovery_duration_p50_seconds": 0.03,
+            "recovery_duration_p95_seconds": 0.04,
+            "machine_fingerprint": "a" * 64,
+            "dependency_fingerprint": "b" * 64,
+            "workload_fingerprint": "c" * 64,
+        }
+        candidate = {**baseline, "machine_fingerprint": "d" * 64}
+
+        with self.assertRaisesRegex(ValueError, "machine_fingerprint"):
+            check_stream_lifecycle_regression(baseline, candidate)
 
 
 if __name__ == "__main__":
