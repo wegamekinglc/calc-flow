@@ -2,7 +2,8 @@
 
 This evidence closes the deferred performance acceptance criterion of the
 SCE-16 milestone delivered by
-[PR #221](https://github.com/wegamekinglc/calc-flow/pull/221) (issue #220).
+[PR #221](https://github.com/wegamekinglc/calc-flow/pull/221)
+([GitHub #220](https://github.com/wegamekinglc/calc-flow/issues/220)).
 Functional equivalence, entity isolation, shared state, segmentation
 invariance, batch/stream parity, and mid-checkpoint recovery without
 retained-history reconstruction are covered separately by the symbolic
