@@ -1,21 +1,19 @@
 # Symbolic Computation Engine Implementation Plan
 
-> **Historical status:** SCE-00 was approved on 2026-08-22. No downstream
-> implementation task became complete merely because its contract was frozen
-> here.
+> **Roadmap status:** COMPLETE. The SCE-00 contract freeze and every
+> implementation milestone through SCE-18 are complete and merged through
+> `main@752760c5d139fcbd1952b51b3026556b135f863d` on 2026-09-02. The final
+> milestone was delivered by PR #226, which closed issue #225 as completed.
 >
 > **Historical baseline:** `main@f6b8a6f90b7a978de1976f5a163ea689b989caee`
 > after PR #166.
 >
-> **Implementation snapshot:** The SCE-01 through SCE-16 milestone changes are
-> merged through `main@0bac2b01cf4ea9793859976bfe4ecfe8074581af` on
-> 2026-09-01. Follow-up hardening now lowers stateful expressions as a
-> deterministic innermost-first DAG: row-local operands materialize before
-> rolling or cross-section state, rolling output may feed a later rolling
-> stage, and compatible multi-stage branches share physical state. Symbolic
-> mid-checkpoint recovery and Finance-Python-inspired RSI composition cover
-> the new boundary. SCE-16 subsequently freezes and implements unadjusted
-> EMA/EWMA, durable rolling state layout v2, and MACD composition.
+> **Implementation history:** SCE-01 through SCE-15 delivered the original
+> release scope. Follow-up hardening added deterministic innermost-first
+> stateful DAG lowering and Finance-Python-inspired RSI composition. SCE-16
+> added unadjusted EMA/EWMA, durable rolling state layout v2, and MACD;
+> SCE-17 exposed bounded symbolic stream joins; and SCE-18 completed
+> independent and nested relational DAGs with explicit post-join ordering.
 >
 > **Design contract:**
 > [Symbolic Computation Engine Design](../specs/2026-08-22-symbolic-computation-engine-design.md),
@@ -108,11 +106,24 @@ is deleted after the atomic cutover; it is not a permanent release branch.
 | SCE-15                | merged      | Studio, docs, and release integration `94b9f6e`                        |
 | SCE-16                | merged      | EWMA contract, layout v2, and MACD `0bac2b0` (#221)                    |
 | SCE-17                | merged      | bounded symbolic stream joins `e502e71` (#224)                         |
-| SCE-18                | delivered   | relational DAG contract, execution, and recovery (#225)                |
+| SCE-18                | merged      | relational DAG execution and recovery `752760c` (#225 / PR #226)       |
 
 This table records implementation history rather than changing the frozen
 semantics below. Later correctness or composability follow-ups receive their
 own RED tests and review evidence.
+
+### Roadmap Completion Record
+
+The formal SCE-00 through SCE-18 roadmap closed on 2026-09-02 at
+`main@752760c5d139fcbd1952b51b3026556b135f863d` (tree
+`a3291640c0a1a1645b5fd5b693829a53048ac115`). Every scheduled milestone in
+the phase map is merged. The P8 completion point retains project format 3,
+the native `stream_join@1` checkpoint layout, DataFusion table ownership, and
+the prohibition on a Python execution fallback.
+
+This completion record does not approve another numbered phase or any item in
+Deferred Work. A future extension requires its own approved design, issue,
+RED evidence, implementation PR, and affected-surface verification.
 
 The single-track median is about 28 engineer-weeks. Two engineers split
 between native streaming/state work and Python/compiler/provider work can
@@ -532,7 +543,7 @@ once, and segmentation-invariant results.
 micro-batch, weights are transferred once per job, and matrix outputs retain
 the approved batch/stream tolerance contract.
 
-## 10. Phases P6-P8: Optimization, Release, and Relational Composition
+## 10. Phase P6: Optimization, Studio, and Release
 
 ### [SCE-14] Add Cross-Domain Optimization and Explain
 
@@ -581,6 +592,8 @@ smoke checks required by `AGENTS.md`.
 **Milestone gate E:** Public documentation describes only implemented
 behavior; no proposed member is advertised early; all generated contracts are
 clean; package contents contain no repository-only plan/spec guidance.
+
+## 11. Phase P7: Exponential Indicators and Stream Joins
 
 ### [SCE-16] Add Durable EWMA and Composed MACD
 
@@ -643,6 +656,8 @@ mid-checkpoint recovery.
 timezone-naive and UTC Arrow timestamps, matching its documented diagnostic
 and the native join constructor.
 
+## 12. Phase P8: Relational Composition
+
 ### [SCE-18] Add Relational DAGs and Post-Join Ordering
 
 **Branch:** `feature/symbolic-relational-dag`
@@ -676,7 +691,7 @@ fingerprints include symbolic v2 ordering metadata; project lowering contains
 only existing native v1 join specs, and recovery validates every physical
 operator before sources resume.
 
-## 11. Cross-Cutting Test Matrix
+## 13. Cross-Cutting Test Matrix
 
 Every supported stateful primitive is exercised over:
 
@@ -705,7 +720,7 @@ Additional fixed properties are:
 - Relational DAG segmentation and recovery preserve the same match set while
   every unique join digest owns one physical checkpoint entry.
 
-## 12. Verification by Surface
+## 14. Verification by Surface
 
 Documentation-only tasks run at least:
 
@@ -740,7 +755,7 @@ sync:api`, frontend build/unit/e2e tests, audit, and exact generated-artifact
 drift checks. Release tasks run every maintained command and package inspector
 listed in `AGENTS.md`.
 
-## 13. Pull Request Contract
+## 15. Pull Request Contract
 
 Each PR title uses an approved prefix and remains under 70 characters. Its
 body contains:
@@ -765,7 +780,7 @@ imperative commit summaries under 72 characters. Stateful PRs include durable
 layout/version review and recovery evidence. Serialized-contract PRs include
 their schema/OpenAPI/generated TypeScript changes in the same commit.
 
-## 14. Deferred Work
+## 16. Deferred Work
 
 These items require separate approved designs after the initial release:
 
