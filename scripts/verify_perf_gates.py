@@ -114,24 +114,36 @@ def load_baseline(path: Path) -> dict[str, BenchResult]:
     return results
 
 
+def _stream_metadata(benchmark: object) -> dict[str, object] | None:
+    if not isinstance(benchmark, dict):
+        return None
+    extra = benchmark.get("extra_info")
+    if not isinstance(extra, dict):
+        return None
+    if extra.get("scenario") != "symbolic_stream_window_checkpoint":
+        return None
+    return extra
+
+
+def _stream_metadata_from_file(path: Path) -> list[dict[str, object]]:
+    document = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(document, dict):
+        return []
+    benchmarks = document.get("benchmarks", [])
+    if not isinstance(benchmarks, list):
+        return []
+    matching = []
+    for benchmark in benchmarks:
+        extra = _stream_metadata(benchmark)
+        if extra is not None:
+            matching.append(extra)
+    return matching
+
+
 def _stream_lifecycle_metadata(path: Path) -> dict[str, object]:
-    matching: list[dict[str, object]] = []
+    matching = []
     for json_file in sorted(path.glob("*.json")):
-        document = json.loads(json_file.read_text(encoding="utf-8"))
-        if not isinstance(document, dict):
-            continue
-        benchmarks = document.get("benchmarks", [])
-        if not isinstance(benchmarks, list):
-            continue
-        for benchmark in benchmarks:
-            if not isinstance(benchmark, dict):
-                continue
-            extra = benchmark.get("extra_info")
-            if (
-                isinstance(extra, dict)
-                and extra.get("scenario") == "symbolic_stream_window_checkpoint"
-            ):
-                matching.append(extra)
+        matching.extend(_stream_metadata_from_file(json_file))
     if len(matching) != 1:
         raise ValueError("paired evidence requires one isolated stream lifecycle case")
     return matching[0]
@@ -152,30 +164,41 @@ def _stream_byte_values(extra: dict[str, object]) -> dict[str, int]:
     return byte_values
 
 
+def _positive_duration(extra: dict[str, object], field: str) -> float:
+    value = extra.get(field)
+    if isinstance(value, bool):
+        raise ValueError(f"stream lifecycle {field} must be positive")
+    if not isinstance(value, int | float):
+        raise ValueError(f"stream lifecycle {field} must be positive")
+    duration = float(value)
+    if not math.isfinite(duration):
+        raise ValueError(f"stream lifecycle {field} must be positive")
+    if duration <= 0:
+        raise ValueError(f"stream lifecycle {field} must be positive")
+    return duration
+
+
+def _duration_quantiles(
+    extra: dict[str, object], phase: str
+) -> tuple[str, float, str, float]:
+    p50_field = f"{phase}_duration_p50_seconds"
+    p95_field = f"{phase}_duration_p95_seconds"
+    p50 = _positive_duration(extra, p50_field)
+    p95 = _positive_duration(extra, p95_field)
+    if p95 < p50:
+        raise ValueError(f"stream lifecycle {p95_field} must be at least p50")
+    return p50_field, p50, p95_field, p95
+
+
 def _stream_duration_values(extra: dict[str, object]) -> dict[str, float]:
-    durations: dict[str, float] = {}
-    for phase in ("checkpoint", "recovery"):
-        p50_field = f"{phase}_duration_p50_seconds"
-        p95_field = f"{phase}_duration_p95_seconds"
-        p50 = extra.get(p50_field)
-        p95 = extra.get(p95_field)
-        if (
-            isinstance(p50, bool)
-            or not isinstance(p50, int | float)
-            or not math.isfinite(p50)
-            or p50 <= 0
-        ):
-            raise ValueError(f"stream lifecycle {p50_field} must be positive")
-        if (
-            isinstance(p95, bool)
-            or not isinstance(p95, int | float)
-            or not math.isfinite(p95)
-            or p95 < p50
-        ):
-            raise ValueError(f"stream lifecycle {p95_field} must be at least p50")
-        durations[p50_field] = float(p50)
-        durations[p95_field] = float(p95)
-    return durations
+    checkpoint = _duration_quantiles(extra, "checkpoint")
+    recovery = _duration_quantiles(extra, "recovery")
+    return {
+        checkpoint[0]: checkpoint[1],
+        checkpoint[2]: checkpoint[3],
+        recovery[0]: recovery[1],
+        recovery[2]: recovery[3],
+    }
 
 
 def _stream_fingerprints(extra: dict[str, object]) -> dict[str, str]:

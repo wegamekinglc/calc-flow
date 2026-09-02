@@ -27,6 +27,11 @@ def _run_manager() -> Any:
     return importlib.import_module("calc_flow_studio.run_manager")
 
 
+def _require(condition: bool, message: str) -> None:
+    if not condition:
+        raise AssertionError(message)
+
+
 def _record(
     benchmark: BenchmarkFixture,
     *,
@@ -85,7 +90,7 @@ def test_checkpoint_directory_monitor_scaling(
 
     measured = benchmark(lambda: sum(directory_size(root) for root in roots))
 
-    assert measured == expected_bytes
+    _require(measured == expected_bytes, "checkpoint scan byte total changed")
 
 
 def _arrow_ipc_payload(rows: int) -> str:
@@ -115,8 +120,11 @@ def test_input_decode_and_combine_chunks(
     warm_table, _encoded, _decoded = decode_source(
         input_format, payload, max_bytes=max_bytes
     )
-    assert warm_table.num_rows == rows
-    assert all(len(column.chunks) == 1 for column in warm_table.columns)
+    _require(warm_table.num_rows == rows, "warm decode row count changed")
+    _require(
+        all(len(column.chunks) == 1 for column in warm_table.columns),
+        "warm decode did not combine Arrow chunks",
+    )
 
     _record(
         benchmark,
@@ -130,5 +138,8 @@ def test_input_decode_and_combine_chunks(
         decode_source, input_format, payload, max_bytes=max_bytes
     )
 
-    assert table.num_rows == rows
-    assert all(len(column.chunks) == 1 for column in table.columns)
+    _require(table.num_rows == rows, "measured decode row count changed")
+    _require(
+        all(len(column.chunks) == 1 for column in table.columns),
+        "measured decode did not combine Arrow chunks",
+    )

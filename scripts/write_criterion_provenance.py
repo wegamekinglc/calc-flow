@@ -7,16 +7,20 @@ import hashlib
 import json
 import os
 import platform
-import subprocess
+import subprocess  # nosec B404
 from pathlib import Path
 from typing import Any
 
 
 def _command(*arguments: str) -> str:
-    return subprocess.run(
+    # Every invocation below uses a fixed executable and fixed flags. The only
+    # variable is the repository path passed as one argv item; shell parsing is
+    # disabled, so it cannot become command syntax.
+    return subprocess.run(  # nosec B603  # nosemgrep
         arguments,
         check=True,
         capture_output=True,
+        shell=False,
         text=True,
     ).stdout.strip()
 
@@ -64,25 +68,23 @@ def _machine_identity() -> dict[str, object]:
     }
 
 
-def build_provenance(root: Path, sources: list[Path]) -> dict[str, Any]:
-    """Build provenance bound to exact benchmark source bytes."""
-    repository = root.resolve()
-    resolved_sources = []
+def _resolve_sources(repository: Path, sources: list[Path]) -> list[tuple[str, Path]]:
+    resolved = []
     for source in sources:
         candidate = (repository / source).resolve()
         if not candidate.is_relative_to(repository):
             raise ValueError(f"benchmark source escapes repository: {source}")
         if not candidate.is_file():
             raise ValueError(f"benchmark source is missing: {source}")
-        resolved_sources.append((source.as_posix(), candidate))
-    cargo_lock = repository / "Cargo.lock"
-    if not cargo_lock.is_file():
-        raise ValueError("Cargo.lock is missing")
+        resolved.append((source.as_posix(), candidate))
+    return resolved
 
+
+def _git_identity(repository: Path) -> str:
     git_sha = _command("git", "-C", str(repository), "rev-parse", "HEAD^{commit}")
-    if len(git_sha) != 40 or any(
-        character not in "0123456789abcdef" for character in git_sha
-    ):
+    if len(git_sha) != 40:
+        raise ValueError("git did not return a lowercase full commit SHA")
+    if any(character not in "0123456789abcdef" for character in git_sha):
         raise ValueError("git did not return a lowercase full commit SHA")
     tree_status = _command(
         "git",
@@ -94,11 +96,26 @@ def build_provenance(root: Path, sources: list[Path]) -> dict[str, Any]:
     )
     if tree_status:
         raise ValueError("Criterion provenance requires a clean tracked worktree")
-    dependency_identity = {
+    return git_sha
+
+
+def _dependency_identity(cargo_lock: Path) -> dict[str, str]:
+    return {
         "cargo_lock_sha256": _file_hash(cargo_lock),
         "rustc": _command("rustc", "-Vv"),
         "cargo": _command("cargo", "-V"),
     }
+
+
+def build_provenance(root: Path, sources: list[Path]) -> dict[str, Any]:
+    """Build provenance bound to exact benchmark source bytes."""
+    repository = root.resolve()
+    resolved_sources = _resolve_sources(repository, sources)
+    cargo_lock = repository / "Cargo.lock"
+    if not cargo_lock.is_file():
+        raise ValueError("Cargo.lock is missing")
+    git_sha = _git_identity(repository)
+    dependency_identity = _dependency_identity(cargo_lock)
     workload_identity = {
         path: _file_hash(source) for path, source in sorted(resolved_sources)
     }
