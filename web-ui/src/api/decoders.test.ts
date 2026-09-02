@@ -40,6 +40,7 @@ const operatorFixture = () => ({
   stateVersion: null,
   deterministic: true,
   replaySafe: true,
+  stateLayouts: [],
 });
 
 const providerFixture = () => ({
@@ -67,7 +68,7 @@ const providerFixture = () => ({
 });
 
 const capabilitiesFixture = () => ({
-  schemaVersion: 2,
+  schemaVersion: 3,
   runtime: {
     scope: { kind: 'runtimeSession', sessionId: 'session', revision: 0 },
     packageVersion: '4.0.0',
@@ -122,8 +123,75 @@ describe('capabilities decoder', () => {
       ...document,
       schemaVersion: 1,
     })).toThrowError(new ApiContractError(
-      'capabilities schema version 1 is unsupported; expected 2',
+      'capabilities schema version 1 is unsupported; expected 3',
     ));
+  });
+
+  it('rejects the retired schema version 2 envelope', () => {
+    const document = capabilitiesFixture();
+
+    expect(() => decodeCapabilitiesResponse({
+      ...document,
+      schemaVersion: 2,
+    })).toThrowError(new ApiContractError(
+      'capabilities schema version 2 is unsupported; expected 3',
+    ));
+  });
+
+  it('accepts every durable rolling state layout', () => {
+    const document = capabilitiesFixture();
+    const rolling = {
+      ...operatorFixture(),
+      kind: 'rolling',
+      requiresDatafusion: false,
+      stateful: true,
+      requiresWatermark: true,
+      checkpointSupport: 'checkpointed_stateful',
+      stateVersion: 1,
+      stateLayouts: [1, 2],
+    };
+
+    expect(decodeCapabilitiesResponse({
+      ...document,
+      runtime: { ...document.runtime, operators: [rolling] },
+    })).toEqual({
+      ...document,
+      runtime: { ...document.runtime, operators: [rolling] },
+    });
+  });
+
+  it('rejects hostile operator state layouts', () => {
+    const stateful = {
+      ...operatorFixture(),
+      kind: 'rolling',
+      requiresDatafusion: false,
+      stateful: true,
+      requiresWatermark: true,
+      checkpointSupport: 'checkpointed_stateful',
+      stateVersion: 1,
+      stateLayouts: [1],
+    };
+    const document = capabilitiesFixture();
+    const withOperator = (operator: Record<string, unknown>) => ({
+      ...document,
+      runtime: { ...document.runtime, operators: [operator] },
+    });
+
+    expect(() => decodeCapabilitiesResponse(
+      withOperator({ ...stateful, stateLayouts: [] }),
+    )).toThrowError(/requires at least one state layout/);
+    expect(() => decodeCapabilitiesResponse(
+      withOperator({ ...stateful, stateLayouts: [2] }),
+    )).toThrowError(/must contain stateVersion/);
+    expect(() => decodeCapabilitiesResponse(
+      withOperator({ ...stateful, stateLayouts: [2, 1] }),
+    )).toThrowError(/strictly ascending/);
+    expect(() => decodeCapabilitiesResponse(
+      withOperator({ ...stateful, stateLayouts: [0, 1] }),
+    )).toThrowError(/expected a positive state layout/);
+    expect(() => decodeCapabilitiesResponse(
+      withOperator({ ...operatorFixture(), stateLayouts: [1] }),
+    )).toThrowError(/must be empty unless checkpointSupport is checkpointed_stateful/);
   });
 
   it('rejects the legacy v1 operator shape', () => {

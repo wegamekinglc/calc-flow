@@ -24,7 +24,7 @@ const catalog = [
 ];
 
 const capabilities = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   runtime: {
     scope: { kind: 'runtimeSession', sessionId: 'session', revision: 0 },
     packageVersion: '4.0.0',

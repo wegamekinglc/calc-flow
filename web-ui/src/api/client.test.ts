@@ -18,7 +18,7 @@ const job = (status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled
 });
 
 const capabilities = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   runtime: {
     scope: { kind: 'runtimeSession', sessionId: 'session', revision: 0 },
     packageVersion: '4.0.0',
@@ -40,6 +40,7 @@ const capabilities = {
       stateVersion: null,
       deterministic: true,
       replaySafe: true,
+      stateLayouts: [],
     }],
     udfs: [],
     providers: [],
@@ -66,12 +67,12 @@ describe('API client', () => {
   it('decodes the closed capabilities document at the raw HTTP boundary', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify(capabilities)))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ schemaVersion: 3 })));
+      .mockResolvedValueOnce(new Response(JSON.stringify({ schemaVersion: 4 })));
     vi.stubGlobal('fetch', fetchMock);
 
     await expect(api.capabilities()).resolves.toEqual(capabilities);
     await expect(api.capabilities()).rejects.toEqual(
-      new ApiContractError('capabilities schema version 3 is unsupported; expected 2'),
+      new ApiContractError('capabilities schema version 4 is unsupported; expected 3'),
     );
   });
 
