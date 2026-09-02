@@ -12,12 +12,41 @@ from pathlib import Path
 from typing import Any
 
 
-def _command(*arguments: str) -> str:
-    # Every invocation below uses a fixed executable and fixed flags. The only
-    # variable is the repository path passed as one argv item; shell parsing is
-    # disabled, so it cannot become command syntax.
-    return subprocess.run(  # nosec B603  # nosemgrep
-        arguments,
+def _git_head(repository: Path) -> str:
+    return subprocess.run(  # nosec B603 B607  # nosemgrep
+        ["git", "rev-parse", "HEAD^{commit}"],
+        check=True,
+        capture_output=True,
+        cwd=repository,
+        shell=False,
+        text=True,
+    ).stdout.strip()
+
+
+def _git_status(repository: Path) -> str:
+    return subprocess.run(  # nosec B603 B607  # nosemgrep
+        ["git", "status", "--porcelain", "--untracked-files=no"],
+        check=True,
+        capture_output=True,
+        cwd=repository,
+        shell=False,
+        text=True,
+    ).stdout.strip()
+
+
+def _rustc_version() -> str:
+    return subprocess.run(  # nosec B603 B607  # nosemgrep
+        ["rustc", "-Vv"],
+        check=True,
+        capture_output=True,
+        shell=False,
+        text=True,
+    ).stdout.strip()
+
+
+def _cargo_version() -> str:
+    return subprocess.run(  # nosec B603 B607  # nosemgrep
+        ["cargo", "-V"],
         check=True,
         capture_output=True,
         shell=False,
@@ -81,19 +110,12 @@ def _resolve_sources(repository: Path, sources: list[Path]) -> list[tuple[str, P
 
 
 def _git_identity(repository: Path) -> str:
-    git_sha = _command("git", "-C", str(repository), "rev-parse", "HEAD^{commit}")
+    git_sha = _git_head(repository)
     if len(git_sha) != 40:
         raise ValueError("git did not return a lowercase full commit SHA")
     if any(character not in "0123456789abcdef" for character in git_sha):
         raise ValueError("git did not return a lowercase full commit SHA")
-    tree_status = _command(
-        "git",
-        "-C",
-        str(repository),
-        "status",
-        "--porcelain",
-        "--untracked-files=no",
-    )
+    tree_status = _git_status(repository)
     if tree_status:
         raise ValueError("Criterion provenance requires a clean tracked worktree")
     return git_sha
@@ -102,8 +124,8 @@ def _git_identity(repository: Path) -> str:
 def _dependency_identity(cargo_lock: Path) -> dict[str, str]:
     return {
         "cargo_lock_sha256": _file_hash(cargo_lock),
-        "rustc": _command("rustc", "-Vv"),
-        "cargo": _command("cargo", "-V"),
+        "rustc": _rustc_version(),
+        "cargo": _cargo_version(),
     }
 
 

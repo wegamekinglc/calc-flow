@@ -7,10 +7,28 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+import scripts.write_criterion_provenance as provenance
 from scripts.write_criterion_provenance import build_provenance
 
 
 class CriterionProvenanceTests(unittest.TestCase):
+    def test_git_head_uses_fixed_argv_without_shell(self) -> None:
+        completed = provenance.subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="1" * 40
+        )
+        with patch.object(provenance.subprocess, "run", return_value=completed) as run:
+            result = provenance._git_head(Path("/repository"))
+
+        self.assertEqual(result, "1" * 40)
+        run.assert_called_once_with(
+            ["git", "rev-parse", "HEAD^{commit}"],
+            check=True,
+            capture_output=True,
+            cwd=Path("/repository"),
+            shell=False,
+            text=True,
+        )
+
     def test_records_exact_source_and_comparable_fingerprints(self) -> None:
         with TemporaryDirectory() as raw:
             root = Path(raw)
@@ -20,8 +38,20 @@ class CriterionProvenanceTests(unittest.TestCase):
             bench.write_text("fn main() {}\n", encoding="utf-8")
             with (
                 patch(
-                    "scripts.write_criterion_provenance._command",
-                    side_effect=("1" * 40, "", "rustc 1.88.0", "cargo 1.88.0"),
+                    "scripts.write_criterion_provenance._git_head",
+                    return_value="1" * 40,
+                ),
+                patch(
+                    "scripts.write_criterion_provenance._git_status",
+                    return_value="",
+                ),
+                patch(
+                    "scripts.write_criterion_provenance._rustc_version",
+                    return_value="rustc 1.88.0",
+                ),
+                patch(
+                    "scripts.write_criterion_provenance._cargo_version",
+                    return_value="cargo 1.88.0",
                 ),
                 patch(
                     "scripts.write_criterion_provenance._machine_identity",
@@ -56,8 +86,12 @@ class CriterionProvenanceTests(unittest.TestCase):
             bench.write_text("fn main() {}\n", encoding="utf-8")
             with (
                 patch(
-                    "scripts.write_criterion_provenance._command",
-                    side_effect=("1" * 40, " M core.rs"),
+                    "scripts.write_criterion_provenance._git_head",
+                    return_value="1" * 40,
+                ),
+                patch(
+                    "scripts.write_criterion_provenance._git_status",
+                    return_value=" M core.rs",
                 ),
                 self.assertRaisesRegex(ValueError, "clean tracked worktree"),
             ):
