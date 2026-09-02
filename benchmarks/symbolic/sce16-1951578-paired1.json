@@ -1,0 +1,418 @@
+{
+    "machine_info": {
+        "node": "chengli-i9",
+        "processor": "",
+        "machine": "x86_64",
+        "python_compiler": "Clang 22.1.3 ",
+        "python_implementation": "CPython",
+        "python_implementation_version": "3.13.13",
+        "python_version": "3.13.13",
+        "python_build": [
+            "main",
+            "Jun  2 2026 22:27:49"
+        ],
+        "release": "5.15.167.4-microsoft-standard-WSL2",
+        "system": "Linux",
+        "cpu": {
+            "python_version": "3.13.13.final.0 (64 bit)",
+            "cpuinfo_version": [
+                10,
+                1,
+                1
+            ],
+            "cpuinfo_version_string": "10.1.1",
+            "arch": "X86_64",
+            "bits": 64,
+            "count": 32,
+            "arch_string_raw": "x86_64",
+            "vendor_id_raw": "GenuineIntel",
+            "brand_raw": "13th Gen Intel(R) Core(TM) i9-13900HX",
+            "hz_advertised_friendly": "2.4192 GHz",
+            "hz_actual_friendly": "2.4192 GHz",
+            "hz_advertised": [
+                2419199000,
+                0
+            ],
+            "hz_actual": [
+                2419199000,
+                0
+            ],
+            "stepping": 1,
+            "model": 183,
+            "family": 6,
+            "flags": [
+                "3dnowprefetch",
+                "abm",
+                "adx",
+                "aes",
+                "apic",
+                "arch_capabilities",
+                "avx",
+                "avx2",
+                "avx_vnni",
+                "bmi1",
+                "bmi2",
+                "clflush",
+                "clflushopt",
+                "clwb",
+                "cmov",
+                "constant_tsc",
+                "cpuid",
+                "cx16",
+                "cx8",
+                "de",
+                "ept",
+                "ept_ad",
+                "erms",
+                "f16c",
+                "flush_l1d",
+                "fma",
+                "fpu",
+                "fsgsbase",
+                "fsrm",
+                "fxsr",
+                "gfni",
+                "ht",
+                "hypervisor",
+                "ibpb",
+                "ibrs",
+                "ibrs_enhanced",
+                "invpcid",
+                "invpcid_single",
+                "lahf_lm",
+                "lm",
+                "mca",
+                "mce",
+                "md_clear",
+                "mmx",
+                "movbe",
+                "movdir64b",
+                "movdiri",
+                "msr",
+                "mtrr",
+                "nonstop_tsc",
+                "nopl",
+                "nx",
+                "osxsave",
+                "pae",
+                "pat",
+                "pcid",
+                "pclmulqdq",
+                "pdpe1gb",
+                "pge",
+                "pni",
+                "popcnt",
+                "pse",
+                "pse36",
+                "rdpid",
+                "rdrand",
+                "rdrnd",
+                "rdseed",
+                "rdtscp",
+                "rep_good",
+                "sep",
+                "serialize",
+                "sha",
+                "sha_ni",
+                "smap",
+                "smep",
+                "ss",
+                "ssbd",
+                "sse",
+                "sse2",
+                "sse4_1",
+                "sse4_2",
+                "ssse3",
+                "stibp",
+                "syscall",
+                "tpr_shadow",
+                "tsc",
+                "tsc_adjust",
+                "tsc_deadline_timer",
+                "tsc_reliable",
+                "tscdeadline",
+                "umip",
+                "vaes",
+                "vme",
+                "vmx",
+                "vnmi",
+                "vpclmulqdq",
+                "vpid",
+                "waitpkg",
+                "x2apic",
+                "xgetbv1",
+                "xsave",
+                "xsavec",
+                "xsaveopt",
+                "xsaves",
+                "xtopology"
+            ],
+            "l3_cache_size": 37748736,
+            "l2_cache_size": 33554432,
+            "l1_data_cache_size": 786432,
+            "l1_instruction_cache_size": 524288,
+            "l2_cache_line_size": 2048,
+            "l2_cache_associativity": 7
+        }
+    },
+    "commit_info": {
+        "id": "195157889a27241bc5c498a858cb6dace9b5fef9",
+        "time": "2026-09-03T02:25:34+08:00",
+        "author_time": "2026-09-03T02:25:34+08:00",
+        "dirty": false,
+        "project": "calc-flow",
+        "branch": "(detached head)"
+    },
+    "benchmarks": [
+        {
+            "group": "sce16-exponential-pair [standard rows=100000 array=100000 matmul=256]",
+            "name": "test_sce16_exponential_indicator_pair[standard]",
+            "fullname": "benchmarks/test_symbolic_baseline.py::test_sce16_exponential_indicator_pair[standard]",
+            "params": {
+                "_scale": "standard"
+            },
+            "param": "standard",
+            "extra_info": {
+                "scenario": "sce16_exponential_indicators",
+                "scale": "standard",
+                "table_rows": 100000,
+                "array_elements": 100000,
+                "matrix_dimension": 256,
+                "input_rows": 99968,
+                "output_rows": 99968,
+                "process_rss_bytes": 383672320,
+                "datafusion_planning_ns": 3121304,
+                "datafusion_execution_ns": 3005029,
+                "datafusion_query_count": 1,
+                "machine_identity": {
+                    "operating_system": "linux",
+                    "architecture": "x86_64",
+                    "cpu_brand": "13th gen intel(r) core(tm) i9-13900hx",
+                    "logical_cpu_count": 32,
+                    "python_implementation": "cpython",
+                    "runner_name": "",
+                    "runner_os": "",
+                    "runner_arch": ""
+                },
+                "dependency_identity": {
+                    "python_version": "3.13.13",
+                    "numpy_version": "2.5.2",
+                    "pyarrow_version": "24.0.0"
+                },
+                "workload_identity": {
+                    "suite": "symbolic",
+                    "workload_version": 1,
+                    "scenario": "sce16_exponential_indicators",
+                    "scale": "standard",
+                    "table_rows": 100000,
+                    "array_elements": 100000,
+                    "matrix_dimension": 256,
+                    "input_rows": 99968,
+                    "output_rows": 99968,
+                    "backend": null,
+                    "stream_configuration": null
+                },
+                "machine_fingerprint": "e726a15dd7f1bc7caa5242ed8a6e79a83de42c1cca2a3304dce4afe7fc8631fc",
+                "dependency_fingerprint": "e345c2b8404656c07d5353cec67110b29008cb1739f35004c59b26d57754625a",
+                "workload_fingerprint": "04010437765fafcd334a14ab8725284b24336b101e3cc13fe61e8101b02f5aea",
+                "peak_rss_bytes": 383672320,
+                "comparison_contract": "same-process-alternating-v1",
+                "workload_contract": "sce16-exponential-v1",
+                "entities": 64,
+                "ewma_spans": [
+                    12,
+                    26
+                ],
+                "native_accumulators": 2,
+                "paired_samples": [
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.342960084,
+                        "symbolic_seconds": 0.343027138
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.349269426,
+                        "symbolic_seconds": 0.358050547
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.344239713,
+                        "symbolic_seconds": 0.355998639
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.349954996,
+                        "symbolic_seconds": 0.340740516
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.363137253,
+                        "symbolic_seconds": 0.362686392
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.352234173,
+                        "symbolic_seconds": 0.347570849
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.355189091,
+                        "symbolic_seconds": 0.334766894
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.368288936,
+                        "symbolic_seconds": 0.351298737
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.348131647,
+                        "symbolic_seconds": 0.346614214
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.353156532,
+                        "symbolic_seconds": 0.346931915
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.354012954,
+                        "symbolic_seconds": 0.354201717
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.349285144,
+                        "symbolic_seconds": 0.344749174
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.340675549,
+                        "symbolic_seconds": 0.347310613
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.348378262,
+                        "symbolic_seconds": 0.353962516
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.350094595,
+                        "symbolic_seconds": 0.349565016
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.357783793,
+                        "symbolic_seconds": 0.34843699
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.361615671,
+                        "symbolic_seconds": 0.365121356
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.344808982,
+                        "symbolic_seconds": 0.360398363
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.336617423,
+                        "symbolic_seconds": 0.343187716
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.355278728,
+                        "symbolic_seconds": 0.357193129
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.349397948,
+                        "symbolic_seconds": 0.349578081
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.350603429,
+                        "symbolic_seconds": 0.348191529
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.356182024,
+                        "symbolic_seconds": 0.343826204
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.345573142,
+                        "symbolic_seconds": 0.357776059
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.343301568,
+                        "symbolic_seconds": 0.351442848
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.426948367,
+                        "symbolic_seconds": 0.37783469
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.414826923,
+                        "symbolic_seconds": 0.406290719
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.406334436,
+                        "symbolic_seconds": 0.415903982
+                    },
+                    {
+                        "order": "hand-built-first",
+                        "hand_built_seconds": 0.39422085,
+                        "symbolic_seconds": 0.406286033
+                    },
+                    {
+                        "order": "symbolic-first",
+                        "hand_built_seconds": 0.348500714,
+                        "symbolic_seconds": 0.364628036
+                    }
+                ]
+            },
+            "options": {
+                "disable_gc": false,
+                "timer": "perf_counter",
+                "min_rounds": 3,
+                "max_time": 0.5,
+                "min_time": 5e-06,
+                "precision": null,
+                "confidence": null,
+                "warmup": false
+            },
+            "stats": {
+                "min": 0.6873733560205437,
+                "max": 0.7069893339648843,
+                "mean": 0.7002651776613978,
+                "stddev": 0.011168111723274358,
+                "rounds": 3,
+                "median": 0.7064328429987654,
+                "iqr": 0.014711983458255418,
+                "q1": 0.6921382277650991,
+                "q3": 0.7068502112233546,
+                "iqr_outliers": 0,
+                "stddev_outliers": 1,
+                "outliers": "1;0",
+                "ld15iqr": 0.6873733560205437,
+                "hd15iqr": 0.7069893339648843,
+                "ops": 1.4280304546052043,
+                "total": 2.1007955329841934,
+                "data": [
+                    0.6873733560205437,
+                    0.7064328429987654,
+                    0.7069893339648843
+                ],
+                "iterations": 1
+            }
+        }
+    ],
+    "datetime": "2026-09-02T19:26:55.665822+00:00",
+    "version": "5.3.0"
+}
