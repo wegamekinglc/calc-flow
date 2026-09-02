@@ -529,7 +529,7 @@ editors or validating stored declarations:
 | row-local columns        | yes               | yes                   | portable scalar types and the documented SQL allowlist                   |
 | rolling `ts`             | yes               | yes                   | source/alias/row-local operands and earlier rolling results              |
 | cross-section `cs`       | yes               | yes                   | staged values; event time and partitions resolve to inputs or aliases    |
-| bounded stream join      | yes               | stream only           | one shared native inner join plus stateless downstream table work        |
+| relational stream joins  | yes               | stream only           | independent/nested native joins with proved post-join ordering           |
 | symbolic matrix          | yes               | exact supported shape | one static `weights` parameter and one allowlisted matmul                |
 | event `window`           | yes               | no                    | declaration-only; compilation fails closed                               |
 | standalone array outputs | yes               | no                    | arrays compile only through the supported table attachment               |
@@ -678,11 +678,12 @@ supplied at execution must match the declared input schema exactly.
 
 `table.stream_join(left, right, /, *, left_keys, right_keys,
 left_event_time, right_event_time, bounds, limits, left_prefix="left",
-right_prefix="right")` declares the existing native bounded inner
-`stream_join@1`. `bounds` is a public `JoinTimeBounds`; `limits` is a public
-`JoinStateLimits`. Both key sequences are non-empty and equal in length, and
-the corresponding resolved fields must have identical supported Arrow types.
-Each event-time name resolves to a non-null `timestamp[us, UTC]` field.
+right_prefix="right", output_entity_by=(), output_event_time=None,
+output_sequence_by=())` declares the existing native bounded inner join.
+`bounds` is a public `JoinTimeBounds`; `limits` is a public `JoinStateLimits`.
+Both key sequences are non-empty and equal in length, and the corresponding
+resolved fields must have identical supported Arrow types. Each event-time
+name resolves to a non-null `timestamp[us, UTC]` field.
 
 Both inputs must declare `event_time`, non-empty `entity_by`, and non-empty
 `sequence_by` ordering facts for stream analysis. Batch analysis and
@@ -691,23 +692,33 @@ all left fields named `{left_prefix}__{name}` in source order, followed by all
 right fields named `{right_prefix}__{name}` in source order, with exact type
 and nullability preserved.
 
-SCE-17 supports one unique join declaration per program. Several row-local
-projection, derivation, or filter outputs may descend from it and share one
-physical join node. Nested or independent joins, unrelated outputs, matrix
-attachment around a join, event windows after a join, and rolling or
-cross-section state after a join fail closed. Those compositions need an
-explicit multi-join and post-join ordering contract; they never fall back to
-Python execution.
+Omitting all three output-ordering arguments preserves the byte-identical
+SCE-17 symbolic `stream_join@1` declaration. Supplying any one requires all
+three and builds symbolic `stream_join@2`: `output_entity_by` must be the
+prefixed left join keys, `output_event_time` must select one prefixed join
+event-time field, and `output_sequence_by` must concatenate every prefixed
+left and right input sequence key. The metadata is immutable and declarative;
+it does not sort rows or create a Python data path.
 
-Lowering copies the declaration into the existing project-v3 join spec with
+SCE-18 programs may contain independent joins, ordered nested joins, outputs
+unrelated to a join, and rolling or cross-section state after an ordered join.
+Each unique declaration digest shares one physical join node. A joined value
+feeding another join or stateful stage without complete valid ordering fails
+with `ordering_required`. Projection removes ordering facts when it removes a
+named ordering field. Matrix attachment around a join remains unsupported,
+and symbolic event-window declarations still have no executable lowerer.
+
+Lowering copies every declaration into the existing project-v3 join spec with
 no symbolic-only serialized fields. Native watermarks, inclusive time bounds,
 state limits, match order, metrics, checkpoint state v1, and recovery remain
-authoritative. A direct join root exposes source binding ids `left` and
-`right` and sink binding id `output`; stateless stages before either side use
-the ordinary graph endpoint naming rules. See
+authoritative. A direct SCE-17 join root exposes source binding ids `left` and
+`right`; a relational DAG exposes `<declared-input>.input` source bindings.
+Single-output plans retain sink binding `output`, while multi-output graphs use
+ordinary `<node>.output` names. See
 [`12_symbolic_stream_join.py`](../examples/12_symbolic_stream_join.py) for a
 segmented two-source execution and the
-[symbolic workflow guide](symbolic-workflows.md#join-two-symbolic-streams).
+[`13_symbolic_relational_dag.py`](../examples/13_symbolic_relational_dag.py)
+for an ordered nested join.
 
 ### Symbolic matrix compilation
 

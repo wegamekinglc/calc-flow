@@ -627,8 +627,15 @@ checkpoint state rather than lowering through separate primitives.
 
 SCE-17 subsequently approves one bounded native inner stream join per
 symbolic program through the normative `symbolic-stream-joins` contract and
-API note. Multiple relational joins and post-join stateful ordering remain
-deferred.
+API note.
+
+SCE-18 subsequently approves multiple independent or nested joins, unrelated
+outputs, and post-join rolling/cross-section state through the normative
+`symbolic-relational-dag` contract and API note. The SCE-17 declaration remains
+byte-identical when output ordering is omitted; complete canonical output
+ordering creates symbolic `stream_join@2` metadata that lowers to the same
+native `stream_join@1` project operator. Symbolic event-window execution and
+matrix attachment around a relational boundary remain deferred.
 
 ## Frozen Decision Gates
 

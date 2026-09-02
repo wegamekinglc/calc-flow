@@ -300,7 +300,7 @@ over cancellation that arrives while the thread is being reclaimed.
 
 `calc_flow.symbolic` is the pure declaration surface: immutable expressions,
 programs, static analysis, and supported row-local, rolling, cross-section,
-and matrix compilation with no separate data execution path. Every expression,
+relational-DAG, and matrix compilation with no separate data execution path. Every expression,
 feature, program, and analysis result is immutable; constructors copy
 caller-owned sequences and mappings.
 
@@ -312,12 +312,12 @@ caller-owned sequences and mappings.
 | `Field(name, data_type, nullable=True)`                                       | One exact table field declaration                                                                                    |
 | `rows(size)` / `duration(micros)`                                             | Row-count and exact-microsecond rolling frames                                                                       |
 | `exact_time(...)` / `event_time_bucket(...)`                                  | Cross-section group declarations                                                                                     |
-| `row` / `ts` / `cs` / `table` / `linalg` / `window`                           | Namespace functions; `ts` includes durable EWMA/EMA and MACD, while `table` includes bounded stream join             |
+| `row` / `ts` / `cs` / `table` / `linalg` / `window`                           | Namespace functions; `ts` includes EWMA/EMA and MACD, while `table` includes ordered relational stream-join DAGs     |
 | `FeatureSet(features=())` / `.with_feature(name, value)`                      | Ordered uniquely named column expressions                                                                            |
 | `TableExpr.with_columns(features)`                                            | Append a feature set as derived columns                                                                              |
 | `Program(name, *, inputs=(), outputs=())`                                     | Declared inputs and outputs with the runtime-independent v1 fingerprint                                              |
 | `Program.analyze(runtime, *, mode)` / `.explain(runtime, *, mode)`            | Static analysis plus deterministic optimization, state, copy-boundary, and provider-cost fact rendering              |
-| `Program.compile_batch(runtime)` / `.compile_stream(runtime, *, ...)`         | Optimize and cache supported row-local, stateful, matrix, and bounded join strict project-v3 plans                   |
+| `Program.compile_batch(runtime)` / `.compile_stream(runtime, *, ...)`         | Optimize and cache supported row-local, stateful, matrix, and relational-DAG strict project-v3 plans                 |
 | `AnalysisIssue` / `AnalysisResult`                                            | Immutable findings with stable output/input-rooted paths                                                             |
 
 Structural identity uses `identical()`; public comparison operators build

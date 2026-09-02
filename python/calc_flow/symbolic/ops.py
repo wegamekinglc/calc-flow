@@ -929,8 +929,16 @@ class TableNamespace:
         limits: JoinStateLimits,
         left_prefix: str = "left",
         right_prefix: str = "right",
+        output_entity_by: Sequence[str] = (),
+        output_event_time: str | None = None,
+        output_sequence_by: Sequence[str] = (),
     ) -> TableExpr:
-        """Declare one bounded native inner join between two stream tables."""
+        """Declare one bounded native inner join between two stream tables.
+
+        Output ordering is optional for a terminal row-local join. Declare all
+        three output ordering arguments when the result feeds another join or
+        a stateful symbolic stage.
+        """
 
         from calc_flow.pipeline import (
             _require_distinct_prefixes,
@@ -959,25 +967,55 @@ class TableNamespace:
         _require_join_bounds(bounds)
         _require_join_limits(limits)
         _require_distinct_prefixes(left_prefix, right_prefix)
+        output_entities = _str_sequence(output_entity_by, function, "output_entity_by")
+        output_sequences = _str_sequence(
+            output_sequence_by, function, "output_sequence_by"
+        )
+        has_output_event_time = output_event_time is not None
+        has_output_entities = bool(output_entities.items)
+        has_output_sequences = bool(output_sequences.items)
+        if any(
+            (has_output_event_time, has_output_entities, has_output_sequences)
+        ) and not all(
+            (has_output_event_time, has_output_entities, has_output_sequences)
+        ):
+            raise ValueError(
+                "calc_flow.symbolic.table.stream_join.output_ordering:"
+                " invalid_literal: output ordering requires non-empty"
+                " output_entity_by, output_event_time, and output_sequence_by"
+            )
+        attrs = {
+            "left_keys": left_key_values,
+            "right_keys": right_key_values,
+            "left_event_time": CStr(left_event_time),
+            "right_event_time": CStr(right_event_time),
+            "before_micros": CInt(_timedelta_micros(bounds.before, "before")),
+            "after_micros": CInt(_timedelta_micros(bounds.after, "after")),
+            "max_state_rows_per_side": CInt(limits.max_state_rows_per_side),
+            "max_state_bytes_per_side": CInt(limits.max_state_bytes_per_side),
+            "max_matches_per_input_batch": CInt(limits.max_matches_per_input_batch),
+            "left_prefix": CStr(left_prefix),
+            "right_prefix": CStr(right_prefix),
+        }
+        if has_output_event_time:
+            attrs.update(
+                {
+                    "output_entity_by": output_entities,
+                    "output_event_time": CStr(
+                        require_non_empty_str(
+                            output_event_time,
+                            f"calc_flow.symbolic.{function}.output_event_time",
+                        )
+                    ),
+                    "output_sequence_by": output_sequences,
+                }
+            )
         return TableExpr(
             build(
                 "stream_join",
                 (left_value._node, right_value._node),
-                {
-                    "left_keys": left_key_values,
-                    "right_keys": right_key_values,
-                    "left_event_time": CStr(left_event_time),
-                    "right_event_time": CStr(right_event_time),
-                    "before_micros": CInt(_timedelta_micros(bounds.before, "before")),
-                    "after_micros": CInt(_timedelta_micros(bounds.after, "after")),
-                    "max_state_rows_per_side": CInt(limits.max_state_rows_per_side),
-                    "max_state_bytes_per_side": CInt(limits.max_state_bytes_per_side),
-                    "max_matches_per_input_batch": CInt(
-                        limits.max_matches_per_input_batch
-                    ),
-                    "left_prefix": CStr(left_prefix),
-                    "right_prefix": CStr(right_prefix),
-                },
+                attrs,
+                version=2 if has_output_event_time else 1,
             )
         )
 

@@ -362,6 +362,9 @@ _PRIMITIVES: dict[str, PrimitiveSpec] = {
                 "max_matches_per_input_batch",
                 "left_prefix",
                 "right_prefix",
+                "output_entity_by",
+                "output_event_time",
+                "output_sequence_by",
             }
         ),
         CMap.from_mapping(

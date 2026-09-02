@@ -206,10 +206,12 @@ covariance/correlation pairs — and the `cs` cross-section declarations —
 rank, percentile, demean, z-score, winsorize, top/bottom selection, and
 mean-fill — plus an explicit `linalg.from_columns` → fused elementwise →
 static-weight `linalg.matmul` → `table.attach_columns` matrix segment into the
-same strict project-v3 execution plans. In stream mode, one
-`table.stream_join` may also lower to the existing bounded native inner join
-and fan out into stateless table branches. Execution remains owned by the
-execution plans and runners above.
+same strict project-v3 execution plans. In stream mode,
+`table.stream_join` declarations may form independent or ordered nested
+relational DAGs, fan out into stateless branches, and feed rolling or
+cross-section stages when explicit post-join ordering is proved. Every unique
+declaration lowers to one existing bounded native inner join. Execution
+remains owned by the execution plans and runners above.
 
 Every `Program` carries a runtime-independent v1 fingerprint over its
 declaration graph. `Program.analyze(runtime, mode=...)` verifies the program
