@@ -288,8 +288,14 @@ class _NodeTiming(TypedDict):
 class _DataFusionMetric(TypedDict):
     query_id: int
     node_id: str | None
+    sql_parse_ns: int
+    logical_planning_ns: int
+    physical_planning_ns: int
+    physical_planning_count: int
     planning_ns: int
+    stream_open_ns: int
     execution_ns: int
+    collect_ns: int
     output_rows: int
     logical_plan: str
     physical_plan: str

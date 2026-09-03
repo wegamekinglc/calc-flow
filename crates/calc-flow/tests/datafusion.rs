@@ -90,8 +90,27 @@ async fn runtime_evaluates_v1_assignment_and_collects_metrics() {
     assert_eq!(metrics[0].query_id, 1);
     assert_eq!(metrics[0].node_id.as_deref(), Some("calculate"));
     assert_eq!(metrics[0].output_rows, 2);
+    assert_eq!(metrics[0].physical_planning_count, 1);
+    assert!(metrics[0].sql_parse_ns > 0);
+    assert!(metrics[0].logical_planning_ns > 0);
+    assert!(metrics[0].physical_planning_ns > 0);
     assert!(metrics[0].planning_ns > 0);
+    assert!(metrics[0].stream_open_ns > 0);
     assert!(metrics[0].execution_ns > 0);
+    assert!(metrics[0].collect_ns > 0);
+    assert_eq!(
+        metrics[0].planning_ns,
+        metrics[0]
+            .sql_parse_ns
+            .saturating_add(metrics[0].logical_planning_ns)
+            .saturating_add(metrics[0].physical_planning_ns)
+    );
+    assert_eq!(
+        metrics[0].execution_ns,
+        metrics[0]
+            .stream_open_ns
+            .saturating_add(metrics[0].collect_ns)
+    );
     assert!(metrics[0].logical_plan.contains("total"));
     assert!(!metrics[0].physical_plan.is_empty());
 }

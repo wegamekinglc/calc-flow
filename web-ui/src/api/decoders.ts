@@ -623,16 +623,28 @@ const resultAt = (value: unknown, path: string): void => {
       exactKeys(metric, [
         'query_id',
         'node_id',
+        'sql_parse_ns',
+        'logical_planning_ns',
+        'physical_planning_ns',
+        'physical_planning_count',
         'planning_ns',
+        'stream_open_ns',
         'execution_ns',
+        'collect_ns',
         'output_rows',
         'logical_plan',
         'physical_plan',
       ], itemPath);
       integerAt(metric.query_id, `${itemPath}.query_id`);
       if (metric.node_id !== null) stringAt(metric.node_id, `${itemPath}.node_id`);
+      integerAt(metric.sql_parse_ns, `${itemPath}.sql_parse_ns`);
+      integerAt(metric.logical_planning_ns, `${itemPath}.logical_planning_ns`);
+      integerAt(metric.physical_planning_ns, `${itemPath}.physical_planning_ns`);
+      integerAt(metric.physical_planning_count, `${itemPath}.physical_planning_count`);
       integerAt(metric.planning_ns, `${itemPath}.planning_ns`);
+      integerAt(metric.stream_open_ns, `${itemPath}.stream_open_ns`);
       integerAt(metric.execution_ns, `${itemPath}.execution_ns`);
+      integerAt(metric.collect_ns, `${itemPath}.collect_ns`);
       integerAt(metric.output_rows, `${itemPath}.output_rows`);
       stringAt(metric.logical_plan, `${itemPath}.logical_plan`);
       stringAt(metric.physical_plan, `${itemPath}.physical_plan`);

@@ -1,6 +1,6 @@
 # TA-Lib Streaming 启发的 Rolling 与 DataFusion 引擎升级计划
 
-> **状态：** 提案，等待按阶段建立 issue 与实现 PR
+> **状态：** 实施中；按用户要求，P0–P5 以分阶段提交集中在 PR #236
 >
 > **Calc Flow 基线：** `main@25dd973bc1575bf0ecc4210cca76664e924acebe`
 >
@@ -432,18 +432,21 @@ secret 写入 `RunResult`。
 
 ## 13. 分阶段实施
 
-| Phase | Scope                     | Main delivery                                            | Exit gate                                                |
-| ----- | ------------------------- | -------------------------------------------------------- | -------------------------------------------------------- |
-| P0    | semantics and evidence    | freeze two examples; metrics; remove duplicate planning  | equivalent output; one physical plan; exact-SHA baseline |
-| P1    | ordered Float64 fast path | typed buffers; order proof; dense state; direct builders | no per-cell ScalarValue; no sort on proven order         |
-| P2    | state and Arrow types     | layout v3; null/integer/extrema/pair/duration kernels    | batch/stream/restore matrix; old-state reads             |
-| P3    | composed output fusion    | DAG liveness; dual-SMA; BBANDS/MACD-class fusion         | no hidden materialization or finality crossing           |
-| P4    | DataFusion integration    | CalcFlowRollingExec; safe rewrite; adaptive partitions   | deterministic fallback, partitions, and memory           |
-| P5    | generation and numerics   | kernel census; fail-closed generation; stable_v2/preview | oracle, non-vacuity, sanitizer, migration, perf          |
+| Phase | Scope                     | Main delivery                                            | Exit gate                                                | Status      |
+| ----- | ------------------------- | -------------------------------------------------------- | -------------------------------------------------------- | ----------- |
+| P0    | semantics and evidence    | freeze two examples; metrics; remove duplicate planning  | equivalent output; one physical plan; exact-SHA baseline | implemented |
+| P1    | ordered Float64 fast path | typed buffers; order proof; dense state; direct builders | no per-cell ScalarValue; no sort on proven order         | pending     |
+| P2    | state and Arrow types     | layout v3; null/integer/extrema/pair/duration kernels    | batch/stream/restore matrix; old-state reads             | pending     |
+| P3    | composed output fusion    | DAG liveness; dual-SMA; BBANDS/MACD-class fusion         | no hidden materialization or finality crossing           | pending     |
+| P4    | DataFusion integration    | CalcFlowRollingExec; safe rewrite; adaptive partitions   | deterministic fallback, partitions, and memory           | pending     |
+| P5    | generation and numerics   | kernel census; fail-closed generation; stable_v2/preview | oracle, non-vacuity, sanitizer, migration, perf          | pending     |
 
-每个 phase 独立 PR，保留旧通用 kernel 作为 fallback。P1 至 P4 的每个性能 PR 都
-先落 focused RED test，再落实现与 paired evidence；没有对应正确性门和 rollback
-开关时不得删除旧路径。
+每个 phase 在当前 PR 内形成独立提交，保留旧通用 kernel 作为 fallback。P1 至 P4
+的每个性能阶段都先落 focused RED test，再落实现与 paired evidence；没有对应
+正确性门和 rollback 开关时不得删除旧路径。
+
+实施期间按用户要求调整为一个 PR 内的独立 phase commits，而不是拆分多个 PR；
+每个阶段仍保留独立 RED test、验证证据、fallback 和可回滚提交边界。
 
 ## 14. 验证矩阵
 

@@ -382,7 +382,23 @@ def test_run_response_serializes_status_and_timestamps() -> None:
     result = {
         "outputs": {},
         "node_timings": {},
-        "datafusion_metrics": [],
+        "datafusion_metrics": [
+            {
+                "query_id": 1,
+                "node_id": "calculate",
+                "sql_parse_ns": 1,
+                "logical_planning_ns": 2,
+                "physical_planning_ns": 3,
+                "physical_planning_count": 1,
+                "planning_ns": 6,
+                "stream_open_ns": 4,
+                "execution_ns": 9,
+                "collect_ns": 5,
+                "output_rows": 2,
+                "logical_plan": "Projection",
+                "physical_plan": "ProjectionExec",
+            }
+        ],
         "metadata": {"values": [1]},
     }
     response = RunResponse.model_validate(
@@ -404,6 +420,7 @@ def test_run_response_serializes_status_and_timestamps() -> None:
     assert data["status"] == "completed"
     assert data["created_at"] == "2026-01-01T00:00:00Z"
     assert data["result"]["metadata"] == {"values": [1]}
+    assert data["result"]["datafusion_metrics"][0]["physical_planning_count"] == 1
 
     for malformed in (
         {

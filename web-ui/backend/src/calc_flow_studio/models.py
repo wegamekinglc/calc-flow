@@ -526,8 +526,14 @@ class NodeTimingPreview(StrictModel):
 class DataFusionMetricPreview(StrictModel):
     query_id: StrictInt = Field(ge=0)
     node_id: str | None
+    sql_parse_ns: StrictInt = Field(ge=0)
+    logical_planning_ns: StrictInt = Field(ge=0)
+    physical_planning_ns: StrictInt = Field(ge=0)
+    physical_planning_count: StrictInt = Field(ge=1)
     planning_ns: StrictInt = Field(ge=0)
+    stream_open_ns: StrictInt = Field(ge=0)
     execution_ns: StrictInt = Field(ge=0)
+    collect_ns: StrictInt = Field(ge=0)
     output_rows: StrictInt = Field(ge=0)
     logical_plan: str
     physical_plan: str

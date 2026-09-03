@@ -148,7 +148,14 @@ default execution behavior. `snapshot[_async]`, `restore[_async]`, and
 consumed by `StreamingRunner` rather than executed directly.
 
 `RunResult` exposes defensive `outputs`, `metadata`, `node_timings`, and
-`datafusion_metrics` values.
+`datafusion_metrics` values. Each DataFusion metric keeps the aggregate
+`planning_ns` and `execution_ns` values and also exposes
+`sql_parse_ns`, `logical_planning_ns`, `physical_planning_ns`,
+`physical_planning_count`, `stream_open_ns`, and `collect_ns`. The aggregate
+planning duration is the saturating sum of its three planning stages, while
+the aggregate execution duration is the saturating sum of stream opening and
+collection. Calc Flow executes the recorded physical plan directly, so a
+successful query reports `physical_planning_count == 1`.
 
 `ExecutionOptions` and `ProviderContext` are frozen native classes exported
 from the package root. The `ExecutionOptions(settings={}, deadline=None)`
