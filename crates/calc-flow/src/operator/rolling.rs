@@ -6413,11 +6413,99 @@ mod tests {
         let continuation = vec![full_row(3, "a", 3, vec![ScalarValue::Float64(Some(18.0))])];
         let expected =
             compute_output_columns(&continuation, &histories, &compiled, "rolling").unwrap();
-        let actual =
-            compute_output_columns(&continuation, &restored.histories, &compiled, "rolling")
-                .unwrap();
-        assert_eq!(float_column(&actual, 0), float_column(&expected, 0));
-        assert_eq!(float_column(&actual, 0), vec![Some(15.0)]);
+        let output_schema = Arc::new(output_schema(&kernel_schema(), &compiled.outputs));
+        let (actual, state, _) = build_typed_stream_output(
+            &continuation,
+            &restored.histories,
+            None,
+            &compiled,
+            &output_schema,
+            "rolling",
+        )
+        .unwrap()
+        .unwrap();
+        let actual = actual
+            .column(kernel_schema().fields().len())
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>();
+        assert_eq!(actual, float_column(&expected, 0));
+        assert_eq!(actual, vec![Some(15.0)]);
+        assert!(state.is_some());
+    }
+
+    #[test]
+    fn layout_one_history_bootstraps_the_typed_transition() {
+        let spec = kernel_spec(json!([aggregate_output("mean", "price", "price_mean", 3)]));
+        let compiled = compile_spec(&spec, &kernel_schema()).unwrap();
+        let first_rows = vec![
+            full_row(1, "a", 1, vec![ScalarValue::Float64(Some(1.0))]),
+            full_row(2, "a", 2, vec![ScalarValue::Float64(Some(3.0))]),
+        ];
+        let first = compute_output_columns(
+            &first_rows,
+            &RollingHistories::default(),
+            &compiled,
+            "rolling",
+        )
+        .unwrap();
+        let mut histories = RollingHistories::default();
+        histories.apply(first.touched);
+        let mut legacy = compiled.clone();
+        legacy.state_layout_version = ROLLING_STATE_LAYOUT_VERSION;
+        legacy.state_schema_fingerprint = compiled.legacy_state_schema_fingerprint.clone();
+        let bytes = encode_state_segment_legacy(
+            &histories,
+            &BTreeMap::new(),
+            &kernel_schema(),
+            &legacy,
+            TEST_FINGERPRINT,
+            "rolling",
+        )
+        .unwrap();
+        let metadata = RollingSnapshotMetadata {
+            state_layout_version: ROLLING_STATE_LAYOUT_VERSION,
+            configuration_hash: compiled.configuration_hash.clone(),
+            state_schema_fingerprint: compiled.legacy_state_schema_fingerprint.clone(),
+            kernel_fingerprint: None,
+            numerical_profile: None,
+            epoch: Epoch::new(1).unwrap(),
+            pipeline_fingerprint: Some(TEST_FINGERPRINT.into()),
+            operator_id: Some("rolling".into()),
+            last_input_watermark: None,
+            next_output_sequence: 0,
+            ended: false,
+            metrics: LateMetricDelta::default(),
+            segment_inventory: Vec::new(),
+        };
+        let restored =
+            decode_state_segment(&bytes, &kernel_schema(), &compiled, &metadata).unwrap();
+        let continuation = vec![full_row(3, "a", 3, vec![ScalarValue::Float64(Some(5.0))])];
+        let expected =
+            compute_output_columns(&continuation, &histories, &compiled, "rolling").unwrap();
+        let output_schema = Arc::new(output_schema(&kernel_schema(), &compiled.outputs));
+        let (actual, state, _) = build_typed_stream_output(
+            &continuation,
+            &restored.histories,
+            None,
+            &compiled,
+            &output_schema,
+            "rolling",
+        )
+        .unwrap()
+        .unwrap();
+        let actual = actual
+            .column(kernel_schema().fields().len())
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>();
+        assert_eq!(actual, float_column(&expected, 0));
+        assert_eq!(actual, vec![Some(3.0)]);
+        assert!(state.is_some());
     }
 
     #[test]

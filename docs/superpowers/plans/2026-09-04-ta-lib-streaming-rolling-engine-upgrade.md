@@ -469,7 +469,7 @@ secret 写入 `RunResult`。
 | ----- | ------------------------- | -------------------------------------------------------- | -------------------------------------------------------- | ----------- |
 | P0    | semantics and evidence    | freeze two examples; metrics; remove duplicate planning  | equivalent output; one physical plan; exact-SHA baseline | implemented |
 | P1    | ordered Float64 fast path | typed buffers; order proof; dense state; direct builders | no per-cell ScalarValue; no sort on proven order         | implemented |
-| P2    | state and Arrow types     | layout v3; null/integer/extrema/pair/duration kernels    | batch/stream/restore matrix; old-state reads             | in progress |
+| P2    | state and Arrow types     | layout v3; null/integer/extrema/pair/duration kernels    | batch/stream/restore matrix; old-state reads             | implemented |
 | P3    | composed output fusion    | DAG liveness; dual-SMA; BBANDS/MACD-class fusion         | no hidden materialization or finality crossing           | pending     |
 | P4    | DataFusion integration    | CalcFlowRollingExec; safe rewrite; adaptive partitions   | deterministic fallback, partitions, and memory           | pending     |
 | P5    | generation and numerics   | kernel census; fail-closed generation; stable_v2/preview | oracle, non-vacuity, sanitizer, migration, perf          | pending     |
@@ -491,8 +491,9 @@ primitive Arrow 数值类型现在也通过列式 cast 进入同一 transition�
 `i128`/`u128` 中间状态并按冻结契约精确收窄，窄整数与 `Float32` extrema 保持原始
 输出类型，pair 输出统一为 `Float64`。EWMA 也使用首样本 seed 的 constant-state
 typed recurrence；stream checkpoint 继续把 recurrence 写入 layout v3，恢复时直接
-播种 typed state，不伪造或重放不存在的历史样本。更宽的 batch/stream/restore
-完整矩阵仍是本阶段未完成项，因此状态保持 `in progress`。
+播种 typed state，不伪造或重放不存在的历史样本。batch/stream/checkpoint-restore
+矩阵覆盖 row/duration、整数、extrema、pair 与 EWMA；layout v1 history 和 layout v2
+EWMA recurrence 都会升级进入同一个 typed transition，因此 P2 已完成。
 
 ## 14. 验证矩阵
 
