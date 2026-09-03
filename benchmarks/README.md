@@ -180,6 +180,9 @@ hardware.
 The full single-SMA and composed dual-SMA tables, their interpretation, and the
 TA-Lib-streaming-inspired engine roadmap are preserved in the
 [rolling and DataFusion upgrade plan](../docs/superpowers/plans/2026-09-04-ta-lib-streaming-rolling-engine-upgrade.md).
+The clean-commit reports with full provenance and raw samples are
+[`SMA(20)`](rolling/rolling-mean-d3a75ee.json) and
+[`SMA(5) - SMA(20)`](rolling/dual-sma-spread-d3a75ee.json).
 
 ## Symbolic execution baselines
 

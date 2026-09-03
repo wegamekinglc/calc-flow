@@ -4,6 +4,9 @@
 >
 > **Calc Flow 基线：** `main@25dd973bc1575bf0ecc4210cca76664e924acebe`
 >
+> **性能证据提交：** `d3a75ee029d35ffbd4a39c9204918799187e39cd`
+> （clean worktree；该提交只新增 benchmark、测试和文档，不修改引擎）
+>
 > **TA-Lib 研究快照：**
 > [`main@df0c6bebbf2a39d49d06193206e2af608cb96624`](https://github.com/TA-Lib/ta-lib/tree/df0c6bebbf2a39d49d06193206e2af608cb96624)，
 > 2026-09-04 获取；其 streaming API 尚未发布，官方页面标注计划进入
@@ -48,6 +51,9 @@ handle 的职责。
 DataFusion SQL window、Finance-Python 0.9.10 公共指标算子，以及
 TA-Lib Python 0.7.1 对 bundled C library 的 `SMA` 调用。安装、完整命令和
 计时边界见 [`benchmarks/README.md`](../../../benchmarks/README.md)。
+完整 provenance 与 20 轮原始样本保存在
+[`SMA(20)` 报告](../../../benchmarks/rolling/rolling-mean-d3a75ee.json)和
+[`SMA(5) - SMA(20)` 报告](../../../benchmarks/rolling/dual-sma-spread-d3a75ee.json)。
 
 ### 2.1 方法与语义边界
 
@@ -69,35 +75,37 @@ TA-Lib Python 0.7.1 对 bundled C library 的 `SMA` 调用。安装、完整命�
 
 |      Rows | Native incremental | SQL window | Finance-Python |   TA-Lib | TA-Lib valid rows | SQL/native | Finance/native | TA-Lib/native |
 | --------: | -----------------: | ---------: | -------------: | -------: | ----------------: | ---------: | -------------: | ------------: |
-|        10 |           0.255 ms |   0.887 ms |       0.453 ms | 0.007 ms |                 0 |     3.479x |         1.778x |        0.028x |
-|       100 |           0.349 ms |   1.017 ms |       1.390 ms | 0.044 ms |                 0 |     2.914x |         3.983x |        0.125x |
-|     1,000 |           0.873 ms |   1.221 ms |       1.808 ms | 0.048 ms |                 0 |     1.398x |         2.070x |        0.055x |
-|    10,000 |           6.204 ms |   3.779 ms |       5.999 ms | 0.072 ms |             8,784 |     0.609x |         0.967x |        0.012x |
-|   100,000 |          73.004 ms |  23.677 ms |      54.617 ms | 0.337 ms |            98,784 |     0.324x |         0.748x |        0.005x |
-| 1,000,000 |         802.910 ms | 234.485 ms |     549.778 ms | 6.647 ms |           998,784 |     0.292x |         0.685x |        0.008x |
+|        10 |           0.264 ms |   0.919 ms |       0.479 ms | 0.007 ms |                 0 |     3.479x |         1.815x |        0.028x |
+|       100 |           0.354 ms |   1.037 ms |       1.426 ms | 0.045 ms |                 0 |     2.928x |         4.027x |        0.127x |
+|     1,000 |           0.904 ms |   1.267 ms |       1.886 ms | 0.048 ms |                 0 |     1.402x |         2.086x |        0.053x |
+|    10,000 |           6.700 ms |   4.011 ms |       6.394 ms | 0.077 ms |             8,784 |     0.599x |         0.954x |        0.012x |
+|   100,000 |          79.959 ms |  24.731 ms |      57.744 ms | 0.353 ms |            98,784 |     0.309x |         0.722x |        0.004x |
+| 1,000,000 |         874.645 ms | 252.231 ms |     572.425 ms | 7.594 ms |           998,784 |     0.288x |         0.654x |        0.009x |
 
 ### 2.3 例子 B：`SMA(5) - SMA(20)`
 
 |      Rows | Native incremental | SQL window | Finance-Python |   TA-Lib | TA-Lib valid rows | SQL/native | Finance/native | TA-Lib/native |
 | --------: | -----------------: | ---------: | -------------: | -------: | ----------------: | ---------: | -------------: | ------------: |
-|        10 |           0.476 ms |   1.099 ms |       0.723 ms | 0.012 ms |                 0 |     2.307x |         1.518x |        0.025x |
-|       100 |           0.575 ms |   1.279 ms |       2.602 ms | 0.078 ms |                 0 |     2.225x |         4.527x |        0.135x |
-|     1,000 |           1.110 ms |   1.605 ms |       3.292 ms | 0.082 ms |                 0 |     1.446x |         2.965x |        0.074x |
-|    10,000 |           7.060 ms |   5.676 ms |      10.810 ms | 0.124 ms |             8,784 |     0.804x |         1.531x |        0.018x |
-|   100,000 |          80.878 ms |  38.455 ms |      88.782 ms | 0.496 ms |            98,784 |     0.475x |         1.098x |        0.006x |
-| 1,000,000 |         926.167 ms | 397.254 ms |     941.100 ms | 8.701 ms |           998,784 |     0.429x |         1.016x |        0.009x |
+|        10 |           0.496 ms |   1.160 ms |       0.768 ms | 0.012 ms |                 0 |     2.340x |         1.550x |        0.025x |
+|       100 |           0.578 ms |   1.318 ms |       2.656 ms | 0.082 ms |                 0 |     2.281x |         4.595x |        0.142x |
+|     1,000 |           1.158 ms |   1.693 ms |       3.434 ms | 0.086 ms |                 0 |     1.463x |         2.967x |        0.074x |
+|    10,000 |           7.451 ms |   5.886 ms |      11.297 ms | 0.127 ms |             8,784 |     0.790x |         1.516x |        0.017x |
+|   100,000 |          87.382 ms |  40.076 ms |      95.176 ms | 0.509 ms |            98,784 |     0.459x |         1.089x |        0.006x |
+| 1,000,000 |         949.669 ms | 404.722 ms |     941.132 ms | 8.829 ms |           998,784 |     0.426x |         0.991x |        0.009x |
 
 ### 2.4 结果解释
 
-结果来自 WSL2 主机上的本地诊断，报告记录
-`calc-flow@25dd973bc1575bf0ecc4210cca76664e924acebe`，但工作区因新增 benchmark
-harness 而为 dirty；不能把这些点估计当成 exact-head 性能门证据。
+结果来自 WSL2 主机上的本地诊断。两个报告均记录 clean
+`calc-flow@d3a75ee029d35ffbd4a39c9204918799187e39cd`、依赖版本、workload 和每轮
+原始样本；该提交相对基线只增加 benchmark、测试和文档，未改变引擎。由于主机
+是虚拟化环境且没有 paired baseline/candidate confidence interval，这些结果仍是
+诊断证据，不能当成回归门或生产容量承诺。
 
 可以确认的结构性信号如下：
 
 - 10 至 1,000 行时，native incremental 的固定开销低于 SQL window；
 - 10,000 行开始，SQL window 更快；在 1,000,000 行时，单 SMA 的 SQL 用时约为
-  native 的 29.2%，复合指标约为 42.9%；
+  native 的 28.8%，复合指标约为 42.6%；
 - 复合指标没有使 native 时间翻倍，说明现有 compatible rolling group sharing
   已经有效，但行式转换、排序、分组和重建仍然主导总成本；
 - TA-Lib 的量级差距证明紧凑列式数值内核仍有很大优化空间，但不证明把 TA-Lib
@@ -485,7 +493,7 @@ TA-Lib streaming research benchmark 另设两种边界：
 - correctness 和 state compatibility 是硬门；
 - 所有新 fast path 在 10、100、1,000 行不得突破 `+5%` regression interval；
 - P1 完成后，100,000 与 1,000,000 行的有序 `Float64 SMA(20)` native 路径应不
-  慢于同进程 SQL window；当前 native 大约慢 3.1 至 3.4 倍，因此把约 2 倍以上
+  慢于同进程 SQL window；当前 native 大约慢 3.2 至 3.5 倍，因此把约 2 倍以上
   的提升作为工程目标，不在首个实验 PR 中伪造硬承诺；
 - 复合 dual-SMA 的 kernel 增量成本应来自第二个 ring，而不是第二次输入扫描或
   两个中间 Arrow arrays；
