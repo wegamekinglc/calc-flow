@@ -515,7 +515,7 @@ secret 写入 `RunResult`。
 | P2    | state and Arrow types     | layout v3; null/integer/extrema/pair/duration kernels    | batch/stream/restore matrix; old-state reads             | implemented |
 | P3    | composed output fusion    | DAG liveness; dual-SMA; BBANDS/MACD-class fusion         | no hidden materialization or finality crossing           | implemented |
 | P4    | DataFusion integration    | CalcFlowRollingExec; safe rewrite; adaptive partitions   | deterministic fallback, partitions, and memory           | implemented |
-| P5    | generation and numerics   | kernel census; fail-closed generation; stable_v2/preview | oracle, non-vacuity, sanitizer, migration, perf          | in progress |
+| P5    | generation and numerics   | kernel census; fail-closed generation; stable_v2/preview | oracle, non-vacuity, sanitizer, migration, perf          | implemented |
 
 每个 phase 在当前 PR 内形成独立提交，保留旧通用 kernel 作为 fallback。P1 至 P4
 的每个性能阶段都先落 focused RED test，再落实现与 paired evidence；没有对应
@@ -535,7 +535,7 @@ secret 写入 `RunResult`。
 | WP-P4C       | batch planner and canonical merge                         | 根据规模、entity 基数和 state bytes 选择 partition；稳定恢复可观察顺序              | WP-P4A     | implemented | 固定 `target_partitions=1`                             |
 | WP-P5A       | kernel capability manifest and generation checks          | 建立 kernel census；声明可 stream 的形状若无法生成 transition 则构建失败             | P3-P4      | implemented | 生成清单只报告，不扩大 capability                      |
 | WP-P5B       | numerical profiles and state migration                    | 冻结 `stable_v1`；以 opt-in preview 引入 rebase/shifted-sum 实验                     | WP-P5A     | implemented | 禁用 preview；writer 继续输出当前 profile              |
-| WP-P5C       | benchmark/evidence scripts and CI validators              | non-vacuity、oracle、migration、sanitizer、paired performance 统一证据               | P3-P5B     | pending     | 性能结果降级为 informational，不放宽 correctness gate  |
+| WP-P5C       | benchmark/evidence scripts and CI validators              | non-vacuity、oracle、migration、sanitizer、paired performance 统一证据               | P3-P5B     | implemented | 性能结果降级为 informational，不放宽 correctness gate  |
 
 每个工作包在同一 PR 内保持独立提交，提交信息说明 capability 扩张、fallback 和 state
 影响。P3/P4 只有在语义、恢复和 deterministic ordering 同时满足时才扩大 fast-path
@@ -555,6 +555,18 @@ numeric/pair accumulator 以首个有限值为 shift，使用 compensated sums �
 风险仍立即 rebase。transition count 写入 layout-v3 已有的 nullable position 列，
 checkpoint restore 后继续同一 cadence；profile 同时进入 configuration、kernel 和
 state metadata fingerprint，混用时 fail closed。
+
+WP-P5C 让同一 census 同时生成 Rust allowlist 和 Python 只读 explain metadata，
+生成内容缺失、过期或包含 `unsafe` 均由脚本单测 fail closed；Rust workspace 继续以
+`unsafe_code = "forbid"` 为最终静态边界。`Program.explain()` 现在逐 rolling stage
+报告 selected kernel、numerical profile、complexity、required order、共享 state
+group 数和 fallback reason。发布候选新增两个同进程案例：`SMA(20)` 与
+`SMA(5) - SMA(20)` 的 ordered primitive kernel 对 DataFusion `SUM/COUNT` 标准窗口，
+并在计时前同时对照独立 direct-window oracle、断言 oracle finite rows 非空、断言
+reference rewrite 数为零。每个案例写入 60 个 alternating pairs；validator 固定
+20,000 次 bootstrap、`+5%` 阈值、machine/dependency/workload fingerprints 和
+candidate exact SHA。实现与门禁配置已经完成；最终 exact-SHA 报告和第 14 节全量
+验证按开发面冻结后的集中验证阶段生成，不把尚未执行的结果写成已通过。
 
 ### 13.2 评审后执行顺序
 

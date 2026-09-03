@@ -312,6 +312,11 @@ def test_explain_reports_deterministic_optimization_and_cost_facts() -> None:
     assert "  optimization" in explanation
     assert "    cse materializations 1" in explanation
     assert "    rolling state_stages 1 shared_outputs 1" in explanation
+    assert (
+        "    rolling kernel output__cf_rolling selected=ordered_primitive"
+        " profile=stable_v1 complexity=amortized_constant"
+        " order=ts,symbol,seq shared_state_groups=1 fallback=none" in explanation
+    )
     assert "  costs" in explanation
     assert "    state output__cf_rolling rows=5" in explanation
     assert "    copies none" in explanation

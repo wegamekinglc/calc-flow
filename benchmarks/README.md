@@ -189,6 +189,36 @@ scale) is retained separately as
 [`SMA(5) - SMA(20)`](rolling/p1-dual-sma-spread-b6bfeed.json); it is exact-SHA
 engineering evidence, not the final 60-pair regression gate.
 
+The release-facing same-process gate is intentionally separate from that
+cross-library diagnostic. It compares the ordered primitive kernel with an
+equivalent DataFusion `SUM/COUNT` window reference for both `SMA(20)` and
+`SMA(5) - SMA(20)`. The reference shape is outside the `AVG` rewrite allowlist,
+so the validator can prove that it still exercised DataFusion's standard
+window executor. Each case validates both outputs against an independent
+direct-window oracle before collecting 60 alternating pairs:
+
+```bash
+CALC_FLOW_BENCHMARK_SCALE=overhead JAX_PLATFORMS=cpu \
+  uv run --extra benchmark pytest benchmarks/test_rolling_kernel.py -q \
+  --benchmark-only \
+  --benchmark-json=target/benchmark-results/rolling-kernel.json
+
+candidate_sha="$(git rev-parse HEAD)"
+uv run python scripts/verify_symbolic_milestone_perf.py \
+  --report target/benchmark-results/rolling-kernel.json \
+  --scenario rolling_kernel_sma20 \
+  --scenario rolling_kernel_dual_sma_5_20 \
+  --expected-commit "${candidate_sha}" \
+  --output target/benchmark-results/rolling-kernel-evidence.json
+```
+
+The validator requires a clean exact commit, stable machine/dependency/workload
+fingerprints, non-vacuous finite oracle coverage, zero reference rewrites, and
+a 95% bootstrap interval from 20,000 resamples. An interval wholly below `+5%`
+passes, wholly above it fails, and an overlapping interval is inconclusive.
+The cross-library table remains informational because Finance-Python runs in a
+legacy interpreter and TA-Lib exposes a thinner C-backed call boundary.
+
 ## Symbolic execution baselines
 
 `test_symbolic_baseline.py` retains the hand-built SCE-01 baselines and adds

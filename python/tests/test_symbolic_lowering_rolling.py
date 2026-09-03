@@ -152,6 +152,9 @@ def test_lag_delta_lower_to_one_rolling_node_with_the_frozen_shape() -> None:
             "target_port": "input",
         }
     ) in graph["edges"]  # type: ignore[index]
+    explanation = program.explain(Runtime(), mode="batch")
+    assert "rolling kernel signals__cf_rolling selected=general" in explanation
+    assert "fallback=primitive_lag_has_no_typed_transition" in explanation
 
 
 def test_ewma_and_macd_lower_to_shared_layout_two_state() -> None:
@@ -223,6 +226,10 @@ def test_dual_mean_difference_is_written_without_hidden_rolling_columns() -> Non
     assert all("__cf_roll_" not in field["name"] for field in output_fields)
     explanation = program.explain(Runtime(), mode="batch")
     assert "    rolling fused_outputs 1 hidden_materializations 0" in explanation
+    assert (
+        "rolling kernel signals__cf_rolling selected=ordered_primitive" in explanation
+    )
+    assert "shared_state_groups=2 fallback=none" in explanation
     assert "    state signals__cf_rolling rows=4" in explanation
 
 
