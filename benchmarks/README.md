@@ -183,6 +183,11 @@ TA-Lib-streaming-inspired engine roadmap are preserved in the
 The clean-commit reports with full provenance and raw samples are
 [`SMA(20)`](rolling/rolling-mean-0052da7.json) and
 [`SMA(5) - SMA(20)`](rolling/dual-sma-spread-0052da7.json).
+The P1 Arrow-native fast-path diagnostic (three scales, four samples per
+scale) is retained separately as
+[`SMA(20)`](rolling/p1-rolling-mean-b6bfeed.json) and
+[`SMA(5) - SMA(20)`](rolling/p1-dual-sma-spread-b6bfeed.json); it is exact-SHA
+engineering evidence, not the final 60-pair regression gate.
 
 ## Symbolic execution baselines
 

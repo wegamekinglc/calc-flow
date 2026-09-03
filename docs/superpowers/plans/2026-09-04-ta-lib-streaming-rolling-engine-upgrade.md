@@ -319,6 +319,23 @@ canonical order 和重复 identity，用 dense entity ID 路由预分配的 per-
 fast path 内不创建逐单元格 `ScalarValue`，也不排序或重建输入列。乱序输入和所有
 不在 allowlist 内的类型、frame、primitive 均保留通用 kernel fallback。
 
+在 clean `calc-flow@b6bfeedd993cae9d400f162ddb8669c5fcf1d64e` 上执行的阶段诊断
+使用相同机器、依赖与 64-symbol workload，每点 4 轮；它用于确认工程方向，不是
+最终 60-pair gate：
+
+| Example               |      Rows | Native typed | SQL window | Baseline/native speedup | SQL/native |
+| --------------------- | --------: | -----------: | ---------: | ----------------------: | ---------: |
+| `SMA(20)`             |       100 |     0.246 ms |   0.817 ms |                   1.42x |     3.319x |
+| `SMA(20)`             |   100,000 |     8.206 ms |  25.129 ms |                   9.85x |     3.062x |
+| `SMA(20)`             | 1,000,000 |    73.121 ms | 254.134 ms |                  12.29x |     3.476x |
+| `SMA(5) - SMA(20)`    |       100 |     0.406 ms |   0.997 ms |                   1.45x |     2.453x |
+| `SMA(5) - SMA(20)`    |   100,000 |     9.555 ms |  40.662 ms |                   9.40x |     4.256x |
+| `SMA(5) - SMA(20)`    | 1,000,000 |    90.499 ms | 414.649 ms |                  11.03x |     4.582x |
+
+阶段原始样本见
+[`SMA(20)`](../../../benchmarks/rolling/p1-rolling-mean-b6bfeed.json)和
+[`SMA(5) - SMA(20)`](../../../benchmarks/rolling/p1-dual-sma-spread-b6bfeed.json)。
+
 ## 8. finality、stream 与 state layout
 
 ### 8.1 finality 与数值 transition 分离
