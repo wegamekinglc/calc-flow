@@ -13,8 +13,10 @@ use std::{
 
 use datafusion::arrow::{
     array::{
-        Array, ArrayRef, Float64Array, Float64Builder, TimestampMicrosecondArray, UInt64Builder,
+        Array, ArrayRef, Float64Array, Float64Builder, Int64Array, Int64Builder,
+        TimestampMicrosecondArray, UInt64Array, UInt64Builder,
     },
+    compute::cast,
     datatypes::{DataType, Schema},
     record_batch::RecordBatch,
     row::{RowConverter, SortField},
@@ -71,10 +73,19 @@ enum Float64GroupPlan {
         input_index: usize,
         frame: TypedFrame,
     },
+    Signed {
+        input_index: usize,
+        frame: TypedFrame,
+    },
+    Unsigned {
+        input_index: usize,
+        frame: TypedFrame,
+    },
     Extrema {
         input_index: usize,
         frame: TypedFrame,
         descending: bool,
+        storage: OutputStorage,
     },
     Pair {
         left_index: usize,
@@ -87,6 +98,8 @@ impl Float64GroupPlan {
     const fn frame(self) -> TypedFrame {
         match self {
             Self::Numeric { frame, .. }
+            | Self::Signed { frame, .. }
+            | Self::Unsigned { frame, .. }
             | Self::Extrema { frame, .. }
             | Self::Pair { frame, .. } => frame,
         }
@@ -125,6 +138,7 @@ impl TryFrom<CompiledFrame> for TypedFrame {
 struct Float64OutputPlan {
     group: usize,
     kind: Float64OutputKind,
+    storage: OutputStorage,
     min_periods: u64,
     ddof: u8,
 }
@@ -136,9 +150,58 @@ enum Float64OutputKind {
     Correlation,
 }
 
-enum Float64GroupInput<'a> {
-    Single(&'a Float64Array),
-    Pair(&'a Float64Array, &'a Float64Array),
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OutputStorage {
+    Count,
+    Int8,
+    Int16,
+    Int32,
+    Int64,
+    UInt8,
+    UInt16,
+    UInt32,
+    UInt64,
+    Float32,
+    Float64,
+}
+
+impl OutputStorage {
+    const fn is_signed(self) -> bool {
+        matches!(self, Self::Int8 | Self::Int16 | Self::Int32 | Self::Int64)
+    }
+
+    const fn is_unsigned(self) -> bool {
+        matches!(
+            self,
+            Self::UInt8 | Self::UInt16 | Self::UInt32 | Self::UInt64
+        )
+    }
+
+    const fn is_float(self) -> bool {
+        matches!(self, Self::Float32 | Self::Float64)
+    }
+
+    const fn data_type(self) -> DataType {
+        match self {
+            Self::Count | Self::UInt64 => DataType::UInt64,
+            Self::Int8 => DataType::Int8,
+            Self::Int16 => DataType::Int16,
+            Self::Int32 => DataType::Int32,
+            Self::Int64 => DataType::Int64,
+            Self::UInt8 => DataType::UInt8,
+            Self::UInt16 => DataType::UInt16,
+            Self::UInt32 => DataType::UInt32,
+            Self::Float32 => DataType::Float32,
+            Self::Float64 => DataType::Float64,
+        }
+    }
+}
+
+enum Float64GroupInput {
+    Single(Float64Array),
+    Signed(Int64Array),
+    Unsigned(UInt64Array),
+    Pair(Float64Array, Float64Array),
 }
 
 /// Stage-level facts from one typed kernel invocation.
@@ -443,7 +506,7 @@ impl RollingKernelPlan {
         let mut builders = self
             .outputs
             .iter()
-            .map(|output| DerivedBuilder::new(output.kind, input.num_rows()))
+            .map(|output| DerivedBuilder::new(*output, input.num_rows()))
             .collect::<Vec<_>>();
 
         let kernel_start = Instant::now();
@@ -462,7 +525,7 @@ impl RollingKernelPlan {
         let columns = builders
             .into_iter()
             .map(DerivedBuilder::finish)
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
         let output_build_ns = nanos(output_start.elapsed());
         let state_bytes = state
             .states
@@ -504,11 +567,7 @@ impl RollingKernelPlan {
         Ok(())
     }
 
-    fn float64_inputs<'a>(
-        &self,
-        input: &'a RecordBatch,
-        node_id: &str,
-    ) -> Result<Vec<Float64GroupInput<'a>>> {
+    fn float64_inputs(&self, input: &RecordBatch, node_id: &str) -> Result<Vec<Float64GroupInput>> {
         self.groups
             .iter()
             .map(|group| float64_group_input(group, input, node_id))
@@ -516,36 +575,83 @@ impl RollingKernelPlan {
     }
 }
 
-fn float64_array<'a>(
-    input: &'a RecordBatch,
-    index: usize,
-    node_id: &str,
-) -> Result<&'a Float64Array> {
-    input.columns()[index]
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .ok_or_else(|| operator_error(node_id, "typed rolling input is not Float64"))
-}
-
-fn float64_group_input<'a>(
+fn float64_group_input(
     group: &Float64GroupPlan,
-    input: &'a RecordBatch,
+    input: &RecordBatch,
     node_id: &str,
-) -> Result<Float64GroupInput<'a>> {
+) -> Result<Float64GroupInput> {
     match *group {
-        Float64GroupPlan::Numeric { input_index, .. }
-        | Float64GroupPlan::Extrema { input_index, .. } => Ok(Float64GroupInput::Single(
-            float64_array(input, input_index, node_id)?,
+        Float64GroupPlan::Numeric { input_index, .. } => Ok(Float64GroupInput::Single(
+            cast_float64(input.column(input_index), node_id)?,
         )),
+        Float64GroupPlan::Extrema {
+            input_index,
+            storage,
+            ..
+        } => {
+            if storage.is_signed() {
+                cast_signed(input.column(input_index), node_id).map(Float64GroupInput::Signed)
+            } else if storage.is_unsigned() {
+                cast_unsigned(input.column(input_index), node_id).map(Float64GroupInput::Unsigned)
+            } else if storage.is_float() {
+                cast_float64(input.column(input_index), node_id).map(Float64GroupInput::Single)
+            } else {
+                Err(internal_error(
+                    "typed extrema group has count output storage",
+                ))
+            }
+        }
+        Float64GroupPlan::Signed { input_index, .. } => {
+            cast_signed(input.column(input_index), node_id).map(Float64GroupInput::Signed)
+        }
+        Float64GroupPlan::Unsigned { input_index, .. } => {
+            cast_unsigned(input.column(input_index), node_id).map(Float64GroupInput::Unsigned)
+        }
         Float64GroupPlan::Pair {
             left_index,
             right_index,
             ..
         } => Ok(Float64GroupInput::Pair(
-            float64_array(input, left_index, node_id)?,
-            float64_array(input, right_index, node_id)?,
+            cast_float64(input.column(left_index), node_id)?,
+            cast_float64(input.column(right_index), node_id)?,
         )),
     }
+}
+
+fn cast_signed(array: &ArrayRef, node_id: &str) -> Result<Int64Array> {
+    cast_primitive(array, &DataType::Int64, node_id)?
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .cloned()
+        .ok_or_else(|| internal_error("signed rolling cast did not produce Int64"))
+}
+
+fn cast_unsigned(array: &ArrayRef, node_id: &str) -> Result<UInt64Array> {
+    cast_primitive(array, &DataType::UInt64, node_id)?
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .cloned()
+        .ok_or_else(|| internal_error("unsigned rolling cast did not produce UInt64"))
+}
+
+fn cast_float64(array: &ArrayRef, node_id: &str) -> Result<Float64Array> {
+    cast_primitive(array, &DataType::Float64, node_id)?
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .cloned()
+        .ok_or_else(|| internal_error("floating rolling cast did not produce Float64"))
+}
+
+fn cast_primitive(array: &ArrayRef, target: &DataType, node_id: &str) -> Result<ArrayRef> {
+    if array.data_type() == target {
+        return Ok(array.clone());
+    }
+    cast(array, target).map_err(|error| {
+        operator_error(
+            node_id,
+            &format!("typed rolling input cast to {target} failed: {error}"),
+        )
+    })
 }
 
 impl RollingKernelState {
@@ -572,7 +678,7 @@ impl RollingKernelState {
 
 fn fill_float64_rows(
     outputs: &[Float64OutputPlan],
-    inputs: &[Float64GroupInput<'_>],
+    inputs: &[Float64GroupInput],
     event_times: &TimestampMicrosecondArray,
     states: &mut [Float64EntityState],
     builders: &mut [DerivedBuilder],
@@ -588,13 +694,13 @@ fn fill_float64_rows(
             row_index,
             node_id,
         )?;
-        append_float64_outputs(outputs, builders, entity)?;
+        append_float64_outputs(outputs, builders, entity, node_id)?;
     }
     Ok(())
 }
 
 fn update_float64_groups(
-    inputs: &[Float64GroupInput<'_>],
+    inputs: &[Float64GroupInput],
     event_time: i64,
     entity: &mut Float64EntityState,
     row_index: usize,
@@ -610,9 +716,10 @@ fn append_float64_outputs(
     outputs: &[Float64OutputPlan],
     builders: &mut [DerivedBuilder],
     entity: &Float64EntityState,
+    node_id: &str,
 ) -> Result<()> {
     for (builder, output) in builders.iter_mut().zip(outputs) {
-        builder.append(&entity.groups[output.group], output)?;
+        builder.append(&entity.groups[output.group], output, node_id)?;
     }
     Ok(())
 }
@@ -623,7 +730,7 @@ fn compile_float64_rows(
     window_groups: &[CompiledWindowGroup],
 ) -> std::result::Result<(Vec<Float64GroupPlan>, Vec<Float64OutputPlan>), String> {
     let groups = compile_float64_groups(input_schema, window_groups)?;
-    let typed_outputs = compile_float64_outputs(outputs, groups.len())?;
+    let typed_outputs = compile_float64_outputs(outputs, &groups)?;
     if groups.is_empty() || typed_outputs.is_empty() {
         return Err("requires at least one Float64 row aggregate".into());
     }
@@ -649,8 +756,8 @@ fn compile_float64_group(
         CompiledWindowGroup::Numeric {
             input_index,
             frame,
-            sum_class: SumClass::Float,
-        } => compile_single_group(input_schema, *input_index, *frame, None),
+            sum_class,
+        } => compile_numeric_group(input_schema, *input_index, *frame, *sum_class),
         CompiledWindowGroup::Extrema {
             input_index,
             frame,
@@ -661,7 +768,31 @@ fn compile_float64_group(
             right_index,
             frame,
         } => compile_pair_group(input_schema, *left_index, *right_index, *frame),
-        _ => Err("requires Float64 numeric, extrema, or pair window groups".into()),
+        CompiledWindowGroup::Ewma { .. } => {
+            Err("requires non-EWMA numeric, extrema, or pair window groups".into())
+        }
+    }
+}
+
+fn compile_numeric_group(
+    input_schema: &Schema,
+    input_index: usize,
+    frame: CompiledFrame,
+    sum_class: SumClass,
+) -> std::result::Result<Float64GroupPlan, String> {
+    let frame = TypedFrame::try_from(frame)?;
+    match sum_class {
+        SumClass::Float
+            if matches!(
+                input_schema.field(input_index).data_type(),
+                DataType::Float32 | DataType::Float64
+            ) =>
+        {
+            Ok(Float64GroupPlan::Numeric { input_index, frame })
+        }
+        SumClass::Signed => Ok(Float64GroupPlan::Signed { input_index, frame }),
+        SumClass::Unsigned => Ok(Float64GroupPlan::Unsigned { input_index, frame }),
+        _ => Err("requires primitive numeric window groups".into()),
     }
 }
 
@@ -671,17 +802,34 @@ fn compile_single_group(
     frame: CompiledFrame,
     descending: Option<bool>,
 ) -> std::result::Result<Float64GroupPlan, String> {
-    require_float64(input_schema, input_index)?;
     let frame = TypedFrame::try_from(frame)?;
     Ok(if let Some(descending) = descending {
         Float64GroupPlan::Extrema {
             input_index,
             frame,
             descending,
+            storage: extrema_storage(input_schema.field(input_index).data_type())?,
         }
     } else {
+        require_float64(input_schema, input_index)?;
         Float64GroupPlan::Numeric { input_index, frame }
     })
+}
+
+fn extrema_storage(data_type: &DataType) -> std::result::Result<OutputStorage, String> {
+    match data_type {
+        DataType::Int8 => Ok(OutputStorage::Int8),
+        DataType::Int16 => Ok(OutputStorage::Int16),
+        DataType::Int32 => Ok(OutputStorage::Int32),
+        DataType::Int64 => Ok(OutputStorage::Int64),
+        DataType::UInt8 => Ok(OutputStorage::UInt8),
+        DataType::UInt16 => Ok(OutputStorage::UInt16),
+        DataType::UInt32 => Ok(OutputStorage::UInt32),
+        DataType::UInt64 => Ok(OutputStorage::UInt64),
+        DataType::Float32 => Ok(OutputStorage::Float32),
+        DataType::Float64 => Ok(OutputStorage::Float64),
+        _ => Err("requires primitive numeric extrema input".into()),
+    }
 }
 
 fn compile_pair_group(
@@ -690,13 +838,33 @@ fn compile_pair_group(
     right_index: usize,
     frame: CompiledFrame,
 ) -> std::result::Result<Float64GroupPlan, String> {
-    require_float64(input_schema, left_index)?;
-    require_float64(input_schema, right_index)?;
+    require_numeric_type(input_schema, left_index)?;
+    require_numeric_type(input_schema, right_index)?;
     Ok(Float64GroupPlan::Pair {
         left_index,
         right_index,
         frame: TypedFrame::try_from(frame)?,
     })
+}
+
+fn require_numeric_type(input_schema: &Schema, index: usize) -> std::result::Result<(), String> {
+    if matches!(
+        input_schema.field(index).data_type(),
+        DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64
+            | DataType::Float32
+            | DataType::Float64
+    ) {
+        Ok(())
+    } else {
+        Err("requires primitive numeric pair inputs".into())
+    }
 }
 
 fn require_float64(input_schema: &Schema, index: usize) -> std::result::Result<(), String> {
@@ -708,12 +876,12 @@ fn require_float64(input_schema: &Schema, index: usize) -> std::result::Result<(
 
 fn compile_float64_outputs(
     outputs: &[CompiledRollingOutput],
-    group_count: usize,
+    groups: &[Float64GroupPlan],
 ) -> std::result::Result<Vec<Float64OutputPlan>, String> {
     let mut typed_outputs = Vec::with_capacity(outputs.len());
     for output in outputs {
-        let plan = compile_float64_output(output)?;
-        if plan.group >= group_count {
+        let plan = compile_float64_output(output, groups)?;
+        if plan.group >= groups.len() {
             return Err("aggregate group index is outside the typed plan".into());
         }
         typed_outputs.push(plan);
@@ -723,11 +891,13 @@ fn compile_float64_outputs(
 
 fn compile_float64_output(
     output: &CompiledRollingOutput,
+    groups: &[Float64GroupPlan],
 ) -> std::result::Result<Float64OutputPlan, String> {
     match &output.evaluation {
         CompiledEvaluation::Aggregate(aggregate) => Ok(Float64OutputPlan {
             group: aggregate.group,
             kind: Float64OutputKind::Statistic(aggregate.statistic),
+            storage: output_storage(aggregate, groups)?,
             min_periods: aggregate.min_periods,
             ddof: aggregate.ddof,
         }),
@@ -738,10 +908,35 @@ fn compile_float64_output(
             } else {
                 Float64OutputKind::Covariance
             },
+            storage: OutputStorage::Float64,
             min_periods: pair.min_periods,
             ddof: pair.ddof,
         }),
         _ => Err("requires aggregate-only outputs".into()),
+    }
+}
+
+fn output_storage(
+    aggregate: &super::CompiledAggregate,
+    groups: &[Float64GroupPlan],
+) -> std::result::Result<OutputStorage, String> {
+    if aggregate.statistic == Statistic::Count {
+        return Ok(OutputStorage::Count);
+    }
+    if matches!(aggregate.statistic, Statistic::Min | Statistic::Max) {
+        return match groups.get(aggregate.group) {
+            Some(Float64GroupPlan::Extrema { storage, .. }) => Ok(*storage),
+            _ => Err("typed rolling extrema output does not reference an extrema group".into()),
+        };
+    }
+    if aggregate.statistic != Statistic::Sum {
+        return Ok(OutputStorage::Float64);
+    }
+    match groups.get(aggregate.group) {
+        Some(Float64GroupPlan::Signed { .. }) => Ok(OutputStorage::Int64),
+        Some(Float64GroupPlan::Unsigned { .. }) => Ok(OutputStorage::UInt64),
+        Some(Float64GroupPlan::Numeric { .. }) => Ok(OutputStorage::Float64),
+        _ => Err("typed rolling sum does not reference a numeric group".into()),
     }
 }
 
@@ -866,6 +1061,7 @@ impl Float64EntityState {
 #[derive(Clone, Debug)]
 enum Float64WindowState {
     Numeric(Float64NumericState),
+    Exact(ExactNumericState),
     Extrema(Float64ExtremaState),
     Pair(Float64PairState),
 }
@@ -876,6 +1072,14 @@ impl Float64WindowState {
             Float64GroupPlan::Numeric { frame, .. } => {
                 Self::Numeric(Float64NumericState::new(frame, entity_rows))
             }
+            Float64GroupPlan::Signed { frame, .. } => {
+                Self::Exact(ExactNumericState::new(frame, SumClass::Signed, entity_rows))
+            }
+            Float64GroupPlan::Unsigned { frame, .. } => Self::Exact(ExactNumericState::new(
+                frame,
+                SumClass::Unsigned,
+                entity_rows,
+            )),
             Float64GroupPlan::Extrema {
                 frame, descending, ..
             } => Self::Extrema(Float64ExtremaState::new(frame, descending, entity_rows)),
@@ -888,7 +1092,7 @@ impl Float64WindowState {
     fn update(
         &mut self,
         event_time: i64,
-        input: &Float64GroupInput<'_>,
+        input: &Float64GroupInput,
         row_index: usize,
         node_id: &str,
     ) -> Result<()> {
@@ -896,9 +1100,39 @@ impl Float64WindowState {
             (Self::Numeric(state), Float64GroupInput::Single(input)) => {
                 state.update(event_time, valid_float64(input, row_index), node_id)
             }
-            (Self::Extrema(state), Float64GroupInput::Single(input)) => {
-                state.update(event_time, valid_float64(input, row_index), node_id)
-            }
+            (Self::Exact(state), Float64GroupInput::Signed(input)) => state.update(
+                event_time,
+                input
+                    .is_valid(row_index)
+                    .then(|| ExactValue::Signed(input.value(row_index))),
+                node_id,
+            ),
+            (Self::Exact(state), Float64GroupInput::Unsigned(input)) => state.update(
+                event_time,
+                input
+                    .is_valid(row_index)
+                    .then(|| ExactValue::Unsigned(input.value(row_index))),
+                node_id,
+            ),
+            (Self::Extrema(state), Float64GroupInput::Single(input)) => state.update(
+                event_time,
+                valid_float64(input, row_index).map(ExtremaValue::Float),
+                node_id,
+            ),
+            (Self::Extrema(state), Float64GroupInput::Signed(input)) => state.update(
+                event_time,
+                input
+                    .is_valid(row_index)
+                    .then(|| ExtremaValue::Signed(input.value(row_index))),
+                node_id,
+            ),
+            (Self::Extrema(state), Float64GroupInput::Unsigned(input)) => state.update(
+                event_time,
+                input
+                    .is_valid(row_index)
+                    .then(|| ExtremaValue::Unsigned(input.value(row_index))),
+                node_id,
+            ),
             (Self::Pair(state), Float64GroupInput::Pair(left, right)) => state.update(
                 event_time,
                 valid_float64_pair(left, right, row_index),
@@ -913,6 +1147,7 @@ impl Float64WindowState {
     fn estimated_bytes(&self) -> usize {
         match self {
             Self::Numeric(state) => state.estimated_bytes(),
+            Self::Exact(state) => state.estimated_bytes(),
             Self::Extrema(state) => state.estimated_bytes(),
             Self::Pair(state) => state.estimated_bytes(),
         }
@@ -946,6 +1181,77 @@ struct Float64NumericState {
 struct TimedFloat64Sample {
     event_time: i64,
     value: Option<f64>,
+}
+
+#[derive(Clone, Debug)]
+struct ExactNumericState {
+    frame: TypedFrame,
+    values: VecDeque<TimedExactSample>,
+    accumulator: WindowAccumulator,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TimedExactSample {
+    event_time: i64,
+    value: Option<ExactValue>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ExactValue {
+    Signed(i64),
+    Unsigned(u64),
+}
+
+impl ExactNumericState {
+    fn new(frame: TypedFrame, sum_class: SumClass, entity_rows: usize) -> Self {
+        let capacity = frame.estimated_samples().min(entity_rows);
+        Self {
+            frame,
+            values: VecDeque::with_capacity(capacity),
+            accumulator: WindowAccumulator::new(sum_class),
+        }
+    }
+
+    fn update(&mut self, event_time: i64, value: Option<ExactValue>, node_id: &str) -> Result<()> {
+        if let Some(value) = value {
+            add_exact(&mut self.accumulator, value, node_id)?;
+        }
+        self.values
+            .push_back(TimedExactSample { event_time, value });
+        self.expire(event_time)
+    }
+
+    fn expire(&mut self, event_time: i64) -> Result<()> {
+        match self.frame {
+            TypedFrame::Rows(window) => {
+                if self.values.len() > window {
+                    self.remove_front()?;
+                }
+            }
+            TypedFrame::Duration(micros) => {
+                let bound = i128::from(event_time) - i128::from(micros);
+                while self
+                    .values
+                    .front()
+                    .is_some_and(|sample| i128::from(sample.event_time) <= bound)
+                {
+                    self.remove_front()?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn remove_front(&mut self) -> Result<()> {
+        if let Some(Some(value)) = self.values.pop_front().map(|sample| sample.value) {
+            remove_exact(&mut self.accumulator, value)?;
+        }
+        Ok(())
+    }
+
+    fn estimated_bytes(&self) -> usize {
+        size_of::<Self>() + self.values.capacity() * size_of::<TimedExactSample>()
+    }
 }
 
 impl Float64NumericState {
@@ -1011,7 +1317,7 @@ struct Float64ExtremaState {
     frame: TypedFrame,
     descending: bool,
     values: VecDeque<TimedExtremaSample>,
-    candidates: VecDeque<(u64, f64)>,
+    candidates: VecDeque<(u64, ExtremaValue)>,
     valid_count: u64,
     next_ordinal: u64,
 }
@@ -1020,7 +1326,27 @@ struct Float64ExtremaState {
 struct TimedExtremaSample {
     ordinal: u64,
     event_time: i64,
-    value: Option<f64>,
+    value: Option<ExtremaValue>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ExtremaValue {
+    Signed(i64),
+    Unsigned(u64),
+    Float(f64),
+}
+
+impl ExtremaValue {
+    fn total_cmp(self, other: Self) -> Result<Ordering> {
+        match (self, other) {
+            (Self::Signed(left), Self::Signed(right)) => Ok(left.cmp(&right)),
+            (Self::Unsigned(left), Self::Unsigned(right)) => Ok(left.cmp(&right)),
+            (Self::Float(left), Self::Float(right)) => Ok(left.total_cmp(&right)),
+            _ => Err(internal_error(
+                "typed rolling extrema candidates have mismatched storage",
+            )),
+        }
+    }
 }
 
 impl Float64ExtremaState {
@@ -1036,7 +1362,12 @@ impl Float64ExtremaState {
         }
     }
 
-    fn update(&mut self, event_time: i64, value: Option<f64>, node_id: &str) -> Result<()> {
+    fn update(
+        &mut self,
+        event_time: i64,
+        value: Option<ExtremaValue>,
+        node_id: &str,
+    ) -> Result<()> {
         let ordinal = self.next_ordinal;
         self.next_ordinal = self
             .next_ordinal
@@ -1053,19 +1384,24 @@ impl Float64ExtremaState {
         self.expire(event_time)
     }
 
-    fn add_candidate(&mut self, ordinal: u64, value: f64, node_id: &str) -> Result<()> {
+    fn add_candidate(&mut self, ordinal: u64, value: ExtremaValue, node_id: &str) -> Result<()> {
         self.valid_count = self
             .valid_count
             .checked_add(1)
             .ok_or_else(|| operator_error(node_id, "rolling extrema count overflowed"))?;
-        while self.candidates.back().is_some_and(|(_, back)| {
-            let ordering = back.total_cmp(&value);
-            if self.descending {
+        loop {
+            let Some((_, back)) = self.candidates.back() else {
+                break;
+            };
+            let ordering = back.total_cmp(value)?;
+            let should_remove = if self.descending {
                 ordering != Ordering::Greater
             } else {
                 ordering != Ordering::Less
+            };
+            if !should_remove {
+                break;
             }
-        }) {
             self.candidates.pop_back();
         }
         self.candidates.push_back((ordinal, value));
@@ -1116,7 +1452,7 @@ impl Float64ExtremaState {
     fn estimated_bytes(&self) -> usize {
         size_of::<Self>()
             + self.values.capacity() * size_of::<TimedExtremaSample>()
-            + self.candidates.capacity() * size_of::<(u64, f64)>()
+            + self.candidates.capacity() * size_of::<(u64, ExtremaValue)>()
     }
 }
 
@@ -1265,6 +1601,104 @@ fn refold_float64(
 
 #[allow(
     clippy::cast_precision_loss,
+    reason = "the frozen integer mean and variance output type is Float64"
+)]
+fn add_exact(accumulator: &mut WindowAccumulator, value: ExactValue, node_id: &str) -> Result<()> {
+    accumulator.valid_count = accumulator
+        .valid_count
+        .checked_add(1)
+        .ok_or_else(|| operator_error(node_id, "rolling valid sample count overflowed"))?;
+    add_exact_sum(accumulator, value, node_id)?;
+    let sample = exact_as_f64(value);
+    let count = accumulator.valid_count as f64;
+    let delta = sample - accumulator.mean;
+    accumulator.mean += delta / count;
+    accumulator.m2 += delta * (sample - accumulator.mean);
+    Ok(())
+}
+
+fn add_exact_sum(
+    accumulator: &mut WindowAccumulator,
+    value: ExactValue,
+    node_id: &str,
+) -> Result<()> {
+    match (&mut accumulator.sum, value) {
+        (Some(SumState::Signed(total)), ExactValue::Signed(value)) => {
+            *total = total
+                .checked_add(i128::from(value))
+                .ok_or_else(|| operator_error(node_id, "rolling integer sum overflowed"))?;
+        }
+        (Some(SumState::Unsigned(total)), ExactValue::Unsigned(value)) => {
+            *total = total
+                .checked_add(u128::from(value))
+                .ok_or_else(|| operator_error(node_id, "rolling integer sum overflowed"))?;
+        }
+        _ => {
+            return Err(internal_error(
+                "typed exact rolling value does not match its sum class",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "the frozen integer mean and variance output type is Float64"
+)]
+fn remove_exact(accumulator: &mut WindowAccumulator, value: ExactValue) -> Result<()> {
+    accumulator.valid_count = accumulator
+        .valid_count
+        .checked_sub(1)
+        .ok_or_else(|| internal_error("rolling removal without a matching add"))?;
+    remove_exact_sum(accumulator, value)?;
+    if accumulator.valid_count == 0 {
+        accumulator.mean = 0.0;
+        accumulator.m2 = 0.0;
+        return Ok(());
+    }
+    let sample = exact_as_f64(value);
+    let count = accumulator.valid_count as f64;
+    let delta = sample - accumulator.mean;
+    accumulator.mean -= delta / count;
+    accumulator.m2 -= delta * (sample - accumulator.mean);
+    Ok(())
+}
+
+fn remove_exact_sum(accumulator: &mut WindowAccumulator, value: ExactValue) -> Result<()> {
+    match (&mut accumulator.sum, value) {
+        (Some(SumState::Signed(total)), ExactValue::Signed(value)) => {
+            *total = total
+                .checked_sub(i128::from(value))
+                .ok_or_else(|| internal_error("rolling signed sum removal overflowed"))?;
+        }
+        (Some(SumState::Unsigned(total)), ExactValue::Unsigned(value)) => {
+            *total = total
+                .checked_sub(u128::from(value))
+                .ok_or_else(|| internal_error("rolling unsigned sum removal overflowed"))?;
+        }
+        _ => {
+            return Err(internal_error(
+                "typed exact rolling value does not match its sum class",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "the frozen integer mean and variance output type is Float64"
+)]
+fn exact_as_f64(value: ExactValue) -> f64 {
+    match value {
+        ExactValue::Signed(value) => value as f64,
+        ExactValue::Unsigned(value) => value as f64,
+    }
+}
+
+#[allow(
+    clippy::cast_precision_loss,
     reason = "the frozen covariance/correlation output type is Float64"
 )]
 fn add_pair_float64(
@@ -1368,85 +1802,251 @@ fn refold_pair_float64(
 
 enum DerivedBuilder {
     Count(UInt64Builder),
-    Float(Float64Builder),
+    Signed(Int64Builder, OutputStorage),
+    Unsigned(UInt64Builder, OutputStorage),
+    Float(Float64Builder, OutputStorage),
 }
 
 impl DerivedBuilder {
-    fn new(kind: Float64OutputKind, capacity: usize) -> Self {
-        if kind == Float64OutputKind::Statistic(Statistic::Count) {
+    fn new(output: Float64OutputPlan, capacity: usize) -> Self {
+        let storage = output.storage;
+        if storage == OutputStorage::Count {
             Self::Count(UInt64Builder::with_capacity(capacity))
+        } else if storage.is_signed() {
+            Self::Signed(Int64Builder::with_capacity(capacity), storage)
+        } else if storage.is_unsigned() {
+            Self::Unsigned(UInt64Builder::with_capacity(capacity), storage)
         } else {
-            Self::Float(Float64Builder::with_capacity(capacity))
+            Self::Float(Float64Builder::with_capacity(capacity), storage)
         }
     }
 
-    fn append(&mut self, state: &Float64WindowState, output: &Float64OutputPlan) -> Result<()> {
+    fn append(
+        &mut self,
+        state: &Float64WindowState,
+        output: &Float64OutputPlan,
+        node_id: &str,
+    ) -> Result<()> {
         if float64_valid_count(state) < output.min_periods {
             self.append_null();
             return Ok(());
         }
-        match (self, state, output.kind) {
-            (
-                Self::Count(builder),
-                Float64WindowState::Numeric(accumulator),
-                Float64OutputKind::Statistic(Statistic::Count),
-            ) => {
-                builder.append_value(accumulator.accumulator.valid_count);
-            }
-            (
-                Self::Float(builder),
-                Float64WindowState::Numeric(accumulator),
-                Float64OutputKind::Statistic(statistic),
-            ) => {
-                append_float(builder, &accumulator.accumulator, statistic, output.ddof)?;
-            }
-            (
-                Self::Float(builder),
-                Float64WindowState::Extrema(accumulator),
-                Float64OutputKind::Statistic(Statistic::Min | Statistic::Max),
-            ) => {
-                if let Some((_, value)) = accumulator.candidates.front() {
-                    builder.append_value(*value);
-                } else {
-                    builder.append_null();
-                }
-            }
-            (
-                Self::Float(builder),
-                Float64WindowState::Pair(accumulator),
-                Float64OutputKind::Covariance | Float64OutputKind::Correlation,
-            ) => {
-                append_pair(builder, &accumulator.accumulator, output)?;
-            }
-            _ => {
-                return Err(internal_error(
-                    "typed rolling output builder does not match its statistic",
-                ));
-            }
+        match state {
+            Float64WindowState::Numeric(state) => self.append_numeric(state, output),
+            Float64WindowState::Exact(state) => self.append_exact(state, output, node_id),
+            Float64WindowState::Extrema(state) => self.append_extrema(state, output),
+            Float64WindowState::Pair(state) => self.append_pair(state, output),
         }
-        Ok(())
+    }
+
+    fn append_numeric(
+        &mut self,
+        state: &Float64NumericState,
+        output: &Float64OutputPlan,
+    ) -> Result<()> {
+        match (self, output.kind) {
+            (Self::Count(builder), Float64OutputKind::Statistic(Statistic::Count)) => {
+                builder.append_value(state.accumulator.valid_count);
+                Ok(())
+            }
+            (Self::Float(builder, _), Float64OutputKind::Statistic(statistic)) => {
+                append_float(builder, &state.accumulator, statistic, output.ddof)
+            }
+            _ => Err(typed_output_mismatch()),
+        }
+    }
+
+    fn append_exact(
+        &mut self,
+        state: &ExactNumericState,
+        output: &Float64OutputPlan,
+        node_id: &str,
+    ) -> Result<()> {
+        match (self, output.kind) {
+            (Self::Signed(builder, _), Float64OutputKind::Statistic(Statistic::Sum)) => {
+                append_signed_sum(builder, &state.accumulator, node_id)
+            }
+            (Self::Unsigned(builder, _), Float64OutputKind::Statistic(Statistic::Sum)) => {
+                append_unsigned_sum(builder, &state.accumulator, node_id)
+            }
+            (Self::Count(builder), Float64OutputKind::Statistic(Statistic::Count)) => {
+                builder.append_value(state.accumulator.valid_count);
+                Ok(())
+            }
+            (Self::Float(builder, _), Float64OutputKind::Statistic(statistic)) => {
+                append_exact_float(builder, &state.accumulator, statistic, output.ddof)
+            }
+            _ => Err(typed_output_mismatch()),
+        }
+    }
+
+    fn append_extrema(
+        &mut self,
+        state: &Float64ExtremaState,
+        output: &Float64OutputPlan,
+    ) -> Result<()> {
+        if !matches!(
+            output.kind,
+            Float64OutputKind::Statistic(Statistic::Min | Statistic::Max)
+        ) {
+            return Err(typed_output_mismatch());
+        }
+        match self {
+            Self::Float(builder, _) => append_float_extrema(builder, state),
+            Self::Signed(builder, _) => append_signed_extrema(builder, state),
+            Self::Unsigned(builder, _) => append_unsigned_extrema(builder, state),
+            Self::Count(_) => Err(typed_output_mismatch()),
+        }
+    }
+
+    fn append_pair(&mut self, state: &Float64PairState, output: &Float64OutputPlan) -> Result<()> {
+        match (self, output.kind) {
+            (
+                Self::Float(builder, _),
+                Float64OutputKind::Covariance | Float64OutputKind::Correlation,
+            ) => append_pair(builder, &state.accumulator, output),
+            _ => Err(typed_output_mismatch()),
+        }
     }
 
     fn append_null(&mut self) {
         match self {
-            Self::Count(builder) => builder.append_null(),
-            Self::Float(builder) => builder.append_null(),
+            Self::Count(builder) | Self::Unsigned(builder, _) => builder.append_null(),
+            Self::Signed(builder, _) => builder.append_null(),
+            Self::Float(builder, _) => builder.append_null(),
         }
     }
 
-    fn finish(self) -> ArrayRef {
+    fn finish(self) -> Result<ArrayRef> {
         match self {
-            Self::Count(mut builder) => std::sync::Arc::new(builder.finish()),
-            Self::Float(mut builder) => std::sync::Arc::new(builder.finish()),
+            Self::Count(mut builder) => Ok(std::sync::Arc::new(builder.finish())),
+            Self::Signed(mut builder, storage) => {
+                finish_with_storage(std::sync::Arc::new(builder.finish()), storage)
+            }
+            Self::Unsigned(mut builder, storage) => {
+                finish_with_storage(std::sync::Arc::new(builder.finish()), storage)
+            }
+            Self::Float(mut builder, storage) => {
+                finish_with_storage(std::sync::Arc::new(builder.finish()), storage)
+            }
         }
     }
+}
+
+fn typed_output_mismatch() -> crate::CalcFlowError {
+    internal_error("typed rolling output builder does not match its statistic")
+}
+
+fn finish_with_storage(array: ArrayRef, storage: OutputStorage) -> Result<ArrayRef> {
+    let data_type = storage.data_type();
+    if array.data_type() == &data_type {
+        return Ok(array);
+    }
+    cast(&array, &data_type).map_err(|error| {
+        internal_error(&format!(
+            "typed rolling output cast to {data_type} failed: {error}"
+        ))
+    })
+}
+
+fn append_float_extrema(builder: &mut Float64Builder, state: &Float64ExtremaState) -> Result<()> {
+    match state.candidates.front().map(|(_, value)| value) {
+        Some(ExtremaValue::Float(value)) => builder.append_value(*value),
+        None => builder.append_null(),
+        _ => {
+            return Err(internal_error(
+                "typed Float64 extrema has the wrong candidate storage",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn append_signed_extrema(builder: &mut Int64Builder, state: &Float64ExtremaState) -> Result<()> {
+    match state.candidates.front().map(|(_, value)| value) {
+        Some(ExtremaValue::Signed(value)) => builder.append_value(*value),
+        None => builder.append_null(),
+        _ => {
+            return Err(internal_error(
+                "typed signed extrema has the wrong candidate storage",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn append_unsigned_extrema(builder: &mut UInt64Builder, state: &Float64ExtremaState) -> Result<()> {
+    match state.candidates.front().map(|(_, value)| value) {
+        Some(ExtremaValue::Unsigned(value)) => builder.append_value(*value),
+        None => builder.append_null(),
+        _ => {
+            return Err(internal_error(
+                "typed unsigned extrema has the wrong candidate storage",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn float64_valid_count(state: &Float64WindowState) -> u64 {
     match state {
         Float64WindowState::Numeric(state) => state.accumulator.valid_count,
+        Float64WindowState::Exact(state) => state.accumulator.valid_count,
         Float64WindowState::Extrema(state) => state.valid_count,
         Float64WindowState::Pair(state) => state.accumulator.valid_count,
+    }
+}
+
+fn append_signed_sum(
+    builder: &mut Int64Builder,
+    accumulator: &WindowAccumulator,
+    node_id: &str,
+) -> Result<()> {
+    let Some(SumState::Signed(total)) = accumulator.sum else {
+        return Err(internal_error("typed signed sum has the wrong accumulator"));
+    };
+    builder.append_value(
+        i64::try_from(total)
+            .map_err(|_| operator_error(node_id, "rolling integer sum overflowed"))?,
+    );
+    Ok(())
+}
+
+fn append_unsigned_sum(
+    builder: &mut UInt64Builder,
+    accumulator: &WindowAccumulator,
+    node_id: &str,
+) -> Result<()> {
+    let Some(SumState::Unsigned(total)) = accumulator.sum else {
+        return Err(internal_error(
+            "typed unsigned sum has the wrong accumulator",
+        ));
+    };
+    builder.append_value(
+        u64::try_from(total)
+            .map_err(|_| operator_error(node_id, "rolling integer sum overflowed"))?,
+    );
+    Ok(())
+}
+
+fn append_exact_float(
+    builder: &mut Float64Builder,
+    accumulator: &WindowAccumulator,
+    statistic: Statistic,
+    ddof: u8,
+) -> Result<()> {
+    match statistic {
+        Statistic::Mean => {
+            builder.append_value(accumulator.mean);
+            Ok(())
+        }
+        Statistic::Variance | Statistic::Stddev => {
+            append_dispersion(builder, accumulator, statistic, ddof);
+            Ok(())
+        }
+        _ => Err(internal_error(
+            "typed exact rolling output requires mean, variance, or stddev",
+        )),
     }
 }
 

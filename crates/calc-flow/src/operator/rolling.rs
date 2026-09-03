@@ -6677,6 +6677,82 @@ mod tests {
         .unwrap()
     }
 
+    fn int64_fast_record(values: &[Option<i64>]) -> RecordBatch {
+        use datafusion::arrow::array::{Int64Array, StringArray, TimestampMicrosecondArray};
+
+        let len = values.len();
+        RecordBatch::try_new(
+            Arc::new(kernel_schema()),
+            vec![
+                Arc::new(
+                    (1..=i64::try_from(len).unwrap())
+                        .map(Some)
+                        .collect::<TimestampMicrosecondArray>()
+                        .with_timezone("UTC"),
+                ),
+                Arc::new(StringArray::from_iter_values(std::iter::repeat_n("a", len))),
+                Arc::new(UInt64Array::from_iter_values(
+                    1..=u64::try_from(len).unwrap(),
+                )),
+                Arc::new(Float64Array::new_null(len)),
+                Arc::new(values.iter().copied().collect::<Int64Array>()),
+                Arc::new(StringArray::new_null(len)),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn primitive_volume_record(values: ArrayRef) -> (Schema, RecordBatch) {
+        use datafusion::arrow::array::{StringArray, TimestampMicrosecondArray};
+
+        let len = values.len();
+        let schema = with_field(
+            &kernel_schema(),
+            4,
+            &Field::new("volume", values.data_type().clone(), true),
+        );
+        let batch = RecordBatch::try_new(
+            Arc::new(schema.clone()),
+            vec![
+                Arc::new(
+                    (1..=i64::try_from(len).unwrap())
+                        .map(Some)
+                        .collect::<TimestampMicrosecondArray>()
+                        .with_timezone("UTC"),
+                ),
+                Arc::new(StringArray::from_iter_values(std::iter::repeat_n("a", len))),
+                Arc::new(UInt64Array::from_iter_values(
+                    1..=u64::try_from(len).unwrap(),
+                )),
+                Arc::new(Float64Array::new_null(len)),
+                values,
+                Arc::new(StringArray::new_null(len)),
+            ],
+        )
+        .unwrap();
+        (schema, batch)
+    }
+
+    fn assert_typed_matches_general(spec: &RollingSpec, schema: &Schema, input: &RecordBatch) {
+        let compiled = compile_spec(spec, schema).unwrap();
+        let fast = compiled
+            .kernel_plan
+            .open_and_fill(input, "rolling")
+            .unwrap()
+            .unwrap();
+        let rows = (0..input.num_rows())
+            .map(|row_index| read_buffered_row(input, row_index, &compiled, "rolling").unwrap())
+            .collect::<Vec<_>>();
+        let general =
+            compute_output_columns(&rows, &RollingHistories::default(), &compiled, "rolling")
+                .unwrap();
+
+        assert_eq!(fast.columns.len(), general.columns.len());
+        for (fast, general) in fast.columns.iter().zip(&general.columns) {
+            assert_eq!(fast.to_data(), general.to_data());
+        }
+    }
+
     #[test]
     fn ordered_float64_plan_matches_general_aggregate_kernel_without_row_materialization() {
         let spec = kernel_spec(json!([
@@ -6895,6 +6971,111 @@ mod tests {
         assert_eq!(fast.columns.len(), general.columns.len());
         for (fast, general) in fast.columns.iter().zip(&general.columns) {
             assert_eq!(fast.to_data(), general.to_data());
+        }
+    }
+
+    #[test]
+    fn int64_numeric_groups_keep_exact_sums_and_match_the_general_kernel() {
+        let spec = kernel_spec(json!([
+            aggregate_output("count", "volume", "volume_count", 2),
+            aggregate_output("sum", "volume", "volume_sum", 2),
+            aggregate_output("mean", "volume", "volume_mean", 2),
+            ddof_output("variance", "volume", "volume_var", 2, 1),
+        ]));
+        let compiled = compile_spec(&spec, &kernel_schema()).unwrap();
+        let input = int64_fast_record(&[Some(i64::MAX), Some(-1), None, Some(2)]);
+        let fast = compiled
+            .kernel_plan
+            .open_and_fill(&input, "rolling")
+            .unwrap()
+            .unwrap();
+        let rows = (0..input.num_rows())
+            .map(|row_index| read_buffered_row(&input, row_index, &compiled, "rolling").unwrap())
+            .collect::<Vec<_>>();
+        let general =
+            compute_output_columns(&rows, &RollingHistories::default(), &compiled, "rolling")
+                .unwrap();
+
+        assert_eq!(fast.columns.len(), general.columns.len());
+        for (fast, general) in fast.columns.iter().zip(&general.columns) {
+            assert_eq!(fast.to_data(), general.to_data());
+        }
+    }
+
+    #[test]
+    fn uint64_numeric_groups_keep_exact_sums_and_match_the_general_kernel() {
+        let spec = kernel_spec(json!([
+            aggregate_output("count", "sequence", "sequence_count", 3),
+            aggregate_output("sum", "sequence", "sequence_sum", 3),
+            aggregate_output("mean", "sequence", "sequence_mean", 3),
+        ]));
+        let compiled = compile_spec(&spec, &kernel_schema()).unwrap();
+        let input = float64_fast_record(&[
+            (1, "a", 1, None),
+            (2, "a", 2, None),
+            (3, "a", 3, None),
+            (4, "a", 4, None),
+        ]);
+        let fast = compiled
+            .kernel_plan
+            .open_and_fill(&input, "rolling")
+            .unwrap()
+            .unwrap();
+        let rows = (0..input.num_rows())
+            .map(|row_index| read_buffered_row(&input, row_index, &compiled, "rolling").unwrap())
+            .collect::<Vec<_>>();
+        let general =
+            compute_output_columns(&rows, &RollingHistories::default(), &compiled, "rolling")
+                .unwrap();
+
+        for (fast, general) in fast.columns.iter().zip(&general.columns) {
+            assert_eq!(fast.to_data(), general.to_data());
+        }
+    }
+
+    #[test]
+    fn primitive_numeric_and_extrema_types_preserve_the_frozen_output_schema() {
+        use datafusion::arrow::array::{Float32Array, Int8Array, UInt16Array};
+
+        let spec = kernel_spec(json!([
+            aggregate_output("count", "volume", "volume_count", 3),
+            aggregate_output("sum", "volume", "volume_sum", 3),
+            aggregate_output("mean", "volume", "volume_mean", 3),
+            aggregate_output("min", "volume", "volume_min", 3),
+            aggregate_output("max", "volume", "volume_max", 3),
+        ]));
+        let cases = [
+            primitive_volume_record(Arc::new(Int8Array::from(vec![
+                Some(-128),
+                Some(127),
+                None,
+                Some(-1),
+            ]))),
+            primitive_volume_record(Arc::new(UInt16Array::from(vec![
+                Some(65_535),
+                Some(1),
+                None,
+                Some(4),
+            ]))),
+            primitive_volume_record(Arc::new(Float32Array::from(vec![
+                Some(-0.0),
+                Some(5.5),
+                Some(f32::NAN),
+                Some(-2.25),
+            ]))),
+        ];
+
+        for (schema, input) in cases {
+            assert_typed_matches_general(&spec, &schema, &input);
+            let compiled = compile_spec(&spec, &schema).unwrap();
+            assert_eq!(
+                &compiled.outputs[3].output_type,
+                schema.field(4).data_type(),
+            );
+            assert_eq!(
+                &compiled.outputs[4].output_type,
+                schema.field(4).data_type(),
+            );
         }
     }
 

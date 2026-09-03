@@ -487,7 +487,9 @@ P2 当前已完成 columnar writer v3、v1/v2 reader dispatch、checkpoint kerne
 restore 后从受限 projected history bootstrap。`Float64` 数值 kernel 已从 bounded
 rows 扩展到严格 `(t - duration, t]` 事件时间窗口，并在同一次 transition scan
 中支持 min/max monotonic queue 与 covariance/correlation co-moment state。其余
-Arrow 类型扩展与
+primitive Arrow 数值类型现在也通过列式 cast 进入同一 transition：整数 sum 使用
+`i128`/`u128` 中间状态并按冻结契约精确收窄，窄整数与 `Float32` extrema 保持原始
+输出类型，pair 输出统一为 `Float64`。EWMA typed transition 与
 batch/stream/restore 完整矩阵仍是本阶段未完成项，因此状态保持 `in progress`。
 
 ## 14. 验证矩阵
