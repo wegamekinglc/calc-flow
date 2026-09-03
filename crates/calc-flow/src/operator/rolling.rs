@@ -6902,7 +6902,7 @@ mod tests {
         let compiled = compile_spec(&spec, &kernel_schema()).unwrap();
         assert_eq!(
             compiled.kernel_plan.selection(),
-            KernelSelection::OrderedFloat64
+            KernelSelection::OrderedPrimitive
         );
         let input = float64_fast_record(&[
             (1, "a", 1, Some(1.0)),
@@ -7055,7 +7055,7 @@ mod tests {
 
         assert_eq!(
             compiled.kernel_plan.selection(),
-            KernelSelection::OrderedFloat64
+            KernelSelection::OrderedPrimitive
         );
         assert_eq!(fast.columns[0].as_ref(), general.columns[0].as_ref());
     }
@@ -7236,7 +7236,7 @@ mod tests {
         assert_eq!(compiled.window_groups.len(), 1);
         assert_eq!(
             compiled.kernel_plan.selection(),
-            KernelSelection::OrderedFloat64
+            KernelSelection::OrderedPrimitive
         );
     }
 

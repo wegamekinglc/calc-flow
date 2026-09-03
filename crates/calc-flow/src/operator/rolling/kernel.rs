@@ -36,8 +36,8 @@ const STABLE_NUMERICAL_PROFILE: &str = "stable_v1";
 /// Selected executable family for one immutable rolling kernel plan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum KernelSelection {
-    /// Columnar `Float64` numeric, extrema, and pair aggregates.
-    OrderedFloat64,
+    /// Columnar primitive numeric aggregates and EWMA recurrence.
+    OrderedPrimitive,
     /// The semantic shape requires the general row kernel.
     General,
 }
@@ -60,15 +60,15 @@ pub(super) struct RollingKernelPlan {
     order_columns: Vec<usize>,
     partition_columns: Vec<usize>,
     sequence_columns: Vec<usize>,
-    groups: Vec<Float64GroupPlan>,
-    outputs: Vec<Float64OutputPlan>,
+    groups: Vec<TypedGroupPlan>,
+    outputs: Vec<TypedOutputPlan>,
     fallback_reason: Option<String>,
     estimated_state_bytes_per_entity: usize,
     fingerprint: String,
 }
 
 #[derive(Clone, Copy, Debug)]
-enum Float64GroupPlan {
+enum TypedGroupPlan {
     Numeric {
         input_index: usize,
         frame: TypedFrame,
@@ -98,7 +98,7 @@ enum Float64GroupPlan {
     },
 }
 
-impl Float64GroupPlan {
+impl TypedGroupPlan {
     const fn frame(self) -> Option<TypedFrame> {
         match self {
             Self::Numeric { frame, .. }
@@ -140,16 +140,16 @@ impl TryFrom<CompiledFrame> for TypedFrame {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct Float64OutputPlan {
+struct TypedOutputPlan {
     group: usize,
-    kind: Float64OutputKind,
+    kind: TypedOutputKind,
     storage: OutputStorage,
     min_periods: u64,
     ddof: u8,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Float64OutputKind {
+enum TypedOutputKind {
     Statistic(Statistic),
     Covariance,
     Correlation,
@@ -203,7 +203,7 @@ impl OutputStorage {
     }
 }
 
-enum Float64GroupInput {
+enum TypedGroupInput {
     Single(Float64Array),
     Signed(Int64Array),
     Unsigned(UInt64Array),
@@ -242,7 +242,7 @@ pub(super) struct RollingKernelExecution {
 pub(super) struct RollingKernelState {
     kernel_fingerprint: Option<String>,
     entities: HashMap<Vec<u8>, usize>,
-    states: Vec<Float64EntityState>,
+    states: Vec<TypedEntityState>,
     last_identity: Option<Vec<u8>>,
 }
 
@@ -268,10 +268,10 @@ impl RollingKernelPlan {
             .iter()
             .map(|column| column.index)
             .collect::<Vec<_>>();
-        let compiled = compile_float64_rows(input_schema, outputs, window_groups);
+        let compiled = compile_typed_plan(input_schema, outputs, window_groups);
         let (selection, complexity, groups, typed_outputs, fallback_reason) = match compiled {
             Ok((groups, typed_outputs)) => (
-                KernelSelection::OrderedFloat64,
+                KernelSelection::OrderedPrimitive,
                 KernelComplexity::AmortizedConstant,
                 groups,
                 typed_outputs,
@@ -287,7 +287,7 @@ impl RollingKernelPlan {
         };
         let estimated_state_bytes_per_entity = groups.iter().fold(0_usize, |total, group| {
             total.saturating_add(
-                size_of::<Float64WindowState>().saturating_add(
+                size_of::<TypedWindowState>().saturating_add(
                     group
                         .frame()
                         .map_or(0, TypedFrame::estimated_samples)
@@ -356,7 +356,7 @@ impl RollingKernelPlan {
     }
 
     pub(super) const fn supports_typed_transition(&self) -> bool {
-        matches!(self.selection, KernelSelection::OrderedFloat64)
+        matches!(self.selection, KernelSelection::OrderedPrimitive)
     }
 
     /// Executes one already-final, canonical-order candidate batch.
@@ -403,7 +403,7 @@ impl RollingKernelPlan {
 
     fn seed_ewma_entity(
         &self,
-        entity: &mut Float64EntityState,
+        entity: &mut TypedEntityState,
         seeds: &[Option<(u64, f64)>],
     ) -> Result<()> {
         if seeds.len() != self.groups.len() {
@@ -412,7 +412,7 @@ impl RollingKernelPlan {
             ));
         }
         for ((group, state), seed) in self.groups.iter().zip(&mut entity.groups).zip(seeds) {
-            let Float64GroupPlan::Ewma { alpha, .. } = group else {
+            let TypedGroupPlan::Ewma { alpha, .. } = group else {
                 if seed.is_some() {
                     return Err(internal_error(
                         "typed EWMA restore populated a non-EWMA group",
@@ -420,7 +420,7 @@ impl RollingKernelPlan {
                 }
                 continue;
             };
-            let Float64WindowState::Ewma(state) = state else {
+            let TypedWindowState::Ewma(state) = state else {
                 return Err(internal_error("typed EWMA restore state mismatch"));
             };
             *state = TypedEwmaState::new(*alpha);
@@ -448,7 +448,7 @@ impl RollingKernelPlan {
         input: &RecordBatch,
         node_id: &str,
     ) -> Result<Option<RollingKernelExecution>> {
-        if self.selection != KernelSelection::OrderedFloat64 {
+        if self.selection != KernelSelection::OrderedPrimitive {
             return Ok(None);
         }
         self.validate_state(state, node_id)?;
@@ -478,7 +478,7 @@ impl RollingKernelPlan {
         let entity_ids = next_state.resolve_entities(&entity_keys, &self.groups);
         let entity_encode_ns = nanos(entity_start.elapsed());
 
-        self.fill_float64(
+        self.fill_typed(
             input,
             &entity_ids,
             next_state,
@@ -554,7 +554,7 @@ impl RollingKernelPlan {
         Ok(true)
     }
 
-    fn fill_float64(
+    fn fill_typed(
         &self,
         input: &RecordBatch,
         entity_ids: &[usize],
@@ -563,7 +563,7 @@ impl RollingKernelPlan {
         node_id: &str,
         mut metrics: RollingKernelMetrics,
     ) -> Result<RollingKernelExecution> {
-        let inputs = self.float64_inputs(input, node_id)?;
+        let inputs = self.typed_inputs(input, node_id)?;
         let event_times = input
             .column(self.order_columns[0])
             .as_any()
@@ -581,7 +581,7 @@ impl RollingKernelPlan {
             .collect::<Vec<_>>();
 
         let kernel_start = Instant::now();
-        fill_float64_rows(
+        fill_typed_rows(
             &self.outputs,
             &inputs,
             event_times,
@@ -601,7 +601,7 @@ impl RollingKernelPlan {
         let state_bytes = state
             .states
             .iter()
-            .map(Float64EntityState::estimated_bytes)
+            .map(TypedEntityState::estimated_bytes)
             .sum();
         if last_identity.is_some() {
             state.last_identity = last_identity;
@@ -638,43 +638,44 @@ impl RollingKernelPlan {
         Ok(())
     }
 
-    fn float64_inputs(&self, input: &RecordBatch, node_id: &str) -> Result<Vec<Float64GroupInput>> {
+    fn typed_inputs(&self, input: &RecordBatch, node_id: &str) -> Result<Vec<TypedGroupInput>> {
         self.groups
             .iter()
-            .map(|group| float64_group_input(group, input, node_id))
+            .map(|group| typed_group_input(group, input, node_id))
             .collect()
     }
 }
 
-fn float64_group_input(
-    group: &Float64GroupPlan,
+fn typed_group_input(
+    group: &TypedGroupPlan,
     input: &RecordBatch,
     node_id: &str,
-) -> Result<Float64GroupInput> {
+) -> Result<TypedGroupInput> {
     match *group {
-        Float64GroupPlan::Numeric { input_index, .. } => Ok(Float64GroupInput::Single(
-            cast_float64(input.column(input_index), node_id)?,
-        )),
-        Float64GroupPlan::Extrema {
+        TypedGroupPlan::Numeric { input_index, .. } => Ok(TypedGroupInput::Single(cast_float64(
+            input.column(input_index),
+            node_id,
+        )?)),
+        TypedGroupPlan::Extrema {
             input_index,
             storage,
             ..
         } => extrema_group_input(input.column(input_index), storage, node_id),
-        Float64GroupPlan::Signed { input_index, .. } => {
-            cast_signed(input.column(input_index), node_id).map(Float64GroupInput::Signed)
+        TypedGroupPlan::Signed { input_index, .. } => {
+            cast_signed(input.column(input_index), node_id).map(TypedGroupInput::Signed)
         }
-        Float64GroupPlan::Unsigned { input_index, .. } => {
-            cast_unsigned(input.column(input_index), node_id).map(Float64GroupInput::Unsigned)
+        TypedGroupPlan::Unsigned { input_index, .. } => {
+            cast_unsigned(input.column(input_index), node_id).map(TypedGroupInput::Unsigned)
         }
-        Float64GroupPlan::Pair {
+        TypedGroupPlan::Pair {
             left_index,
             right_index,
             ..
-        } => Ok(Float64GroupInput::Pair(
+        } => Ok(TypedGroupInput::Pair(
             cast_float64(input.column(left_index), node_id)?,
             cast_float64(input.column(right_index), node_id)?,
         )),
-        Float64GroupPlan::Ewma { input_index, .. } => Ok(Float64GroupInput::Single(cast_float64(
+        TypedGroupPlan::Ewma { input_index, .. } => Ok(TypedGroupInput::Single(cast_float64(
             input.column(input_index),
             node_id,
         )?)),
@@ -685,13 +686,13 @@ fn extrema_group_input(
     input: &ArrayRef,
     storage: OutputStorage,
     node_id: &str,
-) -> Result<Float64GroupInput> {
+) -> Result<TypedGroupInput> {
     if storage.is_signed() {
-        cast_signed(input, node_id).map(Float64GroupInput::Signed)
+        cast_signed(input, node_id).map(TypedGroupInput::Signed)
     } else if storage.is_unsigned() {
-        cast_unsigned(input, node_id).map(Float64GroupInput::Unsigned)
+        cast_unsigned(input, node_id).map(TypedGroupInput::Unsigned)
     } else if storage.is_float() {
-        cast_float64(input, node_id).map(Float64GroupInput::Single)
+        cast_float64(input, node_id).map(TypedGroupInput::Single)
     } else {
         Err(internal_error(
             "typed extrema group has count output storage",
@@ -736,7 +737,7 @@ fn cast_primitive(array: &ArrayRef, target: &DataType, node_id: &str) -> Result<
 }
 
 impl RollingKernelState {
-    fn resolve_entities(&mut self, keys: &[Vec<u8>], groups: &[Float64GroupPlan]) -> Vec<usize> {
+    fn resolve_entities(&mut self, keys: &[Vec<u8>], groups: &[TypedGroupPlan]) -> Vec<usize> {
         let mut counts = HashMap::<&[u8], usize>::new();
         for key in keys {
             let count = counts.entry(key.as_slice()).or_default();
@@ -750,40 +751,40 @@ impl RollingKernelState {
                 let entity_id = self.states.len();
                 let row_count = counts[key.as_slice()];
                 self.entities.insert(key.clone(), entity_id);
-                self.states.push(Float64EntityState::new(groups, row_count));
+                self.states.push(TypedEntityState::new(groups, row_count));
                 entity_id
             })
             .collect()
     }
 }
 
-fn fill_float64_rows(
-    outputs: &[Float64OutputPlan],
-    inputs: &[Float64GroupInput],
+fn fill_typed_rows(
+    outputs: &[TypedOutputPlan],
+    inputs: &[TypedGroupInput],
     event_times: &TimestampMicrosecondArray,
-    states: &mut [Float64EntityState],
+    states: &mut [TypedEntityState],
     builders: &mut [DerivedBuilder],
     entity_ids: &[usize],
     node_id: &str,
 ) -> Result<()> {
     for (row_index, &entity_id) in entity_ids.iter().enumerate() {
         let entity = &mut states[entity_id];
-        update_float64_groups(
+        update_typed_groups(
             inputs,
             event_times.value(row_index),
             entity,
             row_index,
             node_id,
         )?;
-        append_float64_outputs(outputs, builders, entity, node_id)?;
+        append_typed_outputs(outputs, builders, entity, node_id)?;
     }
     Ok(())
 }
 
-fn update_float64_groups(
-    inputs: &[Float64GroupInput],
+fn update_typed_groups(
+    inputs: &[TypedGroupInput],
     event_time: i64,
-    entity: &mut Float64EntityState,
+    entity: &mut TypedEntityState,
     row_index: usize,
     node_id: &str,
 ) -> Result<()> {
@@ -793,10 +794,10 @@ fn update_float64_groups(
     Ok(())
 }
 
-fn append_float64_outputs(
-    outputs: &[Float64OutputPlan],
+fn append_typed_outputs(
+    outputs: &[TypedOutputPlan],
     builders: &mut [DerivedBuilder],
-    entity: &Float64EntityState,
+    entity: &TypedEntityState,
     node_id: &str,
 ) -> Result<()> {
     for (builder, output) in builders.iter_mut().zip(outputs) {
@@ -805,34 +806,34 @@ fn append_float64_outputs(
     Ok(())
 }
 
-fn compile_float64_rows(
+fn compile_typed_plan(
     input_schema: &Schema,
     outputs: &[CompiledRollingOutput],
     window_groups: &[CompiledWindowGroup],
-) -> std::result::Result<(Vec<Float64GroupPlan>, Vec<Float64OutputPlan>), String> {
-    let groups = compile_float64_groups(input_schema, window_groups)?;
-    let typed_outputs = compile_float64_outputs(outputs, &groups)?;
+) -> std::result::Result<(Vec<TypedGroupPlan>, Vec<TypedOutputPlan>), String> {
+    let groups = compile_typed_groups(input_schema, window_groups)?;
+    let typed_outputs = compile_typed_outputs(outputs, &groups)?;
     if groups.is_empty() || typed_outputs.is_empty() {
-        return Err("requires at least one Float64 row aggregate".into());
+        return Err("requires at least one typed rolling output".into());
     }
     Ok((groups, typed_outputs))
 }
 
-fn compile_float64_groups(
+fn compile_typed_groups(
     input_schema: &Schema,
     window_groups: &[CompiledWindowGroup],
-) -> std::result::Result<Vec<Float64GroupPlan>, String> {
+) -> std::result::Result<Vec<TypedGroupPlan>, String> {
     let mut groups = Vec::with_capacity(window_groups.len());
     for group in window_groups {
-        groups.push(compile_float64_group(input_schema, group)?);
+        groups.push(compile_typed_group(input_schema, group)?);
     }
     Ok(groups)
 }
 
-fn compile_float64_group(
+fn compile_typed_group(
     input_schema: &Schema,
     group: &CompiledWindowGroup,
-) -> std::result::Result<Float64GroupPlan, String> {
+) -> std::result::Result<TypedGroupPlan, String> {
     match group {
         CompiledWindowGroup::Numeric {
             input_index,
@@ -843,7 +844,7 @@ fn compile_float64_group(
             input_index,
             frame,
             descending,
-        } => compile_single_group(input_schema, *input_index, *frame, Some(*descending)),
+        } => compile_extrema_group(input_schema, *input_index, *frame, *descending),
         CompiledWindowGroup::Pair {
             left_index,
             right_index,
@@ -853,7 +854,7 @@ fn compile_float64_group(
             input_index, alpha, ..
         } => {
             require_numeric_type(input_schema, *input_index)?;
-            Ok(Float64GroupPlan::Ewma {
+            Ok(TypedGroupPlan::Ewma {
                 input_index: *input_index,
                 alpha: *alpha,
             })
@@ -866,7 +867,7 @@ fn compile_numeric_group(
     input_index: usize,
     frame: CompiledFrame,
     sum_class: SumClass,
-) -> std::result::Result<Float64GroupPlan, String> {
+) -> std::result::Result<TypedGroupPlan, String> {
     let frame = TypedFrame::try_from(frame)?;
     match sum_class {
         SumClass::Float
@@ -875,31 +876,26 @@ fn compile_numeric_group(
                 DataType::Float32 | DataType::Float64
             ) =>
         {
-            Ok(Float64GroupPlan::Numeric { input_index, frame })
+            Ok(TypedGroupPlan::Numeric { input_index, frame })
         }
-        SumClass::Signed => Ok(Float64GroupPlan::Signed { input_index, frame }),
-        SumClass::Unsigned => Ok(Float64GroupPlan::Unsigned { input_index, frame }),
+        SumClass::Signed => Ok(TypedGroupPlan::Signed { input_index, frame }),
+        SumClass::Unsigned => Ok(TypedGroupPlan::Unsigned { input_index, frame }),
         _ => Err("requires primitive numeric window groups".into()),
     }
 }
 
-fn compile_single_group(
+fn compile_extrema_group(
     input_schema: &Schema,
     input_index: usize,
     frame: CompiledFrame,
-    descending: Option<bool>,
-) -> std::result::Result<Float64GroupPlan, String> {
+    descending: bool,
+) -> std::result::Result<TypedGroupPlan, String> {
     let frame = TypedFrame::try_from(frame)?;
-    Ok(if let Some(descending) = descending {
-        Float64GroupPlan::Extrema {
-            input_index,
-            frame,
-            descending,
-            storage: extrema_storage(input_schema.field(input_index).data_type())?,
-        }
-    } else {
-        require_float64(input_schema, input_index)?;
-        Float64GroupPlan::Numeric { input_index, frame }
+    Ok(TypedGroupPlan::Extrema {
+        input_index,
+        frame,
+        descending,
+        storage: extrema_storage(input_schema.field(input_index).data_type())?,
     })
 }
 
@@ -924,10 +920,10 @@ fn compile_pair_group(
     left_index: usize,
     right_index: usize,
     frame: CompiledFrame,
-) -> std::result::Result<Float64GroupPlan, String> {
+) -> std::result::Result<TypedGroupPlan, String> {
     require_numeric_type(input_schema, left_index)?;
     require_numeric_type(input_schema, right_index)?;
-    Ok(Float64GroupPlan::Pair {
+    Ok(TypedGroupPlan::Pair {
         left_index,
         right_index,
         frame: TypedFrame::try_from(frame)?,
@@ -954,20 +950,13 @@ fn require_numeric_type(input_schema: &Schema, index: usize) -> std::result::Res
     }
 }
 
-fn require_float64(input_schema: &Schema, index: usize) -> std::result::Result<(), String> {
-    if input_schema.field(index).data_type() != &DataType::Float64 {
-        return Err("requires every aggregate input to be Float64".into());
-    }
-    Ok(())
-}
-
-fn compile_float64_outputs(
+fn compile_typed_outputs(
     outputs: &[CompiledRollingOutput],
-    groups: &[Float64GroupPlan],
-) -> std::result::Result<Vec<Float64OutputPlan>, String> {
+    groups: &[TypedGroupPlan],
+) -> std::result::Result<Vec<TypedOutputPlan>, String> {
     let mut typed_outputs = Vec::with_capacity(outputs.len());
     for output in outputs {
-        let plan = compile_float64_output(output, groups)?;
+        let plan = compile_typed_output(output, groups)?;
         if plan.group >= groups.len() {
             return Err("aggregate group index is outside the typed plan".into());
         }
@@ -976,32 +965,32 @@ fn compile_float64_outputs(
     Ok(typed_outputs)
 }
 
-fn compile_float64_output(
+fn compile_typed_output(
     output: &CompiledRollingOutput,
-    groups: &[Float64GroupPlan],
-) -> std::result::Result<Float64OutputPlan, String> {
+    groups: &[TypedGroupPlan],
+) -> std::result::Result<TypedOutputPlan, String> {
     match &output.evaluation {
-        CompiledEvaluation::Aggregate(aggregate) => Ok(Float64OutputPlan {
+        CompiledEvaluation::Aggregate(aggregate) => Ok(TypedOutputPlan {
             group: aggregate.group,
-            kind: Float64OutputKind::Statistic(aggregate.statistic),
+            kind: TypedOutputKind::Statistic(aggregate.statistic),
             storage: output_storage(aggregate, groups)?,
             min_periods: aggregate.min_periods,
             ddof: aggregate.ddof,
         }),
-        CompiledEvaluation::Pair(pair) => Ok(Float64OutputPlan {
+        CompiledEvaluation::Pair(pair) => Ok(TypedOutputPlan {
             group: pair.group,
             kind: if pair.correlation {
-                Float64OutputKind::Correlation
+                TypedOutputKind::Correlation
             } else {
-                Float64OutputKind::Covariance
+                TypedOutputKind::Covariance
             },
             storage: OutputStorage::Float64,
             min_periods: pair.min_periods,
             ddof: pair.ddof,
         }),
-        CompiledEvaluation::Ewma(ewma) => Ok(Float64OutputPlan {
+        CompiledEvaluation::Ewma(ewma) => Ok(TypedOutputPlan {
             group: ewma.group,
-            kind: Float64OutputKind::Ewma,
+            kind: TypedOutputKind::Ewma,
             storage: OutputStorage::Float64,
             min_periods: ewma.min_periods,
             ddof: 0,
@@ -1012,14 +1001,14 @@ fn compile_float64_output(
 
 fn output_storage(
     aggregate: &super::CompiledAggregate,
-    groups: &[Float64GroupPlan],
+    groups: &[TypedGroupPlan],
 ) -> std::result::Result<OutputStorage, String> {
     if aggregate.statistic == Statistic::Count {
         return Ok(OutputStorage::Count);
     }
     if matches!(aggregate.statistic, Statistic::Min | Statistic::Max) {
         return match groups.get(aggregate.group) {
-            Some(Float64GroupPlan::Extrema { storage, .. }) => Ok(*storage),
+            Some(TypedGroupPlan::Extrema { storage, .. }) => Ok(*storage),
             _ => Err("typed rolling extrema output does not reference an extrema group".into()),
         };
     }
@@ -1027,9 +1016,9 @@ fn output_storage(
         return Ok(OutputStorage::Float64);
     }
     match groups.get(aggregate.group) {
-        Some(Float64GroupPlan::Signed { .. }) => Ok(OutputStorage::Int64),
-        Some(Float64GroupPlan::Unsigned { .. }) => Ok(OutputStorage::UInt64),
-        Some(Float64GroupPlan::Numeric { .. }) => Ok(OutputStorage::Float64),
+        Some(TypedGroupPlan::Signed { .. }) => Ok(OutputStorage::Int64),
+        Some(TypedGroupPlan::Unsigned { .. }) => Ok(OutputStorage::UInt64),
+        Some(TypedGroupPlan::Numeric { .. }) => Ok(OutputStorage::Float64),
         _ => Err("typed rolling sum does not reference a numeric group".into()),
     }
 }
@@ -1064,8 +1053,8 @@ struct KernelFingerprintInput<'a> {
     complexity: KernelComplexity,
     order_columns: &'a [usize],
     partition_columns: &'a [usize],
-    groups: &'a [Float64GroupPlan],
-    outputs: &'a [Float64OutputPlan],
+    groups: &'a [TypedGroupPlan],
+    outputs: &'a [TypedOutputPlan],
     fallback_reason: Option<&'a str>,
 }
 
@@ -1128,16 +1117,16 @@ fn encoded_keys(entity_rows: &datafusion::arrow::row::Rows, row_count: usize) ->
 }
 
 #[derive(Clone, Debug)]
-struct Float64EntityState {
-    groups: Vec<Float64WindowState>,
+struct TypedEntityState {
+    groups: Vec<TypedWindowState>,
 }
 
-impl Float64EntityState {
-    fn new(groups: &[Float64GroupPlan], entity_rows: usize) -> Self {
+impl TypedEntityState {
+    fn new(groups: &[TypedGroupPlan], entity_rows: usize) -> Self {
         Self {
             groups: groups
                 .iter()
-                .map(|group| Float64WindowState::new(*group, entity_rows))
+                .map(|group| TypedWindowState::new(*group, entity_rows))
                 .collect(),
         }
     }
@@ -1147,94 +1136,94 @@ impl Float64EntityState {
             + self
                 .groups
                 .iter()
-                .map(Float64WindowState::estimated_bytes)
+                .map(TypedWindowState::estimated_bytes)
                 .sum::<usize>()
     }
 }
 
 #[derive(Clone, Debug)]
-enum Float64WindowState {
+enum TypedWindowState {
     Numeric(Float64NumericState),
     Exact(ExactNumericState),
-    Extrema(Float64ExtremaState),
+    Extrema(TypedExtremaState),
     Pair(Float64PairState),
     Ewma(TypedEwmaState),
 }
 
-impl Float64WindowState {
-    fn new(group: Float64GroupPlan, entity_rows: usize) -> Self {
+impl TypedWindowState {
+    fn new(group: TypedGroupPlan, entity_rows: usize) -> Self {
         match group {
-            Float64GroupPlan::Numeric { frame, .. } => {
+            TypedGroupPlan::Numeric { frame, .. } => {
                 Self::Numeric(Float64NumericState::new(frame, entity_rows))
             }
-            Float64GroupPlan::Signed { frame, .. } => {
+            TypedGroupPlan::Signed { frame, .. } => {
                 Self::Exact(ExactNumericState::new(frame, SumClass::Signed, entity_rows))
             }
-            Float64GroupPlan::Unsigned { frame, .. } => Self::Exact(ExactNumericState::new(
+            TypedGroupPlan::Unsigned { frame, .. } => Self::Exact(ExactNumericState::new(
                 frame,
                 SumClass::Unsigned,
                 entity_rows,
             )),
-            Float64GroupPlan::Extrema {
+            TypedGroupPlan::Extrema {
                 frame, descending, ..
-            } => Self::Extrema(Float64ExtremaState::new(frame, descending, entity_rows)),
-            Float64GroupPlan::Pair { frame, .. } => {
+            } => Self::Extrema(TypedExtremaState::new(frame, descending, entity_rows)),
+            TypedGroupPlan::Pair { frame, .. } => {
                 Self::Pair(Float64PairState::new(frame, entity_rows))
             }
-            Float64GroupPlan::Ewma { alpha, .. } => Self::Ewma(TypedEwmaState::new(alpha)),
+            TypedGroupPlan::Ewma { alpha, .. } => Self::Ewma(TypedEwmaState::new(alpha)),
         }
     }
 
     fn update(
         &mut self,
         event_time: i64,
-        input: &Float64GroupInput,
+        input: &TypedGroupInput,
         row_index: usize,
         node_id: &str,
     ) -> Result<()> {
         match (self, input) {
-            (Self::Numeric(state), Float64GroupInput::Single(input)) => {
+            (Self::Numeric(state), TypedGroupInput::Single(input)) => {
                 state.update(event_time, valid_float64(input, row_index), node_id)
             }
-            (Self::Exact(state), Float64GroupInput::Signed(input)) => state.update(
+            (Self::Exact(state), TypedGroupInput::Signed(input)) => state.update(
                 event_time,
                 input
                     .is_valid(row_index)
                     .then(|| ExactValue::Signed(input.value(row_index))),
                 node_id,
             ),
-            (Self::Exact(state), Float64GroupInput::Unsigned(input)) => state.update(
+            (Self::Exact(state), TypedGroupInput::Unsigned(input)) => state.update(
                 event_time,
                 input
                     .is_valid(row_index)
                     .then(|| ExactValue::Unsigned(input.value(row_index))),
                 node_id,
             ),
-            (Self::Extrema(state), Float64GroupInput::Single(input)) => state.update(
+            (Self::Extrema(state), TypedGroupInput::Single(input)) => state.update(
                 event_time,
                 valid_float64(input, row_index).map(ExtremaValue::Float),
                 node_id,
             ),
-            (Self::Extrema(state), Float64GroupInput::Signed(input)) => state.update(
+            (Self::Extrema(state), TypedGroupInput::Signed(input)) => state.update(
                 event_time,
                 input
                     .is_valid(row_index)
                     .then(|| ExtremaValue::Signed(input.value(row_index))),
                 node_id,
             ),
-            (Self::Extrema(state), Float64GroupInput::Unsigned(input)) => state.update(
+            (Self::Extrema(state), TypedGroupInput::Unsigned(input)) => state.update(
                 event_time,
                 input
                     .is_valid(row_index)
                     .then(|| ExtremaValue::Unsigned(input.value(row_index))),
                 node_id,
             ),
-            (Self::Pair(state), Float64GroupInput::Pair(left, right)) => state.update(
+            (Self::Pair(state), TypedGroupInput::Pair(left, right)) => state.update(
                 event_time,
                 valid_float64_pair(left, right, row_index),
                 node_id,
             ),
-            (Self::Ewma(state), Float64GroupInput::Single(input)) => {
+            (Self::Ewma(state), TypedGroupInput::Single(input)) => {
                 state.update(valid_float64(input, row_index), node_id)
             }
             _ => Err(internal_error(
@@ -1413,7 +1402,7 @@ impl Float64NumericState {
 }
 
 #[derive(Clone, Debug)]
-struct Float64ExtremaState {
+struct TypedExtremaState {
     frame: TypedFrame,
     descending: bool,
     values: VecDeque<TimedExtremaSample>,
@@ -1449,7 +1438,7 @@ impl ExtremaValue {
     }
 }
 
-impl Float64ExtremaState {
+impl TypedExtremaState {
     fn new(frame: TypedFrame, descending: bool, entity_rows: usize) -> Self {
         let capacity = frame.estimated_samples().min(entity_rows);
         Self {
@@ -1945,7 +1934,7 @@ enum DerivedBuilder {
 }
 
 impl DerivedBuilder {
-    fn new(output: Float64OutputPlan, capacity: usize) -> Self {
+    fn new(output: TypedOutputPlan, capacity: usize) -> Self {
         let storage = output.storage;
         if storage == OutputStorage::Count {
             Self::Count(UInt64Builder::with_capacity(capacity))
@@ -1960,34 +1949,34 @@ impl DerivedBuilder {
 
     fn append(
         &mut self,
-        state: &Float64WindowState,
-        output: &Float64OutputPlan,
+        state: &TypedWindowState,
+        output: &TypedOutputPlan,
         node_id: &str,
     ) -> Result<()> {
-        if float64_valid_count(state) < output.min_periods {
+        if typed_valid_count(state) < output.min_periods {
             self.append_null();
             return Ok(());
         }
         match state {
-            Float64WindowState::Numeric(state) => self.append_numeric(state, output),
-            Float64WindowState::Exact(state) => self.append_exact(state, output, node_id),
-            Float64WindowState::Extrema(state) => self.append_extrema(state, output),
-            Float64WindowState::Pair(state) => self.append_pair(state, output),
-            Float64WindowState::Ewma(state) => self.append_ewma(state, output),
+            TypedWindowState::Numeric(state) => self.append_numeric(state, output),
+            TypedWindowState::Exact(state) => self.append_exact(state, output, node_id),
+            TypedWindowState::Extrema(state) => self.append_extrema(state, output),
+            TypedWindowState::Pair(state) => self.append_pair(state, output),
+            TypedWindowState::Ewma(state) => self.append_ewma(state, output),
         }
     }
 
     fn append_numeric(
         &mut self,
         state: &Float64NumericState,
-        output: &Float64OutputPlan,
+        output: &TypedOutputPlan,
     ) -> Result<()> {
         match (self, output.kind) {
-            (Self::Count(builder), Float64OutputKind::Statistic(Statistic::Count)) => {
+            (Self::Count(builder), TypedOutputKind::Statistic(Statistic::Count)) => {
                 builder.append_value(state.accumulator.valid_count);
                 Ok(())
             }
-            (Self::Float(builder, _), Float64OutputKind::Statistic(statistic)) => {
+            (Self::Float(builder, _), TypedOutputKind::Statistic(statistic)) => {
                 append_float(builder, &state.accumulator, statistic, output.ddof)
             }
             _ => Err(typed_output_mismatch()),
@@ -1997,21 +1986,21 @@ impl DerivedBuilder {
     fn append_exact(
         &mut self,
         state: &ExactNumericState,
-        output: &Float64OutputPlan,
+        output: &TypedOutputPlan,
         node_id: &str,
     ) -> Result<()> {
         match (self, output.kind) {
-            (Self::Signed(builder, _), Float64OutputKind::Statistic(Statistic::Sum)) => {
+            (Self::Signed(builder, _), TypedOutputKind::Statistic(Statistic::Sum)) => {
                 append_signed_sum(builder, &state.accumulator, node_id)
             }
-            (Self::Unsigned(builder, _), Float64OutputKind::Statistic(Statistic::Sum)) => {
+            (Self::Unsigned(builder, _), TypedOutputKind::Statistic(Statistic::Sum)) => {
                 append_unsigned_sum(builder, &state.accumulator, node_id)
             }
-            (Self::Count(builder), Float64OutputKind::Statistic(Statistic::Count)) => {
+            (Self::Count(builder), TypedOutputKind::Statistic(Statistic::Count)) => {
                 builder.append_value(state.accumulator.valid_count);
                 Ok(())
             }
-            (Self::Float(builder, _), Float64OutputKind::Statistic(statistic)) => {
+            (Self::Float(builder, _), TypedOutputKind::Statistic(statistic)) => {
                 append_exact_float(builder, &state.accumulator, statistic, output.ddof)
             }
             _ => Err(typed_output_mismatch()),
@@ -2020,12 +2009,12 @@ impl DerivedBuilder {
 
     fn append_extrema(
         &mut self,
-        state: &Float64ExtremaState,
-        output: &Float64OutputPlan,
+        state: &TypedExtremaState,
+        output: &TypedOutputPlan,
     ) -> Result<()> {
         if !matches!(
             output.kind,
-            Float64OutputKind::Statistic(Statistic::Min | Statistic::Max)
+            TypedOutputKind::Statistic(Statistic::Min | Statistic::Max)
         ) {
             return Err(typed_output_mismatch());
         }
@@ -2037,19 +2026,19 @@ impl DerivedBuilder {
         }
     }
 
-    fn append_pair(&mut self, state: &Float64PairState, output: &Float64OutputPlan) -> Result<()> {
+    fn append_pair(&mut self, state: &Float64PairState, output: &TypedOutputPlan) -> Result<()> {
         match (self, output.kind) {
             (
                 Self::Float(builder, _),
-                Float64OutputKind::Covariance | Float64OutputKind::Correlation,
+                TypedOutputKind::Covariance | TypedOutputKind::Correlation,
             ) => append_pair(builder, &state.accumulator, output),
             _ => Err(typed_output_mismatch()),
         }
     }
 
-    fn append_ewma(&mut self, state: &TypedEwmaState, output: &Float64OutputPlan) -> Result<()> {
+    fn append_ewma(&mut self, state: &TypedEwmaState, output: &TypedOutputPlan) -> Result<()> {
         match (self, output.kind) {
-            (Self::Float(builder, _), Float64OutputKind::Ewma) => {
+            (Self::Float(builder, _), TypedOutputKind::Ewma) => {
                 builder.append_value(state.value);
                 Ok(())
             }
@@ -2097,7 +2086,7 @@ fn finish_with_storage(array: ArrayRef, storage: OutputStorage) -> Result<ArrayR
     })
 }
 
-fn append_float_extrema(builder: &mut Float64Builder, state: &Float64ExtremaState) -> Result<()> {
+fn append_float_extrema(builder: &mut Float64Builder, state: &TypedExtremaState) -> Result<()> {
     match state.candidates.front().map(|(_, value)| value) {
         Some(ExtremaValue::Float(value)) => builder.append_value(*value),
         None => builder.append_null(),
@@ -2110,7 +2099,7 @@ fn append_float_extrema(builder: &mut Float64Builder, state: &Float64ExtremaStat
     Ok(())
 }
 
-fn append_signed_extrema(builder: &mut Int64Builder, state: &Float64ExtremaState) -> Result<()> {
+fn append_signed_extrema(builder: &mut Int64Builder, state: &TypedExtremaState) -> Result<()> {
     match state.candidates.front().map(|(_, value)| value) {
         Some(ExtremaValue::Signed(value)) => builder.append_value(*value),
         None => builder.append_null(),
@@ -2123,7 +2112,7 @@ fn append_signed_extrema(builder: &mut Int64Builder, state: &Float64ExtremaState
     Ok(())
 }
 
-fn append_unsigned_extrema(builder: &mut UInt64Builder, state: &Float64ExtremaState) -> Result<()> {
+fn append_unsigned_extrema(builder: &mut UInt64Builder, state: &TypedExtremaState) -> Result<()> {
     match state.candidates.front().map(|(_, value)| value) {
         Some(ExtremaValue::Unsigned(value)) => builder.append_value(*value),
         None => builder.append_null(),
@@ -2136,13 +2125,13 @@ fn append_unsigned_extrema(builder: &mut UInt64Builder, state: &Float64ExtremaSt
     Ok(())
 }
 
-fn float64_valid_count(state: &Float64WindowState) -> u64 {
+fn typed_valid_count(state: &TypedWindowState) -> u64 {
     match state {
-        Float64WindowState::Numeric(state) => state.accumulator.valid_count,
-        Float64WindowState::Exact(state) => state.accumulator.valid_count,
-        Float64WindowState::Extrema(state) => state.valid_count,
-        Float64WindowState::Pair(state) => state.accumulator.valid_count,
-        Float64WindowState::Ewma(state) => state.valid_count,
+        TypedWindowState::Numeric(state) => state.accumulator.valid_count,
+        TypedWindowState::Exact(state) => state.accumulator.valid_count,
+        TypedWindowState::Extrema(state) => state.valid_count,
+        TypedWindowState::Pair(state) => state.accumulator.valid_count,
+        TypedWindowState::Ewma(state) => state.valid_count,
     }
 }
 
@@ -2206,7 +2195,7 @@ fn append_exact_float(
 fn append_pair(
     builder: &mut Float64Builder,
     accumulator: &PairAccumulator,
-    output: &Float64OutputPlan,
+    output: &TypedOutputPlan,
 ) -> Result<()> {
     let divisor = accumulator.valid_count - u64::from(output.ddof);
     if divisor == 0 {
@@ -2218,18 +2207,18 @@ fn append_pair(
         return Ok(());
     }
     match output.kind {
-        Float64OutputKind::Covariance => {
+        TypedOutputKind::Covariance => {
             builder.append_value(accumulator.co_moment / divisor as f64);
         }
-        Float64OutputKind::Correlation => {
+        TypedOutputKind::Correlation => {
             append_correlation(builder, accumulator);
         }
-        Float64OutputKind::Statistic(_) => {
+        TypedOutputKind::Statistic(_) => {
             return Err(internal_error(
                 "typed pair state received a scalar statistic",
             ));
         }
-        Float64OutputKind::Ewma => {
+        TypedOutputKind::Ewma => {
             return Err(internal_error("typed pair state received an EWMA output"));
         }
     }
