@@ -90,6 +90,14 @@ class _CaseInputs:
 
 
 @dataclass(frozen=True, slots=True)
+class _ProbeCompletionAck:
+    node_id: str
+    input_batches: int
+    processing_before_micros: int
+    processing_after_micros: int
+
+
+@dataclass(frozen=True, slots=True)
 class _NativeObservation:
     output: pa.Table
     seconds: float | None
@@ -98,7 +106,7 @@ class _NativeObservation:
     seed_emissions: int
     seed_probe_emissions: int
     delta_emissions: int
-    seed_probe_operator_inputs: tuple[tuple[str, int], ...]
+    seed_probe_ack: _ProbeCompletionAck
     seed_completed_ns: int
     append_started_ns: int | None
 
@@ -280,7 +288,9 @@ class _GatedAppendSource:
     def __init__(self, inputs: _CaseInputs) -> None:
         self._inputs = inputs
         self._phase = 0
+        self._probe_release = asyncio.Event()
         self._delta_release = asyncio.Event()
+        self.waiting_for_probe = asyncio.Event()
         self.waiting_for_delta = asyncio.Event()
         self._hold_open = asyncio.Event()
         self.seed_emissions = 0
@@ -317,6 +327,8 @@ class _GatedAppendSource:
             self._phase = 2
             return Watermark(_last_event_time(self._inputs.history_table))
         if self._phase == 2:
+            self.waiting_for_probe.set()
+            await self._probe_release.wait()
             self._phase = 3
             self.seed_probe_emissions += 1
             return Data(
@@ -343,6 +355,9 @@ class _GatedAppendSource:
 
     def release_delta(self) -> None:
         self._delta_release.set()
+
+    def release_probe(self) -> None:
+        self._probe_release.set()
 
 
 class _MaterializingSink:
@@ -392,11 +407,60 @@ class _WarmNativeSession:
     job: Any
     source: _GatedAppendSource
     sink: _MaterializingSink
-    seed_probe_operator_inputs: tuple[tuple[str, int], ...]
+    seed_probe_ack: _ProbeCompletionAck
     seed_completed_ns: int
 
 
-async def _wait_for_seed_probe(job: Any) -> tuple[tuple[str, int], ...]:
+def _rolling_progress(status: dict[str, Any]) -> tuple[int, int] | None:
+    rolling = status["operators"].get(ROLLING_NODE_ID)
+    if rolling is None:
+        return None
+    return (
+        int(rolling["input_batches"]),
+        int(rolling["processing_duration_micros"]),
+    )
+
+
+def _completed_seed_processing_micros(
+    progress: tuple[int, int] | None,
+) -> int | None:
+    if progress is None:
+        return None
+    input_batches, processing_micros = progress
+    if input_batches == 1 and processing_micros > 0:
+        return processing_micros
+    if input_batches > 1:
+        raise AssertionError(
+            "native probe entered rolling before its release gate: "
+            f"rolling_progress={progress}"
+        )
+    return None
+
+
+async def _wait_for_seed_completion(job: Any) -> int:
+    deadline = asyncio.get_running_loop().time() + STREAM_TIMEOUT_SECONDS
+    while True:
+        status = job.status()
+        if status["state"] == "failed":
+            outcome = await job.wait_async()
+            raise AssertionError(
+                f"native seed failed before probe release: {outcome.errors}"
+            )
+        progress = _rolling_progress(status)
+        processing_micros = _completed_seed_processing_micros(progress)
+        if processing_micros is not None:
+            return processing_micros
+        if asyncio.get_running_loop().time() > deadline:
+            raise AssertionError(
+                "native seed process_data did not complete before probe release: "
+                f"rolling_progress={progress}"
+            )
+        await asyncio.sleep(0.001)
+
+
+async def _wait_for_seed_probe(
+    job: Any, processing_before_micros: int
+) -> _ProbeCompletionAck:
     deadline = asyncio.get_running_loop().time() + STREAM_TIMEOUT_SECONDS
     while True:
         status = job.status()
@@ -405,18 +469,25 @@ async def _wait_for_seed_probe(job: Any) -> tuple[tuple[str, int], ...]:
             raise AssertionError(
                 f"native seed probe failed before timing: {outcome.errors}"
             )
-        rolling = status["operators"].get(ROLLING_NODE_ID)
-        observed = (
-            ()
-            if rolling is None
-            else ((ROLLING_NODE_ID, int(rolling["input_batches"])),)
-        )
-        if observed and observed[0][1] >= 2:
-            return observed
+        progress = _rolling_progress(status)
+        if progress is not None:
+            input_batches, processing_after_micros = progress
+            if (
+                input_batches >= 2
+                and processing_after_micros > processing_before_micros
+            ):
+                return _ProbeCompletionAck(
+                    node_id=ROLLING_NODE_ID,
+                    input_batches=input_batches,
+                    processing_before_micros=processing_before_micros,
+                    processing_after_micros=processing_after_micros,
+                )
         if asyncio.get_running_loop().time() > deadline:
             raise AssertionError(
-                "untimed empty probe did not pass the rolling operator before timing: "
-                f"rolling_input_batches={observed}"
+                "untimed empty probe did not complete after process_data "
+                "before timing: "
+                f"rolling_progress={progress}, "
+                f"processing_before_micros={processing_before_micros}"
             )
         await asyncio.sleep(0.001)
 
@@ -460,7 +531,12 @@ async def _start_warm_native(
             f"expected {inputs.history.num_rows}"
         )
     try:
-        seed_probe_operator_inputs = await _wait_for_seed_probe(job)
+        await asyncio.wait_for(
+            source.waiting_for_probe.wait(), timeout=STREAM_TIMEOUT_SECONDS
+        )
+        processing_before_micros = await _wait_for_seed_completion(job)
+        source.release_probe()
+        seed_probe_ack = await _wait_for_seed_probe(job, processing_before_micros)
         await asyncio.wait_for(
             source.waiting_for_delta.wait(), timeout=STREAM_TIMEOUT_SECONDS
         )
@@ -471,7 +547,7 @@ async def _start_warm_native(
         job=job,
         source=source,
         sink=sink,
-        seed_probe_operator_inputs=seed_probe_operator_inputs,
+        seed_probe_ack=seed_probe_ack,
         seed_completed_ns=time.perf_counter_ns(),
     )
 
@@ -504,7 +580,7 @@ async def _append_native(
         seed_emissions=session.source.seed_emissions,
         seed_probe_emissions=session.source.seed_probe_emissions,
         delta_emissions=session.source.delta_emissions,
-        seed_probe_operator_inputs=session.seed_probe_operator_inputs,
+        seed_probe_ack=session.seed_probe_ack,
         seed_completed_ns=session.seed_completed_ns,
         append_started_ns=append_started_ns,
     )
@@ -515,6 +591,13 @@ async def _append_native(
 def _assert_native_measurement_contract(
     observation: _NativeObservation, delta_rows: int
 ) -> None:
+    _assert_emission_counts(observation)
+    _assert_probe_completion_ack(observation.seed_probe_ack)
+    _assert_delta_output_rows(observation, delta_rows)
+    _assert_timer_ordering(observation)
+
+
+def _assert_emission_counts(observation: _NativeObservation) -> None:
     if (
         observation.seed_emissions != 1
         or observation.seed_probe_emissions != 1
@@ -523,11 +606,22 @@ def _assert_native_measurement_contract(
         raise AssertionError(
             "each native sample must emit seed, empty probe, and delta exactly once"
         )
-    if not observation.seed_probe_operator_inputs or any(
-        input_batches < 2
-        for _name, input_batches in observation.seed_probe_operator_inputs
-    ):
-        raise AssertionError("native seed probe must pass rolling before timing")
+
+
+def _assert_probe_completion_ack(ack: _ProbeCompletionAck) -> None:
+    if ack.node_id != ROLLING_NODE_ID or ack.input_batches < 2:
+        raise AssertionError("native seed probe must enter rolling before timing")
+    if ack.processing_before_micros <= 0:
+        raise AssertionError(
+            "native seed process_data must complete before probe release"
+        )
+    if ack.processing_after_micros <= ack.processing_before_micros:
+        raise AssertionError(
+            "native seed probe must complete after process_data before timing"
+        )
+
+
+def _assert_delta_output_rows(observation: _NativeObservation, delta_rows: int) -> None:
     if (
         observation.delta_rows != delta_rows
         or observation.output.num_rows != delta_rows
@@ -535,6 +629,9 @@ def _assert_native_measurement_contract(
         raise AssertionError(
             "native timed output must contain exactly the appended rows"
         )
+
+
+def _assert_timer_ordering(observation: _NativeObservation) -> None:
     if (
         observation.append_started_ns is not None
         and observation.seed_completed_ns > observation.append_started_ns
@@ -640,6 +737,30 @@ def test_warm_append_profile_contract() -> None:
         assert profile.measured_samples == STANDARD_SAMPLE_COUNT
 
 
+def test_probe_completion_requires_post_process_metric() -> None:
+    entered_only = _ProbeCompletionAck(
+        node_id=ROLLING_NODE_ID,
+        input_batches=2,
+        processing_before_micros=100,
+        processing_after_micros=100,
+    )
+
+    with pytest.raises(AssertionError, match="complete after process_data"):
+        _assert_probe_completion_ack(entered_only)
+
+
+def test_probe_completion_requires_completed_seed_baseline() -> None:
+    probe_after_unfinished_seed = _ProbeCompletionAck(
+        node_id=ROLLING_NODE_ID,
+        input_batches=2,
+        processing_before_micros=0,
+        processing_after_micros=1,
+    )
+
+    with pytest.raises(AssertionError, match="seed process_data must complete"):
+        _assert_probe_completion_ack(probe_after_unfinished_seed)
+
+
 @pytest.mark.benchmark(
     group=benchmark_group("rolling-warm-append"), min_rounds=1, max_time=0.1
 )
@@ -710,7 +831,18 @@ def test_warm_state_append_vs_sql_full_recompute(
             "native_seed_rows_before_timer": observation.native.history_rows,
             "native_timed_output_rows": observation.native.delta_rows,
             "native_seed_probe_operator_inputs": dict(
-                observation.native.seed_probe_operator_inputs
+                (
+                    (
+                        observation.native.seed_probe_ack.node_id,
+                        observation.native.seed_probe_ack.input_batches,
+                    ),
+                )
+            ),
+            "native_seed_probe_processing_before_micros": (
+                observation.native.seed_probe_ack.processing_before_micros
+            ),
+            "native_seed_probe_processing_after_micros": (
+                observation.native.seed_probe_ack.processing_after_micros
             ),
             "sql_input_rows": observation.sql_input_rows,
             "seed_completed_before_timer": (
@@ -747,8 +879,10 @@ def test_warm_state_append_vs_sql_full_recompute(
             "boundary_policy": "current row plus window_rows - 1 preceding entity rows",
             "seed_strategy": SEED_STRATEGY,
             "seed_state_proof": (
-                "an empty probe is processed after the seed watermark; rolling reports "
-                "at least two input batches before timing"
+                "with the probe source-gated, rolling reports one input batch and a "
+                "positive processing duration; after release it reports at least two "
+                "input batches and a strictly increased processing duration before "
+                "timing"
             ),
             "timing_boundary_native": (
                 "release delta source gate through sink Arrow "
