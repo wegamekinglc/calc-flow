@@ -6633,6 +6633,50 @@ mod tests {
         .unwrap()
     }
 
+    fn float64_pair_schema() -> Schema {
+        with_field(
+            &kernel_schema(),
+            4,
+            &Field::new("volume", DataType::Float64, true),
+        )
+    }
+
+    type Float64PairRow<'a> = (i64, &'a str, u64, Option<f64>, Option<f64>);
+
+    fn float64_pair_record(rows: &[Float64PairRow<'_>]) -> RecordBatch {
+        use datafusion::arrow::array::{StringArray, TimestampMicrosecondArray};
+
+        let timestamps = rows
+            .iter()
+            .map(|(event_time, ..)| Some(*event_time))
+            .collect::<TimestampMicrosecondArray>()
+            .with_timezone("UTC");
+        RecordBatch::try_new(
+            Arc::new(float64_pair_schema()),
+            vec![
+                Arc::new(timestamps),
+                Arc::new(StringArray::from_iter_values(
+                    rows.iter().map(|(_, symbol, ..)| *symbol),
+                )),
+                Arc::new(UInt64Array::from_iter_values(
+                    rows.iter().map(|(_, _, sequence, ..)| *sequence),
+                )),
+                Arc::new(
+                    rows.iter()
+                        .map(|(_, _, _, price, _)| *price)
+                        .collect::<Float64Array>(),
+                ),
+                Arc::new(
+                    rows.iter()
+                        .map(|(_, _, _, _, volume)| *volume)
+                        .collect::<Float64Array>(),
+                ),
+                Arc::new(StringArray::new_null(rows.len())),
+            ],
+        )
+        .unwrap()
+    }
+
     #[test]
     fn ordered_float64_plan_matches_general_aggregate_kernel_without_row_materialization() {
         let spec = kernel_spec(json!([
@@ -6645,7 +6689,7 @@ mod tests {
         let compiled = compile_spec(&spec, &kernel_schema()).unwrap();
         assert_eq!(
             compiled.kernel_plan.selection(),
-            KernelSelection::OrderedFloat64Rows
+            KernelSelection::OrderedFloat64
         );
         let input = float64_fast_record(&[
             (1, "a", 1, Some(1.0)),
@@ -6798,9 +6842,60 @@ mod tests {
 
         assert_eq!(
             compiled.kernel_plan.selection(),
-            KernelSelection::OrderedFloat64Rows
+            KernelSelection::OrderedFloat64
         );
         assert_eq!(fast.columns[0].as_ref(), general.columns[0].as_ref());
+    }
+
+    #[test]
+    fn float64_extrema_and_pair_groups_match_the_general_kernel() {
+        let spec = aggregate_spec(json!([
+            duration_output("mean", "price", "price_mean", 10),
+            duration_output("min", "price", "price_min", 10),
+            duration_output("max", "price", "price_max", 10),
+            pair_output(
+                "covariance",
+                "price",
+                "volume",
+                "price_volume_cov",
+                json!({"kind": "duration", "micros": 10}),
+                1
+            ),
+            pair_output(
+                "correlation",
+                "price",
+                "volume",
+                "price_volume_corr",
+                json!({"kind": "rows", "size": 3}),
+                1
+            ),
+        ]));
+        let schema = float64_pair_schema();
+        let compiled = compile_spec(&spec, &schema).unwrap();
+        let input = float64_pair_record(&[
+            (1, "a", 1, Some(-0.0), Some(2.0)),
+            (5, "a", 2, Some(5.0), Some(4.0)),
+            (12, "a", 3, Some(3.0), Some(8.0)),
+            (12, "b", 1, Some(20.0), Some(1.0)),
+            (14, "a", 4, Some(7.0), Some(16.0)),
+            (15, "a", 5, Some(f64::NAN), Some(32.0)),
+        ]);
+        let fast = compiled
+            .kernel_plan
+            .open_and_fill(&input, "rolling")
+            .unwrap()
+            .unwrap();
+        let rows = (0..input.num_rows())
+            .map(|row_index| read_buffered_row(&input, row_index, &compiled, "rolling").unwrap())
+            .collect::<Vec<_>>();
+        let general =
+            compute_output_columns(&rows, &RollingHistories::default(), &compiled, "rolling")
+                .unwrap();
+
+        assert_eq!(fast.columns.len(), general.columns.len());
+        for (fast, general) in fast.columns.iter().zip(&general.columns) {
+            assert_eq!(fast.to_data(), general.to_data());
+        }
     }
 
     #[test]

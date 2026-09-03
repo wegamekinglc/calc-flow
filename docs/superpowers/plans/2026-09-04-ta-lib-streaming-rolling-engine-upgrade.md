@@ -485,7 +485,9 @@ P2 当前已完成 columnar writer v3、v1/v2 reader dispatch、checkpoint kerne
 校验和 runtime capability 升级。`RollingKernelPlan` 也已提供 failure-atomic typed
 `update_and_fill`：跨 micro-batch 保留 dense entity state，并在 stream 首次运行或
 restore 后从受限 projected history bootstrap。`Float64` 数值 kernel 已从 bounded
-rows 扩展到严格 `(t - duration, t]` 事件时间窗口。其余 Arrow 类型扩展与
+rows 扩展到严格 `(t - duration, t]` 事件时间窗口，并在同一次 transition scan
+中支持 min/max monotonic queue 与 covariance/correlation co-moment state。其余
+Arrow 类型扩展与
 batch/stream/restore 完整矩阵仍是本阶段未完成项，因此状态保持 `in progress`。
 
 ## 14. 验证矩阵

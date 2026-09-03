@@ -5,6 +5,7 @@
 //! rows that are safe to process.
 
 use std::{
+    cmp::Ordering,
     collections::{HashMap, VecDeque},
     mem::size_of,
     time::{Duration, Instant},
@@ -22,8 +23,8 @@ use sha2::{Digest, Sha256};
 
 use super::{
     CompiledEvaluation, CompiledFrame, CompiledKeyColumn, CompiledRollingOutput,
-    CompiledWindowGroup, Statistic, SumClass, SumState, WindowAccumulator, internal_error,
-    operator_error,
+    CompiledWindowGroup, PairAccumulator, Statistic, SumClass, SumState, WindowAccumulator,
+    internal_error, operator_error,
 };
 use crate::Result;
 
@@ -33,8 +34,8 @@ const STABLE_NUMERICAL_PROFILE: &str = "stable_v1";
 /// Selected executable family for one immutable rolling kernel plan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum KernelSelection {
-    /// Columnar `Float64` numeric aggregates over bounded row frames.
-    OrderedFloat64Rows,
+    /// Columnar `Float64` numeric, extrema, and pair aggregates.
+    OrderedFloat64,
     /// The semantic shape requires the general row kernel.
     General,
 }
@@ -65,9 +66,31 @@ pub(super) struct RollingKernelPlan {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct Float64GroupPlan {
-    input_index: usize,
-    frame: TypedFrame,
+enum Float64GroupPlan {
+    Numeric {
+        input_index: usize,
+        frame: TypedFrame,
+    },
+    Extrema {
+        input_index: usize,
+        frame: TypedFrame,
+        descending: bool,
+    },
+    Pair {
+        left_index: usize,
+        right_index: usize,
+        frame: TypedFrame,
+    },
+}
+
+impl Float64GroupPlan {
+    const fn frame(self) -> TypedFrame {
+        match self {
+            Self::Numeric { frame, .. }
+            | Self::Extrema { frame, .. }
+            | Self::Pair { frame, .. } => frame,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -101,9 +124,21 @@ impl TryFrom<CompiledFrame> for TypedFrame {
 #[derive(Clone, Copy, Debug)]
 struct Float64OutputPlan {
     group: usize,
-    statistic: Statistic,
+    kind: Float64OutputKind,
     min_periods: u64,
     ddof: u8,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Float64OutputKind {
+    Statistic(Statistic),
+    Covariance,
+    Correlation,
+}
+
+enum Float64GroupInput<'a> {
+    Single(&'a Float64Array),
+    Pair(&'a Float64Array, &'a Float64Array),
 }
 
 /// Stage-level facts from one typed kernel invocation.
@@ -167,7 +202,7 @@ impl RollingKernelPlan {
         let compiled = compile_float64_rows(input_schema, outputs, window_groups);
         let (selection, complexity, groups, typed_outputs, fallback_reason) = match compiled {
             Ok((groups, typed_outputs)) => (
-                KernelSelection::OrderedFloat64Rows,
+                KernelSelection::OrderedFloat64,
                 KernelComplexity::AmortizedConstant,
                 groups,
                 typed_outputs,
@@ -185,7 +220,7 @@ impl RollingKernelPlan {
             total.saturating_add(
                 size_of::<Float64WindowState>().saturating_add(
                     group
-                        .frame
+                        .frame()
                         .estimated_samples()
                         .saturating_mul(size_of::<TimedFloat64Sample>()),
                 ),
@@ -252,7 +287,7 @@ impl RollingKernelPlan {
     }
 
     pub(super) const fn supports_typed_transition(&self) -> bool {
-        matches!(self.selection, KernelSelection::OrderedFloat64Rows)
+        matches!(self.selection, KernelSelection::OrderedFloat64)
     }
 
     /// Executes one already-final, canonical-order candidate batch.
@@ -279,7 +314,7 @@ impl RollingKernelPlan {
         input: &RecordBatch,
         node_id: &str,
     ) -> Result<Option<RollingKernelExecution>> {
-        if self.selection != KernelSelection::OrderedFloat64Rows {
+        if self.selection != KernelSelection::OrderedFloat64 {
             return Ok(None);
         }
         self.validate_state(state, node_id)?;
@@ -408,7 +443,7 @@ impl RollingKernelPlan {
         let mut builders = self
             .outputs
             .iter()
-            .map(|output| DerivedBuilder::new(output.statistic, input.num_rows()))
+            .map(|output| DerivedBuilder::new(output.kind, input.num_rows()))
             .collect::<Vec<_>>();
 
         let kernel_start = Instant::now();
@@ -473,16 +508,43 @@ impl RollingKernelPlan {
         &self,
         input: &'a RecordBatch,
         node_id: &str,
-    ) -> Result<Vec<&'a Float64Array>> {
+    ) -> Result<Vec<Float64GroupInput<'a>>> {
         self.groups
             .iter()
-            .map(|group| {
-                input.columns()[group.input_index]
-                    .as_any()
-                    .downcast_ref::<Float64Array>()
-                    .ok_or_else(|| operator_error(node_id, "typed rolling input is not Float64"))
-            })
+            .map(|group| float64_group_input(group, input, node_id))
             .collect()
+    }
+}
+
+fn float64_array<'a>(
+    input: &'a RecordBatch,
+    index: usize,
+    node_id: &str,
+) -> Result<&'a Float64Array> {
+    input.columns()[index]
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .ok_or_else(|| operator_error(node_id, "typed rolling input is not Float64"))
+}
+
+fn float64_group_input<'a>(
+    group: &Float64GroupPlan,
+    input: &'a RecordBatch,
+    node_id: &str,
+) -> Result<Float64GroupInput<'a>> {
+    match *group {
+        Float64GroupPlan::Numeric { input_index, .. }
+        | Float64GroupPlan::Extrema { input_index, .. } => Ok(Float64GroupInput::Single(
+            float64_array(input, input_index, node_id)?,
+        )),
+        Float64GroupPlan::Pair {
+            left_index,
+            right_index,
+            ..
+        } => Ok(Float64GroupInput::Pair(
+            float64_array(input, left_index, node_id)?,
+            float64_array(input, right_index, node_id)?,
+        )),
     }
 }
 
@@ -510,7 +572,7 @@ impl RollingKernelState {
 
 fn fill_float64_rows(
     outputs: &[Float64OutputPlan],
-    inputs: &[&Float64Array],
+    inputs: &[Float64GroupInput<'_>],
     event_times: &TimestampMicrosecondArray,
     states: &mut [Float64EntityState],
     builders: &mut [DerivedBuilder],
@@ -532,19 +594,14 @@ fn fill_float64_rows(
 }
 
 fn update_float64_groups(
-    inputs: &[&Float64Array],
+    inputs: &[Float64GroupInput<'_>],
     event_time: i64,
     entity: &mut Float64EntityState,
     row_index: usize,
     node_id: &str,
 ) -> Result<()> {
-    for (group_index, input) in inputs.iter().enumerate() {
-        let sample = if input.is_null(row_index) || input.value(row_index).is_nan() {
-            None
-        } else {
-            Some(input.value(row_index))
-        };
-        entity.groups[group_index].update(event_time, sample, node_id)?;
+    for (state, input) in entity.groups.iter_mut().zip(inputs) {
+        state.update(event_time, input, row_index, node_id)?;
     }
     Ok(())
 }
@@ -555,7 +612,7 @@ fn append_float64_outputs(
     entity: &Float64EntityState,
 ) -> Result<()> {
     for (builder, output) in builders.iter_mut().zip(outputs) {
-        builder.append(&entity.groups[output.group].accumulator, output)?;
+        builder.append(&entity.groups[output.group], output)?;
     }
     Ok(())
 }
@@ -579,24 +636,74 @@ fn compile_float64_groups(
 ) -> std::result::Result<Vec<Float64GroupPlan>, String> {
     let mut groups = Vec::with_capacity(window_groups.len());
     for group in window_groups {
-        let CompiledWindowGroup::Numeric {
+        groups.push(compile_float64_group(input_schema, group)?);
+    }
+    Ok(groups)
+}
+
+fn compile_float64_group(
+    input_schema: &Schema,
+    group: &CompiledWindowGroup,
+) -> std::result::Result<Float64GroupPlan, String> {
+    match group {
+        CompiledWindowGroup::Numeric {
             input_index,
             frame,
             sum_class: SumClass::Float,
-        } = group
-        else {
-            return Err("requires a non-Float64, duration, extrema, pair, or EWMA group".into());
-        };
-        if input_schema.field(*input_index).data_type() != &DataType::Float64 {
-            return Err("requires every aggregate input to be Float64".into());
-        }
-        let frame = TypedFrame::try_from(*frame)?;
-        groups.push(Float64GroupPlan {
-            input_index: *input_index,
+        } => compile_single_group(input_schema, *input_index, *frame, None),
+        CompiledWindowGroup::Extrema {
+            input_index,
             frame,
-        });
+            descending,
+        } => compile_single_group(input_schema, *input_index, *frame, Some(*descending)),
+        CompiledWindowGroup::Pair {
+            left_index,
+            right_index,
+            frame,
+        } => compile_pair_group(input_schema, *left_index, *right_index, *frame),
+        _ => Err("requires Float64 numeric, extrema, or pair window groups".into()),
     }
-    Ok(groups)
+}
+
+fn compile_single_group(
+    input_schema: &Schema,
+    input_index: usize,
+    frame: CompiledFrame,
+    descending: Option<bool>,
+) -> std::result::Result<Float64GroupPlan, String> {
+    require_float64(input_schema, input_index)?;
+    let frame = TypedFrame::try_from(frame)?;
+    Ok(if let Some(descending) = descending {
+        Float64GroupPlan::Extrema {
+            input_index,
+            frame,
+            descending,
+        }
+    } else {
+        Float64GroupPlan::Numeric { input_index, frame }
+    })
+}
+
+fn compile_pair_group(
+    input_schema: &Schema,
+    left_index: usize,
+    right_index: usize,
+    frame: CompiledFrame,
+) -> std::result::Result<Float64GroupPlan, String> {
+    require_float64(input_schema, left_index)?;
+    require_float64(input_schema, right_index)?;
+    Ok(Float64GroupPlan::Pair {
+        left_index,
+        right_index,
+        frame: TypedFrame::try_from(frame)?,
+    })
+}
+
+fn require_float64(input_schema: &Schema, index: usize) -> std::result::Result<(), String> {
+    if input_schema.field(index).data_type() != &DataType::Float64 {
+        return Err("requires every aggregate input to be Float64".into());
+    }
+    Ok(())
 }
 
 fn compile_float64_outputs(
@@ -605,30 +712,37 @@ fn compile_float64_outputs(
 ) -> std::result::Result<Vec<Float64OutputPlan>, String> {
     let mut typed_outputs = Vec::with_capacity(outputs.len());
     for output in outputs {
-        let CompiledEvaluation::Aggregate(aggregate) = &output.evaluation else {
-            return Err("requires aggregate-only outputs".into());
-        };
-        if !matches!(
-            aggregate.statistic,
-            Statistic::Count
-                | Statistic::Sum
-                | Statistic::Mean
-                | Statistic::Variance
-                | Statistic::Stddev
-        ) {
-            return Err("requires count, sum, mean, variance, or stddev outputs".into());
-        }
-        if aggregate.group >= group_count {
+        let plan = compile_float64_output(output)?;
+        if plan.group >= group_count {
             return Err("aggregate group index is outside the typed plan".into());
         }
-        typed_outputs.push(Float64OutputPlan {
-            group: aggregate.group,
-            statistic: aggregate.statistic,
-            min_periods: aggregate.min_periods,
-            ddof: aggregate.ddof,
-        });
+        typed_outputs.push(plan);
     }
     Ok(typed_outputs)
+}
+
+fn compile_float64_output(
+    output: &CompiledRollingOutput,
+) -> std::result::Result<Float64OutputPlan, String> {
+    match &output.evaluation {
+        CompiledEvaluation::Aggregate(aggregate) => Ok(Float64OutputPlan {
+            group: aggregate.group,
+            kind: Float64OutputKind::Statistic(aggregate.statistic),
+            min_periods: aggregate.min_periods,
+            ddof: aggregate.ddof,
+        }),
+        CompiledEvaluation::Pair(pair) => Ok(Float64OutputPlan {
+            group: pair.group,
+            kind: if pair.correlation {
+                Float64OutputKind::Correlation
+            } else {
+                Float64OutputKind::Covariance
+            },
+            min_periods: pair.min_periods,
+            ddof: pair.ddof,
+        }),
+        _ => Err("requires aggregate-only outputs".into()),
+    }
 }
 
 fn duplicate_identity_error(
@@ -734,7 +848,7 @@ impl Float64EntityState {
         Self {
             groups: groups
                 .iter()
-                .map(|group| Float64WindowState::with_frame(group.frame, entity_rows))
+                .map(|group| Float64WindowState::new(*group, entity_rows))
                 .collect(),
         }
     }
@@ -750,7 +864,79 @@ impl Float64EntityState {
 }
 
 #[derive(Clone, Debug)]
-struct Float64WindowState {
+enum Float64WindowState {
+    Numeric(Float64NumericState),
+    Extrema(Float64ExtremaState),
+    Pair(Float64PairState),
+}
+
+impl Float64WindowState {
+    fn new(group: Float64GroupPlan, entity_rows: usize) -> Self {
+        match group {
+            Float64GroupPlan::Numeric { frame, .. } => {
+                Self::Numeric(Float64NumericState::new(frame, entity_rows))
+            }
+            Float64GroupPlan::Extrema {
+                frame, descending, ..
+            } => Self::Extrema(Float64ExtremaState::new(frame, descending, entity_rows)),
+            Float64GroupPlan::Pair { frame, .. } => {
+                Self::Pair(Float64PairState::new(frame, entity_rows))
+            }
+        }
+    }
+
+    fn update(
+        &mut self,
+        event_time: i64,
+        input: &Float64GroupInput<'_>,
+        row_index: usize,
+        node_id: &str,
+    ) -> Result<()> {
+        match (self, input) {
+            (Self::Numeric(state), Float64GroupInput::Single(input)) => {
+                state.update(event_time, valid_float64(input, row_index), node_id)
+            }
+            (Self::Extrema(state), Float64GroupInput::Single(input)) => {
+                state.update(event_time, valid_float64(input, row_index), node_id)
+            }
+            (Self::Pair(state), Float64GroupInput::Pair(left, right)) => state.update(
+                event_time,
+                valid_float64_pair(left, right, row_index),
+                node_id,
+            ),
+            _ => Err(internal_error(
+                "typed rolling group state does not match its input plan",
+            )),
+        }
+    }
+
+    fn estimated_bytes(&self) -> usize {
+        match self {
+            Self::Numeric(state) => state.estimated_bytes(),
+            Self::Extrema(state) => state.estimated_bytes(),
+            Self::Pair(state) => state.estimated_bytes(),
+        }
+    }
+}
+
+fn valid_float64(input: &Float64Array, row_index: usize) -> Option<f64> {
+    if input.is_null(row_index) || input.value(row_index).is_nan() {
+        None
+    } else {
+        Some(input.value(row_index))
+    }
+}
+
+fn valid_float64_pair(
+    left: &Float64Array,
+    right: &Float64Array,
+    row_index: usize,
+) -> Option<(f64, f64)> {
+    valid_float64(left, row_index).zip(valid_float64(right, row_index))
+}
+
+#[derive(Clone, Debug)]
+struct Float64NumericState {
     frame: TypedFrame,
     values: VecDeque<TimedFloat64Sample>,
     accumulator: WindowAccumulator,
@@ -762,8 +948,8 @@ struct TimedFloat64Sample {
     value: Option<f64>,
 }
 
-impl Float64WindowState {
-    fn with_frame(frame: TypedFrame, entity_rows: usize) -> Self {
+impl Float64NumericState {
+    fn new(frame: TypedFrame, entity_rows: usize) -> Self {
         let capacity = frame.estimated_samples().min(entity_rows);
         Self {
             frame,
@@ -817,6 +1003,188 @@ impl Float64WindowState {
 
     fn estimated_bytes(&self) -> usize {
         size_of::<Self>() + self.values.capacity() * size_of::<Option<f64>>()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct Float64ExtremaState {
+    frame: TypedFrame,
+    descending: bool,
+    values: VecDeque<TimedExtremaSample>,
+    candidates: VecDeque<(u64, f64)>,
+    valid_count: u64,
+    next_ordinal: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TimedExtremaSample {
+    ordinal: u64,
+    event_time: i64,
+    value: Option<f64>,
+}
+
+impl Float64ExtremaState {
+    fn new(frame: TypedFrame, descending: bool, entity_rows: usize) -> Self {
+        let capacity = frame.estimated_samples().min(entity_rows);
+        Self {
+            frame,
+            descending,
+            values: VecDeque::with_capacity(capacity),
+            candidates: VecDeque::with_capacity(capacity),
+            valid_count: 0,
+            next_ordinal: 0,
+        }
+    }
+
+    fn update(&mut self, event_time: i64, value: Option<f64>, node_id: &str) -> Result<()> {
+        let ordinal = self.next_ordinal;
+        self.next_ordinal = self
+            .next_ordinal
+            .checked_add(1)
+            .ok_or_else(|| operator_error(node_id, "rolling extrema ordinal overflowed"))?;
+        if let Some(value) = value {
+            self.add_candidate(ordinal, value, node_id)?;
+        }
+        self.values.push_back(TimedExtremaSample {
+            ordinal,
+            event_time,
+            value,
+        });
+        self.expire(event_time)
+    }
+
+    fn add_candidate(&mut self, ordinal: u64, value: f64, node_id: &str) -> Result<()> {
+        self.valid_count = self
+            .valid_count
+            .checked_add(1)
+            .ok_or_else(|| operator_error(node_id, "rolling extrema count overflowed"))?;
+        while self.candidates.back().is_some_and(|(_, back)| {
+            let ordering = back.total_cmp(&value);
+            if self.descending {
+                ordering != Ordering::Greater
+            } else {
+                ordering != Ordering::Less
+            }
+        }) {
+            self.candidates.pop_back();
+        }
+        self.candidates.push_back((ordinal, value));
+        Ok(())
+    }
+
+    fn expire(&mut self, event_time: i64) -> Result<()> {
+        match self.frame {
+            TypedFrame::Rows(window) => {
+                if self.values.len() > window {
+                    self.remove_front()?;
+                }
+            }
+            TypedFrame::Duration(micros) => {
+                let bound = i128::from(event_time) - i128::from(micros);
+                while self
+                    .values
+                    .front()
+                    .is_some_and(|sample| i128::from(sample.event_time) <= bound)
+                {
+                    self.remove_front()?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn remove_front(&mut self) -> Result<()> {
+        let Some(expiring) = self.values.pop_front() else {
+            return Ok(());
+        };
+        if expiring.value.is_some() {
+            self.valid_count = self
+                .valid_count
+                .checked_sub(1)
+                .ok_or_else(|| internal_error("rolling extrema removal without an add"))?;
+        }
+        if self
+            .candidates
+            .front()
+            .is_some_and(|(ordinal, _)| *ordinal == expiring.ordinal)
+        {
+            self.candidates.pop_front();
+        }
+        Ok(())
+    }
+
+    fn estimated_bytes(&self) -> usize {
+        size_of::<Self>()
+            + self.values.capacity() * size_of::<TimedExtremaSample>()
+            + self.candidates.capacity() * size_of::<(u64, f64)>()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct Float64PairState {
+    frame: TypedFrame,
+    values: VecDeque<TimedPairSample>,
+    accumulator: PairAccumulator,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TimedPairSample {
+    event_time: i64,
+    value: Option<(f64, f64)>,
+}
+
+impl Float64PairState {
+    fn new(frame: TypedFrame, entity_rows: usize) -> Self {
+        let capacity = frame.estimated_samples().min(entity_rows);
+        Self {
+            frame,
+            values: VecDeque::with_capacity(capacity),
+            accumulator: PairAccumulator::default(),
+        }
+    }
+
+    fn update(&mut self, event_time: i64, value: Option<(f64, f64)>, node_id: &str) -> Result<()> {
+        if let Some((left, right)) = value {
+            add_pair_float64(&mut self.accumulator, left, right, node_id)?;
+        }
+        self.values.push_back(TimedPairSample { event_time, value });
+        self.expire(event_time)?;
+        if self.accumulator.is_non_finite() {
+            refold_pair_float64(&mut self.accumulator, &self.values, node_id)?;
+        }
+        Ok(())
+    }
+
+    fn expire(&mut self, event_time: i64) -> Result<()> {
+        match self.frame {
+            TypedFrame::Rows(window) => {
+                if self.values.len() > window {
+                    self.remove_front()?;
+                }
+            }
+            TypedFrame::Duration(micros) => {
+                let bound = i128::from(event_time) - i128::from(micros);
+                while self
+                    .values
+                    .front()
+                    .is_some_and(|sample| i128::from(sample.event_time) <= bound)
+                {
+                    self.remove_front()?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn remove_front(&mut self) -> Result<()> {
+        if let Some(Some((left, right))) = self.values.pop_front().map(|sample| sample.value) {
+            remove_pair_float64(&mut self.accumulator, left, right)?;
+        }
+        Ok(())
+    }
+
+    fn estimated_bytes(&self) -> usize {
+        size_of::<Self>() + self.values.capacity() * size_of::<TimedPairSample>()
     }
 }
 
@@ -895,39 +1263,160 @@ fn refold_float64(
     Ok(())
 }
 
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "the frozen covariance/correlation output type is Float64"
+)]
+fn add_pair_float64(
+    accumulator: &mut PairAccumulator,
+    left: f64,
+    right: f64,
+    node_id: &str,
+) -> Result<()> {
+    accumulator.valid_count = accumulator
+        .valid_count
+        .checked_add(1)
+        .ok_or_else(|| operator_error(node_id, "rolling pair sample count overflowed"))?;
+    update_pair_infinity_counts(accumulator, left, right, true);
+    let count = accumulator.valid_count as f64;
+    let delta_x = left - accumulator.mean_x;
+    accumulator.mean_x += delta_x / count;
+    let delta_y = right - accumulator.mean_y;
+    accumulator.mean_y += delta_y / count;
+    accumulator.co_moment += delta_x * (right - accumulator.mean_y);
+    accumulator.m2_x += delta_x * (left - accumulator.mean_x);
+    accumulator.m2_y += delta_y * (right - accumulator.mean_y);
+    Ok(())
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "the frozen covariance/correlation output type is Float64"
+)]
+fn remove_pair_float64(accumulator: &mut PairAccumulator, left: f64, right: f64) -> Result<()> {
+    accumulator.valid_count = accumulator
+        .valid_count
+        .checked_sub(1)
+        .ok_or_else(|| internal_error("rolling pair removal without a matching add"))?;
+    update_pair_infinity_counts(accumulator, left, right, false);
+    if accumulator.valid_count == 0 {
+        reset_pair_values(accumulator);
+        return Ok(());
+    }
+    let count = accumulator.valid_count as f64;
+    let delta_x = left - accumulator.mean_x;
+    accumulator.mean_x -= delta_x / count;
+    let delta_y = right - accumulator.mean_y;
+    accumulator.mean_y -= delta_y / count;
+    accumulator.co_moment -= delta_x * (right - accumulator.mean_y);
+    accumulator.m2_x -= delta_x * (left - accumulator.mean_x);
+    accumulator.m2_y -= delta_y * (right - accumulator.mean_y);
+    Ok(())
+}
+
+fn update_pair_infinity_counts(
+    accumulator: &mut PairAccumulator,
+    left: f64,
+    right: f64,
+    add: bool,
+) {
+    update_infinity_count(
+        &mut accumulator.pos_inf_x,
+        &mut accumulator.neg_inf_x,
+        left,
+        add,
+    );
+    update_infinity_count(
+        &mut accumulator.pos_inf_y,
+        &mut accumulator.neg_inf_y,
+        right,
+        add,
+    );
+}
+
+fn update_infinity_count(positive: &mut u64, negative: &mut u64, value: f64, add: bool) {
+    if !value.is_infinite() {
+        return;
+    }
+    let count = if value > 0.0 { positive } else { negative };
+    *count = if add {
+        count.saturating_add(1)
+    } else {
+        count.saturating_sub(1)
+    };
+}
+
+fn reset_pair_values(accumulator: &mut PairAccumulator) {
+    accumulator.mean_x = 0.0;
+    accumulator.mean_y = 0.0;
+    accumulator.co_moment = 0.0;
+    accumulator.m2_x = 0.0;
+    accumulator.m2_y = 0.0;
+}
+
+fn refold_pair_float64(
+    accumulator: &mut PairAccumulator,
+    values: &VecDeque<TimedPairSample>,
+    node_id: &str,
+) -> Result<()> {
+    *accumulator = PairAccumulator::default();
+    for (left, right) in values.iter().filter_map(|sample| sample.value) {
+        add_pair_float64(accumulator, left, right, node_id)?;
+    }
+    Ok(())
+}
+
 enum DerivedBuilder {
     Count(UInt64Builder),
     Float(Float64Builder),
 }
 
 impl DerivedBuilder {
-    fn new(statistic: Statistic, capacity: usize) -> Self {
-        match statistic {
-            Statistic::Count => Self::Count(UInt64Builder::with_capacity(capacity)),
-            Statistic::Sum | Statistic::Mean | Statistic::Variance | Statistic::Stddev => {
-                Self::Float(Float64Builder::with_capacity(capacity))
-            }
-            Statistic::Min | Statistic::Max => {
-                unreachable!("extrema are excluded from the typed Float64 plan")
-            }
+    fn new(kind: Float64OutputKind, capacity: usize) -> Self {
+        if kind == Float64OutputKind::Statistic(Statistic::Count) {
+            Self::Count(UInt64Builder::with_capacity(capacity))
+        } else {
+            Self::Float(Float64Builder::with_capacity(capacity))
         }
     }
 
-    fn append(
-        &mut self,
-        accumulator: &WindowAccumulator,
-        output: &Float64OutputPlan,
-    ) -> Result<()> {
-        if accumulator.valid_count < output.min_periods {
+    fn append(&mut self, state: &Float64WindowState, output: &Float64OutputPlan) -> Result<()> {
+        if float64_valid_count(state) < output.min_periods {
             self.append_null();
             return Ok(());
         }
-        match (self, output.statistic) {
-            (Self::Count(builder), Statistic::Count) => {
-                builder.append_value(accumulator.valid_count);
+        match (self, state, output.kind) {
+            (
+                Self::Count(builder),
+                Float64WindowState::Numeric(accumulator),
+                Float64OutputKind::Statistic(Statistic::Count),
+            ) => {
+                builder.append_value(accumulator.accumulator.valid_count);
             }
-            (Self::Float(builder), statistic) => {
-                append_float(builder, accumulator, statistic, output.ddof)?;
+            (
+                Self::Float(builder),
+                Float64WindowState::Numeric(accumulator),
+                Float64OutputKind::Statistic(statistic),
+            ) => {
+                append_float(builder, &accumulator.accumulator, statistic, output.ddof)?;
+            }
+            (
+                Self::Float(builder),
+                Float64WindowState::Extrema(accumulator),
+                Float64OutputKind::Statistic(Statistic::Min | Statistic::Max),
+            ) => {
+                if let Some((_, value)) = accumulator.candidates.front() {
+                    builder.append_value(*value);
+                } else {
+                    builder.append_null();
+                }
+            }
+            (
+                Self::Float(builder),
+                Float64WindowState::Pair(accumulator),
+                Float64OutputKind::Covariance | Float64OutputKind::Correlation,
+            ) => {
+                append_pair(builder, &accumulator.accumulator, output)?;
             }
             _ => {
                 return Err(internal_error(
@@ -950,6 +1439,58 @@ impl DerivedBuilder {
             Self::Count(mut builder) => std::sync::Arc::new(builder.finish()),
             Self::Float(mut builder) => std::sync::Arc::new(builder.finish()),
         }
+    }
+}
+
+fn float64_valid_count(state: &Float64WindowState) -> u64 {
+    match state {
+        Float64WindowState::Numeric(state) => state.accumulator.valid_count,
+        Float64WindowState::Extrema(state) => state.valid_count,
+        Float64WindowState::Pair(state) => state.accumulator.valid_count,
+    }
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "the frozen pair output type is Float64"
+)]
+fn append_pair(
+    builder: &mut Float64Builder,
+    accumulator: &PairAccumulator,
+    output: &Float64OutputPlan,
+) -> Result<()> {
+    let divisor = accumulator.valid_count - u64::from(output.ddof);
+    if divisor == 0 {
+        builder.append_null();
+        return Ok(());
+    }
+    if accumulator.holds_infinity() {
+        builder.append_value(f64::NAN);
+        return Ok(());
+    }
+    match output.kind {
+        Float64OutputKind::Covariance => {
+            builder.append_value(accumulator.co_moment / divisor as f64);
+        }
+        Float64OutputKind::Correlation => {
+            append_correlation(builder, accumulator);
+        }
+        Float64OutputKind::Statistic(_) => {
+            return Err(internal_error(
+                "typed pair state received a scalar statistic",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn append_correlation(builder: &mut Float64Builder, accumulator: &PairAccumulator) {
+    let m2_x = accumulator.m2_x.max(0.0);
+    let m2_y = accumulator.m2_y.max(0.0);
+    if m2_x == 0.0 || m2_y == 0.0 {
+        builder.append_null();
+    } else {
+        builder.append_value(accumulator.co_moment / (m2_x.sqrt() * m2_y.sqrt()));
     }
 }
 
