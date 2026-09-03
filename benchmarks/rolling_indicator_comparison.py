@@ -469,25 +469,52 @@ def ta_lib_iterations_per_sample(rows: int) -> int:
     return max(1, min(200, 5_000_000 // rows))
 
 
-def _git_output(root: Path, *arguments: str) -> str:
-    """Run one read-only Git query through a verified absolute executable."""
+def _git_executable() -> Path:
+    """Return the verified absolute Git executable used for provenance."""
     discovered = shutil.which("git")
     if discovered is None:
         raise RuntimeError("git is required for benchmark provenance")
     executable = Path(discovered).resolve()
     if not executable.is_file():
         raise RuntimeError(f"git executable is not a regular file: {executable}")
+    return executable
+
+
+def _git_root(root: Path) -> Path:
+    """Resolve one caller path before using it as a subprocess directory."""
+    resolved = root.resolve()
+    if not resolved.is_dir():
+        raise RuntimeError(f"Git provenance root is not a directory: {resolved}")
+    return resolved
+
+
+def _git_head(root: Path) -> str:
+    """Read HEAD with fixed argv and no caller data in the command."""
+    executable = _git_executable()
     return subprocess.run(  # nosec B603  # nosemgrep
-        [str(executable), "-C", str(root), *arguments],
+        [str(executable), "rev-parse", "HEAD"],
         check=True,
         capture_output=True,
+        cwd=_git_root(root),
+        text=True,
+    ).stdout.strip()
+
+
+def _git_status(root: Path) -> str:
+    """Read porcelain status with fixed argv and a separately checked cwd."""
+    executable = _git_executable()
+    return subprocess.run(  # nosec B603  # nosemgrep
+        [str(executable), "status", "--short"],
+        check=True,
+        capture_output=True,
+        cwd=_git_root(root),
         text=True,
     ).stdout.strip()
 
 
 def _verified_finance_python_root(root: Path) -> str:
-    head = _git_output(root, "rev-parse", "HEAD")
-    status = _git_output(root, "status", "--short")
+    head = _git_head(root)
+    status = _git_status(root)
     if head != FINANCE_PYTHON_COMMIT or status:
         raise RuntimeError(
             "Finance-Python source must be the clean frozen commit "
@@ -718,8 +745,8 @@ def _measure_scale(
 
 def _git_identity() -> dict[str, object]:
     root = Path(__file__).resolve().parents[1]
-    head = _git_output(root, "rev-parse", "HEAD")
-    dirty = bool(_git_output(root, "status", "--short"))
+    head = _git_head(root)
+    dirty = bool(_git_status(root))
     return {"commit": head, "dirty": dirty}
 
 
