@@ -63,6 +63,10 @@ below.
   [phased implementation plan](superpowers/plans/2026-08-22-symbolic-computation-engine.md).
   The immutable declaration and static-analysis layer is available today; see
   the [Python API guide](python-api.md)
+- **[TA-Lib-inspired rolling engine upgrade plan](superpowers/plans/2026-09-04-ta-lib-streaming-rolling-engine-upgrade.md)**
+  — point-in-time performance evidence for single and composed rolling
+  indicators, analysis of TA-Lib's unreleased streaming API, and the phased
+  Arrow-native rolling/DataFusion 54 upgrade path
 - **[Project schema](../schemas/project-v3.schema.json)** — the canonical
   generated v3 project contract
 - **[Studio README](../web-ui/README.md)** — the local calc-flow-studio

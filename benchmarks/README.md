@@ -92,6 +92,95 @@ versions, power modes, or benchmark scales. CI publishes these measurements as
 informational artifacts; it does not fail builds on benchmark deltas until at
 least 20 comparable main-branch samples exist on stable runners.
 
+## Rolling indicator implementation comparison
+
+`rolling_indicator_comparison.py` is a standalone, correctness-gated example
+that compares either one 20-row per-symbol moving average or the composed
+dual-SMA spread `SMA(5) - SMA(20)` across:
+
+- the current native incremental rolling operator declared with `ts.mean`;
+- the earlier DataFusion `AVG(...) OVER (... ROWS ...)` SQL path;
+- Finance-Python 0.9.10's public `MA(...).transform(...)` operator at the
+  finance-reference commit `3e33d3e70c3458b4c6dcf76b88df6148229b402c`; and
+- [TA-Lib Python 0.7.1](https://github.com/TA-Lib/ta-lib-python/tree/v0.7.1)
+  `SMA`, backed by its bundled C library, at release commit
+  `a9ff1b47b3ddbd57274116645d688c0ed677338b`.
+
+The default matrix uses up to 64 symbols and 10, 100, 1,000, 10,000, 100,000,
+and 1,000,000 rows. The 10-, 100-, and 1,000-row cases measure startup and
+partially filled 20-row per-symbol windows; 10,000 rows and above include full
+windows for every symbol. Plans, inputs, legacy-worker startup, and warm-up are
+outside the timed boundary. TA-Lib accepts one series per call, so its timed
+boundary includes per-symbol slicing and contiguous copies, one or two `SMA`
+calls per symbol, composition, and reconstruction of timestamp-major output
+order.
+
+Before sampling, Calc Flow and Finance-Python outputs must match an independent
+direct-window oracle within `rtol=1e-10` and `atol=1e-10`. TA-Lib must match
+the same oracle after its documented full-window warm-up: `SMA(20)` returns
+`NaN` for each symbol's first 19 observations. The report records the number of
+valid TA-Lib outputs at each scale; cases with zero valid outputs measure
+all-warm-up invocation cost and are not equivalent valid-output throughput
+comparisons.
+
+Twenty samples rotate the four-method order evenly, force garbage collection
+outside each timing boundary, and report medians, throughput, raw samples, and
+native-relative ratios. Calc Flow and Finance-Python samples repeat a complete
+execution until they cover about 50,000 rows, capped at 50 iterations; TA-Lib
+uses an independent cap of 200 iterations and targets about 5,000,000 rows to
+stabilize its much shorter calls. Large cases reduce these repetition counts.
+
+Finance-Python does not build in Calc Flow's Python 3.13 environment. Prepare a
+separate Python 3.9 environment from the frozen upstream source:
+
+```bash
+git clone https://github.com/alpha-miner/Finance-Python.git \
+  target/third-party/finance-python
+git -C target/third-party/finance-python checkout \
+  3e33d3e70c3458b4c6dcf76b88df6148229b402c
+UV_CACHE_DIR=target/uv-cache uv venv \
+  target/finance-python-venv --python 3.9
+UV_CACHE_DIR=target/uv-cache uv pip install \
+  --python target/finance-python-venv/bin/python \
+  'setuptools<70' wheel 'Cython==0.29.37' 'numpy==1.26.4' \
+  'pandas==1.5.3' 'scipy==1.13.1' 'simpleutils>=0.1.0' 'six>=1.10.0'
+UV_CACHE_DIR=target/uv-cache uv pip install \
+  --python target/finance-python-venv/bin/python \
+  --no-build-isolation --no-deps target/third-party/finance-python
+```
+
+The benchmark extra installs the pinned TA-Lib wheel. Run the comparison and
+retain the full provenance and samples:
+
+```bash
+UV_CACHE_DIR=target/uv-cache uv run --extra benchmark python \
+  benchmarks/rolling_indicator_comparison.py \
+  --finance-python-python target/finance-python-venv/bin/python \
+  --finance-python-root target/third-party/finance-python \
+  --json target/benchmark-results/rolling-indicator-comparison.json
+```
+
+Select the cross-library composite indicator explicitly and save it separately:
+
+```bash
+UV_CACHE_DIR=target/uv-cache uv run --extra benchmark python \
+  benchmarks/rolling_indicator_comparison.py \
+  --indicator dual_sma_spread --fast-window 5 --window 20 \
+  --finance-python-python target/finance-python-venv/bin/python \
+  --finance-python-root target/third-party/finance-python \
+  --json target/benchmark-results/composite-indicator-comparison.json
+```
+
+This is a diagnostic cross-runtime and cross-abstraction comparison, not an
+accepted regression gate: Finance-Python necessarily runs in a separate legacy
+interpreter, while TA-Lib calls a much thinner C-backed API. Results from
+virtualized or changing-power hosts must not be generalized to production
+hardware.
+
+The full single-SMA and composed dual-SMA tables, their interpretation, and the
+TA-Lib-streaming-inspired engine roadmap are preserved in the
+[rolling and DataFusion upgrade plan](../docs/superpowers/plans/2026-09-04-ta-lib-streaming-rolling-engine-upgrade.md).
+
 ## Symbolic execution baselines
 
 `test_symbolic_baseline.py` retains the hand-built SCE-01 baselines and adds

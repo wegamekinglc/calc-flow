@@ -19,6 +19,7 @@ numpy = ["numpy>=2.0.0"]
 jax = ["jax>=0.4"]
 array = ["jax>=0.4", "numpy>=2.0.0"]
 benchmark = [
+    "TA-Lib==0.7.1",
     "jax>=0.4",
     "numpy>=2.0.0",
     "psutil>=6.1",
