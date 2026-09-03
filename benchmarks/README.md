@@ -103,19 +103,20 @@ accepted milestone gates and their raw evidence are documented in
 [symbolic/SCE14.md](symbolic/SCE14.md), and
 [symbolic/SCE16.md](symbolic/SCE16.md).
 
-| Scenario                                  | Timed boundary                                             |
-| ----------------------------------------- | ---------------------------------------------------------- |
-| `symbolic_projection_20_columns`          | one DataFusion execute of a 20-column row-local SQL        |
-| `symbolic_rolling_20_60_row_features`     | one DataFusion execute of rolling window SQL               |
-| `symbolic_cross_section_rank_zscore`      | one DataFusion execute of complete-group rank/z-score      |
-| `symbolic_table_matmul_numpy`/`_jax`      | SQL features plus one counting table_matmul call           |
-| `symbolic_stream_window_checkpoint`       | full stream lifecycle (see below)                          |
-| `sce05_row_local_20_columns`              | alternating hand-built/symbolic single projections         |
-| `sce08_temporal_catalog`                  | alternating native/symbolic duration rolling runs          |
-| `sce14_cross_domain_sharing`              | separate versus shared rolling and cross-section branches  |
-| `sce16_exponential_indicators`            | alternating hand-built/symbolic EWMA and MACD runs          |
-| `symbolic_multistage_rolling_sharing`     | separate versus shared two-stage rolling output branches   |
-| `incremental_rolling_vs_sql_window`       | native incremental rolling versus SQL row-window functions |
+| Scenario                                   | Timed boundary                                             |
+| ------------------------------------------ | ---------------------------------------------------------- |
+| `symbolic_projection_20_columns`           | one DataFusion execute of a 20-column row-local SQL        |
+| `symbolic_rolling_20_60_row_features`      | one DataFusion execute of rolling window SQL               |
+| `symbolic_cross_section_rank_zscore`       | one DataFusion execute of complete-group rank/z-score      |
+| `symbolic_table_matmul_numpy`/`_jax`       | SQL features plus one counting table_matmul call           |
+| `symbolic_stream_window_checkpoint`        | full stream lifecycle (see below)                          |
+| `sce05_row_local_20_columns`               | alternating hand-built/symbolic single projections         |
+| `sce08_temporal_catalog`                   | alternating native/symbolic duration rolling runs          |
+| `sce14_cross_domain_sharing`               | separate versus shared rolling and cross-section branches  |
+| `sce16_exponential_indicators`             | alternating hand-built/symbolic EWMA and MACD runs         |
+| `symbolic_multistage_rolling_sharing`      | separate versus shared two-stage rolling output branches   |
+| `incremental_rolling_vs_sql_window`        | native incremental rolling versus SQL row-window functions |
+| `warm_native_append_vs_sql_full_recompute` | warm stream append versus SQL full-history recompute       |
 
 Every scenario records rows and peak RSS (`VmHWM`) in `extra_info`, then adds
 the applicable batch, provider or DataFusion query, and Arrow/dense-copy
@@ -186,4 +187,9 @@ CALC_FLOW_BENCHMARK_SCALE=standard \
 The focused rolling comparison validates native and SQL results before timing,
 then alternates 30 samples of each implementation in the same process. See
 [rolling/DAL184.md](rolling/DAL184.md) for its null and boundary semantics,
-environment contract, reproduction command, and latest measured summary.
+environment contract, reproduction command, and latest measured summary. The
+same document also covers the separate 12-case warm-state matrix. Its native
+timer begins only after a fresh runner has materialized the seed and ends when
+the delta output is collected; its SQL timer recomputes and collects the full
+history plus delta. The two throughput fields retain those different row
+denominators explicitly.

@@ -5,6 +5,14 @@ engine or Studio capabilities.
 
 ## 2026-09
 
+- 2026-09-04: Add a 12-case DAL-184 warm-state rolling benchmark. It seeds a
+  fresh public streaming runner outside timing, measures 64/640/6,400-row
+  appends across 20/60/252/1,024-row windows through output materialization,
+  and compares them with precompiled SQL plans that fully recompute the same
+  history plus delta. Per-sample assertions freeze seed/timer separation,
+  logical history, row counts, ordering, null masks, and floating values. No
+  rolling semantics or public API changed.
+
 - 2026-09-03: Add a complete symbolic incremental-rolling indicator example
   and a same-process benchmark against equivalent DataFusion SQL row-window
   functions. The benchmark verifies ordered outputs, null masks, and floating
