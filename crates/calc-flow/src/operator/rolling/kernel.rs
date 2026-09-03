@@ -21,8 +21,9 @@ use datafusion::arrow::{
 use sha2::{Digest, Sha256};
 
 use super::{
-    CompiledEvaluation, CompiledKeyColumn, CompiledRollingOutput, CompiledWindowGroup, Statistic,
-    SumClass, SumState, WindowAccumulator, internal_error, operator_error,
+    CompiledEvaluation, CompiledFrame, CompiledKeyColumn, CompiledRollingOutput,
+    CompiledWindowGroup, Statistic, SumClass, SumState, WindowAccumulator, internal_error,
+    operator_error,
 };
 use crate::Result;
 
@@ -66,7 +67,35 @@ pub(super) struct RollingKernelPlan {
 #[derive(Clone, Copy, Debug)]
 struct Float64GroupPlan {
     input_index: usize,
-    window: usize,
+    frame: TypedFrame,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum TypedFrame {
+    Rows(usize),
+    Duration(u64),
+}
+
+impl TypedFrame {
+    const fn estimated_samples(self) -> usize {
+        match self {
+            Self::Rows(rows) => rows,
+            Self::Duration(_) => 0,
+        }
+    }
+}
+
+impl TryFrom<CompiledFrame> for TypedFrame {
+    type Error = String;
+
+    fn try_from(frame: CompiledFrame) -> std::result::Result<Self, Self::Error> {
+        match frame {
+            CompiledFrame::Rows(rows) => usize::try_from(rows)
+                .map(Self::Rows)
+                .map_err(|_| "row window does not fit the platform usize".to_owned()),
+            CompiledFrame::Duration(micros) => Ok(Self::Duration(micros)),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -154,8 +183,12 @@ impl RollingKernelPlan {
         };
         let estimated_state_bytes_per_entity = groups.iter().fold(0_usize, |total, group| {
             total.saturating_add(
-                size_of::<Float64WindowState>()
-                    .saturating_add(group.window.saturating_mul(size_of::<Option<f64>>())),
+                size_of::<Float64WindowState>().saturating_add(
+                    group
+                        .frame
+                        .estimated_samples()
+                        .saturating_mul(size_of::<TimedFloat64Sample>()),
+                ),
             )
         });
         let fingerprint = kernel_fingerprint(&KernelFingerprintInput {
@@ -362,6 +395,16 @@ impl RollingKernelPlan {
         mut metrics: RollingKernelMetrics,
     ) -> Result<RollingKernelExecution> {
         let inputs = self.float64_inputs(input, node_id)?;
+        let event_times = input
+            .column(self.order_columns[0])
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .ok_or_else(|| {
+                operator_error(
+                    node_id,
+                    "rolling event-time value is not a microsecond timestamp",
+                )
+            })?;
         let mut builders = self
             .outputs
             .iter()
@@ -370,9 +413,9 @@ impl RollingKernelPlan {
 
         let kernel_start = Instant::now();
         fill_float64_rows(
-            &self.groups,
             &self.outputs,
             &inputs,
+            event_times,
             &mut state.states,
             &mut builders,
             entity_ids,
@@ -466,9 +509,9 @@ impl RollingKernelState {
 }
 
 fn fill_float64_rows(
-    groups: &[Float64GroupPlan],
     outputs: &[Float64OutputPlan],
     inputs: &[&Float64Array],
+    event_times: &TimestampMicrosecondArray,
     states: &mut [Float64EntityState],
     builders: &mut [DerivedBuilder],
     entity_ids: &[usize],
@@ -476,28 +519,32 @@ fn fill_float64_rows(
 ) -> Result<()> {
     for (row_index, &entity_id) in entity_ids.iter().enumerate() {
         let entity = &mut states[entity_id];
-        update_float64_groups(groups, inputs, entity, row_index, node_id)?;
+        update_float64_groups(
+            inputs,
+            event_times.value(row_index),
+            entity,
+            row_index,
+            node_id,
+        )?;
         append_float64_outputs(outputs, builders, entity)?;
     }
     Ok(())
 }
 
 fn update_float64_groups(
-    groups: &[Float64GroupPlan],
     inputs: &[&Float64Array],
+    event_time: i64,
     entity: &mut Float64EntityState,
     row_index: usize,
     node_id: &str,
 ) -> Result<()> {
-    for (group_index, group) in groups.iter().enumerate() {
-        let input = inputs[group_index];
+    for (group_index, input) in inputs.iter().enumerate() {
         let sample = if input.is_null(row_index) || input.value(row_index).is_nan() {
             None
         } else {
             Some(input.value(row_index))
         };
-        entity.groups[group_index].update(sample, node_id)?;
-        debug_assert_eq!(entity.groups[group_index].window, group.window);
+        entity.groups[group_index].update(event_time, sample, node_id)?;
     }
     Ok(())
 }
@@ -534,7 +581,7 @@ fn compile_float64_groups(
     for group in window_groups {
         let CompiledWindowGroup::Numeric {
             input_index,
-            frame: super::CompiledFrame::Rows(rows),
+            frame,
             sum_class: SumClass::Float,
         } = group
         else {
@@ -543,11 +590,10 @@ fn compile_float64_groups(
         if input_schema.field(*input_index).data_type() != &DataType::Float64 {
             return Err("requires every aggregate input to be Float64".into());
         }
-        let window = usize::try_from(*rows)
-            .map_err(|_| "row window does not fit the platform usize".to_owned())?;
+        let frame = TypedFrame::try_from(*frame)?;
         groups.push(Float64GroupPlan {
             input_index: *input_index,
-            window,
+            frame,
         });
     }
     Ok(groups)
@@ -688,7 +734,7 @@ impl Float64EntityState {
         Self {
             groups: groups
                 .iter()
-                .map(|group| Float64WindowState::new(group.window, entity_rows))
+                .map(|group| Float64WindowState::with_frame(group.frame, entity_rows))
                 .collect(),
         }
     }
@@ -705,32 +751,66 @@ impl Float64EntityState {
 
 #[derive(Clone, Debug)]
 struct Float64WindowState {
-    window: usize,
-    values: VecDeque<Option<f64>>,
+    frame: TypedFrame,
+    values: VecDeque<TimedFloat64Sample>,
     accumulator: WindowAccumulator,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct TimedFloat64Sample {
+    event_time: i64,
+    value: Option<f64>,
+}
+
 impl Float64WindowState {
-    fn new(window: usize, entity_rows: usize) -> Self {
+    fn with_frame(frame: TypedFrame, entity_rows: usize) -> Self {
+        let capacity = frame.estimated_samples().min(entity_rows);
         Self {
-            window,
-            values: VecDeque::with_capacity(window.min(entity_rows)),
+            frame,
+            values: VecDeque::with_capacity(capacity),
             accumulator: WindowAccumulator::new(SumClass::Float),
         }
     }
 
-    fn update(&mut self, sample: Option<f64>, node_id: &str) -> Result<()> {
+    fn update(&mut self, event_time: i64, sample: Option<f64>, node_id: &str) -> Result<()> {
         if let Some(sample) = sample {
             add_float64(&mut self.accumulator, sample, node_id)?;
         }
-        self.values.push_back(sample);
-        if self.values.len() > self.window
-            && let Some(Some(expiring)) = self.values.pop_front()
-        {
-            remove_float64(&mut self.accumulator, expiring)?;
-        }
+        self.values.push_back(TimedFloat64Sample {
+            event_time,
+            value: sample,
+        });
+        self.expire(event_time)?;
         if self.accumulator.is_non_finite() {
             refold_float64(&mut self.accumulator, &self.values, node_id)?;
+        }
+        Ok(())
+    }
+
+    fn expire(&mut self, event_time: i64) -> Result<()> {
+        match self.frame {
+            TypedFrame::Rows(window) => {
+                if self.values.len() > window {
+                    self.remove_front()?;
+                }
+            }
+            TypedFrame::Duration(micros) => {
+                let bound = i128::from(event_time) - i128::from(micros);
+                while self
+                    .values
+                    .front()
+                    .is_some_and(|sample| i128::from(sample.event_time) <= bound)
+                {
+                    self.remove_front()?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn remove_front(&mut self) -> Result<()> {
+        if let Some(Some(expiring)) = self.values.pop_front().map(|sample| sample.value) {
+            remove_float64(&mut self.accumulator, expiring)?;
         }
         Ok(())
     }
@@ -805,12 +885,12 @@ fn remove_float64(accumulator: &mut WindowAccumulator, sample: f64) -> Result<()
 
 fn refold_float64(
     accumulator: &mut WindowAccumulator,
-    values: &VecDeque<Option<f64>>,
+    values: &VecDeque<TimedFloat64Sample>,
     node_id: &str,
 ) -> Result<()> {
     *accumulator = WindowAccumulator::new(SumClass::Float);
-    for sample in values.iter().flatten() {
-        add_float64(accumulator, *sample, node_id)?;
+    for sample in values.iter().filter_map(|sample| sample.value) {
+        add_float64(accumulator, sample, node_id)?;
     }
     Ok(())
 }

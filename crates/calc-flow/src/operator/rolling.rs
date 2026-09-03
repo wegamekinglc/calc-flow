@@ -6774,24 +6774,33 @@ mod tests {
     }
 
     #[test]
-    fn duration_aggregate_has_an_explained_general_kernel_fallback() {
+    fn duration_float64_plan_matches_the_general_kernel() {
         let spec = aggregate_spec(json!([duration_output("mean", "price", "price_mean", 10)]));
-        let first = compile_spec(&spec, &kernel_schema()).unwrap();
-        let second = compile_spec(&spec, &kernel_schema()).unwrap();
+        let compiled = compile_spec(&spec, &kernel_schema()).unwrap();
+        let input = float64_fast_record(&[
+            (1, "a", 1, Some(1.0)),
+            (5, "a", 2, Some(5.0)),
+            (12, "a", 3, Some(12.0)),
+            (12, "b", 1, Some(20.0)),
+            (14, "a", 4, Some(14.0)),
+        ]);
+        let fast = compiled
+            .kernel_plan
+            .open_and_fill(&input, "rolling")
+            .unwrap()
+            .unwrap();
+        let rows = (0..input.num_rows())
+            .map(|row_index| read_buffered_row(&input, row_index, &compiled, "rolling").unwrap())
+            .collect::<Vec<_>>();
+        let general =
+            compute_output_columns(&rows, &RollingHistories::default(), &compiled, "rolling")
+                .unwrap();
 
-        assert_eq!(first.kernel_plan.selection(), KernelSelection::General);
         assert_eq!(
-            first.kernel_plan.fingerprint(),
-            second.kernel_plan.fingerprint()
+            compiled.kernel_plan.selection(),
+            KernelSelection::OrderedFloat64Rows
         );
-        assert_eq!(first.kernel_plan.fingerprint().len(), 64);
-        assert!(
-            first
-                .kernel_plan
-                .fallback_reason()
-                .unwrap()
-                .contains("duration")
-        );
+        assert_eq!(fast.columns[0].as_ref(), general.columns[0].as_ref());
     }
 
     #[test]
