@@ -73,6 +73,10 @@ The files cover:
 - `14_symbolic_incremental_rolling.py` — ordered per-symbol rolling indicators,
   null handling, native incremental execution, and result retrieval.
 
+The focused native-versus-SQL performance comparison, including its complete
+workload contract, reproduction command, and recorded result, is documented in
+[`benchmarks/rolling/DAL184.md`](../benchmarks/rolling/DAL184.md).
+
 `07_array_and_dataframe.py` selects ordered numeric `pyarrow.Table` columns
 and multiplies their dense matrix by an array weight matrix. After input
 `Batch` construction, execution makes no redundant copies: NumPy allocates one

@@ -117,13 +117,14 @@ accepted milestone gates and their raw evidence are documented in
 | `symbolic_multistage_rolling_sharing`     | separate versus shared two-stage rolling output branches   |
 | `incremental_rolling_vs_sql_window`       | native incremental rolling versus SQL row-window functions |
 
-Every scenario records rows, batches, peak RSS (`VmHWM`), provider or
-DataFusion query counts, and Arrow/dense copy bytes in `extra_info`. The
-stream scenario additionally records checkpoint duration, checkpoint bytes,
-and recovery duration from a dedicated measured lifecycle: run to half the
-batches, checkpoint, cancel, then restore from the durable checkpoint in a
-second runner. Cancelling drops the unconsumed half by design, so its output
-expectation counts only the windows accumulated before the checkpoint.
+Every scenario records rows and peak RSS (`VmHWM`) in `extra_info`, then adds
+the applicable batch, provider or DataFusion query, and Arrow/dense-copy
+measurements for its execution path. The stream scenario additionally records
+checkpoint duration, checkpoint bytes, and recovery duration from a dedicated
+measured lifecycle: run to half the batches, checkpoint, cancel, then restore
+from the durable checkpoint in a second runner. Cancelling drops the unconsumed
+half by design, so its output expectation counts only the windows accumulated
+before the checkpoint.
 
 The stream workload is capped at 50,000 rows regardless of scale so the
 `nightly` matrix stays bounded; every other dimension (seed, entity count,

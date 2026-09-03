@@ -82,7 +82,9 @@ The sink asserts both deterministic aggregates before printing them.
   `10_symbolic_streaming_recovery.py` for continuous recovery or
   `11_symbolic_static_matrix.py` for immutable model weights.
 - For the smallest complete rolling-indicator example, including null and
-  boundary behavior, use `14_symbolic_incremental_rolling.py`.
+  boundary behavior, use `14_symbolic_incremental_rolling.py`; its focused
+  native-versus-SQL benchmark and recorded result are in the
+  [DAL-184 rolling comparison](../benchmarks/rolling/DAL184.md).
 - For a bounded match over two ordered symbolic streams, use
   `12_symbolic_stream_join.py`; for independent or nested joins and explicit
   post-join ordering, continue with `13_symbolic_relational_dag.py`.
@@ -91,9 +93,9 @@ The sink asserts both deterministic aggregates before printing them.
   project-v3 connector binding from the [connector guide](connectors.md).
 - For a browser-managed local job, use [Calc Flow Studio](../web-ui/README.md).
 
-The [symbolic workflow guide](symbolic-workflows.md) connects the five
-symbolic examples to Studio inspection, NumPy/JAX selection, failure handling,
-and compile-time performance facts.
+The [symbolic workflow guide](symbolic-workflows.md) connects the compositional
+and streaming symbolic examples to Studio inspection, NumPy/JAX selection,
+failure handling, and compile-time performance facts.
 
 ## Verification contract
 
