@@ -2463,33 +2463,108 @@ fn build_typed_stream_output(
     if !compiled.kernel_plan.supports_typed_transition() {
         return Ok(None);
     }
-    let mut bootstrap = if state.is_none() {
-        typed_bootstrap_rows(histories, compiled)?
-    } else {
-        Vec::new()
-    };
-    let output_offset = bootstrap.len();
-    bootstrap.extend_from_slice(rows);
-    let input_schema = Schema::new(
+    let input_schema = Arc::new(Schema::new(
         output_schema.fields()[..output_schema.fields().len() - compiled.outputs.len()].to_vec(),
-    );
-    let input = build_input_record(&bootstrap, Arc::new(input_schema), node_id)?;
-    let empty_state = RollingKernelState::default();
-    let prior = state.unwrap_or(&empty_state);
+    ));
+    let restored_state;
+    let prior = if let Some(state) = state {
+        state
+    } else {
+        restored_state = reconstruct_typed_state(histories, compiled, &input_schema, node_id)?;
+        &restored_state
+    };
+    let input = build_input_record(rows, input_schema, node_id)?;
     let execution = compiled
         .kernel_plan
         .update_and_fill(prior, &input, node_id)?
         .ok_or_else(|| {
             internal_error("typed rolling stream rows did not satisfy canonical ordering")
         })?;
-    let columns = execution
-        .columns
-        .into_iter()
-        .map(|column| column.slice(output_offset, rows.len()))
-        .collect();
+    let columns = execution.columns;
     let record = build_output_record(rows, columns, output_schema, node_id)?;
-    let touched = typed_history_updates(rows, histories, compiled);
+    let touched = typed_history_updates(rows, histories, compiled, node_id)?;
     Ok(Some((record, Some(execution.state), touched)))
+}
+
+fn reconstruct_typed_state(
+    histories: &RollingHistories,
+    compiled: &CompiledRollingSpec,
+    input_schema: &SchemaRef,
+    node_id: &str,
+) -> Result<RollingKernelState> {
+    let bootstrap = typed_bootstrap_rows(histories, compiled)?;
+    let reconstructed = if bootstrap.is_empty() {
+        RollingKernelState::default()
+    } else {
+        let input = build_input_record(&bootstrap, Arc::clone(input_schema), node_id)?;
+        compiled
+            .kernel_plan
+            .update_and_fill(&RollingKernelState::default(), &input, node_id)?
+            .ok_or_else(|| internal_error("typed rolling restore history is not canonical"))?
+            .state
+    };
+    seed_typed_ewma(histories, compiled, input_schema, &reconstructed, node_id)
+}
+
+fn seed_typed_ewma(
+    histories: &RollingHistories,
+    compiled: &CompiledRollingSpec,
+    input_schema: &SchemaRef,
+    state: &RollingKernelState,
+    node_id: &str,
+) -> Result<RollingKernelState> {
+    if histories.by_entity.is_empty()
+        || !compiled
+            .window_groups
+            .iter()
+            .any(|group| matches!(group, CompiledWindowGroup::Ewma { .. }))
+    {
+        return Ok(state.clone());
+    }
+    let values = histories
+        .by_entity
+        .keys()
+        .map(|entity| ewma_entity_values(entity, input_schema, compiled))
+        .collect::<Result<Vec<_>>>()?;
+    let seeds = histories
+        .by_entity
+        .values()
+        .map(|entity| typed_ewma_seeds(entity, compiled))
+        .collect::<Result<Vec<_>>>()?;
+    let nullable_schema = Arc::new(Schema::new(
+        input_schema
+            .fields()
+            .iter()
+            .map(|field| Field::new(field.name(), field.data_type().clone(), true))
+            .collect::<Vec<_>>(),
+    ));
+    let entities = build_value_record(&values, nullable_schema, node_id)?;
+    compiled
+        .kernel_plan
+        .seed_ewma(state, &entities, &seeds, node_id)
+}
+
+fn typed_ewma_seeds(
+    entity: &EntityRollingState,
+    compiled: &CompiledRollingSpec,
+) -> Result<Vec<Option<(u64, f64)>>> {
+    compiled
+        .window_groups
+        .iter()
+        .enumerate()
+        .map(|(group_index, group)| {
+            if !matches!(group, CompiledWindowGroup::Ewma { .. }) {
+                return Ok(None);
+            }
+            match entity.windows.get(group_index) {
+                Some(WindowState::Ewma(state)) if state.valid_count > 0 => {
+                    Ok(Some((state.valid_count, state.value)))
+                }
+                Some(WindowState::Ewma(_)) | None => Ok(None),
+                _ => Err(internal_error("rolling EWMA checkpoint state mismatch")),
+            }
+        })
+        .collect()
 }
 
 fn typed_bootstrap_rows(
@@ -2531,23 +2606,85 @@ fn build_input_record(
     })
 }
 
+fn build_value_record(
+    rows: &[Vec<ScalarValue>],
+    schema: SchemaRef,
+    node_id: &str,
+) -> Result<RecordBatch> {
+    let arrays = (0..schema.fields().len())
+        .map(|index| {
+            ScalarValue::iter_to_array(rows.iter().map(|row| row[index].clone())).map_err(|error| {
+                operator_error(
+                    node_id,
+                    &format!("typed rolling restore entity encoding failed: {error}"),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    RecordBatch::try_new(schema, arrays).map_err(|error| {
+        operator_error(
+            node_id,
+            &format!("typed rolling restore entity batch is invalid: {error}"),
+        )
+    })
+}
+
 fn typed_history_updates(
     rows: &[BufferedRow],
     histories: &RollingHistories,
     compiled: &CompiledRollingSpec,
-) -> HistoryUpdates {
+    node_id: &str,
+) -> Result<HistoryUpdates> {
+    let has_ewma = compiled
+        .window_groups
+        .iter()
+        .any(|group| matches!(group, CompiledWindowGroup::Ewma { .. }));
     group_rows_by_entity(rows)
         .into_iter()
         .map(|(entity, indices)| {
             let mut state = histories.by_entity.get(entity).cloned().unwrap_or_default();
-            state.windows.clear();
+            if has_ewma {
+                advance_typed_ewma_windows(&mut state, rows, &indices, compiled, node_id)?;
+            } else {
+                state.windows.clear();
+            }
             state
                 .rows
                 .extend(indices.into_iter().map(|index| rows[index].values.clone()));
             evict_retained_history(&mut state, compiled);
-            (entity.clone(), state)
+            Ok((entity.clone(), state))
         })
         .collect()
+}
+
+fn advance_typed_ewma_windows(
+    state: &mut EntityRollingState,
+    rows: &[BufferedRow],
+    indices: &[usize],
+    compiled: &CompiledRollingSpec,
+    node_id: &str,
+) -> Result<()> {
+    if state.windows.len() != compiled.window_groups.len() {
+        state.windows = fresh_windows(compiled);
+    }
+    for &row_index in indices {
+        for (group_index, group) in compiled.window_groups.iter().enumerate() {
+            let CompiledWindowGroup::Ewma {
+                input_index, alpha, ..
+            } = group
+            else {
+                continue;
+            };
+            let WindowState::Ewma(accumulator) = &mut state.windows[group_index] else {
+                return Err(internal_error("rolling typed EWMA history state mismatch"));
+            };
+            let sample = &rows[row_index].values[*input_index];
+            if is_valid_sample(sample) {
+                accumulator.add(sample, *alpha, node_id)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -7077,6 +7214,119 @@ mod tests {
                 schema.field(4).data_type(),
             );
         }
+    }
+
+    #[test]
+    fn typed_ewma_shares_one_recurrence_and_matches_the_general_kernel() {
+        let spec = exponential_kernel_spec(json!([
+            ewma_price(3, 1, "ema_ready"),
+            ewma_price(3, 3, "ema_warm"),
+        ]));
+        let input = float64_fast_record(&[
+            (1, "a", 1, Some(1.0)),
+            (1, "b", 1, Some(10.0)),
+            (2, "a", 2, None),
+            (3, "a", 3, Some(3.0)),
+            (4, "a", 4, Some(f64::NAN)),
+            (5, "a", 5, Some(5.0)),
+        ]);
+
+        assert_typed_matches_general(&spec, &kernel_schema(), &input);
+        let compiled = compile_spec(&spec, &kernel_schema()).unwrap();
+        assert_eq!(compiled.window_groups.len(), 1);
+        assert_eq!(
+            compiled.kernel_plan.selection(),
+            KernelSelection::OrderedFloat64
+        );
+    }
+
+    #[test]
+    fn typed_ewma_resumes_from_a_columnar_checkpoint_without_replaying_history() {
+        let spec = exponential_kernel_spec(json!([ewma_price(3, 1, "ema")]));
+        let compiled = compile_spec(&spec, &kernel_schema()).unwrap();
+        let output_schema = Arc::new(output_schema(&kernel_schema(), &compiled.outputs));
+        let rows = vec![
+            full_row(1, "a", 1, vec![ScalarValue::Float64(Some(10.0))]),
+            full_row(2, "a", 2, vec![ScalarValue::Float64(Some(14.0))]),
+            full_row(3, "a", 3, vec![ScalarValue::Float64(Some(18.0))]),
+            full_row(4, "a", 4, vec![ScalarValue::Float64(Some(10.0))]),
+        ];
+        let expected =
+            compute_output_columns(&rows, &RollingHistories::default(), &compiled, "rolling")
+                .unwrap();
+
+        let (first, _, touched) = build_typed_stream_output(
+            &rows[..2],
+            &RollingHistories::default(),
+            None,
+            &compiled,
+            &output_schema,
+            "rolling",
+        )
+        .unwrap()
+        .unwrap();
+        let mut histories = RollingHistories::default();
+        histories.apply(touched);
+        let bytes = encode_state_segment(
+            &histories,
+            &BTreeMap::new(),
+            &kernel_schema(),
+            &compiled,
+            TEST_FINGERPRINT,
+            "rolling",
+        )
+        .unwrap();
+        let metadata = RollingSnapshotMetadata {
+            state_layout_version: ROLLING_COLUMNAR_STATE_LAYOUT_VERSION,
+            configuration_hash: compiled.configuration_hash.clone(),
+            state_schema_fingerprint: compiled.state_schema_fingerprint.clone(),
+            kernel_fingerprint: Some(compiled.kernel_plan.fingerprint().to_owned()),
+            numerical_profile: Some(compiled.kernel_plan.numerical_profile().to_owned()),
+            epoch: Epoch::new(1).unwrap(),
+            pipeline_fingerprint: Some(TEST_FINGERPRINT.into()),
+            operator_id: Some("rolling".into()),
+            last_input_watermark: None,
+            next_output_sequence: 0,
+            ended: false,
+            metrics: LateMetricDelta::default(),
+            segment_inventory: Vec::new(),
+        };
+        let restored =
+            decode_state_segment(&bytes, &kernel_schema(), &compiled, &metadata).unwrap();
+        assert!(
+            restored
+                .histories
+                .by_entity
+                .values()
+                .all(|state| state.rows.is_empty())
+        );
+        let (second, _, _) = build_typed_stream_output(
+            &rows[2..],
+            &restored.histories,
+            None,
+            &compiled,
+            &output_schema,
+            "rolling",
+        )
+        .unwrap()
+        .unwrap();
+
+        let actual = first
+            .column(kernel_schema().fields().len())
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .iter()
+            .chain(
+                second
+                    .column(kernel_schema().fields().len())
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap()
+                    .iter(),
+            )
+            .collect::<Vec<_>>();
+        assert_eq!(actual, float_column(&expected, 0));
     }
 
     #[test]

@@ -489,8 +489,10 @@ rows 扩展到严格 `(t - duration, t]` 事件时间窗口，并在同一次 tr
 中支持 min/max monotonic queue 与 covariance/correlation co-moment state。其余
 primitive Arrow 数值类型现在也通过列式 cast 进入同一 transition：整数 sum 使用
 `i128`/`u128` 中间状态并按冻结契约精确收窄，窄整数与 `Float32` extrema 保持原始
-输出类型，pair 输出统一为 `Float64`。EWMA typed transition 与
-batch/stream/restore 完整矩阵仍是本阶段未完成项，因此状态保持 `in progress`。
+输出类型，pair 输出统一为 `Float64`。EWMA 也使用首样本 seed 的 constant-state
+typed recurrence；stream checkpoint 继续把 recurrence 写入 layout v3，恢复时直接
+播种 typed state，不伪造或重放不存在的历史样本。更宽的 batch/stream/restore
+完整矩阵仍是本阶段未完成项，因此状态保持 `in progress`。
 
 ## 14. 验证矩阵
 

@@ -92,16 +92,21 @@ enum Float64GroupPlan {
         right_index: usize,
         frame: TypedFrame,
     },
+    Ewma {
+        input_index: usize,
+        alpha: f64,
+    },
 }
 
 impl Float64GroupPlan {
-    const fn frame(self) -> TypedFrame {
+    const fn frame(self) -> Option<TypedFrame> {
         match self {
             Self::Numeric { frame, .. }
             | Self::Signed { frame, .. }
             | Self::Unsigned { frame, .. }
             | Self::Extrema { frame, .. }
-            | Self::Pair { frame, .. } => frame,
+            | Self::Pair { frame, .. } => Some(frame),
+            Self::Ewma { .. } => None,
         }
     }
 }
@@ -148,6 +153,7 @@ enum Float64OutputKind {
     Statistic(Statistic),
     Covariance,
     Correlation,
+    Ewma,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -284,7 +290,7 @@ impl RollingKernelPlan {
                 size_of::<Float64WindowState>().saturating_add(
                     group
                         .frame()
-                        .estimated_samples()
+                        .map_or(0, TypedFrame::estimated_samples)
                         .saturating_mul(size_of::<TimedFloat64Sample>()),
                 ),
             )
@@ -364,6 +370,71 @@ impl RollingKernelPlan {
         node_id: &str,
     ) -> Result<Option<RollingKernelExecution>> {
         self.update_and_fill(&RollingKernelState::default(), input, node_id)
+    }
+
+    /// Installs durable EWMA recurrence values into an otherwise reconstructed
+    /// typed state. This is used only after checkpoint restore; ordinary live
+    /// transitions keep the typed state directly.
+    pub(super) fn seed_ewma(
+        &self,
+        state: &RollingKernelState,
+        entities: &RecordBatch,
+        seeds: &[Vec<Option<(u64, f64)>>],
+        node_id: &str,
+    ) -> Result<RollingKernelState> {
+        self.validate_state(state, node_id)?;
+        if entities.num_rows() != seeds.len() {
+            return Err(internal_error(
+                "typed EWMA restore entity and seed counts differ",
+            ));
+        }
+        let entity_rows = encode_rows(entities, &self.partition_columns, node_id)?;
+        let entity_keys = encoded_keys(&entity_rows, entities.num_rows());
+        let mut seeded = state.clone();
+        seeded
+            .kernel_fingerprint
+            .get_or_insert_with(|| self.fingerprint.clone());
+        let entity_ids = seeded.resolve_entities(&entity_keys, &self.groups);
+        for (row_index, values) in seeds.iter().enumerate() {
+            self.seed_ewma_entity(&mut seeded.states[entity_ids[row_index]], values)?;
+        }
+        Ok(seeded)
+    }
+
+    fn seed_ewma_entity(
+        &self,
+        entity: &mut Float64EntityState,
+        seeds: &[Option<(u64, f64)>],
+    ) -> Result<()> {
+        if seeds.len() != self.groups.len() {
+            return Err(internal_error(
+                "typed EWMA restore seed width differs from the kernel plan",
+            ));
+        }
+        for ((group, state), seed) in self.groups.iter().zip(&mut entity.groups).zip(seeds) {
+            let Float64GroupPlan::Ewma { alpha, .. } = group else {
+                if seed.is_some() {
+                    return Err(internal_error(
+                        "typed EWMA restore populated a non-EWMA group",
+                    ));
+                }
+                continue;
+            };
+            let Float64WindowState::Ewma(state) = state else {
+                return Err(internal_error("typed EWMA restore state mismatch"));
+            };
+            *state = TypedEwmaState::new(*alpha);
+            if let Some((valid_count, value)) = seed {
+                if *valid_count == 0 {
+                    return Err(internal_error(
+                        "typed EWMA restore populated a zero sample count",
+                    ));
+                }
+                state.valid_count = *valid_count;
+                state.value = *value;
+            }
+        }
+        Ok(())
     }
 
     /// Applies one canonical micro-batch to a scratch clone and returns the
@@ -588,19 +659,7 @@ fn float64_group_input(
             input_index,
             storage,
             ..
-        } => {
-            if storage.is_signed() {
-                cast_signed(input.column(input_index), node_id).map(Float64GroupInput::Signed)
-            } else if storage.is_unsigned() {
-                cast_unsigned(input.column(input_index), node_id).map(Float64GroupInput::Unsigned)
-            } else if storage.is_float() {
-                cast_float64(input.column(input_index), node_id).map(Float64GroupInput::Single)
-            } else {
-                Err(internal_error(
-                    "typed extrema group has count output storage",
-                ))
-            }
-        }
+        } => extrema_group_input(input.column(input_index), storage, node_id),
         Float64GroupPlan::Signed { input_index, .. } => {
             cast_signed(input.column(input_index), node_id).map(Float64GroupInput::Signed)
         }
@@ -615,6 +674,28 @@ fn float64_group_input(
             cast_float64(input.column(left_index), node_id)?,
             cast_float64(input.column(right_index), node_id)?,
         )),
+        Float64GroupPlan::Ewma { input_index, .. } => Ok(Float64GroupInput::Single(cast_float64(
+            input.column(input_index),
+            node_id,
+        )?)),
+    }
+}
+
+fn extrema_group_input(
+    input: &ArrayRef,
+    storage: OutputStorage,
+    node_id: &str,
+) -> Result<Float64GroupInput> {
+    if storage.is_signed() {
+        cast_signed(input, node_id).map(Float64GroupInput::Signed)
+    } else if storage.is_unsigned() {
+        cast_unsigned(input, node_id).map(Float64GroupInput::Unsigned)
+    } else if storage.is_float() {
+        cast_float64(input, node_id).map(Float64GroupInput::Single)
+    } else {
+        Err(internal_error(
+            "typed extrema group has count output storage",
+        ))
     }
 }
 
@@ -768,8 +849,14 @@ fn compile_float64_group(
             right_index,
             frame,
         } => compile_pair_group(input_schema, *left_index, *right_index, *frame),
-        CompiledWindowGroup::Ewma { .. } => {
-            Err("requires non-EWMA numeric, extrema, or pair window groups".into())
+        CompiledWindowGroup::Ewma {
+            input_index, alpha, ..
+        } => {
+            require_numeric_type(input_schema, *input_index)?;
+            Ok(Float64GroupPlan::Ewma {
+                input_index: *input_index,
+                alpha: *alpha,
+            })
         }
     }
 }
@@ -912,7 +999,14 @@ fn compile_float64_output(
             min_periods: pair.min_periods,
             ddof: pair.ddof,
         }),
-        _ => Err("requires aggregate-only outputs".into()),
+        CompiledEvaluation::Ewma(ewma) => Ok(Float64OutputPlan {
+            group: ewma.group,
+            kind: Float64OutputKind::Ewma,
+            storage: OutputStorage::Float64,
+            min_periods: ewma.min_periods,
+            ddof: 0,
+        }),
+        _ => Err("requires aggregate, pair, or EWMA outputs".into()),
     }
 }
 
@@ -1064,6 +1158,7 @@ enum Float64WindowState {
     Exact(ExactNumericState),
     Extrema(Float64ExtremaState),
     Pair(Float64PairState),
+    Ewma(TypedEwmaState),
 }
 
 impl Float64WindowState {
@@ -1086,6 +1181,7 @@ impl Float64WindowState {
             Float64GroupPlan::Pair { frame, .. } => {
                 Self::Pair(Float64PairState::new(frame, entity_rows))
             }
+            Float64GroupPlan::Ewma { alpha, .. } => Self::Ewma(TypedEwmaState::new(alpha)),
         }
     }
 
@@ -1138,6 +1234,9 @@ impl Float64WindowState {
                 valid_float64_pair(left, right, row_index),
                 node_id,
             ),
+            (Self::Ewma(state), Float64GroupInput::Single(input)) => {
+                state.update(valid_float64(input, row_index), node_id)
+            }
             _ => Err(internal_error(
                 "typed rolling group state does not match its input plan",
             )),
@@ -1150,6 +1249,7 @@ impl Float64WindowState {
             Self::Exact(state) => state.estimated_bytes(),
             Self::Extrema(state) => state.estimated_bytes(),
             Self::Pair(state) => state.estimated_bytes(),
+            Self::Ewma(_) => TypedEwmaState::estimated_bytes(),
         }
     }
 }
@@ -1524,6 +1624,43 @@ impl Float64PairState {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct TypedEwmaState {
+    alpha: f64,
+    valid_count: u64,
+    value: f64,
+}
+
+impl TypedEwmaState {
+    const fn new(alpha: f64) -> Self {
+        Self {
+            alpha,
+            valid_count: 0,
+            value: 0.0,
+        }
+    }
+
+    fn update(&mut self, sample: Option<f64>, node_id: &str) -> Result<()> {
+        let Some(sample) = sample else {
+            return Ok(());
+        };
+        self.value = if self.valid_count == 0 {
+            sample
+        } else {
+            self.value + self.alpha * (sample - self.value)
+        };
+        self.valid_count = self
+            .valid_count
+            .checked_add(1)
+            .ok_or_else(|| operator_error(node_id, "rolling EWMA sample count overflowed"))?;
+        Ok(())
+    }
+
+    const fn estimated_bytes() -> usize {
+        size_of::<Self>()
+    }
+}
+
 #[allow(
     clippy::cast_precision_loss,
     reason = "the frozen mean and variance output type is Float64"
@@ -1836,6 +1973,7 @@ impl DerivedBuilder {
             Float64WindowState::Exact(state) => self.append_exact(state, output, node_id),
             Float64WindowState::Extrema(state) => self.append_extrema(state, output),
             Float64WindowState::Pair(state) => self.append_pair(state, output),
+            Float64WindowState::Ewma(state) => self.append_ewma(state, output),
         }
     }
 
@@ -1905,6 +2043,16 @@ impl DerivedBuilder {
                 Self::Float(builder, _),
                 Float64OutputKind::Covariance | Float64OutputKind::Correlation,
             ) => append_pair(builder, &state.accumulator, output),
+            _ => Err(typed_output_mismatch()),
+        }
+    }
+
+    fn append_ewma(&mut self, state: &TypedEwmaState, output: &Float64OutputPlan) -> Result<()> {
+        match (self, output.kind) {
+            (Self::Float(builder, _), Float64OutputKind::Ewma) => {
+                builder.append_value(state.value);
+                Ok(())
+            }
             _ => Err(typed_output_mismatch()),
         }
     }
@@ -1994,6 +2142,7 @@ fn float64_valid_count(state: &Float64WindowState) -> u64 {
         Float64WindowState::Exact(state) => state.accumulator.valid_count,
         Float64WindowState::Extrema(state) => state.valid_count,
         Float64WindowState::Pair(state) => state.accumulator.valid_count,
+        Float64WindowState::Ewma(state) => state.valid_count,
     }
 }
 
@@ -2079,6 +2228,9 @@ fn append_pair(
             return Err(internal_error(
                 "typed pair state received a scalar statistic",
             ));
+        }
+        Float64OutputKind::Ewma => {
+            return Err(internal_error("typed pair state received an EWMA output"));
         }
     }
     Ok(())
