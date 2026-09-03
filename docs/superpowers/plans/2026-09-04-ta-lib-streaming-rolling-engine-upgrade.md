@@ -15,6 +15,23 @@
 > **性质：** 本文是点时架构与执行计划，不改变当前公共 API、rolling 语义、
 > checkpoint 契约或 DataFusion 54 的唯一表引擎地位
 
+### 本轮评审边界
+
+本轮主要交付是可执行的开发方案，而不是用零散本地测试替代方案评审。评审时应
+先确认以下决策，再继续扩大实现面：
+
+1. TA-Lib 仅作为 kernel 设计与验证方法的参考，不新增运行时依赖；
+2. finality/order 与数值 transition 分层，batch、stream 和受支持 SQL 共享同一
+   `RollingKernelPlan`；
+3. 旧通用 kernel、旧 state reader 和 DataFusion 标准 window 均保留为可解释的
+   fail-closed fallback；
+4. 数值行为通过 profile 版本化，`stable_v2` 不静默替换现有 `stable_v1`；
+5. 两个性能例子作为基线与复现入口，正式性能结论等候候选实现冻结后再统一测量。
+
+本文件同时给出目标架构、任务拆解、迁移和回滚策略、验收矩阵及性能方法。除已
+记录的基线证据外，后续测试按 phase 聚合执行；不要求为了更新计划而重复运行完整
+测试矩阵。
+
 ## 1. 结论
 
 Calc Flow 不应把 TA-Lib 直接替换成默认 rolling 后端。TA-Lib 的突出优势是
@@ -480,6 +497,38 @@ secret 写入 `RunResult`。
 
 实施期间按用户要求调整为一个 PR 内的独立 phase commits，而不是拆分多个 PR；
 每个阶段仍保留独立 RED test、验证证据、fallback 和可回滚提交边界。
+
+### 13.1 剩余开发工作包
+
+| Work package | Primary code surface                                      | Concrete delivery                                                                 | Depends on | Rollback boundary                                      |
+| ------------ | --------------------------------------------------------- | --------------------------------------------------------------------------------- | ---------- | ------------------------------------------------------ |
+| WP-P3A       | `operator/rolling.rs`, `operator/rolling/kernel.rs`        | 将输出表达式编译为 liveness DAG；dual-SMA 只写最终差值列                          | P2         | 关闭 fused-output capability，回到独立输出物化         |
+| WP-P3B       | `python/calc_flow/symbolic/`                               | 识别 SMA、EWMA/MACD 类共享叶节点；仅隐藏无其他观察者的中间值                       | WP-P3A     | 保留原 symbolic lowering，不跨 finality/materialization |
+| WP-P4A       | `datafusion.rs`, rolling physical execution module        | 实现 crate-private `CalcFlowRollingExec`，复用 typed transition 与 run memory pool | P3         | planner extension 不注册，继续使用 DataFusion window   |
+| WP-P4B       | SQL logical/physical rewrite and explain metrics          | 只改写 bounded `ROWS ... CURRENT ROW` allowlist，并记录拒绝原因                     | WP-P4A     | allowlist 置空即全量 fallback                          |
+| WP-P4C       | batch planner and canonical merge                         | 根据规模、entity 基数和 state bytes 选择 partition；稳定恢复可观察顺序              | WP-P4A     | 固定 `target_partitions=1`                             |
+| WP-P5A       | kernel capability manifest and generation checks          | 建立 kernel census；声明可 stream 的形状若无法生成 transition 则构建失败             | P3-P4      | 生成清单只报告，不扩大 capability                      |
+| WP-P5B       | numerical profiles and state migration                    | 冻结 `stable_v1`；以 opt-in preview 引入 rebase/shifted-sum 实验                     | WP-P5A     | 禁用 preview；writer 继续输出当前 profile              |
+| WP-P5C       | benchmark/evidence scripts and CI validators              | non-vacuity、oracle、migration、sanitizer、paired performance 统一证据               | P3-P5B     | 性能结果降级为 informational，不放宽 correctness gate  |
+
+每个工作包在同一 PR 内保持独立提交，提交信息说明 capability 扩张、fallback 和 state
+影响。P3/P4 只有在语义、恢复和 deterministic ordering 同时满足时才扩大 fast-path
+allowlist；P5 的 numerical preview 默认关闭。
+
+### 13.2 评审后执行顺序
+
+```text
+方案/API 评审
+    -> WP-P3A -> WP-P3B
+    -> WP-P4A -> WP-P4B -> WP-P4C
+    -> WP-P5A -> WP-P5B
+    -> WP-P5C 统一验收与 exact-SHA 性能报告
+```
+
+开发阶段只运行与当前工作包直接相关的编译和 focused correctness 检查。等实现面
+冻结后，再一次性执行第 14 节的 batch/stream/restore/SQL matrix、完整仓库门禁和
+paired benchmark；这样测试成本服务于明确的候选提交，而不是在方案迭代期间反复
+消耗。
 
 P2 当前已完成 columnar writer v3、v1/v2 reader dispatch、checkpoint kernel identity
 校验和 runtime capability 升级。`RollingKernelPlan` 也已提供 failure-atomic typed
