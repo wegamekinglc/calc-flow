@@ -48,7 +48,7 @@ mod state_v3;
 
 #[cfg(test)]
 use kernel::KernelSelection;
-use kernel::RollingKernelPlan;
+use kernel::{RollingKernelPlan, RollingKernelState};
 
 /// Semantic configuration version of the first rolling operator release.
 pub const ROLLING_CONFIGURATION_VERSION: u32 = 1;
@@ -711,6 +711,7 @@ struct RollingStreamState {
     pipeline_fingerprint: Option<String>,
     operator_id: Option<String>,
     last_checkpoint_epoch: Option<Epoch>,
+    typed_kernel_state: Option<Box<RollingKernelState>>,
 }
 
 /// Bounded inline manifest contribution of one rolling checkpoint (SCE-00
@@ -927,6 +928,7 @@ impl StreamOperator for RollingOperator {
             pipeline_fingerprint: metadata.pipeline_fingerprint,
             operator_id: metadata.operator_id,
             last_checkpoint_epoch: Some(metadata.epoch),
+            typed_kernel_state: None,
         };
         Ok(())
     }
@@ -1069,20 +1071,37 @@ impl RollingOperator {
         if rows.is_empty() {
             return Ok(());
         }
-        let computed = compute_output_columns(
+        let output_schema = self.output_ports[0]
+            .schema()
+            .expect("rolling output always has an exact schema");
+        let typed = build_typed_stream_output(
             &rows,
             &self.state.histories,
+            self.state.typed_kernel_state.as_deref(),
             &self.compiled,
+            output_schema,
             context.operator_id(),
         )?;
-        let record = build_output_record(
-            &rows,
-            computed.columns,
-            self.output_ports[0]
-                .schema()
-                .expect("rolling output always has an exact schema"),
-            context.operator_id(),
-        )?;
+        let (record, next_kernel_state, touched) = if let Some(typed) = typed {
+            typed
+        } else {
+            let computed = compute_output_columns(
+                &rows,
+                &self.state.histories,
+                &self.compiled,
+                context.operator_id(),
+            )?;
+            (
+                build_output_record(
+                    &rows,
+                    computed.columns,
+                    output_schema,
+                    context.operator_id(),
+                )?,
+                None,
+                computed.touched,
+            )
+        };
         let batches = chunk_output_record(
             &record,
             context.operator_id(),
@@ -1103,7 +1122,8 @@ impl RollingOperator {
             .next_output_sequence
             .checked_add(chunk_count)
             .ok_or_else(|| operator_error(context.operator_id(), "output sequence overflowed"))?;
-        self.state.histories.apply(computed.touched);
+        self.state.histories.apply(touched);
+        self.state.typed_kernel_state = next_kernel_state.map(Box::new);
         Ok(())
     }
 }
@@ -2425,6 +2445,109 @@ fn build_typed_batch_output(
                 &format!("typed rolling output record is invalid: {error}"),
             )
         })
+}
+
+type TypedStreamOutput = (RecordBatch, Option<RollingKernelState>, HistoryUpdates);
+
+// Bootstrap, transition, output slicing, and history replacement form one
+// failure-atomic stream update; none of them may escape independently.
+// #lizard forgives
+fn build_typed_stream_output(
+    rows: &[BufferedRow],
+    histories: &RollingHistories,
+    state: Option<&RollingKernelState>,
+    compiled: &CompiledRollingSpec,
+    output_schema: &SchemaRef,
+    node_id: &str,
+) -> Result<Option<TypedStreamOutput>> {
+    if !compiled.kernel_plan.supports_typed_transition() {
+        return Ok(None);
+    }
+    let mut bootstrap = if state.is_none() {
+        typed_bootstrap_rows(histories, compiled)?
+    } else {
+        Vec::new()
+    };
+    let output_offset = bootstrap.len();
+    bootstrap.extend_from_slice(rows);
+    let input_schema = Schema::new(
+        output_schema.fields()[..output_schema.fields().len() - compiled.outputs.len()].to_vec(),
+    );
+    let input = build_input_record(&bootstrap, Arc::new(input_schema), node_id)?;
+    let empty_state = RollingKernelState::default();
+    let prior = state.unwrap_or(&empty_state);
+    let execution = compiled
+        .kernel_plan
+        .update_and_fill(prior, &input, node_id)?
+        .ok_or_else(|| {
+            internal_error("typed rolling stream rows did not satisfy canonical ordering")
+        })?;
+    let columns = execution
+        .columns
+        .into_iter()
+        .map(|column| column.slice(output_offset, rows.len()))
+        .collect();
+    let record = build_output_record(rows, columns, output_schema, node_id)?;
+    let touched = typed_history_updates(rows, histories, compiled);
+    Ok(Some((record, Some(execution.state), touched)))
+}
+
+fn typed_bootstrap_rows(
+    histories: &RollingHistories,
+    compiled: &CompiledRollingSpec,
+) -> Result<Vec<BufferedRow>> {
+    let mut rows = histories
+        .by_entity
+        .values()
+        .flat_map(|state| state.rows.iter())
+        .map(|values| buffered_row_from_values(values.clone(), compiled))
+        .collect::<Result<Vec<_>>>()?;
+    rows.sort_by(|left, right| left.identity.cmp(&right.identity));
+    Ok(rows)
+}
+
+fn build_input_record(
+    rows: &[BufferedRow],
+    schema: SchemaRef,
+    node_id: &str,
+) -> Result<RecordBatch> {
+    let arrays = (0..schema.fields().len())
+        .map(|index| {
+            ScalarValue::iter_to_array(rows.iter().map(|row| row.values[index].clone())).map_err(
+                |error| {
+                    operator_error(
+                        node_id,
+                        &format!("typed rolling stream input encoding failed: {error}"),
+                    )
+                },
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    RecordBatch::try_new(schema, arrays).map_err(|error| {
+        operator_error(
+            node_id,
+            &format!("typed rolling stream input batch is invalid: {error}"),
+        )
+    })
+}
+
+fn typed_history_updates(
+    rows: &[BufferedRow],
+    histories: &RollingHistories,
+    compiled: &CompiledRollingSpec,
+) -> HistoryUpdates {
+    group_rows_by_entity(rows)
+        .into_iter()
+        .map(|(entity, indices)| {
+            let mut state = histories.by_entity.get(entity).cloned().unwrap_or_default();
+            state.windows.clear();
+            state
+                .rows
+                .extend(indices.into_iter().map(|index| rows[index].values.clone()));
+            evict_retained_history(&mut state, compiled);
+            (entity.clone(), state)
+        })
+        .collect()
 }
 
 #[derive(Clone)]
@@ -6553,6 +6676,53 @@ mod tests {
         assert_eq!(fast.metrics.entities, 2);
         assert_eq!(fast.metrics.scalar_value_conversions, 0);
         assert_eq!(fast.metrics.sort_count, 0);
+    }
+
+    #[test]
+    fn typed_update_and_fill_matches_one_shot_fill_across_micro_batches() {
+        use datafusion::arrow::compute::concat;
+
+        let spec = kernel_spec(json!([
+            aggregate_output("count", "price", "price_count", 3),
+            aggregate_output("mean", "price", "price_mean", 3),
+            ddof_output("variance", "price", "price_var", 3, 1),
+        ]));
+        let compiled = compile_spec(&spec, &kernel_schema()).unwrap();
+        let input = float64_fast_record(&[
+            (1, "a", 1, Some(1.0)),
+            (1, "b", 1, Some(10.0)),
+            (2, "a", 2, None),
+            (2, "b", 2, Some(20.0)),
+            (3, "a", 3, Some(3.0)),
+            (3, "b", 3, Some(30.0)),
+        ]);
+        let one_shot = compiled
+            .kernel_plan
+            .open_and_fill(&input, "rolling")
+            .unwrap()
+            .unwrap();
+        let first = compiled
+            .kernel_plan
+            .open_and_fill(&input.slice(0, 4), "rolling")
+            .unwrap()
+            .unwrap();
+        let second = compiled
+            .kernel_plan
+            .update_and_fill(&first.state, &input.slice(4, 2), "rolling")
+            .unwrap()
+            .unwrap();
+
+        for ((expected, prefix), suffix) in one_shot
+            .columns
+            .iter()
+            .zip(&first.columns)
+            .zip(&second.columns)
+        {
+            let combined = concat(&[prefix.as_ref(), suffix.as_ref()]).unwrap();
+            assert_eq!(combined.as_ref(), expected.as_ref());
+        }
+        assert_eq!(second.metrics.entities, 2);
+        assert_eq!(second.metrics.scalar_value_conversions, 0);
     }
 
     #[test]

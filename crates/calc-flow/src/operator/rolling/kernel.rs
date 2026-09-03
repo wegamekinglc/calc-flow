@@ -101,6 +101,16 @@ pub(super) struct RollingKernelMetrics {
 pub(super) struct RollingKernelExecution {
     pub columns: Vec<ArrayRef>,
     pub metrics: RollingKernelMetrics,
+    pub state: RollingKernelState,
+}
+
+/// Opaque, cloneable transition state for one typed kernel plan.
+#[derive(Clone, Debug, Default)]
+pub(super) struct RollingKernelState {
+    kernel_fingerprint: Option<String>,
+    entities: HashMap<Vec<u8>, usize>,
+    states: Vec<Float64EntityState>,
+    last_identity: Option<Vec<u8>>,
 }
 
 impl RollingKernelPlan {
@@ -208,6 +218,10 @@ impl RollingKernelPlan {
         self.estimated_state_bytes_per_entity
     }
 
+    pub(super) const fn supports_typed_transition(&self) -> bool {
+        matches!(self.selection, KernelSelection::OrderedFloat64Rows)
+    }
+
     /// Executes one already-final, canonical-order candidate batch.
     ///
     /// `Ok(None)` means ordering was not proven and the caller must use the
@@ -218,29 +232,55 @@ impl RollingKernelPlan {
         input: &RecordBatch,
         node_id: &str,
     ) -> Result<Option<RollingKernelExecution>> {
+        self.update_and_fill(&RollingKernelState::default(), input, node_id)
+    }
+
+    /// Applies one canonical micro-batch to a scratch clone and returns the
+    /// next state only after every transition and output succeeds.
+    // Validation, ordering, entity routing, and scratch-state construction
+    // deliberately remain one atomic preparation boundary.
+    // #lizard forgives
+    pub(super) fn update_and_fill(
+        &self,
+        state: &RollingKernelState,
+        input: &RecordBatch,
+        node_id: &str,
+    ) -> Result<Option<RollingKernelExecution>> {
         if self.selection != KernelSelection::OrderedFloat64Rows {
             return Ok(None);
         }
+        self.validate_state(state, node_id)?;
 
         let validation_start = Instant::now();
         self.validate_required_values(input, node_id)?;
         let input_validation_ns = nanos(validation_start.elapsed());
 
         let order_start = Instant::now();
-        if !self.canonical_order_is_proven(input, node_id)? {
+        let order_rows = encode_rows(input, &self.order_columns, node_id)?;
+        if !self.canonical_order_is_proven(input, &order_rows, state, node_id)? {
             return Ok(None);
         }
+        let last_identity = input
+            .num_rows()
+            .checked_sub(1)
+            .map(|row_index| order_rows.row(row_index).data().to_vec());
         let order_proof_ns = nanos(order_start.elapsed());
 
         let entity_start = Instant::now();
         let entity_rows = encode_rows(input, &self.partition_columns, node_id)?;
-        let (entity_ids, entity_counts) = dense_entity_ids(&entity_rows, input.num_rows());
+        let entity_keys = encoded_keys(&entity_rows, input.num_rows());
+        let mut next_state = state.clone();
+        next_state
+            .kernel_fingerprint
+            .get_or_insert_with(|| self.fingerprint.clone());
+        let entity_ids = next_state.resolve_entities(&entity_keys, &self.groups);
         let entity_encode_ns = nanos(entity_start.elapsed());
 
         self.fill_float64(
             input,
             &entity_ids,
-            &entity_counts,
+            next_state,
+            last_identity,
             node_id,
             RollingKernelMetrics {
                 input_validation_ns,
@@ -255,8 +295,45 @@ impl RollingKernelPlan {
         .map(Some)
     }
 
-    fn canonical_order_is_proven(&self, input: &RecordBatch, node_id: &str) -> Result<bool> {
-        let order_rows = encode_rows(input, &self.order_columns, node_id)?;
+    fn validate_state(&self, state: &RollingKernelState, node_id: &str) -> Result<()> {
+        if state
+            .kernel_fingerprint
+            .as_deref()
+            .is_some_and(|fingerprint| fingerprint != self.fingerprint)
+        {
+            return Err(operator_error(
+                node_id,
+                "typed rolling state belongs to a different kernel plan",
+            ));
+        }
+        Ok(())
+    }
+
+    // Cross-batch and within-batch ordering are one canonical identity proof.
+    // #lizard forgives
+    fn canonical_order_is_proven(
+        &self,
+        input: &RecordBatch,
+        order_rows: &datafusion::arrow::row::Rows,
+        state: &RollingKernelState,
+        node_id: &str,
+    ) -> Result<bool> {
+        if input.num_rows() > 0
+            && let Some(previous) = state.last_identity.as_deref()
+        {
+            let current = order_rows.row(0).data();
+            if previous == current {
+                return Err(duplicate_identity_error(
+                    input,
+                    self.order_columns[0],
+                    0,
+                    node_id,
+                )?);
+            }
+            if previous > current {
+                return Ok(false);
+            }
+        }
         for row_index in 1..input.num_rows() {
             let previous = order_rows.row(row_index - 1);
             let current = order_rows.row(row_index);
@@ -279,15 +356,12 @@ impl RollingKernelPlan {
         &self,
         input: &RecordBatch,
         entity_ids: &[usize],
-        entity_counts: &[usize],
+        mut state: RollingKernelState,
+        last_identity: Option<Vec<u8>>,
         node_id: &str,
         mut metrics: RollingKernelMetrics,
     ) -> Result<RollingKernelExecution> {
         let inputs = self.float64_inputs(input, node_id)?;
-        let mut states = entity_counts
-            .iter()
-            .map(|count| Float64EntityState::new(&self.groups, *count))
-            .collect::<Vec<_>>();
         let mut builders = self
             .outputs
             .iter()
@@ -299,7 +373,7 @@ impl RollingKernelPlan {
             &self.groups,
             &self.outputs,
             &inputs,
-            &mut states,
+            &mut state.states,
             &mut builders,
             entity_ids,
             node_id,
@@ -312,12 +386,23 @@ impl RollingKernelPlan {
             .map(DerivedBuilder::finish)
             .collect::<Vec<_>>();
         let output_build_ns = nanos(output_start.elapsed());
-        let state_bytes = states.iter().map(Float64EntityState::estimated_bytes).sum();
+        let state_bytes = state
+            .states
+            .iter()
+            .map(Float64EntityState::estimated_bytes)
+            .sum();
+        if last_identity.is_some() {
+            state.last_identity = last_identity;
+        }
         metrics.kernel_ns = kernel_ns;
         metrics.output_build_ns = output_build_ns;
-        metrics.entities = states.len();
+        metrics.entities = state.states.len();
         metrics.state_bytes = state_bytes;
-        Ok(RollingKernelExecution { columns, metrics })
+        Ok(RollingKernelExecution {
+            columns,
+            metrics,
+            state,
+        })
     }
 
     fn validate_required_values(&self, input: &RecordBatch, node_id: &str) -> Result<()> {
@@ -353,6 +438,28 @@ impl RollingKernelPlan {
                     .as_any()
                     .downcast_ref::<Float64Array>()
                     .ok_or_else(|| operator_error(node_id, "typed rolling input is not Float64"))
+            })
+            .collect()
+    }
+}
+
+impl RollingKernelState {
+    fn resolve_entities(&mut self, keys: &[Vec<u8>], groups: &[Float64GroupPlan]) -> Vec<usize> {
+        let mut counts = HashMap::<&[u8], usize>::new();
+        for key in keys {
+            let count = counts.entry(key.as_slice()).or_default();
+            *count = count.saturating_add(1);
+        }
+        keys.iter()
+            .map(|key| {
+                if let Some(&entity_id) = self.entities.get(key.as_slice()) {
+                    return entity_id;
+                }
+                let entity_id = self.states.len();
+                let row_count = counts[key.as_slice()];
+                self.entities.insert(key.clone(), entity_id);
+                self.states.push(Float64EntityState::new(groups, row_count));
+                entity_id
             })
             .collect()
     }
@@ -565,30 +672,13 @@ fn encode_rows(
         })
 }
 
-fn dense_entity_ids(
-    entity_rows: &datafusion::arrow::row::Rows,
-    row_count: usize,
-) -> (Vec<usize>, Vec<usize>) {
-    let mut entities = HashMap::<Vec<u8>, usize>::new();
-    let mut entity_ids = Vec::with_capacity(row_count);
-    let mut entity_counts = Vec::<usize>::new();
-    for row_index in 0..row_count {
-        let key = entity_rows.row(row_index).data();
-        let entity_id = if let Some(&entity_id) = entities.get(key) {
-            entity_id
-        } else {
-            let entity_id = entity_counts.len();
-            entities.insert(key.to_vec(), entity_id);
-            entity_counts.push(0);
-            entity_id
-        };
-        entity_counts[entity_id] = entity_counts[entity_id].saturating_add(1);
-        entity_ids.push(entity_id);
-    }
-    (entity_ids, entity_counts)
+fn encoded_keys(entity_rows: &datafusion::arrow::row::Rows, row_count: usize) -> Vec<Vec<u8>> {
+    (0..row_count)
+        .map(|row_index| entity_rows.row(row_index).data().to_vec())
+        .collect()
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Float64EntityState {
     groups: Vec<Float64WindowState>,
 }
@@ -613,7 +703,7 @@ impl Float64EntityState {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Float64WindowState {
     window: usize,
     values: VecDeque<Option<f64>>,
