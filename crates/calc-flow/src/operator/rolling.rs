@@ -138,6 +138,125 @@ impl RollingFrameSpec {
     }
 }
 
+/// One Float64 rolling readout used only inside a fused derived output.
+///
+/// These leaves declare state semantics but have no output name, so the
+/// operator can share their accumulators without materializing intermediate
+/// Arrow columns.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RollingFloatPrimitiveSpec {
+    /// Float64 mean over a row or duration frame.
+    Mean {
+        /// Primitive version; must equal `1`.
+        primitive_version: u32,
+        /// Numeric input column name.
+        input: String,
+        /// Rolling frame.
+        frame: RollingFrameSpec,
+        /// Minimum valid samples for a non-null result.
+        #[schemars(range(min = 1))]
+        min_periods: u64,
+    },
+    /// Float64 variance over a row or duration frame.
+    Variance {
+        /// Primitive version; must equal `1`.
+        primitive_version: u32,
+        /// Numeric input column name.
+        input: String,
+        /// Rolling frame.
+        frame: RollingFrameSpec,
+        /// Minimum valid samples for a non-null result.
+        #[schemars(range(min = 1))]
+        min_periods: u64,
+        /// Degrees-of-freedom adjustment; must be `0` or `1`.
+        #[schemars(range(min = 0, max = 1))]
+        ddof: u8,
+    },
+    /// Float64 standard deviation over a row or duration frame.
+    Stddev {
+        /// Primitive version; must equal `1`.
+        primitive_version: u32,
+        /// Numeric input column name.
+        input: String,
+        /// Rolling frame.
+        frame: RollingFrameSpec,
+        /// Minimum valid samples for a non-null result.
+        #[schemars(range(min = 1))]
+        min_periods: u64,
+        /// Degrees-of-freedom adjustment; must be `0` or `1`.
+        #[schemars(range(min = 0, max = 1))]
+        ddof: u8,
+    },
+    /// Unadjusted exponentially weighted moving average.
+    Ewma {
+        /// Primitive version; must equal `1`.
+        primitive_version: u32,
+        /// Numeric input column name.
+        input: String,
+        /// Positive exponential span.
+        #[schemars(range(min = 1))]
+        span: u64,
+        /// Minimum valid samples for a non-null result.
+        #[schemars(range(min = 1))]
+        min_periods: u64,
+    },
+}
+
+impl RollingFloatPrimitiveSpec {
+    const fn primitive_version(&self) -> u32 {
+        match self {
+            Self::Mean {
+                primitive_version, ..
+            }
+            | Self::Variance {
+                primitive_version, ..
+            }
+            | Self::Stddev {
+                primitive_version, ..
+            }
+            | Self::Ewma {
+                primitive_version, ..
+            } => *primitive_version,
+        }
+    }
+
+    fn input(&self) -> &str {
+        match self {
+            Self::Mean { input, .. }
+            | Self::Variance { input, .. }
+            | Self::Stddev { input, .. }
+            | Self::Ewma { input, .. } => input,
+        }
+    }
+
+    const fn retained_rows(&self) -> u64 {
+        match self {
+            Self::Mean { frame, .. }
+            | Self::Variance { frame, .. }
+            | Self::Stddev { frame, .. } => frame.row_retention(),
+            Self::Ewma { .. } => 0,
+        }
+    }
+
+    const fn retained_micros(&self) -> Option<u64> {
+        match self {
+            Self::Mean { frame, .. }
+            | Self::Variance { frame, .. }
+            | Self::Stddev { frame, .. }
+                if frame.is_duration() =>
+            {
+                Some(frame.micros())
+            }
+            _ => None,
+        }
+    }
+
+    const fn requires_ewma_layout(&self) -> bool {
+        matches!(self, Self::Ewma { .. })
+    }
+}
+
 /// One declared rolling output and its output column name.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -329,6 +448,18 @@ pub enum RollingOutputSpec {
         #[schemars(range(min = 0, max = 1))]
         ddof: u8,
     },
+    /// Difference of two Float64 rolling readouts, evaluated directly from
+    /// their shared state without materializing either leaf.
+    Difference {
+        /// Primitive version; must equal `1`.
+        primitive_version: u32,
+        /// Left rolling readout.
+        left: RollingFloatPrimitiveSpec,
+        /// Right rolling readout.
+        right: RollingFloatPrimitiveSpec,
+        /// Output column name.
+        output: String,
+    },
 }
 
 impl RollingOutputSpec {
@@ -369,6 +500,9 @@ impl RollingOutputSpec {
             }
             | Self::Correlation {
                 primitive_version, ..
+            }
+            | Self::Difference {
+                primitive_version, ..
             } => *primitive_version,
         }
     }
@@ -387,6 +521,7 @@ impl RollingOutputSpec {
             | Self::Min { input, .. }
             | Self::Max { input, .. } => input,
             Self::Covariance { left, .. } | Self::Correlation { left, .. } => left,
+            Self::Difference { left, .. } => left.input(),
         }
     }
 
@@ -411,7 +546,8 @@ impl RollingOutputSpec {
             | Self::Min { output, .. }
             | Self::Max { output, .. }
             | Self::Covariance { output, .. }
-            | Self::Correlation { output, .. } => output,
+            | Self::Correlation { output, .. }
+            | Self::Difference { output, .. } => output,
         }
     }
 
@@ -430,6 +566,11 @@ impl RollingOutputSpec {
             | Self::Max { frame, .. }
             | Self::Covariance { frame, .. }
             | Self::Correlation { frame, .. } => frame.row_retention(),
+            Self::Difference { left, right, .. } => {
+                let left = left.retained_rows();
+                let right = right.retained_rows();
+                if left > right { left } else { right }
+            }
         }
     }
 
@@ -453,12 +594,21 @@ impl RollingOutputSpec {
                     None
                 }
             }
+            Self::Difference { left, right, .. } => {
+                match (left.retained_micros(), right.retained_micros()) {
+                    (Some(left), Some(right)) => Some(if left > right { left } else { right }),
+                    (Some(value), None) | (None, Some(value)) => Some(value),
+                    (None, None) => None,
+                }
+            }
         }
     }
 
     const fn frame(&self) -> Option<RollingFrameSpec> {
         match self {
-            Self::Lag { .. } | Self::Delta { .. } | Self::Ewma { .. } => None,
+            Self::Lag { .. } | Self::Delta { .. } | Self::Ewma { .. } | Self::Difference { .. } => {
+                None
+            }
             Self::Count { frame, .. }
             | Self::Sum { frame, .. }
             | Self::Mean { frame, .. }
@@ -473,7 +623,7 @@ impl RollingOutputSpec {
 
     const fn min_periods(&self) -> Option<u64> {
         match self {
-            Self::Lag { .. } | Self::Delta { .. } => None,
+            Self::Lag { .. } | Self::Delta { .. } | Self::Difference { .. } => None,
             Self::Ewma { min_periods, .. }
             | Self::Count { min_periods, .. }
             | Self::Sum { min_periods, .. }
@@ -501,6 +651,16 @@ impl RollingOutputSpec {
         match self {
             Self::Ewma { span, .. } => Some(*span),
             _ => None,
+        }
+    }
+
+    const fn requires_ewma_layout(&self) -> bool {
+        match self {
+            Self::Ewma { .. } => true,
+            Self::Difference { left, right, .. } => {
+                left.requires_ewma_layout() || right.requires_ewma_layout()
+            }
+            _ => false,
         }
     }
 }
@@ -2725,15 +2885,28 @@ enum CompiledEvaluation {
     Ewma(CompiledEwma),
     Aggregate(CompiledAggregate),
     Pair(CompiledPairAggregate),
+    Difference(CompiledDifference),
 }
 
 #[derive(Clone)]
+struct CompiledDifference {
+    left: CompiledFloatReadout,
+    right: CompiledFloatReadout,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CompiledFloatReadout {
+    Aggregate(CompiledAggregate),
+    Ewma(CompiledEwma),
+}
+
+#[derive(Clone, Copy, Debug)]
 struct CompiledEwma {
     group: usize,
     min_periods: u64,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy, Debug)]
 struct CompiledAggregate {
     group: usize,
     statistic: Statistic,
@@ -4197,6 +4370,9 @@ fn compute_output_value(
         CompiledEvaluation::Pair(aggregate) => {
             return evaluate_pair_aggregate(aggregate, windows, output);
         }
+        CompiledEvaluation::Difference(difference) => {
+            return evaluate_difference(difference, windows);
+        }
     };
     let referenced = if position + view.history.len() < periods {
         None
@@ -4221,6 +4397,69 @@ fn compute_output_value(
             &format!("rolling delta failed with checked arithmetic: {error}"),
         )
     })
+}
+
+fn evaluate_difference(
+    difference: &CompiledDifference,
+    windows: &[WindowState],
+) -> Result<ScalarValue> {
+    Ok(ScalarValue::Float64(
+        evaluate_float_readout(difference.left, windows)?
+            .zip(evaluate_float_readout(difference.right, windows)?)
+            .map(|(left, right)| left - right),
+    ))
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "the frozen fused rolling readout type is Float64"
+)]
+fn evaluate_float_readout(
+    readout: CompiledFloatReadout,
+    windows: &[WindowState],
+) -> Result<Option<f64>> {
+    match readout {
+        CompiledFloatReadout::Ewma(readout) => {
+            let WindowState::Ewma(state) = &windows[readout.group] else {
+                return Err(internal_error("fused EWMA readout state mismatch"));
+            };
+            Ok((state.valid_count >= readout.min_periods).then_some(state.value))
+        }
+        CompiledFloatReadout::Aggregate(readout) => {
+            let WindowState::Numeric(state) = &windows[readout.group] else {
+                return Err(internal_error("fused aggregate readout state mismatch"));
+            };
+            if state.valid_count < readout.min_periods {
+                return Ok(None);
+            }
+            match readout.statistic {
+                Statistic::Mean => Ok(Some(match (state.pos_inf > 0, state.neg_inf > 0) {
+                    (true, true) => f64::NAN,
+                    (true, false) => f64::INFINITY,
+                    (false, true) => f64::NEG_INFINITY,
+                    (false, false) => state.mean,
+                })),
+                Statistic::Variance | Statistic::Stddev => {
+                    let divisor = state.valid_count - u64::from(readout.ddof);
+                    if divisor == 0 {
+                        return Ok(None);
+                    }
+                    if state.pos_inf > 0 || state.neg_inf > 0 {
+                        return Ok(Some(f64::NAN));
+                    }
+                    let variance = state.m2.max(0.0) / divisor as f64;
+                    Ok(Some(if readout.statistic == Statistic::Stddev {
+                        variance.sqrt()
+                    } else {
+                        variance
+                    }))
+                }
+                _ => Err(internal_error(
+                    "fused aggregate readout has a non-floating statistic",
+                )),
+            }
+        }
+    }
 }
 
 fn evaluate_ewma(
@@ -4407,7 +4646,7 @@ fn validate_arguments(spec: &RollingSpec) -> Result<()> {
     if spec
         .outputs
         .iter()
-        .any(|output| matches!(output, RollingOutputSpec::Ewma { .. }))
+        .any(RollingOutputSpec::requires_ewma_layout)
         && spec.state_layout_version != ROLLING_EWMA_STATE_LAYOUT_VERSION
     {
         return Err(invalid_argument(
@@ -4460,6 +4699,10 @@ fn validate_outputs(outputs: &[RollingOutputSpec]) -> Result<()> {
                 "unsupported rolling primitive version",
             ));
         }
+        if let RollingOutputSpec::Difference { left, right, .. } = output {
+            validate_float_primitive(&format!("{base}.left"), left)?;
+            validate_float_primitive(&format!("{base}.right"), right)?;
+        }
         if output.span().is_some_and(|span| span == 0) {
             return Err(invalid_argument(
                 &format!("{base}.span"),
@@ -4478,7 +4721,10 @@ fn validate_outputs(outputs: &[RollingOutputSpec]) -> Result<()> {
                 };
                 return Err(invalid_argument(&field, "must be greater than zero"));
             }
-        } else if output.span().is_none() && output.retained_rows() == 0 {
+        } else if output.span().is_none()
+            && output.retained_rows() == 0
+            && !matches!(output, RollingOutputSpec::Difference { .. })
+        {
             return Err(invalid_argument(
                 &format!("{base}.periods"),
                 "must be greater than zero",
@@ -4536,6 +4782,87 @@ fn validate_outputs(outputs: &[RollingOutputSpec]) -> Result<()> {
                 "duplicates an earlier rolling output",
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_float_primitive(base: &str, primitive: &RollingFloatPrimitiveSpec) -> Result<()> {
+    if primitive.primitive_version() != 1 {
+        return Err(invalid_argument(
+            &format!("{base}.primitive_version"),
+            "unsupported rolling primitive version",
+        ));
+    }
+    if primitive.input().is_empty() {
+        return Err(invalid_argument(
+            &format!("{base}.input"),
+            "must not be empty",
+        ));
+    }
+    match primitive {
+        RollingFloatPrimitiveSpec::Ewma {
+            span, min_periods, ..
+        } => {
+            if *span == 0 {
+                return Err(invalid_argument(
+                    &format!("{base}.span"),
+                    "must be greater than zero",
+                ));
+            }
+            validate_positive_min_periods(base, *min_periods, None)
+        }
+        RollingFloatPrimitiveSpec::Mean {
+            frame, min_periods, ..
+        } => validate_positive_min_periods(base, *min_periods, Some(*frame)),
+        RollingFloatPrimitiveSpec::Variance {
+            frame,
+            min_periods,
+            ddof,
+            ..
+        }
+        | RollingFloatPrimitiveSpec::Stddev {
+            frame,
+            min_periods,
+            ddof,
+            ..
+        } => {
+            if *ddof > 1 {
+                return Err(invalid_argument(&format!("{base}.ddof"), "must be 0 or 1"));
+            }
+            validate_positive_min_periods(base, *min_periods, Some(*frame))
+        }
+    }
+}
+
+fn validate_positive_min_periods(
+    base: &str,
+    min_periods: u64,
+    frame: Option<RollingFrameSpec>,
+) -> Result<()> {
+    if min_periods == 0 {
+        return Err(invalid_argument(
+            &format!("{base}.min_periods"),
+            "must be greater than zero",
+        ));
+    }
+    if let Some(RollingFrameSpec::Rows { size }) = frame {
+        if size == 0 {
+            return Err(invalid_argument(
+                &format!("{base}.frame.size"),
+                "must be greater than zero",
+            ));
+        }
+        if min_periods > size {
+            return Err(invalid_argument(
+                &format!("{base}.min_periods"),
+                "must not exceed the row-frame size",
+            ));
+        }
+    } else if matches!(frame, Some(RollingFrameSpec::Duration { micros: 0 })) {
+        return Err(invalid_argument(
+            &format!("{base}.frame.micros"),
+            "must be greater than zero",
+        ));
     }
     Ok(())
 }
@@ -4729,15 +5056,19 @@ fn compile_output(
                 ddof: *ddof,
             })
         }
+        RollingOutputSpec::Difference { left, right, .. } => {
+            CompiledEvaluation::Difference(CompiledDifference {
+                left: compile_float_readout(input_schema, left, window_groups)?,
+                right: compile_float_readout(input_schema, right, window_groups)?,
+            })
+        }
         aggregate => compile_aggregate_output(aggregate, input_index, &input_type, window_groups)?,
     };
     let output_type = match &evaluation {
         CompiledEvaluation::Lag { .. } | CompiledEvaluation::Delta { .. } => input_type.clone(),
-        CompiledEvaluation::Ewma(_) => DataType::Float64,
-        CompiledEvaluation::Pair(aggregate) => {
-            let _ = aggregate;
-            DataType::Float64
-        }
+        CompiledEvaluation::Ewma(_)
+        | CompiledEvaluation::Pair(_)
+        | CompiledEvaluation::Difference(_) => DataType::Float64,
         CompiledEvaluation::Aggregate(aggregate) => match aggregate.statistic {
             Statistic::Count => DataType::UInt64,
             Statistic::Sum => match SumClass::from_input(&input_type) {
@@ -4757,6 +5088,88 @@ fn compile_output(
         input_type,
         evaluation,
     })
+}
+
+fn compile_float_readout(
+    input_schema: &Schema,
+    primitive: &RollingFloatPrimitiveSpec,
+    window_groups: &mut Vec<CompiledWindowGroup>,
+) -> Result<CompiledFloatReadout> {
+    let input_index = exact_field_index(input_schema, primitive.input())?;
+    let input_type = input_schema.field(input_index).data_type();
+    require_numeric(primitive.input(), input_type, "fused difference")?;
+    match primitive {
+        RollingFloatPrimitiveSpec::Ewma {
+            span, min_periods, ..
+        } => Ok(CompiledFloatReadout::Ewma(CompiledEwma {
+            group: compile_ewma_group(input_index, *span, window_groups),
+            min_periods: *min_periods,
+        })),
+        RollingFloatPrimitiveSpec::Mean {
+            frame, min_periods, ..
+        } => compile_float_aggregate_readout(
+            input_index,
+            input_type,
+            *frame,
+            *min_periods,
+            0,
+            Statistic::Mean,
+            window_groups,
+        ),
+        RollingFloatPrimitiveSpec::Variance {
+            frame,
+            min_periods,
+            ddof,
+            ..
+        } => compile_float_aggregate_readout(
+            input_index,
+            input_type,
+            *frame,
+            *min_periods,
+            *ddof,
+            Statistic::Variance,
+            window_groups,
+        ),
+        RollingFloatPrimitiveSpec::Stddev {
+            frame,
+            min_periods,
+            ddof,
+            ..
+        } => compile_float_aggregate_readout(
+            input_index,
+            input_type,
+            *frame,
+            *min_periods,
+            *ddof,
+            Statistic::Stddev,
+            window_groups,
+        ),
+    }
+}
+
+fn compile_float_aggregate_readout(
+    input_index: usize,
+    input_type: &DataType,
+    frame: RollingFrameSpec,
+    min_periods: u64,
+    ddof: u8,
+    statistic: Statistic,
+    window_groups: &mut Vec<CompiledWindowGroup>,
+) -> Result<CompiledFloatReadout> {
+    let CompiledEvaluation::Aggregate(aggregate) = compile_aggregate(
+        input_index,
+        input_type,
+        frame,
+        min_periods,
+        ddof,
+        statistic,
+        window_groups,
+    ) else {
+        return Err(internal_error(
+            "fused float aggregate did not compile as an aggregate",
+        ));
+    };
+    Ok(CompiledFloatReadout::Aggregate(aggregate))
 }
 
 #[allow(
@@ -4866,7 +5279,8 @@ fn compile_aggregate_output(
         | RollingOutputSpec::Delta { .. }
         | RollingOutputSpec::Ewma { .. }
         | RollingOutputSpec::Covariance { .. }
-        | RollingOutputSpec::Correlation { .. } => {
+        | RollingOutputSpec::Correlation { .. }
+        | RollingOutputSpec::Difference { .. } => {
             unreachable!("lag, delta, and pair outputs compile before aggregates")
         }
     };
@@ -5687,6 +6101,26 @@ mod tests {
         });
         declaration["frame"] = frame;
         declaration
+    }
+
+    fn mean_leaf(input: &str, size: u64) -> Value {
+        json!({
+            "kind": "mean",
+            "primitive_version": 1,
+            "input": input,
+            "frame": {"kind": "rows", "size": size},
+            "min_periods": 1
+        })
+    }
+
+    fn difference_output(left: &Value, right: &Value, output: &str) -> Value {
+        json!({
+            "kind": "difference",
+            "primitive_version": 1,
+            "left": left,
+            "right": right,
+            "output": output
+        })
     }
 
     fn aggregate_spec(outputs: Value) -> RollingSpec {
@@ -7415,6 +7849,47 @@ mod tests {
             )
             .collect::<Vec<_>>();
         assert_eq!(actual, float_column(&expected, 0));
+    }
+
+    #[test]
+    fn fused_dual_mean_writes_only_the_final_difference_column() {
+        let spec = kernel_spec(json!([difference_output(
+            &mean_leaf("price", 2),
+            &mean_leaf("price", 4),
+            "mean_spread"
+        )]));
+        let compiled = compile_spec(&spec, &kernel_schema()).unwrap();
+        let input = float64_fast_record(&[
+            (1, "a", 1, Some(1.0)),
+            (2, "a", 2, Some(3.0)),
+            (3, "a", 3, Some(5.0)),
+            (4, "a", 4, Some(9.0)),
+        ]);
+        let fast = compiled
+            .kernel_plan
+            .open_and_fill(&input, "rolling")
+            .unwrap()
+            .unwrap();
+        let rows = (0..input.num_rows())
+            .map(|row_index| read_buffered_row(&input, row_index, &compiled, "rolling").unwrap())
+            .collect::<Vec<_>>();
+        let general =
+            compute_output_columns(&rows, &RollingHistories::default(), &compiled, "rolling")
+                .unwrap();
+
+        assert_eq!(compiled.outputs.len(), 1);
+        assert_eq!(compiled.window_groups.len(), 2);
+        assert_eq!(fast.columns.len(), 1);
+        assert_eq!(fast.columns[0].to_data(), general.columns[0].to_data());
+        assert_eq!(
+            fast.columns[0]
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![Some(0.0), Some(0.0), Some(1.0), Some(2.5)]
+        );
     }
 
     #[test]

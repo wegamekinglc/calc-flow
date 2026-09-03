@@ -241,6 +241,10 @@ def _rolling_output_bounds(
 ) -> tuple[tuple[int, ...], tuple[int, ...]]:
     if not isinstance(output, dict):
         return (), ()
+    if output.get("kind") == "difference":
+        left_rows, left_durations = _rolling_output_bounds(output.get("left"))
+        right_rows, right_durations = _rolling_output_bounds(output.get("right"))
+        return (*left_rows, *right_rows), (*left_durations, *right_durations)
     periods = output.get("periods")
     row_bounds = (periods + 1,) if isinstance(periods, int) else ()
     frame_rows, duration_bounds = _frame_bounds(output.get("frame"))
@@ -376,6 +380,20 @@ def _state_output_count(items: list[dict[str, object]], /) -> int:
     return count
 
 
+def _rolling_fusion_count(items: list[dict[str, object]], /) -> int:
+    count = 0
+    for item in items:
+        operator = item["operator"]
+        spec = operator.get("spec") if isinstance(operator, dict) else None
+        outputs = spec.get("outputs") if isinstance(spec, dict) else None
+        if isinstance(outputs, list):
+            count += sum(
+                isinstance(output, dict) and output.get("kind") == "difference"
+                for output in outputs
+            )
+    return count
+
+
 def _cost_lines(
     nodes: list[dict[str, object]],
     renderer: Callable[[dict[str, object]], str | None],
@@ -404,6 +422,8 @@ def explain_optimization(document: dict[str, object], /) -> tuple[str, ...]:
         f"    cse materializations {cse_count}",
         "    rolling state_stages"
         f" {len(rolling)} shared_outputs {_state_output_count(rolling)}",
+        "    rolling fused_outputs"
+        f" {_rolling_fusion_count(rolling)} hidden_materializations 0",
         "    cross_section grouping_stages"
         f" {len(cross_section)} shared_outputs {_state_output_count(cross_section)}",
         f"    stream_join state_stages {len(stream_join)}",

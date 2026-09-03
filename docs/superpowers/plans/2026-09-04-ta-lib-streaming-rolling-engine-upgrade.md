@@ -400,6 +400,15 @@ frame 和数值 recurrence 的输出进入同一 state group；中间结果只�
 观察时物化。优化器必须保留 exact operation order、null propagation 和输出
 类型，不允许为了 fusion 穿越 finality 或 array/materialization 边界。
 
+P3 已实现第一条通用复合输出：`difference` 持有两个无名字的 Float64 rolling
+readout，可组合 mean、variance、stddev 和 EWMA。Rust compiler 把叶节点编译到
+现有共享 window/EWMA group，typed 与 fallback kernel 都从 state 直接计算最终
+差值，只创建一个最终 Arrow builder。Symbolic lowering 以 DAG liveness 判断叶
+节点是否仍被其他输出观察：只有完全隐藏的 dual-SMA/MACD 叶节点才省略物化；
+复用叶节点仍保留独立输出。融合只发生在同一个 rolling state stage，不跨
+finality、array 或 materialization 边界；state layout v3 按实际 group 投影恢复所需
+输入，派生差值不进入 checkpoint。
+
 ## 10. DataFusion 54 升级路径
 
 ### 10.1 先消除重复 physical planning
@@ -487,7 +496,7 @@ secret 写入 `RunResult`。
 | P0    | semantics and evidence    | freeze two examples; metrics; remove duplicate planning  | equivalent output; one physical plan; exact-SHA baseline | implemented |
 | P1    | ordered Float64 fast path | typed buffers; order proof; dense state; direct builders | no per-cell ScalarValue; no sort on proven order         | implemented |
 | P2    | state and Arrow types     | layout v3; null/integer/extrema/pair/duration kernels    | batch/stream/restore matrix; old-state reads             | implemented |
-| P3    | composed output fusion    | DAG liveness; dual-SMA; BBANDS/MACD-class fusion         | no hidden materialization or finality crossing           | pending     |
+| P3    | composed output fusion    | DAG liveness; dual-SMA; BBANDS/MACD-class fusion         | no hidden materialization or finality crossing           | implemented |
 | P4    | DataFusion integration    | CalcFlowRollingExec; safe rewrite; adaptive partitions   | deterministic fallback, partitions, and memory           | pending     |
 | P5    | generation and numerics   | kernel census; fail-closed generation; stable_v2/preview | oracle, non-vacuity, sanitizer, migration, perf          | pending     |
 
@@ -498,18 +507,18 @@ secret 写入 `RunResult`。
 实施期间按用户要求调整为一个 PR 内的独立 phase commits，而不是拆分多个 PR；
 每个阶段仍保留独立 RED test、验证证据、fallback 和可回滚提交边界。
 
-### 13.1 剩余开发工作包
+### 13.1 开发工作包与状态
 
-| Work package | Primary code surface                                      | Concrete delivery                                                                 | Depends on | Rollback boundary                                      |
-| ------------ | --------------------------------------------------------- | --------------------------------------------------------------------------------- | ---------- | ------------------------------------------------------ |
-| WP-P3A       | `operator/rolling.rs`, `operator/rolling/kernel.rs`        | 将输出表达式编译为 liveness DAG；dual-SMA 只写最终差值列                          | P2         | 关闭 fused-output capability，回到独立输出物化         |
-| WP-P3B       | `python/calc_flow/symbolic/`                               | 识别 SMA、EWMA/MACD 类共享叶节点；仅隐藏无其他观察者的中间值                       | WP-P3A     | 保留原 symbolic lowering，不跨 finality/materialization |
-| WP-P4A       | `datafusion.rs`, rolling physical execution module        | 实现 crate-private `CalcFlowRollingExec`，复用 typed transition 与 run memory pool | P3         | planner extension 不注册，继续使用 DataFusion window   |
-| WP-P4B       | SQL logical/physical rewrite and explain metrics          | 只改写 bounded `ROWS ... CURRENT ROW` allowlist，并记录拒绝原因                     | WP-P4A     | allowlist 置空即全量 fallback                          |
-| WP-P4C       | batch planner and canonical merge                         | 根据规模、entity 基数和 state bytes 选择 partition；稳定恢复可观察顺序              | WP-P4A     | 固定 `target_partitions=1`                             |
-| WP-P5A       | kernel capability manifest and generation checks          | 建立 kernel census；声明可 stream 的形状若无法生成 transition 则构建失败             | P3-P4      | 生成清单只报告，不扩大 capability                      |
-| WP-P5B       | numerical profiles and state migration                    | 冻结 `stable_v1`；以 opt-in preview 引入 rebase/shifted-sum 实验                     | WP-P5A     | 禁用 preview；writer 继续输出当前 profile              |
-| WP-P5C       | benchmark/evidence scripts and CI validators              | non-vacuity、oracle、migration、sanitizer、paired performance 统一证据               | P3-P5B     | 性能结果降级为 informational，不放宽 correctness gate  |
+| Work package | Primary code surface                                      | Concrete delivery                                                                 | Depends on | Status      | Rollback boundary                                      |
+| ------------ | --------------------------------------------------------- | --------------------------------------------------------------------------------- | ---------- | ----------- | ------------------------------------------------------ |
+| WP-P3A       | `operator/rolling.rs`, `operator/rolling/kernel.rs`        | 将输出表达式编译为 liveness DAG；dual-SMA 只写最终差值列                          | P2         | implemented | 关闭 fused-output capability，回到独立输出物化         |
+| WP-P3B       | `python/calc_flow/symbolic/`                               | 识别 SMA、EWMA/MACD 类共享叶节点；仅隐藏无其他观察者的中间值                       | WP-P3A     | implemented | 保留原 symbolic lowering，不跨 finality/materialization |
+| WP-P4A       | `datafusion.rs`, rolling physical execution module        | 实现 crate-private `CalcFlowRollingExec`，复用 typed transition 与 run memory pool | P3         | pending     | planner extension 不注册，继续使用 DataFusion window   |
+| WP-P4B       | SQL logical/physical rewrite and explain metrics          | 只改写 bounded `ROWS ... CURRENT ROW` allowlist，并记录拒绝原因                     | WP-P4A     | pending     | allowlist 置空即全量 fallback                          |
+| WP-P4C       | batch planner and canonical merge                         | 根据规模、entity 基数和 state bytes 选择 partition；稳定恢复可观察顺序              | WP-P4A     | pending     | 固定 `target_partitions=1`                             |
+| WP-P5A       | kernel capability manifest and generation checks          | 建立 kernel census；声明可 stream 的形状若无法生成 transition 则构建失败             | P3-P4      | pending     | 生成清单只报告，不扩大 capability                      |
+| WP-P5B       | numerical profiles and state migration                    | 冻结 `stable_v1`；以 opt-in preview 引入 rebase/shifted-sum 实验                     | WP-P5A     | pending     | 禁用 preview；writer 继续输出当前 profile              |
+| WP-P5C       | benchmark/evidence scripts and CI validators              | non-vacuity、oracle、migration、sanitizer、paired performance 统一证据               | P3-P5B     | pending     | 性能结果降级为 informational，不放宽 correctness gate  |
 
 每个工作包在同一 PR 内保持独立提交，提交信息说明 capability 扩张、fallback 和 state
 影响。P3/P4 只有在语义、恢复和 deterministic ordering 同时满足时才扩大 fast-path

@@ -172,11 +172,58 @@ def test_ewma_and_macd_lower_to_shared_layout_two_state() -> None:
     spec = rolling[0]["operator"]["spec"]  # type: ignore[index]
     assert spec["state_layout_version"] == 2
     outputs = spec["outputs"]
-    assert [output["kind"] for output in outputs] == ["ewma", "ewma", "ewma"]
-    assert [output["span"] for output in outputs] == [3, 2, 4]
+    assert [output["kind"] for output in outputs] == ["ewma", "difference"]
+    assert outputs[0]["span"] == 3
     assert outputs[0]["output"] in {"ema", "same_ema"}
+    assert outputs[1]["left"]["span"] == 2
+    assert outputs[1]["right"]["span"] == 4
+    assert outputs[1]["output"] == "macd"
     assert all("frame" not in output for output in outputs)
-    assert all(output["min_periods"] > 0 for output in outputs)
+
+
+def test_dual_mean_difference_is_written_without_hidden_rolling_columns() -> None:
+    quotes = _ordered()
+    spread = ts.mean(quotes["x"], window=rows(2)) - ts.mean(quotes["x"], window=rows(4))
+    program = _program([("spread", spread)])
+
+    document = lower_program_document(program, Runtime(), "batch")
+
+    (rolling,) = _rolling_nodes(document)
+    spec = rolling["operator"]["spec"]
+    assert spec["outputs"] == [
+        {
+            "kind": "difference",
+            "primitive_version": 1,
+            "left": {
+                "kind": "mean",
+                "primitive_version": 1,
+                "input": "x",
+                "frame": {"kind": "rows", "size": 2},
+                "min_periods": 1,
+            },
+            "right": {
+                "kind": "mean",
+                "primitive_version": 1,
+                "input": "x",
+                "frame": {"kind": "rows", "size": 4},
+                "min_periods": 1,
+            },
+            "output": "spread",
+        }
+    ]
+    output_fields = rolling["output_ports"][0]["schema"]
+    assert [field["name"] for field in output_fields] == [
+        "ts",
+        "symbol",
+        "seq",
+        "x",
+        "v",
+        "spread",
+    ]
+    assert all("__cf_roll_" not in field["name"] for field in output_fields)
+    explanation = program.explain(Runtime(), mode="batch")
+    assert "    rolling fused_outputs 1 hidden_materializations 0" in explanation
+    assert "    state signals__cf_rolling rows=4" in explanation
 
 
 def test_stream_lowering_carries_the_lateness_arguments() -> None:

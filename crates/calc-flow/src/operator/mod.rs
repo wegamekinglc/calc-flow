@@ -26,7 +26,8 @@ pub use join::{
 pub use rolling::{
     LateErrorScope, LatePolicySpec, ROLLING_COLUMNAR_STATE_LAYOUT_VERSION,
     ROLLING_CONFIGURATION_VERSION, ROLLING_EWMA_STATE_LAYOUT_VERSION, ROLLING_STATE_LAYOUT_VERSION,
-    RollingFrameSpec, RollingOperator, RollingOutputSpec, RollingSpec, RollingValuePolicy,
+    RollingFloatPrimitiveSpec, RollingFrameSpec, RollingOperator, RollingOutputSpec, RollingSpec,
+    RollingValuePolicy,
 };
 pub use sql::SqlOperator;
 pub use stream::{

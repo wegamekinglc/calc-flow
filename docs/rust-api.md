@@ -187,7 +187,10 @@ output column names, a positive frame, and `min_periods`, with `variance` and
 name, a positive frame, `min_periods`, and `ddof`. Kind `ewma` carries
 input/output names, a positive `span`, and positive `min_periods`; it emits nullable `float64` from the
 unadjusted `alpha = 2 / (span + 1)` recurrence and shares constant state by
-`(input, span)`.
+`(input, span)`. Kind `difference` embeds two `mean`, `variance`, `stddev`, or
+`ewma` readouts and one output name. The leaves create and share state but are
+not output columns; the operator writes their nullable `float64` difference
+directly.
 
 A frame is `rows(size)` —
 the `size` rows through the current row of the entity total order — or
@@ -231,6 +234,7 @@ table:
 | `mean` / `variance` / `stddev` | numeric          | `float64`         |
 | `min` / `max`                  | total order      | input type        |
 | `covariance` / `correlation`   | numeric pair     | `float64`         |
+| `difference`                   | float readouts   | `float64`         |
 
 Aggregates count valid samples — values that are neither null nor NaN;
 infinities are numeric samples and count toward `min_periods`. A window with

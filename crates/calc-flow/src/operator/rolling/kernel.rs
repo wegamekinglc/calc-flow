@@ -24,9 +24,9 @@ use datafusion::arrow::{
 use sha2::{Digest, Sha256};
 
 use super::{
-    CompiledEvaluation, CompiledFrame, CompiledKeyColumn, CompiledRollingOutput,
-    CompiledWindowGroup, PairAccumulator, Statistic, SumClass, SumState, WindowAccumulator,
-    internal_error, operator_error,
+    CompiledEvaluation, CompiledFloatReadout, CompiledFrame, CompiledKeyColumn,
+    CompiledRollingOutput, CompiledWindowGroup, PairAccumulator, Statistic, SumClass, SumState,
+    WindowAccumulator, internal_error, operator_error,
 };
 use crate::Result;
 
@@ -153,6 +153,26 @@ enum TypedOutputKind {
     Statistic(Statistic),
     Covariance,
     Correlation,
+    Ewma,
+    Difference {
+        left: TypedFloatReadout,
+        right: TypedFloatReadout,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TypedFloatReadout {
+    group: usize,
+    kind: TypedFloatReadoutKind,
+    min_periods: u64,
+    ddof: u8,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TypedFloatReadoutKind {
+    Mean,
+    Variance,
+    Stddev,
     Ewma,
 }
 
@@ -801,7 +821,7 @@ fn append_typed_outputs(
     node_id: &str,
 ) -> Result<()> {
     for (builder, output) in builders.iter_mut().zip(outputs) {
-        builder.append(&entity.groups[output.group], output, node_id)?;
+        builder.append(&entity.groups, output, node_id)?;
     }
     Ok(())
 }
@@ -957,7 +977,7 @@ fn compile_typed_outputs(
     let mut typed_outputs = Vec::with_capacity(outputs.len());
     for output in outputs {
         let plan = compile_typed_output(output, groups)?;
-        if plan.group >= groups.len() {
+        if !typed_output_groups_are_valid(&plan, groups.len()) {
             return Err("aggregate group index is outside the typed plan".into());
         }
         typed_outputs.push(plan);
@@ -995,7 +1015,53 @@ fn compile_typed_output(
             min_periods: ewma.min_periods,
             ddof: 0,
         }),
-        _ => Err("requires aggregate, pair, or EWMA outputs".into()),
+        CompiledEvaluation::Difference(difference) => Ok(TypedOutputPlan {
+            group: 0,
+            kind: TypedOutputKind::Difference {
+                left: compile_typed_readout(difference.left)?,
+                right: compile_typed_readout(difference.right)?,
+            },
+            storage: OutputStorage::Float64,
+            min_periods: 0,
+            ddof: 0,
+        }),
+        _ => Err("requires aggregate, pair, EWMA, or fused difference outputs".into()),
+    }
+}
+
+fn compile_typed_readout(
+    readout: CompiledFloatReadout,
+) -> std::result::Result<TypedFloatReadout, String> {
+    match readout {
+        CompiledFloatReadout::Ewma(readout) => Ok(TypedFloatReadout {
+            group: readout.group,
+            kind: TypedFloatReadoutKind::Ewma,
+            min_periods: readout.min_periods,
+            ddof: 0,
+        }),
+        CompiledFloatReadout::Aggregate(readout) => {
+            let kind = match readout.statistic {
+                Statistic::Mean => TypedFloatReadoutKind::Mean,
+                Statistic::Variance => TypedFloatReadoutKind::Variance,
+                Statistic::Stddev => TypedFloatReadoutKind::Stddev,
+                _ => return Err("fused difference requires floating readouts".into()),
+            };
+            Ok(TypedFloatReadout {
+                group: readout.group,
+                kind,
+                min_periods: readout.min_periods,
+                ddof: readout.ddof,
+            })
+        }
+    }
+}
+
+const fn typed_output_groups_are_valid(output: &TypedOutputPlan, group_count: usize) -> bool {
+    match output.kind {
+        TypedOutputKind::Difference { left, right } => {
+            left.group < group_count && right.group < group_count
+        }
+        _ => output.group < group_count,
     }
 }
 
@@ -1949,10 +2015,16 @@ impl DerivedBuilder {
 
     fn append(
         &mut self,
-        state: &TypedWindowState,
+        states: &[TypedWindowState],
         output: &TypedOutputPlan,
         node_id: &str,
     ) -> Result<()> {
+        if let TypedOutputKind::Difference { left, right } = output.kind {
+            return self.append_difference(states, left, right);
+        }
+        let state = states
+            .get(output.group)
+            .ok_or_else(|| internal_error("typed rolling output group is out of bounds"))?;
         if typed_valid_count(state) < output.min_periods {
             self.append_null();
             return Ok(());
@@ -2046,6 +2118,25 @@ impl DerivedBuilder {
         }
     }
 
+    fn append_difference(
+        &mut self,
+        states: &[TypedWindowState],
+        left: TypedFloatReadout,
+        right: TypedFloatReadout,
+    ) -> Result<()> {
+        let Self::Float(builder, _) = self else {
+            return Err(typed_output_mismatch());
+        };
+        match (
+            read_typed_float(states, left)?,
+            read_typed_float(states, right)?,
+        ) {
+            (Some(left), Some(right)) => builder.append_value(left - right),
+            _ => builder.append_null(),
+        }
+        Ok(())
+    }
+
     fn append_null(&mut self) {
         match self {
             Self::Count(builder) | Self::Unsigned(builder, _) => builder.append_null(),
@@ -2135,6 +2226,66 @@ fn typed_valid_count(state: &TypedWindowState) -> u64 {
     }
 }
 
+fn read_typed_float(
+    states: &[TypedWindowState],
+    readout: TypedFloatReadout,
+) -> Result<Option<f64>> {
+    let state = states
+        .get(readout.group)
+        .ok_or_else(|| internal_error("typed fused readout group is out of bounds"))?;
+    if typed_valid_count(state) < readout.min_periods {
+        return Ok(None);
+    }
+    if readout.kind == TypedFloatReadoutKind::Ewma {
+        let TypedWindowState::Ewma(state) = state else {
+            return Err(internal_error("typed fused EWMA readout state mismatch"));
+        };
+        return Ok(Some(state.value));
+    }
+    let accumulator = match state {
+        TypedWindowState::Numeric(state) => &state.accumulator,
+        TypedWindowState::Exact(state) => &state.accumulator,
+        _ => {
+            return Err(internal_error(
+                "typed fused aggregate readout state mismatch",
+            ));
+        }
+    };
+    match readout.kind {
+        TypedFloatReadoutKind::Mean => Ok(Some(float_mean(accumulator))),
+        TypedFloatReadoutKind::Variance | TypedFloatReadoutKind::Stddev => Ok(dispersion_value(
+            accumulator,
+            readout.kind == TypedFloatReadoutKind::Stddev,
+            readout.ddof,
+        )),
+        TypedFloatReadoutKind::Ewma => unreachable!("EWMA readouts return before aggregation"),
+    }
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "the frozen variance output type is Float64"
+)]
+fn dispersion_value(
+    accumulator: &WindowAccumulator,
+    standard_deviation: bool,
+    ddof: u8,
+) -> Option<f64> {
+    let divisor = accumulator.valid_count - u64::from(ddof);
+    if divisor == 0 {
+        return None;
+    }
+    if accumulator.pos_inf > 0 || accumulator.neg_inf > 0 {
+        return Some(f64::NAN);
+    }
+    let variance = accumulator.m2.max(0.0) / divisor as f64;
+    Some(if standard_deviation {
+        variance.sqrt()
+    } else {
+        variance
+    })
+}
+
 fn append_signed_sum(
     builder: &mut Int64Builder,
     accumulator: &WindowAccumulator,
@@ -2221,6 +2372,11 @@ fn append_pair(
         TypedOutputKind::Ewma => {
             return Err(internal_error("typed pair state received an EWMA output"));
         }
+        TypedOutputKind::Difference { .. } => {
+            return Err(internal_error(
+                "typed pair state received a fused difference output",
+            ));
+        }
     }
     Ok(())
 }
@@ -2286,21 +2442,11 @@ fn append_dispersion(
     statistic: Statistic,
     ddof: u8,
 ) {
-    let divisor = accumulator.valid_count - u64::from(ddof);
-    if divisor == 0 {
-        builder.append_null();
-        return;
-    }
-    if accumulator.pos_inf > 0 || accumulator.neg_inf > 0 {
-        builder.append_value(f64::NAN);
-        return;
-    }
-    let variance = accumulator.m2.max(0.0) / divisor as f64;
-    builder.append_value(if statistic == Statistic::Stddev {
-        variance.sqrt()
+    if let Some(value) = dispersion_value(accumulator, statistic == Statistic::Stddev, ddof) {
+        builder.append_value(value);
     } else {
-        variance
-    });
+        builder.append_null();
+    }
 }
 
 fn nanos(duration: Duration) -> u64 {

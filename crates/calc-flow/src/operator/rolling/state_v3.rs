@@ -203,39 +203,28 @@ fn history_projection(compiled: &CompiledRollingSpec) -> BTreeSet<usize> {
     let mut projection = BTreeSet::from([compiled.event_time_index]);
     projection.extend(compiled.sequence_columns.iter().map(|column| column.index));
     for output in &compiled.outputs {
-        match &output.evaluation {
-            CompiledEvaluation::Lag { .. } | CompiledEvaluation::Delta { .. } => {
-                projection.insert(output.input_index);
+        if matches!(
+            output.evaluation,
+            CompiledEvaluation::Lag { .. } | CompiledEvaluation::Delta { .. }
+        ) {
+            projection.insert(output.input_index);
+        }
+    }
+    for group in &compiled.window_groups {
+        match group {
+            CompiledWindowGroup::Numeric { input_index, .. }
+            | CompiledWindowGroup::Extrema { input_index, .. } => {
+                projection.insert(*input_index);
             }
-            CompiledEvaluation::Aggregate(aggregate) => {
-                match &compiled.window_groups[aggregate.group] {
-                    CompiledWindowGroup::Numeric { input_index, .. }
-                    | CompiledWindowGroup::Extrema { input_index, .. } => {
-                        projection.insert(*input_index);
-                    }
-                    CompiledWindowGroup::Pair {
-                        left_index,
-                        right_index,
-                        ..
-                    } => {
-                        projection.insert(*left_index);
-                        projection.insert(*right_index);
-                    }
-                    CompiledWindowGroup::Ewma { .. } => {}
-                }
+            CompiledWindowGroup::Pair {
+                left_index,
+                right_index,
+                ..
+            } => {
+                projection.insert(*left_index);
+                projection.insert(*right_index);
             }
-            CompiledEvaluation::Pair(pair) => {
-                if let CompiledWindowGroup::Pair {
-                    left_index,
-                    right_index,
-                    ..
-                } = &compiled.window_groups[pair.group]
-                {
-                    projection.insert(*left_index);
-                    projection.insert(*right_index);
-                }
-            }
-            CompiledEvaluation::Ewma(_) => {}
+            CompiledWindowGroup::Ewma { .. } => {}
         }
     }
     projection

@@ -797,6 +797,12 @@ remaining aggregate columns take the frozen output type — `uint64` for
 `count`, `int64` or `uint64` for an integer `sum`, `float64` otherwise —
 and the engine evaluates the frozen window semantics described in the
 [Rust API guide](rust-api.md).
+The direct difference of two `mean`, `variance`, `stddev`, or EWMA expressions
+at the same finality boundary lowers as one native `difference` output. Its two
+leaf states still participate in ordinary group sharing, but neither leaf is
+materialized as a hidden Arrow column; the rolling builder writes only the
+nullable `float64` result. This is the path used by dual-SMA spreads and the
+fast-minus-slow portion of `ts.macd`.
 `ts.ewma(value, span=n, min_periods=m)` instead declares constant exponential
 state: `n` and `m` are positive, the first valid value seeds the unadjusted
 average exactly, and later valid values apply
