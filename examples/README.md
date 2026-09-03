@@ -29,6 +29,7 @@ uv run python examples/10_symbolic_streaming_recovery.py
 uv run python examples/11_symbolic_static_matrix.py
 uv run python examples/12_symbolic_stream_join.py
 uv run python examples/13_symbolic_relational_dag.py
+uv run python examples/14_symbolic_incremental_rolling.py
 ```
 
 Or run the entire Python and Rust user-example inventory:
@@ -69,6 +70,8 @@ The files cover:
   bounded native stream join and executed across independent segmentations.
 - `13_symbolic_relational_dag.py` — explicit post-join ordering composes an
   authorization/payment match with a settlement join in one native DAG.
+- `14_symbolic_incremental_rolling.py` — ordered per-symbol rolling indicators,
+  null handling, native incremental execution, and result retrieval.
 
 `07_array_and_dataframe.py` selects ordered numeric `pyarrow.Table` columns
 and multiplies their dense matrix by an array weight matrix. After input

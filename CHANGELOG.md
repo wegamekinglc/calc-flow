@@ -5,6 +5,13 @@ engine or Studio capabilities.
 
 ## 2026-09
 
+- 2026-09-03: Add a complete symbolic incremental-rolling indicator example
+  and a same-process benchmark against equivalent DataFusion SQL row-window
+  functions. The benchmark verifies ordered outputs, null masks, and floating
+  values before timing, then records alternating samples, throughput, elapsed
+  time, workload parameters, environment identity, and relative performance.
+  No rolling semantics or public API changed.
+
 - 2026-09-02: Add symbolic relational stream-join DAGs and explicit post-join
   ordering (SCE-18). Independent and nested bounded joins, unrelated outputs,
   and ordered post-join rolling/cross-section stages now lower to one existing

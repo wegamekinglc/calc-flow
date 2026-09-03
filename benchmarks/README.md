@@ -115,6 +115,7 @@ accepted milestone gates and their raw evidence are documented in
 | `sce14_cross_domain_sharing`              | separate versus shared rolling and cross-section branches  |
 | `sce16_exponential_indicators`            | alternating hand-built/symbolic EWMA and MACD runs          |
 | `symbolic_multistage_rolling_sharing`     | separate versus shared two-stage rolling output branches   |
+| `incremental_rolling_vs_sql_window`       | native incremental rolling versus SQL row-window functions |
 
 Every scenario records rows, batches, peak RSS (`VmHWM`), provider or
 DataFusion query counts, and Arrow/dense copy bytes in `extra_info`. The
@@ -180,3 +181,8 @@ CALC_FLOW_BENCHMARK_SCALE=standard \
   uv run pytest benchmarks/test_symbolic_baseline.py -q --benchmark-only \
   --benchmark-json=<output>.json
 ```
+
+The focused rolling comparison validates native and SQL results before timing,
+then alternates 30 samples of each implementation in the same process. See
+[rolling/DAL184.md](rolling/DAL184.md) for its null and boundary semantics,
+environment contract, reproduction command, and latest measured summary.

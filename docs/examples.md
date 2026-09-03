@@ -50,6 +50,7 @@ the [Rust example inventory](../crates/calc-flow/examples/README.md).
 | [`11_symbolic_static_matrix.py`](../examples/11_symbolic_static_matrix.py)                | Batch/stream static weights, copy facts, and provider failure         |
 | [`12_symbolic_stream_join.py`](../examples/12_symbolic_stream_join.py)                    | Two ordered symbolic inputs and one bounded native stream join        |
 | [`13_symbolic_relational_dag.py`](../examples/13_symbolic_relational_dag.py)              | Ordered nested joins lowered to two durable native state owners       |
+| [`14_symbolic_incremental_rolling.py`](../examples/14_symbolic_incremental_rolling.py)    | Per-symbol rolling indicators backed by native incremental state      |
 
 The Python continuous examples use application-owned in-memory connectors.
 Production transport configuration is data-only and covered by the
@@ -80,6 +81,8 @@ The sink asserts both deterministic aggregates before printing them.
   `09_symbolic_financial_features.py`, then use
   `10_symbolic_streaming_recovery.py` for continuous recovery or
   `11_symbolic_static_matrix.py` for immutable model weights.
+- For the smallest complete rolling-indicator example, including null and
+  boundary behavior, use `14_symbolic_incremental_rolling.py`.
 - For a bounded match over two ordered symbolic streams, use
   `12_symbolic_stream_join.py`; for independent or nested joins and explicit
   post-join ordering, continue with `13_symbolic_relational_dag.py`.
