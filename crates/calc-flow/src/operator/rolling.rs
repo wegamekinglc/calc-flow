@@ -43,6 +43,7 @@ use super::{
     validate_operator_name,
 };
 
+mod generated_kernel_manifest;
 mod kernel;
 mod state_v3;
 
@@ -108,7 +109,7 @@ impl DataFusionRollingKernel {
         order_indices: &[usize],
         windows: &[DataFusionRollingWindow],
     ) -> Option<Self> {
-        if windows.is_empty() {
+        if windows.is_empty() || !kernel::supports_datafusion_primitive("mean") {
             return None;
         }
         let (&event_time_index, sequence_indices) = order_indices.split_first()?;

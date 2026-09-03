@@ -26,7 +26,11 @@ use sha2::{Digest, Sha256};
 use super::{
     CompiledEvaluation, CompiledFloatReadout, CompiledFrame, CompiledKeyColumn,
     CompiledRollingOutput, CompiledWindowGroup, PairAccumulator, Statistic, SumClass, SumState,
-    WindowAccumulator, internal_error, operator_error,
+    WindowAccumulator,
+    generated_kernel_manifest::{
+        GeneratedComplexity, GeneratedTransition, generated_kernel_capability,
+    },
+    internal_error, operator_error,
 };
 use crate::Result;
 
@@ -1025,43 +1029,96 @@ fn compile_typed_output(
     groups: &[TypedGroupPlan],
 ) -> std::result::Result<TypedOutputPlan, String> {
     match &output.evaluation {
-        CompiledEvaluation::Aggregate(aggregate) => Ok(TypedOutputPlan {
-            group: aggregate.group,
-            kind: TypedOutputKind::Statistic(aggregate.statistic),
-            storage: output_storage(aggregate, groups)?,
-            min_periods: aggregate.min_periods,
-            ddof: aggregate.ddof,
-        }),
-        CompiledEvaluation::Pair(pair) => Ok(TypedOutputPlan {
-            group: pair.group,
-            kind: if pair.correlation {
-                TypedOutputKind::Correlation
+        CompiledEvaluation::Aggregate(aggregate) => {
+            let transition = if matches!(aggregate.statistic, Statistic::Min | Statistic::Max) {
+                GeneratedTransition::Extrema
             } else {
-                TypedOutputKind::Covariance
-            },
-            storage: OutputStorage::Float64,
-            min_periods: pair.min_periods,
-            ddof: pair.ddof,
-        }),
-        CompiledEvaluation::Ewma(ewma) => Ok(TypedOutputPlan {
-            group: ewma.group,
-            kind: TypedOutputKind::Ewma,
-            storage: OutputStorage::Float64,
-            min_periods: ewma.min_periods,
-            ddof: 0,
-        }),
-        CompiledEvaluation::Difference(difference) => Ok(TypedOutputPlan {
-            group: 0,
-            kind: TypedOutputKind::Difference {
-                left: compile_typed_readout(difference.left)?,
-                right: compile_typed_readout(difference.right)?,
-            },
-            storage: OutputStorage::Float64,
-            min_periods: 0,
-            ddof: 0,
-        }),
+                GeneratedTransition::Numeric
+            };
+            require_generated_transition(aggregate.statistic.name(), transition)?;
+            Ok(TypedOutputPlan {
+                group: aggregate.group,
+                kind: TypedOutputKind::Statistic(aggregate.statistic),
+                storage: output_storage(aggregate, groups)?,
+                min_periods: aggregate.min_periods,
+                ddof: aggregate.ddof,
+            })
+        }
+        CompiledEvaluation::Pair(pair) => {
+            let primitive = if pair.correlation {
+                "correlation"
+            } else {
+                "covariance"
+            };
+            require_generated_transition(primitive, GeneratedTransition::Pair)?;
+            Ok(TypedOutputPlan {
+                group: pair.group,
+                kind: if pair.correlation {
+                    TypedOutputKind::Correlation
+                } else {
+                    TypedOutputKind::Covariance
+                },
+                storage: OutputStorage::Float64,
+                min_periods: pair.min_periods,
+                ddof: pair.ddof,
+            })
+        }
+        CompiledEvaluation::Ewma(ewma) => {
+            require_generated_transition("ewma", GeneratedTransition::Ewma)?;
+            Ok(TypedOutputPlan {
+                group: ewma.group,
+                kind: TypedOutputKind::Ewma,
+                storage: OutputStorage::Float64,
+                min_periods: ewma.min_periods,
+                ddof: 0,
+            })
+        }
+        CompiledEvaluation::Difference(difference) => {
+            require_generated_transition("difference", GeneratedTransition::FusedDifference)?;
+            Ok(TypedOutputPlan {
+                group: 0,
+                kind: TypedOutputKind::Difference {
+                    left: compile_typed_readout(difference.left)?,
+                    right: compile_typed_readout(difference.right)?,
+                },
+                storage: OutputStorage::Float64,
+                min_periods: 0,
+                ddof: 0,
+            })
+        }
         _ => Err("requires aggregate, pair, EWMA, or fused difference outputs".into()),
     }
+}
+
+fn require_generated_transition(
+    primitive: &str,
+    expected: GeneratedTransition,
+) -> std::result::Result<(), String> {
+    let capability = generated_kernel_capability(primitive)
+        .ok_or_else(|| format!("kernel census is missing primitive {primitive}"))?;
+    if !capability.batch || !capability.stream {
+        return Err(format!(
+            "kernel census does not declare batch and stream support for {primitive}"
+        ));
+    }
+    if capability.typed_transition != Some(expected)
+        || capability.complexity != GeneratedComplexity::AmortizedConstant
+    {
+        return Err(format!(
+            "kernel census does not declare the required typed transition for {primitive}"
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn supports_datafusion_primitive(primitive: &str) -> bool {
+    generated_kernel_capability(primitive).is_some_and(|capability| {
+        capability.batch
+            && capability.stream
+            && capability.datafusion
+            && capability.typed_transition.is_some()
+            && capability.complexity == GeneratedComplexity::AmortizedConstant
+    })
 }
 
 fn compile_typed_readout(

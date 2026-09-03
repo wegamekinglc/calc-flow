@@ -515,7 +515,7 @@ secret 写入 `RunResult`。
 | P2    | state and Arrow types     | layout v3; null/integer/extrema/pair/duration kernels    | batch/stream/restore matrix; old-state reads             | implemented |
 | P3    | composed output fusion    | DAG liveness; dual-SMA; BBANDS/MACD-class fusion         | no hidden materialization or finality crossing           | implemented |
 | P4    | DataFusion integration    | CalcFlowRollingExec; safe rewrite; adaptive partitions   | deterministic fallback, partitions, and memory           | implemented |
-| P5    | generation and numerics   | kernel census; fail-closed generation; stable_v2/preview | oracle, non-vacuity, sanitizer, migration, perf          | pending     |
+| P5    | generation and numerics   | kernel census; fail-closed generation; stable_v2/preview | oracle, non-vacuity, sanitizer, migration, perf          | in progress |
 
 每个 phase 在当前 PR 内形成独立提交，保留旧通用 kernel 作为 fallback。P1 至 P4
 的每个性能阶段都先落 focused RED test，再落实现与 paired evidence；没有对应
@@ -533,13 +533,19 @@ secret 写入 `RunResult`。
 | WP-P4A       | `datafusion.rs`, rolling physical execution module        | 实现 crate-private `CalcFlowRollingExec`，复用 typed transition 与 run memory pool | P3         | implemented | planner extension 不注册，继续使用 DataFusion window   |
 | WP-P4B       | SQL logical/physical rewrite and explain metrics          | 只改写 bounded `ROWS ... CURRENT ROW` allowlist，并记录拒绝原因                     | WP-P4A     | implemented | allowlist 置空即全量 fallback                          |
 | WP-P4C       | batch planner and canonical merge                         | 根据规模、entity 基数和 state bytes 选择 partition；稳定恢复可观察顺序              | WP-P4A     | implemented | 固定 `target_partitions=1`                             |
-| WP-P5A       | kernel capability manifest and generation checks          | 建立 kernel census；声明可 stream 的形状若无法生成 transition 则构建失败             | P3-P4      | pending     | 生成清单只报告，不扩大 capability                      |
+| WP-P5A       | kernel capability manifest and generation checks          | 建立 kernel census；声明可 stream 的形状若无法生成 transition 则构建失败             | P3-P4      | implemented | 生成清单只报告，不扩大 capability                      |
 | WP-P5B       | numerical profiles and state migration                    | 冻结 `stable_v1`；以 opt-in preview 引入 rebase/shifted-sum 实验                     | WP-P5A     | pending     | 禁用 preview；writer 继续输出当前 profile              |
 | WP-P5C       | benchmark/evidence scripts and CI validators              | non-vacuity、oracle、migration、sanitizer、paired performance 统一证据               | P3-P5B     | pending     | 性能结果降级为 informational，不放宽 correctness gate  |
 
 每个工作包在同一 PR 内保持独立提交，提交信息说明 capability 扩张、fallback 和 state
 影响。P3/P4 只有在语义、恢复和 deterministic ordering 同时满足时才扩大 fast-path
 allowlist；P5 的 numerical preview 默认关闭。
+
+WP-P5A 已把 `crates/calc-flow/rolling-kernels.json` 设为 capability census 的
+单一来源，并生成 Rust allowlist。生成器要求 primitive 集合和顺序完整；typed
+transition 必须同时声明 batch/stream surface，DataFusion capability 必须引用可生成
+transition，未知 transition/complexity 或缺少 primitive 都直接失败。运行时 typed
+plan 和 DataFusion rewrite 也读取同一生成表，因此清单不是仅供文档展示的旁路数据。
 
 ### 13.2 评审后执行顺序
 

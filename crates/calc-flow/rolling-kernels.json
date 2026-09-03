@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "kernels": [
+    {
+      "primitive": "lag",
+      "batch": true,
+      "stream": true,
+      "datafusion": false,
+      "typed_transition": null,
+      "complexity": "general"
+    },
+    {
+      "primitive": "delta",
+      "batch": true,
+      "stream": true,
+      "datafusion": false,
+      "typed_transition": null,
+      "complexity": "general"
+    },
+    {
+      "primitive": "count",
+      "batch": true,
+      "stream": true,
+      "datafusion": false,
+      "typed_transition": "numeric",
+      "complexity": "amortized_constant"
+    },
+    {
+      "primitive": "sum",
+      "batch": true,
+      "stream": true,
+      "datafusion": false,
+      "typed_transition": "numeric",
+      "complexity": "amortized_constant"
+    },
+    {
+      "primitive": "mean",
+      "batch": true,
+      "stream": true,
+      "datafusion": true,
+      "typed_transition": "numeric",
+      "complexity": "amortized_constant"
+    },
+    {
+      "primitive": "variance",
+      "batch": true,
+      "stream": true,
+      "datafusion": false,
+      "typed_transition": "numeric",
+      "complexity": "amortized_constant"
+    },
+    {
+      "primitive": "stddev",
+      "batch": true,
+      "stream": true,
+      "datafusion": false,
+      "typed_transition": "numeric",
+      "complexity": "amortized_constant"
+    },
+    {
+      "primitive": "min",
+      "batch": true,
+      "stream": true,
+      "datafusion": false,
+      "typed_transition": "extrema",
+      "complexity": "amortized_constant"
+    },
+    {
+      "primitive": "max",
+      "batch": true,
+      "stream": true,
+      "datafusion": false,
+      "typed_transition": "extrema",
+      "complexity": "amortized_constant"
+    },
+    {
+      "primitive": "covariance",
+      "batch": true,
+      "stream": true,
+      "datafusion": false,
+      "typed_transition": "pair",
+      "complexity": "amortized_constant"
+    },
+    {
+      "primitive": "correlation",
+      "batch": true,
+      "stream": true,
+      "datafusion": false,
+      "typed_transition": "pair",
+      "complexity": "amortized_constant"
+    },
+    {
+      "primitive": "ewma",
+      "batch": true,
+      "stream": true,
+      "datafusion": false,
+      "typed_transition": "ewma",
+      "complexity": "amortized_constant"
+    },
+    {
+      "primitive": "difference",
+      "batch": true,
+      "stream": true,
+      "datafusion": false,
+      "typed_transition": "fused_difference",
+      "complexity": "amortized_constant"
+    }
+  ]
+}
