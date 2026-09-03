@@ -2,9 +2,10 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use calc_flow::{
     Batch, BatchMetadata, CancellationToken, EdgeCollector, Epoch, EventTime, JsonMap,
-    LocalStateBackend, OperatorMetadata, OperatorStateSnapshot, RollingOperator, RollingSpec,
-    StateBackend, StateHandle, StateLineageKey, StateSegment, StreamCollector, StreamJobContext,
-    StreamOperator, StreamOperatorContext,
+    LocalStateBackend, OperatorMetadata, OperatorStateSnapshot,
+    ROLLING_COLUMNAR_STATE_LAYOUT_VERSION, RollingOperator, RollingSpec, StateBackend, StateHandle,
+    StateLineageKey, StateSegment, StreamCollector, StreamJobContext, StreamOperator,
+    StreamOperatorContext,
 };
 use datafusion::arrow::{
     array::{
@@ -1107,6 +1108,45 @@ async fn snapshot_with_history_and_buffer() -> OperatorStateSnapshot {
 }
 
 #[tokio::test]
+async fn checkpoints_write_the_columnar_v3_layout_and_kernel_identity() {
+    use datafusion::arrow::ipc::reader::FileReader;
+
+    let snapshot = snapshot_with_history_and_buffer().await;
+    assert_eq!(
+        snapshot.inline_metadata["state_layout_version"],
+        ROLLING_COLUMNAR_STATE_LAYOUT_VERSION
+    );
+    assert_eq!(
+        snapshot.inline_metadata["segment_inventory"][0]["state_layout_version"],
+        ROLLING_COLUMNAR_STATE_LAYOUT_VERSION
+    );
+    assert_eq!(snapshot.inline_metadata["numerical_profile"], "stable_v1");
+    assert_eq!(
+        snapshot.inline_metadata["kernel_fingerprint"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+    let segment = snapshot.segments.values().next().unwrap();
+    let reader = FileReader::try_new(std::io::Cursor::new(segment.bytes()), None).unwrap();
+    let schema = reader.schema();
+    assert_eq!(
+        schema.metadata()["calc_flow.state_layout_version"],
+        ROLLING_COLUMNAR_STATE_LAYOUT_VERSION.to_string()
+    );
+    assert_eq!(schema.field(0).name(), "_state_kind");
+    assert_eq!(schema.field(1).name(), "_entity_id");
+    assert_eq!(schema.field(2).name(), "_entity_position");
+    assert_eq!(
+        schema.metadata()["calc_flow.rolling_kernel_fingerprint"],
+        snapshot.inline_metadata["kernel_fingerprint"]
+            .as_str()
+            .unwrap()
+    );
+}
+
+#[tokio::test]
 async fn segment_with_wrong_column_count_is_rejected() {
     let snapshot = snapshot_with_history_and_buffer().await;
     let corrupted = reencode_segment(&snapshot, |schema, record| {
@@ -1145,10 +1185,30 @@ async fn segment_with_non_contiguous_history_positions_is_rejected() {
     let snapshot = snapshot_with_history_and_buffer().await;
     let corrupted = reencode_segment(&snapshot, |schema, record| {
         let mut columns = record.columns().to_vec();
+        let kinds = record
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt8Array>()
+            .unwrap();
+        let original = record
+            .column(2)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        let mut corrupted_history = false;
         let positions: Vec<Option<u64>> = (0..record.num_rows())
-            .map(|index| if index == 0 { Some(5) } else { None })
+            .map(|index| {
+                if kinds.value(index) == 1 && !corrupted_history {
+                    corrupted_history = true;
+                    Some(5)
+                } else if original.is_null(index) {
+                    None
+                } else {
+                    Some(original.value(index))
+                }
+            })
             .collect();
-        columns[1] = Arc::new(UInt64Array::from(positions));
+        columns[2] = Arc::new(UInt64Array::from(positions));
         let new_record = RecordBatch::try_new(record.schema(), columns).unwrap();
         (schema.clone(), new_record)
     });
@@ -1176,7 +1236,7 @@ async fn inventory_with_a_future_epoch_is_rejected() {
         "segment_inventory".into(),
         serde_json::json!([{
             "kind": "base",
-            "state_layout_version": 1,
+            "state_layout_version": inventory["state_layout_version"].clone(),
             "schema_fingerprint": inventory["schema_fingerprint"].clone(),
             "handle": {
                 "operator_id": "rolling",

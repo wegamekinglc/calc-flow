@@ -359,8 +359,14 @@ temporal finality 或 cross-section finality 边界。
 - order frontier、watermark、next output sequence；
 - kernel、numeric profile 和 schema fingerprint。
 
-reader 必须继续识别现有 layout v1/v2；新 writer 只写 v3。恢复测试必须证明旧
-checkpoint 可升级读取、v3 round-trip 稳定、损坏或 fingerprint 不匹配时 fail
+reader 必须继续识别现有 layout v1/v2；新 writer 只写 v3。当前实现已经把
+entity dictionary、projected history、reorder buffer 与 EWMA recurrence 分区编码，
+并把 kernel fingerprint 和 numerical profile 写入 inline metadata 与 Arrow IPC
+schema metadata。声明层仍接受 v1/v2，以保持 project/config fingerprint 稳定；
+编译后的 operator capability 与新 checkpoint descriptor 则报告 writer v3。
+
+后续恢复测试必须证明旧 checkpoint 可升级读取、v3 round-trip 稳定、损坏或
+fingerprint 不匹配时 fail
 closed，并保持 manifest v3 的 checksum 与 lineage 规则。
 
 ## 9. 复合指标与多输出融合
@@ -463,7 +469,7 @@ secret 写入 `RunResult`。
 | ----- | ------------------------- | -------------------------------------------------------- | -------------------------------------------------------- | ----------- |
 | P0    | semantics and evidence    | freeze two examples; metrics; remove duplicate planning  | equivalent output; one physical plan; exact-SHA baseline | implemented |
 | P1    | ordered Float64 fast path | typed buffers; order proof; dense state; direct builders | no per-cell ScalarValue; no sort on proven order         | implemented |
-| P2    | state and Arrow types     | layout v3; null/integer/extrema/pair/duration kernels    | batch/stream/restore matrix; old-state reads             | pending     |
+| P2    | state and Arrow types     | layout v3; null/integer/extrema/pair/duration kernels    | batch/stream/restore matrix; old-state reads             | in progress |
 | P3    | composed output fusion    | DAG liveness; dual-SMA; BBANDS/MACD-class fusion         | no hidden materialization or finality crossing           | pending     |
 | P4    | DataFusion integration    | CalcFlowRollingExec; safe rewrite; adaptive partitions   | deterministic fallback, partitions, and memory           | pending     |
 | P5    | generation and numerics   | kernel census; fail-closed generation; stable_v2/preview | oracle, non-vacuity, sanitizer, migration, perf          | pending     |
@@ -474,6 +480,10 @@ secret 写入 `RunResult`。
 
 实施期间按用户要求调整为一个 PR 内的独立 phase commits，而不是拆分多个 PR；
 每个阶段仍保留独立 RED test、验证证据、fallback 和可回滚提交边界。
+
+P2 当前已完成 columnar writer v3、v1/v2 reader dispatch、checkpoint kernel identity
+校验和 runtime capability 升级；Arrow 类型扩展与 batch/stream/restore 完整矩阵仍是
+本阶段未完成项，因此状态保持 `in progress`。
 
 ## 14. 验证矩阵
 

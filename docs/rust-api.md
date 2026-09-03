@@ -197,7 +197,13 @@ ordered by `sequence_by`. `configuration_version` and `state_layout_version`
 must equal `ROLLING_CONFIGURATION_VERSION` (1). Existing rolling declarations
 use `ROLLING_STATE_LAYOUT_VERSION` (1), while any EWMA declaration requires
 `ROLLING_EWMA_STATE_LAYOUT_VERSION` (2) so checkpoint segments persist the
-valid count and exact binary64 accumulator. `allowed_lateness_micros` and a
+valid count and exact binary64 accumulator. These declaration versions remain
+stable in project documents and configuration fingerprints. Current operators
+write `ROLLING_COLUMNAR_STATE_LAYOUT_VERSION` (3): one deterministic entity
+dictionary, projected retained history, a columnar reorder buffer, recurrence
+state, and kernel/numerical fingerprints. Restore continues to read the
+declaration's v1/v2 layout, while newly emitted descriptors and pipeline
+capabilities report writer layout v3. `allowed_lateness_micros` and a
 `LatePolicySpec` of `Error` (envelope scope) or `Drop` (metrics version 1)
 classify late rows
 against the input watermark, and `RollingValuePolicy` is the frozen

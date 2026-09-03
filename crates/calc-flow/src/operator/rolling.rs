@@ -44,6 +44,7 @@ use super::{
 };
 
 mod kernel;
+mod state_v3;
 
 #[cfg(test)]
 use kernel::KernelSelection;
@@ -55,6 +56,8 @@ pub const ROLLING_CONFIGURATION_VERSION: u32 = 1;
 pub const ROLLING_STATE_LAYOUT_VERSION: u32 = 1;
 /// Durable state-layout version that persists exponential accumulators.
 pub const ROLLING_EWMA_STATE_LAYOUT_VERSION: u32 = 2;
+/// Durable columnar state-layout version written by current rolling operators.
+pub const ROLLING_COLUMNAR_STATE_LAYOUT_VERSION: u32 = 3;
 
 /// Transaction scope of the `error` late-row policy (API note section 3.2).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -594,6 +597,11 @@ impl RollingOperator {
     pub const fn spec(&self) -> &RollingSpec {
         &self.spec
     }
+
+    /// Returns the durable state layout written by this operator build.
+    pub const fn state_layout_version(&self) -> u32 {
+        self.compiled.state_layout_version
+    }
 }
 
 impl std::fmt::Debug for RollingOperator {
@@ -713,6 +721,10 @@ struct RollingSnapshotMetadata {
     state_layout_version: u32,
     configuration_hash: String,
     state_schema_fingerprint: String,
+    #[serde(default)]
+    kernel_fingerprint: Option<String>,
+    #[serde(default)]
+    numerical_profile: Option<String>,
     epoch: Epoch,
     #[serde(deserialize_with = "deserialize_required_option")]
     pipeline_fingerprint: Option<String>,
@@ -871,6 +883,8 @@ impl StreamOperator for RollingOperator {
             state_layout_version: self.compiled.state_layout_version,
             configuration_hash: self.compiled.configuration_hash.clone(),
             state_schema_fingerprint: self.compiled.state_schema_fingerprint.clone(),
+            kernel_fingerprint: Some(self.compiled.kernel_plan.fingerprint().to_owned()),
+            numerical_profile: Some(self.compiled.kernel_plan.numerical_profile().to_owned()),
             epoch,
             pipeline_fingerprint: self.state.pipeline_fingerprint.clone(),
             operator_id: self.state.operator_id.clone(),
@@ -1206,6 +1220,9 @@ struct DecodedRollingState {
 type StateRowOrderKey = (u8, Vec<Option<KeyValue>>, RowIdentity, Option<u64>);
 
 fn state_fields(input_schema: &Schema, state_layout_version: u32) -> Vec<Field> {
+    if state_layout_version == ROLLING_COLUMNAR_STATE_LAYOUT_VERSION {
+        return state_v3::state_fields(input_schema);
+    }
     let mut fields = vec![
         Field::new("_state_kind", DataType::UInt8, false),
         Field::new("_entity_position", DataType::UInt64, true),
@@ -1241,27 +1258,38 @@ fn state_schema(
     pipeline_fingerprint: &str,
     operator_id: &str,
 ) -> Schema {
+    let mut metadata = HashMap::from([
+        (
+            "calc_flow.state_layout_version".into(),
+            compiled.state_layout_version.to_string(),
+        ),
+        (
+            "calc_flow.pipeline_fingerprint".into(),
+            pipeline_fingerprint.into(),
+        ),
+        ("calc_flow.operator_id".into(), operator_id.into()),
+        (
+            "calc_flow.operator_configuration_hash".into(),
+            compiled.configuration_hash.clone(),
+        ),
+        (
+            "calc_flow.state_schema_fingerprint".into(),
+            compiled.state_schema_fingerprint.clone(),
+        ),
+    ]);
+    if compiled.state_layout_version == ROLLING_COLUMNAR_STATE_LAYOUT_VERSION {
+        metadata.insert(
+            "calc_flow.rolling_kernel_fingerprint".into(),
+            compiled.kernel_plan.fingerprint().to_owned(),
+        );
+        metadata.insert(
+            "calc_flow.numerical_profile".into(),
+            compiled.kernel_plan.numerical_profile().to_owned(),
+        );
+    }
     Schema::new_with_metadata(
         state_fields(input_schema, compiled.state_layout_version),
-        HashMap::from([
-            (
-                "calc_flow.state_layout_version".into(),
-                compiled.state_layout_version.to_string(),
-            ),
-            (
-                "calc_flow.pipeline_fingerprint".into(),
-                pipeline_fingerprint.into(),
-            ),
-            ("calc_flow.operator_id".into(), operator_id.into()),
-            (
-                "calc_flow.operator_configuration_hash".into(),
-                compiled.configuration_hash.clone(),
-            ),
-            (
-                "calc_flow.state_schema_fingerprint".into(),
-                compiled.state_schema_fingerprint.clone(),
-            ),
-        ]),
+        metadata,
     )
 }
 
@@ -1269,6 +1297,34 @@ fn state_schema(
 // by column with checked conversions for every value class.
 // #lizard forgives
 fn encode_state_segment(
+    histories: &RollingHistories,
+    buffer: &BTreeMap<RowIdentity, BufferedRow>,
+    input_schema: &Schema,
+    compiled: &CompiledRollingSpec,
+    pipeline_fingerprint: &str,
+    operator_id: &str,
+) -> Result<Vec<u8>> {
+    if compiled.state_layout_version == ROLLING_COLUMNAR_STATE_LAYOUT_VERSION {
+        return state_v3::encode(
+            histories,
+            buffer,
+            input_schema,
+            compiled,
+            pipeline_fingerprint,
+            operator_id,
+        );
+    }
+    encode_state_segment_legacy(
+        histories,
+        buffer,
+        input_schema,
+        compiled,
+        pipeline_fingerprint,
+        operator_id,
+    )
+}
+
+fn encode_state_segment_legacy(
     histories: &RollingHistories,
     buffer: &BTreeMap<RowIdentity, BufferedRow>,
     input_schema: &Schema,
@@ -1404,6 +1460,23 @@ fn decode_state_segment(
     compiled: &CompiledRollingSpec,
     metadata: &RollingSnapshotMetadata,
 ) -> Result<DecodedRollingState> {
+    if metadata.state_layout_version == ROLLING_COLUMNAR_STATE_LAYOUT_VERSION {
+        return state_v3::decode(bytes, input_schema, compiled, metadata);
+    }
+    let mut legacy = compiled.clone();
+    legacy.state_layout_version = metadata.state_layout_version;
+    legacy
+        .state_schema_fingerprint
+        .clone_from(&metadata.state_schema_fingerprint);
+    decode_state_segment_legacy(bytes, input_schema, &legacy, metadata)
+}
+
+fn decode_state_segment_legacy(
+    bytes: &[u8],
+    input_schema: &Schema,
+    compiled: &CompiledRollingSpec,
+    metadata: &RollingSnapshotMetadata,
+) -> Result<DecodedRollingState> {
     let reader = FileReader::try_new(Cursor::new(bytes), None)
         .map_err(|error| state_format(format!("rolling state IPC open failed: {error}")))?;
     validate_segment_schema_metadata(reader.schema().metadata(), metadata, compiled)?;
@@ -1481,12 +1554,12 @@ fn decode_state_segment(
 fn validate_segment_schema_metadata(
     metadata: &HashMap<String, String>,
     snapshot: &RollingSnapshotMetadata,
-    compiled: &CompiledRollingSpec,
+    _compiled: &CompiledRollingSpec,
 ) -> Result<()> {
-    let expected = [
+    let mut expected = vec![
         (
             "calc_flow.state_layout_version",
-            compiled.state_layout_version.to_string(),
+            snapshot.state_layout_version.to_string(),
         ),
         (
             "calc_flow.pipeline_fingerprint",
@@ -1498,13 +1571,25 @@ fn validate_segment_schema_metadata(
         ),
         (
             "calc_flow.operator_configuration_hash",
-            compiled.configuration_hash.clone(),
+            snapshot.configuration_hash.clone(),
         ),
         (
             "calc_flow.state_schema_fingerprint",
-            compiled.state_schema_fingerprint.clone(),
+            snapshot.state_schema_fingerprint.clone(),
         ),
     ];
+    if snapshot.state_layout_version == ROLLING_COLUMNAR_STATE_LAYOUT_VERSION {
+        expected.extend([
+            (
+                "calc_flow.rolling_kernel_fingerprint",
+                snapshot.kernel_fingerprint.clone().unwrap_or_default(),
+            ),
+            (
+                "calc_flow.numerical_profile",
+                snapshot.numerical_profile.clone().unwrap_or_default(),
+            ),
+        ]);
+    }
     for (key, value) in expected {
         if metadata.get(key).map(String::as_str) != Some(value.as_str()) {
             return Err(checkpoint_mismatch(format!(
@@ -1961,27 +2046,44 @@ fn validate_snapshot_metadata(
     compiled: &CompiledRollingSpec,
     snapshot: &crate::OperatorStateSnapshot,
 ) -> Result<StateInventory> {
-    if metadata.state_layout_version != compiled.state_layout_version {
-        return Err(checkpoint_mismatch(format!(
-            "rolling state layout version {} does not match expected {}",
-            metadata.state_layout_version, compiled.state_layout_version
-        )));
-    }
+    let expected_schema_fingerprint =
+        if metadata.state_layout_version == compiled.state_layout_version {
+            &compiled.state_schema_fingerprint
+        } else if metadata.state_layout_version == compiled.legacy_state_layout_version {
+            &compiled.legacy_state_schema_fingerprint
+        } else {
+            return Err(checkpoint_mismatch(format!(
+                "rolling state layout version {} does not match current {} or declared legacy {}",
+                metadata.state_layout_version,
+                compiled.state_layout_version,
+                compiled.legacy_state_layout_version
+            )));
+        };
     if metadata.configuration_hash != compiled.configuration_hash {
         return Err(checkpoint_mismatch(
             "rolling operator configuration hash does not match the compiled operator".into(),
         ));
     }
-    if metadata.state_schema_fingerprint != compiled.state_schema_fingerprint {
+    if metadata.state_schema_fingerprint != *expected_schema_fingerprint {
         return Err(checkpoint_mismatch(
             "rolling state schema fingerprint does not match the compiled operator".into(),
+        ));
+    }
+    if metadata.state_layout_version == ROLLING_COLUMNAR_STATE_LAYOUT_VERSION
+        && (metadata.kernel_fingerprint.as_deref() != Some(compiled.kernel_plan.fingerprint())
+            || metadata.numerical_profile.as_deref()
+                != Some(compiled.kernel_plan.numerical_profile()))
+    {
+        return Err(checkpoint_mismatch(
+            "rolling kernel fingerprint or numerical profile does not match the compiled operator"
+                .into(),
         ));
     }
     let inventory = StateInventory::new(metadata.segment_inventory.clone())
         .map_err(|error| checkpoint_mismatch(error.to_string()))?;
     for descriptor in inventory.segments() {
-        if descriptor.state_layout_version != compiled.state_layout_version
-            || descriptor.schema_fingerprint != compiled.state_schema_fingerprint
+        if descriptor.state_layout_version != metadata.state_layout_version
+            || descriptor.schema_fingerprint != metadata.state_schema_fingerprint
         {
             return Err(checkpoint_mismatch(
                 "rolling segment inventory layout or schema does not match the compiled operator"
@@ -2328,6 +2430,7 @@ fn build_typed_batch_output(
 #[derive(Clone)]
 struct CompiledRollingSpec {
     state_layout_version: u32,
+    legacy_state_layout_version: u32,
     event_time_index: usize,
     partition_columns: Vec<CompiledKeyColumn>,
     sequence_columns: Vec<CompiledKeyColumn>,
@@ -2338,6 +2441,7 @@ struct CompiledRollingSpec {
     max_duration_micros: Option<u64>,
     configuration_hash: String,
     state_schema_fingerprint: String,
+    legacy_state_schema_fingerprint: String,
 }
 
 #[derive(Clone)]
@@ -4227,7 +4331,7 @@ fn compile_spec_against_schema(
         .max();
     let kernel_plan = RollingKernelPlan::compile(
         input_schema,
-        spec.state_layout_version,
+        ROLLING_COLUMNAR_STATE_LAYOUT_VERSION,
         event_time_index,
         &partition_columns,
         &sequence_columns,
@@ -4235,7 +4339,8 @@ fn compile_spec_against_schema(
         &window_groups,
     );
     Ok(CompiledRollingSpec {
-        state_layout_version: spec.state_layout_version,
+        state_layout_version: ROLLING_COLUMNAR_STATE_LAYOUT_VERSION,
+        legacy_state_layout_version: spec.state_layout_version,
         event_time_index,
         partition_columns,
         sequence_columns,
@@ -4245,7 +4350,14 @@ fn compile_spec_against_schema(
         max_row_retention,
         max_duration_micros,
         configuration_hash,
-        state_schema_fingerprint: state_schema_fingerprint(input_schema, spec.state_layout_version),
+        state_schema_fingerprint: state_schema_fingerprint(
+            input_schema,
+            ROLLING_COLUMNAR_STATE_LAYOUT_VERSION,
+        ),
+        legacy_state_schema_fingerprint: state_schema_fingerprint(
+            input_schema,
+            spec.state_layout_version,
+        ),
     })
 }
 
@@ -6009,11 +6121,14 @@ mod tests {
                 .values()
                 .all(|state| state.rows.is_empty())
         );
-        let bytes = encode_state_segment(
+        let mut legacy = compiled.clone();
+        legacy.state_layout_version = ROLLING_EWMA_STATE_LAYOUT_VERSION;
+        legacy.state_schema_fingerprint = compiled.legacy_state_schema_fingerprint.clone();
+        let bytes = encode_state_segment_legacy(
             &histories,
             &BTreeMap::new(),
             &kernel_schema(),
-            &compiled,
+            &legacy,
             TEST_FINGERPRINT,
             "rolling",
         )
@@ -6021,7 +6136,9 @@ mod tests {
         let metadata = RollingSnapshotMetadata {
             state_layout_version: 2,
             configuration_hash: compiled.configuration_hash.clone(),
-            state_schema_fingerprint: compiled.state_schema_fingerprint.clone(),
+            state_schema_fingerprint: compiled.legacy_state_schema_fingerprint.clone(),
+            kernel_fingerprint: None,
+            numerical_profile: None,
             epoch: Epoch::new(1).unwrap(),
             pipeline_fingerprint: Some(TEST_FINGERPRINT.into()),
             operator_id: Some("rolling".into()),
