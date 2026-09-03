@@ -23,6 +23,10 @@ pub use join::{
     STREAM_JOIN_STATE_ROW_OVERHEAD_BYTES_V1, StreamJoinOperator, StreamJoinSideStatus,
     StreamJoinSpec, StreamJoinStatus, StreamJoinType,
 };
+pub(crate) use rolling::{
+    DataFusionRollingKernel, DataFusionRollingMetrics, DataFusionRollingState,
+    DataFusionRollingWindow,
+};
 pub use rolling::{
     LateErrorScope, LatePolicySpec, ROLLING_COLUMNAR_STATE_LAYOUT_VERSION,
     ROLLING_CONFIGURATION_VERSION, ROLLING_EWMA_STATE_LAYOUT_VERSION, ROLLING_STATE_LAYOUT_VERSION,

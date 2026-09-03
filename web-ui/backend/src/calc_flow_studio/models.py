@@ -535,6 +535,11 @@ class DataFusionMetricPreview(StrictModel):
     execution_ns: StrictInt = Field(ge=0)
     collect_ns: StrictInt = Field(ge=0)
     output_rows: StrictInt = Field(ge=0)
+    configured_target_partitions: StrictInt = Field(ge=1)
+    effective_target_partitions: StrictInt = Field(ge=1)
+    rolling_candidate_windows: StrictInt = Field(ge=0)
+    rolling_rewritten_windows: StrictInt = Field(ge=0)
+    rolling_fallback_reasons: tuple[str, ...]
     logical_plan: str
     physical_plan: str
 

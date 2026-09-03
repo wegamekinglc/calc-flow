@@ -59,6 +59,156 @@ pub const ROLLING_EWMA_STATE_LAYOUT_VERSION: u32 = 2;
 /// Durable columnar state-layout version written by current rolling operators.
 pub const ROLLING_COLUMNAR_STATE_LAYOUT_VERSION: u32 = 3;
 
+/// One SQL AVG window accepted by the crate-private `DataFusion` rolling
+/// physical planner.
+#[derive(Clone, Debug)]
+pub(crate) struct DataFusionRollingWindow {
+    pub input_index: usize,
+    pub output_name: String,
+    pub rows: u64,
+}
+
+/// Immutable typed rolling plan shared with `CalcFlowRollingExec`.
+#[derive(Clone, Debug)]
+pub(crate) struct DataFusionRollingKernel {
+    plan: RollingKernelPlan,
+}
+
+/// Per-partition transition state owned by one `DataFusion` execution stream.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct DataFusionRollingState {
+    inner: RollingKernelState,
+}
+
+/// Deterministic execution facts forwarded to `DataFusion` physical metrics.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct DataFusionRollingMetrics {
+    pub input_validation_ns: u64,
+    pub order_proof_ns: u64,
+    pub entity_encode_ns: u64,
+    pub kernel_ns: u64,
+    pub output_build_ns: u64,
+    pub input_rows: usize,
+    pub entities: usize,
+    pub state_bytes: usize,
+}
+
+/// One typed `DataFusion` rolling transition and its next state.
+#[derive(Debug)]
+pub(crate) struct DataFusionRollingBatch {
+    pub columns: Vec<ArrayRef>,
+    pub state: DataFusionRollingState,
+    pub metrics: DataFusionRollingMetrics,
+}
+
+impl DataFusionRollingKernel {
+    pub(crate) fn compile(
+        input_schema: &Schema,
+        partition_indices: &[usize],
+        order_indices: &[usize],
+        windows: &[DataFusionRollingWindow],
+    ) -> Option<Self> {
+        if windows.is_empty() {
+            return None;
+        }
+        let (&event_time_index, sequence_indices) = order_indices.split_first()?;
+        if input_schema.field(event_time_index).data_type()
+            != &DataType::Timestamp(TimeUnit::Microsecond, None)
+            || order_indices
+                .iter()
+                .any(|&index| input_schema.field(index).is_nullable())
+            || partition_indices
+                .iter()
+                .any(|index| order_indices.contains(index))
+        {
+            return None;
+        }
+        let mut groups = Vec::new();
+        let mut outputs = Vec::with_capacity(windows.len());
+        for window in windows {
+            if window.rows == 0
+                || input_schema.field(window.input_index).data_type() != &DataType::Float64
+            {
+                return None;
+            }
+            let input_type = DataType::Float64;
+            let evaluation = compile_aggregate(
+                window.input_index,
+                &input_type,
+                RollingFrameSpec::Rows { size: window.rows },
+                1,
+                0,
+                Statistic::Mean,
+                &mut groups,
+            );
+            outputs.push(CompiledRollingOutput {
+                input_index: window.input_index,
+                name: window.output_name.clone(),
+                input_type: input_type.clone(),
+                output_type: DataType::Float64,
+                evaluation,
+            });
+        }
+        let sequence_columns = sequence_indices
+            .iter()
+            .copied()
+            .map(|index| CompiledKeyColumn { index })
+            .collect::<Vec<_>>();
+        let physical_order = partition_indices
+            .iter()
+            .chain(order_indices)
+            .copied()
+            .collect::<Vec<_>>();
+        let plan = RollingKernelPlan::compile_with_order(
+            input_schema,
+            ROLLING_STATE_LAYOUT_VERSION,
+            event_time_index,
+            physical_order,
+            partition_indices.to_vec(),
+            sequence_columns.iter().map(|column| column.index).collect(),
+            &outputs,
+            &groups,
+        );
+        plan.supports_typed_transition().then_some(Self { plan })
+    }
+
+    pub(crate) fn update_and_fill(
+        &self,
+        state: &DataFusionRollingState,
+        input: &RecordBatch,
+    ) -> Result<DataFusionRollingBatch> {
+        let execution = self
+            .plan
+            .update_and_fill(&state.inner, input, "datafusion.rolling")?
+            .ok_or_else(|| internal_error("DataFusion input violated the planned rolling order"))?;
+        let metrics = execution.metrics;
+        Ok(DataFusionRollingBatch {
+            columns: execution.columns,
+            state: DataFusionRollingState {
+                inner: execution.state,
+            },
+            metrics: DataFusionRollingMetrics {
+                input_validation_ns: metrics.input_validation_ns,
+                order_proof_ns: metrics.order_proof_ns,
+                entity_encode_ns: metrics.entity_encode_ns,
+                kernel_ns: metrics.kernel_ns,
+                output_build_ns: metrics.output_build_ns,
+                input_rows: metrics.input_rows,
+                entities: metrics.entities,
+                state_bytes: metrics.state_bytes,
+            },
+        })
+    }
+
+    pub(crate) fn fingerprint(&self) -> &str {
+        self.plan.fingerprint()
+    }
+
+    pub(crate) const fn estimated_state_bytes_per_entity(&self) -> usize {
+        self.plan.estimated_state_bytes_per_entity()
+    }
+}
+
 /// Transaction scope of the `error` late-row policy (API note section 3.2).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -454,9 +604,9 @@ pub enum RollingOutputSpec {
         /// Primitive version; must equal `1`.
         primitive_version: u32,
         /// Left rolling readout.
-        left: RollingFloatPrimitiveSpec,
+        left: Box<RollingFloatPrimitiveSpec>,
         /// Right rolling readout.
-        right: RollingFloatPrimitiveSpec,
+        right: Box<RollingFloatPrimitiveSpec>,
         /// Output column name.
         output: String,
     },
@@ -715,7 +865,7 @@ pub struct RollingOperator {
     spec: RollingSpec,
     input_ports: [Port; 1],
     output_ports: [Port; 1],
-    compiled: CompiledRollingSpec,
+    compiled: Box<CompiledRollingSpec>,
     state: RollingStreamState,
 }
 
@@ -731,7 +881,7 @@ impl RollingOperator {
         validate_operator_name(name)?;
         validate_arguments(&spec)?;
         let configuration = configuration(&spec)?;
-        let compiled = compile_spec_full(&spec, &input_schema, &configuration)?;
+        let compiled = Box::new(compile_spec_full(&spec, &input_schema, &configuration)?);
         let output_schema = Arc::new(output_schema(&input_schema, &compiled.outputs));
         Ok(Self {
             name: name.into(),

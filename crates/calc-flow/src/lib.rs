@@ -30,6 +30,7 @@ mod connector;
 mod context;
 mod continuous;
 mod datafusion;
+mod datafusion_rolling;
 mod error;
 mod expression;
 mod json;

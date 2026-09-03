@@ -632,6 +632,11 @@ const resultAt = (value: unknown, path: string): void => {
         'execution_ns',
         'collect_ns',
         'output_rows',
+        'configured_target_partitions',
+        'effective_target_partitions',
+        'rolling_candidate_windows',
+        'rolling_rewritten_windows',
+        'rolling_fallback_reasons',
         'logical_plan',
         'physical_plan',
       ], itemPath);
@@ -646,6 +651,15 @@ const resultAt = (value: unknown, path: string): void => {
       integerAt(metric.execution_ns, `${itemPath}.execution_ns`);
       integerAt(metric.collect_ns, `${itemPath}.collect_ns`);
       integerAt(metric.output_rows, `${itemPath}.output_rows`);
+      integerAt(metric.configured_target_partitions, `${itemPath}.configured_target_partitions`);
+      integerAt(metric.effective_target_partitions, `${itemPath}.effective_target_partitions`);
+      integerAt(metric.rolling_candidate_windows, `${itemPath}.rolling_candidate_windows`);
+      integerAt(metric.rolling_rewritten_windows, `${itemPath}.rolling_rewritten_windows`);
+      arrayAt(metric.rolling_fallback_reasons, `${itemPath}.rolling_fallback_reasons`)
+        .forEach((reason, reasonIndex) => stringAt(
+          reason,
+          `${itemPath}.rolling_fallback_reasons[${reasonIndex}]`,
+        ));
       stringAt(metric.logical_plan, `${itemPath}.logical_plan`);
       stringAt(metric.physical_plan, `${itemPath}.physical_plan`);
     });

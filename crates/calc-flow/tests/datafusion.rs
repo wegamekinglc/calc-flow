@@ -4,7 +4,11 @@ use calc_flow::{
     Batch, BatchMetadata, CalcFlowError, DataFusionConfig, DataFusionRuntime, ExternalPayload,
 };
 use datafusion::arrow::{
-    array::Int64Array, compute::concat_batches, ipc::reader::FileReader, record_batch::RecordBatch,
+    array::{Float64Array, Int64Array, StringArray, TimestampMicrosecondArray, UInt64Array},
+    compute::concat_batches,
+    datatypes::{DataType, Field, Schema, TimeUnit},
+    ipc::reader::FileReader,
+    record_batch::RecordBatch,
 };
 use serde_json::json;
 
@@ -32,6 +36,30 @@ impl ExternalPayload for TestArray {
 fn input(values: Vec<i64>) -> Batch {
     let record =
         RecordBatch::try_from_iter(vec![("a", Arc::new(Int64Array::from(values)) as _)]).unwrap();
+    Batch::table(vec![record], BatchMetadata::default()).unwrap()
+}
+
+fn rolling_input() -> Batch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            "event_time",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            false,
+        ),
+        Field::new("sequence", DataType::UInt64, false),
+        Field::new("symbol", DataType::Utf8, false),
+        Field::new("price", DataType::Float64, true),
+    ]));
+    let record = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(TimestampMicrosecondArray::from(vec![1, 1, 2, 2, 3])),
+            Arc::new(UInt64Array::from(vec![1, 1, 2, 2, 3])),
+            Arc::new(StringArray::from(vec!["a", "b", "a", "b", "a"])),
+            Arc::new(Float64Array::from(vec![1.0, 10.0, 3.0, 14.0, 5.0])),
+        ],
+    )
+    .unwrap();
     Batch::table(vec![record], BatchMetadata::default()).unwrap()
 }
 
@@ -142,6 +170,99 @@ async fn runtime_matches_v1_sql_join_and_preserves_the_input_map() {
     assert_eq!(tables["l"].table_payload().unwrap().batches(), left_before);
     assert_eq!(tables["r"].table_payload().unwrap().batches(), right_before);
     assert_eq!(runtime.metrics()[0].output_rows, 2);
+}
+
+#[tokio::test]
+async fn bounded_float64_avg_uses_the_shared_rolling_physical_kernel() {
+    let runtime = DataFusionRuntime::new(DataFusionConfig {
+        batch_size: 2,
+        target_partitions: 4,
+    })
+    .unwrap();
+    let tables = BTreeMap::from([("input".to_owned(), rolling_input())]);
+
+    let output = runtime
+        .sql(
+            "SELECT event_time, sequence, symbol, price, \
+             avg(price) OVER (PARTITION BY symbol ORDER BY event_time, sequence \
+             ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS sma_2 FROM input",
+            &tables,
+            Some("rolling_sql"),
+        )
+        .await
+        .unwrap();
+
+    let table = output.table_payload().unwrap();
+    let record = concat_batches(table.schema(), table.batches()).unwrap();
+    let symbol = record
+        .column_by_name("symbol")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    let sequence = record
+        .column_by_name("sequence")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .unwrap();
+    let actual = record
+        .column_by_name("sma_2")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    let rows = (0..record.num_rows())
+        .map(|index| {
+            (
+                (symbol.value(index).to_owned(), sequence.value(index)),
+                actual.value(index),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    for (key, expected) in [
+        (("a".to_owned(), 1), 1.0_f64),
+        (("a".to_owned(), 2), 2.0),
+        (("a".to_owned(), 3), 4.0),
+        (("b".to_owned(), 1), 10.0),
+        (("b".to_owned(), 2), 12.0),
+    ] {
+        assert_eq!(rows[&key].to_bits(), expected.to_bits());
+    }
+
+    let metrics = runtime.metrics();
+    assert_eq!(metrics[0].configured_target_partitions, 4);
+    assert_eq!(metrics[0].effective_target_partitions, 1);
+    assert_eq!(metrics[0].rolling_candidate_windows, 1);
+    assert_eq!(metrics[0].rolling_rewritten_windows, 1);
+    assert!(metrics[0].rolling_fallback_reasons.is_empty());
+    assert!(metrics[0].physical_plan.contains("CalcFlowRollingExec"));
+}
+
+#[tokio::test]
+async fn unsupported_sql_window_stays_on_the_datafusion_fallback() {
+    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+    let tables = BTreeMap::from([("input".to_owned(), rolling_input())]);
+
+    let output = runtime
+        .sql(
+            "SELECT sum(price) OVER (PARTITION BY symbol ORDER BY event_time, sequence \
+             ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS rolling_sum FROM input",
+            &tables,
+            Some("rolling_fallback"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(output.num_rows(), 5);
+    let metrics = runtime.metrics();
+    assert_eq!(metrics[0].rolling_candidate_windows, 1);
+    assert_eq!(metrics[0].rolling_rewritten_windows, 0);
+    assert_eq!(
+        metrics[0].rolling_fallback_reasons,
+        ["window_aggregate_is_not_avg"]
+    );
+    assert!(!metrics[0].physical_plan.contains("CalcFlowRollingExec"));
 }
 
 #[tokio::test]

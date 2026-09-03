@@ -106,6 +106,19 @@ execution. The canonical SQL example is
 [`crates/calc-flow/examples/sql_join.rs`](../crates/calc-flow/examples/sql_join.rs),
 which joins `orders` to `fees` for `net = amount - fee`:
 
+The run-scoped physical planner has one fail-closed rolling extension. A
+bounded ascending `AVG(Float64) OVER (PARTITION BY simple_columns ORDER BY
+non_null_timestamp_us, non_null_sequence... ROWS n PRECEDING ... CURRENT
+ROW)` may execute through the crate-private `CalcFlowRollingExec`; it reuses
+the same typed `RollingKernelPlan` transition as `RollingOperator`. Filters,
+`DISTINCT`, explicit null treatment, descending or expression order keys,
+`RANGE`/`GROUPS`, future or unbounded frames, other aggregates and unsupported
+types remain on DataFusion's standard window executor. `DataFusionQueryMetric`
+reports the candidate/rewrite counts, stable fallback reasons, configured and
+effective partition counts, and the physical plan. Configured parallelism is
+adapted downward below 65,536 input rows per useful partition so small queries
+stay single-partition; it is never increased above `target_partitions`.
+
 ```rust
 use std::{collections::BTreeMap, sync::Arc};
 

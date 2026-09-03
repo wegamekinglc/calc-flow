@@ -452,12 +452,29 @@ kernel plan 或 SessionState template，不是带注册表和运行状态的 con
 其余 SQL 保持 DataFusion 标准计划。rewrite 必须是 allowlist、可解释并 fail
 closed；不能因为表达式“看起来像 rolling”就改变 SQL 语义。
 
+P4 当前实现以自定义 `QueryPlanner` 保守检查 logical window，再在 DataFusion
+完成标准 physical optimization 后替换完全匹配的 `BoundedWindowAggExec`。第一条
+allowlist 仅接受无 filter、无 distinct、无显式 null treatment 的
+`AVG(Float64)`、简单非空升序时间/sequence key、简单 partition column，以及
+bounded `ROWS ... CURRENT ROW`。`CalcFlowRollingExec` 沿用 DataFusion 已建立的
+hash distribution 与 local ordering，每个 physical partition 持有独立 typed
+state，并逐 `RecordBatch` 调用与 native rolling 相同的 `update_and_fill`。任何
+logical 或 physical 前置条件不满足时保留原 DataFusion node，query metrics 记录
+候选数、改写数和稳定 fallback reason；physical plan 会直接显示 kernel
+fingerprint 与预计 state bytes/entity。
+
 ### 10.4 并行与批大小
 
 当前默认 `target_partitions=1`、`batch_size=8192`。后续可根据 row count、entity
 cardinality、平均 rows/entity 和 state bytes/entity 自适应决定 partition 数；
 小数据量保持单 partition，避免调度成本。并行结果必须经过稳定 merge，在不同
 线程数、batch size 和输入 partitioning 下产生相同 observable order 与数值。
+
+当前实现不增加公共配置字段，而是把用户配置的 `target_partitions` 视为上限：
+每 65,536 输入行才启用一个有用 partition，小查询自动降为 1，大查询最多使用
+配置上限。DataFusion 继续负责 hash repartition、local sort、memory pool、
+cancellation 和最终 collect；metrics 同时记录 configured/effective partition，
+因此自适应决策可复核且不会在不知情时扩大并行度。
 
 ## 11. 数值策略
 
@@ -497,7 +514,7 @@ secret 写入 `RunResult`。
 | P1    | ordered Float64 fast path | typed buffers; order proof; dense state; direct builders | no per-cell ScalarValue; no sort on proven order         | implemented |
 | P2    | state and Arrow types     | layout v3; null/integer/extrema/pair/duration kernels    | batch/stream/restore matrix; old-state reads             | implemented |
 | P3    | composed output fusion    | DAG liveness; dual-SMA; BBANDS/MACD-class fusion         | no hidden materialization or finality crossing           | implemented |
-| P4    | DataFusion integration    | CalcFlowRollingExec; safe rewrite; adaptive partitions   | deterministic fallback, partitions, and memory           | pending     |
+| P4    | DataFusion integration    | CalcFlowRollingExec; safe rewrite; adaptive partitions   | deterministic fallback, partitions, and memory           | implemented |
 | P5    | generation and numerics   | kernel census; fail-closed generation; stable_v2/preview | oracle, non-vacuity, sanitizer, migration, perf          | pending     |
 
 每个 phase 在当前 PR 内形成独立提交，保留旧通用 kernel 作为 fallback。P1 至 P4
@@ -513,9 +530,9 @@ secret 写入 `RunResult`。
 | ------------ | --------------------------------------------------------- | --------------------------------------------------------------------------------- | ---------- | ----------- | ------------------------------------------------------ |
 | WP-P3A       | `operator/rolling.rs`, `operator/rolling/kernel.rs`        | 将输出表达式编译为 liveness DAG；dual-SMA 只写最终差值列                          | P2         | implemented | 关闭 fused-output capability，回到独立输出物化         |
 | WP-P3B       | `python/calc_flow/symbolic/`                               | 识别 SMA、EWMA/MACD 类共享叶节点；仅隐藏无其他观察者的中间值                       | WP-P3A     | implemented | 保留原 symbolic lowering，不跨 finality/materialization |
-| WP-P4A       | `datafusion.rs`, rolling physical execution module        | 实现 crate-private `CalcFlowRollingExec`，复用 typed transition 与 run memory pool | P3         | pending     | planner extension 不注册，继续使用 DataFusion window   |
-| WP-P4B       | SQL logical/physical rewrite and explain metrics          | 只改写 bounded `ROWS ... CURRENT ROW` allowlist，并记录拒绝原因                     | WP-P4A     | pending     | allowlist 置空即全量 fallback                          |
-| WP-P4C       | batch planner and canonical merge                         | 根据规模、entity 基数和 state bytes 选择 partition；稳定恢复可观察顺序              | WP-P4A     | pending     | 固定 `target_partitions=1`                             |
+| WP-P4A       | `datafusion.rs`, rolling physical execution module        | 实现 crate-private `CalcFlowRollingExec`，复用 typed transition 与 run memory pool | P3         | implemented | planner extension 不注册，继续使用 DataFusion window   |
+| WP-P4B       | SQL logical/physical rewrite and explain metrics          | 只改写 bounded `ROWS ... CURRENT ROW` allowlist，并记录拒绝原因                     | WP-P4A     | implemented | allowlist 置空即全量 fallback                          |
+| WP-P4C       | batch planner and canonical merge                         | 根据规模、entity 基数和 state bytes 选择 partition；稳定恢复可观察顺序              | WP-P4A     | implemented | 固定 `target_partitions=1`                             |
 | WP-P5A       | kernel capability manifest and generation checks          | 建立 kernel census；声明可 stream 的形状若无法生成 transition 则构建失败             | P3-P4      | pending     | 生成清单只报告，不扩大 capability                      |
 | WP-P5B       | numerical profiles and state migration                    | 冻结 `stable_v1`；以 opt-in preview 引入 rebase/shifted-sum 实验                     | WP-P5A     | pending     | 禁用 preview；writer 继续输出当前 profile              |
 | WP-P5C       | benchmark/evidence scripts and CI validators              | non-vacuity、oracle、migration、sanitizer、paired performance 统一证据               | P3-P5B     | pending     | 性能结果降级为 informational，不放宽 correctness gate  |

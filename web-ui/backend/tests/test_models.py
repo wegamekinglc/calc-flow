@@ -395,6 +395,11 @@ def test_run_response_serializes_status_and_timestamps() -> None:
                 "execution_ns": 9,
                 "collect_ns": 5,
                 "output_rows": 2,
+                "configured_target_partitions": 4,
+                "effective_target_partitions": 1,
+                "rolling_candidate_windows": 0,
+                "rolling_rewritten_windows": 0,
+                "rolling_fallback_reasons": [],
                 "logical_plan": "Projection",
                 "physical_plan": "ProjectionExec",
             }

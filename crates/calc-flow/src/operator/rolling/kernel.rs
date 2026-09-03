@@ -57,6 +57,7 @@ pub(super) struct RollingKernelPlan {
     numerical_profile: &'static str,
     selection: KernelSelection,
     complexity: KernelComplexity,
+    event_time_index: usize,
     order_columns: Vec<usize>,
     partition_columns: Vec<usize>,
     sequence_columns: Vec<usize>,
@@ -288,7 +289,34 @@ impl RollingKernelPlan {
             .iter()
             .map(|column| column.index)
             .collect::<Vec<_>>();
+        Self::compile_with_order(
+            input_schema,
+            state_layout_version,
+            event_time_index,
+            order_columns,
+            partition_columns,
+            sequence_columns,
+            outputs,
+            window_groups,
+        )
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the compiler boundary keeps every ordering semantic explicit"
+    )]
+    pub(super) fn compile_with_order(
+        input_schema: &Schema,
+        state_layout_version: u32,
+        event_time_index: usize,
+        order_columns: Vec<usize>,
+        partition_columns: Vec<usize>,
+        sequence_columns: Vec<usize>,
+        outputs: &[CompiledRollingOutput],
+        window_groups: &[CompiledWindowGroup],
+    ) -> Self {
         let compiled = compile_typed_plan(input_schema, outputs, window_groups);
+        let allow_order_peers = order_columns.first() != Some(&event_time_index);
         let (selection, complexity, groups, typed_outputs, fallback_reason) = match compiled {
             Ok((groups, typed_outputs)) => (
                 KernelSelection::OrderedPrimitive,
@@ -320,8 +348,10 @@ impl RollingKernelPlan {
             state_layout_version,
             selection,
             complexity,
+            event_time_index,
             order_columns: &order_columns,
             partition_columns: &partition_columns,
+            allow_order_peers,
             groups: &groups,
             outputs: &typed_outputs,
             fallback_reason: fallback_reason.as_deref(),
@@ -332,6 +362,7 @@ impl RollingKernelPlan {
             numerical_profile: STABLE_NUMERICAL_PROFILE,
             selection,
             complexity,
+            event_time_index,
             order_columns,
             partition_columns,
             sequence_columns,
@@ -544,10 +575,10 @@ impl RollingKernelPlan {
             && let Some(previous) = state.last_identity.as_deref()
         {
             let current = order_rows.row(0).data();
-            if previous == current {
+            if previous == current && !self.allows_order_peers() {
                 return Err(duplicate_identity_error(
                     input,
-                    self.order_columns[0],
+                    self.event_time_index,
                     0,
                     node_id,
                 )?);
@@ -559,10 +590,10 @@ impl RollingKernelPlan {
         for row_index in 1..input.num_rows() {
             let previous = order_rows.row(row_index - 1);
             let current = order_rows.row(row_index);
-            if previous == current {
+            if previous == current && !self.allows_order_peers() {
                 return Err(duplicate_identity_error(
                     input,
-                    self.order_columns[0],
+                    self.event_time_index,
                     row_index,
                     node_id,
                 )?);
@@ -572,6 +603,10 @@ impl RollingKernelPlan {
             }
         }
         Ok(true)
+    }
+
+    fn allows_order_peers(&self) -> bool {
+        self.order_columns.first() != Some(&self.event_time_index)
     }
 
     fn fill_typed(
@@ -585,7 +620,7 @@ impl RollingKernelPlan {
     ) -> Result<RollingKernelExecution> {
         let inputs = self.typed_inputs(input, node_id)?;
         let event_times = input
-            .column(self.order_columns[0])
+            .column(self.event_time_index)
             .as_any()
             .downcast_ref::<TimestampMicrosecondArray>()
             .ok_or_else(|| {
@@ -638,7 +673,7 @@ impl RollingKernelPlan {
     }
 
     fn validate_required_values(&self, input: &RecordBatch, node_id: &str) -> Result<()> {
-        let event_time_index = self.order_columns[0];
+        let event_time_index = self.event_time_index;
         if input.column(event_time_index).null_count() > 0 {
             return Err(operator_error(
                 node_id,
@@ -1117,8 +1152,10 @@ struct KernelFingerprintInput<'a> {
     state_layout_version: u32,
     selection: KernelSelection,
     complexity: KernelComplexity,
+    event_time_index: usize,
     order_columns: &'a [usize],
     partition_columns: &'a [usize],
+    allow_order_peers: bool,
     groups: &'a [TypedGroupPlan],
     outputs: &'a [TypedOutputPlan],
     fallback_reason: Option<&'a str>,
@@ -1140,12 +1177,14 @@ fn kernel_fingerprint(input: &KernelFingerprintInput<'_>) -> String {
         })
         .collect::<Vec<_>>();
     let descriptor = format!(
-        "version={ROLLING_KERNEL_PLAN_VERSION}|state={}|numeric={STABLE_NUMERICAL_PROFILE}|selection={:?}|complexity={:?}|schema={schema:?}|order={:?}|partition={:?}|groups={:?}|outputs={:?}|fallback={:?}",
+        "version={ROLLING_KERNEL_PLAN_VERSION}|state={}|numeric={STABLE_NUMERICAL_PROFILE}|selection={:?}|complexity={:?}|schema={schema:?}|event_time={}|order={:?}|partition={:?}|duplicates={:?}|groups={:?}|outputs={:?}|fallback={:?}",
         input.state_layout_version,
         input.selection,
         input.complexity,
+        input.event_time_index,
         input.order_columns,
         input.partition_columns,
+        input.allow_order_peers,
         input.groups,
         input.outputs,
         input.fallback_reason,
