@@ -165,7 +165,10 @@ max, variance, standard deviation, covariance, and correlation — read a
 per-entity row-count or event-time duration frame with a minimum-period
 null gate and IEEE infinity semantics. EWMA instead holds one unadjusted
 constant-state average per shared input/span and persists it in state layout
-v2. `RollingOperator` compiles into both
+v2. The optional `numerical_profile` defaults to the released `stable_v1`
+operation order; explicit `stable_v2` enables the shifted-sum/rebase preview
+and is included in kernel and checkpoint fingerprints. `RollingOperator`
+compiles into both
 batch and stream graphs, emits the input fields followed by the declared
 rolling outputs, and checkpoints its stream state at the aligned epoch cut.
 

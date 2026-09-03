@@ -534,7 +534,7 @@ secret 写入 `RunResult`。
 | WP-P4B       | SQL logical/physical rewrite and explain metrics          | 只改写 bounded `ROWS ... CURRENT ROW` allowlist，并记录拒绝原因                     | WP-P4A     | implemented | allowlist 置空即全量 fallback                          |
 | WP-P4C       | batch planner and canonical merge                         | 根据规模、entity 基数和 state bytes 选择 partition；稳定恢复可观察顺序              | WP-P4A     | implemented | 固定 `target_partitions=1`                             |
 | WP-P5A       | kernel capability manifest and generation checks          | 建立 kernel census；声明可 stream 的形状若无法生成 transition 则构建失败             | P3-P4      | implemented | 生成清单只报告，不扩大 capability                      |
-| WP-P5B       | numerical profiles and state migration                    | 冻结 `stable_v1`；以 opt-in preview 引入 rebase/shifted-sum 实验                     | WP-P5A     | pending     | 禁用 preview；writer 继续输出当前 profile              |
+| WP-P5B       | numerical profiles and state migration                    | 冻结 `stable_v1`；以 opt-in preview 引入 rebase/shifted-sum 实验                     | WP-P5A     | implemented | 禁用 preview；writer 继续输出当前 profile              |
 | WP-P5C       | benchmark/evidence scripts and CI validators              | non-vacuity、oracle、migration、sanitizer、paired performance 统一证据               | P3-P5B     | pending     | 性能结果降级为 informational，不放宽 correctness gate  |
 
 每个工作包在同一 PR 内保持独立提交，提交信息说明 capability 扩张、fallback 和 state
@@ -546,6 +546,15 @@ WP-P5A 已把 `crates/calc-flow/rolling-kernels.json` 设为 capability census �
 transition 必须同时声明 batch/stream surface，DataFusion capability 必须引用可生成
 transition，未知 transition/complexity 或缺少 primitive 都直接失败。运行时 typed
 plan 和 DataFusion rewrite 也读取同一生成表，因此清单不是仅供文档展示的旁路数据。
+
+WP-P5B 保持 `stable_v1` 为默认值，并在 canonical configuration 中省略该默认字段，
+因此既有 project JSON、configuration hash、kernel fingerprint 和 layout-v3 state
+字节结构不变。只有显式写入 `numerical_profile: stable_v2` 才启用预览：Float64
+numeric/pair accumulator 以首个有限值为 shift，使用 compensated sums 计算一阶、
+二阶和交叉矩，并按每个 entity 大约一个当前窗口周期 deterministic rebase；非有限
+风险仍立即 rebase。transition count 写入 layout-v3 已有的 nullable position 列，
+checkpoint restore 后继续同一 cadence；profile 同时进入 configuration、kernel 和
+state metadata fingerprint，混用时 fail closed。
 
 ### 13.2 评审后执行顺序
 

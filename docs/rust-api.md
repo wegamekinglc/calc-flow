@@ -224,7 +224,18 @@ capabilities report writer layout v3. `allowed_lateness_micros` and a
 classify late rows
 against the input watermark, and `RollingValuePolicy` is the frozen
 `stateful_numeric_v1`, which preserves a null or NaN current or referenced
-value. Validation rejects unknown fields, empty or duplicate keys, duplicate
+value.
+
+`numerical_profile` is optional. Its default `stable_v1` is omitted from the
+canonical configuration, preserving existing project and checkpoint hashes.
+The explicit `stable_v2` value is a preview: floating numeric and pair windows
+periodically rebuild from retained values with shifted compensated sums. The
+per-entity transition count is stored in the existing nullable columnar-state
+position field, so the cadence survives checkpoint recovery without changing
+the layout-v3 field schema. The profile is part of both configuration and
+kernel fingerprints, and restore rejects a profile mismatch.
+
+Validation rejects unknown fields, empty or duplicate keys, duplicate
 or input-colliding output names, nullable or floating sequence columns,
 non-numeric `delta`, `ewma`, `sum`, `mean`, `variance`, `stddev`, `covariance`,
 and `correlation` inputs, `min` and `max` inputs outside the total-order types

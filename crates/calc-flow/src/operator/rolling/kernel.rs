@@ -25,8 +25,8 @@ use sha2::{Digest, Sha256};
 
 use super::{
     CompiledEvaluation, CompiledFloatReadout, CompiledFrame, CompiledKeyColumn,
-    CompiledRollingOutput, CompiledWindowGroup, PairAccumulator, Statistic, SumClass, SumState,
-    WindowAccumulator,
+    CompiledRollingOutput, CompiledWindowGroup, PairAccumulator, RollingNumericalProfile,
+    Statistic, SumClass, SumState, WindowAccumulator,
     generated_kernel_manifest::{
         GeneratedComplexity, GeneratedTransition, generated_kernel_capability,
     },
@@ -35,7 +35,6 @@ use super::{
 use crate::Result;
 
 const ROLLING_KERNEL_PLAN_VERSION: u32 = 1;
-const STABLE_NUMERICAL_PROFILE: &str = "stable_v1";
 
 /// Selected executable family for one immutable rolling kernel plan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -58,7 +57,7 @@ pub(super) enum KernelComplexity {
 pub(super) struct RollingKernelPlan {
     version: u32,
     state_layout_version: u32,
-    numerical_profile: &'static str,
+    numerical_profile: RollingNumericalProfile,
     selection: KernelSelection,
     complexity: KernelComplexity,
     event_time_index: usize,
@@ -275,6 +274,7 @@ impl RollingKernelPlan {
     pub(super) fn compile(
         input_schema: &Schema,
         state_layout_version: u32,
+        numerical_profile: RollingNumericalProfile,
         event_time_index: usize,
         partition_columns: &[CompiledKeyColumn],
         sequence_columns: &[CompiledKeyColumn],
@@ -296,6 +296,7 @@ impl RollingKernelPlan {
         Self::compile_with_order(
             input_schema,
             state_layout_version,
+            numerical_profile,
             event_time_index,
             order_columns,
             partition_columns,
@@ -312,6 +313,7 @@ impl RollingKernelPlan {
     pub(super) fn compile_with_order(
         input_schema: &Schema,
         state_layout_version: u32,
+        numerical_profile: RollingNumericalProfile,
         event_time_index: usize,
         order_columns: Vec<usize>,
         partition_columns: Vec<usize>,
@@ -350,6 +352,7 @@ impl RollingKernelPlan {
         let fingerprint = kernel_fingerprint(&KernelFingerprintInput {
             input_schema,
             state_layout_version,
+            numerical_profile,
             selection,
             complexity,
             event_time_index,
@@ -363,7 +366,7 @@ impl RollingKernelPlan {
         Self {
             version: ROLLING_KERNEL_PLAN_VERSION,
             state_layout_version,
-            numerical_profile: STABLE_NUMERICAL_PROFILE,
+            numerical_profile,
             selection,
             complexity,
             event_time_index,
@@ -391,6 +394,10 @@ impl RollingKernelPlan {
     }
 
     pub(super) const fn numerical_profile(&self) -> &'static str {
+        self.numerical_profile.name()
+    }
+
+    pub(super) const fn numerical_profile_kind(&self) -> RollingNumericalProfile {
         self.numerical_profile
     }
 
@@ -427,20 +434,21 @@ impl RollingKernelPlan {
         self.update_and_fill(&RollingKernelState::default(), input, node_id)
     }
 
-    /// Installs durable EWMA recurrence values into an otherwise reconstructed
-    /// typed state. This is used only after checkpoint restore; ordinary live
-    /// transitions keep the typed state directly.
-    pub(super) fn seed_ewma(
+    /// Installs durable per-entity transition counts and EWMA recurrence values
+    /// into an otherwise reconstructed typed state. This is used only after
+    /// checkpoint restore; ordinary live transitions keep both values directly.
+    pub(super) fn seed_restored_state(
         &self,
         state: &RollingKernelState,
         entities: &RecordBatch,
+        transition_counts: &[u64],
         seeds: &[Vec<Option<(u64, f64)>>],
         node_id: &str,
     ) -> Result<RollingKernelState> {
         self.validate_state(state, node_id)?;
-        if entities.num_rows() != seeds.len() {
+        if entities.num_rows() != seeds.len() || seeds.len() != transition_counts.len() {
             return Err(internal_error(
-                "typed EWMA restore entity and seed counts differ",
+                "typed rolling restore entity metadata counts differ",
             ));
         }
         let entity_rows = encode_rows(entities, &self.partition_columns, node_id)?;
@@ -451,7 +459,12 @@ impl RollingKernelPlan {
             .get_or_insert_with(|| self.fingerprint.clone());
         let entity_ids = seeded.resolve_entities(&entity_keys, &self.groups);
         for (row_index, values) in seeds.iter().enumerate() {
-            self.seed_ewma_entity(&mut seeded.states[entity_ids[row_index]], values)?;
+            let entity = &mut seeded.states[entity_ids[row_index]];
+            if self.numerical_profile == RollingNumericalProfile::StableV2Preview {
+                entity.force_stable_v2_rebase(node_id)?;
+            }
+            entity.transition_count = transition_counts[row_index];
+            self.seed_ewma_entity(entity, values)?;
         }
         Ok(seeded)
     }
@@ -647,6 +660,7 @@ impl RollingKernelPlan {
             &mut state.states,
             &mut builders,
             entity_ids,
+            self.numerical_profile,
             node_id,
         )?;
         let kernel_ns = nanos(kernel_start.elapsed());
@@ -824,15 +838,21 @@ fn fill_typed_rows(
     states: &mut [TypedEntityState],
     builders: &mut [DerivedBuilder],
     entity_ids: &[usize],
+    numerical_profile: RollingNumericalProfile,
     node_id: &str,
 ) -> Result<()> {
     for (row_index, &entity_id) in entity_ids.iter().enumerate() {
         let entity = &mut states[entity_id];
+        entity.transition_count = entity
+            .transition_count
+            .checked_add(1)
+            .ok_or_else(|| operator_error(node_id, "rolling entity transition count overflowed"))?;
         update_typed_groups(
             inputs,
             event_times.value(row_index),
             entity,
             row_index,
+            numerical_profile,
             node_id,
         )?;
         append_typed_outputs(outputs, builders, entity, node_id)?;
@@ -845,10 +865,18 @@ fn update_typed_groups(
     event_time: i64,
     entity: &mut TypedEntityState,
     row_index: usize,
+    numerical_profile: RollingNumericalProfile,
     node_id: &str,
 ) -> Result<()> {
     for (state, input) in entity.groups.iter_mut().zip(inputs) {
-        state.update(event_time, input, row_index, node_id)?;
+        state.update(
+            event_time,
+            input,
+            row_index,
+            numerical_profile,
+            entity.transition_count,
+            node_id,
+        )?;
     }
     Ok(())
 }
@@ -1207,6 +1235,7 @@ fn duplicate_identity_error(
 struct KernelFingerprintInput<'a> {
     input_schema: &'a Schema,
     state_layout_version: u32,
+    numerical_profile: RollingNumericalProfile,
     selection: KernelSelection,
     complexity: KernelComplexity,
     event_time_index: usize,
@@ -1234,8 +1263,9 @@ fn kernel_fingerprint(input: &KernelFingerprintInput<'_>) -> String {
         })
         .collect::<Vec<_>>();
     let descriptor = format!(
-        "version={ROLLING_KERNEL_PLAN_VERSION}|state={}|numeric={STABLE_NUMERICAL_PROFILE}|selection={:?}|complexity={:?}|schema={schema:?}|event_time={}|order={:?}|partition={:?}|duplicates={:?}|groups={:?}|outputs={:?}|fallback={:?}",
+        "version={ROLLING_KERNEL_PLAN_VERSION}|state={}|numeric={}|selection={:?}|complexity={:?}|schema={schema:?}|event_time={}|order={:?}|partition={:?}|duplicates={:?}|groups={:?}|outputs={:?}|fallback={:?}",
         input.state_layout_version,
+        input.numerical_profile.name(),
         input.selection,
         input.complexity,
         input.event_time_index,
@@ -1281,6 +1311,7 @@ fn encoded_keys(entity_rows: &datafusion::arrow::row::Rows, row_count: usize) ->
 #[derive(Clone, Debug)]
 struct TypedEntityState {
     groups: Vec<TypedWindowState>,
+    transition_count: u64,
 }
 
 impl TypedEntityState {
@@ -1290,7 +1321,15 @@ impl TypedEntityState {
                 .iter()
                 .map(|group| TypedWindowState::new(*group, entity_rows))
                 .collect(),
+            transition_count: 0,
         }
+    }
+
+    fn force_stable_v2_rebase(&mut self, node_id: &str) -> Result<()> {
+        for group in &mut self.groups {
+            group.force_stable_v2_rebase(node_id)?;
+        }
+        Ok(())
     }
 
     fn estimated_bytes(&self) -> usize {
@@ -1341,12 +1380,18 @@ impl TypedWindowState {
         event_time: i64,
         input: &TypedGroupInput,
         row_index: usize,
+        numerical_profile: RollingNumericalProfile,
+        transition_count: u64,
         node_id: &str,
     ) -> Result<()> {
         match (self, input) {
-            (Self::Numeric(state), TypedGroupInput::Single(input)) => {
-                state.update(event_time, valid_float64(input, row_index), node_id)
-            }
+            (Self::Numeric(state), TypedGroupInput::Single(input)) => state.update(
+                event_time,
+                valid_float64(input, row_index),
+                numerical_profile,
+                transition_count,
+                node_id,
+            ),
             (Self::Exact(state), TypedGroupInput::Signed(input)) => state.update(
                 event_time,
                 input
@@ -1383,6 +1428,8 @@ impl TypedWindowState {
             (Self::Pair(state), TypedGroupInput::Pair(left, right)) => state.update(
                 event_time,
                 valid_float64_pair(left, right, row_index),
+                numerical_profile,
+                transition_count,
                 node_id,
             ),
             (Self::Ewma(state), TypedGroupInput::Single(input)) => {
@@ -1391,6 +1438,14 @@ impl TypedWindowState {
             _ => Err(internal_error(
                 "typed rolling group state does not match its input plan",
             )),
+        }
+    }
+
+    fn force_stable_v2_rebase(&mut self, node_id: &str) -> Result<()> {
+        match self {
+            Self::Numeric(state) => state.rebase_stable_v2(node_id),
+            Self::Pair(state) => state.rebase_stable_v2(node_id),
+            Self::Exact(_) | Self::Extrema(_) | Self::Ewma(_) => Ok(()),
         }
     }
 
@@ -1515,7 +1570,14 @@ impl Float64NumericState {
         }
     }
 
-    fn update(&mut self, event_time: i64, sample: Option<f64>, node_id: &str) -> Result<()> {
+    fn update(
+        &mut self,
+        event_time: i64,
+        sample: Option<f64>,
+        numerical_profile: RollingNumericalProfile,
+        transition_count: u64,
+        node_id: &str,
+    ) -> Result<()> {
         if let Some(sample) = sample {
             add_float64(&mut self.accumulator, sample, node_id)?;
         }
@@ -1524,9 +1586,25 @@ impl Float64NumericState {
             value: sample,
         });
         self.expire(event_time)?;
-        if self.accumulator.is_non_finite() {
+        if numerical_profile == RollingNumericalProfile::StableV2Preview
+            && stable_v2_rebase_due(
+                transition_count,
+                self.values.len(),
+                self.accumulator.is_non_finite(),
+            )
+        {
+            self.rebase_stable_v2(node_id)?;
+        } else if self.accumulator.is_non_finite() {
             refold_float64(&mut self.accumulator, &self.values, node_id)?;
         }
+        Ok(())
+    }
+
+    fn rebase_stable_v2(&mut self, node_id: &str) -> Result<()> {
+        self.accumulator = stable_v2_float64_accumulator(
+            self.values.iter().filter_map(|sample| sample.value),
+            node_id,
+        )?;
         Ok(())
     }
 
@@ -1730,15 +1808,38 @@ impl Float64PairState {
         }
     }
 
-    fn update(&mut self, event_time: i64, value: Option<(f64, f64)>, node_id: &str) -> Result<()> {
+    fn update(
+        &mut self,
+        event_time: i64,
+        value: Option<(f64, f64)>,
+        numerical_profile: RollingNumericalProfile,
+        transition_count: u64,
+        node_id: &str,
+    ) -> Result<()> {
         if let Some((left, right)) = value {
             add_pair_float64(&mut self.accumulator, left, right, node_id)?;
         }
         self.values.push_back(TimedPairSample { event_time, value });
         self.expire(event_time)?;
-        if self.accumulator.is_non_finite() {
+        if numerical_profile == RollingNumericalProfile::StableV2Preview
+            && stable_v2_rebase_due(
+                transition_count,
+                self.values.len(),
+                self.accumulator.is_non_finite(),
+            )
+        {
+            self.rebase_stable_v2(node_id)?;
+        } else if self.accumulator.is_non_finite() {
             refold_pair_float64(&mut self.accumulator, &self.values, node_id)?;
         }
+        Ok(())
+    }
+
+    fn rebase_stable_v2(&mut self, node_id: &str) -> Result<()> {
+        self.accumulator = stable_v2_pair_accumulator(
+            self.values.iter().filter_map(|sample| sample.value),
+            node_id,
+        )?;
         Ok(())
     }
 
@@ -2086,6 +2187,136 @@ fn refold_pair_float64(
         add_pair_float64(accumulator, left, right, node_id)?;
     }
     Ok(())
+}
+
+pub(super) fn stable_v2_rebase_due(
+    transition_count: u64,
+    retained_samples: usize,
+    numerical_risk: bool,
+) -> bool {
+    if numerical_risk {
+        return true;
+    }
+    if retained_samples < 2 {
+        return false;
+    }
+    let cadence = u64::try_from(retained_samples.max(64)).unwrap_or(u64::MAX);
+    transition_count % cadence == 0
+}
+
+#[derive(Default)]
+struct CompensatedSum {
+    value: f64,
+    correction: f64,
+}
+
+impl CompensatedSum {
+    fn add(&mut self, sample: f64) {
+        let adjusted = sample - self.correction;
+        let next = self.value + adjusted;
+        self.correction = (next - self.value) - adjusted;
+        self.value = next;
+    }
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "the stable_v2 preview retains the frozen Float64 output type"
+)]
+pub(super) fn stable_v2_float64_accumulator(
+    values: impl Iterator<Item = f64>,
+    node_id: &str,
+) -> Result<WindowAccumulator> {
+    let mut accumulator = WindowAccumulator::new(SumClass::Float);
+    let mut shift = None;
+    let mut finite_count = 0_u64;
+    let mut shifted_sum = CompensatedSum::default();
+    let mut shifted_squares = CompensatedSum::default();
+    for sample in values {
+        accumulator.valid_count = accumulator
+            .valid_count
+            .checked_add(1)
+            .ok_or_else(|| operator_error(node_id, "rolling valid sample count overflowed"))?;
+        if sample.is_infinite() {
+            update_infinity_count(
+                &mut accumulator.pos_inf,
+                &mut accumulator.neg_inf,
+                sample,
+                true,
+            );
+            continue;
+        }
+        let origin = *shift.get_or_insert(sample);
+        let shifted = sample - origin;
+        shifted_sum.add(shifted);
+        shifted_squares.add(shifted * shifted);
+        finite_count = finite_count
+            .checked_add(1)
+            .ok_or_else(|| operator_error(node_id, "rolling finite sample count overflowed"))?;
+    }
+    let origin = shift.unwrap_or(0.0);
+    let finite_total = origin * finite_count as f64 + shifted_sum.value;
+    let total = match (accumulator.pos_inf > 0, accumulator.neg_inf > 0) {
+        (true, true) => f64::NAN,
+        (true, false) => f64::INFINITY,
+        (false, true) => f64::NEG_INFINITY,
+        (false, false) => finite_total,
+    };
+    accumulator.sum = Some(SumState::Float(total));
+    if finite_count > 0 {
+        let count = finite_count as f64;
+        accumulator.mean = origin + shifted_sum.value / count;
+        accumulator.m2 = shifted_squares.value - shifted_sum.value * shifted_sum.value / count;
+    }
+    Ok(accumulator)
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "the stable_v2 preview retains the frozen Float64 output type"
+)]
+pub(super) fn stable_v2_pair_accumulator(
+    values: impl Iterator<Item = (f64, f64)>,
+    node_id: &str,
+) -> Result<PairAccumulator> {
+    let mut accumulator = PairAccumulator::default();
+    let mut shift = None;
+    let mut finite_count = 0_u64;
+    let mut shifted_x = CompensatedSum::default();
+    let mut shifted_y = CompensatedSum::default();
+    let mut shifted_xx = CompensatedSum::default();
+    let mut shifted_yy = CompensatedSum::default();
+    let mut shifted_xy = CompensatedSum::default();
+    for (left, right) in values {
+        accumulator.valid_count = accumulator
+            .valid_count
+            .checked_add(1)
+            .ok_or_else(|| operator_error(node_id, "rolling pair sample count overflowed"))?;
+        update_pair_infinity_counts(&mut accumulator, left, right, true);
+        if !left.is_finite() || !right.is_finite() {
+            continue;
+        }
+        let (origin_x, origin_y) = *shift.get_or_insert((left, right));
+        let x = left - origin_x;
+        let y = right - origin_y;
+        shifted_x.add(x);
+        shifted_y.add(y);
+        shifted_xx.add(x * x);
+        shifted_yy.add(y * y);
+        shifted_xy.add(x * y);
+        finite_count = finite_count
+            .checked_add(1)
+            .ok_or_else(|| operator_error(node_id, "rolling finite pair count overflowed"))?;
+    }
+    if let Some((origin_x, origin_y)) = shift {
+        let count = finite_count as f64;
+        accumulator.mean_x = origin_x + shifted_x.value / count;
+        accumulator.mean_y = origin_y + shifted_y.value / count;
+        accumulator.m2_x = shifted_xx.value - shifted_x.value * shifted_x.value / count;
+        accumulator.m2_y = shifted_yy.value - shifted_y.value * shifted_y.value / count;
+        accumulator.co_moment = shifted_xy.value - shifted_x.value * shifted_y.value / count;
+    }
+    Ok(accumulator)
 }
 
 enum DerivedBuilder {

@@ -60,6 +60,35 @@ pub const ROLLING_EWMA_STATE_LAYOUT_VERSION: u32 = 2;
 /// Durable columnar state-layout version written by current rolling operators.
 pub const ROLLING_COLUMNAR_STATE_LAYOUT_VERSION: u32 = 3;
 
+/// Versioned floating-point behavior for rolling numeric transitions.
+///
+/// `StableV1` remains the default and preserves the released operation order.
+/// `StableV2Preview` is an explicit opt-in experiment whose serialized name is
+/// `stable_v2`; it may not replace the default without a separate migration.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RollingNumericalProfile {
+    /// Released West/Welford add/remove behavior.
+    #[default]
+    StableV1,
+    /// Deterministically rebased, shifted-sum preview behavior.
+    #[serde(rename = "stable_v2")]
+    StableV2Preview,
+}
+
+impl RollingNumericalProfile {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::StableV1 => "stable_v1",
+            Self::StableV2Preview => "stable_v2",
+        }
+    }
+
+    const fn is_stable_v1(&self) -> bool {
+        matches!(self, Self::StableV1)
+    }
+}
+
 /// One SQL AVG window accepted by the crate-private `DataFusion` rolling
 /// physical planner.
 #[derive(Clone, Debug)]
@@ -163,6 +192,7 @@ impl DataFusionRollingKernel {
         let plan = RollingKernelPlan::compile_with_order(
             input_schema,
             ROLLING_STATE_LAYOUT_VERSION,
+            RollingNumericalProfile::StableV1,
             event_time_index,
             physical_order,
             partition_indices.to_vec(),
@@ -827,6 +857,11 @@ pub struct RollingSpec {
     /// [`ROLLING_STATE_LAYOUT_VERSION`]; EWMA requires
     /// [`ROLLING_EWMA_STATE_LAYOUT_VERSION`].
     pub state_layout_version: u32,
+    /// Versioned floating-point behavior. `stable_v1` is omitted from the
+    /// canonical configuration so existing project and checkpoint hashes stay
+    /// compatible; `stable_v2` is an explicit preview opt-in.
+    #[serde(default, skip_serializing_if = "RollingNumericalProfile::is_stable_v1")]
+    pub numerical_profile: RollingNumericalProfile,
     /// Ordered non-empty entity partition key.
     pub partition_by: Vec<String>,
     /// Non-null UTC `timestamp[us]` event-time column.
@@ -2192,16 +2227,28 @@ fn rebuild_windows(
         for (group_index, group) in compiled.window_groups.iter().enumerate() {
             match group {
                 CompiledWindowGroup::Numeric {
-                    input_index, frame, ..
+                    input_index,
+                    frame,
+                    sum_class,
                 } => {
                     let WindowState::Numeric(accumulator) = &mut windows[group_index] else {
                         return Err(internal_error("rolling numeric group state mismatch"));
                     };
                     let start = retained_window_start(*frame, state, compiled);
-                    for values in state.rows.iter().skip(start) {
-                        let value = &values[*input_index];
-                        if is_valid_sample(value) {
-                            accumulator.add(value, node_id)?;
+                    if spec_uses_stable_v2(compiled) && *sum_class == SumClass::Float {
+                        *accumulator = kernel::stable_v2_float64_accumulator(
+                            state.rows.iter().skip(start).filter_map(|values| {
+                                let value = &values[*input_index];
+                                is_valid_sample(value).then(|| float_sample(value))
+                            }),
+                            node_id,
+                        )?;
+                    } else {
+                        for values in state.rows.iter().skip(start) {
+                            let value = &values[*input_index];
+                            if is_valid_sample(value) {
+                                accumulator.add(value, node_id)?;
+                            }
                         }
                     }
                     if let CompiledFrame::Duration(micros) = frame {
@@ -2232,11 +2279,23 @@ fn rebuild_windows(
                         return Err(internal_error("rolling pair group state mismatch"));
                     };
                     let start = retained_window_start(*frame, state, compiled);
-                    for values in state.rows.iter().skip(start) {
-                        let x = &values[*left_index];
-                        let y = &values[*right_index];
-                        if is_valid_sample(x) && is_valid_sample(y) {
-                            accumulator.add(x, y, node_id)?;
+                    if spec_uses_stable_v2(compiled) {
+                        *accumulator = kernel::stable_v2_pair_accumulator(
+                            state.rows.iter().skip(start).filter_map(|values| {
+                                let x = &values[*left_index];
+                                let y = &values[*right_index];
+                                (is_valid_sample(x) && is_valid_sample(y))
+                                    .then(|| (float_sample(x), float_sample(y)))
+                            }),
+                            node_id,
+                        )?;
+                    } else {
+                        for values in state.rows.iter().skip(start) {
+                            let x = &values[*left_index];
+                            let y = &values[*right_index];
+                            if is_valid_sample(x) && is_valid_sample(y) {
+                                accumulator.add(x, y, node_id)?;
+                            }
                         }
                     }
                     if let CompiledFrame::Duration(micros) = frame {
@@ -2814,22 +2873,17 @@ fn reconstruct_typed_state(
             .ok_or_else(|| internal_error("typed rolling restore history is not canonical"))?
             .state
     };
-    seed_typed_ewma(histories, compiled, input_schema, &reconstructed, node_id)
+    seed_typed_restored_state(histories, compiled, input_schema, &reconstructed, node_id)
 }
 
-fn seed_typed_ewma(
+fn seed_typed_restored_state(
     histories: &RollingHistories,
     compiled: &CompiledRollingSpec,
     input_schema: &SchemaRef,
     state: &RollingKernelState,
     node_id: &str,
 ) -> Result<RollingKernelState> {
-    if histories.by_entity.is_empty()
-        || !compiled
-            .window_groups
-            .iter()
-            .any(|group| matches!(group, CompiledWindowGroup::Ewma { .. }))
-    {
+    if histories.by_entity.is_empty() {
         return Ok(state.clone());
     }
     let values = histories
@@ -2842,6 +2896,11 @@ fn seed_typed_ewma(
         .values()
         .map(|entity| typed_ewma_seeds(entity, compiled))
         .collect::<Result<Vec<_>>>()?;
+    let transition_counts = histories
+        .by_entity
+        .values()
+        .map(|entity| entity.transition_count)
+        .collect::<Vec<_>>();
     let nullable_schema = Arc::new(Schema::new(
         input_schema
             .fields()
@@ -2852,7 +2911,7 @@ fn seed_typed_ewma(
     let entities = build_value_record(&values, nullable_schema, node_id)?;
     compiled
         .kernel_plan
-        .seed_ewma(state, &entities, &seeds, node_id)
+        .seed_restored_state(state, &entities, &transition_counts, &seeds, node_id)
 }
 
 fn typed_ewma_seeds(
@@ -2954,6 +3013,9 @@ fn typed_history_updates(
         .into_iter()
         .map(|(entity, indices)| {
             let mut state = histories.by_entity.get(entity).cloned().unwrap_or_default();
+            let transitions = u64::try_from(indices.len()).map_err(|_| {
+                operator_error(node_id, "rolling micro-batch row count does not fit u64")
+            })?;
             if has_ewma {
                 advance_typed_ewma_windows(&mut state, rows, &indices, compiled, node_id)?;
             } else {
@@ -2962,6 +3024,13 @@ fn typed_history_updates(
             state
                 .rows
                 .extend(indices.into_iter().map(|index| rows[index].values.clone()));
+            state.transition_count =
+                state
+                    .transition_count
+                    .checked_add(transitions)
+                    .ok_or_else(|| {
+                        operator_error(node_id, "rolling entity transition count overflowed")
+                    })?;
             evict_retained_history(&mut state, compiled);
             Ok((entity.clone(), state))
         })
@@ -3376,6 +3445,7 @@ impl BufferedRow {
 struct EntityRollingState {
     rows: VecDeque<Vec<ScalarValue>>,
     windows: Vec<WindowState>,
+    transition_count: u64,
 }
 
 impl EntityRollingState {
@@ -3383,6 +3453,7 @@ impl EntityRollingState {
         Self {
             rows: VecDeque::new(),
             windows: fresh_windows(compiled),
+            transition_count: 0,
         }
     }
 }
@@ -3606,6 +3677,10 @@ impl WindowAccumulator {
         sum_non_finite || !self.mean.is_finite() || !self.m2.is_finite()
     }
 
+    const fn has_float_sum(&self) -> bool {
+        matches!(self.sum, Some(SumState::Float(_)))
+    }
+
     fn reset(&mut self) {
         *self = Self::new(match &self.sum {
             Some(SumState::Signed(_)) => SumClass::Signed,
@@ -3614,6 +3689,10 @@ impl WindowAccumulator {
             None => SumClass::CountOnly,
         });
     }
+}
+
+fn spec_uses_stable_v2(compiled: &CompiledRollingSpec) -> bool {
+    compiled.kernel_plan.numerical_profile_kind() == RollingNumericalProfile::StableV2Preview
 }
 
 /// Canonical expiry key of one queued extrema candidate: the entity-local
@@ -4010,10 +4089,17 @@ fn compute_output_columns(
                 event_time_index: compiled.event_time_index,
             };
             for (position, &row_index) in indices.iter().enumerate() {
+                entity_state.transition_count = entity_state
+                    .transition_count
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        operator_error(node_id, "rolling entity transition count overflowed")
+                    })?;
                 slide_windows(
                     &view,
                     position,
                     row_index,
+                    entity_state.transition_count,
                     compiled,
                     &mut entity_state.windows,
                     node_id,
@@ -4210,6 +4296,7 @@ fn slide_windows(
     view: &EntityRowView<'_>,
     position: usize,
     row_index: usize,
+    transition_count: u64,
     compiled: &CompiledRollingSpec,
     windows: &mut [WindowState],
     node_id: &str,
@@ -4228,7 +4315,23 @@ fn slide_windows(
                     accumulator.add(current, node_id)?;
                 }
                 expire_numeric(accumulator, view, combined, *input_index, *frame, node_id)?;
-                if accumulator.is_non_finite() {
+                let stable_v2_rebase = spec_uses_stable_v2(compiled)
+                    && accumulator.has_float_sum()
+                    && kernel::stable_v2_rebase_due(
+                        transition_count,
+                        window_positions(view, combined, *frame, node_id)?.count(),
+                        accumulator.is_non_finite(),
+                    );
+                if stable_v2_rebase {
+                    rebase_numeric_stable_v2(
+                        accumulator,
+                        view,
+                        combined,
+                        *input_index,
+                        *frame,
+                        node_id,
+                    )?;
+                } else if accumulator.is_non_finite() {
                     refold_numeric(accumulator, view, combined, *input_index, *frame, node_id)?;
                 }
             }
@@ -4274,7 +4377,23 @@ fn slide_windows(
                     *frame,
                     node_id,
                 )?;
-                if accumulator.is_non_finite() {
+                let stable_v2_rebase = spec_uses_stable_v2(compiled)
+                    && kernel::stable_v2_rebase_due(
+                        transition_count,
+                        window_positions(view, combined, *frame, node_id)?.count(),
+                        accumulator.is_non_finite(),
+                    );
+                if stable_v2_rebase {
+                    rebase_pair_stable_v2(
+                        accumulator,
+                        view,
+                        combined,
+                        *left_index,
+                        *right_index,
+                        *frame,
+                        node_id,
+                    )?;
+                } else if accumulator.is_non_finite() {
                     refold_pair(
                         accumulator,
                         view,
@@ -4451,6 +4570,26 @@ fn refold_numeric(
     Ok(())
 }
 
+fn rebase_numeric_stable_v2(
+    accumulator: &mut WindowAccumulator,
+    view: &EntityRowView<'_>,
+    combined: usize,
+    input_index: usize,
+    frame: CompiledFrame,
+    node_id: &str,
+) -> Result<()> {
+    let expired_through = accumulator.expired_through;
+    *accumulator = kernel::stable_v2_float64_accumulator(
+        window_positions(view, combined, frame, node_id)?.filter_map(|index| {
+            let value = view.value(index, input_index);
+            is_valid_sample(value).then(|| float_sample(value))
+        }),
+        node_id,
+    )?;
+    accumulator.expired_through = expired_through;
+    Ok(())
+}
+
 /// Rebuilds one pair accumulator as the ordered fold over the current
 /// pairwise-valid window (SCE-00 D11/D13).
 fn refold_pair(
@@ -4473,6 +4612,29 @@ fn refold_pair(
     if let CompiledFrame::Duration(micros) = frame {
         accumulator.expired_through = duration_bound(view.event_time(combined), micros);
     }
+    Ok(())
+}
+
+fn rebase_pair_stable_v2(
+    accumulator: &mut PairAccumulator,
+    view: &EntityRowView<'_>,
+    combined: usize,
+    left_index: usize,
+    right_index: usize,
+    frame: CompiledFrame,
+    node_id: &str,
+) -> Result<()> {
+    let expired_through = accumulator.expired_through;
+    *accumulator = kernel::stable_v2_pair_accumulator(
+        window_positions(view, combined, frame, node_id)?.filter_map(|index| {
+            let left = view.value(index, left_index);
+            let right = view.value(index, right_index);
+            (is_valid_sample(left) && is_valid_sample(right))
+                .then(|| (float_sample(left), float_sample(right)))
+        }),
+        node_id,
+    )?;
+    accumulator.expired_through = expired_through;
     Ok(())
 }
 
@@ -5070,6 +5232,7 @@ fn compile_spec_against_schema(
     let kernel_plan = RollingKernelPlan::compile(
         input_schema,
         ROLLING_COLUMNAR_STATE_LAYOUT_VERSION,
+        spec.numerical_profile,
         event_time_index,
         &partition_columns,
         &sequence_columns,
@@ -5749,7 +5912,32 @@ mod tests {
     #[test]
     fn canonical_lag_delta_spec_round_trips_the_frozen_json() {
         let spec: RollingSpec = serde_json::from_value(valid_spec_json()).unwrap();
+        assert_eq!(spec.numerical_profile, RollingNumericalProfile::StableV1);
         assert_eq!(serde_json::to_value(&spec).unwrap(), valid_spec_json());
+    }
+
+    #[test]
+    fn stable_v2_profile_is_explicit_and_fingerprinted() {
+        let mut document = valid_spec_json();
+        document["numerical_profile"] = json!("stable_v2");
+        let preview: RollingSpec = serde_json::from_value(document.clone()).unwrap();
+        let stable = valid_spec();
+
+        assert_eq!(
+            preview.numerical_profile,
+            RollingNumericalProfile::StableV2Preview
+        );
+        assert_eq!(serde_json::to_value(&preview).unwrap(), document);
+        assert_ne!(
+            compile_spec(&stable, &input_schema())
+                .unwrap()
+                .kernel_plan
+                .fingerprint(),
+            compile_spec(&preview, &input_schema())
+                .unwrap()
+                .kernel_plan
+                .fingerprint()
+        );
     }
 
     #[test]
@@ -6885,6 +7073,45 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn stable_v2_rebases_large_offset_variance_with_shifted_sums() {
+        let mut spec = kernel_spec(json!([ddof_output(
+            "variance",
+            "price",
+            "price_variance",
+            64,
+            0
+        )]));
+        spec.numerical_profile = RollingNumericalProfile::StableV2Preview;
+        let prices = (0..64)
+            .map(|index| 1.0e12 + f64::from(index % 9) / 10.0)
+            .collect::<Vec<_>>();
+        let rows = prices
+            .iter()
+            .enumerate()
+            .map(|(index, price)| {
+                let sequence = u64::try_from(index + 1).unwrap();
+                full_row(
+                    i64::try_from(index + 1).unwrap(),
+                    "a",
+                    sequence,
+                    vec![ScalarValue::Float64(Some(*price))],
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let outputs = compute(&spec, &RollingHistories::default(), &rows).unwrap();
+        let actual = float_column(&outputs, 0)[63].unwrap();
+        let shift = prices[0];
+        let shifted = prices.iter().map(|value| value - shift).collect::<Vec<_>>();
+        let sum = shifted.iter().sum::<f64>();
+        let expected =
+            shifted.iter().map(|value| value * value).sum::<f64>() / 64.0 - (sum / 64.0).powi(2);
+
+        assert_eq!(actual.to_bits(), expected.to_bits());
+        assert_eq!(outputs.touched[0].1.transition_count, 64);
+    }
+
     fn signed_column(outputs: &ComputedOutputs, index: usize) -> Vec<Option<i64>> {
         outputs.columns[index]
             .as_any()
@@ -8000,6 +8227,66 @@ mod tests {
             )
             .collect::<Vec<_>>();
         assert_eq!(actual, float_column(&expected, 0));
+    }
+
+    #[test]
+    fn stable_v2_transition_count_round_trips_in_columnar_state() {
+        let mut spec = kernel_spec(json!([aggregate_output("mean", "price", "price_mean", 64)]));
+        spec.numerical_profile = RollingNumericalProfile::StableV2Preview;
+        let compiled = compile_spec(&spec, &kernel_schema()).unwrap();
+        let rows = (0..64)
+            .map(|index| {
+                let sequence = u64::try_from(index + 1).unwrap();
+                full_row(
+                    i64::try_from(index + 1).unwrap(),
+                    "a",
+                    sequence,
+                    vec![ScalarValue::Float64(Some(1.0e12 + f64::from(index)))],
+                )
+            })
+            .collect::<Vec<_>>();
+        let outputs =
+            compute_output_columns(&rows, &RollingHistories::default(), &compiled, "rolling")
+                .unwrap();
+        let mut histories = RollingHistories::default();
+        histories.apply(outputs.touched);
+        let bytes = encode_state_segment(
+            &histories,
+            &BTreeMap::new(),
+            &kernel_schema(),
+            &compiled,
+            TEST_FINGERPRINT,
+            "rolling",
+        )
+        .unwrap();
+        let metadata = RollingSnapshotMetadata {
+            state_layout_version: ROLLING_COLUMNAR_STATE_LAYOUT_VERSION,
+            configuration_hash: compiled.configuration_hash.clone(),
+            state_schema_fingerprint: compiled.state_schema_fingerprint.clone(),
+            kernel_fingerprint: Some(compiled.kernel_plan.fingerprint().to_owned()),
+            numerical_profile: Some("stable_v2".into()),
+            epoch: Epoch::new(1).unwrap(),
+            pipeline_fingerprint: Some(TEST_FINGERPRINT.into()),
+            operator_id: Some("rolling".into()),
+            last_input_watermark: None,
+            next_output_sequence: 0,
+            ended: false,
+            metrics: LateMetricDelta::default(),
+            segment_inventory: Vec::new(),
+        };
+
+        let restored =
+            decode_state_segment(&bytes, &kernel_schema(), &compiled, &metadata).unwrap();
+        assert_eq!(
+            restored
+                .histories
+                .by_entity
+                .values()
+                .next()
+                .unwrap()
+                .transition_count,
+            64
+        );
     }
 
     #[test]

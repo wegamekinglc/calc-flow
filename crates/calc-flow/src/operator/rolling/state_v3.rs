@@ -22,10 +22,10 @@ use datafusion::{
 
 use super::{
     BufferedRow, CompiledEvaluation, CompiledRollingSpec, CompiledWindowGroup, DecodedRollingState,
-    EntityRollingState, KeyValue, RollingHistories, RollingSnapshotMetadata, WindowState,
-    buffered_row_from_values, ewma_entity_from_values, ewma_entity_values, internal_error,
-    rebuild_windows, state_format, state_schema, typed_null, validate_decoded_state,
-    validate_segment_schema_metadata,
+    EntityRollingState, KeyValue, RollingHistories, RollingNumericalProfile,
+    RollingSnapshotMetadata, WindowState, buffered_row_from_values, ewma_entity_from_values,
+    ewma_entity_values, internal_error, rebuild_windows, state_format, state_schema, typed_null,
+    validate_decoded_state, validate_segment_schema_metadata,
 };
 use crate::Result;
 
@@ -79,10 +79,18 @@ pub(super) fn encode(
     let mut encoded = EncodedColumns::new(input_schema);
 
     for (entity, &entity_id) in &entity_ids {
+        let transition_count = (compiled.kernel_plan.numerical_profile_kind()
+            == RollingNumericalProfile::StableV2Preview)
+            .then(|| {
+                histories
+                    .by_entity
+                    .get(entity)
+                    .map_or(0, |state| state.transition_count)
+            });
         encoded.push(
             KIND_ENTITY,
             entity_id,
-            None,
+            transition_count,
             ewma_entity_values(entity, input_schema, compiled)?,
             None,
         );
@@ -404,6 +412,7 @@ struct StateDecoder<'a> {
     compiled: &'a CompiledRollingSpec,
     projection: BTreeSet<usize>,
     entities: Vec<(Vec<Option<KeyValue>>, Vec<ScalarValue>)>,
+    transition_counts: Vec<u64>,
     used_entities: Vec<bool>,
     decoded: DecodedRollingState,
     last_kind: Option<u8>,
@@ -423,6 +432,7 @@ impl<'a> StateDecoder<'a> {
             compiled,
             projection,
             entities: Vec::new(),
+            transition_counts: Vec::new(),
             used_entities: Vec::new(),
             decoded: DecodedRollingState::default(),
             last_kind: None,
@@ -479,11 +489,24 @@ impl<'a> StateDecoder<'a> {
         ewma: Option<(u64, u64, f64)>,
         values: Vec<ScalarValue>,
     ) -> Result<()> {
-        if position.is_some() || ewma.is_some() {
+        if ewma.is_some() {
             return Err(state_format(
                 "rolling entity dictionary row carries state payload".to_owned(),
             ));
         }
+        let transition_count = match self.compiled.kernel_plan.numerical_profile_kind() {
+            RollingNumericalProfile::StableV1 if position.is_none() => 0,
+            RollingNumericalProfile::StableV2Preview => position.ok_or_else(|| {
+                state_format(
+                    "stable_v2 rolling entity row is missing its transition count".to_owned(),
+                )
+            })?,
+            RollingNumericalProfile::StableV1 => {
+                return Err(state_format(
+                    "stable_v1 rolling entity row carries a transition count".to_owned(),
+                ));
+            }
+        };
         if usize::try_from(entity_id).ok() != Some(self.entities.len()) {
             return Err(state_format(
                 "rolling entity dictionary IDs are not contiguous".to_owned(),
@@ -500,6 +523,7 @@ impl<'a> StateDecoder<'a> {
             ));
         }
         self.entities.push((entity, values));
+        self.transition_counts.push(transition_count);
         self.used_entities.push(false);
         Ok(())
     }
@@ -717,6 +741,15 @@ impl<'a> StateDecoder<'a> {
             return Err(state_format(
                 "rolling entity dictionary contains an unused entry".to_owned(),
             ));
+        }
+        for ((entity, _), transition_count) in self.entities.iter().zip(&self.transition_counts) {
+            if let Some(state) = self.decoded.histories.by_entity.get_mut(entity) {
+                state.transition_count = *transition_count;
+            } else if *transition_count != 0 {
+                return Err(state_format(
+                    "rolling entity transition count has no retained state".to_owned(),
+                ));
+            }
         }
         validate_decoded_state(&self.decoded, self.compiled)?;
         rebuild_windows(&mut self.decoded.histories, self.compiled, "rolling")?;
