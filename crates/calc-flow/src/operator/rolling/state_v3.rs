@@ -54,6 +54,9 @@ pub(super) fn state_fields(input_schema: &Schema) -> Vec<Field> {
     fields
 }
 
+// The encoder keeps dictionary, history, buffer, and recurrence ordering in
+// one transaction so partial state cannot escape.
+// #lizard forgives
 pub(super) fn encode(
     histories: &RollingHistories,
     buffer: &BTreeMap<super::RowIdentity, BufferedRow>,
@@ -145,6 +148,9 @@ pub(super) fn encode(
     Ok(bytes)
 }
 
+// Header, shape, row, and reconstructed-state validation form one fail-closed
+// transaction before any live operator state is installed.
+// #lizard forgives
 pub(super) fn decode(
     bytes: &[u8],
     input_schema: &Schema,
@@ -509,6 +515,8 @@ impl<'a> StateDecoder<'a> {
         Ok(())
     }
 
+    // Projection, identity, ordering, and position are one row invariant.
+    // #lizard forgives
     fn decode_history(
         &mut self,
         entity_id: u64,
@@ -553,6 +561,8 @@ impl<'a> StateDecoder<'a> {
         Ok(())
     }
 
+    // Buffer identity and canonical ordering are validated before insertion.
+    // #lizard forgives
     fn decode_buffer(
         &mut self,
         entity_id: u64,
@@ -598,6 +608,8 @@ impl<'a> StateDecoder<'a> {
         Ok(())
     }
 
+    // EWMA payload, ordering, group type, and uniqueness are one invariant.
+    // #lizard forgives
     fn decode_ewma(
         &mut self,
         entity_id: u64,

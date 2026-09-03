@@ -227,30 +227,8 @@ impl RollingKernelPlan {
         let input_validation_ns = nanos(validation_start.elapsed());
 
         let order_start = Instant::now();
-        let order_rows = encode_rows(input, &self.order_columns, node_id)?;
-        for row_index in 1..input.num_rows() {
-            let previous = order_rows.row(row_index - 1);
-            let current = order_rows.row(row_index);
-            if previous == current {
-                let event_time = input
-                    .column(self.order_columns[0])
-                    .as_any()
-                    .downcast_ref::<TimestampMicrosecondArray>()
-                    .ok_or_else(|| {
-                        operator_error(
-                            node_id,
-                            "rolling event-time value is not a microsecond timestamp",
-                        )
-                    })?
-                    .value(row_index);
-                return Err(operator_error(
-                    node_id,
-                    &format!("duplicate row identity at event_time_micros={event_time}"),
-                ));
-            }
-            if previous > current {
-                return Ok(None);
-            }
+        if !self.canonical_order_is_proven(input, node_id)? {
+            return Ok(None);
         }
         let order_proof_ns = nanos(order_start.elapsed());
 
@@ -259,6 +237,52 @@ impl RollingKernelPlan {
         let (entity_ids, entity_counts) = dense_entity_ids(&entity_rows, input.num_rows());
         let entity_encode_ns = nanos(entity_start.elapsed());
 
+        self.fill_float64(
+            input,
+            &entity_ids,
+            &entity_counts,
+            node_id,
+            RollingKernelMetrics {
+                input_validation_ns,
+                order_proof_ns,
+                entity_encode_ns,
+                order_proof_rows: input.num_rows(),
+                input_rows: input.num_rows(),
+                output_rows: input.num_rows(),
+                ..RollingKernelMetrics::default()
+            },
+        )
+        .map(Some)
+    }
+
+    fn canonical_order_is_proven(&self, input: &RecordBatch, node_id: &str) -> Result<bool> {
+        let order_rows = encode_rows(input, &self.order_columns, node_id)?;
+        for row_index in 1..input.num_rows() {
+            let previous = order_rows.row(row_index - 1);
+            let current = order_rows.row(row_index);
+            if previous == current {
+                return Err(duplicate_identity_error(
+                    input,
+                    self.order_columns[0],
+                    row_index,
+                    node_id,
+                )?);
+            }
+            if previous > current {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn fill_float64(
+        &self,
+        input: &RecordBatch,
+        entity_ids: &[usize],
+        entity_counts: &[usize],
+        node_id: &str,
+        mut metrics: RollingKernelMetrics,
+    ) -> Result<RollingKernelExecution> {
         let inputs = self.float64_inputs(input, node_id)?;
         let mut states = entity_counts
             .iter()
@@ -271,22 +295,15 @@ impl RollingKernelPlan {
             .collect::<Vec<_>>();
 
         let kernel_start = Instant::now();
-        for (row_index, &entity_id) in entity_ids.iter().enumerate() {
-            let entity = &mut states[entity_id];
-            for (group_index, group) in self.groups.iter().enumerate() {
-                let input = inputs[group_index];
-                let sample = if input.is_null(row_index) || input.value(row_index).is_nan() {
-                    None
-                } else {
-                    Some(input.value(row_index))
-                };
-                entity.groups[group_index].update(sample, node_id)?;
-                debug_assert_eq!(entity.groups[group_index].window, group.window);
-            }
-            for (builder, output) in builders.iter_mut().zip(&self.outputs) {
-                builder.append(&entity.groups[output.group].accumulator, output)?;
-            }
-        }
+        fill_float64_rows(
+            &self.groups,
+            &self.outputs,
+            &inputs,
+            &mut states,
+            &mut builders,
+            entity_ids,
+            node_id,
+        )?;
         let kernel_ns = nanos(kernel_start.elapsed());
 
         let output_start = Instant::now();
@@ -296,22 +313,11 @@ impl RollingKernelPlan {
             .collect::<Vec<_>>();
         let output_build_ns = nanos(output_start.elapsed());
         let state_bytes = states.iter().map(Float64EntityState::estimated_bytes).sum();
-        Ok(Some(RollingKernelExecution {
-            columns,
-            metrics: RollingKernelMetrics {
-                input_validation_ns,
-                order_proof_ns,
-                entity_encode_ns,
-                kernel_ns,
-                output_build_ns,
-                order_proof_rows: input.num_rows(),
-                entities: states.len(),
-                input_rows: input.num_rows(),
-                output_rows: input.num_rows(),
-                state_bytes,
-                ..RollingKernelMetrics::default()
-            },
-        }))
+        metrics.kernel_ns = kernel_ns;
+        metrics.output_build_ns = output_build_ns;
+        metrics.entities = states.len();
+        metrics.state_bytes = state_bytes;
+        Ok(RollingKernelExecution { columns, metrics })
     }
 
     fn validate_required_values(&self, input: &RecordBatch, node_id: &str) -> Result<()> {
@@ -352,11 +358,71 @@ impl RollingKernelPlan {
     }
 }
 
+fn fill_float64_rows(
+    groups: &[Float64GroupPlan],
+    outputs: &[Float64OutputPlan],
+    inputs: &[&Float64Array],
+    states: &mut [Float64EntityState],
+    builders: &mut [DerivedBuilder],
+    entity_ids: &[usize],
+    node_id: &str,
+) -> Result<()> {
+    for (row_index, &entity_id) in entity_ids.iter().enumerate() {
+        let entity = &mut states[entity_id];
+        update_float64_groups(groups, inputs, entity, row_index, node_id)?;
+        append_float64_outputs(outputs, builders, entity)?;
+    }
+    Ok(())
+}
+
+fn update_float64_groups(
+    groups: &[Float64GroupPlan],
+    inputs: &[&Float64Array],
+    entity: &mut Float64EntityState,
+    row_index: usize,
+    node_id: &str,
+) -> Result<()> {
+    for (group_index, group) in groups.iter().enumerate() {
+        let input = inputs[group_index];
+        let sample = if input.is_null(row_index) || input.value(row_index).is_nan() {
+            None
+        } else {
+            Some(input.value(row_index))
+        };
+        entity.groups[group_index].update(sample, node_id)?;
+        debug_assert_eq!(entity.groups[group_index].window, group.window);
+    }
+    Ok(())
+}
+
+fn append_float64_outputs(
+    outputs: &[Float64OutputPlan],
+    builders: &mut [DerivedBuilder],
+    entity: &Float64EntityState,
+) -> Result<()> {
+    for (builder, output) in builders.iter_mut().zip(outputs) {
+        builder.append(&entity.groups[output.group].accumulator, output)?;
+    }
+    Ok(())
+}
+
 fn compile_float64_rows(
     input_schema: &Schema,
     outputs: &[CompiledRollingOutput],
     window_groups: &[CompiledWindowGroup],
 ) -> std::result::Result<(Vec<Float64GroupPlan>, Vec<Float64OutputPlan>), String> {
+    let groups = compile_float64_groups(input_schema, window_groups)?;
+    let typed_outputs = compile_float64_outputs(outputs, groups.len())?;
+    if groups.is_empty() || typed_outputs.is_empty() {
+        return Err("requires at least one Float64 row aggregate".into());
+    }
+    Ok((groups, typed_outputs))
+}
+
+fn compile_float64_groups(
+    input_schema: &Schema,
+    window_groups: &[CompiledWindowGroup],
+) -> std::result::Result<Vec<Float64GroupPlan>, String> {
     let mut groups = Vec::with_capacity(window_groups.len());
     for group in window_groups {
         let CompiledWindowGroup::Numeric {
@@ -377,6 +443,13 @@ fn compile_float64_rows(
             window,
         });
     }
+    Ok(groups)
+}
+
+fn compile_float64_outputs(
+    outputs: &[CompiledRollingOutput],
+    group_count: usize,
+) -> std::result::Result<Vec<Float64OutputPlan>, String> {
     let mut typed_outputs = Vec::with_capacity(outputs.len());
     for output in outputs {
         let CompiledEvaluation::Aggregate(aggregate) = &output.evaluation else {
@@ -392,7 +465,7 @@ fn compile_float64_rows(
         ) {
             return Err("requires count, sum, mean, variance, or stddev outputs".into());
         }
-        if aggregate.group >= groups.len() {
+        if aggregate.group >= group_count {
             return Err("aggregate group index is outside the typed plan".into());
         }
         typed_outputs.push(Float64OutputPlan {
@@ -402,10 +475,30 @@ fn compile_float64_rows(
             ddof: aggregate.ddof,
         });
     }
-    if groups.is_empty() || typed_outputs.is_empty() {
-        return Err("requires at least one Float64 row aggregate".into());
-    }
-    Ok((groups, typed_outputs))
+    Ok(typed_outputs)
+}
+
+fn duplicate_identity_error(
+    input: &RecordBatch,
+    event_time_index: usize,
+    row_index: usize,
+    node_id: &str,
+) -> Result<crate::CalcFlowError> {
+    let event_time = input
+        .column(event_time_index)
+        .as_any()
+        .downcast_ref::<TimestampMicrosecondArray>()
+        .ok_or_else(|| {
+            operator_error(
+                node_id,
+                "rolling event-time value is not a microsecond timestamp",
+            )
+        })?
+        .value(row_index);
+    Ok(operator_error(
+        node_id,
+        &format!("duplicate row identity at event_time_micros={event_time}"),
+    ))
 }
 
 struct KernelFingerprintInput<'a> {
@@ -663,47 +756,8 @@ impl DerivedBuilder {
             (Self::Count(builder), Statistic::Count) => {
                 builder.append_value(accumulator.valid_count);
             }
-            (Self::Float(builder), Statistic::Sum) => {
-                let Some(SumState::Float(total)) = accumulator.sum else {
-                    return Err(internal_error(
-                        "typed Float64 sum has a non-floating accumulator",
-                    ));
-                };
-                builder.append_value(total);
-            }
-            (Self::Float(builder), Statistic::Mean) => {
-                builder.append_value(match (accumulator.pos_inf > 0, accumulator.neg_inf > 0) {
-                    (true, true) => f64::NAN,
-                    (true, false) => f64::INFINITY,
-                    (false, true) => f64::NEG_INFINITY,
-                    (false, false) => accumulator.mean,
-                });
-            }
-            (Self::Float(builder), Statistic::Variance | Statistic::Stddev) => {
-                let divisor = accumulator.valid_count - u64::from(output.ddof);
-                if divisor == 0 {
-                    builder.append_null();
-                    return Ok(());
-                }
-                if accumulator.pos_inf > 0 || accumulator.neg_inf > 0 {
-                    builder.append_value(f64::NAN);
-                    return Ok(());
-                }
-                let m2 = if accumulator.m2 < 0.0 {
-                    0.0
-                } else {
-                    accumulator.m2
-                };
-                #[allow(
-                    clippy::cast_precision_loss,
-                    reason = "the frozen variance output type is Float64"
-                )]
-                let variance = m2 / divisor as f64;
-                builder.append_value(if output.statistic == Statistic::Stddev {
-                    variance.sqrt()
-                } else {
-                    variance
-                });
+            (Self::Float(builder), statistic) => {
+                append_float(builder, accumulator, statistic, output.ddof)?;
             }
             _ => {
                 return Err(internal_error(
@@ -727,6 +781,74 @@ impl DerivedBuilder {
             Self::Float(mut builder) => std::sync::Arc::new(builder.finish()),
         }
     }
+}
+
+fn append_float(
+    builder: &mut Float64Builder,
+    accumulator: &WindowAccumulator,
+    statistic: Statistic,
+    ddof: u8,
+) -> Result<()> {
+    match statistic {
+        Statistic::Sum => append_sum(builder, accumulator),
+        Statistic::Mean => {
+            builder.append_value(float_mean(accumulator));
+            Ok(())
+        }
+        Statistic::Variance | Statistic::Stddev => {
+            append_dispersion(builder, accumulator, statistic, ddof);
+            Ok(())
+        }
+        _ => Err(internal_error(
+            "typed rolling float builder received a non-floating statistic",
+        )),
+    }
+}
+
+fn append_sum(builder: &mut Float64Builder, accumulator: &WindowAccumulator) -> Result<()> {
+    let Some(SumState::Float(total)) = accumulator.sum else {
+        return Err(internal_error(
+            "typed Float64 sum has a non-floating accumulator",
+        ));
+    };
+    builder.append_value(total);
+    Ok(())
+}
+
+fn float_mean(accumulator: &WindowAccumulator) -> f64 {
+    match (accumulator.pos_inf > 0, accumulator.neg_inf > 0) {
+        (true, true) => f64::NAN,
+        (true, false) => f64::INFINITY,
+        (false, true) => f64::NEG_INFINITY,
+        (false, false) => accumulator.mean,
+    }
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "the frozen variance output type is Float64"
+)]
+fn append_dispersion(
+    builder: &mut Float64Builder,
+    accumulator: &WindowAccumulator,
+    statistic: Statistic,
+    ddof: u8,
+) {
+    let divisor = accumulator.valid_count - u64::from(ddof);
+    if divisor == 0 {
+        builder.append_null();
+        return;
+    }
+    if accumulator.pos_inf > 0 || accumulator.neg_inf > 0 {
+        builder.append_value(f64::NAN);
+        return;
+    }
+    let variance = accumulator.m2.max(0.0) / divisor as f64;
+    builder.append_value(if statistic == Statistic::Stddev {
+        variance.sqrt()
+    } else {
+        variance
+    });
 }
 
 fn nanos(duration: Duration) -> u64 {
