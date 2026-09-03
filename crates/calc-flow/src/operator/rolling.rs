@@ -16,6 +16,7 @@ use std::{
 use async_trait::async_trait;
 use datafusion::arrow::{
     array::{Array, ArrayRef, Float64Array, UInt8Array, UInt64Array, new_null_array},
+    compute::concat_batches,
     datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit},
     ipc::{
         convert::IpcSchemaEncoder,
@@ -41,6 +42,12 @@ use super::{
     StreamOperator, StreamOperatorContext, accumulate_late_metrics, expression::required_input,
     validate_operator_name,
 };
+
+mod kernel;
+
+#[cfg(test)]
+use kernel::KernelSelection;
+use kernel::RollingKernelPlan;
 
 /// Semantic configuration version of the first rolling operator release.
 pub const ROLLING_CONFIGURATION_VERSION: u32 = 1;
@@ -597,6 +604,29 @@ impl std::fmt::Debug for RollingOperator {
             .field("spec", &self.spec)
             .field("input_ports", &self.input_ports)
             .field("output_ports", &self.output_ports)
+            .field("kernel_version", &self.compiled.kernel_plan.version())
+            .field(
+                "kernel_state_layout_version",
+                &self.compiled.kernel_plan.state_layout_version(),
+            )
+            .field("kernel", &self.compiled.kernel_plan.selection())
+            .field("kernel_complexity", &self.compiled.kernel_plan.complexity())
+            .field(
+                "kernel_estimated_state_bytes_per_entity",
+                &self.compiled.kernel_plan.estimated_state_bytes_per_entity(),
+            )
+            .field(
+                "kernel_fingerprint",
+                &self.compiled.kernel_plan.fingerprint(),
+            )
+            .field(
+                "numerical_profile",
+                &self.compiled.kernel_plan.numerical_profile(),
+            )
+            .field(
+                "kernel_fallback_reason",
+                &self.compiled.kernel_plan.fallback_reason(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -635,22 +665,25 @@ impl BatchOperator for RollingOperator {
         let input = required_input(inputs, "input", &self.name, None)?;
         self.input_ports[0].validate(input, &format!("{}.input", self.name))?;
         context.run.check_cancelled()?;
-        let rows = read_buffered_rows(input.table_payload()?, &self.compiled, &self.name)?;
-        let ordered = sort_and_validate(rows, &self.name)?;
-        let computed = compute_output_columns(
-            &ordered,
-            &RollingHistories::default(),
-            &self.compiled,
-            &self.name,
-        )?;
-        let record = build_output_record(
-            &ordered,
-            computed.columns,
-            self.output_ports[0]
-                .schema()
-                .expect("rolling output always has an exact schema"),
-            &self.name,
-        )?;
+        let table = input.table_payload()?;
+        let output_schema = self.output_ports[0]
+            .schema()
+            .expect("rolling output always has an exact schema");
+        let record = if let Some(record) =
+            build_typed_batch_output(table, &self.compiled, output_schema, &self.name)?
+        {
+            record
+        } else {
+            let rows = read_buffered_rows(table, &self.compiled, &self.name)?;
+            let ordered = sort_and_validate(rows, &self.name)?;
+            let computed = compute_output_columns(
+                &ordered,
+                &RollingHistories::default(),
+                &self.compiled,
+                &self.name,
+            )?;
+            build_output_record(&ordered, computed.columns, output_schema, &self.name)?
+        };
         let metadata = BatchMetadata::new(&self.name, 0, BTreeMap::new())?;
         let batch = Batch::table(vec![record], metadata)?;
         Ok(BTreeMap::from([("output".into(), batch)]))
@@ -2256,6 +2289,42 @@ fn build_output_record(
     })
 }
 
+/// Builds a batch result directly from Arrow buffers when the immutable
+/// kernel plan supports the semantic shape and the input proves canonical
+/// order. `None` preserves the general sort-capable fallback.
+fn build_typed_batch_output(
+    table: &TableBatch,
+    compiled: &CompiledRollingSpec,
+    output_schema: &SchemaRef,
+    node_id: &str,
+) -> Result<Option<RecordBatch>> {
+    let input = if let [record] = table.batches() {
+        record.clone()
+    } else {
+        concat_batches(table.schema(), table.batches()).map_err(|error| {
+            operator_error(
+                node_id,
+                &format!("typed rolling input concatenation failed: {error}"),
+            )
+        })?
+    };
+    let Some(execution) = compiled.kernel_plan.open_and_fill(&input, node_id)? else {
+        return Ok(None);
+    };
+    debug_assert_eq!(execution.metrics.input_rows, input.num_rows());
+    debug_assert_eq!(execution.metrics.output_rows, input.num_rows());
+    let mut columns = input.columns().to_vec();
+    columns.extend(execution.columns);
+    RecordBatch::try_new(Arc::clone(output_schema), columns)
+        .map(Some)
+        .map_err(|error| {
+            operator_error(
+                node_id,
+                &format!("typed rolling output record is invalid: {error}"),
+            )
+        })
+}
+
 #[derive(Clone)]
 struct CompiledRollingSpec {
     state_layout_version: u32,
@@ -2264,6 +2333,7 @@ struct CompiledRollingSpec {
     sequence_columns: Vec<CompiledKeyColumn>,
     outputs: Vec<CompiledRollingOutput>,
     window_groups: Vec<CompiledWindowGroup>,
+    kernel_plan: RollingKernelPlan,
     max_row_retention: u64,
     max_duration_micros: Option<u64>,
     configuration_hash: String,
@@ -4155,6 +4225,15 @@ fn compile_spec_against_schema(
         .iter()
         .filter_map(RollingOutputSpec::retained_micros)
         .max();
+    let kernel_plan = RollingKernelPlan::compile(
+        input_schema,
+        spec.state_layout_version,
+        event_time_index,
+        &partition_columns,
+        &sequence_columns,
+        &outputs,
+        &window_groups,
+    );
     Ok(CompiledRollingSpec {
         state_layout_version: spec.state_layout_version,
         event_time_index,
@@ -4162,6 +4241,7 @@ fn compile_spec_against_schema(
         sequence_columns,
         outputs,
         window_groups,
+        kernel_plan,
         max_row_retention,
         max_duration_micros,
         configuration_hash,
@@ -6280,6 +6360,151 @@ mod tests {
             .unwrap()
             .iter()
             .collect()
+    }
+
+    fn float64_fast_record(rows: &[(i64, &str, u64, Option<f64>)]) -> RecordBatch {
+        use datafusion::arrow::array::{Int64Array, StringArray, TimestampMicrosecondArray};
+
+        let timestamps = rows
+            .iter()
+            .map(|(event_time, ..)| Some(*event_time))
+            .collect::<TimestampMicrosecondArray>()
+            .with_timezone("UTC");
+        let symbols = StringArray::from_iter_values(rows.iter().map(|(_, symbol, ..)| *symbol));
+        let sequences =
+            UInt64Array::from_iter_values(rows.iter().map(|(_, _, sequence, _)| *sequence));
+        let prices = rows
+            .iter()
+            .map(|(_, _, _, price)| *price)
+            .collect::<Float64Array>();
+        let volume = Int64Array::new_null(rows.len());
+        let label = StringArray::new_null(rows.len());
+        RecordBatch::try_new(
+            Arc::new(kernel_schema()),
+            vec![
+                Arc::new(timestamps),
+                Arc::new(symbols),
+                Arc::new(sequences),
+                Arc::new(prices),
+                Arc::new(volume),
+                Arc::new(label),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn ordered_float64_plan_matches_general_aggregate_kernel_without_row_materialization() {
+        let spec = kernel_spec(json!([
+            aggregate_output("count", "price", "price_count", 2),
+            aggregate_output("sum", "price", "price_sum", 2),
+            aggregate_output("mean", "price", "price_mean", 2),
+            ddof_output("variance", "price", "price_var", 2, 1),
+            ddof_output("stddev", "price", "price_std", 2, 0),
+        ]));
+        let compiled = compile_spec(&spec, &kernel_schema()).unwrap();
+        assert_eq!(
+            compiled.kernel_plan.selection(),
+            KernelSelection::OrderedFloat64Rows
+        );
+        let input = float64_fast_record(&[
+            (1, "a", 1, Some(1.0)),
+            (1, "b", 1, Some(10.0)),
+            (2, "a", 2, None),
+            (2, "b", 2, Some(20.0)),
+            (3, "a", 3, Some(f64::NAN)),
+            (3, "b", 3, Some(30.0)),
+            (4, "a", 4, Some(4.0)),
+        ]);
+        let fast = compiled
+            .kernel_plan
+            .open_and_fill(&input, "rolling")
+            .unwrap()
+            .unwrap();
+        let rows = (0..input.num_rows())
+            .map(|row_index| read_buffered_row(&input, row_index, &compiled, "rolling").unwrap())
+            .collect::<Vec<_>>();
+        let general =
+            compute_output_columns(&rows, &RollingHistories::default(), &compiled, "rolling")
+                .unwrap();
+
+        assert_eq!(fast.columns.len(), general.columns.len());
+        for (fast, general) in fast.columns.iter().zip(&general.columns) {
+            assert_eq!(fast.as_ref(), general.as_ref());
+        }
+        assert_eq!(fast.metrics.order_proof_rows, input.num_rows());
+        assert_eq!(fast.metrics.entities, 2);
+        assert_eq!(fast.metrics.scalar_value_conversions, 0);
+        assert_eq!(fast.metrics.sort_count, 0);
+    }
+
+    #[test]
+    fn ordered_float64_plan_falls_back_for_unsorted_input() {
+        let spec = kernel_spec(json!([aggregate_output("mean", "price", "price_mean", 2)]));
+        let compiled = compile_spec(&spec, &kernel_schema()).unwrap();
+        let input = float64_fast_record(&[(2, "a", 2, Some(2.0)), (1, "a", 1, Some(1.0))]);
+
+        assert!(
+            compiled
+                .kernel_plan
+                .open_and_fill(&input, "rolling")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn ordered_float64_plan_preserves_infinity_and_overflow_classification() {
+        let spec = kernel_spec(json!([
+            aggregate_output("sum", "price", "price_sum", 2),
+            aggregate_output("mean", "price", "price_mean", 2),
+            ddof_output("variance", "price", "price_var", 2, 1),
+            ddof_output("stddev", "price", "price_std", 2, 0),
+        ]));
+        let compiled = compile_spec(&spec, &kernel_schema()).unwrap();
+        let input = float64_fast_record(&[
+            (1, "a", 1, Some(f64::INFINITY)),
+            (2, "a", 2, Some(f64::NEG_INFINITY)),
+            (3, "a", 3, Some(1.0)),
+            (4, "a", 4, Some(f64::MAX)),
+            (5, "a", 5, Some(f64::MAX)),
+        ]);
+        let fast = compiled
+            .kernel_plan
+            .open_and_fill(&input, "rolling")
+            .unwrap()
+            .unwrap();
+        let rows = (0..input.num_rows())
+            .map(|row_index| read_buffered_row(&input, row_index, &compiled, "rolling").unwrap())
+            .collect::<Vec<_>>();
+        let general =
+            compute_output_columns(&rows, &RollingHistories::default(), &compiled, "rolling")
+                .unwrap();
+
+        for (fast, general) in fast.columns.iter().zip(&general.columns) {
+            assert_eq!(fast.to_data(), general.to_data());
+        }
+    }
+
+    #[test]
+    fn duration_aggregate_has_an_explained_general_kernel_fallback() {
+        let spec = aggregate_spec(json!([duration_output("mean", "price", "price_mean", 10)]));
+        let first = compile_spec(&spec, &kernel_schema()).unwrap();
+        let second = compile_spec(&spec, &kernel_schema()).unwrap();
+
+        assert_eq!(first.kernel_plan.selection(), KernelSelection::General);
+        assert_eq!(
+            first.kernel_plan.fingerprint(),
+            second.kernel_plan.fingerprint()
+        );
+        assert_eq!(first.kernel_plan.fingerprint().len(), 64);
+        assert!(
+            first
+                .kernel_plan
+                .fallback_reason()
+                .unwrap()
+                .contains("duration")
+        );
     }
 
     #[test]

@@ -309,6 +309,16 @@ enum dispatch 位于 row loop 外。fast path 中禁止 `ScalarValue::try_from_a
 
 `update_and_fill` 必须保持 Calc Flow 的失败原子性，不能部分安装 state。
 
+### 7.4 当前实现状态
+
+P1 已在 `operator/rolling/kernel.rs` 落地第一条 typed vertical path：编译期生成
+不可变、带 fingerprint 的 kernel plan；运行期用 Arrow row encoding 线性证明
+canonical order 和重复 identity，用 dense entity ID 路由预分配的 per-entity ring，
+并直接写入 `UInt64Builder`/`Float64Builder`。支持有序 `Float64` bounded-row
+`count`、`sum`、`mean`、`variance` 和 `stddev`，共享相同 frame 的 accumulator；
+fast path 内不创建逐单元格 `ScalarValue`，也不排序或重建输入列。乱序输入和所有
+不在 allowlist 内的类型、frame、primitive 均保留通用 kernel fallback。
+
 ## 8. finality、stream 与 state layout
 
 ### 8.1 finality 与数值 transition 分离
@@ -435,7 +445,7 @@ secret 写入 `RunResult`。
 | Phase | Scope                     | Main delivery                                            | Exit gate                                                | Status      |
 | ----- | ------------------------- | -------------------------------------------------------- | -------------------------------------------------------- | ----------- |
 | P0    | semantics and evidence    | freeze two examples; metrics; remove duplicate planning  | equivalent output; one physical plan; exact-SHA baseline | implemented |
-| P1    | ordered Float64 fast path | typed buffers; order proof; dense state; direct builders | no per-cell ScalarValue; no sort on proven order         | pending     |
+| P1    | ordered Float64 fast path | typed buffers; order proof; dense state; direct builders | no per-cell ScalarValue; no sort on proven order         | implemented |
 | P2    | state and Arrow types     | layout v3; null/integer/extrema/pair/duration kernels    | batch/stream/restore matrix; old-state reads             | pending     |
 | P3    | composed output fusion    | DAG liveness; dual-SMA; BBANDS/MACD-class fusion         | no hidden materialization or finality crossing           | pending     |
 | P4    | DataFusion integration    | CalcFlowRollingExec; safe rewrite; adaptive partitions   | deterministic fallback, partitions, and memory           | pending     |
