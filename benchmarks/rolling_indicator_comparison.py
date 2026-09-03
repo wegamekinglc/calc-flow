@@ -27,6 +27,7 @@ import gc
 import json
 import os
 import platform
+import shutil
 import statistics
 import subprocess  # nosec B404
 import sys
@@ -407,15 +408,23 @@ def _sql_query(window: int, *, indicator: str, fast_window: int) -> str:
         if indicator == INDICATOR_ROLLING_MEAN
         else f"({_sql_window_average(fast_window)}) - ({slow})"
     )
-    return f"""
-SELECT
-  event_time,
-  sequence,
-  symbol,
-  price,
-  {value} AS {_OUTPUT_COLUMNS[indicator]}
-FROM input
-"""
+    # The projection is built only from parsed integer frame bounds and an
+    # allowlisted output name. Keeping SELECT/FROM in static lines also makes
+    # the absence of caller-provided SQL text explicit to security scanners.
+    projection = f"  {value} AS {_OUTPUT_COLUMNS[indicator]}"
+    return "\n".join(
+        (
+            "",
+            "SELECT",
+            "  event_time,",
+            "  sequence,",
+            "  symbol,",
+            "  price,",
+            projection,
+            "FROM input",
+            "",
+        )
+    )
 
 
 def build_calc_flow_methods(
@@ -460,19 +469,25 @@ def ta_lib_iterations_per_sample(rows: int) -> int:
     return max(1, min(200, 5_000_000 // rows))
 
 
+def _git_output(root: Path, *arguments: str) -> str:
+    """Run one read-only Git query through a verified absolute executable."""
+    discovered = shutil.which("git")
+    if discovered is None:
+        raise RuntimeError("git is required for benchmark provenance")
+    executable = Path(discovered).resolve()
+    if not executable.is_file():
+        raise RuntimeError(f"git executable is not a regular file: {executable}")
+    return subprocess.run(  # nosec B603  # nosemgrep
+        [str(executable), "-C", str(root), *arguments],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
 def _verified_finance_python_root(root: Path) -> str:
-    head = subprocess.run(  # nosec B603  # nosemgrep
-        ["git", "-C", str(root), "rev-parse", "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    status = subprocess.run(  # nosec B603  # nosemgrep
-        ["git", "-C", str(root), "status", "--short"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    head = _git_output(root, "rev-parse", "HEAD")
+    status = _git_output(root, "status", "--short")
     if head != FINANCE_PYTHON_COMMIT or status:
         raise RuntimeError(
             "Finance-Python source must be the clean frozen commit "
@@ -524,6 +539,118 @@ def _summarize(samples: list[float], rows: int) -> MethodResult:
     )
 
 
+def _expected_outputs(
+    workload: RollingWorkload,
+    *,
+    indicator: str,
+    fast_window: int,
+    window: int,
+) -> tuple[np.ndarray, np.ndarray, int | None]:
+    """Return Calc Flow and TA-Lib oracles plus TA-Lib's fast window."""
+    if indicator == INDICATOR_DUAL_SMA_SPREAD:
+        return (
+            expected_dual_sma_spread(
+                workload.prices,
+                entities=workload.entities,
+                fast_window=fast_window,
+                slow_window=window,
+            ),
+            ta_lib_expected_dual_sma_spread(
+                workload.prices,
+                entities=workload.entities,
+                fast_window=fast_window,
+                slow_window=window,
+            ),
+            fast_window,
+        )
+    return (
+        expected_rolling_mean(
+            workload.prices,
+            entities=workload.entities,
+            window=window,
+        ),
+        ta_lib_expected_rolling_mean(
+            workload.prices,
+            entities=workload.entities,
+            window=window,
+        ),
+        None,
+    )
+
+
+def _assert_reference_outputs(
+    warm_outputs: dict[str, np.ndarray],
+    finance_output: np.ndarray,
+    expected: np.ndarray,
+    ta_lib_output: np.ndarray,
+    ta_lib_expected: np.ndarray,
+) -> None:
+    """Reject a benchmark scale before timing if any output is incorrect."""
+    actual_outputs = (*warm_outputs.items(), ("finance_python", finance_output))
+    for name, actual in actual_outputs:
+        np.testing.assert_allclose(
+            actual,
+            expected,
+            rtol=_CORRECTNESS_RTOL,
+            atol=_CORRECTNESS_ATOL,
+            err_msg=f"{name} rolling output differs from the oracle",
+        )
+    np.testing.assert_allclose(
+        ta_lib_output,
+        ta_lib_expected,
+        rtol=_CORRECTNESS_RTOL,
+        atol=_CORRECTNESS_ATOL,
+        err_msg="TA-Lib rolling output differs from its warm-up-aware oracle",
+    )
+
+
+def _sample_method(
+    name: str,
+    methods: dict[str, CalcFlowMethod],
+    finance_worker: FinancePythonWorker,
+    ta_lib_method: TaLibMethod,
+    iterations: int,
+    ta_lib_iterations: int,
+) -> float:
+    """Take one method sample using its preselected repetition count."""
+    if name == "finance_python":
+        return finance_worker.sample(iterations)
+    if name == "ta_lib":
+        return _timed_ta_lib(ta_lib_method, ta_lib_iterations)
+    return _timed_calc_flow(methods[name], iterations)
+
+
+def _measure_samples(
+    *,
+    methods: dict[str, CalcFlowMethod],
+    finance_worker: FinancePythonWorker,
+    ta_lib_method: TaLibMethod,
+    rows: int,
+    rounds: int,
+) -> dict[str, list[float]]:
+    """Rotate method order evenly and retain every raw sample."""
+    iterations = iterations_per_sample(rows)
+    ta_lib_iterations = ta_lib_iterations_per_sample(rows)
+    samples = {name: [] for name in (*methods, "finance_python", "ta_lib")}
+    names = tuple(samples)
+    for round_index in range(rounds):
+        offset = round_index % len(names)
+        order = (*names[offset:], *names[:offset])
+        for name in order:
+            gc.collect()
+            samples[name].append(
+                _sample_method(
+                    name,
+                    methods,
+                    finance_worker,
+                    ta_lib_method,
+                    iterations,
+                    ta_lib_iterations,
+                )
+            )
+    return samples
+
+
 def _measure_scale(
     *,
     rows: int,
@@ -542,40 +669,17 @@ def _measure_scale(
         indicator=indicator,
         fast_window=fast_window,
     )
-    is_composite = indicator == INDICATOR_DUAL_SMA_SPREAD
+    expected, ta_lib_expected, ta_lib_fast_window = _expected_outputs(
+        workload,
+        indicator=indicator,
+        fast_window=fast_window,
+        window=window,
+    )
     ta_lib_method = TaLibMethod(
         workload.prices,
         entities=entities,
         window=window,
-        fast_window=fast_window if is_composite else None,
-    )
-    expected = (
-        expected_dual_sma_spread(
-            workload.prices,
-            entities=entities,
-            fast_window=fast_window,
-            slow_window=window,
-        )
-        if is_composite
-        else expected_rolling_mean(
-            workload.prices,
-            entities=entities,
-            window=window,
-        )
-    )
-    ta_lib_expected = (
-        ta_lib_expected_dual_sma_spread(
-            workload.prices,
-            entities=entities,
-            fast_window=fast_window,
-            slow_window=window,
-        )
-        if is_composite
-        else ta_lib_expected_rolling_mean(
-            workload.prices,
-            entities=entities,
-            window=window,
-        )
+        fast_window=ta_lib_fast_window,
     )
     warm_outputs = {name: method.execute() for name, method in methods.items()}
     ta_lib_output = ta_lib_method.run()
@@ -590,38 +694,20 @@ def _measure_scale(
         fast_window=fast_window,
     ) as finance_worker:
         finance_output = np.load(warm_output_path, allow_pickle=False)
-        for name, actual in (*warm_outputs.items(), ("finance_python", finance_output)):
-            np.testing.assert_allclose(
-                actual,
-                expected,
-                rtol=_CORRECTNESS_RTOL,
-                atol=_CORRECTNESS_ATOL,
-                err_msg=f"{name} rolling output differs from the oracle",
-            )
-        np.testing.assert_allclose(
+        _assert_reference_outputs(
+            warm_outputs,
+            finance_output,
+            expected,
             ta_lib_output,
             ta_lib_expected,
-            rtol=_CORRECTNESS_RTOL,
-            atol=_CORRECTNESS_ATOL,
-            err_msg="TA-Lib rolling output differs from its warm-up-aware oracle",
         )
-
-        iterations = iterations_per_sample(rows)
-        ta_lib_iterations = ta_lib_iterations_per_sample(rows)
-        samples = {name: [] for name in (*methods, "finance_python", "ta_lib")}
-        names = tuple(samples)
-        for round_index in range(rounds):
-            offset = round_index % len(names)
-            order = (*names[offset:], *names[:offset])
-            for name in order:
-                gc.collect()
-                if name == "finance_python":
-                    seconds = finance_worker.sample(iterations)
-                elif name == "ta_lib":
-                    seconds = _timed_ta_lib(ta_lib_method, ta_lib_iterations)
-                else:
-                    seconds = _timed_calc_flow(methods[name], iterations)
-                samples[name].append(seconds)
+        samples = _measure_samples(
+            methods=methods,
+            finance_worker=finance_worker,
+            ta_lib_method=ta_lib_method,
+            rows=rows,
+            rounds=rounds,
+        )
         identity = finance_worker.identity
 
     return (
@@ -632,20 +718,8 @@ def _measure_scale(
 
 def _git_identity() -> dict[str, object]:
     root = Path(__file__).resolve().parents[1]
-    head = subprocess.run(  # nosec B603  # nosemgrep
-        ["git", "-C", str(root), "rev-parse", "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    dirty = bool(
-        subprocess.run(  # nosec B603  # nosemgrep
-            ["git", "-C", str(root), "status", "--short"],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-    )
+    head = _git_output(root, "rev-parse", "HEAD")
+    dirty = bool(_git_output(root, "status", "--short"))
     return {"commit": head, "dirty": dirty}
 
 

@@ -86,9 +86,61 @@ def _reply(payload: dict[str, object]) -> None:
     print(json.dumps(payload, sort_keys=True), flush=True)
 
 
-def main() -> None:
-    args = _parse_args()
-    frame = _input_frame(args.rows, args.entities)
+def _validated_iterations(command: dict[str, object]) -> int:
+    """Return one valid run count or reject the worker command."""
+    iterations = command.get("iterations")
+    if command.get("command") != "run" or type(iterations) is not int:
+        raise ValueError(f"unsupported command: {command!r}")
+    if iterations <= 0:
+        raise ValueError(f"unsupported command: {command!r}")
+    return iterations
+
+
+def _timed_execute(
+    frame: pd.DataFrame,
+    args: argparse.Namespace,
+    iterations: int,
+) -> tuple[np.ndarray, float]:
+    """Measure repeated transforms while keeping GC outside the boundary."""
+    gc.collect()
+    gc_was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        started = time.perf_counter_ns()
+        for _iteration in range(iterations):
+            output = _execute(
+                frame,
+                args.window,
+                indicator=args.indicator,
+                fast_window=args.fast_window,
+            )
+        seconds = (time.perf_counter_ns() - started) / 1_000_000_000
+    finally:
+        if gc_was_enabled:
+            gc.enable()
+    return output, seconds / iterations
+
+
+def _serve(frame: pd.DataFrame, args: argparse.Namespace) -> None:
+    """Serve benchmark commands until the parent asks the worker to stop."""
+    for line in sys.stdin:
+        command = json.loads(line)
+        if command == {"command": "stop"}:
+            return
+        iterations = _validated_iterations(command)
+        output, seconds = _timed_execute(frame, args, iterations)
+        _reply(
+            {
+                "event": "sample",
+                "iterations": iterations,
+                "rows": len(output),
+                "seconds": seconds,
+            }
+        )
+
+
+def _prepare(frame: pd.DataFrame, args: argparse.Namespace) -> None:
+    """Write the untimed warm output and announce immutable worker identity."""
     warm_output = _execute(
         frame,
         args.window,
@@ -109,41 +161,12 @@ def main() -> None:
         }
     )
 
-    for line in sys.stdin:
-        command = json.loads(line)
-        if command == {"command": "stop"}:
-            return
-        iterations = command.get("iterations")
-        if (
-            command.get("command") != "run"
-            or not isinstance(iterations, int)
-            or iterations <= 0
-        ):
-            raise ValueError(f"unsupported command: {command!r}")
-        gc.collect()
-        gc_was_enabled = gc.isenabled()
-        gc.disable()
-        try:
-            started = time.perf_counter_ns()
-            for _iteration in range(iterations):
-                output = _execute(
-                    frame,
-                    args.window,
-                    indicator=args.indicator,
-                    fast_window=args.fast_window,
-                )
-            seconds = (time.perf_counter_ns() - started) / 1_000_000_000
-        finally:
-            if gc_was_enabled:
-                gc.enable()
-        _reply(
-            {
-                "event": "sample",
-                "iterations": iterations,
-                "rows": len(output),
-                "seconds": seconds / iterations,
-            }
-        )
+
+def main() -> None:
+    args = _parse_args()
+    frame = _input_frame(args.rows, args.entities)
+    _prepare(frame, args)
+    _serve(frame, args)
 
 
 if __name__ == "__main__":
