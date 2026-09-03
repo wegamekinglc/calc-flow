@@ -627,6 +627,7 @@ def _assert_reference_outputs(
         ta_lib_expected,
         rtol=_CORRECTNESS_RTOL,
         atol=_CORRECTNESS_ATOL,
+        equal_nan=True,
         err_msg="TA-Lib rolling output differs from its warm-up-aware oracle",
     )
 

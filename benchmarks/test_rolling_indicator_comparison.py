@@ -40,7 +40,13 @@ def test_ta_lib_sma_matches_oracle_after_its_warmup() -> None:
     actual = TaLibMethod(workload.prices, entities=8, window=20).run()
     expected = ta_lib_expected_rolling_mean(workload.prices, entities=8, window=20)
 
-    np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(
+        actual,
+        expected,
+        rtol=1e-12,
+        atol=1e-12,
+        equal_nan=True,
+    )
     assert ta_lib_valid_rows(rows=257, entities=8, window=20) == 105
     assert ta_lib_valid_rows(rows=1_000, entities=64, window=20) == 0
 
@@ -80,6 +86,7 @@ def test_dual_sma_spread_matches_partial_and_full_window_oracles() -> None:
         ta_lib_expected,
         rtol=1e-12,
         atol=1e-12,
+        equal_nan=True,
     )
 
 
