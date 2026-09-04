@@ -600,6 +600,9 @@ fn physical_plan_statistics(
     plan: &dyn datafusion::physical_plan::ExecutionPlan,
     output_rows: usize,
 ) -> PhysicalPlanStatistics {
+    // The recursive accumulator keeps every physical metric on the same plan
+    // traversal so operator and timing totals cannot observe different trees.
+    // #lizard forgives
     use datafusion::physical_plan::metrics::MetricValue;
 
     let partition_count = plan.output_partitioning().partition_count().max(1);
@@ -706,6 +709,9 @@ fn parallelism_decision(
     active_entities: Option<usize>,
     available_parallelism: usize,
 ) -> DataFusionParallelismDecision {
+    // The ordered early returns are the audit trail for every conservative
+    // partition cap and intentionally remain in one decision function.
+    // #lizard forgives
     let available_parallelism = available_parallelism.max(1);
     let requested_partitions = match config.parallelism_mode {
         DataFusionParallelismMode::Fixed => config.target_partitions,

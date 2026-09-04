@@ -637,7 +637,7 @@ jobs:
       - name: Validate SQL/DataFusion comparison smoke
         run: |
           mkdir -p benchmark-results
-          cargo test --locked -p calc-flow --bench sql_datafusion_performance -- \
+          cargo bench --locked -p calc-flow --bench sql_datafusion_performance -- \
             --profile serial-control \
             --rows 10000 \
             --entities 4 \

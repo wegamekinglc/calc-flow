@@ -436,11 +436,14 @@ test('persists and validates a DataFusion UDF graph without browser code', async
 
   const projects = await page.request.get('http://127.0.0.1:8765/api/v3/projects');
   expect(projects.ok()).toBeTruthy();
-  const summaries: Array<{ id: string }> = await projects.json();
+  const summaries: { id: string }[] = await projects.json();
   const summary = summaries.find(({ id }) => /^project_[0-9a-f]{32}$/.test(id));
   expect(summary).toBeDefined();
+  if (summary === undefined) {
+    throw new Error('created project summary is missing');
+  }
   const project = await page.request.get(
-    `http://127.0.0.1:8765/api/v3/projects/${summary!.id}`,
+    `http://127.0.0.1:8765/api/v3/projects/${summary.id}`,
   );
   expect(project.ok()).toBeTruthy();
   const document = await project.json();
@@ -456,7 +459,7 @@ test('persists and validates a DataFusion UDF graph without browser code', async
   expect(JSON.stringify(document)).not.toContain('def double_value');
 
   const validation = await page.request.post(
-    `http://127.0.0.1:8765/api/v3/projects/${summary!.id}/validate`,
+    `http://127.0.0.1:8765/api/v3/projects/${summary.id}/validate`,
   );
   expect(validation.ok()).toBeTruthy();
   expect(await validation.json()).toMatchObject({ valid: true, issues: [] });
@@ -464,15 +467,18 @@ test('persists and validates a DataFusion UDF graph without browser code', async
   const downloadPromise = page.waitForEvent('download');
   await page.getByRole('button', { name: 'Export JSON' }).click({ force: true });
   const download = await downloadPromise;
-  expect(download.suggestedFilename()).toBe(`${summary!.id}.json`);
+  expect(download.suggestedFilename()).toBe(`${summary.id}.json`);
   const downloadPath = await download.path();
   expect(downloadPath).not.toBeNull();
+  if (downloadPath === null) {
+    throw new Error('project export download path is missing');
+  }
 
   page.once('dialog', (dialog) => dialog.accept());
   await page.getByLabel('Import project').setInputFiles({
     name: download.suggestedFilename(),
     mimeType: 'application/json',
-    buffer: await readFile(downloadPath!),
+    buffer: await readFile(downloadPath),
   });
   await expect(page.getByText('Project imported')).toBeVisible();
 
@@ -480,8 +486,8 @@ test('persists and validates a DataFusion UDF graph without browser code', async
   await page.getByRole('button', { name: 'Delete', exact: true }).click({ force: true });
   await expect(page.getByText('Project deleted')).toBeVisible();
   const remaining = await page.request.get('http://127.0.0.1:8765/api/v3/projects');
-  const remainingSummaries: Array<{ id: string }> = await remaining.json();
-  expect(remainingSummaries.map(({ id }) => id)).not.toContain(summary!.id);
+  const remainingSummaries: { id: string }[] = await remaining.json();
+  expect(remainingSummaries.map(({ id }) => id)).not.toContain(summary.id);
 });
 
 test('starts and observes a persistent continuous file job', async ({ page, request }) => {

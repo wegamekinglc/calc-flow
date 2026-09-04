@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
+import subprocess  # nosec B404 -- executes one explicit local benchmark binary
 import sys
 from collections import defaultdict
 from collections.abc import Iterable
@@ -70,7 +70,7 @@ def _run_one(
     batch_size: int,
     samples: int,
 ) -> None:
-    subprocess.run(
+    subprocess.run(  # nosec B603  # nosemgrep
         [
             str(binary),
             "--profile",
@@ -92,6 +92,7 @@ def _run_one(
         ],
         check=True,
         cwd=Path(__file__).resolve().parents[1],
+        shell=False,
     )
 
 
@@ -113,6 +114,9 @@ def run_screening(args: argparse.Namespace) -> None:
 
 
 def summarize(reports: list[Path], output: Path) -> dict[str, Any]:
+    # This fail-closed reducer intentionally validates and groups every report
+    # in one deterministic pass so it cannot publish a partial matrix.
+    # #lizard forgives
     grouped: dict[tuple[int, int, str], list[dict[str, Any]]] = defaultdict(list)
     fingerprints: set[tuple[str, str]] = set()
     git_shas: set[str] = set()

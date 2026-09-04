@@ -63,6 +63,30 @@ fn rolling_input() -> Batch {
     Batch::table(vec![record], BatchMetadata::default()).unwrap()
 }
 
+fn rolling_utc_input() -> Batch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            "event_time",
+            DataType::Timestamp(TimeUnit::Microsecond, Some(Arc::from("UTC"))),
+            false,
+        ),
+        Field::new("sequence", DataType::UInt64, false),
+        Field::new("symbol", DataType::Utf8, false),
+        Field::new("price", DataType::Float64, true),
+    ]));
+    let record = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(TimestampMicrosecondArray::from(vec![1, 1, 2, 2, 3]).with_timezone("UTC")),
+            Arc::new(UInt64Array::from(vec![1, 1, 2, 2, 3])),
+            Arc::new(StringArray::from(vec!["a", "b", "a", "b", "a"])),
+            Arc::new(Float64Array::from(vec![1.0, 10.0, 3.0, 14.0, 5.0])),
+        ],
+    )
+    .unwrap();
+    Batch::table(vec![record], BatchMetadata::default()).unwrap()
+}
+
 fn rolling_semantic_input() -> Batch {
     let schema = Arc::new(Schema::new(vec![
         Field::new(
@@ -295,6 +319,30 @@ async fn bounded_float64_avg_uses_the_shared_rolling_physical_kernel() {
         metrics[0].output_partition_rows.iter().sum::<usize>(),
         output.num_rows()
     );
+}
+
+#[tokio::test]
+async fn bounded_float64_avg_rewrites_utc_event_time() {
+    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+    let tables = BTreeMap::from([("input".to_owned(), rolling_utc_input())]);
+
+    let output = runtime
+        .sql(
+            "SELECT event_time, sequence, symbol, price, \
+             avg(price) OVER (PARTITION BY symbol ORDER BY event_time, sequence \
+             ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS sma_2 FROM input",
+            &tables,
+            Some("rolling_sql_utc"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(output.num_rows(), 5);
+    let metrics = runtime.metrics();
+    assert_eq!(metrics[0].rolling_candidate_windows, 1);
+    assert_eq!(metrics[0].rolling_rewritten_windows, 1);
+    assert!(metrics[0].rolling_fallback_reasons.is_empty());
+    assert!(metrics[0].physical_plan.contains("CalcFlowRollingExec"));
 }
 
 #[tokio::test]

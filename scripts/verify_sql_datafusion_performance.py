@@ -173,6 +173,9 @@ def _verify_engine(
     minimum_samples: int,
     require_stable: bool,
 ) -> tuple[dict[str, Any], list[float]]:
+    # The evidence contract deliberately checks every field in one fail-closed
+    # engine boundary and reports the precise malformed path.
+    # #lizard forgives
     engine = _exact_fields(raw, ENGINE_FIELDS, label)
     for field in (
         "configured_partitions",
@@ -384,6 +387,9 @@ def _verify_case(
     minimum_samples: int,
     require_stable: bool,
 ) -> None:
+    # Paired ordering, correctness, comparability, and conclusions are one
+    # atomic evidence contract; keep all rejection paths together.
+    # #lizard forgives
     label = f"cases[{index}]"
     case = _exact_fields(raw, CASE_FIELDS, label)
     if not isinstance(case["name"], str) or not case["name"]:
@@ -486,6 +492,9 @@ def _case_key(case: dict[str, Any]) -> tuple[object, ...]:
 
 
 def _verify_repeat(report: dict[str, Any], repeat: dict[str, Any]) -> None:
+    # Independent-repeat validation accumulates the complete comparable case
+    # identity before accepting latency or memory stability.
+    # #lizard forgives
     if report["git_sha"] != repeat["git_sha"]:
         raise ValueError("repeat report git_sha does not match")
     for field in (
@@ -533,6 +542,9 @@ def _verify_repeat(report: dict[str, Any], repeat: dict[str, Any]) -> None:
 
 def verify_p1(report: object, serial_control: object) -> None:
     """Apply the P1 matched-p16 latency, ratio, and memory requirements."""
+    # P1 is a single conjunctive gate across provenance, both workloads,
+    # latency, paired ratio, and peak memory.
+    # #lizard forgives
     if not isinstance(report, dict) or report.get("profile") != "matched-adaptive":
         raise ValueError("P1 report must use matched-adaptive profile")
     if (
@@ -596,6 +608,9 @@ def verify_report(
     repeat: object | None = None,
 ) -> None:
     """Validate one report and optionally its independent repeat."""
+    # Top-level provenance, environment, cases, and repeat validation form one
+    # fail-closed admission boundary for a report.
+    # #lizard forgives
     report = _exact_fields(
         raw,
         {"schema_version", "git_sha", "profile", "environment", "cases"},

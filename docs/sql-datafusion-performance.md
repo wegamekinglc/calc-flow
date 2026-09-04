@@ -22,10 +22,13 @@ rollback switches for SQL rolling rewrites and diagnostic collection.
 | `enable_rolling_rewrite` |  `true` | Enables the fail-closed bounded `AVG` rewrite                  |
 | `collect_diagnostics`    |  `true` | Collects plan strings and physical metric traversal            |
 
-All numeric values must be positive. Existing project documents that omit the
-new fields retain their defaults. `parallelism_mode="auto"` is opt-in: the
-weekly P3 matrix and two stable candidate repeats must pass before changing the
-default.
+The project schema accepts non-negative numeric values for compatibility with
+external-only plans, which never create a DataFusion runtime. When a project
+does execute a table expression or SQL node, every numeric value is validated
+as positive before DataFusion is initialized. Existing project documents that
+omit the new fields retain their defaults. `parallelism_mode="auto"` is opt-in:
+the weekly P3 matrix and two stable candidate repeats must pass before changing
+the default.
 
 Auto mode calculates:
 

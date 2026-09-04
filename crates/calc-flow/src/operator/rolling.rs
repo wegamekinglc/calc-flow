@@ -146,11 +146,13 @@ impl DataFusionRollingKernel {
             return None;
         }
         let (&event_time_index, sequence_indices) = order_indices.split_first()?;
-        if input_schema.field(event_time_index).data_type()
-            != &DataType::Timestamp(TimeUnit::Microsecond, None)
-            || order_indices
-                .iter()
-                .any(|&index| input_schema.field(index).is_nullable())
+        if !matches!(
+            input_schema.field(event_time_index).data_type(),
+            DataType::Timestamp(TimeUnit::Microsecond, timezone)
+                if timezone.as_deref().is_none_or(|timezone| timezone == "UTC")
+        ) || order_indices
+            .iter()
+            .any(|&index| input_schema.field(index).is_nullable())
             || partition_indices
                 .iter()
                 .any(|index| order_indices.contains(index))

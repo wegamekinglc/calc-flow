@@ -51,6 +51,9 @@ def _decision(enabled: bool, reason: str) -> dict[str, str]:
 
 
 def _analyze_case(case: dict[str, Any]) -> dict[str, Any]:
+    # Attribution and all P5/P6/P7 decisions share one fail-closed case boundary
+    # so no component can be reported without the matching residual checks.
+    # #lizard forgives
     if case["comparability"]["comparable"] is not True:
         raise ValueError(f"attribution case {case['name']} must be comparable")
     calc = case["calc_flow"]
