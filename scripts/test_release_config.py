@@ -480,6 +480,7 @@ class ReleaseConfigTests(unittest.TestCase):
             "scripts.test_verify_stream_lifecycle_evidence "
             "scripts.test_verify_symbolic_milestone_perf "
             "scripts.test_write_criterion_provenance "
+            "scripts.test_verify_complexity_gates "
             "scripts.test_verify_security_gates"
         )
         windows_test = (
