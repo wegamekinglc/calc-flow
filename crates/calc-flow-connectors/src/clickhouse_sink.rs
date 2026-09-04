@@ -334,78 +334,33 @@ impl ClickHouseSink {
         evidence: &JsonMap,
         insert_block: String,
     ) -> Result<PreparedInsert> {
-        let string = |field: &str| {
-            evidence
-                .get(field)
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .ok_or_else(|| fail("commit", &format!("pre-commit field {field:?} is missing")))
-        };
-        if string("pipeline")? != self.config.pipeline
-            || string("output")? != self.config.output
-            || string("target")? != self.config.table
-        {
-            return Err(fail(
-                "commit",
-                "pre-commit evidence names a different sink identity",
-            ));
-        }
-        if evidence.get("epoch").and_then(Value::as_u64) != Some(epoch.as_u64()) {
-            return Err(fail(
-                "commit",
-                "pre-commit evidence names a different epoch",
-            ));
-        }
+        let protocol = |message: String| fail("commit", &message);
+        crate::evidence::check_identity(
+            evidence,
+            &self.config.pipeline,
+            &self.config.output,
+            &self.config.table,
+        )
+        .map_err(protocol)?;
+        crate::evidence::check_epoch(evidence, epoch).map_err(protocol)?;
         let expected_token =
             dedup_token(&self.config.pipeline, &self.config.output, epoch.as_u64());
-        if string("token")? != expected_token {
+        if crate::evidence::string_field(evidence, "token").map_err(protocol)? != expected_token {
             return Err(fail("commit", "pre-commit evidence has an invalid token"));
         }
-        if string("segment_id")? != PREPARED_SEGMENT_ID {
-            return Err(fail("commit", "pre-commit segment identity is invalid"));
-        }
-        let expected_bytes = evidence
-            .get("segment_bytes")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| fail("commit", "pre-commit segment byte count is missing"))?;
-        if expected_bytes != u64::try_from(insert_block.len()).unwrap_or(u64::MAX) {
-            return Err(fail(
-                "commit",
-                "pre-commit segment byte count does not match its insert block",
-            ));
-        }
-        if string("segment_sha256")? != hex::encode(Sha256::digest(insert_block.as_bytes())) {
-            return Err(fail(
-                "commit",
-                "pre-commit segment checksum does not match its insert block",
-            ));
-        }
-        let schema_hash = string("schema_hash")?;
-        if schema_hash.len() != 64 || !schema_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(fail(
-                "commit",
-                "pre-commit evidence has an invalid schema hash",
-            ));
-        }
-        let rows = evidence
-            .get("rows")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| fail("commit", "pre-commit row count is missing"))?;
+        crate::evidence::check_segment_id(evidence, PREPARED_SEGMENT_ID).map_err(protocol)?;
+        crate::evidence::check_segment(evidence, insert_block.as_bytes()).map_err(protocol)?;
+        crate::evidence::check_schema_hash(evidence).map_err(protocol)?;
         let actual_rows = if insert_block.is_empty() {
             0
         } else {
             u64::try_from(insert_block.lines().count()).unwrap_or(u64::MAX)
         };
-        if rows != actual_rows {
-            return Err(fail(
-                "commit",
-                "pre-commit row count does not match its insert block",
-            ));
-        }
+        crate::evidence::check_rows(evidence, actual_rows).map_err(protocol)?;
         Ok(PreparedInsert {
             token: expected_token,
             insert_block,
-            rows,
+            rows: actual_rows,
         })
     }
 

@@ -828,27 +828,19 @@ fn validate_prepared_evidence(
     records: &[Vec<u8>],
 ) -> Result<()> {
     validate_recovery_evidence(&config.transactional_id, evidence)?;
-    if evidence.get("epoch").and_then(Value::as_u64) != Some(epoch.as_u64())
-        || evidence.get("ledger_topic").and_then(Value::as_str)
-            != Some(config.ledger_topic.as_str())
-        || evidence.get("segment_id").and_then(Value::as_str) != Some(PREPARED_RECORDS_SEGMENT)
+    let protocol = |message: String| fail("recover", &message);
+    crate::evidence::check_epoch(evidence, epoch).map_err(protocol)?;
+    if crate::evidence::string_field(evidence, "ledger_topic").map_err(protocol)?
+        != config.ledger_topic
     {
         return Err(fail(
             "recover",
-            "prepared Kafka evidence names another epoch or sink",
+            "prepared Kafka evidence names another sink",
         ));
     }
+    crate::evidence::check_segment_id(evidence, PREPARED_RECORDS_SEGMENT).map_err(protocol)?;
     let segment = encode_records(records)?;
-    let actual_hash = hex::encode(Sha256::digest(&segment));
-    if evidence.get("segment_bytes").and_then(Value::as_u64)
-        != Some(u64::try_from(segment.len()).unwrap_or(u64::MAX))
-        || evidence.get("segment_sha256").and_then(Value::as_str) != Some(actual_hash.as_str())
-    {
-        return Err(fail(
-            "recover",
-            "prepared Kafka record segment does not match its evidence",
-        ));
-    }
+    crate::evidence::check_segment(evidence, &segment).map_err(protocol)?;
     Ok(())
 }
 

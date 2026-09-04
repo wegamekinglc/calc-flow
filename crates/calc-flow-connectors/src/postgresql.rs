@@ -1394,38 +1394,22 @@ impl TransactionalPostgresSink {
 
     // Durable evidence validation is an atomic trust boundary. All identity,
     // epoch, schema, SQL, row, and checksum checks stay together and fail closed.
-    // #lizard forgives
     fn validate_evidence(
         &self,
         epoch: calc_flow::Epoch,
         evidence: &JsonMap,
         rows: Vec<Vec<crate::database_types::PgValue>>,
     ) -> Result<PreparedPostgresCommit> {
-        let string = |field: &str| {
-            evidence
-                .get(field)
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .ok_or_else(|| fail("commit", &format!("pre-commit field {field:?} is missing")))
-        };
-        if string("pipeline")? != self.config.pipeline
-            || string("output")? != self.config.output
-            || string("target")? != self.config.table
-        {
-            return Err(fail(
-                "commit",
-                "pre-commit evidence names a different sink identity",
-            ));
-        }
-        if evidence.get("epoch").and_then(Value::as_u64) != Some(epoch.as_u64()) {
-            return Err(fail(
-                "commit",
-                "pre-commit evidence names a different epoch",
-            ));
-        }
-        if string("segment_id")? != PREPARED_SEGMENT_ID {
-            return Err(fail("commit", "pre-commit segment identity is invalid"));
-        }
+        let protocol = |message: String| fail("commit", &message);
+        crate::evidence::check_identity(
+            evidence,
+            &self.config.pipeline,
+            &self.config.output,
+            &self.config.table,
+        )
+        .map_err(protocol)?;
+        crate::evidence::check_epoch(evidence, epoch).map_err(protocol)?;
+        crate::evidence::check_segment_id(evidence, PREPARED_SEGMENT_ID).map_err(protocol)?;
         let columns = evidence
             .get("columns")
             .and_then(Value::as_array)
@@ -1439,13 +1423,7 @@ impl TransactionalPostgresSink {
             })
             .collect::<Result<Vec<_>>>()?;
         let sql = compile_insert_sql(&self.config, &columns)?;
-        let schema_hash = string("schema_hash")?;
-        if schema_hash.len() != 64 || !schema_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(fail(
-                "commit",
-                "pre-commit evidence has an invalid schema hash",
-            ));
-        }
+        crate::evidence::check_schema_hash(evidence).map_err(protocol)?;
         if rows.iter().any(|row| row.len() != columns.len()) {
             return Err(fail(
                 "commit",
@@ -1454,31 +1432,12 @@ impl TransactionalPostgresSink {
         }
         let prepared_rows = serde_json::to_vec(&evidence_rows(&rows))
             .map_err(|error| fail("commit", &error.to_string()))?;
-        if evidence.get("segment_bytes").and_then(Value::as_u64)
-            != Some(u64::try_from(prepared_rows.len()).unwrap_or(u64::MAX))
-        {
-            return Err(fail(
-                "commit",
-                "pre-commit segment byte count does not match its prepared rows",
-            ));
-        }
-        if string("segment_sha256")? != hex::encode(Sha256::digest(&prepared_rows)) {
-            return Err(fail(
-                "commit",
-                "pre-commit segment checksum does not match its prepared rows",
-            ));
-        }
-        let expected_rows = evidence
-            .get("rows")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| fail("commit", "pre-commit row count is missing"))?;
-        let actual_rows = u64::try_from(rows.len()).unwrap_or(u64::MAX);
-        if expected_rows != actual_rows {
-            return Err(fail(
-                "commit",
-                "pre-commit row count does not match its prepared rows",
-            ));
-        }
+        crate::evidence::check_segment(evidence, &prepared_rows).map_err(protocol)?;
+        crate::evidence::check_rows(
+            evidence,
+            u64::try_from(rows.len()).unwrap_or(u64::MAX),
+        )
+        .map_err(protocol)?;
         Ok(PreparedPostgresCommit { sql, rows })
     }
 

@@ -33,6 +33,8 @@
 
 pub mod arrow_schema;
 pub mod csv;
+#[cfg(any(feature = "clickhouse", feature = "kafka", feature = "postgresql"))]
+mod evidence;
 pub mod json_lines;
 mod options;
 #[cfg(feature = "file")]
