@@ -1433,11 +1433,8 @@ impl TransactionalPostgresSink {
         let prepared_rows = serde_json::to_vec(&evidence_rows(&rows))
             .map_err(|error| fail("commit", &error.to_string()))?;
         crate::evidence::check_segment(evidence, &prepared_rows).map_err(protocol)?;
-        crate::evidence::check_rows(
-            evidence,
-            u64::try_from(rows.len()).unwrap_or(u64::MAX),
-        )
-        .map_err(protocol)?;
+        crate::evidence::check_rows(evidence, u64::try_from(rows.len()).unwrap_or(u64::MAX))
+            .map_err(protocol)?;
         Ok(PreparedPostgresCommit { sql, rows })
     }
 
