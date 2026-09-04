@@ -43,6 +43,7 @@ import {
   type DataSourceFormat,
 } from './components/dataSourceEditorModel';
 import { editSqlInputAliases } from './components/inputAliasEditorModel';
+import { derivedInputNames, derivedOutputNames } from './portNamesModel';
 import {
   PANEL_LIMITS,
   PANEL_RESIZE_HANDLE_WIDTH,
@@ -179,18 +180,8 @@ const makeNode = (
 export const flowNodeData = (node: NodeConfig): FlowNodeData => ({
   label: node.id,
   kind: node.operator.kind,
-  inputPorts: node.input_ports.length
-    ? node.input_ports.map((port) => port.name)
-    : node.operator.kind === 'sql'
-      ? node.operator.aliases
-      : node.operator.kind === 'expression'
-        ? ['input']
-        : [],
-  outputPorts: node.output_ports.length
-    ? node.output_ports.map((port) => port.name)
-    : node.operator.kind === 'external'
-      ? []
-      : ['output'],
+  inputPorts: derivedInputNames(node),
+  outputPorts: derivedOutputNames(node),
 });
 
 export const connectProject = (

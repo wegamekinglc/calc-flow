@@ -248,6 +248,52 @@ describe('NodeInspector', () => {
     });
   });
 
+  it('shows the required output port for stream join nodes without declared ports', () => {
+    const base = blankProject().graph.nodes[0];
+    const node = {
+      ...base,
+      id: 'join',
+      input_ports: [
+        { name: 'left', kind: 'table' as const, required: true, schema: [] },
+        { name: 'right', kind: 'table' as const, required: true, schema: [] },
+      ],
+      output_ports: [],
+      operator: {
+        kind: 'stream_join' as const,
+        spec: {
+          join_type: 'inner' as const,
+          left_keys: ['account_id'],
+          right_keys: ['account_id'],
+          left_event_time: 'authorized_at',
+          right_event_time: 'paid_at',
+          bounds: { before_micros: 0, after_micros: 0 },
+          limits: {
+            max_state_rows_per_side: 100_000,
+            max_state_bytes_per_side: 134_217_728,
+            max_matches_per_input_batch: 1_000_000,
+          },
+          left_prefix: 'left',
+          right_prefix: 'right',
+        },
+      },
+    };
+
+    render(
+      <NodeInspector
+        node={node}
+        arrowTypes={['int64']}
+        udfs={[]}
+        onChange={vi.fn()}
+        onSqlAliasEdit={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText('out · output')).toBeDefined();
+    expect(screen.getByText('in · left')).toBeDefined();
+    expect(screen.getByText('in · right')).toBeDefined();
+  });
+
   it('shows read-only facts from the strict lowered project', () => {
     const project = blankProject();
     const node = project.graph.nodes[0];
