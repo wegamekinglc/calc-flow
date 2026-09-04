@@ -18,7 +18,7 @@
   "lizard_forgives": {
     "crates/calc-flow-connectors/src/database_types.rs": 1,
     "crates/calc-flow-connectors/src/kafka.rs": 4,
-    "crates/calc-flow-connectors/src/postgresql.rs": 3,
+    "crates/calc-flow-connectors/src/postgresql.rs": 2,
     "crates/calc-flow-connectors/src/postgresql_cdc.rs": 8,
     "crates/calc-flow-connectors/src/websocket.rs": 1,
     "crates/calc-flow/src/config.rs": 8,
@@ -98,9 +98,11 @@
       "C901": 2
     },
     "D:/dev/github/calc-flow/web-ui/backend/src/calc_flow_studio/app.py": {
-      "C901": 1,
-      "PLR0913": 1,
-      "PLR0915": 1
+      "PLR0913": 1
+    },
+    "D:/dev/github/calc-flow/web-ui/backend/src/calc_flow_studio/routes.py": {
+      "C901": 2,
+      "PLR0915": 2
     },
     "D:/dev/github/calc-flow/web-ui/backend/src/calc_flow_studio/run_manager.py": {
       "C901": 5,
