@@ -52,6 +52,7 @@ import {
   useElementWidth,
   usePanelLayout,
 } from './components/panelLayout';
+import { useBusyAction } from './hooks/useBusyAction';
 import { useJobEvents } from './hooks/useJobEvents';
 import {
   blankProject,
@@ -240,7 +241,8 @@ export default function App() {
   const [job, setJob] = useState<JobResponse | null>(null);
   const [progress, setProgress] = useState<JobEvent | null>(null);
   const [message, setMessage] = useState('');
-  const [busy, setBusy] = useState(false);
+  const { busy, run } = useBusyAction(setMessage);
+
   const [pendingFileReads, setPendingFileReads] = useState(0);
   const [pendingFileReadKeys, setPendingFileReadKeys] = useState<
     ReadonlySet<string>
@@ -457,40 +459,25 @@ export default function App() {
     return prepared;
   };
 
-  const save = async () => {
-    setBusy(true);
-    try {
-      const prepared = prepareProject();
-      if (!prepared) return;
-      await persistProject(prepared);
-      setMessage('Project saved');
-    } catch (error) {
-      setMessage((error as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
+  const save = () => run(async () => {
+    const prepared = prepareProject();
+    if (!prepared) return;
+    await persistProject(prepared);
+    setMessage('Project saved');
+  });
 
-  const validate = async () => {
-    setBusy(true);
-    try {
-      const prepared = prepareProject();
-      if (!prepared) return;
-      const saved = await persistProject(prepared);
-      const report = await api.validateProject(saved.id);
-      setValidation(report);
-      setMessage(report.valid ? 'Graph compiled successfully' : 'Validation failed');
-    } catch (error) {
-      setMessage((error as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
+  const validate = () => run(async () => {
+    const prepared = prepareProject();
+    if (!prepared) return;
+    const saved = await persistProject(prepared);
+    const report = await api.validateProject(saved.id);
+    setValidation(report);
+    setMessage(report.valid ? 'Graph compiled successfully' : 'Validation failed');
+  });
 
-  const startJob = async () => {
-    setBusy(true);
+  const startJob = () => {
     setMessage('');
-    try {
+    void run(async () => {
       const prepared = prepareProject();
       if (!prepared) return;
       if (prepared.runtime.mode !== 'stream') {
@@ -502,37 +489,23 @@ export default function App() {
       setProgress(null);
       setJob(submitted);
       setMessage('Continuous job started');
-    } catch (error) {
-      setMessage((error as Error).message);
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
-  const checkpointJob = async () => {
+  const checkpointJob = () => {
     if (!job) return;
-    setBusy(true);
-    try {
+    void run(async () => {
       setJob(await api.checkpointJob(job.id));
       setMessage('Checkpoint requested');
-    } catch (error) {
-      setMessage((error as Error).message);
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
-  const shutdownJob = async () => {
+  const shutdownJob = () => {
     if (!job) return;
-    setBusy(true);
-    try {
+    void run(async () => {
       setJob(await api.shutdownJob(job.id));
       setMessage('Graceful shutdown requested');
-    } catch (error) {
-      setMessage((error as Error).message);
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   const addDataSource = () => {
@@ -660,17 +633,12 @@ export default function App() {
     }
   };
 
-  const cancelJob = async () => {
+  const cancelJob = () => {
     if (!job) return;
-    setBusy(true);
-    try {
+    void run(async () => {
       setJob(await api.cancelJob(job.id));
       setMessage('Job cancelled');
-    } catch (error) {
-      setMessage((error as Error).message);
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   const newProject = () => {
@@ -690,8 +658,7 @@ export default function App() {
       setMessage('Project import requires a .json, .yaml, or .yml file');
       return;
     }
-    setBusy(true);
-    try {
+    void run(async () => {
       const document = await file.text();
       let imported: ProjectDocument;
       try {
@@ -710,17 +677,12 @@ export default function App() {
       replaceEditableProject(imported, true);
       await refreshProjects();
       setMessage('Project imported');
-    } catch (error) {
-      setMessage((error as Error).message);
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
-  const exportProject = async (format: 'json' | 'yaml') => {
+  const exportProject = (format: 'json' | 'yaml') => {
     if (!persisted) return;
-    setBusy(true);
-    try {
+    void run(async () => {
       const exported = await api.exportProject(project.id, format);
       const url = URL.createObjectURL(
         new Blob([exported.document], {
@@ -733,28 +695,19 @@ export default function App() {
       anchor.click();
       URL.revokeObjectURL(url);
       setMessage(`Project exported as ${format.toUpperCase()}`);
-    } catch (error) {
-      setMessage((error as Error).message);
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
-  const deleteProject = async () => {
+  const deleteProject = () => {
     if (!persisted || !window.confirm(`Delete ${project.name}?`)) return;
-    setBusy(true);
-    try {
+    void run(async () => {
       await api.deleteProject(project.id);
       const remaining = await refreshProjects();
       const [nextProject] = remaining;
       if (nextProject) await loadProject(nextProject.id);
       else newProject();
       setMessage('Project deleted');
-    } catch (error) {
-      setMessage((error as Error).message);
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   const addNode = (kind: EditableNodeKind) => {
