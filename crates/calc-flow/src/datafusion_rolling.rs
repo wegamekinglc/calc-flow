@@ -16,10 +16,12 @@ use datafusion::{
     },
     logical_expr::{
         Expr, LogicalPlan, WindowFrameBound, WindowFrameUnits, WindowFunctionDefinition,
+        expr::{WindowFunction, WindowFunctionParams},
     },
     physical_expr::{
-        Distribution, EquivalenceProperties, OrderingRequirements, expressions::Column,
-        window::SlidingAggregateWindowExpr,
+        Distribution, EquivalenceProperties, OrderingRequirements,
+        expressions::Column,
+        window::{SlidingAggregateWindowExpr, WindowExpr},
     },
     physical_plan::{
         DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, InputOrderMode,
@@ -135,6 +137,12 @@ fn inspect_logical_node(plan: &LogicalPlan, audit: &mut RollingRewriteAuditSnaps
 }
 
 fn inspect_logical_window(expression: &Expr) -> Result<(), &'static str> {
+    let window = logical_window_function(expression)?;
+    inspect_logical_aggregate(window)?;
+    inspect_logical_parameters(&window.params)
+}
+
+fn logical_window_function(expression: &Expr) -> Result<&WindowFunction, &'static str> {
     let expression = match expression {
         Expr::Alias(alias) => alias.expr.as_ref(),
         expression => expression,
@@ -142,45 +150,69 @@ fn inspect_logical_window(expression: &Expr) -> Result<(), &'static str> {
     let Expr::WindowFunction(window) = expression else {
         return Err("logical_window_is_not_a_function");
     };
+    Ok(window)
+}
+
+fn inspect_logical_aggregate(window: &WindowFunction) -> Result<(), &'static str> {
     let WindowFunctionDefinition::AggregateUDF(function) = &window.fun else {
         return Err("window_function_is_not_an_aggregate");
     };
     if !function.name().eq_ignore_ascii_case("avg") {
         return Err("window_aggregate_is_not_avg");
     }
-    let parameters = &window.params;
-    if parameters.args.len() != 1 || !matches!(parameters.args[0], Expr::Column(_)) {
+    Ok(())
+}
+
+fn inspect_logical_parameters(parameters: &WindowFunctionParams) -> Result<(), &'static str> {
+    if !logical_avg_argument_supported(parameters) {
         return Err("avg_argument_is_not_one_column");
     }
-    if parameters.partition_by.is_empty()
-        || parameters
-            .partition_by
-            .iter()
-            .any(|expression| !matches!(expression, Expr::Column(_)))
-    {
+    if !logical_partition_supported(parameters) {
         return Err("partition_keys_are_not_simple_columns");
     }
-    if parameters.order_by.is_empty()
-        || parameters
-            .order_by
-            .iter()
-            .any(|sort| !sort.asc || !matches!(sort.expr, Expr::Column(_)))
-    {
+    if !logical_order_supported(parameters) {
         return Err("ordering_is_not_simple_ascending_columns");
     }
-    if parameters.filter.is_some() || parameters.distinct || parameters.null_treatment.is_some() {
+    if !logical_options_supported(parameters) {
         return Err("avg_filter_distinct_or_null_treatment_is_not_supported");
     }
-    if parameters.window_frame.units != WindowFrameUnits::Rows
-        || !matches!(
-            parameters.window_frame.end_bound,
-            WindowFrameBound::CurrentRow
-        )
-        || bounded_preceding_rows(&parameters.window_frame.start_bound).is_none()
-    {
+    if !logical_frame_supported(parameters) {
         return Err("window_frame_is_not_bounded_rows_to_current_row");
     }
     Ok(())
+}
+
+fn logical_avg_argument_supported(parameters: &WindowFunctionParams) -> bool {
+    matches!(parameters.args.as_slice(), [Expr::Column(_)])
+}
+
+fn logical_partition_supported(parameters: &WindowFunctionParams) -> bool {
+    !parameters.partition_by.is_empty()
+        && parameters
+            .partition_by
+            .iter()
+            .all(|expression| matches!(expression, Expr::Column(_)))
+}
+
+fn logical_order_supported(parameters: &WindowFunctionParams) -> bool {
+    !parameters.order_by.is_empty()
+        && parameters
+            .order_by
+            .iter()
+            .all(|sort| sort.asc && matches!(sort.expr, Expr::Column(_)))
+}
+
+fn logical_options_supported(parameters: &WindowFunctionParams) -> bool {
+    parameters.filter.is_none() && !parameters.distinct && parameters.null_treatment.is_none()
+}
+
+fn logical_frame_supported(parameters: &WindowFunctionParams) -> bool {
+    parameters.window_frame.units == WindowFrameUnits::Rows
+        && matches!(
+            parameters.window_frame.end_bound,
+            WindowFrameBound::CurrentRow
+        )
+        && bounded_preceding_rows(&parameters.window_frame.start_bound).is_some()
 }
 
 fn bounded_preceding_rows(bound: &WindowFrameBound) -> Option<u64> {
@@ -272,51 +304,80 @@ fn physical_windows(
     };
     let mut windows = Vec::with_capacity(window.window_expr().len());
     for expression in window.window_expr() {
-        if physical_columns(expression.partition_by()).as_ref() != Some(&partition_indices)
-            || physical_order_columns(expression.order_by()).as_ref() != Some(&order_indices)
-        {
-            return Ok(None);
-        }
-        let Some(sliding) = expression
-            .as_any()
-            .downcast_ref::<SlidingAggregateWindowExpr>()
+        let Some(window) =
+            physical_window(expression.as_ref(), &partition_indices, &order_indices)?
         else {
             return Ok(None);
         };
-        let aggregate = sliding.get_aggregate_expr();
-        if !aggregate.fun().name().eq_ignore_ascii_case("avg")
-            || aggregate.is_distinct()
-            || aggregate.ignore_nulls()
-            || !aggregate.order_bys().is_empty()
-        {
-            return Ok(None);
-        }
-        let arguments = expression.expressions();
-        let [argument] = arguments.as_slice() else {
-            return Ok(None);
-        };
-        let Some(argument) = argument.downcast_ref::<Column>() else {
-            return Ok(None);
-        };
-        let Some(rows) = bounded_preceding_rows(&expression.get_window_frame().start_bound) else {
-            return Ok(None);
-        };
-        if expression.get_window_frame().units != WindowFrameUnits::Rows
-            || !matches!(
-                expression.get_window_frame().end_bound,
-                WindowFrameBound::CurrentRow
-            )
-        {
-            return Ok(None);
-        }
-        let field = expression.field()?;
-        windows.push(DataFusionRollingWindow {
-            input_index: argument.index(),
-            output_name: field.name().to_owned(),
-            rows,
-        });
+        windows.push(window);
     }
     Ok(Some((partition_indices, order_indices, windows)))
+}
+
+fn physical_window(
+    expression: &dyn WindowExpr,
+    partition_indices: &[usize],
+    order_indices: &[usize],
+) -> DataFusionResult<Option<DataFusionRollingWindow>> {
+    if !physical_window_order_matches(expression, partition_indices, order_indices) {
+        return Ok(None);
+    }
+    let Some(sliding) = expression
+        .as_any()
+        .downcast_ref::<SlidingAggregateWindowExpr>()
+    else {
+        return Ok(None);
+    };
+    if !physical_avg_supported(sliding) {
+        return Ok(None);
+    }
+    let Some(input_index) = physical_window_input(expression) else {
+        return Ok(None);
+    };
+    let Some(rows) = physical_window_rows(expression) else {
+        return Ok(None);
+    };
+    let field = expression.field()?;
+    Ok(Some(DataFusionRollingWindow {
+        input_index,
+        output_name: field.name().to_owned(),
+        rows,
+    }))
+}
+
+fn physical_window_order_matches(
+    expression: &dyn WindowExpr,
+    partition_indices: &[usize],
+    order_indices: &[usize],
+) -> bool {
+    physical_columns(expression.partition_by()).as_deref() == Some(partition_indices)
+        && physical_order_columns(expression.order_by()).as_deref() == Some(order_indices)
+}
+
+fn physical_avg_supported(expression: &SlidingAggregateWindowExpr) -> bool {
+    let aggregate = expression.get_aggregate_expr();
+    aggregate.fun().name().eq_ignore_ascii_case("avg")
+        && !aggregate.is_distinct()
+        && !aggregate.ignore_nulls()
+        && aggregate.order_bys().is_empty()
+}
+
+fn physical_window_input(expression: &dyn WindowExpr) -> Option<usize> {
+    let arguments = expression.expressions();
+    let [argument] = arguments.as_slice() else {
+        return None;
+    };
+    argument.downcast_ref::<Column>().map(Column::index)
+}
+
+fn physical_window_rows(expression: &dyn WindowExpr) -> Option<u64> {
+    let frame = expression.get_window_frame();
+    if frame.units != WindowFrameUnits::Rows
+        || !matches!(frame.end_bound, WindowFrameBound::CurrentRow)
+    {
+        return None;
+    }
+    bounded_preceding_rows(&frame.start_bound)
 }
 
 fn physical_columns(

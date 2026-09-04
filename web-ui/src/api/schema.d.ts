@@ -1223,6 +1223,14 @@ export interface components {
                      */
                     micros: number;
                 };
+                /**
+                 * @description Versioned floating-point behavior for rolling numeric transitions.
+                 *
+                 *     `StableV1` remains the default and preserves the released operation order.
+                 *     `StableV2Preview` is an explicit opt-in experiment whose serialized name is
+                 *     `stable_v2`; it may not replace the default without a separate migration.
+                 */
+                RollingNumericalProfile: "stable_v1" | "stable_v2";
                 /** @description One declared rolling output and its output column name. */
                 RollingOutputSpec: {
                     /** @description Input column name. */
@@ -1507,6 +1515,12 @@ export interface components {
                     event_time: string;
                     /** @description Late-row policy. */
                     late_policy: components["schemas"]["ProjectCreateRequest"]["$defs"]["LatePolicySpec"];
+                    /**
+                     * @description Versioned floating-point behavior. `stable_v1` is omitted from the
+                     *     canonical configuration so existing project and checkpoint hashes stay
+                     *     compatible; `stable_v2` is an explicit preview opt-in.
+                     */
+                    numerical_profile?: components["schemas"]["ProjectCreateRequest"]["$defs"]["RollingNumericalProfile"];
                     /** @description Rolling outputs in semantic declaration order. */
                     outputs: components["schemas"]["ProjectCreateRequest"]["$defs"]["RollingOutputSpec"][];
                     /** @description Ordered non-empty entity partition key. */
@@ -2322,6 +2336,14 @@ export interface components {
                      */
                     micros: number;
                 };
+                /**
+                 * @description Versioned floating-point behavior for rolling numeric transitions.
+                 *
+                 *     `StableV1` remains the default and preserves the released operation order.
+                 *     `StableV2Preview` is an explicit opt-in experiment whose serialized name is
+                 *     `stable_v2`; it may not replace the default without a separate migration.
+                 */
+                RollingNumericalProfile: "stable_v1" | "stable_v2";
                 /** @description One declared rolling output and its output column name. */
                 RollingOutputSpec: {
                     /** @description Input column name. */
@@ -2606,6 +2628,12 @@ export interface components {
                     event_time: string;
                     /** @description Late-row policy. */
                     late_policy: components["schemas"]["ProjectDocument"]["$defs"]["LatePolicySpec"];
+                    /**
+                     * @description Versioned floating-point behavior. `stable_v1` is omitted from the
+                     *     canonical configuration so existing project and checkpoint hashes stay
+                     *     compatible; `stable_v2` is an explicit preview opt-in.
+                     */
+                    numerical_profile?: components["schemas"]["ProjectDocument"]["$defs"]["RollingNumericalProfile"];
                     /** @description Rolling outputs in semantic declaration order. */
                     outputs: components["schemas"]["ProjectDocument"]["$defs"]["RollingOutputSpec"][];
                     /** @description Ordered non-empty entity partition key. */

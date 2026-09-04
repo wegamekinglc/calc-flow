@@ -84,6 +84,10 @@ impl RollingNumericalProfile {
         }
     }
 
+    #[allow(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "serde skip_serializing_if requires a borrowed field predicate"
+    )]
     const fn is_stable_v1(&self) -> bool {
         matches!(self, Self::StableV1)
     }
@@ -2846,7 +2850,7 @@ fn build_typed_stream_output(
     let input = build_input_record(rows, input_schema, node_id)?;
     let execution = compiled
         .kernel_plan
-        .update_and_fill(prior, &input, node_id)?
+        .update_stream_and_fill(prior, &input, node_id)?
         .ok_or_else(|| {
             internal_error("typed rolling stream rows did not satisfy canonical ordering")
         })?;
@@ -4286,12 +4290,17 @@ impl EntityRowView<'_> {
     }
 }
 
-/// Slides every shared window group to the current row: add the current
-/// valid sample, remove every sample that left the frame, then repair any
-/// non-finite accumulator by re-folding the window so live state and the
-/// checkpoint rebuild agree on non-finite classifications (SCE-00 D3.2).
-// Add precedes removal so the frozen order matches the rebuild fold exactly.
-// #lizard forgives
+struct WindowSlideContext<'a> {
+    view: &'a EntityRowView<'a>,
+    row_index: usize,
+    transition_count: u64,
+    compiled: &'a CompiledRollingSpec,
+    node_id: &'a str,
+    combined: usize,
+}
+
+/// Slides every shared window group to the current row. Add precedes removal
+/// so the frozen order matches the rebuild fold exactly.
 fn slide_windows(
     view: &EntityRowView<'_>,
     position: usize,
@@ -4301,122 +4310,185 @@ fn slide_windows(
     windows: &mut [WindowState],
     node_id: &str,
 ) -> Result<()> {
-    let combined = view.history.len() + position;
-    for (group_index, group) in compiled.window_groups.iter().enumerate() {
+    if compiled.window_groups.len() != windows.len() {
+        return Err(internal_error(
+            "rolling window group declarations and states differ",
+        ));
+    }
+    let context = WindowSlideContext {
+        view,
+        row_index,
+        transition_count,
+        compiled,
+        node_id,
+        combined: view.history.len() + position,
+    };
+    for (group, state) in compiled.window_groups.iter().zip(windows) {
         match group {
             CompiledWindowGroup::Numeric {
                 input_index, frame, ..
-            } => {
-                let current = &view.rows[row_index].values[*input_index];
-                let WindowState::Numeric(accumulator) = &mut windows[group_index] else {
-                    return Err(internal_error("rolling numeric group has the wrong state"));
-                };
-                if is_valid_sample(current) {
-                    accumulator.add(current, node_id)?;
-                }
-                expire_numeric(accumulator, view, combined, *input_index, *frame, node_id)?;
-                let stable_v2_rebase = spec_uses_stable_v2(compiled)
-                    && accumulator.has_float_sum()
-                    && kernel::stable_v2_rebase_due(
-                        transition_count,
-                        window_positions(view, combined, *frame, node_id)?.count(),
-                        accumulator.is_non_finite(),
-                    );
-                if stable_v2_rebase {
-                    rebase_numeric_stable_v2(
-                        accumulator,
-                        view,
-                        combined,
-                        *input_index,
-                        *frame,
-                        node_id,
-                    )?;
-                } else if accumulator.is_non_finite() {
-                    refold_numeric(accumulator, view, combined, *input_index, *frame, node_id)?;
-                }
-            }
+            } => slide_numeric_window(&context, *input_index, *frame, state)?,
             CompiledWindowGroup::Extrema {
                 input_index, frame, ..
-            } => {
-                let WindowState::Extrema(accumulator) = &mut windows[group_index] else {
-                    return Err(internal_error("rolling extrema group has the wrong state"));
-                };
-                let current = &view.rows[row_index].values[*input_index];
-                if is_valid_sample(current) {
-                    accumulator.add(view.extrema_key(combined, compiled), current.clone());
-                }
-                expire_extrema(
-                    accumulator,
-                    view,
-                    combined,
-                    *input_index,
-                    *frame,
-                    compiled,
-                    node_id,
-                )?;
-            }
+            } => slide_extrema_window(&context, *input_index, *frame, state)?,
             CompiledWindowGroup::Pair {
                 left_index,
                 right_index,
                 frame,
-            } => {
-                let x = &view.rows[row_index].values[*left_index];
-                let y = &view.rows[row_index].values[*right_index];
-                let WindowState::Pair(accumulator) = &mut windows[group_index] else {
-                    return Err(internal_error("rolling pair group has the wrong state"));
-                };
-                if is_valid_sample(x) && is_valid_sample(y) {
-                    accumulator.add(x, y, node_id)?;
-                }
-                expire_pair(
-                    accumulator,
-                    view,
-                    combined,
-                    *left_index,
-                    *right_index,
-                    *frame,
-                    node_id,
-                )?;
-                let stable_v2_rebase = spec_uses_stable_v2(compiled)
-                    && kernel::stable_v2_rebase_due(
-                        transition_count,
-                        window_positions(view, combined, *frame, node_id)?.count(),
-                        accumulator.is_non_finite(),
-                    );
-                if stable_v2_rebase {
-                    rebase_pair_stable_v2(
-                        accumulator,
-                        view,
-                        combined,
-                        *left_index,
-                        *right_index,
-                        *frame,
-                        node_id,
-                    )?;
-                } else if accumulator.is_non_finite() {
-                    refold_pair(
-                        accumulator,
-                        view,
-                        combined,
-                        *left_index,
-                        *right_index,
-                        *frame,
-                        node_id,
-                    )?;
-                }
-            }
+            } => slide_pair_window(&context, *left_index, *right_index, *frame, state)?,
             CompiledWindowGroup::Ewma {
                 input_index, alpha, ..
-            } => {
-                let current = &view.rows[row_index].values[*input_index];
-                let WindowState::Ewma(accumulator) = &mut windows[group_index] else {
-                    return Err(internal_error("rolling EWMA group has the wrong state"));
-                };
-                if is_valid_sample(current) {
-                    accumulator.add(current, *alpha, node_id)?;
-                }
-            }
+            } => slide_ewma_window(&context, *input_index, *alpha, state)?,
         }
+    }
+    Ok(())
+}
+
+fn slide_numeric_window(
+    context: &WindowSlideContext<'_>,
+    input_index: usize,
+    frame: CompiledFrame,
+    state: &mut WindowState,
+) -> Result<()> {
+    let WindowState::Numeric(accumulator) = state else {
+        return Err(internal_error("rolling numeric group has the wrong state"));
+    };
+    let current = &context.view.rows[context.row_index].values[input_index];
+    if is_valid_sample(current) {
+        accumulator.add(current, context.node_id)?;
+    }
+    expire_numeric(
+        accumulator,
+        context.view,
+        context.combined,
+        input_index,
+        frame,
+        context.node_id,
+    )?;
+    let stable_v2_rebase = spec_uses_stable_v2(context.compiled)
+        && accumulator.has_float_sum()
+        && kernel::stable_v2_rebase_due(
+            context.transition_count,
+            window_positions(context.view, context.combined, frame, context.node_id)?.count(),
+            accumulator.is_non_finite(),
+        );
+    if stable_v2_rebase {
+        rebase_numeric_stable_v2(
+            accumulator,
+            context.view,
+            context.combined,
+            input_index,
+            frame,
+            context.node_id,
+        )
+    } else if accumulator.is_non_finite() {
+        refold_numeric(
+            accumulator,
+            context.view,
+            context.combined,
+            input_index,
+            frame,
+            context.node_id,
+        )
+    } else {
+        Ok(())
+    }
+}
+
+fn slide_extrema_window(
+    context: &WindowSlideContext<'_>,
+    input_index: usize,
+    frame: CompiledFrame,
+    state: &mut WindowState,
+) -> Result<()> {
+    let WindowState::Extrema(accumulator) = state else {
+        return Err(internal_error("rolling extrema group has the wrong state"));
+    };
+    let current = &context.view.rows[context.row_index].values[input_index];
+    if is_valid_sample(current) {
+        accumulator.add(
+            context.view.extrema_key(context.combined, context.compiled),
+            current.clone(),
+        );
+    }
+    expire_extrema(
+        accumulator,
+        context.view,
+        context.combined,
+        input_index,
+        frame,
+        context.compiled,
+        context.node_id,
+    )
+}
+
+fn slide_pair_window(
+    context: &WindowSlideContext<'_>,
+    left_index: usize,
+    right_index: usize,
+    frame: CompiledFrame,
+    state: &mut WindowState,
+) -> Result<()> {
+    let WindowState::Pair(accumulator) = state else {
+        return Err(internal_error("rolling pair group has the wrong state"));
+    };
+    let left = &context.view.rows[context.row_index].values[left_index];
+    let right = &context.view.rows[context.row_index].values[right_index];
+    if is_valid_sample(left) && is_valid_sample(right) {
+        accumulator.add(left, right, context.node_id)?;
+    }
+    expire_pair(
+        accumulator,
+        context.view,
+        context.combined,
+        left_index,
+        right_index,
+        frame,
+        context.node_id,
+    )?;
+    let stable_v2_rebase = spec_uses_stable_v2(context.compiled)
+        && kernel::stable_v2_rebase_due(
+            context.transition_count,
+            window_positions(context.view, context.combined, frame, context.node_id)?.count(),
+            accumulator.is_non_finite(),
+        );
+    if stable_v2_rebase {
+        rebase_pair_stable_v2(
+            accumulator,
+            context.view,
+            context.combined,
+            left_index,
+            right_index,
+            frame,
+            context.node_id,
+        )
+    } else if accumulator.is_non_finite() {
+        refold_pair(
+            accumulator,
+            context.view,
+            context.combined,
+            left_index,
+            right_index,
+            frame,
+            context.node_id,
+        )
+    } else {
+        Ok(())
+    }
+}
+
+fn slide_ewma_window(
+    context: &WindowSlideContext<'_>,
+    input_index: usize,
+    alpha: f64,
+    state: &mut WindowState,
+) -> Result<()> {
+    let WindowState::Ewma(accumulator) = state else {
+        return Err(internal_error("rolling EWMA group has the wrong state"));
+    };
+    let current = &context.view.rows[context.row_index].values[input_index];
+    if is_valid_sample(current) {
+        accumulator.add(current, alpha, context.node_id)?;
     }
     Ok(())
 }
@@ -8238,7 +8310,7 @@ mod tests {
             .map(|index| {
                 let sequence = u64::try_from(index + 1).unwrap();
                 full_row(
-                    i64::try_from(index + 1).unwrap(),
+                    i64::from(index + 1),
                     "a",
                     sequence,
                     vec![ScalarValue::Float64(Some(1.0e12 + f64::from(index)))],

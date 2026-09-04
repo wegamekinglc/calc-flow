@@ -70,15 +70,24 @@ def _load(path: Path) -> list[dict[str, object]]:
     return [_validate_kernel(index, value) for index, value in enumerate(kernels)]
 
 
-def _validate_kernel(index: int, value: object) -> dict[str, object]:
+def _validate_kernel_shape(index: int, value: object) -> dict[str, object]:
     if not isinstance(value, dict) or set(value) != FIELDS:
         raise ValueError(f"kernel {index} must contain exactly {sorted(FIELDS)}")
     primitive = value["primitive"]
     if not isinstance(primitive, str) or not primitive:
         raise ValueError(f"kernel {index} primitive must be a non-empty string")
+    return value
+
+
+def _validate_kernel_support_flags(value: dict[str, object]) -> None:
+    primitive = value["primitive"]
     for field in ("batch", "stream", "datafusion"):
         if type(value[field]) is not bool:
             raise ValueError(f"kernel {primitive!r} {field} must be boolean")
+
+
+def _validate_kernel_transition(value: dict[str, object]) -> object:
+    primitive = value["primitive"]
     transition = value["typed_transition"]
     if transition is not None and transition not in TRANSITIONS:
         raise ValueError(f"kernel {primitive!r} has unknown typed transition")
@@ -90,13 +99,27 @@ def _validate_kernel(index: int, value: object) -> dict[str, object]:
         raise ValueError(
             f"kernel {primitive!r} DataFusion support requires a typed transition"
         )
+    return transition
+
+
+def _validate_kernel_complexity(
+    value: dict[str, object], transition: object, /
+) -> None:
+    primitive = value["primitive"]
     if value["complexity"] not in COMPLEXITIES:
         raise ValueError(f"kernel {primitive!r} has unknown complexity")
     if transition is not None and value["complexity"] != "amortized_constant":
         raise ValueError(
             f"kernel {primitive!r} typed transition must advertise amortized_constant"
         )
-    return value
+
+
+def _validate_kernel(index: int, value: object) -> dict[str, object]:
+    kernel = _validate_kernel_shape(index, value)
+    _validate_kernel_support_flags(kernel)
+    transition = _validate_kernel_transition(kernel)
+    _validate_kernel_complexity(kernel, transition)
+    return kernel
 
 
 def _rust_bool(value: object) -> str:

@@ -116,9 +116,15 @@ def _ordered_indicator(result: object, output: str) -> np.ndarray:
     return values[np.argsort(sequence, kind="stable")]
 
 
+def _execute_static_plan(plan: object, batch: Batch) -> Any:
+    """Execute a plan compiled only from this module's static declarations."""
+
+    return plan.execute({"input": batch})  # type: ignore[attr-defined]  # nosemgrep
+
+
 def _timed_execute(plan: object, batch: Batch) -> tuple[Any, float]:
     started = time.perf_counter_ns()
-    result = plan.execute({"input": batch})
+    result = _execute_static_plan(plan, batch)
     elapsed = (time.perf_counter_ns() - started) / 1_000_000_000
     return result, elapsed
 
@@ -158,8 +164,8 @@ def _run_paired_case(benchmark: BenchmarkFixture, *, dual: bool, scenario: str) 
     )
     assert f"shared_state_groups={expected_state_groups}" in optimized_explanation
     assert "fallback=none" in optimized_explanation
-    reference_result = reference.execute({"input": batch})
-    optimized_result = optimized.execute({"input": batch})
+    reference_result = _execute_static_plan(reference, batch)
+    optimized_result = _execute_static_plan(optimized, batch)
     expected = _direct_window_oracle(batch.to_pyarrow(), dual=dual)
     reference_values = _ordered_indicator(reference_result, "output")
     optimized_values = _ordered_indicator(optimized_result, "output")
@@ -193,8 +199,8 @@ def _run_paired_case(benchmark: BenchmarkFixture, *, dual: bool, scenario: str) 
 
     def execute_pair() -> tuple[Any, Any]:
         return (
-            reference.execute({"input": batch}),
-            optimized.execute({"input": batch}),
+            _execute_static_plan(reference, batch),
+            _execute_static_plan(optimized, batch),
         )
 
     reference_result, optimized_result = benchmark(execute_pair)

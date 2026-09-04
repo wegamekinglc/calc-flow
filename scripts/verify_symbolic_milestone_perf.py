@@ -134,8 +134,7 @@ def _workload(extra: Mapping[str, object], path: Path) -> dict[str, object]:
     }
 
 
-def _validate_rolling_evidence(extra: Mapping[str, object], path: Path) -> None:
-    scenario = str(extra["scenario"])
+def _require_rolling_evidence(extra: Mapping[str, object], path: Path) -> None:
     required = {
         "machine_fingerprint",
         "dependency_fingerprint",
@@ -156,6 +155,9 @@ def _validate_rolling_evidence(extra: Mapping[str, object], path: Path) -> None:
         raise ValueError(
             f"rolling benchmark report {path} lacks evidence: {', '.join(missing)}"
         )
+
+
+def _validate_rolling_fingerprints(extra: Mapping[str, object], path: Path) -> None:
     for field in (
         "machine_fingerprint",
         "dependency_fingerprint",
@@ -164,6 +166,9 @@ def _validate_rolling_evidence(extra: Mapping[str, object], path: Path) -> None:
         value = extra[field]
         if not isinstance(value, str) or FINGERPRINT.fullmatch(value) is None:
             raise ValueError(f"rolling benchmark report {path} has invalid {field}")
+
+
+def _validate_rolling_oracle_rows(extra: Mapping[str, object], path: Path) -> None:
     checked_rows = extra["oracle_checked_rows"]
     finite_rows = extra["oracle_finite_rows"]
     if (
@@ -177,8 +182,14 @@ def _validate_rolling_evidence(extra: Mapping[str, object], path: Path) -> None:
         raise ValueError(
             f"rolling benchmark report {path} has no finite oracle outputs"
         )
+
+
+def _validate_rolling_oracle(extra: Mapping[str, object], path: Path) -> None:
     if extra["oracle"] != "independent_direct_window_v1":
         raise ValueError(f"rolling benchmark report {path} has an unknown oracle")
+
+
+def _validate_rolling_tolerances(extra: Mapping[str, object], path: Path) -> None:
     for field in ("oracle_rtol", "oracle_atol"):
         value = extra[field]
         if (
@@ -188,6 +199,11 @@ def _validate_rolling_evidence(extra: Mapping[str, object], path: Path) -> None:
             or not 0.0 <= float(value) <= 1e-10
         ):
             raise ValueError(f"rolling benchmark report {path} has invalid {field}")
+
+
+def _validate_rolling_kernel_evidence(
+    extra: Mapping[str, object], path: Path, scenario: str
+) -> None:
     expected_fast = 5 if scenario == "rolling_kernel_dual_sma_5_20" else None
     expected_groups = 2 if expected_fast is not None else 1
     if (
@@ -198,6 +214,15 @@ def _validate_rolling_evidence(extra: Mapping[str, object], path: Path) -> None:
         or extra["fast_window"] != expected_fast
     ):
         raise ValueError(f"rolling benchmark report {path} has invalid kernel evidence")
+
+
+def _validate_rolling_evidence(extra: Mapping[str, object], path: Path) -> None:
+    _require_rolling_evidence(extra, path)
+    _validate_rolling_fingerprints(extra, path)
+    _validate_rolling_oracle_rows(extra, path)
+    _validate_rolling_oracle(extra, path)
+    _validate_rolling_tolerances(extra, path)
+    _validate_rolling_kernel_evidence(extra, path, str(extra["scenario"]))
 
 
 def _seconds(value: object, path: Path) -> float:

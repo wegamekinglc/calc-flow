@@ -494,37 +494,44 @@ impl<'a> StateDecoder<'a> {
                 "rolling entity dictionary row carries state payload".to_owned(),
             ));
         }
-        let transition_count = match self.compiled.kernel_plan.numerical_profile_kind() {
-            RollingNumericalProfile::StableV1 if position.is_none() => 0,
+        let transition_count = self.entity_transition_count(position)?;
+        let entity = ewma_entity_from_values(&values, self.compiled)?;
+        self.validate_entity_identity(entity_id, &entity)?;
+        self.entities.push((entity, values));
+        self.transition_counts.push(transition_count);
+        self.used_entities.push(false);
+        Ok(())
+    }
+
+    fn entity_transition_count(&self, position: Option<u64>) -> Result<u64> {
+        match self.compiled.kernel_plan.numerical_profile_kind() {
+            RollingNumericalProfile::StableV1 if position.is_none() => Ok(0),
             RollingNumericalProfile::StableV2Preview => position.ok_or_else(|| {
                 state_format(
                     "stable_v2 rolling entity row is missing its transition count".to_owned(),
                 )
-            })?,
-            RollingNumericalProfile::StableV1 => {
-                return Err(state_format(
-                    "stable_v1 rolling entity row carries a transition count".to_owned(),
-                ));
-            }
-        };
+            }),
+            RollingNumericalProfile::StableV1 => Err(state_format(
+                "stable_v1 rolling entity row carries a transition count".to_owned(),
+            )),
+        }
+    }
+
+    fn validate_entity_identity(&self, entity_id: u64, entity: &[Option<KeyValue>]) -> Result<()> {
         if usize::try_from(entity_id).ok() != Some(self.entities.len()) {
             return Err(state_format(
                 "rolling entity dictionary IDs are not contiguous".to_owned(),
             ));
         }
-        let entity = ewma_entity_from_values(&values, self.compiled)?;
         if self
             .entities
             .last()
-            .is_some_and(|(previous, _)| previous >= &entity)
+            .is_some_and(|(previous, _)| previous.as_slice() >= entity)
         {
             return Err(state_format(
                 "rolling entity dictionary is not in canonical key order".to_owned(),
             ));
         }
-        self.entities.push((entity, values));
-        self.transition_counts.push(transition_count);
-        self.used_entities.push(false);
         Ok(())
     }
 

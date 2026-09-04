@@ -445,6 +445,37 @@ def _rolling_group_key(output: dict[str, object], /) -> tuple[object, ...] | Non
     return None
 
 
+def _first_rolling_fallback(
+    outputs: tuple[dict[str, object], ...], field_types: dict[str, object], /
+) -> str | None:
+    for output in outputs:
+        fallback = _rolling_kernel_fallback(output, field_types)
+        if fallback is not None:
+            return fallback
+    return None
+
+
+def _rolling_input_columns(
+    output: dict[str, object], transition: object, /
+) -> tuple[object, ...]:
+    if transition == "pair":
+        return output.get("left"), output.get("right")
+    return (output.get("input"),)
+
+
+def _rolling_numeric_fallback(
+    kind: object,
+    columns: tuple[object, ...],
+    field_types: dict[str, object],
+    /,
+) -> str | None:
+    for column in columns:
+        data_type = field_types.get(column) if isinstance(column, str) else None
+        if data_type not in _PRIMITIVE_NUMERIC_TYPES:
+            return f"primitive_{kind}_requires_numeric_column_{column}"
+    return None
+
+
 def _rolling_kernel_fallback(
     output: dict[str, object], field_types: dict[str, object], /
 ) -> str | None:
@@ -456,62 +487,64 @@ def _rolling_kernel_fallback(
     if transition is None:
         return f"primitive_{kind}_has_no_typed_transition"
     if kind == "difference":
-        for leaf in _rolling_leaf_outputs(output):
-            fallback = _rolling_kernel_fallback(leaf, field_types)
-            if fallback is not None:
-                return fallback
-        return None
-    columns = (
-        (output.get("left"), output.get("right"))
-        if transition == "pair"
-        else (output.get("input"),)
+        return _first_rolling_fallback(_rolling_leaf_outputs(output), field_types)
+    return _rolling_numeric_fallback(
+        kind, _rolling_input_columns(output, transition), field_types
     )
-    for column in columns:
-        data_type = field_types.get(column) if isinstance(column, str) else None
-        if data_type not in _PRIMITIVE_NUMERIC_TYPES:
-            return f"primitive_{kind}_requires_numeric_column_{column}"
-    return None
 
 
-def _rolling_kernel_line(node: dict[str, object], /) -> str | None:
+def _rolling_spec_outputs(
+    node: dict[str, object], /
+) -> tuple[dict[str, object], tuple[dict[str, object], ...]] | None:
     operator = node.get("operator")
     spec = operator.get("spec") if isinstance(operator, dict) else None
-    outputs = spec.get("outputs") if isinstance(spec, dict) else None
-    if not isinstance(spec, dict) or not isinstance(outputs, list):
+    raw_outputs = spec.get("outputs") if isinstance(spec, dict) else None
+    if not isinstance(spec, dict) or not isinstance(raw_outputs, list):
         return None
-    field_types = {
+    return spec, tuple(output for output in raw_outputs if isinstance(output, dict))
+
+
+def _rolling_field_types(node: dict[str, object], /) -> dict[str, object]:
+    return {
         str(field.get("name")): field.get("data_type")
         for field in _input_schema_fields(node)
     }
-    groups = {
-        key
-        for output in outputs
-        for leaf in _rolling_leaf_outputs(output)
-        if (key := _rolling_group_key(leaf)) is not None
-    }
-    fallback = next(
-        (
-            reason
-            for output in outputs
-            if isinstance(output, dict)
-            if (reason := _rolling_kernel_fallback(output, field_types)) is not None
-        ),
-        None,
+
+
+def _rolling_state_groups(
+    outputs: tuple[dict[str, object], ...], /
+) -> set[tuple[object, ...]]:
+    groups: set[tuple[object, ...]] = set()
+    for output in outputs:
+        for leaf in _rolling_leaf_outputs(output):
+            key = _rolling_group_key(leaf)
+            if key is not None:
+                groups.add(key)
+    return groups
+
+
+def _rolling_order(spec: dict[str, object], /) -> str:
+    values = (
+        spec.get("event_time"),
+        *(spec.get("partition_by") or []),
+        *(spec.get("sequence_by") or []),
     )
+    return ",".join(str(value) for value in values)
+
+
+def _rolling_kernel_line(node: dict[str, object], /) -> str | None:
+    plan = _rolling_spec_outputs(node)
+    if plan is None:
+        return None
+    spec, outputs = plan
+    groups = _rolling_state_groups(outputs)
+    fallback = _first_rolling_fallback(outputs, _rolling_field_types(node))
     selected = "ordered_primitive" if fallback is None and groups else "general"
     complexity = "amortized_constant" if selected == "ordered_primitive" else "general"
-    order = ",".join(
-        str(value)
-        for value in (
-            spec.get("event_time"),
-            *(spec.get("partition_by") or []),
-            *(spec.get("sequence_by") or []),
-        )
-    )
     profile = spec.get("numerical_profile", "stable_v1")
     return (
         f"    rolling kernel {node['id']} selected={selected}"
-        f" profile={profile} complexity={complexity} order={order}"
+        f" profile={profile} complexity={complexity} order={_rolling_order(spec)}"
         f" shared_state_groups={len(groups)} fallback={fallback or 'none'}"
     )
 
