@@ -75,6 +75,25 @@ Only one read-only DataFusion `SELECT` or CTE is accepted. The full version is
 [`examples/02_sql_join.py`](../examples/02_sql_join.py), which mirrors the Rust
 `sql_join.rs` example.
 
+Use the immutable builder method to opt into conservative auto parallelism or
+to select rollback controls:
+
+```python
+builder = PipelineBuilder("parallel-sql").with_datafusion_config(
+    parallelism_mode="auto",
+    max_partitions=16,
+    min_rows_per_partition=65_536,
+    small_rows_threshold=10_001,
+    enable_rolling_rewrite=True,
+    collect_diagnostics=True,
+)
+```
+
+Auto mode requires trusted `calc_flow.datafusion.active_entities` batch
+metadata and otherwise uses p1 without scanning the table. Fixed p1 remains the
+default. See [SQL and DataFusion performance controls](sql-datafusion-performance.md)
+for all fields, telemetry, evidence gates, and rollback steps.
+
 ## Trusted Python scalar UDFs
 
 ```python

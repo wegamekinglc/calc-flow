@@ -227,6 +227,31 @@ fn datafusion_config_accepts_strict_partial_defaults() {
 }
 
 #[test]
+fn datafusion_config_accepts_opt_in_auto_parallelism() {
+    let config = serde_json::from_value::<DataFusionConfig>(json!({
+        "parallelism_mode": "auto",
+        "max_partitions": 16,
+        "min_rows_per_partition": 32_768,
+        "small_rows_threshold": 10_001
+    }))
+    .unwrap();
+
+    assert_eq!(
+        serde_json::to_value(config).unwrap(),
+        json!({
+            "batch_size": 8_192,
+            "target_partitions": 1,
+            "parallelism_mode": "auto",
+            "max_partitions": 16,
+            "min_rows_per_partition": 32_768,
+            "small_rows_threshold": 10_001,
+            "enable_rolling_rewrite": true,
+            "collect_diagnostics": true
+        })
+    );
+}
+
+#[test]
 fn validate_rejects_invalid_constructed_identity_positions_and_limits() {
     let (providers, udfs) = empty_registries();
     let mut value = project(expression_node("node"));
@@ -485,10 +510,12 @@ fn direct_graph_compile_validates_core_datafusion_config() {
         DataFusionConfig {
             batch_size: 0,
             target_partitions: 1,
+            ..DataFusionConfig::default()
         },
         DataFusionConfig {
             batch_size: 8_192,
             target_partitions: 0,
+            ..DataFusionConfig::default()
         },
     ] {
         assert!(matches!(
@@ -669,6 +696,7 @@ fn external_only_projects_ignore_unused_datafusion_configuration() {
     changed.graph.datafusion = DataFusionConfig {
         batch_size: 0,
         target_partitions: 0,
+        ..DataFusionConfig::default()
     };
     let report = validate_project(&changed, &providers, &udfs);
     assert!(report.valid, "{:?}", report.issues);

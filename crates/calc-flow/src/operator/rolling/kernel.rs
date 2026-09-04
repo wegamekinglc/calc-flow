@@ -65,6 +65,7 @@ pub(super) struct RollingKernelPlan {
     order_columns: Vec<usize>,
     partition_columns: Vec<usize>,
     sequence_columns: Vec<usize>,
+    nan_as_value: bool,
     groups: Vec<TypedGroupPlan>,
     outputs: Vec<TypedOutputPlan>,
     fallback_reason: Option<String>,
@@ -383,6 +384,7 @@ impl RollingKernelPlan {
             order_columns,
             partition_columns,
             sequence_columns,
+            nan_as_value: false,
             groups,
             outputs: typed_outputs,
             fallback_reason,
@@ -401,6 +403,14 @@ impl RollingKernelPlan {
 
     pub(super) fn fingerprint(&self) -> &str {
         &self.fingerprint
+    }
+
+    pub(super) fn with_nan_as_value(mut self) -> Self {
+        self.nan_as_value = true;
+        self.fingerprint = hex::encode(Sha256::digest(
+            format!("{}|nan=value", self.fingerprint).as_bytes(),
+        ));
+        self
     }
 
     pub(super) const fn numerical_profile(&self) -> &'static str {
@@ -924,6 +934,7 @@ fn fill_typed_rows(
             entity,
             row_index,
             plan.numerical_profile,
+            plan.nan_as_value,
             node_id,
         )?;
         append_typed_outputs(&plan.outputs, builders, entity, node_id)?;
@@ -937,6 +948,7 @@ fn update_typed_groups(
     entity: &mut TypedEntityState,
     row_index: usize,
     numerical_profile: RollingNumericalProfile,
+    nan_as_value: bool,
     node_id: &str,
 ) -> Result<()> {
     for (state, input) in entity.groups.iter_mut().zip(inputs) {
@@ -945,6 +957,7 @@ fn update_typed_groups(
             input,
             row_index,
             numerical_profile,
+            nan_as_value,
             entity.transition_count,
             node_id,
         )?;
@@ -1461,19 +1474,24 @@ impl TypedWindowState {
         }
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the typed transition keeps row, numerical, and DataFusion NaN policy explicit"
+    )]
     fn update(
         &mut self,
         event_time: i64,
         input: &TypedGroupInput,
         row_index: usize,
         numerical_profile: RollingNumericalProfile,
+        nan_as_value: bool,
         transition_count: u64,
         node_id: &str,
     ) -> Result<()> {
         match (self, input) {
             (Self::Numeric(state), TypedGroupInput::Single(input)) => state.update(
                 event_time,
-                valid_float64(input, row_index),
+                valid_float64(input, row_index, nan_as_value),
                 numerical_profile,
                 transition_count,
                 node_id,
@@ -1494,7 +1512,7 @@ impl TypedWindowState {
             ),
             (Self::Extrema(state), TypedGroupInput::Single(input)) => state.update(
                 event_time,
-                valid_float64(input, row_index).map(ExtremaValue::Float),
+                valid_float64(input, row_index, false).map(ExtremaValue::Float),
                 node_id,
             ),
             (Self::Extrema(state), TypedGroupInput::Signed(input)) => state.update(
@@ -1519,7 +1537,7 @@ impl TypedWindowState {
                 node_id,
             ),
             (Self::Ewma(state), TypedGroupInput::Single(input)) => {
-                state.update(valid_float64(input, row_index), node_id)
+                state.update(valid_float64(input, row_index, false), node_id)
             }
             _ => Err(internal_error(
                 "typed rolling group state does not match its input plan",
@@ -1546,8 +1564,8 @@ impl TypedWindowState {
     }
 }
 
-fn valid_float64(input: &Float64Array, row_index: usize) -> Option<f64> {
-    if input.is_null(row_index) || input.value(row_index).is_nan() {
+fn valid_float64(input: &Float64Array, row_index: usize, nan_as_value: bool) -> Option<f64> {
+    if input.is_null(row_index) || (!nan_as_value && input.value(row_index).is_nan()) {
         None
     } else {
         Some(input.value(row_index))
@@ -1559,7 +1577,7 @@ fn valid_float64_pair(
     right: &Float64Array,
     row_index: usize,
 ) -> Option<(f64, f64)> {
-    valid_float64(left, row_index).zip(valid_float64(right, row_index))
+    valid_float64(left, row_index, false).zip(valid_float64(right, row_index, false))
 }
 
 #[derive(Clone, Debug)]
@@ -1681,6 +1699,12 @@ impl Float64NumericState {
         transition_count: u64,
         node_id: &str,
     ) -> Result<()> {
+        // DataFusion 54's sliding AVG accumulator remains NaN after a NaN has
+        // entered the partition, even after that row leaves a bounded frame.
+        // The compatibility plan preserves that observable behavior.
+        if self.accumulator.nan_count > 0 {
+            return Ok(());
+        }
         if numerical_profile == RollingNumericalProfile::StableV2Preview
             && stable_v2_rebase_due(
                 transition_count,
@@ -2026,6 +2050,10 @@ fn add_float64(accumulator: &mut WindowAccumulator, sample: f64, node_id: &str) 
         .valid_count
         .checked_add(1)
         .ok_or_else(|| operator_error(node_id, "rolling valid sample count overflowed"))?;
+    if sample.is_nan() {
+        accumulator.nan_count = accumulator.nan_count.saturating_add(1);
+        return Ok(());
+    }
     let Some(SumState::Float(total)) = &mut accumulator.sum else {
         return Err(internal_error(
             "typed Float64 rolling group has a non-floating sum state",
@@ -2055,6 +2083,11 @@ fn remove_float64(accumulator: &mut WindowAccumulator, sample: f64) -> Result<()
         .valid_count
         .checked_sub(1)
         .ok_or_else(|| internal_error("rolling removal without a matching add"))?;
+    if sample.is_nan() {
+        // Deliberately sticky for DataFusion 54 AVG compatibility. The normal
+        // rolling API filters NaNs before they can reach this transition.
+        return Ok(());
+    }
     let Some(SumState::Float(total)) = &mut accumulator.sum else {
         return Err(internal_error(
             "typed Float64 rolling group has a non-floating sum state",
@@ -2348,6 +2381,10 @@ impl StableFloat64Fold {
             .valid_count
             .checked_add(1)
             .ok_or_else(|| operator_error(node_id, "rolling valid sample count overflowed"))?;
+        if sample.is_nan() {
+            self.accumulator.nan_count = self.accumulator.nan_count.saturating_add(1);
+            return Ok(());
+        }
         if sample.is_infinite() {
             update_infinity_count(
                 &mut self.accumulator.pos_inf,
@@ -2759,7 +2796,7 @@ fn dispersion_value(
     if divisor == 0 {
         return None;
     }
-    if accumulator.pos_inf > 0 || accumulator.neg_inf > 0 {
+    if accumulator.nan_count > 0 || accumulator.pos_inf > 0 || accumulator.neg_inf > 0 {
         return Some(f64::NAN);
     }
     let variance = accumulator.m2.max(0.0) / divisor as f64;
@@ -2908,6 +2945,9 @@ fn append_sum(builder: &mut Float64Builder, accumulator: &WindowAccumulator) -> 
 }
 
 fn float_mean(accumulator: &WindowAccumulator) -> f64 {
+    if accumulator.nan_count > 0 {
+        return f64::NAN;
+    }
     match (accumulator.pos_inf > 0, accumulator.neg_inf > 0) {
         (true, true) => f64::NAN,
         (true, false) => f64::INFINITY,
@@ -2994,6 +3034,7 @@ mod tests {
             order_columns: vec![0, 1],
             partition_columns: vec![2],
             sequence_columns: vec![1],
+            nan_as_value: false,
             groups,
             outputs,
             fallback_reason: None,

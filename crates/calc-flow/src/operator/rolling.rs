@@ -203,7 +203,8 @@ impl DataFusionRollingKernel {
             sequence_columns.iter().map(|column| column.index).collect(),
             &outputs,
             &groups,
-        );
+        )
+        .with_nan_as_value();
         plan.supports_typed_transition().then_some(Self { plan })
     }
 
@@ -3519,6 +3520,9 @@ struct WindowAccumulator {
     sum: Option<SumState>,
     mean: f64,
     m2: f64,
+    /// Retained IEEE NaN samples. The normal rolling surface filters NaNs,
+    /// while the `DataFusion` compatibility plan counts and propagates them.
+    nan_count: u64,
     pos_inf: u64,
     neg_inf: u64,
     /// Duration frames only: event-time bound (exclusive) whose rows this
@@ -3575,6 +3579,7 @@ impl WindowAccumulator {
             sum,
             mean: 0.0,
             m2: 0.0,
+            nan_count: 0,
             pos_inf: 0,
             neg_inf: 0,
             expired_through: i128::MIN,

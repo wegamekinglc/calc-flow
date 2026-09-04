@@ -288,15 +288,63 @@ class _NodeTiming(TypedDict):
 class _DataFusionMetric(TypedDict):
     query_id: int
     node_id: str | None
+    runtime_acquire_ns: int
+    session_state_create_ns: int
+    input_adapter_ns: int
+    table_register_ns: int
     sql_parse_ns: int
     logical_planning_ns: int
     physical_planning_ns: int
     physical_planning_count: int
     planning_ns: int
     stream_open_ns: int
+    execution_to_first_batch_ns: int
+    execution_remaining_ns: int
     execution_ns: int
     collect_ns: int
+    output_arrow_wrap_ns: int
+    audit_ns: int
+    metrics_traversal_ns: int
+    logical_plan_string_ns: int
+    physical_plan_string_ns: int
+    batch_envelope_ns: int
+    run_result_ns: int
+    physical_metric_count: int
+    output_partition_count: int
+    output_partition_rows: list[int]
+    window_partition_count: int
+    window_partition_rows: list[int]
+    spill_bytes: int
+    elapsed_compute_ns: int
+    window_compute_ns: int
+    repartition_sort_compute_ns: int
+    window_operator_count: int
+    repartition_operator_count: int
+    sort_operator_count: int
+    coalesce_operator_count: int
     output_rows: int
+    configured_batch_size: int
+    parallelism_mode: Literal["fixed", "auto"]
+    configured_target_partitions: int
+    requested_target_partitions: int
+    effective_target_partitions: int
+    available_parallelism: int
+    max_partitions: int
+    min_rows_per_partition: int
+    small_rows_threshold: int
+    parallelism_decision_reused: bool
+    decision_input_rows: int
+    decision_active_entities: int | None
+    decision_active_entities_source: str
+    input_rows: int
+    active_entities: int | None
+    active_entities_source: str
+    partition_limit_reason: str
+    rolling_rewrite_enabled: bool
+    diagnostics_collected: bool
+    rolling_candidate_windows: int
+    rolling_rewritten_windows: int
+    rolling_fallback_reasons: list[str]
     logical_plan: str
     physical_plan: str
 

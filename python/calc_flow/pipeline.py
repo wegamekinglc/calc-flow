@@ -840,6 +840,57 @@ class PipelineBuilder:
     def project(self) -> dict[str, Any]:
         return json.loads(self._project_json)
 
+    def with_datafusion_config(
+        self,
+        *,
+        batch_size: int = 8_192,
+        target_partitions: int = 1,
+        parallelism_mode: Literal["fixed", "auto"] = "fixed",
+        max_partitions: int = 32,
+        min_rows_per_partition: int = 65_536,
+        small_rows_threshold: int = 10_001,
+        enable_rolling_rewrite: bool = True,
+        collect_diagnostics: bool = True,
+    ) -> PipelineBuilder:
+        """Return a builder with an immutable run-scoped DataFusion policy.
+
+        ``auto`` is opt-in. It uses trusted
+        ``calc_flow.datafusion.active_entities`` batch metadata and safely
+        falls back to one partition when that statistic is absent or invalid.
+        """
+        integers = {
+            "batch_size": batch_size,
+            "target_partitions": target_partitions,
+            "max_partitions": max_partitions,
+            "min_rows_per_partition": min_rows_per_partition,
+            "small_rows_threshold": small_rows_threshold,
+        }
+        for field_name, value in integers.items():
+            if type(value) is not int:
+                raise TypeError(f"{field_name} must be a positive integer")
+            if value <= 0:
+                raise ValueError(f"{field_name} must be a positive integer")
+        if type(parallelism_mode) is not str:
+            raise TypeError("parallelism_mode must be fixed or auto")
+        if parallelism_mode not in {"fixed", "auto"}:
+            raise ValueError("parallelism_mode must be fixed or auto")
+        for field_name, value in {
+            "enable_rolling_rewrite": enable_rolling_rewrite,
+            "collect_diagnostics": collect_diagnostics,
+        }.items():
+            if type(value) is not bool:
+                raise TypeError(f"{field_name} must be an exact bool")
+
+        def update(project: dict[str, Any]) -> None:
+            project["graph"]["datafusion"] = {
+                **integers,
+                "parallelism_mode": parallelism_mode,
+                "enable_rolling_rewrite": enable_rolling_rewrite,
+                "collect_diagnostics": collect_diagnostics,
+            }
+
+        return self._from_json(_updated_project(self._project_json, update))
+
     def expression(
         self,
         name: str,

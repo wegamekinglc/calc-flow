@@ -33,6 +33,8 @@ below.
   matrices, capability failures, Studio inspection, and performance output
 - **[Rust API guide](rust-api.md)** — native batches, operators, graph
   compiler, UDF/provider registries, and recovery, with paired examples
+- **[SQL and DataFusion performance](sql-datafusion-performance.md)** — fixed
+  and auto parallelism, telemetry, evidence gates, canary, and rollback
 - **[API reference](api-reference.md)** — the supported surfaces at a glance:
   Rust exports, Python members, and the Studio HTTP API
 - **[Python release guide](python-release.md)** — local packaging rehearsal,

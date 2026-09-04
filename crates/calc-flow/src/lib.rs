@@ -73,7 +73,10 @@ pub use continuous::{
     StreamSink, StreamSource, StreamingError, StreamingErrorCategory, StreamingFailureReason,
     StreamingJob, StreamingRunner, TerminalCause, TransactionalStreamSink, WatermarkPolicy,
 };
-pub use datafusion::{DataFusionConfig, DataFusionQueryMetric, DataFusionRuntime};
+pub use datafusion::{
+    DATAFUSION_ACTIVE_ENTITIES_METADATA_KEY, DataFusionConfig, DataFusionParallelismMode,
+    DataFusionQueryMetric, DataFusionRuntime,
+};
 pub use error::{CalcFlowError, Result};
 pub use json::{JsonMap, MAX_JSON_DEPTH, canonical_json};
 pub use operator::{

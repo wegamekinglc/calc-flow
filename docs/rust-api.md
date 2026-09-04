@@ -95,6 +95,12 @@ through `ProviderRegistry` and lifecycle-specific factories, covered below.
 `None` means the plan is external-only and owns no table resources, so its runs
 create no DataFusion session or UDF snapshot.
 `BatchExecutionPlan::requires_datafusion()` returns the classification alone.
+`DataFusionConfig` keeps `parallelism_mode=Fixed` and
+`target_partitions=1` as its compatible default. Opt-in `Auto` uses row count,
+host capacity, and the trusted `calc_flow.datafusion.active_entities` batch
+metadata value without scanning input. See
+[SQL and DataFusion performance controls](sql-datafusion-performance.md) for
+the complete configuration, telemetry, benchmark, and rollback contract.
 
 ## SQL operators
 
@@ -115,9 +121,10 @@ the same typed `RollingKernelPlan` transition as `RollingOperator`. Filters,
 `RANGE`/`GROUPS`, future or unbounded frames, other aggregates and unsupported
 types remain on DataFusion's standard window executor. `DataFusionQueryMetric`
 reports the candidate/rewrite counts, stable fallback reasons, configured and
-effective partition counts, and the physical plan. Configured parallelism is
-adapted downward below 65,536 input rows per useful partition so small queries
-stay single-partition; it is never increased above `target_partitions`.
+effective partition counts, and the physical plan. Fixed parallelism is
+adapted downward below 65,536 input rows per useful partition and is never
+increased above `target_partitions`. Auto mode is bounded by
+`max_partitions`, work rows, and trusted active-entity statistics.
 
 ```rust
 use std::{collections::BTreeMap, sync::Arc};

@@ -1,6 +1,6 @@
 # Calc Flow SQL 与原生 DataFusion 性能提升实施计划
 
-> **状态：** 提议，待按里程碑执行
+> **状态：** 已实施（2026-09-04）；证据门控项按下述 Go/No-Go 结论处理
 >
 > **关联工作：** DAL-184；基准与实现证据来自
 > [calc-flow PR #236](https://github.com/wegamekinglc/calc-flow/pull/236)，证据快照为
@@ -398,6 +398,26 @@ P4 与 P2/P3 可以并行。P5、P6、P7 必须分别满足 P4 的证据门槛�
 
 未达到长期 `<= 1.10x` 不阻塞已经验证的 P1/P2 并行收益发布，但必须保留剩余差距
 任务，且不得宣称 Calc Flow 与原生 DataFusion 已经等速。
+
+## 2026-09-04 实施收口
+
+本计划的生产代码、证据合同和自动化已实施。性能数字仍由绑定具体 SHA、机器和依赖指纹的
+报告决定；仓库不提交本机诊断样本，也不把 hosted runner 的单次结果写成发布承诺。
+
+| 阶段 | 实施状态 | 当前决策 |
+| ---- | -------- | -------- |
+| P0   | 同二进制 AB/BA benchmark、严格 JSON schema 和 fail-closed verifier 已落地 | Go；正式结论仍要求 20 对样本和独立重复 |
+| P1   | 显式 fixed pN、effective partition/原因/资源 telemetry 和 p1 回退已落地 | Go；nightly 持续执行绝对延迟、ratio 和 RSS 门槛 |
+| P2   | `fixed \| auto`、三个调节参数、可信实体统计和无扫描降级已落地 | Go（仅 opt-in）；默认仍为 fixed p1 |
+| P3   | 完整筛选矩阵、Pareto 选择和候选双 20 对复测已进入 weekly | Auto 默认值 No-Go，直到完整矩阵和连续基线通过 |
+| P4   | phase、算子级 compute/count 和同二进制归因器已落地 | 少于 90% 可解释差距时 fail closed |
+| P5   | 未引入新的 partitioned `Batch` 公共语义或 DAG 物化路径 | No-Go；只有出现 Calc Flow 独有重复 shuffle/merge 且达到 20% 才重开 |
+| P6   | 受限 AVG/ROWS rewrite、独立关闭开关、fallback audit 和边界语义矩阵已落地 | Go；整体查询仍为 `O(N)`，不宣称全历史 `O(1)` |
+| P7   | run 内 SessionContext 复用沿用现有隔离；诊断收集可关闭 | 跨 run cache No-Go；未证明 5% 收益，不扩大污染面 |
+| M5   | PR smoke、nightly、weekly、配置/监控/灰度/回滚文档已落地 | 灰度推进继续受两次 nightly 和全局护栏约束 |
+
+运行命令、字段解释、canary 和回滚步骤见
+[`docs/sql-datafusion-performance.md`](../../sql-datafusion-performance.md)。
 
 ## RACI
 

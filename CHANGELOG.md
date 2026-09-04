@@ -5,6 +5,17 @@ engine or Studio capabilities.
 
 ## 2026-09
 
+- 2026-09-04: Add reproducible SQL-versus-DataFusion performance controls and
+  evidence gates. Project-v3 and the immutable Python builder now expose
+  compatible fixed parallelism plus opt-in conservative auto partitioning,
+  trusted active-entity metadata, explicit decision telemetry, phase and
+  physical-operator metrics, and rollback switches for bounded AVG rewrites
+  and diagnostic collection. A same-binary AB/BA benchmark, strict JSON
+  contract, P1 verifier, P3 Pareto matrix, P4 attribution gate, nightly and
+  weekly workflows, and DataFusion boundary semantics tests cover the release
+  path. Auto remains opt-in; cross-run caches and partition-preserving DAG
+  envelopes remain evidence-gated No-Go directions.
+
 - 2026-09-02: Add symbolic relational stream-join DAGs and explicit post-join
   ordering (SCE-18). Independent and nested bounded joins, unrelated outputs,
   and ordered post-join rolling/cross-section stages now lower to one existing

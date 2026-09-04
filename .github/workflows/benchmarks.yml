@@ -2,6 +2,7 @@ name: Benchmarks
 on:
   schedule:
     - cron: "17 3 * * *"
+    - cron: "41 4 * * 0"
   workflow_dispatch:
 permissions:
   contents: read
@@ -9,6 +10,113 @@ concurrency:
   group: benchmarks-${{ github.ref }}
   cancel-in-progress: false
 jobs:
+  sql-datafusion-nightly:
+    name: SQL and raw DataFusion paired evidence
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '17 3 * * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+      - name: Build paired benchmark binary
+        run: cargo bench --locked -p calc-flow --bench sql_datafusion_performance --no-run
+      - name: Run two independent paired baselines
+        run: |
+          mkdir -p benchmark-results/sql-datafusion
+          for repeat in first second; do
+            for profile in serial-control matched-adaptive p32-saturation attribution; do
+              cargo bench --locked -p calc-flow --bench sql_datafusion_performance -- \
+                --profile "$profile" \
+                --samples 20 \
+                --warmups 1 \
+                --output "benchmark-results/sql-datafusion/${profile}-${repeat}.json"
+            done
+          done
+      - name: Validate comparability, stability, and P1 targets
+        run: |
+          for profile in serial-control matched-adaptive p32-saturation attribution; do
+            python scripts/verify_sql_datafusion_performance.py \
+              "benchmark-results/sql-datafusion/${profile}-first.json" \
+              --repeat "benchmark-results/sql-datafusion/${profile}-second.json" \
+              --minimum-samples 20 \
+              --require-stable
+          done
+          python scripts/verify_sql_datafusion_performance.py \
+            benchmark-results/sql-datafusion/matched-adaptive-first.json \
+            --repeat benchmark-results/sql-datafusion/matched-adaptive-second.json \
+            --serial-control benchmark-results/sql-datafusion/serial-control-first.json \
+            --minimum-samples 20 \
+            --require-stable \
+            --require-p1
+          python scripts/analyze_sql_datafusion_attribution.py \
+            benchmark-results/sql-datafusion/attribution-first.json \
+            --output benchmark-results/sql-datafusion/attribution-analysis.json
+      - name: Upload SQL/DataFusion reports
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: benchmark-sql-datafusion-${{ github.run_id }}
+          path: benchmark-results/sql-datafusion/*.json
+          if-no-files-found: error
+          retention-days: 90
+  sql-datafusion-weekly-matrix:
+    name: SQL/DataFusion adaptive tuning matrix
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '41 4 * * 0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+      - name: Build matrix benchmark binary
+        run: cargo bench --locked -p calc-flow --bench sql_datafusion_performance --no-run
+      - name: Run five-pair screening matrix
+        run: |
+          BENCH_BINARY="$(find target/release/deps -maxdepth 1 -type f \
+            -name 'sql_datafusion_performance-*' -perm -111 | head -n 1)"
+          test -n "$BENCH_BINARY"
+          python scripts/run_sql_datafusion_matrix.py screen \
+            --bench-binary "$BENCH_BINARY" \
+            --output-dir benchmark-results/sql-datafusion/matrix/screening
+      - name: Select the latency and RSS Pareto frontier
+        run: |
+          python scripts/run_sql_datafusion_matrix.py summarize \
+            benchmark-results/sql-datafusion/matrix/screening/*.json \
+            --output benchmark-results/sql-datafusion/matrix/pareto.json
+      - name: Run two twenty-pair candidate baselines
+        run: |
+          BENCH_BINARY="$(find target/release/deps -maxdepth 1 -type f \
+            -name 'sql_datafusion_performance-*' -perm -111 | head -n 1)"
+          python scripts/run_sql_datafusion_matrix.py rerun \
+            --bench-binary "$BENCH_BINARY" \
+            --manifest benchmark-results/sql-datafusion/matrix/pareto.json \
+            --output-dir benchmark-results/sql-datafusion/matrix/candidates
+          for FIRST in benchmark-results/sql-datafusion/matrix/candidates/*-first.json; do
+            SECOND="${FIRST%-first.json}-second.json"
+            python scripts/verify_sql_datafusion_performance.py "$FIRST" \
+              --repeat "$SECOND" --minimum-samples 20 --require-stable
+          done
+      - name: Upload SQL/DataFusion matrix reports
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: benchmark-sql-datafusion-matrix-${{ github.run_id }}
+          path: benchmark-results/sql-datafusion/matrix
+          if-no-files-found: error
+          retention-days: 90
   rust-benchmark:
     name: Informational Rust core benchmarks
     runs-on: ubuntu-latest
