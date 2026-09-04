@@ -329,6 +329,7 @@ const hasExactMatrixPorts = (node: NodeConfig): boolean => {
   if (node.input_ports.length !== 2 || node.output_ports.length !== 1) return false;
   const [tableInput, weightsInput] = node.input_ports;
   const [tableOutput] = node.output_ports;
+  if (!tableInput || !weightsInput || !tableOutput) return false;
   return isExactPort(tableInput, 'input', 'table')
     && isExactPort(weightsInput, 'weights', 'array')
     && isExactPort(tableOutput, 'output', 'table');
@@ -384,6 +385,7 @@ const hasExactStaticWeights = (
 ): boolean => {
   if (staticInputs.length !== 1) return false;
   const [input] = staticInputs;
+  if (!input) return false;
   return hasStaticWeightIdentity(input, backend)
     && hasStaticWeightShape(input, columns, names);
 };

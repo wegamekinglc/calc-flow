@@ -281,6 +281,9 @@ export default function App() {
 
   useEffect(() => {
     const controller = new AbortController();
+    // Read the flag through a helper: narrowing of signal.aborted must not
+    // carry across the awaits, where cleanup may abort the controller.
+    const aborted = (): boolean => controller.signal.aborted;
     const initialize = async () => {
       try {
         const [loadedCatalog, loadedCapabilities, loadedProjects] = await Promise.all([
@@ -288,13 +291,14 @@ export default function App() {
           api.capabilities(),
           api.projects(),
         ]);
-        if (controller.signal.aborted) return;
+        if (aborted()) return;
         setCatalog(loadedCatalog);
         setCapabilities(loadedCapabilities);
         setProjects(loadedProjects);
-        if (loadedProjects.length) {
-          const loaded = await api.project(loadedProjects[0].id);
-          if (controller.signal.aborted) return;
+        const [firstProject] = loadedProjects;
+        if (firstProject) {
+          const loaded = await api.project(firstProject.id);
+          if (aborted()) return;
           replaceEditableProject(loaded, true);
         }
       } catch (error) {
@@ -741,7 +745,8 @@ export default function App() {
     try {
       await api.deleteProject(project.id);
       const remaining = await refreshProjects();
-      if (remaining.length) await loadProject(remaining[0].id);
+      const [nextProject] = remaining;
+      if (nextProject) await loadProject(nextProject.id);
       else newProject();
       setMessage('Project deleted');
     } catch (error) {

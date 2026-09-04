@@ -102,7 +102,7 @@ export function NodeInspector({
     || ![...node.input_ports, ...node.output_ports].some((port) => port.kind === 'array');
   const matchingUdfs =
     node.operator.kind === 'expression' || node.operator.kind === 'sql'
-      ? udfs.filter((entry) => entry.kind === 'data_fusion_scalar')
+      ? udfs
       : [];
   const streamJoin = node.operator.kind === 'stream_join' ? node.operator : null;
 

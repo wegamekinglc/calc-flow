@@ -132,7 +132,6 @@ const providerOptionsAt = (value: unknown, path: string): void => {
 };
 
 const capabilityLifecycleAt = (
-  value: Record<string, unknown>,
   path: string,
   fields: {
     modes: unknown;
@@ -297,7 +296,7 @@ const runtimeCapabilitiesAt = (value: unknown, path: string): void => {
     arrayAt(operator.outputPorts, `${itemPath}.outputPorts`)
       .forEach((port, portIndex) => providerPortAt(port, `${itemPath}.outputPorts[${portIndex}]`));
     booleanAt(operator.requiresDatafusion, `${itemPath}.requiresDatafusion`);
-    capabilityLifecycleAt(operator, itemPath, {
+    capabilityLifecycleAt(itemPath, {
       modes: operator.modes,
       finality: operator.finality,
       stateful: operator.stateful,
@@ -368,7 +367,7 @@ const runtimeCapabilitiesAt = (value: unknown, path: string): void => {
     arrayAt(provider.outputPorts, `${itemPath}.outputPorts`)
       .forEach((port, portIndex) => providerPortAt(port, `${itemPath}.outputPorts[${portIndex}]`));
     providerOptionsAt(provider.optionsSchema, `${itemPath}.optionsSchema`);
-    capabilityLifecycleAt(provider, itemPath, {
+    capabilityLifecycleAt(itemPath, {
       modes: provider.modes,
       finality: provider.finality,
       stateful: provider.stateful,
@@ -552,120 +551,6 @@ export const decodeValidationReport = (value: unknown): ValidationReport => {
   return value as ValidationReport;
 };
 
-const rowCountsAt = (value: unknown, path: string): void => {
-  const counts = objectAt(value, path);
-  Object.entries(counts).forEach(([key, count]) => integerAt(count, `${path}.${key}`));
-};
-
-const resultAt = (value: unknown, path: string): void => {
-  const result = objectAt(value, path);
-  exactKeys(result, ['outputs', 'node_timings', 'datafusion_metrics', 'metadata'], path);
-  const outputs = objectAt(result.outputs, `${path}.outputs`);
-  Object.entries(outputs).forEach(([name, rawOutput]) => {
-    const itemPath = `${path}.outputs.${name}`;
-    const output = objectAt(rawOutput, itemPath);
-    const kind = output.kind;
-    if (kind !== 'table' && kind !== 'array') {
-      throw new ApiContractError(
-        `run result output '${name}' has unsupported kind '${String(kind)}'; `
-        + "expected 'table' or 'array'",
-      );
-    }
-    if (kind === 'table') {
-      exactKeys(
-        output,
-        ['kind', 'total_rows', 'truncated', 'schema', 'rows', 'metadata'],
-        itemPath,
-      );
-      arrayAt(output.schema, `${itemPath}.schema`).forEach((field, index) => {
-        const fieldPath = `${itemPath}.schema[${index}]`;
-        const decoded = objectAt(field, fieldPath);
-        exactKeys(decoded, ['name', 'type', 'nullable'], fieldPath);
-        stringAt(decoded.name, `${fieldPath}.name`);
-        stringAt(decoded.type, `${fieldPath}.type`);
-        booleanAt(decoded.nullable, `${fieldPath}.nullable`);
-      });
-      arrayAt(output.rows, `${itemPath}.rows`).forEach((row, index) => {
-        const decoded = objectAt(row, `${itemPath}.rows[${index}]`);
-        Object.entries(decoded).forEach(([key, item]) => {
-          jsonAt(item, `${itemPath}.rows[${index}].${key}`);
-        });
-      });
-    } else {
-      exactKeys(
-        output,
-        ['kind', 'backend', 'total_rows', 'truncated', 'data', 'metadata'],
-        itemPath,
-      );
-      stringAt(output.backend, `${itemPath}.backend`);
-      jsonAt(output.data, `${itemPath}.data`);
-    }
-    integerAt(output.total_rows, `${itemPath}.total_rows`);
-    booleanAt(output.truncated, `${itemPath}.truncated`);
-    const metadata = objectAt(output.metadata, `${itemPath}.metadata`);
-    Object.entries(metadata).forEach(([key, item]) => {
-      jsonAt(item, `${itemPath}.metadata.${key}`);
-    });
-  });
-  const timings = objectAt(result.node_timings, `${path}.node_timings`);
-  Object.entries(timings).forEach(([name, rawTiming]) => {
-    const itemPath = `${path}.node_timings.${name}`;
-    const timing = objectAt(rawTiming, itemPath);
-    exactKeys(timing, ['duration_ns', 'input_rows', 'output_rows'], itemPath);
-    integerAt(timing.duration_ns, `${itemPath}.duration_ns`);
-    rowCountsAt(timing.input_rows, `${itemPath}.input_rows`);
-    rowCountsAt(timing.output_rows, `${itemPath}.output_rows`);
-  });
-  arrayAt(result.datafusion_metrics, `${path}.datafusion_metrics`)
-    .forEach((rawMetric, index) => {
-      const itemPath = `${path}.datafusion_metrics[${index}]`;
-      const metric = objectAt(rawMetric, itemPath);
-      exactKeys(metric, [
-        'query_id',
-        'node_id',
-        'sql_parse_ns',
-        'logical_planning_ns',
-        'physical_planning_ns',
-        'physical_planning_count',
-        'planning_ns',
-        'stream_open_ns',
-        'execution_ns',
-        'collect_ns',
-        'output_rows',
-        'configured_target_partitions',
-        'effective_target_partitions',
-        'rolling_candidate_windows',
-        'rolling_rewritten_windows',
-        'rolling_fallback_reasons',
-        'logical_plan',
-        'physical_plan',
-      ], itemPath);
-      integerAt(metric.query_id, `${itemPath}.query_id`);
-      if (metric.node_id !== null) stringAt(metric.node_id, `${itemPath}.node_id`);
-      integerAt(metric.sql_parse_ns, `${itemPath}.sql_parse_ns`);
-      integerAt(metric.logical_planning_ns, `${itemPath}.logical_planning_ns`);
-      integerAt(metric.physical_planning_ns, `${itemPath}.physical_planning_ns`);
-      integerAt(metric.physical_planning_count, `${itemPath}.physical_planning_count`);
-      integerAt(metric.planning_ns, `${itemPath}.planning_ns`);
-      integerAt(metric.stream_open_ns, `${itemPath}.stream_open_ns`);
-      integerAt(metric.execution_ns, `${itemPath}.execution_ns`);
-      integerAt(metric.collect_ns, `${itemPath}.collect_ns`);
-      integerAt(metric.output_rows, `${itemPath}.output_rows`);
-      integerAt(metric.configured_target_partitions, `${itemPath}.configured_target_partitions`);
-      integerAt(metric.effective_target_partitions, `${itemPath}.effective_target_partitions`);
-      integerAt(metric.rolling_candidate_windows, `${itemPath}.rolling_candidate_windows`);
-      integerAt(metric.rolling_rewritten_windows, `${itemPath}.rolling_rewritten_windows`);
-      arrayAt(metric.rolling_fallback_reasons, `${itemPath}.rolling_fallback_reasons`)
-        .forEach((reason, reasonIndex) => stringAt(
-          reason,
-          `${itemPath}.rolling_fallback_reasons[${reasonIndex}]`,
-        ));
-      stringAt(metric.logical_plan, `${itemPath}.logical_plan`);
-      stringAt(metric.physical_plan, `${itemPath}.physical_plan`);
-    });
-  const metadata = objectAt(result.metadata, `${path}.metadata`);
-  Object.entries(metadata).forEach(([key, item]) => jsonAt(item, `${path}.metadata.${key}`));
-};
 
 const nullableStringAt = (value: unknown, path: string): void => {
   if (value !== null) stringAt(value, path);

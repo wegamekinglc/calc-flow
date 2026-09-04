@@ -71,6 +71,7 @@ export function DataSourceEditor({
 
   useEffect(() => {
     if (activeEditor && !drafts.some((draft) => draft.key === activeEditor.key)) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- external draft removal closes the dialog
       setActiveEditor(null);
     }
   }, [activeEditor, drafts]);

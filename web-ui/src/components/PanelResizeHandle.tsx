@@ -66,18 +66,21 @@ export function PanelResizeHandle({
           startX: event.clientX,
           startValue: value,
         };
+        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- jsdom lacks pointer capture
         event.currentTarget.setPointerCapture?.(event.pointerId);
       }}
       onPointerMove={(event) => {
-        if (!drag.current || drag.current.pointerId !== event.pointerId) return;
-        const physicalDelta = event.clientX - drag.current.startX;
+        if (drag.current?.pointerId !== event.pointerId) return;
+        const physicalDelta = event.clientX - drag.current!.startX;
         const valueDelta = grow === 'start' ? physicalDelta : -physicalDelta;
         emit(drag.current.startValue + valueDelta);
       }}
       onPointerUp={(event) => {
-        if (!drag.current || drag.current.pointerId !== event.pointerId) return;
+        if (drag.current?.pointerId !== event.pointerId) return;
         drag.current = null;
+        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- jsdom lacks pointer capture
         if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+          // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- jsdom lacks pointer capture
           event.currentTarget.releasePointerCapture?.(event.pointerId);
         }
       }}

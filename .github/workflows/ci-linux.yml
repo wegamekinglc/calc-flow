@@ -264,6 +264,8 @@ jobs:
           cache-dependency-path: web-ui/package-lock.json
       - name: Install dependencies
         run: npm ci
+      - name: Lint studio frontend
+        run: npm run lint
       - name: Build studio
         run: npm run build
       - name: Run frontend tests

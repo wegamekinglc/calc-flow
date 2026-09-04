@@ -183,6 +183,7 @@ export const useElementWidth = <T extends HTMLElement>() => {
 
   useEffect(() => {
     if (element === null) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- DOM measurement is effect-owned
       setWidth(0);
       return undefined;
     }

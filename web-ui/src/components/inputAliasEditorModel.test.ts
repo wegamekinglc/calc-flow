@@ -75,10 +75,10 @@ describe('SQL input aliases', () => {
       nextAlias: 'rhs',
     });
 
-    expect(updated.graph.nodes[0].operator).toMatchObject({
+    expect(updated.graph.nodes[0]!.operator).toMatchObject({
       aliases: ['left', 'rhs'],
     });
-    expect(updated.graph.nodes[0].input_ports[1]).toEqual({
+    expect(updated.graph.nodes[0]!.input_ports[1]!).toEqual({
       name: 'rhs',
       kind: 'table',
       required: true,
@@ -86,8 +86,8 @@ describe('SQL input aliases', () => {
     });
     expect(updated.graph.edges.map((edge) => edge.target_port))
       .toEqual(['left', 'rhs']);
-    expect(project.graph.nodes[0].input_ports[1].name).toBe('right');
-    expect(project.graph.edges[1].target_port).toBe('right');
+    expect(project.graph.nodes[0]!.input_ports[1]!.name).toBe('right');
+    expect(project.graph.edges[1]!.target_port).toBe('right');
   });
 
   it('removes only the selected alias, port, and incoming edge', () => {
@@ -97,8 +97,8 @@ describe('SQL input aliases', () => {
       alias: 'right',
     });
 
-    expect(updated.graph.nodes[0].operator).toMatchObject({ aliases: ['left'] });
-    expect(updated.graph.nodes[0].input_ports.map((port) => port.name))
+    expect(updated.graph.nodes[0]!.operator).toMatchObject({ aliases: ['left'] });
+    expect(updated.graph.nodes[0]!.input_ports.map((port) => port.name))
       .toEqual(['left']);
     expect(updated.graph.edges.map((edge) => edge.target_port)).toEqual(['left']);
   });
@@ -114,10 +114,10 @@ describe('SQL input aliases', () => {
     };
     const updated = editSqlInputAliases(derived, 'join', { type: 'add' });
 
-    expect(updated.graph.nodes[0].operator).toMatchObject({
+    expect(updated.graph.nodes[0]!.operator).toMatchObject({
       aliases: ['left', 'right', 'input'],
     });
-    expect(updated.graph.nodes[0].input_ports).toEqual([]);
+    expect(updated.graph.nodes[0]!.input_ports).toEqual([]);
   });
 
   it('rejects an invalid rename without cloning the project', () => {

@@ -5,7 +5,6 @@ type GeneratedProjectDocument = components['schemas']['ProjectDocument'];
 
 export type ProjectCreateRequest = Omit<GeneratedProjectCreateRequest, '$defs'>;
 export type ProjectDocument = Omit<GeneratedProjectDocument, '$defs'>;
-export type ProjectConfig = ProjectDocument;
 export type EditableProject = ProjectDocument;
 export type DataSourceSpec = GeneratedProjectDocument['$defs']['DataSourceSpec'];
 export type ProjectSummary = components['schemas']['ProjectSummary'];
@@ -124,20 +123,4 @@ export const blankProject = (): ProjectCreateRequest => ({
   sources: [],
   sinks: [],
   state: { root: '.calc-flow-state', retention: 3 },
-});
-
-export const updateNodeOperator = (
-  project: EditableProject,
-  nodeId: string,
-  update: (operator: OperatorSpec) => OperatorSpec,
-): EditableProject => ({
-  ...project,
-  graph: {
-    ...project.graph,
-    nodes: project.graph.nodes.map((node) =>
-      node.id === nodeId
-        ? { ...node, operator: update(node.operator) }
-        : node,
-    ),
-  },
 });

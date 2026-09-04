@@ -29,6 +29,7 @@ function InputAliasRow({
   const errorId = `input-alias-${index + 1}-error`;
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- resets the local edit when the committed alias changes
     setDraft(alias);
     setError(null);
   }, [alias]);

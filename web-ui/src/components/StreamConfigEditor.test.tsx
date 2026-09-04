@@ -39,7 +39,7 @@ describe('StreamConfigEditor', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Stream' }));
 
     expect(onChange).toHaveBeenCalledOnce();
-    expect(onChange.mock.calls[0][0]).toMatchObject({
+    expect(onChange.mock.calls[0]![0]).toMatchObject({
       runtime: {
         mode: 'stream',
         options: { checkpoint_interval_ms: 30_000 },
@@ -93,7 +93,7 @@ describe('StreamConfigEditor', () => {
     fireEvent.change(screen.getByLabelText('Checkpoint interval (ms)'), {
       target: { value: '5000' },
     });
-    expect(onChange.mock.calls[0][0].runtime.options.checkpoint_interval_ms).toBe(5000);
+    expect(onChange.mock.calls[0]![0].runtime.options.checkpoint_interval_ms).toBe(5000);
 
     fireEvent.change(screen.getByLabelText('Options'), {
       target: { value: '{bad' },

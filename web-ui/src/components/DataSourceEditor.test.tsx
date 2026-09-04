@@ -94,7 +94,7 @@ describe('DataSourceEditor', () => {
         {...initialProps}
         drafts={[
           { key: 'left-key', dataText: '[{"value":7}]', error: null },
-          initialProps.drafts[1],
+          initialProps.drafts[1]!,
         ]}
       />,
     );

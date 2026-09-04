@@ -14,10 +14,10 @@ type Materialization =
   | { readonly ok: false; readonly message: string; readonly drafts: DataSourceDraft[] };
 
 const sourceDataText = (source: DataSourceSpec): string => {
-  if (source.format === 'inline_json') return JSON.stringify(source.data, null, 2) ?? '';
+  if (source.format === 'inline_json') return JSON.stringify(source.data, null, 2);
   return typeof source.data === 'string'
     ? source.data
-    : JSON.stringify(source.data, null, 2) ?? '';
+    : JSON.stringify(source.data, null, 2);
 };
 
 export const createDataSourceDrafts = (
@@ -61,7 +61,7 @@ export const materializeDataSources = (
   }));
   const first = invalid.values().next().value as number | undefined;
   if (first !== undefined) {
-    const label = sources[first]?.id || `#${first + 1}`;
+    const label = sources[first]?.id ?? `#${first + 1}`;
     return {
       ok: false,
       message: `Data source ${label} contains invalid inline JSON`,

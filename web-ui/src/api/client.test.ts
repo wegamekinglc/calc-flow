@@ -180,7 +180,7 @@ describe('API client', () => {
       'POST',
       'POST',
     ]);
-    expect(JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body))).toEqual({
+    expect(JSON.parse(String((fetchMock.mock.calls[0]![1] as RequestInit).body))).toEqual({
       project_id: 'project-1',
     });
   });
@@ -194,8 +194,8 @@ describe('API client', () => {
 
     await api.createProject(created);
 
-    const init = fetchMock.mock.calls[0][1] as RequestInit;
-    expect(fetchMock.mock.calls[0][0]).toBe('/api/v3/projects');
+    const init = fetchMock.mock.calls[0]![1] as RequestInit;
+    expect(fetchMock.mock.calls[0]![0]).toBe('/api/v3/projects');
     expect(init.method).toBe('POST');
     expect(JSON.parse(String(init.body))).toEqual(created);
   });

@@ -72,7 +72,7 @@ describe('useJobEvents', () => {
     renderHook(() => {
       useJobEvents('job-1', onUpdate, onEvent, onError);
     });
-    const source = FakeEventSource.instances[0];
+    const source = FakeEventSource.instances[0]!;
     const progress = {
       sequence: 2,
       timestamp: '2026-01-01T00:00:02Z',
@@ -101,7 +101,7 @@ describe('useJobEvents', () => {
     renderHook(() => {
       useJobEvents('job-1', onUpdate, vi.fn(), vi.fn());
     });
-    const source = FakeEventSource.instances[0];
+    const source = FakeEventSource.instances[0]!;
     act(() => {
       source.emit('terminal');
     });
@@ -121,13 +121,13 @@ describe('useJobEvents', () => {
     renderHook(() => {
       useJobEvents('job-1', onUpdate, vi.fn(), onError);
     });
-    const source = FakeEventSource.instances[0];
+    const source = FakeEventSource.instances[0]!;
     act(() => {
       source.emit('state');
     });
 
     await waitFor(() => expect(onError).toHaveBeenCalledOnce());
-    expect(onError.mock.calls[0][0]).toBeInstanceOf(ApiContractError);
+    expect(onError.mock.calls[0]![0]).toBeInstanceOf(ApiContractError);
     expect(onUpdate).not.toHaveBeenCalled();
     expect(source.close).toHaveBeenCalledOnce();
   });
@@ -146,7 +146,7 @@ describe('useJobEvents', () => {
     renderHook(() => {
       useJobEvents('job-1', onUpdate, vi.fn(), vi.fn());
     });
-    const source = FakeEventSource.instances[0];
+    const source = FakeEventSource.instances[0]!;
     act(() => {
       source.emit('progress');
       source.emit('terminal');
@@ -154,11 +154,11 @@ describe('useJobEvents', () => {
     await waitFor(() => expect(requests).toHaveLength(2));
 
     await act(async () => {
-      requests[1](new Response(JSON.stringify(job('completed'))));
+      requests[1]!(new Response(JSON.stringify(job('completed'))));
       await Promise.resolve();
     });
     await act(async () => {
-      requests[0](new Response(JSON.stringify(job('running'))));
+      requests[0]!(new Response(JSON.stringify(job('running'))));
       await Promise.resolve();
     });
 
@@ -175,7 +175,7 @@ describe('useJobEvents', () => {
     renderHook(() => {
       useJobEvents('job-1', onUpdate, vi.fn(), vi.fn());
     });
-    const source = FakeEventSource.instances[0];
+    const source = FakeEventSource.instances[0]!;
     act(() => {
       source.emit('error');
       source.emit('error');
@@ -192,7 +192,7 @@ describe('useJobEvents', () => {
         useJobEvents('job-1', vi.fn(), vi.fn(), vi.fn());
       },
     );
-    const source = FakeEventSource.instances[0];
+    const source = FakeEventSource.instances[0]!;
 
     unmount();
 
