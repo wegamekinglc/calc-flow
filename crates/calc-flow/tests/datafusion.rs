@@ -192,7 +192,9 @@ async fn runtime_evaluates_v1_assignment_and_collects_metrics() {
     assert!(metrics[0].execution_to_first_batch_ns > 0);
     assert!(metrics[0].execution_ns > 0);
     assert!(metrics[0].collect_ns > 0);
-    assert!(metrics[0].output_arrow_wrap_ns > 0);
+    // Reusing a non-empty RecordBatch vector is a no-copy operation and can
+    // complete within one timer tick, especially on Windows. Its u64 metric
+    // therefore permits a truthful zero-duration sample.
     assert!(metrics[0].audit_ns > 0);
     assert!(metrics[0].physical_plan_string_ns > 0);
     assert_eq!(metrics[0].output_partition_rows.iter().sum::<usize>(), 2);
