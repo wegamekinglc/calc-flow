@@ -222,6 +222,8 @@ jobs:
           uv pip install --python .venv/bin/python --no-deps dist/calc_flow-*.whl
       - name: Run Ruff
         run: uv run --no-sync ruff check .
+      - name: Verify complexity gates
+        run: uv run --no-sync python scripts/verify_complexity_gates.py
       - name: Run unit, property, and coverage tests
         env:
           PYTEST_XDIST_AUTO_NUM_WORKERS: 2
@@ -396,7 +398,7 @@ jobs:
           enable-cache: true
       - name: Build wheel and source distribution
         run: |
-          python -m unittest scripts.test_generate_rolling_kernel_manifest scripts.test_run_rust_tests scripts.test_run_rust_coverage scripts.test_classify_ci_changes scripts.test_build_python_release scripts.test_inspect_wheel scripts.test_release_config scripts.test_verify_python_release scripts.test_verify_perf_gates scripts.test_verify_stream_lifecycle_evidence scripts.test_verify_symbolic_milestone_perf scripts.test_write_criterion_provenance scripts.test_verify_security_gates
+          python -m unittest scripts.test_generate_rolling_kernel_manifest scripts.test_run_rust_tests scripts.test_run_rust_coverage scripts.test_classify_ci_changes scripts.test_build_python_release scripts.test_inspect_wheel scripts.test_release_config scripts.test_verify_python_release scripts.test_verify_perf_gates scripts.test_verify_stream_lifecycle_evidence scripts.test_verify_symbolic_milestone_perf scripts.test_write_criterion_provenance scripts.test_verify_complexity_gates scripts.test_verify_security_gates
           uv build
           python scripts/inspect_wheel.py core-wheel dist/calc_flow-*.whl
           python scripts/inspect_wheel.py sdist dist/calc_flow-*.tar.gz
