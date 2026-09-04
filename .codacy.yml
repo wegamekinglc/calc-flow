@@ -19,6 +19,15 @@ engines:
     # valid React closures and className attributes.
     exclude_paths:
       - "web-ui/**"
+  eslint:
+    # The repository lints the frontend through `npm run lint` in CI using its
+    # own ESLint 10 flat config (typescript-eslint, react-hooks). That config
+    # resolves plugin devDependencies from web-ui/node_modules, which the
+    # Codacy sandbox does not install, so the sandboxed engine can only fail
+    # to load the config for every file. Keep the Codacy engine away from the
+    # frontend and rely on the repository gate.
+    exclude_paths:
+      - "web-ui/**"
 exclude_paths:
   # Build artifacts and local environments
   - ".venv/**"

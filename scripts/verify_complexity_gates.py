@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
+import subprocess  # nosec B404 -- fixed, module-owned ruff invocation only
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -75,7 +75,7 @@ def count_markers(
 def run_ruff_complexity() -> dict[str, dict[str, int]]:
     """Return per-file per-rule ruff complexity finding counts."""
 
-    completed = subprocess.run(
+    completed = subprocess.run(  # nosec B603  # nosemgrep
         [
             sys.executable,
             "-m",
