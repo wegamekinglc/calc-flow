@@ -44,6 +44,7 @@ import {
 } from './components/dataSourceEditorModel';
 import { editSqlInputAliases } from './components/inputAliasEditorModel';
 import { derivedInputNames, derivedOutputNames } from './portNamesModel';
+import { isJobActive } from './jobStatusModel';
 import {
   PANEL_LIMITS,
   PANEL_RESIZE_HANDLE_WIDTH,
@@ -332,7 +333,7 @@ export default function App() {
     setMessage(error.message);
   }, []);
 
-  const observedJobId = job?.status === 'pending' || job?.status === 'running'
+  const observedJobId = job !== null && isJobActive(job.status)
     ? job.id
     : null;
   useJobEvents(observedJobId, handleJobUpdate, handleJobEvent, handleJobError);
@@ -801,7 +802,7 @@ export default function App() {
   };
 
   const persistenceBusy = busy || pendingFileReads > 0;
-  const activeJob = job?.status === 'pending' || job?.status === 'running';
+  const activeJob = job !== null && isJobActive(job.status);
   const workspaceLayout = useMemo(
     () => workspaceWidth > 0
       ? clampWorkspaceLayout(layout, workspaceWidth)

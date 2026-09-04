@@ -2,13 +2,8 @@ import { useEffect } from 'react';
 import type { Dispatch } from 'react';
 
 import { api, ApiContractError } from '../api/client';
+import { isTerminalJobStatus } from '../jobStatusModel';
 import type { JobEvent, JobResponse } from '../types';
-
-const terminalStatuses = new Set<JobResponse['status']>([
-  'completed',
-  'failed',
-  'cancelled',
-]);
 
 const eventTypes = ['state', 'progress', 'checkpoint', 'terminal'];
 
@@ -54,7 +49,7 @@ export function useJobEvents(
         if (!isLive()) return true;
         if (revision !== refreshRevision) return false;
         onUpdate(current);
-        if (terminalStatuses.has(current.status)) {
+        if (isTerminalJobStatus(current.status)) {
           stop();
           return true;
         }

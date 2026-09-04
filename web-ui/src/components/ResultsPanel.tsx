@@ -1,4 +1,5 @@
 import type { JobEvent, JobResponse, ValidationReport } from '../types';
+import { isJobActive } from '../jobStatusModel';
 
 interface ResultsPanelProps {
   validation: ValidationReport | null;
@@ -22,7 +23,7 @@ export function ResultsPanel({
   onShutdown,
   onCancel,
 }: ResultsPanelProps) {
-  const active = job?.status === 'pending' || job?.status === 'running';
+  const active = job !== null && isJobActive(job.status);
 
   return (
     <section className="results panel job-observatory">
