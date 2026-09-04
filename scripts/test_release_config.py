@@ -676,7 +676,11 @@ class ReleaseConfigTests(unittest.TestCase):
             smoke,
         )
         self.assertNotIn("cargo test", smoke)
-        self.assertIn("--output benchmark-results/sql-datafusion-smoke.json", smoke)
+        evidence_path = (
+            '"${GITHUB_WORKSPACE}/benchmark-results/sql-datafusion-smoke.json"'
+        )
+        self.assertIn('mkdir -p "${GITHUB_WORKSPACE}/benchmark-results"', smoke)
+        self.assertEqual(smoke.count(evidence_path), 2)
         self.assertIn("scripts/verify_sql_datafusion_performance.py", smoke)
 
     def test_pr_and_release_isolate_stream_lifecycle_evidence(self) -> None:
