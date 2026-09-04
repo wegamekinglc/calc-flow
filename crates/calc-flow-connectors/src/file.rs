@@ -24,6 +24,7 @@ use serde_json::Value;
 use crate::arrow_schema::{codec_connector_identity, schema_from_spec};
 use crate::csv::CsvCodec;
 use crate::json_lines::JsonLinesCodec;
+use crate::options::{bool_option, required_str, u64_option};
 
 /// Default ceiling for one decoded file payload.
 pub const DEFAULT_MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
@@ -103,7 +104,7 @@ impl FileSourceConfig {
     pub fn from_options(options: &calc_flow::JsonMap) -> Result<Self> {
         let path = parse_path(options)?;
         let format = FileFormat::parse(
-            string_option(options, "format")?,
+            required_str(options, "format")?,
             bool_option(options, "header")?.unwrap_or(true),
         )?;
         let (max_batch_rows, max_batch_bytes, max_file_bytes) = parse_bounds(options)?;
@@ -131,7 +132,7 @@ fn parse_bounds(options: &calc_flow::JsonMap) -> Result<(u64, u64, u64)> {
 }
 
 fn parse_path(options: &calc_flow::JsonMap) -> Result<PathBuf> {
-    let path = PathBuf::from(string_option(options, "path")?);
+    let path = PathBuf::from(required_str(options, "path")?);
     if path
         .components()
         .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
@@ -155,50 +156,6 @@ fn parse_schema(options: &calc_flow::JsonMap) -> Result<Vec<ArrowFieldSpec>> {
                 }
             })
         }
-    }
-}
-
-fn string_option<'a>(options: &'a calc_flow::JsonMap, key: &str) -> Result<&'a str> {
-    match options.get(key) {
-        Some(Value::String(value)) => Ok(value.as_str()),
-        Some(_) => Err(calc_flow::CalcFlowError::InvalidArgument {
-            field: key.into(),
-            message: "option must be a string".into(),
-        }),
-        None => Err(calc_flow::CalcFlowError::InvalidArgument {
-            field: key.into(),
-            message: "option is required".into(),
-        }),
-    }
-}
-
-fn bool_option(options: &calc_flow::JsonMap, key: &str) -> Result<Option<bool>> {
-    match options.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::Bool(value)) => Ok(Some(*value)),
-        Some(_) => Err(calc_flow::CalcFlowError::InvalidArgument {
-            field: key.into(),
-            message: "option must be a boolean".into(),
-        }),
-    }
-}
-
-fn u64_option(options: &calc_flow::JsonMap, key: &str) -> Result<Option<u64>> {
-    match options.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::Number(number)) => {
-            number
-                .as_u64()
-                .map(Some)
-                .ok_or(calc_flow::CalcFlowError::InvalidArgument {
-                    field: key.into(),
-                    message: "option must be a non-negative integer".into(),
-                })
-        }
-        Some(_) => Err(calc_flow::CalcFlowError::InvalidArgument {
-            field: key.into(),
-            message: "option must be a non-negative integer".into(),
-        }),
     }
 }
 

@@ -34,6 +34,7 @@
 pub mod arrow_schema;
 pub mod csv;
 pub mod json_lines;
+mod options;
 #[cfg(feature = "file")]
 pub mod parquet;
 

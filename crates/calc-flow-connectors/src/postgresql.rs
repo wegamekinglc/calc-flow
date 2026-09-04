@@ -25,6 +25,7 @@ use tokio_postgres::types::ToSql;
 use tokio_postgres::{Client, Row};
 
 use crate::database_types::{PgColumn, arrow_schema, pg_identifier, record_batch};
+use crate::options::{bool_option, required_string, u64_option};
 
 const PREPARED_SEGMENT_ID: &str = "prepared-rows";
 
@@ -294,17 +295,6 @@ fn parse_source_mode(options: &JsonMap) -> Result<PgSourceMode> {
         other => Err(CalcFlowError::InvalidArgument {
             field: "mode".into(),
             message: format!("unsupported source mode {other:?}"),
-        }),
-    }
-}
-
-fn bool_option(options: &JsonMap, key: &str) -> Result<Option<bool>> {
-    match options.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::Bool(value)) => Ok(Some(*value)),
-        Some(_) => Err(CalcFlowError::InvalidArgument {
-            field: key.into(),
-            message: "option must be a boolean".into(),
         }),
     }
 }
@@ -1067,39 +1057,6 @@ fn parse_conflict_columns(options: &JsonMap) -> Result<Vec<String>> {
         Some(_) => Err(CalcFlowError::InvalidArgument {
             field: "conflict_columns".into(),
             message: "conflict_columns must be a string array".into(),
-        }),
-    }
-}
-
-fn required_string(options: &JsonMap, key: &str) -> Result<String> {
-    match options.get(key) {
-        Some(Value::String(value)) => Ok(value.clone()),
-        Some(_) => Err(CalcFlowError::InvalidArgument {
-            field: key.into(),
-            message: "option must be a string".into(),
-        }),
-        None => Err(CalcFlowError::InvalidArgument {
-            field: key.into(),
-            message: "option is required".into(),
-        }),
-    }
-}
-
-fn u64_option(options: &JsonMap, key: &str) -> Result<Option<u64>> {
-    match options.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::Number(number)) => {
-            number
-                .as_u64()
-                .map(Some)
-                .ok_or(CalcFlowError::InvalidArgument {
-                    field: key.into(),
-                    message: "option must be a non-negative integer".into(),
-                })
-        }
-        Some(_) => Err(CalcFlowError::InvalidArgument {
-            field: key.into(),
-            message: "option must be a non-negative integer".into(),
         }),
     }
 }

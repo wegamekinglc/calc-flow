@@ -17,9 +17,8 @@ use calc_flow::{
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
-use super::clickhouse::{
-    ch_identifier, fail, redact_url_error, required_string, resolve_clickhouse_url, u64_option,
-};
+use super::clickhouse::{ch_identifier, fail, redact_url_error, resolve_clickhouse_url};
+use crate::options::{required_string, u64_option};
 
 const PREPARED_SEGMENT_ID: &str = "insert-block";
 const PREFLIGHT_RESPONSE_LIMIT: usize = 64 * 1024;
