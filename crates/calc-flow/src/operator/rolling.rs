@@ -47,6 +47,7 @@ mod generated_kernel_manifest;
 mod kernel;
 mod state_v3;
 
+use super::checkpoint::{checkpoint_mismatch, compile_error, internal_error, state_format};
 #[cfg(test)]
 use kernel::KernelSelection;
 use kernel::{RollingKernelPlan, RollingKernelState};
@@ -1211,7 +1212,7 @@ impl StreamOperator for RollingOperator {
             .is_some_and(|previous| epoch <= previous)
         {
             return Err(checkpoint_mismatch(
-                "rolling checkpoint epoch did not advance strictly".into(),
+                "rolling checkpoint epoch did not advance strictly",
             ));
         }
         let encoded = self.encode_state(epoch)?;
@@ -1536,7 +1537,7 @@ impl RollingOperator {
         segment: &crate::StateSegment,
     ) -> Result<SegmentDescriptor> {
         let operator_id = self.state.operator_id.as_deref().ok_or_else(|| {
-            checkpoint_mismatch("rolling segment is missing its operator identity".into())
+            checkpoint_mismatch("rolling segment is missing its operator identity")
         })?;
         let relative_path = format!(
             "committed/{operator_id}/{:020}-{segment_id}.arrow",
@@ -2455,12 +2456,12 @@ fn validate_snapshot_metadata(
         };
     if metadata.configuration_hash != compiled.configuration_hash {
         return Err(checkpoint_mismatch(
-            "rolling operator configuration hash does not match the compiled operator".into(),
+            "rolling operator configuration hash does not match the compiled operator",
         ));
     }
     if metadata.state_schema_fingerprint != *expected_schema_fingerprint {
         return Err(checkpoint_mismatch(
-            "rolling state schema fingerprint does not match the compiled operator".into(),
+            "rolling state schema fingerprint does not match the compiled operator",
         ));
     }
     if metadata.state_layout_version == ROLLING_COLUMNAR_STATE_LAYOUT_VERSION
@@ -2469,70 +2470,21 @@ fn validate_snapshot_metadata(
                 != Some(compiled.kernel_plan.numerical_profile()))
     {
         return Err(checkpoint_mismatch(
-            "rolling kernel fingerprint or numerical profile does not match the compiled operator"
-                .into(),
+            "rolling kernel fingerprint or numerical profile does not match the compiled operator",
         ));
     }
-    let inventory = StateInventory::new(metadata.segment_inventory.clone())
-        .map_err(|error| checkpoint_mismatch(error.to_string()))?;
-    for descriptor in inventory.segments() {
-        if descriptor.state_layout_version != metadata.state_layout_version
-            || descriptor.schema_fingerprint != metadata.state_schema_fingerprint
-        {
-            return Err(checkpoint_mismatch(
-                "rolling segment inventory layout or schema does not match the compiled operator"
-                    .into(),
-            ));
-        }
-        if descriptor.handle.epoch() > metadata.epoch {
-            return Err(checkpoint_mismatch(
-                "rolling segment inventory contains a future epoch".into(),
-            ));
-        }
-        if metadata.operator_id.as_deref() != Some(descriptor.handle.operator_id()) {
-            return Err(checkpoint_mismatch(
-                "rolling segment inventory operator does not match snapshot metadata".into(),
-            ));
-        }
-    }
-    let expected_ids = inventory
-        .segments()
-        .iter()
-        .map(|descriptor| descriptor.handle.segment_id().to_owned())
-        .collect::<Vec<_>>();
-    let actual_ids = snapshot.segments.keys().cloned().collect::<Vec<_>>();
-    if expected_ids != actual_ids {
-        return Err(checkpoint_mismatch(
-            "rolling snapshot segment IDs are missing, extra, duplicated, or non-canonical".into(),
-        ));
-    }
-    if !snapshot.segments.is_empty()
-        && (metadata.pipeline_fingerprint.is_none() || metadata.operator_id.is_none())
-    {
-        return Err(checkpoint_mismatch(
-            "rolling segments require pipeline and operator identity metadata".into(),
-        ));
-    }
-    if let Some(fingerprint) = metadata.pipeline_fingerprint.as_deref()
-        && (fingerprint.len() != 64
-            || !fingerprint
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
-    {
-        return Err(checkpoint_mismatch(
-            "rolling pipeline fingerprint is not lowercase SHA-256".into(),
-        ));
-    }
-    if metadata
-        .operator_id
-        .as_deref()
-        .is_some_and(|operator_id| operator_id.is_empty() || operator_id.contains('\0'))
-    {
-        return Err(checkpoint_mismatch(
-            "rolling operator ID is empty or contains NUL".into(),
-        ));
-    }
-    Ok(inventory)
+    super::checkpoint::validate_inventory(
+        &super::checkpoint::SnapshotContract {
+            name: "rolling",
+            state_layout_version: metadata.state_layout_version,
+            schema_fingerprint: &metadata.state_schema_fingerprint,
+            epoch: metadata.epoch,
+            pipeline_fingerprint: metadata.pipeline_fingerprint.as_deref(),
+            operator_id: metadata.operator_id.as_deref(),
+            segment_inventory: metadata.segment_inventory.clone(),
+        },
+        snapshot,
+    )
 }
 
 fn snapshot_segments(
@@ -2553,12 +2505,12 @@ fn snapshot_segments(
             let bytes = segment.bytes();
             if u64::try_from(bytes.len()).ok() != Some(descriptor.handle.byte_len()) {
                 return Err(checkpoint_mismatch(
-                    "rolling snapshot segment byte length does not match its handle".into(),
+                    "rolling snapshot segment byte length does not match its handle",
                 ));
             }
             if hex::encode(Sha256::digest(bytes)) != descriptor.handle.sha256() {
                 return Err(checkpoint_mismatch(
-                    "rolling snapshot segment checksum does not match its handle".into(),
+                    "rolling snapshot segment checksum does not match its handle",
                 ));
             }
             Ok(segment.bytes_arc())
@@ -5875,24 +5827,6 @@ fn operator_error(node_id: &str, message: &str) -> CalcFlowError {
         node_id: node_id.into(),
         message: message.into(),
     }
-}
-
-fn checkpoint_mismatch(message: String) -> CalcFlowError {
-    CalcFlowError::CheckpointMismatch { message }
-}
-
-fn internal_error(message: &str) -> CalcFlowError {
-    CalcFlowError::Internal {
-        message: message.into(),
-    }
-}
-
-fn state_format(message: String) -> CalcFlowError {
-    CalcFlowError::Format { message }
-}
-
-fn compile_error(message: String) -> CalcFlowError {
-    CalcFlowError::Compile { message }
 }
 
 fn format_error(error: &serde_json::Error) -> CalcFlowError {
