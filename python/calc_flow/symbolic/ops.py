@@ -940,13 +940,13 @@ class TableNamespace:
         a stateful symbolic stage.
         """
 
-        from calc_flow.pipeline import (
-            _require_distinct_prefixes,
-            _require_equal_key_counts,
-            _require_event_time_columns,
-            _require_join_bounds,
-            _require_join_limits,
-            _timedelta_micros,
+        from calc_flow.join_spec import (
+            require_distinct_prefixes,
+            require_equal_key_counts,
+            require_event_time_columns,
+            require_join_bounds,
+            require_join_limits,
+            timedelta_micros,
         )
 
         function = "table.stream_join"
@@ -959,14 +959,14 @@ class TableNamespace:
                 "calc_flow.symbolic.table.stream_join.keys: invalid_literal:"
                 " key sequences must be non-empty"
             )
-        _require_equal_key_counts(
+        require_equal_key_counts(
             tuple(item.value for item in left_key_values.items),
             tuple(item.value for item in right_key_values.items),
         )
-        _require_event_time_columns(left_event_time, right_event_time)
-        _require_join_bounds(bounds)
-        _require_join_limits(limits)
-        _require_distinct_prefixes(left_prefix, right_prefix)
+        require_event_time_columns(left_event_time, right_event_time)
+        require_join_bounds(bounds)
+        require_join_limits(limits)
+        require_distinct_prefixes(left_prefix, right_prefix)
         output_entities = _str_sequence(output_entity_by, function, "output_entity_by")
         output_sequences = _str_sequence(
             output_sequence_by, function, "output_sequence_by"
@@ -989,8 +989,8 @@ class TableNamespace:
             "right_keys": right_key_values,
             "left_event_time": CStr(left_event_time),
             "right_event_time": CStr(right_event_time),
-            "before_micros": CInt(_timedelta_micros(bounds.before, "before")),
-            "after_micros": CInt(_timedelta_micros(bounds.after, "after")),
+            "before_micros": CInt(timedelta_micros(bounds.before, "before")),
+            "after_micros": CInt(timedelta_micros(bounds.after, "after")),
             "max_state_rows_per_side": CInt(limits.max_state_rows_per_side),
             "max_state_bytes_per_side": CInt(limits.max_state_bytes_per_side),
             "max_matches_per_input_batch": CInt(limits.max_matches_per_input_batch),

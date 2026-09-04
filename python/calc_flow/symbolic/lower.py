@@ -14,6 +14,12 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final, Never
 
 from calc_flow.capabilities import RuntimeCapabilities
+from calc_flow.join_spec import (
+    JoinSideWire,
+    bounds_wire,
+    join_wire_spec,
+    limits_wire,
+)
 from calc_flow.pipeline import (
     Runtime,
     StreamRequirements,
@@ -2524,30 +2530,27 @@ def _stream_join_node(
         ],
         "operator": {
             "kind": "stream_join",
-            "spec": {
-                "join_type": "inner",
-                "left_keys": list(_cstr_seq(node.attr("left_keys"))),
-                "right_keys": list(_cstr_seq(node.attr("right_keys"))),
-                "left_event_time": _cstr(node.attr("left_event_time")),
-                "right_event_time": _cstr(node.attr("right_event_time")),
-                "bounds": {
-                    "before_micros": _cint(node.attr("before_micros")),
-                    "after_micros": _cint(node.attr("after_micros")),
-                },
-                "limits": {
-                    "max_state_rows_per_side": _cint(
-                        node.attr("max_state_rows_per_side")
-                    ),
-                    "max_state_bytes_per_side": _cint(
-                        node.attr("max_state_bytes_per_side")
-                    ),
-                    "max_matches_per_input_batch": _cint(
-                        node.attr("max_matches_per_input_batch")
-                    ),
-                },
-                "left_prefix": _cstr(node.attr("left_prefix")),
-                "right_prefix": _cstr(node.attr("right_prefix")),
-            },
+            "spec": join_wire_spec(
+                JoinSideWire(
+                    keys=_cstr_seq(node.attr("left_keys")),
+                    event_time=_cstr(node.attr("left_event_time")),
+                    prefix=_cstr(node.attr("left_prefix")),
+                ),
+                JoinSideWire(
+                    keys=_cstr_seq(node.attr("right_keys")),
+                    event_time=_cstr(node.attr("right_event_time")),
+                    prefix=_cstr(node.attr("right_prefix")),
+                ),
+                bounds_wire(
+                    _cint(node.attr("before_micros")),
+                    _cint(node.attr("after_micros")),
+                ),
+                limits_wire(
+                    _cint(node.attr("max_state_rows_per_side")),
+                    _cint(node.attr("max_state_bytes_per_side")),
+                    _cint(node.attr("max_matches_per_input_batch")),
+                ),
+            ),
         },
         "output_ports": [],
     }

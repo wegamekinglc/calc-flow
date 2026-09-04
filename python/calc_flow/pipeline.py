@@ -4,7 +4,6 @@ import asyncio
 import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import timedelta
 from enum import StrEnum
 from threading import RLock
 from types import MappingProxyType
@@ -19,11 +18,24 @@ from calc_flow.capabilities import (
     _StatelessProviderLifecycle,
     runtime_capabilities,
 )
+from calc_flow.join_spec import (
+    JoinSideWire,
+    JoinStateLimits,
+    JoinTimeBounds,
+    bounds_wire,
+    join_wire_spec,
+    limits_wire,
+    require_distinct_prefixes,
+    require_equal_key_counts,
+    require_event_time_columns,
+    require_join_bounds,
+    require_join_limits,
+    timedelta_micros,
+)
 from calc_flow.store import _copy_json_value, _run_blocking
 
 JSONValue = None | bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"]
 UdfReference = tuple[str, str, str]
-STREAM_JOIN_MAX_SAFE_JSON_INTEGER = 9_007_199_254_740_991
 _SYMBOLIC_COMPILE_CACHE_MAX_ENTRIES = 128
 
 
@@ -646,92 +658,6 @@ class ArrowFieldSpec:
             raise TypeError("nullable must be an exact bool")
 
 
-@dataclass(frozen=True, slots=True)
-class JoinTimeBounds:
-    """Inclusive non-negative event-time distances around a left row."""
-
-    before: timedelta
-    after: timedelta
-
-    def __post_init__(self) -> None:
-        _timedelta_micros(self.before, "before")
-        _timedelta_micros(self.after, "after")
-
-
-@dataclass(frozen=True, slots=True)
-class JoinStateLimits:
-    """Required logical state and per-input match limits."""
-
-    max_state_rows_per_side: int
-    max_state_bytes_per_side: int
-    max_matches_per_input_batch: int
-
-    def __post_init__(self) -> None:
-        for field_name in (
-            "max_state_rows_per_side",
-            "max_state_bytes_per_side",
-            "max_matches_per_input_batch",
-        ):
-            value = getattr(self, field_name)
-            if type(value) is not int:
-                raise TypeError(f"{field_name} must be an exact int")
-            if not 1 <= value <= STREAM_JOIN_MAX_SAFE_JSON_INTEGER:
-                raise ValueError(
-                    f"{field_name} must be in 1..={STREAM_JOIN_MAX_SAFE_JSON_INTEGER}"
-                )
-
-
-def _require_equal_key_counts(
-    left_keys: Sequence[str], right_keys: Sequence[str]
-) -> None:
-    if len(left_keys) != len(right_keys):
-        raise ValueError("left_keys and right_keys must have equal length")
-
-
-def _require_event_time_columns(left_event_time: str, right_event_time: str) -> None:
-    for field_name, value in (
-        ("left_event_time", left_event_time),
-        ("right_event_time", right_event_time),
-    ):
-        if not isinstance(value, str) or not value:
-            raise TypeError(f"{field_name} must be a non-empty string")
-
-
-def _require_join_bounds(bounds: JoinTimeBounds) -> None:
-    if not isinstance(bounds, JoinTimeBounds):
-        raise TypeError("bounds must be a calc_flow.JoinTimeBounds")
-
-
-def _require_join_limits(limits: JoinStateLimits) -> None:
-    if not isinstance(limits, JoinStateLimits):
-        raise TypeError("limits must be a calc_flow.JoinStateLimits")
-
-
-def _portable_identifier(value: object) -> bool:
-    return isinstance(value, str) and value.isidentifier() and value.isascii()
-
-
-def _require_distinct_prefixes(left_prefix: str, right_prefix: str) -> None:
-    if not _portable_identifier(left_prefix) or not _portable_identifier(right_prefix):
-        raise ValueError("prefixes must be distinct portable identifiers")
-    if left_prefix == right_prefix:
-        raise ValueError("prefixes must be distinct portable identifiers")
-
-
-def _timedelta_micros(value: timedelta, field_name: str) -> int:
-    if type(value) is not timedelta:
-        raise TypeError(f"{field_name} must be an exact datetime.timedelta")
-    micros = (
-        value.days * 86_400_000_000 + value.seconds * 1_000_000 + value.microseconds
-    )
-    if not 0 <= micros <= STREAM_JOIN_MAX_SAFE_JSON_INTEGER:
-        raise ValueError(
-            f"{field_name} must be in "
-            f"0..={STREAM_JOIN_MAX_SAFE_JSON_INTEGER} microseconds"
-        )
-    return micros
-
-
 def _arrow_fields(
     values: Sequence[ArrowFieldSpec], field_name: str
 ) -> list[dict[str, object]]:
@@ -1009,11 +935,11 @@ class PipelineBuilder:
         copied_right_schema = _arrow_fields(right_schema, "right_schema")
         copied_left_keys = _join_keys(left_keys, "left_keys")
         copied_right_keys = _join_keys(right_keys, "right_keys")
-        _require_equal_key_counts(copied_left_keys, copied_right_keys)
-        _require_event_time_columns(left_event_time, right_event_time)
-        _require_join_bounds(bounds)
-        _require_join_limits(limits)
-        _require_distinct_prefixes(left_prefix, right_prefix)
+        require_equal_key_counts(copied_left_keys, copied_right_keys)
+        require_event_time_columns(left_event_time, right_event_time)
+        require_join_bounds(bounds)
+        require_join_limits(limits)
+        require_distinct_prefixes(left_prefix, right_prefix)
 
         def add(project: dict[str, Any]) -> None:
             project["graph"]["nodes"].append(
@@ -1035,34 +961,27 @@ class PipelineBuilder:
                     ],
                     "operator": {
                         "kind": "stream_join",
-                        "spec": {
-                            "join_type": "inner",
-                            "left_keys": copied_left_keys,
-                            "right_keys": copied_right_keys,
-                            "left_event_time": left_event_time,
-                            "right_event_time": right_event_time,
-                            "bounds": {
-                                "before_micros": _timedelta_micros(
-                                    bounds.before, "before"
-                                ),
-                                "after_micros": _timedelta_micros(
-                                    bounds.after, "after"
-                                ),
-                            },
-                            "limits": {
-                                "max_state_rows_per_side": (
-                                    limits.max_state_rows_per_side
-                                ),
-                                "max_state_bytes_per_side": (
-                                    limits.max_state_bytes_per_side
-                                ),
-                                "max_matches_per_input_batch": (
-                                    limits.max_matches_per_input_batch
-                                ),
-                            },
-                            "left_prefix": left_prefix,
-                            "right_prefix": right_prefix,
-                        },
+                        "spec": join_wire_spec(
+                            JoinSideWire(
+                                keys=tuple(copied_left_keys),
+                                event_time=left_event_time,
+                                prefix=left_prefix,
+                            ),
+                            JoinSideWire(
+                                keys=tuple(copied_right_keys),
+                                event_time=right_event_time,
+                                prefix=right_prefix,
+                            ),
+                            bounds_wire(
+                                timedelta_micros(bounds.before, "before"),
+                                timedelta_micros(bounds.after, "after"),
+                            ),
+                            limits_wire(
+                                limits.max_state_rows_per_side,
+                                limits.max_state_bytes_per_side,
+                                limits.max_matches_per_input_batch,
+                            ),
+                        ),
                     },
                     "output_ports": [],
                 }
