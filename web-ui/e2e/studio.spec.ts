@@ -7,7 +7,6 @@ import {
 } from '@playwright/test';
 import {
   mkdir,
-  readFile,
   readdir,
   rm,
   writeFile,
@@ -468,17 +467,17 @@ test('persists and validates a DataFusion UDF graph without browser code', async
   await page.getByRole('button', { name: 'Export JSON' }).click({ force: true });
   const download = await downloadPromise;
   expect(download.suggestedFilename()).toBe(`${summary.id}.json`);
-  const downloadPath = await download.path();
-  expect(downloadPath).not.toBeNull();
-  if (downloadPath === null) {
-    throw new Error('project export download path is missing');
+  const downloadStream = await download.createReadStream();
+  const downloadChunks: Buffer[] = [];
+  for await (const chunk of downloadStream) {
+    downloadChunks.push(Buffer.from(chunk));
   }
 
   page.once('dialog', (dialog) => dialog.accept());
   await page.getByLabel('Import project').setInputFiles({
     name: download.suggestedFilename(),
     mimeType: 'application/json',
-    buffer: await readFile(downloadPath),
+    buffer: Buffer.concat(downloadChunks),
   });
   await expect(page.getByText('Project imported')).toBeVisible();
 
