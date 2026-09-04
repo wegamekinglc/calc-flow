@@ -17,7 +17,7 @@ from calc_flow import (
 from fastapi.testclient import TestClient
 from starlette.requests import Request as StarletteRequest
 
-import calc_flow_studio.app as app_module
+import calc_flow_studio.routes as routes_module
 from calc_flow_studio.app import API_PREFIX, create_app, validate_bind_host
 from calc_flow_studio.models import RunEvent, RunResponse, RunStatus
 from calc_flow_studio.run_manager import CapabilitySnapshotError, RunManagerError
@@ -652,7 +652,7 @@ def test_import_streams_with_early_and_running_size_limits(
         parser_calls.append(len(document))
         return ProjectDocument.model_validate(_project())
 
-    monkeypatch.setattr(app_module, "import_project_json", tracking_parser)
+    monkeypatch.setattr(routes_module, "import_project_json", tracking_parser)
     with _client(tmp_path) as client:
         declared_oversize = client.post(
             f"{API_PREFIX}/projects/import?format=json",
@@ -755,13 +755,13 @@ def test_import_and_export_threadpool_only_pure_rust_transformations(
     tmp_path, monkeypatch
 ) -> None:
     calls: list[object] = []
-    original = app_module.run_in_threadpool
+    original = routes_module.run_in_threadpool
 
     async def tracking(function, *args, **kwargs):
         calls.append(function)
         return await original(function, *args, **kwargs)
 
-    monkeypatch.setattr(app_module, "run_in_threadpool", tracking)
+    monkeypatch.setattr(routes_module, "run_in_threadpool", tracking)
     with _client(tmp_path) as client:
         assert (
             client.post(
@@ -777,8 +777,8 @@ def test_import_and_export_threadpool_only_pure_rust_transformations(
             == 200
         )
 
-    assert app_module.import_project_json in calls
-    assert app_module.export_project_yaml in calls
+    assert routes_module.import_project_json in calls
+    assert routes_module.export_project_yaml in calls
     assert FileProjectStore.create not in calls
     assert FileProjectStore.get not in calls
 
