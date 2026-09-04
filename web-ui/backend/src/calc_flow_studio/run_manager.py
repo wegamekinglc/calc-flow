@@ -64,13 +64,6 @@ type LazyBuiltinIdentity = tuple[str, str, str]
 
 _STREAM_JOIN_FAILURE_REASONS = frozenset(
     {
-        "unsupported_join_type",
-        "invalid_time_bound",
-        "invalid_join_limit",
-        "invalid_join_keys",
-        "incompatible_key_type",
-        "invalid_event_time",
-        "invalid_output_prefix",
         "join_state_limit_exceeded",
         "join_match_limit_exceeded",
         "join_counter_overflow",
