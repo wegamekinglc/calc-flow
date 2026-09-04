@@ -11,11 +11,12 @@ re-run on the same process, input order, and machine is comparable.
 from __future__ import annotations
 
 import json
-import resource
 import sys
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import psutil
@@ -126,6 +127,19 @@ def quote_workload(rows: int | None = None) -> QuoteWorkload:
 def matmul_workload() -> QuoteWorkload:
     """Quote workload capped to the dense-matrix budget of the matmul scenario."""
     return quote_workload(rows=min(selected_scale().table_rows, MATMUL_MAX_ROWS))
+
+
+def utc_event_time_batch(batch: Batch) -> Batch:
+    """Return one batch whose event_time column carries a UTC timezone."""
+    table = batch.to_pyarrow()
+    event_time = table.schema.get_field_index("event_time")
+    return Batch.from_pyarrow(
+        table.set_column(
+            event_time,
+            pa.field("event_time", pa.timestamp("us", tz="UTC"), nullable=False),
+            table["event_time"].cast(pa.timestamp("us", tz="UTC")),
+        )
+    )
 
 
 def stream_batches(
@@ -263,7 +277,11 @@ def peak_rss_bytes() -> int:
                     return int(line.split()[1]) * 1024
     except OSError:
         pass
+    if sys.platform == "win32":
+        return int(psutil.Process().memory_info().peak_wset)
     # ru_maxrss is reported in bytes on macOS and kibibytes elsewhere.
+    import resource
+
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return peak if sys.platform == "darwin" else peak * 1024
 
@@ -314,8 +332,6 @@ def counting_matmul_runtime(backend: str) -> tuple[Runtime, CountingTableMatmul]
 
 def _matmul_namespace(backend: str) -> object:
     if backend == "numpy":
-        import numpy as np
-
         return np
     if backend == "jax":
         import jax.numpy as jnp
@@ -328,6 +344,52 @@ def arrow_column_bytes(batch: Batch, columns: Sequence[str]) -> int:
     """Bytes of the Arrow buffers backing the selected input columns."""
     table = batch.to_pyarrow()
     return sum(table[name].nbytes for name in columns)
+
+
+def execute_compiled_plan(plan: Any, inputs: Mapping[str, Batch]) -> Any:
+    """Execute a plan compiled only from static benchmark declarations."""
+
+    return plan.execute(dict(inputs))  # type: ignore[attr-defined]  # nosemgrep
+
+
+def timed_plan_execute(plan: Any, inputs: Mapping[str, Batch]) -> tuple[Any, float]:
+    """Time one compiled-plan execution, returning the result and seconds."""
+    started = time.perf_counter_ns()
+    result = execute_compiled_plan(plan, inputs)
+    seconds = (time.perf_counter_ns() - started) / 1_000_000_000
+    return result, seconds
+
+
+def alternating_plan_samples(
+    hand_built_plan: Any,
+    symbolic_plan: Any,
+    inputs: Mapping[str, Batch],
+    *,
+    sample_count: int,
+) -> list[dict[str, object]]:
+    """Collect paired plan timings, alternating the execution order each round."""
+    samples: list[dict[str, object]] = []
+    for index in range(sample_count):
+        if index % 2 == 0:
+            _hand_result, hand_seconds = timed_plan_execute(hand_built_plan, inputs)
+            _symbolic_result, symbolic_seconds = timed_plan_execute(
+                symbolic_plan, inputs
+            )
+            order = "hand-built-first"
+        else:
+            _symbolic_result, symbolic_seconds = timed_plan_execute(
+                symbolic_plan, inputs
+            )
+            _hand_result, hand_seconds = timed_plan_execute(hand_built_plan, inputs)
+            order = "symbolic-first"
+        samples.append(
+            {
+                "order": order,
+                "hand_built_seconds": hand_seconds,
+                "symbolic_seconds": symbolic_seconds,
+            }
+        )
+    return samples
 
 
 def record_symbolic_benchmark(

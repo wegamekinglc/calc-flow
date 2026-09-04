@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from collections import defaultdict, deque
 from typing import Any
 
@@ -11,8 +10,14 @@ import pyarrow as pa
 import pytest
 
 from benchmarks.support import BenchmarkFixture, benchmark_group, selected_scale
-from benchmarks.symbolic_support import quote_workload, record_symbolic_benchmark
-from calc_flow import Batch, PipelineBuilder, Runtime
+from benchmarks.symbolic_support import (
+    alternating_plan_samples,
+    execute_compiled_plan,
+    quote_workload,
+    record_symbolic_benchmark,
+    utc_event_time_batch,
+)
+from calc_flow import PipelineBuilder, Runtime
 from calc_flow.symbolic import FeatureSet, Field, Program, rows, table_input, ts
 
 _SMA_SCENARIO = "rolling_kernel_sma20"
@@ -24,18 +29,6 @@ _FAST_WINDOW = 5
 _SLOW_WINDOW = 20
 _RTOL = 1e-10
 _ATOL = 1e-10
-
-
-def _utc_batch(batch: Batch) -> Batch:
-    table = batch.to_pyarrow()
-    event_time = table.schema.get_field_index("event_time")
-    return Batch.from_pyarrow(
-        table.set_column(
-            event_time,
-            pa.field("event_time", pa.timestamp("us", tz="UTC"), nullable=False),
-            table["event_time"].cast(pa.timestamp("us", tz="UTC")),
-        )
-    )
 
 
 def _symbolic_plan(*, dual: bool) -> tuple[object, str]:
@@ -116,45 +109,9 @@ def _ordered_indicator(result: object, output: str) -> np.ndarray:
     return values[np.argsort(sequence, kind="stable")]
 
 
-def _execute_static_plan(plan: object, batch: Batch) -> Any:
-    """Execute a plan compiled only from this module's static declarations."""
-
-    return plan.execute({"input": batch})  # type: ignore[attr-defined]  # nosemgrep
-
-
-def _timed_execute(plan: object, batch: Batch) -> tuple[Any, float]:
-    started = time.perf_counter_ns()
-    result = _execute_static_plan(plan, batch)
-    elapsed = (time.perf_counter_ns() - started) / 1_000_000_000
-    return result, elapsed
-
-
-def _alternating_samples(
-    reference: object, optimized: object, batch: Batch
-) -> list[dict[str, object]]:
-    samples: list[dict[str, object]] = []
-    for index in range(_PAIRED_SAMPLES):
-        if index % 2 == 0:
-            _reference_result, reference_seconds = _timed_execute(reference, batch)
-            _optimized_result, optimized_seconds = _timed_execute(optimized, batch)
-            order = "hand-built-first"
-        else:
-            _optimized_result, optimized_seconds = _timed_execute(optimized, batch)
-            _reference_result, reference_seconds = _timed_execute(reference, batch)
-            order = "symbolic-first"
-        samples.append(
-            {
-                "order": order,
-                "hand_built_seconds": reference_seconds,
-                "symbolic_seconds": optimized_seconds,
-            }
-        )
-    return samples
-
-
 def _run_paired_case(benchmark: BenchmarkFixture, *, dual: bool, scenario: str) -> None:
     workload = quote_workload()
-    batch = _utc_batch(workload.batch)
+    inputs = {"input": utc_event_time_batch(workload.batch)}
     reference = _reference_plan(dual=dual)
     optimized, optimized_explanation = _symbolic_plan(dual=dual)
     expected_state_groups = 2 if dual else 1
@@ -164,16 +121,21 @@ def _run_paired_case(benchmark: BenchmarkFixture, *, dual: bool, scenario: str) 
     )
     assert f"shared_state_groups={expected_state_groups}" in optimized_explanation
     assert "fallback=none" in optimized_explanation
-    reference_result = _execute_static_plan(reference, batch)
-    optimized_result = _execute_static_plan(optimized, batch)
-    expected = _direct_window_oracle(batch.to_pyarrow(), dual=dual)
+    reference_result = execute_compiled_plan(reference, inputs)
+    optimized_result = execute_compiled_plan(optimized, inputs)
+    expected = _direct_window_oracle(inputs["input"].to_pyarrow(), dual=dual)
     reference_values = _ordered_indicator(reference_result, "output")
     optimized_values = _ordered_indicator(optimized_result, "output")
     np.testing.assert_allclose(reference_values, expected, rtol=_RTOL, atol=_ATOL)
     np.testing.assert_allclose(optimized_values, expected, rtol=_RTOL, atol=_ATOL)
     reference_metric = reference_result.datafusion_metrics[0]
     assert reference_metric["rolling_rewritten_windows"] == 0
-    paired_samples = _alternating_samples(reference, optimized, batch)
+    paired_samples = alternating_plan_samples(
+        reference,
+        optimized,
+        inputs,
+        sample_count=_PAIRED_SAMPLES,
+    )
 
     record_symbolic_benchmark(
         benchmark,
@@ -199,8 +161,8 @@ def _run_paired_case(benchmark: BenchmarkFixture, *, dual: bool, scenario: str) 
 
     def execute_pair() -> tuple[Any, Any]:
         return (
-            _execute_static_plan(reference, batch),
-            _execute_static_plan(optimized, batch),
+            execute_compiled_plan(reference, inputs),
+            execute_compiled_plan(optimized, inputs),
         )
 
     reference_result, optimized_result = benchmark(execute_pair)

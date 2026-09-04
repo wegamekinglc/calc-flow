@@ -30,6 +30,7 @@ from benchmarks.symbolic_support import (
     STREAM_BATCH_ROWS,
     STREAM_ENTITIES,
     STREAM_WINDOW_SECONDS,
+    alternating_plan_samples,
     arrow_column_bytes,
     counting_matmul_runtime,
     directory_bytes,
@@ -38,6 +39,7 @@ from benchmarks.symbolic_support import (
     record_symbolic_benchmark,
     stream_batches,
     stream_graph_json,
+    utc_event_time_batch,
 )
 from calc_flow import (
     Batch,
@@ -179,40 +181,6 @@ def _projection_symbolic_program() -> Program:
     )
 
 
-def _timed_execute(plan: object, inputs: dict[str, Batch]) -> tuple[Any, float]:
-    start = time.perf_counter_ns()
-    result = plan.execute(inputs)
-    seconds = (time.perf_counter_ns() - start) / 1_000_000_000
-    return result, seconds
-
-
-def _alternating_plan_samples(
-    hand_built_plan: object,
-    symbolic_plan: object,
-    inputs: dict[str, Batch],
-    *,
-    sample_count: int,
-) -> list[dict[str, object]]:
-    samples: list[dict[str, object]] = []
-    for index in range(sample_count):
-        if index % 2 == 0:
-            _hand_result, hand_seconds = _timed_execute(hand_built_plan, inputs)
-            _symbolic_result, symbolic_seconds = _timed_execute(symbolic_plan, inputs)
-            order = "hand-built-first"
-        else:
-            _symbolic_result, symbolic_seconds = _timed_execute(symbolic_plan, inputs)
-            _hand_result, hand_seconds = _timed_execute(hand_built_plan, inputs)
-            order = "symbolic-first"
-        samples.append(
-            {
-                "order": order,
-                "hand_built_seconds": hand_seconds,
-                "symbolic_seconds": symbolic_seconds,
-            }
-        )
-    return samples
-
-
 _ROLLING_FRAME = (
     "PARTITION BY symbol ORDER BY event_time, sequence ROWS BETWEEN "
     "{preceding} PRECEDING AND CURRENT ROW"
@@ -285,15 +253,7 @@ def _sce08_input_schema() -> list[dict[str, object]]:
 
 
 def _utc_quote_batch() -> Batch:
-    input_table = quote_workload().batch.to_pyarrow()
-    event_time_index = input_table.schema.get_field_index("event_time")
-    return Batch.from_pyarrow(
-        input_table.set_column(
-            event_time_index,
-            pa.field("event_time", pa.timestamp("us", tz="UTC"), nullable=False),
-            input_table["event_time"].cast(pa.timestamp("us", tz="UTC")),
-        )
-    )
+    return utc_event_time_batch(quote_workload().batch)
 
 
 def _sce14_programs() -> tuple[Program, Program, Program]:
@@ -849,7 +809,7 @@ def test_sce05_row_local_milestone_pair(
     symbolic_warm_result = symbolic_plan.execute({"input": workload.batch})
     assert len(symbolic_warm_result.datafusion_metrics) == 1
     inputs = {"input": workload.batch}
-    paired_samples = _alternating_plan_samples(
+    paired_samples = alternating_plan_samples(
         hand_built_plan,
         symbolic_plan,
         inputs,
@@ -890,26 +850,19 @@ def test_sce08_temporal_milestone_pair(
     benchmark: BenchmarkFixture, _scale: str
 ) -> None:
     workload = quote_workload()
-    input_table = workload.batch.to_pyarrow()
-    event_time_index = input_table.schema.get_field_index("event_time")
-    input_table = input_table.set_column(
-        event_time_index,
-        pa.field("event_time", pa.timestamp("us", tz="UTC"), nullable=False),
-        input_table["event_time"].cast(pa.timestamp("us", tz="UTC")),
-    )
     hand_built_plan = PipelineBuilder._from_json(
         _sce08_hand_built_project_json()
     ).compile_batch()
     symbolic_plan = _sce08_symbolic_program().compile_batch(Runtime())
     assert hand_built_plan.fingerprint == symbolic_plan.fingerprint
-    inputs = {"input": Batch.from_pyarrow(input_table)}
+    inputs = {"input": utc_event_time_batch(workload.batch)}
 
     hand_built_output = hand_built_plan.execute(inputs).outputs["output"].to_pyarrow()
     symbolic_warm_result = symbolic_plan.execute(inputs)
     symbolic_output = symbolic_warm_result.outputs["output"].to_pyarrow()
     _assert_sce08_outputs_equal(hand_built_output, symbolic_output)
     assert len(symbolic_warm_result.datafusion_metrics) == 1
-    paired_samples = _alternating_plan_samples(
+    paired_samples = alternating_plan_samples(
         hand_built_plan,
         symbolic_plan,
         inputs,
@@ -964,7 +917,7 @@ def test_sce16_exponential_indicator_pair(
     symbolic_warm_result = symbolic_plan.execute(inputs)
     symbolic_output = symbolic_warm_result.outputs["output"].to_pyarrow()
     assert hand_built_output.equals(symbolic_output)
-    paired_samples = _alternating_plan_samples(
+    paired_samples = alternating_plan_samples(
         hand_built_plan,
         symbolic_plan,
         inputs,
@@ -1025,7 +978,7 @@ def test_sce14_cross_domain_sharing_pair(
         .to_pyarrow()
         .equals(optimized_warm.outputs["second.output"].to_pyarrow())
     )
-    paired_samples = _alternating_plan_samples(
+    paired_samples = alternating_plan_samples(
         reference,
         optimized,
         inputs,
@@ -1092,7 +1045,7 @@ def test_multi_stage_rolling_sharing_pair(
         atol=1e-12,
         equal_nan=True,
     )
-    paired_samples = _alternating_plan_samples(
+    paired_samples = alternating_plan_samples(
         reference,
         optimized,
         inputs,
