@@ -64,12 +64,63 @@ type LazyBuiltinIdentity = tuple[str, str, str]
 
 _STREAM_JOIN_FAILURE_REASONS = frozenset(
     {
+        "unsupported_join_type",
+        "invalid_time_bound",
+        "invalid_join_limit",
+        "invalid_join_keys",
+        "incompatible_key_type",
+        "invalid_event_time",
+        "invalid_output_prefix",
         "join_state_limit_exceeded",
         "join_match_limit_exceeded",
         "join_counter_overflow",
         "join_time_conversion_failed",
     }
 )
+
+# One shared lifecycle vocabulary: every transition guard and pruning pass
+# reads these sets instead of re-declaring status literals.
+ACTIVE_STATUSES = frozenset({RunStatus.PENDING, RunStatus.RUNNING})
+TERMINAL_STATUSES = frozenset(
+    {
+        RunStatus.COMPLETED,
+        RunStatus.FAILED,
+        RunStatus.CANCELLED,
+        RunStatus.TIMED_OUT,
+    }
+)
+
+
+def _teardown_worker(
+    worker: Any,
+    *,
+    terminate: bool,
+    join_timeout: float,
+    join_current: bool = True,
+) -> None:
+    """Terminate, join, and as a last resort kill one spawned worker."""
+    if worker is None:
+        return
+    if terminate and worker.is_alive():
+        with suppress(BaseException):
+            worker.terminate()
+    if join_current or worker is not current_thread():
+        with suppress(BaseException):
+            worker.join(timeout=join_timeout)
+    if worker.is_alive():
+        with suppress(BaseException):
+            worker.kill()
+            worker.join(timeout=1)
+
+
+def _teardown_channel(channel: Any) -> None:
+    """Close and drain one multiprocessing channel, ignoring teardown errors."""
+    if channel is None:
+        return
+    with suppress(BaseException):
+        channel.close()
+    with suppress(BaseException):
+        channel.join_thread()
 
 
 def _stream_join_failure_reason(value: object) -> str | None:
@@ -1248,8 +1299,7 @@ class RunManager:
             if self._shutdown:
                 raise RunManagerError("run manager is shut down")
             active = sum(
-                handle.status in {RunStatus.PENDING, RunStatus.RUNNING}
-                for handle in self._runs.values()
+                handle.status in ACTIVE_STATUSES for handle in self._runs.values()
             )
             if active >= self._max_workers:
                 raise RunManagerError("all local preview workers are busy")
@@ -1391,8 +1441,7 @@ class RunManager:
             if self._shutdown:
                 raise RunManagerError("run manager is shut down")
             active = sum(
-                handle.status in {RunStatus.PENDING, RunStatus.RUNNING}
-                for handle in self._jobs.values()
+                handle.status in ACTIVE_STATUSES for handle in self._jobs.values()
             )
             if active >= self._resource_limits.max_concurrent_jobs:
                 raise RunManagerError("job_limit_exceeded: max_concurrent_jobs")
@@ -1528,7 +1577,7 @@ class RunManager:
             if run_id in self._jobs:
                 return self._command_job(self._jobs[run_id], "cancel")
             handle = self._require(run_id)
-            if handle.status not in {RunStatus.PENDING, RunStatus.RUNNING}:
+            if handle.status not in ACTIVE_STATUSES:
                 return self._response(handle)
             handle.cancel_requested = True
             handle.status = RunStatus.CANCELLED
@@ -1552,7 +1601,7 @@ class RunManager:
                 return
             self._shutdown = True
             for handle in self._jobs.values():
-                if handle.status in {RunStatus.PENDING, RunStatus.RUNNING}:
+                if handle.status in ACTIVE_STATUSES:
                     handle.cancel_requested = True
                     if handle.commands is not None:
                         with suppress(BaseException):
@@ -1566,7 +1615,7 @@ class RunManager:
                         )
                     )
             for handle in self._runs.values():
-                if handle.status in {RunStatus.PENDING, RunStatus.RUNNING}:
+                if handle.status in ACTIVE_STATUSES:
                     handle.cancel_requested = True
                     handle.status = RunStatus.CANCELLED
                     handle.finished_at = datetime.now(UTC)
@@ -1720,13 +1769,7 @@ class RunManager:
             (
                 handle
                 for handle in self._runs.values()
-                if handle.status
-                in {
-                    RunStatus.COMPLETED,
-                    RunStatus.FAILED,
-                    RunStatus.CANCELLED,
-                    RunStatus.TIMED_OUT,
-                }
+                if handle.status in TERMINAL_STATUSES
             ),
             key=lambda handle: handle.created_at,
         )
@@ -1769,21 +1812,9 @@ class RunManager:
     def _cleanup_resources(
         self, worker: Any, output_queue: Any, *, terminate: bool
     ) -> None:
-        if worker is not None:
-            if self._use_processes and terminate and worker.is_alive():
-                with suppress(BaseException):
-                    worker.terminate()
-            with suppress(BaseException):
-                worker.join(timeout=1)
-            if self._use_processes and worker.is_alive():
-                with suppress(BaseException):
-                    worker.kill()
-                    worker.join(timeout=1)
-        if self._use_processes and output_queue is not None:
-            with suppress(BaseException):
-                output_queue.close()
-            with suppress(BaseException):
-                output_queue.join_thread()
+        _teardown_worker(worker, terminate=terminate, join_timeout=1)
+        if self._use_processes:
+            _teardown_channel(output_queue)
 
     @staticmethod
     def _join_monitor(monitor: Thread | None) -> None:
@@ -1814,7 +1845,7 @@ class RunManager:
     def shutdown_job(self, run_id: str) -> JobResponse:
         with self._lock:
             handle = self._require_job(run_id)
-            if handle.status not in {RunStatus.PENDING, RunStatus.RUNNING}:
+            if handle.status not in ACTIVE_STATUSES:
                 return self._job_response(handle)
             return self._command_job(handle, "shutdown")
 
@@ -1822,7 +1853,7 @@ class RunManager:
         return self._resource_limits
 
     def _command_job(self, handle: _JobHandle, command: str) -> JobResponse:
-        if handle.status not in {RunStatus.PENDING, RunStatus.RUNNING}:
+        if handle.status not in ACTIVE_STATUSES:
             return self._job_response(handle)
         if handle.commands is None:
             raise RunManagerError(f"job {handle.id} command channel is unavailable")
@@ -1961,7 +1992,7 @@ class RunManager:
                 global_resident = sum(
                     _resident_bytes(job.worker) or 0
                     for job in self._jobs.values()
-                    if job.status in {RunStatus.PENDING, RunStatus.RUNNING}
+                    if job.status in ACTIVE_STATUSES
                 )
             if global_resident > self._resource_limits.max_global_resident_memory_bytes:
                 return "max_global_resident_memory_bytes"
@@ -1984,7 +2015,7 @@ class RunManager:
     ) -> None:
         with self._lock:
             handle = self._require_job(job_id)
-            if handle.status not in {RunStatus.PENDING, RunStatus.RUNNING}:
+            if handle.status not in ACTIVE_STATUSES:
                 return
             handle.status = status
             handle.finished_at = datetime.now(UTC)
@@ -2070,22 +2101,12 @@ class RunManager:
         *,
         terminate: bool,
     ) -> None:
-        # #lizard forgives
-        if worker is not None:
-            if self._use_processes and terminate and worker.is_alive():
-                with suppress(BaseException):
-                    worker.terminate()
-            if worker is not current_thread():
-                with suppress(BaseException):
-                    worker.join(timeout=2)
-            if self._use_processes and worker.is_alive():
-                with suppress(BaseException):
-                    worker.kill()
-                    worker.join(timeout=1)
+        _teardown_worker(
+            worker,
+            terminate=terminate and self._use_processes,
+            join_timeout=2,
+            join_current=False,
+        )
         if self._use_processes:
-            for channel in (commands, output_queue):
-                if channel is not None:
-                    with suppress(BaseException):
-                        channel.close()
-                    with suppress(BaseException):
-                        channel.join_thread()
+            _teardown_channel(commands)
+            _teardown_channel(output_queue)
