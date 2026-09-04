@@ -4,6 +4,20 @@ Calc Flow benchmarks use deterministic Arrow and Array API inputs and export
 complete `pytest-benchmark` JSON reports. They are informational until at least
 20 comparable main-branch samples have been collected on stable runners.
 
+## Layout
+
+| Path                                               | Contents                                                         |
+| -------------------------------------------------- | ---------------------------------------------------------------- |
+| `support.py`                                       | Scale selection, metric recording, and identity fingerprints     |
+| `array_support.py`, `test_array_*.py`              | Array API kernel, provider, plan, and ownership scopes           |
+| `symbolic_support.py`, `test_symbolic_baseline.py` | Symbolic baselines, milestone pairs, and stream lifecycle        |
+| `test_datafusion.py`, `test_runtime.py`            | DataFusion operator scenarios and graph fan-out                  |
+| `test_rolling_kernel.py`                           | Paired rolling-kernel gate against a DataFusion window reference |
+| `rolling_indicator_comparison.py`                  | Standalone cross-library rolling comparison driver               |
+| `finance_python_rolling_runner.py`                 | Isolated legacy Finance-Python worker subprocess                 |
+| `test_rolling_indicator_comparison.py`             | Correctness tests for the comparison harness                     |
+| `rolling/`, `symbolic/`                            | Frozen JSON and Markdown evidence referenced by this README      |
+
 Install and run the overhead suite:
 
 ```bash
@@ -37,8 +51,8 @@ count reported by the runtime.
 
 The v2 suite covers DataFusion projections, filters, aggregates, joins,
 windows, trusted Python scalar UDFs, explicit session configuration, and
-repeated execution of a compiled plan. Runtime scenarios cover graph fan-out
-plus strict v2 checkpoint serialization, atomic writes, and recovery reads.
+repeated execution of a compiled plan. The runtime scenario covers graph
+fan-out.
 
 ## Array measurement scopes
 
