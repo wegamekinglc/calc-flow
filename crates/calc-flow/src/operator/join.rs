@@ -1,1123 +1,3 @@
-#[cfg(test)]
-mod tests {
-    use std::{collections::BTreeMap, sync::Arc, time::Duration};
-
-    use datafusion::arrow::{
-        array::{
-            BinaryArray, FixedSizeBinaryArray, Int64Array, StringArray, TimestampMicrosecondArray,
-        },
-        datatypes::{DataType, Field, Schema, TimeUnit},
-        record_batch::RecordBatch,
-    };
-
-    use super::*;
-    use crate::{
-        BatchMetadata, CancellationToken, EdgeBudget, EdgeCollector, IngressProgress,
-        IngressProgressSnapshot, IngressState, JsonMap, OperatorMetadata, StreamJobContext,
-        StreamMessageKind, StreamOperator,
-    };
-
-    fn left_schema() -> Arc<Schema> {
-        Arc::new(Schema::new(vec![
-            Field::new("account_id", DataType::Int64, false),
-            Field::new(
-                "authorized_at",
-                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
-                false,
-            ),
-            Field::new("amount", DataType::Int64, true),
-        ]))
-    }
-
-    fn right_schema() -> Arc<Schema> {
-        Arc::new(Schema::new(vec![
-            Field::new("account_id", DataType::Int64, false),
-            Field::new(
-                "paid_at",
-                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
-                false,
-            ),
-            Field::new("status", DataType::Utf8, true),
-        ]))
-    }
-
-    fn spec() -> StreamJoinSpec {
-        StreamJoinSpec::inner(
-            ["account_id"],
-            ["account_id"],
-            "authorized_at",
-            "paid_at",
-            JoinTimeBounds::new(Duration::from_secs(300), Duration::from_secs(60)).unwrap(),
-            JoinStateLimits::new(100, 1_000_000, 1_000).unwrap(),
-        )
-        .unwrap()
-        .with_prefixes("authorization", "payment")
-        .unwrap()
-    }
-
-    fn left_batch(times: Vec<i64>) -> Batch {
-        let rows = times.len();
-        Batch::table(
-            vec![
-                RecordBatch::try_new(
-                    left_schema(),
-                    vec![
-                        Arc::new(Int64Array::from(vec![7; rows])),
-                        Arc::new(TimestampMicrosecondArray::from(times).with_timezone("UTC")),
-                        Arc::new(Int64Array::from(vec![42; rows])),
-                    ],
-                )
-                .unwrap(),
-            ],
-            BatchMetadata::default(),
-        )
-        .unwrap()
-    }
-
-    fn right_batch(times: Vec<i64>) -> Batch {
-        let rows = times.len();
-        Batch::table(
-            vec![
-                RecordBatch::try_new(
-                    right_schema(),
-                    vec![
-                        Arc::new(Int64Array::from(vec![7; rows])),
-                        Arc::new(TimestampMicrosecondArray::from(times).with_timezone("UTC")),
-                        Arc::new(StringArray::from(vec!["paid"; rows])),
-                    ],
-                )
-                .unwrap(),
-            ],
-            BatchMetadata::default(),
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn derives_exact_prefixed_ports() {
-        let operator =
-            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
-
-        assert_eq!(
-            operator
-                .input_ports()
-                .iter()
-                .map(Port::name)
-                .collect::<Vec<_>>(),
-            ["left", "right"]
-        );
-        let output = operator.output_ports()[0].schema().unwrap();
-        assert_eq!(
-            output
-                .fields()
-                .iter()
-                .map(|field| field.name().as_str())
-                .collect::<Vec<_>>(),
-            [
-                "authorization__account_id",
-                "authorization__authorized_at",
-                "authorization__amount",
-                "payment__account_id",
-                "payment__paid_at",
-                "payment__status",
-            ]
-        );
-        assert!(output.field(2).is_nullable());
-        assert!(output.field(5).is_nullable());
-    }
-
-    #[test]
-    fn rejects_values_beyond_the_json_safe_integer_domain() {
-        let too_large = STREAM_JOIN_MAX_SAFE_JSON_INTEGER + 1;
-        assert!(JoinStateLimits::new(too_large, 1, 1).is_err());
-        assert!(JoinTimeBounds::new(Duration::from_micros(too_large), Duration::ZERO).is_err());
-        assert!(JoinStateLimits::new(1, 1, 1).is_ok());
-    }
-
-    #[test]
-    fn inclusive_bound_helper_accepts_both_edges() {
-        let bounds =
-            JoinTimeBounds::new(Duration::from_micros(10), Duration::from_micros(20)).unwrap();
-        assert!(bounds.contains_pair(100, 90));
-        assert!(bounds.contains_pair(100, 120));
-        assert!(!bounds.contains_pair(100, 89));
-        assert!(!bounds.contains_pair(100, 121));
-    }
-
-    #[test]
-    fn output_frontier_uses_live_idle_and_ended_formulas() {
-        let operator =
-            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
-        let snapshot = |left_state: IngressState,
-                        left: Option<i64>,
-                        right_state: IngressState,
-                        right: Option<i64>| {
-            IngressProgressSnapshot::new(BTreeMap::from([
-                (
-                    "left".into(),
-                    IngressProgress::new(left_state, left.map(EventTime::from_micros)),
-                ),
-                (
-                    "right".into(),
-                    IngressProgress::new(right_state, right.map(EventTime::from_micros)),
-                ),
-            ]))
-        };
-        let micros = |value: Option<EventTime>| value.map(EventTime::as_micros);
-
-        assert_eq!(
-            micros(
-                operator
-                    .output_frontier_candidate(&snapshot(
-                        IngressState::Idle,
-                        Some(400_000_000),
-                        IngressState::Active,
-                        Some(100_000_000),
-                    ))
-                    .unwrap()
-            ),
-            Some(40_000_000)
-        );
-        assert_eq!(
-            micros(
-                operator
-                    .output_frontier_candidate(&snapshot(
-                        IngressState::Active,
-                        Some(400_000_000),
-                        IngressState::Ended,
-                        Some(100_000_000),
-                    ))
-                    .unwrap()
-            ),
-            Some(100_000_000)
-        );
-        assert_eq!(
-            micros(
-                operator
-                    .output_frontier_candidate(&snapshot(
-                        IngressState::Ended,
-                        Some(400_000_000),
-                        IngressState::Active,
-                        Some(100_000_000),
-                    ))
-                    .unwrap()
-            ),
-            Some(40_000_000)
-        );
-        assert_eq!(
-            operator
-                .output_frontier_candidate(&snapshot(
-                    IngressState::Ended,
-                    Some(400_000_000),
-                    IngressState::Ended,
-                    Some(100_000_000),
-                ))
-                .unwrap(),
-            None
-        );
-        assert_eq!(
-            operator
-                .output_frontier_candidate(&snapshot(
-                    IngressState::Active,
-                    None,
-                    IngressState::Active,
-                    Some(100_000_000),
-                ))
-                .unwrap(),
-            None
-        );
-    }
-
-    #[tokio::test]
-    async fn emits_duplicate_pairs_at_both_inclusive_boundaries() {
-        let mut operator =
-            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
-        let job = StreamJobContext::new(
-            1,
-            "fingerprint",
-            JsonMap::new(),
-            None,
-            CancellationToken::new(),
-        );
-        let context = StreamOperatorContext::new(&job, "match", None);
-        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
-
-        operator
-            .process_data("left", left_batch(vec![100, 100]), &context, &mut collector)
-            .await
-            .unwrap();
-        operator
-            .process_data(
-                "right",
-                right_batch(vec![-299_999_900, 60_000_100, 60_000_101]),
-                &context,
-                &mut collector,
-            )
-            .await
-            .unwrap();
-
-        let outputs = collector.drain("output");
-        assert_eq!(outputs.len(), 4);
-        assert!(
-            outputs
-                .iter()
-                .all(|message| message.kind() == StreamMessageKind::Data)
-        );
-        assert_eq!(
-            outputs
-                .iter()
-                .map(|message| message.as_data().unwrap().metadata().sequence())
-                .collect::<Vec<_>>(),
-            [0, 1, 2, 3]
-        );
-    }
-
-    fn job() -> StreamJobContext {
-        StreamJobContext::new(
-            1,
-            "fingerprint",
-            JsonMap::new(),
-            None,
-            CancellationToken::new(),
-        )
-    }
-
-    fn progress_context(
-        job_context: &StreamJobContext,
-        left: (IngressState, Option<i64>),
-        right: (IngressState, Option<i64>),
-    ) -> StreamOperatorContext<'_> {
-        let snapshot = IngressProgressSnapshot::new(BTreeMap::from([
-            (
-                "left".into(),
-                IngressProgress::new(left.0, left.1.map(EventTime::from_micros)),
-            ),
-            (
-                "right".into(),
-                IngressProgress::new(right.0, right.1.map(EventTime::from_micros)),
-            ),
-        ]));
-        StreamOperatorContext::for_task(
-            job_context,
-            "match",
-            None,
-            snapshot,
-            EdgeBudget::default(),
-            Arc::new(NoopLateMetrics),
-        )
-    }
-
-    struct NoopLateMetrics;
-
-    impl crate::operator::LateMetricSink for NoopLateMetrics {
-        fn record(&self, _delta: crate::operator::LateMetricDelta) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    fn reason_of(error: &CalcFlowError) -> Option<crate::StreamingFailureReason> {
-        match error {
-            CalcFlowError::OperatorReason { reason_code, .. } => Some(*reason_code),
-            _ => None,
-        }
-    }
-
-    fn checkpoint_metadata(operator: &mut StreamJoinOperator, epoch: u64) -> JsonMap {
-        operator
-            .checkpoint(Epoch::new(epoch).unwrap())
-            .unwrap()
-            .inline_metadata
-    }
-
-    #[tokio::test]
-    async fn late_rows_are_dropped_with_metrics_and_never_retained() {
-        let mut operator =
-            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
-        let job_context = job();
-        let context = progress_context(
-            &job_context,
-            (IngressState::Active, Some(500_000_000)),
-            (IngressState::Active, None),
-        );
-        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
-
-        operator
-            .process_data(
-                "left",
-                left_batch(vec![100_000_000, 499_999_999]),
-                &context,
-                &mut collector,
-            )
-            .await
-            .unwrap();
-
-        assert!(collector.drain("output").is_empty());
-        let metadata = checkpoint_metadata(&mut operator, 1);
-        let state = serde_json::to_string(&metadata["metrics"]["left"]).unwrap();
-        assert!(state.contains("\"late_rows\":2"), "{state}");
-        assert!(
-            state.contains("\"late_affected_batches\":1")
-                && state.contains("\"max_lateness_micros\":400000000"),
-            "{state}"
-        );
-        assert!(
-            state.contains("\"retained_rows\":0"),
-            "late rows must never be retained: {state}"
-        );
-    }
-
-    #[tokio::test]
-    async fn null_event_time_and_null_key_rows_are_counted_not_stored() {
-        let nullable_time_schema = Arc::new(Schema::new(vec![
-            Field::new("account_id", DataType::Int64, false),
-            Field::new(
-                "authorized_at",
-                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
-                true,
-            ),
-            Field::new("amount", DataType::Int64, true),
-        ]));
-        let nullable_key_schema = Arc::new(Schema::new(vec![
-            Field::new("account_id", DataType::Int64, true),
-            Field::new(
-                "paid_at",
-                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
-                false,
-            ),
-            Field::new("status", DataType::Utf8, true),
-        ]));
-        let mut operator = StreamJoinOperator::new(
-            "match",
-            Arc::clone(&nullable_time_schema),
-            Arc::clone(&nullable_key_schema),
-            spec(),
-        )
-        .unwrap();
-        let job_context = job();
-        let context = StreamOperatorContext::new(&job_context, "match", None);
-        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
-
-        let null_time = Batch::table(
-            vec![
-                RecordBatch::try_new(
-                    Arc::clone(&nullable_time_schema),
-                    vec![
-                        Arc::new(Int64Array::from(vec![7])),
-                        Arc::new(
-                            TimestampMicrosecondArray::from(vec![None::<i64>]).with_timezone("UTC"),
-                        ),
-                        Arc::new(Int64Array::from(vec![42])),
-                    ],
-                )
-                .unwrap(),
-            ],
-            BatchMetadata::default(),
-        )
-        .unwrap();
-        let nullable_key_schema = Arc::new(Schema::new(vec![
-            Field::new("account_id", DataType::Int64, true),
-            Field::new(
-                "paid_at",
-                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
-                false,
-            ),
-            Field::new("status", DataType::Utf8, true),
-        ]));
-        let null_key = Batch::table(
-            vec![
-                RecordBatch::try_new(
-                    Arc::clone(&nullable_key_schema),
-                    vec![
-                        Arc::new(Int64Array::from(vec![None::<i64>])),
-                        Arc::new(TimestampMicrosecondArray::from(vec![0]).with_timezone("UTC")),
-                        Arc::new(StringArray::from(vec!["paid"])),
-                    ],
-                )
-                .unwrap(),
-            ],
-            BatchMetadata::default(),
-        )
-        .unwrap();
-
-        operator
-            .process_data("left", null_time, &context, &mut collector)
-            .await
-            .unwrap();
-        operator
-            .process_data("right", null_key, &context, &mut collector)
-            .await
-            .unwrap();
-
-        assert!(collector.drain("output").is_empty());
-        let metadata = checkpoint_metadata(&mut operator, 1);
-        assert_eq!(metadata["metrics"]["left"]["null_event_time_rows"], 1);
-        assert_eq!(metadata["metrics"]["right"]["null_key_rows"], 1);
-        assert_eq!(metadata["metrics"]["left"]["retained_rows"], 0);
-        assert_eq!(metadata["metrics"]["right"]["retained_rows"], 0);
-    }
-
-    #[tokio::test]
-    async fn watermark_progress_evicts_expired_opposite_rows_and_end_clears_them() {
-        let mut operator =
-            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
-        let job_context = job();
-        let context = StreamOperatorContext::new(&job_context, "match", None);
-        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
-        operator
-            .process_data(
-                "left",
-                left_batch(vec![0, 100_000_000]),
-                &context,
-                &mut collector,
-            )
-            .await
-            .unwrap();
-        let metadata = checkpoint_metadata(&mut operator, 1);
-        assert_eq!(metadata["metrics"]["left"]["retained_rows"], 2);
-
-        let eviction = progress_context(
-            &job_context,
-            (IngressState::Active, Some(1_000_000)),
-            (IngressState::Active, Some(150_000_000)),
-        );
-        operator
-            .on_ingress_progress("right", &eviction)
-            .await
-            .unwrap();
-        let metadata = checkpoint_metadata(&mut operator, 2);
-        let left_metrics = serde_json::to_string(&metadata["metrics"]["left"]).unwrap();
-        assert!(
-            left_metrics.contains("\"retained_rows\":1")
-                && left_metrics.contains("\"evicted_rows\":1"),
-            "{left_metrics}"
-        );
-
-        let ended = progress_context(
-            &job_context,
-            (IngressState::Active, Some(1_000_000)),
-            (IngressState::Ended, Some(50_000_000)),
-        );
-        operator.on_ingress_progress("right", &ended).await.unwrap();
-        let metadata = checkpoint_metadata(&mut operator, 3);
-        assert_eq!(metadata["metrics"]["left"]["retained_rows"], 0);
-    }
-
-    #[tokio::test]
-    async fn unknown_ingress_and_data_after_end_fail_loudly() {
-        let mut operator =
-            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
-        let job_context = job();
-        let context = StreamOperatorContext::new(&job_context, "match", None);
-        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
-
-        let unknown = operator
-            .process_data("middle", left_batch(vec![0]), &context, &mut collector)
-            .await
-            .unwrap_err();
-        assert!(unknown.to_string().contains("unknown ingress"), "{unknown}");
-
-        operator.on_end(&context, &mut collector).await.unwrap();
-        let after_end = operator
-            .process_data("left", left_batch(vec![0]), &context, &mut collector)
-            .await
-            .unwrap_err();
-        assert!(
-            after_end.to_string().contains("data after end-of-input"),
-            "{after_end}"
-        );
-
-        let progress = IngressProgressSnapshot::new(BTreeMap::from([
-            (
-                "left".into(),
-                IngressProgress::new(IngressState::Active, Some(EventTime::from_micros(1))),
-            ),
-            (
-                "right".into(),
-                IngressProgress::new(IngressState::Active, Some(EventTime::from_micros(1))),
-            ),
-            (
-                "middle".into(),
-                IngressProgress::new(IngressState::Active, Some(EventTime::from_micros(1))),
-            ),
-        ]));
-        let unknown_progress = operator
-            .on_ingress_progress(
-                "middle",
-                &StreamOperatorContext::for_task(
-                    &job_context,
-                    "match",
-                    None,
-                    progress,
-                    EdgeBudget::default(),
-                    Arc::new(NoopLateMetrics),
-                ),
-            )
-            .await
-            .unwrap_err();
-        assert!(
-            unknown_progress.to_string().contains("unknown ingress"),
-            "{unknown_progress}"
-        );
-    }
-
-    #[tokio::test]
-    async fn state_row_limit_failure_is_atomic_with_typed_reason() {
-        let limited = StreamJoinSpec::inner(
-            ["account_id"],
-            ["account_id"],
-            "authorized_at",
-            "paid_at",
-            JoinTimeBounds::new(Duration::from_secs(300), Duration::from_secs(60)).unwrap(),
-            JoinStateLimits::new(1, 1_000_000, 1_000).unwrap(),
-        )
-        .unwrap();
-        let mut operator =
-            StreamJoinOperator::new("match", left_schema(), right_schema(), limited).unwrap();
-        let job_context = job();
-        let context = StreamOperatorContext::new(&job_context, "match", None);
-        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
-
-        operator
-            .process_data("left", left_batch(vec![0]), &context, &mut collector)
-            .await
-            .unwrap();
-        let failure = operator
-            .process_data("left", left_batch(vec![1]), &context, &mut collector)
-            .await
-            .unwrap_err();
-        assert_eq!(
-            reason_of(&failure),
-            Some(crate::StreamingFailureReason::JoinStateLimitExceeded)
-        );
-
-        let metadata = checkpoint_metadata(&mut operator, 1);
-        assert_eq!(metadata["metrics"]["state_limit_failures"], 1);
-        assert_eq!(metadata["metrics"]["left"]["retained_rows"], 1);
-        assert!(collector.drain("output").is_empty());
-    }
-
-    #[tokio::test]
-    async fn match_limit_failure_is_atomic_with_typed_reason() {
-        let limited = StreamJoinSpec::inner(
-            ["account_id"],
-            ["account_id"],
-            "authorized_at",
-            "paid_at",
-            JoinTimeBounds::new(Duration::from_secs(300), Duration::from_secs(60)).unwrap(),
-            JoinStateLimits::new(100, 1_000_000, 1).unwrap(),
-        )
-        .unwrap();
-        let mut operator =
-            StreamJoinOperator::new("match", left_schema(), right_schema(), limited).unwrap();
-        let job_context = job();
-        let context = StreamOperatorContext::new(&job_context, "match", None);
-        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
-
-        operator
-            .process_data("left", left_batch(vec![0, 0]), &context, &mut collector)
-            .await
-            .unwrap();
-        let failure = operator
-            .process_data("right", right_batch(vec![0, 0]), &context, &mut collector)
-            .await
-            .unwrap_err();
-        assert_eq!(
-            reason_of(&failure),
-            Some(crate::StreamingFailureReason::JoinMatchLimitExceeded)
-        );
-
-        let metadata = checkpoint_metadata(&mut operator, 1);
-        assert_eq!(metadata["metrics"]["match_limit_failures"], 1);
-        assert_eq!(metadata["metrics"]["right"]["retained_rows"], 0);
-        assert!(collector.drain("output").is_empty());
-    }
-
-    #[tokio::test]
-    async fn checkpoint_and_restore_round_trip_preserves_state_and_counters() {
-        let mut operator =
-            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
-        let job_context = job();
-        let context = StreamOperatorContext::new(&job_context, "match", None);
-        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
-        operator
-            .process_data("left", left_batch(vec![0]), &context, &mut collector)
-            .await
-            .unwrap();
-        operator
-            .process_data("right", right_batch(vec![1]), &context, &mut collector)
-            .await
-            .unwrap();
-        collector.drain("output");
-        let snapshot = operator.checkpoint(Epoch::new(7).unwrap()).unwrap();
-
-        let same_epoch = operator.checkpoint(Epoch::new(7).unwrap()).unwrap_err();
-        assert!(
-            same_epoch.to_string().contains("did not advance"),
-            "{same_epoch}"
-        );
-
-        let mut restored =
-            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
-        restored.restore(&snapshot).unwrap();
-        let round_trip = restored.checkpoint(Epoch::new(8).unwrap()).unwrap();
-        let mut expected_metadata = snapshot.inline_metadata.clone();
-        expected_metadata.insert("epoch".into(), 8.into());
-        assert_eq!(round_trip.inline_metadata, expected_metadata);
-        assert_eq!(round_trip.segments, snapshot.segments);
-
-        let mut collector = EdgeCollector::new(restored.output_ports().to_vec());
-        restored
-            .process_data("right", right_batch(vec![0]), &context, &mut collector)
-            .await
-            .unwrap();
-        let outputs = collector.drain("output");
-        assert_eq!(outputs.len(), 1, "restored left state must still match");
-    }
-
-    #[tokio::test]
-    async fn checkpoint_encodes_dirty_upserts_from_carried_records_not_live_state() {
-        let mut operator =
-            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
-        let job_context = job();
-        let context = StreamOperatorContext::new(&job_context, "match", None);
-        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
-        operator
-            .process_data("left", left_batch(vec![0, 1, 2]), &context, &mut collector)
-            .await
-            .unwrap();
-        // The dirty log must encode from the records it carries at admission:
-        // the checkpoint path may not scan live state per dirty row, or capture
-        // cost grows with the total retained state instead of the dirty set.
-        operator.state.left.clear();
-        let snapshot = operator.checkpoint(Epoch::INITIAL).unwrap();
-
-        let mut restored =
-            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
-        restored.restore(&snapshot).unwrap();
-        assert_eq!(restored.status().left.retained_rows, 3);
-    }
-
-    #[tokio::test]
-    async fn checkpoint_shares_carried_segment_allocations_across_epochs() {
-        let mut operator =
-            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
-        let job_context = job();
-        let context = StreamOperatorContext::new(&job_context, "match", None);
-        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
-        operator
-            .process_data("left", left_batch(vec![0]), &context, &mut collector)
-            .await
-            .unwrap();
-        let first = operator.checkpoint(Epoch::INITIAL).unwrap();
-        operator
-            .process_data("left", left_batch(vec![1]), &context, &mut collector)
-            .await
-            .unwrap();
-        let second = operator.checkpoint(Epoch::INITIAL.next().unwrap()).unwrap();
-
-        // Capture cost must stay proportional to the dirty set (spec FR47): a
-        // segment the operator already encoded is carried into the next
-        // snapshot by sharing its allocation, never by copying its bytes.
-        let mut shared = 0_usize;
-        for (segment_id, carried) in &second.segments {
-            if let Some(original) = first.segments.get(segment_id) {
-                assert!(
-                    Arc::ptr_eq(&original.bytes_arc(), &carried.bytes_arc()),
-                    "carried segment {segment_id:?} must share its allocation"
-                );
-                shared += 1;
-            }
-        }
-        assert_eq!(shared, 1, "epoch 1 delta carries into epoch 2");
-        assert!(
-            second.segments.contains_key("left-delta-2"),
-            "epoch 2 dirty ops encode a fresh segment"
-        );
-    }
-
-    #[tokio::test]
-    async fn restore_rejects_tampered_checkpoints() {
-        let mut operator =
-            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
-        let job_context = job();
-        let context = StreamOperatorContext::new(&job_context, "match", None);
-        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
-        operator
-            .process_data("left", left_batch(vec![0]), &context, &mut collector)
-            .await
-            .unwrap();
-        let snapshot = operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
-
-        let fresh = |snapshot: &OperatorStateSnapshot| {
-            StreamJoinOperator::new("match", left_schema(), right_schema(), spec())
-                .unwrap()
-                .restore(snapshot)
-        };
-
-        let mut bad_magic = snapshot.clone();
-        bad_magic
-            .segments
-            .insert("left-delta-1".into(), StateSegment::new(vec![0_u8; 8]));
-        assert!(fresh(&bad_magic).is_err(), "invalid magic must be rejected");
-
-        let mut short_inventory = snapshot.clone();
-        short_inventory.segments.remove("left-delta-1");
-        assert!(
-            fresh(&short_inventory).is_err(),
-            "missing segment must be rejected"
-        );
-
-        let mut truncated = snapshot.clone();
-        let segment = truncated.segments.get_mut("left-delta-1").unwrap();
-        let mut bytes = segment.bytes().to_vec();
-        bytes.truncate(bytes.len() - 1);
-        *segment = StateSegment::new(bytes);
-        assert!(
-            fresh(&truncated).is_err(),
-            "truncated segment must be rejected"
-        );
-
-        let mut wrong_layout = snapshot.clone();
-        wrong_layout
-            .inline_metadata
-            .insert("layout_version".into(), 2.into());
-        assert!(
-            fresh(&wrong_layout).is_err(),
-            "layout bump must be rejected"
-        );
-
-        let mut wrong_metrics = snapshot.clone();
-        wrong_metrics
-            .inline_metadata
-            .entry("metrics".into())
-            .or_default()["left"]["retained_rows"] = 99.into();
-        assert!(
-            fresh(&wrong_metrics).is_err(),
-            "inconsistent retained metrics must be rejected"
-        );
-
-        let mut wrong_limits = snapshot.clone();
-        wrong_limits
-            .inline_metadata
-            .entry("spec".into())
-            .or_default()["limits"]["max_state_rows_per_side"] = 5.into();
-        assert!(
-            fresh(&wrong_limits).is_err(),
-            "spec change must be rejected"
-        );
-
-        let mut bad_metadata = snapshot.clone();
-        bad_metadata
-            .inline_metadata
-            .insert("layout_version".into(), "not-a-number".into());
-        assert!(
-            fresh(&bad_metadata).is_err(),
-            "invalid metadata must be rejected"
-        );
-
-        assert!(fresh(&snapshot).is_ok(), "the untampered snapshot restores");
-    }
-
-    #[test]
-    fn reset_clears_state_for_reuse() {
-        let mut operator =
-            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
-        let record = left_batch(vec![0]).table_payload().unwrap().batches()[0].slice(0, 1);
-        operator.state.left.push(StoredRow {
-            encoded_key: Arc::new(encode_join_key_v1(&record, 0, &[0]).unwrap()),
-            record,
-            event_time: EventTime::from_micros(0),
-            row_id: 0,
-            charge: 64,
-        });
-        operator.state.metrics.left.retained_rows = 1;
-
-        operator.reset().unwrap();
-
-        assert!(operator.state.left.is_empty());
-        assert_eq!(operator.state.metrics.left.retained_rows, 0);
-    }
-
-    #[test]
-    fn metadata_exposes_data_only_configuration_and_debug() {
-        let operator =
-            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
-        assert_eq!(operator.name(), "match");
-        assert_eq!(operator.input_ports().len(), 2);
-        assert_eq!(operator.output_ports().len(), 1);
-        let configuration = operator.configuration();
-        assert_eq!(configuration["join_type"], "inner");
-        assert_eq!(configuration["left_event_time"], "authorized_at");
-        assert!(!configuration.contains_key("callable"));
-        let debug = format!("{operator:?}");
-        assert!(debug.contains("match"), "{debug}");
-    }
-
-    #[test]
-    fn spec_validation_rejects_invalid_declarations() {
-        let bounds =
-            JoinTimeBounds::new(Duration::from_secs(300), Duration::from_secs(60)).unwrap();
-        let limits = JoinStateLimits::new(100, 1_000_000, 1_000).unwrap();
-
-        let empty_keys = StreamJoinSpec::inner(
-            Vec::<String>::new(),
-            ["account_id"],
-            "authorized_at",
-            "paid_at",
-            bounds,
-            limits,
-        );
-        assert!(empty_keys.is_err());
-
-        let unequal = StreamJoinSpec::inner(
-            ["a", "b"],
-            ["account_id"],
-            "authorized_at",
-            "paid_at",
-            bounds,
-            limits,
-        );
-        assert!(unequal.is_err());
-
-        let duplicate = StreamJoinSpec::inner(
-            ["account_id", "account_id"],
-            ["account_id", "account_id"],
-            "authorized_at",
-            "paid_at",
-            bounds,
-            limits,
-        );
-        assert!(duplicate.is_err());
-
-        let empty_event_time = StreamJoinSpec::inner(
-            ["account_id"],
-            ["account_id"],
-            "",
-            "paid_at",
-            bounds,
-            limits,
-        );
-        assert!(empty_event_time.is_err());
-
-        let valid = StreamJoinSpec::inner(
-            ["account_id"],
-            ["account_id"],
-            "authorized_at",
-            "paid_at",
-            bounds,
-            limits,
-        )
-        .unwrap();
-        assert!(valid.clone().with_prefixes("same", "same").is_err());
-        assert!(valid.clone().with_prefixes("not valid", "right").is_err());
-
-        let prefixed = valid.with_prefixes("authorization", "payment").unwrap();
-        assert_eq!(prefixed.left_keys(), ["account_id"]);
-        assert_eq!(prefixed.right_keys(), ["account_id"]);
-        assert_eq!(prefixed.left_event_time(), "authorized_at");
-        assert_eq!(prefixed.right_event_time(), "paid_at");
-        assert_eq!(prefixed.left_prefix(), "authorization");
-        assert_eq!(prefixed.right_prefix(), "payment");
-        assert_eq!(prefixed.join_type(), StreamJoinType::Inner);
-        assert_eq!(prefixed.bounds().before(), Duration::from_secs(300));
-        assert_eq!(prefixed.bounds().after(), Duration::from_secs(60));
-        assert_eq!(prefixed.limits().max_state_rows_per_side(), 100);
-        assert_eq!(prefixed.limits().max_state_bytes_per_side(), 1_000_000);
-        assert_eq!(prefixed.limits().max_matches_per_input_batch(), 1_000);
-        assert!(format!("{prefixed:?}").contains("StreamJoinSpec"));
-    }
-
-    #[test]
-    fn serde_round_trips_and_rejects_unknown_or_wrong_kind_fields() {
-        let source = r#"{
-            "join_type": "inner",
-            "left_keys": ["account_id"],
-            "right_keys": ["account_id"],
-            "left_event_time": "authorized_at",
-            "right_event_time": "paid_at",
-            "bounds": {"before_micros": 300000000, "after_micros": 60000000},
-            "limits": {
-                "max_state_rows_per_side": 100,
-                "max_state_bytes_per_side": 1000000,
-                "max_matches_per_input_batch": 1000
-            }
-        }"#;
-        let parsed: StreamJoinSpec = serde_json::from_str(source).unwrap();
-        assert_eq!(parsed.left_prefix(), "left");
-        assert_eq!(parsed.right_prefix(), "right");
-        let encoded = serde_json::to_value(&parsed).unwrap();
-        assert_eq!(encoded["bounds"]["before_micros"], 300_000_000);
-
-        let unknown = source.replace(
-            "\"join_type\": \"inner\",",
-            "\"join_type\": \"inner\", \"extra\": 1,",
-        );
-        assert!(serde_json::from_str::<StreamJoinSpec>(&unknown).is_err());
-
-        let outer_join = source.replace("\"inner\"", "\"outer\"");
-        assert!(serde_json::from_str::<StreamJoinSpec>(&outer_join).is_err());
-
-        let unknown_bound = source.replace(
-            "\"before_micros\": 300000000,",
-            "\"before_micros\": 300000000, \"extra\": 1,",
-        );
-        assert!(serde_json::from_str::<StreamJoinSpec>(&unknown_bound).is_err());
-
-        let unknown_limit = source.replace(
-            "\"max_matches_per_input_batch\": 1000",
-            "\"max_matches_per_input_batch\": 1000, \"extra\": 1",
-        );
-        assert!(serde_json::from_str::<StreamJoinSpec>(&unknown_limit).is_err());
-
-        let zero_limit = source.replace(
-            "\"max_state_rows_per_side\": 100",
-            "\"max_state_rows_per_side\": 0",
-        );
-        assert!(serde_json::from_str::<StreamJoinSpec>(&zero_limit).is_err());
-    }
-
-    #[tokio::test]
-    async fn event_time_columns_accept_every_timestamp_unit_and_reject_others() {
-        for (unit, _value) in [
-            (TimeUnit::Second, 1_i64),
-            (TimeUnit::Millisecond, 1_000),
-            (TimeUnit::Microsecond, 1_000_000),
-            (TimeUnit::Nanosecond, 1_000_000_000),
-        ] {
-            let schema = Arc::new(Schema::new(vec![
-                Field::new("account_id", DataType::Int64, false),
-                Field::new(
-                    "authorized_at",
-                    DataType::Timestamp(unit, Some("UTC".into())),
-                    false,
-                ),
-                Field::new("amount", DataType::Int64, true),
-            ]));
-            let operator = StreamJoinOperator::new("match", schema, right_schema(), spec());
-            assert!(operator.is_ok(), "unit {unit:?} must be supported");
-        }
-
-        let not_a_timestamp = Arc::new(Schema::new(vec![
-            Field::new("account_id", DataType::Int64, false),
-            Field::new("authorized_at", DataType::Int64, false),
-            Field::new("amount", DataType::Int64, true),
-        ]));
-        let rejected = StreamJoinOperator::new("match", not_a_timestamp, right_schema(), spec());
-        assert!(
-            rejected.is_err(),
-            "non-timestamp event time must be rejected"
-        );
-
-        let missing_key = Arc::new(Schema::new(vec![
-            Field::new("ledger_id", DataType::Int64, false),
-            Field::new(
-                "authorized_at",
-                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
-                false,
-            ),
-        ]));
-        let rejected = StreamJoinOperator::new("match", missing_key, right_schema(), spec());
-        assert!(rejected.is_err(), "missing key column must be rejected");
-
-        let wrong_key_type = Arc::new(Schema::new(vec![
-            Field::new("account_id", DataType::Float64, false),
-            Field::new(
-                "authorized_at",
-                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
-                false,
-            ),
-            Field::new("amount", DataType::Int64, true),
-        ]));
-        let rejected = StreamJoinOperator::new("match", wrong_key_type, right_schema(), spec());
-        assert!(rejected.is_err(), "unsupported key type must be rejected");
-
-        let zoned = Arc::new(Schema::new(vec![
-            Field::new("account_id", DataType::Int64, false),
-            Field::new(
-                "authorized_at",
-                DataType::Timestamp(TimeUnit::Microsecond, Some("America/New_York".into())),
-                false,
-            ),
-            Field::new("amount", DataType::Int64, true),
-        ]));
-        let rejected = StreamJoinOperator::new("match", zoned, right_schema(), spec());
-        assert!(rejected.is_err(), "non-UTC timezone must be rejected");
-    }
-
-    #[tokio::test]
-    async fn variable_width_payloads_are_charged_and_limited_deterministically() {
-        let payload_schema = Arc::new(Schema::new(vec![
-            Field::new("account_id", DataType::Int64, false),
-            Field::new(
-                "authorized_at",
-                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
-                false,
-            ),
-            Field::new("notes", DataType::Utf8, true),
-            Field::new("blob", DataType::Binary, true),
-            Field::new("tag", DataType::FixedSizeBinary(4), true),
-        ]));
-        let keys_schema = Arc::new(Schema::new(vec![
-            Field::new("account_id", DataType::Int64, false),
-            Field::new(
-                "paid_at",
-                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
-                false,
-            ),
-            Field::new("status", DataType::Utf8, true),
-        ]));
-        let tiny = StreamJoinSpec::inner(
-            ["account_id"],
-            ["account_id"],
-            "authorized_at",
-            "paid_at",
-            JoinTimeBounds::new(Duration::from_secs(300), Duration::from_secs(60)).unwrap(),
-            JoinStateLimits::new(100, 96, 1_000).unwrap(),
-        )
-        .unwrap();
-        let mut operator =
-            StreamJoinOperator::new("match", Arc::clone(&payload_schema), keys_schema, tiny)
-                .unwrap();
-        let job_context = job();
-        let context = StreamOperatorContext::new(&job_context, "match", None);
-        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
-
-        let batch = Batch::table(
-            vec![
-                RecordBatch::try_new(
-                    payload_schema,
-                    vec![
-                        Arc::new(Int64Array::from(vec![7])),
-                        Arc::new(TimestampMicrosecondArray::from(vec![0]).with_timezone("UTC")),
-                        Arc::new(StringArray::from(vec!["0123456789"])),
-                        Arc::new(BinaryArray::from_opt_vec(vec![Some(&[0_u8; 8][..])])),
-                        Arc::new(
-                            FixedSizeBinaryArray::try_from_sparse_iter_with_size(
-                                vec![Some([1_u8; 4])].into_iter(),
-                                4,
-                            )
-                            .unwrap(),
-                        ),
-                    ],
-                )
-                .unwrap(),
-            ],
-            BatchMetadata::default(),
-        )
-        .unwrap();
-
-        let failure = operator
-            .process_data("left", batch, &context, &mut collector)
-            .await
-            .unwrap_err();
-        assert_eq!(
-            reason_of(&failure),
-            Some(crate::StreamingFailureReason::JoinStateLimitExceeded)
-        );
-        let metadata = checkpoint_metadata(&mut operator, 1);
-        assert_eq!(metadata["metrics"]["left"]["retained_rows"], 0);
-    }
-}
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
@@ -4612,4 +3492,1125 @@ fn timestamp_key_bytes(array: &dyn Array, row_index: usize, unit: TimeUnit) -> R
             .value(row_index),
     };
     Ok(raw.to_le_bytes().to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::BTreeMap, sync::Arc, time::Duration};
+
+    use datafusion::arrow::{
+        array::{
+            BinaryArray, FixedSizeBinaryArray, Int64Array, StringArray, TimestampMicrosecondArray,
+        },
+        datatypes::{DataType, Field, Schema, TimeUnit},
+        record_batch::RecordBatch,
+    };
+
+    use super::*;
+    use crate::{
+        BatchMetadata, CancellationToken, EdgeBudget, EdgeCollector, IngressProgress,
+        IngressProgressSnapshot, IngressState, JsonMap, OperatorMetadata, StreamJobContext,
+        StreamMessageKind, StreamOperator,
+    };
+
+    fn left_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![
+            Field::new("account_id", DataType::Int64, false),
+            Field::new(
+                "authorized_at",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                false,
+            ),
+            Field::new("amount", DataType::Int64, true),
+        ]))
+    }
+
+    fn right_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![
+            Field::new("account_id", DataType::Int64, false),
+            Field::new(
+                "paid_at",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                false,
+            ),
+            Field::new("status", DataType::Utf8, true),
+        ]))
+    }
+
+    fn spec() -> StreamJoinSpec {
+        StreamJoinSpec::inner(
+            ["account_id"],
+            ["account_id"],
+            "authorized_at",
+            "paid_at",
+            JoinTimeBounds::new(Duration::from_secs(300), Duration::from_secs(60)).unwrap(),
+            JoinStateLimits::new(100, 1_000_000, 1_000).unwrap(),
+        )
+        .unwrap()
+        .with_prefixes("authorization", "payment")
+        .unwrap()
+    }
+
+    fn left_batch(times: Vec<i64>) -> Batch {
+        let rows = times.len();
+        Batch::table(
+            vec![
+                RecordBatch::try_new(
+                    left_schema(),
+                    vec![
+                        Arc::new(Int64Array::from(vec![7; rows])),
+                        Arc::new(TimestampMicrosecondArray::from(times).with_timezone("UTC")),
+                        Arc::new(Int64Array::from(vec![42; rows])),
+                    ],
+                )
+                .unwrap(),
+            ],
+            BatchMetadata::default(),
+        )
+        .unwrap()
+    }
+
+    fn right_batch(times: Vec<i64>) -> Batch {
+        let rows = times.len();
+        Batch::table(
+            vec![
+                RecordBatch::try_new(
+                    right_schema(),
+                    vec![
+                        Arc::new(Int64Array::from(vec![7; rows])),
+                        Arc::new(TimestampMicrosecondArray::from(times).with_timezone("UTC")),
+                        Arc::new(StringArray::from(vec!["paid"; rows])),
+                    ],
+                )
+                .unwrap(),
+            ],
+            BatchMetadata::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn derives_exact_prefixed_ports() {
+        let operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+
+        assert_eq!(
+            operator
+                .input_ports()
+                .iter()
+                .map(Port::name)
+                .collect::<Vec<_>>(),
+            ["left", "right"]
+        );
+        let output = operator.output_ports()[0].schema().unwrap();
+        assert_eq!(
+            output
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<Vec<_>>(),
+            [
+                "authorization__account_id",
+                "authorization__authorized_at",
+                "authorization__amount",
+                "payment__account_id",
+                "payment__paid_at",
+                "payment__status",
+            ]
+        );
+        assert!(output.field(2).is_nullable());
+        assert!(output.field(5).is_nullable());
+    }
+
+    #[test]
+    fn rejects_values_beyond_the_json_safe_integer_domain() {
+        let too_large = STREAM_JOIN_MAX_SAFE_JSON_INTEGER + 1;
+        assert!(JoinStateLimits::new(too_large, 1, 1).is_err());
+        assert!(JoinTimeBounds::new(Duration::from_micros(too_large), Duration::ZERO).is_err());
+        assert!(JoinStateLimits::new(1, 1, 1).is_ok());
+    }
+
+    #[test]
+    fn inclusive_bound_helper_accepts_both_edges() {
+        let bounds =
+            JoinTimeBounds::new(Duration::from_micros(10), Duration::from_micros(20)).unwrap();
+        assert!(bounds.contains_pair(100, 90));
+        assert!(bounds.contains_pair(100, 120));
+        assert!(!bounds.contains_pair(100, 89));
+        assert!(!bounds.contains_pair(100, 121));
+    }
+
+    #[test]
+    fn output_frontier_uses_live_idle_and_ended_formulas() {
+        let operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let snapshot = |left_state: IngressState,
+                        left: Option<i64>,
+                        right_state: IngressState,
+                        right: Option<i64>| {
+            IngressProgressSnapshot::new(BTreeMap::from([
+                (
+                    "left".into(),
+                    IngressProgress::new(left_state, left.map(EventTime::from_micros)),
+                ),
+                (
+                    "right".into(),
+                    IngressProgress::new(right_state, right.map(EventTime::from_micros)),
+                ),
+            ]))
+        };
+        let micros = |value: Option<EventTime>| value.map(EventTime::as_micros);
+
+        assert_eq!(
+            micros(
+                operator
+                    .output_frontier_candidate(&snapshot(
+                        IngressState::Idle,
+                        Some(400_000_000),
+                        IngressState::Active,
+                        Some(100_000_000),
+                    ))
+                    .unwrap()
+            ),
+            Some(40_000_000)
+        );
+        assert_eq!(
+            micros(
+                operator
+                    .output_frontier_candidate(&snapshot(
+                        IngressState::Active,
+                        Some(400_000_000),
+                        IngressState::Ended,
+                        Some(100_000_000),
+                    ))
+                    .unwrap()
+            ),
+            Some(100_000_000)
+        );
+        assert_eq!(
+            micros(
+                operator
+                    .output_frontier_candidate(&snapshot(
+                        IngressState::Ended,
+                        Some(400_000_000),
+                        IngressState::Active,
+                        Some(100_000_000),
+                    ))
+                    .unwrap()
+            ),
+            Some(40_000_000)
+        );
+        assert_eq!(
+            operator
+                .output_frontier_candidate(&snapshot(
+                    IngressState::Ended,
+                    Some(400_000_000),
+                    IngressState::Ended,
+                    Some(100_000_000),
+                ))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            operator
+                .output_frontier_candidate(&snapshot(
+                    IngressState::Active,
+                    None,
+                    IngressState::Active,
+                    Some(100_000_000),
+                ))
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn emits_duplicate_pairs_at_both_inclusive_boundaries() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let job = StreamJobContext::new(
+            1,
+            "fingerprint",
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        );
+        let context = StreamOperatorContext::new(&job, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+
+        operator
+            .process_data("left", left_batch(vec![100, 100]), &context, &mut collector)
+            .await
+            .unwrap();
+        operator
+            .process_data(
+                "right",
+                right_batch(vec![-299_999_900, 60_000_100, 60_000_101]),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+
+        let outputs = collector.drain("output");
+        assert_eq!(outputs.len(), 4);
+        assert!(
+            outputs
+                .iter()
+                .all(|message| message.kind() == StreamMessageKind::Data)
+        );
+        assert_eq!(
+            outputs
+                .iter()
+                .map(|message| message.as_data().unwrap().metadata().sequence())
+                .collect::<Vec<_>>(),
+            [0, 1, 2, 3]
+        );
+    }
+
+    fn job() -> StreamJobContext {
+        StreamJobContext::new(
+            1,
+            "fingerprint",
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        )
+    }
+
+    fn progress_context(
+        job_context: &StreamJobContext,
+        left: (IngressState, Option<i64>),
+        right: (IngressState, Option<i64>),
+    ) -> StreamOperatorContext<'_> {
+        let snapshot = IngressProgressSnapshot::new(BTreeMap::from([
+            (
+                "left".into(),
+                IngressProgress::new(left.0, left.1.map(EventTime::from_micros)),
+            ),
+            (
+                "right".into(),
+                IngressProgress::new(right.0, right.1.map(EventTime::from_micros)),
+            ),
+        ]));
+        StreamOperatorContext::for_task(
+            job_context,
+            "match",
+            None,
+            snapshot,
+            EdgeBudget::default(),
+            Arc::new(NoopLateMetrics),
+        )
+    }
+
+    struct NoopLateMetrics;
+
+    impl crate::operator::LateMetricSink for NoopLateMetrics {
+        fn record(&self, _delta: crate::operator::LateMetricDelta) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn reason_of(error: &CalcFlowError) -> Option<crate::StreamingFailureReason> {
+        match error {
+            CalcFlowError::OperatorReason { reason_code, .. } => Some(*reason_code),
+            _ => None,
+        }
+    }
+
+    fn checkpoint_metadata(operator: &mut StreamJoinOperator, epoch: u64) -> JsonMap {
+        operator
+            .checkpoint(Epoch::new(epoch).unwrap())
+            .unwrap()
+            .inline_metadata
+    }
+
+    #[tokio::test]
+    async fn late_rows_are_dropped_with_metrics_and_never_retained() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let job_context = job();
+        let context = progress_context(
+            &job_context,
+            (IngressState::Active, Some(500_000_000)),
+            (IngressState::Active, None),
+        );
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+
+        operator
+            .process_data(
+                "left",
+                left_batch(vec![100_000_000, 499_999_999]),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+
+        assert!(collector.drain("output").is_empty());
+        let metadata = checkpoint_metadata(&mut operator, 1);
+        let state = serde_json::to_string(&metadata["metrics"]["left"]).unwrap();
+        assert!(state.contains("\"late_rows\":2"), "{state}");
+        assert!(
+            state.contains("\"late_affected_batches\":1")
+                && state.contains("\"max_lateness_micros\":400000000"),
+            "{state}"
+        );
+        assert!(
+            state.contains("\"retained_rows\":0"),
+            "late rows must never be retained: {state}"
+        );
+    }
+
+    #[tokio::test]
+    async fn null_event_time_and_null_key_rows_are_counted_not_stored() {
+        let nullable_time_schema = Arc::new(Schema::new(vec![
+            Field::new("account_id", DataType::Int64, false),
+            Field::new(
+                "authorized_at",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                true,
+            ),
+            Field::new("amount", DataType::Int64, true),
+        ]));
+        let nullable_key_schema = Arc::new(Schema::new(vec![
+            Field::new("account_id", DataType::Int64, true),
+            Field::new(
+                "paid_at",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                false,
+            ),
+            Field::new("status", DataType::Utf8, true),
+        ]));
+        let mut operator = StreamJoinOperator::new(
+            "match",
+            Arc::clone(&nullable_time_schema),
+            Arc::clone(&nullable_key_schema),
+            spec(),
+        )
+        .unwrap();
+        let job_context = job();
+        let context = StreamOperatorContext::new(&job_context, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+
+        let null_time = Batch::table(
+            vec![
+                RecordBatch::try_new(
+                    Arc::clone(&nullable_time_schema),
+                    vec![
+                        Arc::new(Int64Array::from(vec![7])),
+                        Arc::new(
+                            TimestampMicrosecondArray::from(vec![None::<i64>]).with_timezone("UTC"),
+                        ),
+                        Arc::new(Int64Array::from(vec![42])),
+                    ],
+                )
+                .unwrap(),
+            ],
+            BatchMetadata::default(),
+        )
+        .unwrap();
+        let nullable_key_schema = Arc::new(Schema::new(vec![
+            Field::new("account_id", DataType::Int64, true),
+            Field::new(
+                "paid_at",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                false,
+            ),
+            Field::new("status", DataType::Utf8, true),
+        ]));
+        let null_key = Batch::table(
+            vec![
+                RecordBatch::try_new(
+                    Arc::clone(&nullable_key_schema),
+                    vec![
+                        Arc::new(Int64Array::from(vec![None::<i64>])),
+                        Arc::new(TimestampMicrosecondArray::from(vec![0]).with_timezone("UTC")),
+                        Arc::new(StringArray::from(vec!["paid"])),
+                    ],
+                )
+                .unwrap(),
+            ],
+            BatchMetadata::default(),
+        )
+        .unwrap();
+
+        operator
+            .process_data("left", null_time, &context, &mut collector)
+            .await
+            .unwrap();
+        operator
+            .process_data("right", null_key, &context, &mut collector)
+            .await
+            .unwrap();
+
+        assert!(collector.drain("output").is_empty());
+        let metadata = checkpoint_metadata(&mut operator, 1);
+        assert_eq!(metadata["metrics"]["left"]["null_event_time_rows"], 1);
+        assert_eq!(metadata["metrics"]["right"]["null_key_rows"], 1);
+        assert_eq!(metadata["metrics"]["left"]["retained_rows"], 0);
+        assert_eq!(metadata["metrics"]["right"]["retained_rows"], 0);
+    }
+
+    #[tokio::test]
+    async fn watermark_progress_evicts_expired_opposite_rows_and_end_clears_them() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let job_context = job();
+        let context = StreamOperatorContext::new(&job_context, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data(
+                "left",
+                left_batch(vec![0, 100_000_000]),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        let metadata = checkpoint_metadata(&mut operator, 1);
+        assert_eq!(metadata["metrics"]["left"]["retained_rows"], 2);
+
+        let eviction = progress_context(
+            &job_context,
+            (IngressState::Active, Some(1_000_000)),
+            (IngressState::Active, Some(150_000_000)),
+        );
+        operator
+            .on_ingress_progress("right", &eviction)
+            .await
+            .unwrap();
+        let metadata = checkpoint_metadata(&mut operator, 2);
+        let left_metrics = serde_json::to_string(&metadata["metrics"]["left"]).unwrap();
+        assert!(
+            left_metrics.contains("\"retained_rows\":1")
+                && left_metrics.contains("\"evicted_rows\":1"),
+            "{left_metrics}"
+        );
+
+        let ended = progress_context(
+            &job_context,
+            (IngressState::Active, Some(1_000_000)),
+            (IngressState::Ended, Some(50_000_000)),
+        );
+        operator.on_ingress_progress("right", &ended).await.unwrap();
+        let metadata = checkpoint_metadata(&mut operator, 3);
+        assert_eq!(metadata["metrics"]["left"]["retained_rows"], 0);
+    }
+
+    #[tokio::test]
+    async fn unknown_ingress_and_data_after_end_fail_loudly() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let job_context = job();
+        let context = StreamOperatorContext::new(&job_context, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+
+        let unknown = operator
+            .process_data("middle", left_batch(vec![0]), &context, &mut collector)
+            .await
+            .unwrap_err();
+        assert!(unknown.to_string().contains("unknown ingress"), "{unknown}");
+
+        operator.on_end(&context, &mut collector).await.unwrap();
+        let after_end = operator
+            .process_data("left", left_batch(vec![0]), &context, &mut collector)
+            .await
+            .unwrap_err();
+        assert!(
+            after_end.to_string().contains("data after end-of-input"),
+            "{after_end}"
+        );
+
+        let progress = IngressProgressSnapshot::new(BTreeMap::from([
+            (
+                "left".into(),
+                IngressProgress::new(IngressState::Active, Some(EventTime::from_micros(1))),
+            ),
+            (
+                "right".into(),
+                IngressProgress::new(IngressState::Active, Some(EventTime::from_micros(1))),
+            ),
+            (
+                "middle".into(),
+                IngressProgress::new(IngressState::Active, Some(EventTime::from_micros(1))),
+            ),
+        ]));
+        let unknown_progress = operator
+            .on_ingress_progress(
+                "middle",
+                &StreamOperatorContext::for_task(
+                    &job_context,
+                    "match",
+                    None,
+                    progress,
+                    EdgeBudget::default(),
+                    Arc::new(NoopLateMetrics),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            unknown_progress.to_string().contains("unknown ingress"),
+            "{unknown_progress}"
+        );
+    }
+
+    #[tokio::test]
+    async fn state_row_limit_failure_is_atomic_with_typed_reason() {
+        let limited = StreamJoinSpec::inner(
+            ["account_id"],
+            ["account_id"],
+            "authorized_at",
+            "paid_at",
+            JoinTimeBounds::new(Duration::from_secs(300), Duration::from_secs(60)).unwrap(),
+            JoinStateLimits::new(1, 1_000_000, 1_000).unwrap(),
+        )
+        .unwrap();
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), limited).unwrap();
+        let job_context = job();
+        let context = StreamOperatorContext::new(&job_context, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+
+        operator
+            .process_data("left", left_batch(vec![0]), &context, &mut collector)
+            .await
+            .unwrap();
+        let failure = operator
+            .process_data("left", left_batch(vec![1]), &context, &mut collector)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            reason_of(&failure),
+            Some(crate::StreamingFailureReason::JoinStateLimitExceeded)
+        );
+
+        let metadata = checkpoint_metadata(&mut operator, 1);
+        assert_eq!(metadata["metrics"]["state_limit_failures"], 1);
+        assert_eq!(metadata["metrics"]["left"]["retained_rows"], 1);
+        assert!(collector.drain("output").is_empty());
+    }
+
+    #[tokio::test]
+    async fn match_limit_failure_is_atomic_with_typed_reason() {
+        let limited = StreamJoinSpec::inner(
+            ["account_id"],
+            ["account_id"],
+            "authorized_at",
+            "paid_at",
+            JoinTimeBounds::new(Duration::from_secs(300), Duration::from_secs(60)).unwrap(),
+            JoinStateLimits::new(100, 1_000_000, 1).unwrap(),
+        )
+        .unwrap();
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), limited).unwrap();
+        let job_context = job();
+        let context = StreamOperatorContext::new(&job_context, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+
+        operator
+            .process_data("left", left_batch(vec![0, 0]), &context, &mut collector)
+            .await
+            .unwrap();
+        let failure = operator
+            .process_data("right", right_batch(vec![0, 0]), &context, &mut collector)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            reason_of(&failure),
+            Some(crate::StreamingFailureReason::JoinMatchLimitExceeded)
+        );
+
+        let metadata = checkpoint_metadata(&mut operator, 1);
+        assert_eq!(metadata["metrics"]["match_limit_failures"], 1);
+        assert_eq!(metadata["metrics"]["right"]["retained_rows"], 0);
+        assert!(collector.drain("output").is_empty());
+    }
+
+    #[tokio::test]
+    async fn checkpoint_and_restore_round_trip_preserves_state_and_counters() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let job_context = job();
+        let context = StreamOperatorContext::new(&job_context, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("left", left_batch(vec![0]), &context, &mut collector)
+            .await
+            .unwrap();
+        operator
+            .process_data("right", right_batch(vec![1]), &context, &mut collector)
+            .await
+            .unwrap();
+        collector.drain("output");
+        let snapshot = operator.checkpoint(Epoch::new(7).unwrap()).unwrap();
+
+        let same_epoch = operator.checkpoint(Epoch::new(7).unwrap()).unwrap_err();
+        assert!(
+            same_epoch.to_string().contains("did not advance"),
+            "{same_epoch}"
+        );
+
+        let mut restored =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        restored.restore(&snapshot).unwrap();
+        let round_trip = restored.checkpoint(Epoch::new(8).unwrap()).unwrap();
+        let mut expected_metadata = snapshot.inline_metadata.clone();
+        expected_metadata.insert("epoch".into(), 8.into());
+        assert_eq!(round_trip.inline_metadata, expected_metadata);
+        assert_eq!(round_trip.segments, snapshot.segments);
+
+        let mut collector = EdgeCollector::new(restored.output_ports().to_vec());
+        restored
+            .process_data("right", right_batch(vec![0]), &context, &mut collector)
+            .await
+            .unwrap();
+        let outputs = collector.drain("output");
+        assert_eq!(outputs.len(), 1, "restored left state must still match");
+    }
+
+    #[tokio::test]
+    async fn checkpoint_encodes_dirty_upserts_from_carried_records_not_live_state() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let job_context = job();
+        let context = StreamOperatorContext::new(&job_context, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("left", left_batch(vec![0, 1, 2]), &context, &mut collector)
+            .await
+            .unwrap();
+        // The dirty log must encode from the records it carries at admission:
+        // the checkpoint path may not scan live state per dirty row, or capture
+        // cost grows with the total retained state instead of the dirty set.
+        operator.state.left.clear();
+        let snapshot = operator.checkpoint(Epoch::INITIAL).unwrap();
+
+        let mut restored =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        restored.restore(&snapshot).unwrap();
+        assert_eq!(restored.status().left.retained_rows, 3);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_shares_carried_segment_allocations_across_epochs() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let job_context = job();
+        let context = StreamOperatorContext::new(&job_context, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("left", left_batch(vec![0]), &context, &mut collector)
+            .await
+            .unwrap();
+        let first = operator.checkpoint(Epoch::INITIAL).unwrap();
+        operator
+            .process_data("left", left_batch(vec![1]), &context, &mut collector)
+            .await
+            .unwrap();
+        let second = operator.checkpoint(Epoch::INITIAL.next().unwrap()).unwrap();
+
+        // Capture cost must stay proportional to the dirty set (spec FR47): a
+        // segment the operator already encoded is carried into the next
+        // snapshot by sharing its allocation, never by copying its bytes.
+        let mut shared = 0_usize;
+        for (segment_id, carried) in &second.segments {
+            if let Some(original) = first.segments.get(segment_id) {
+                assert!(
+                    Arc::ptr_eq(&original.bytes_arc(), &carried.bytes_arc()),
+                    "carried segment {segment_id:?} must share its allocation"
+                );
+                shared += 1;
+            }
+        }
+        assert_eq!(shared, 1, "epoch 1 delta carries into epoch 2");
+        assert!(
+            second.segments.contains_key("left-delta-2"),
+            "epoch 2 dirty ops encode a fresh segment"
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_rejects_tampered_checkpoints() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let job_context = job();
+        let context = StreamOperatorContext::new(&job_context, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("left", left_batch(vec![0]), &context, &mut collector)
+            .await
+            .unwrap();
+        let snapshot = operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
+
+        let fresh = |snapshot: &OperatorStateSnapshot| {
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec())
+                .unwrap()
+                .restore(snapshot)
+        };
+
+        let mut bad_magic = snapshot.clone();
+        bad_magic
+            .segments
+            .insert("left-delta-1".into(), StateSegment::new(vec![0_u8; 8]));
+        assert!(fresh(&bad_magic).is_err(), "invalid magic must be rejected");
+
+        let mut short_inventory = snapshot.clone();
+        short_inventory.segments.remove("left-delta-1");
+        assert!(
+            fresh(&short_inventory).is_err(),
+            "missing segment must be rejected"
+        );
+
+        let mut truncated = snapshot.clone();
+        let segment = truncated.segments.get_mut("left-delta-1").unwrap();
+        let mut bytes = segment.bytes().to_vec();
+        bytes.truncate(bytes.len() - 1);
+        *segment = StateSegment::new(bytes);
+        assert!(
+            fresh(&truncated).is_err(),
+            "truncated segment must be rejected"
+        );
+
+        let mut wrong_layout = snapshot.clone();
+        wrong_layout
+            .inline_metadata
+            .insert("layout_version".into(), 2.into());
+        assert!(
+            fresh(&wrong_layout).is_err(),
+            "layout bump must be rejected"
+        );
+
+        let mut wrong_metrics = snapshot.clone();
+        wrong_metrics
+            .inline_metadata
+            .entry("metrics".into())
+            .or_default()["left"]["retained_rows"] = 99.into();
+        assert!(
+            fresh(&wrong_metrics).is_err(),
+            "inconsistent retained metrics must be rejected"
+        );
+
+        let mut wrong_limits = snapshot.clone();
+        wrong_limits
+            .inline_metadata
+            .entry("spec".into())
+            .or_default()["limits"]["max_state_rows_per_side"] = 5.into();
+        assert!(
+            fresh(&wrong_limits).is_err(),
+            "spec change must be rejected"
+        );
+
+        let mut bad_metadata = snapshot.clone();
+        bad_metadata
+            .inline_metadata
+            .insert("layout_version".into(), "not-a-number".into());
+        assert!(
+            fresh(&bad_metadata).is_err(),
+            "invalid metadata must be rejected"
+        );
+
+        assert!(fresh(&snapshot).is_ok(), "the untampered snapshot restores");
+    }
+
+    #[test]
+    fn reset_clears_state_for_reuse() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let record = left_batch(vec![0]).table_payload().unwrap().batches()[0].slice(0, 1);
+        operator.state.left.push(StoredRow {
+            encoded_key: Arc::new(encode_join_key_v1(&record, 0, &[0]).unwrap()),
+            record,
+            event_time: EventTime::from_micros(0),
+            row_id: 0,
+            charge: 64,
+        });
+        operator.state.metrics.left.retained_rows = 1;
+
+        operator.reset().unwrap();
+
+        assert!(operator.state.left.is_empty());
+        assert_eq!(operator.state.metrics.left.retained_rows, 0);
+    }
+
+    #[test]
+    fn metadata_exposes_data_only_configuration_and_debug() {
+        let operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        assert_eq!(operator.name(), "match");
+        assert_eq!(operator.input_ports().len(), 2);
+        assert_eq!(operator.output_ports().len(), 1);
+        let configuration = operator.configuration();
+        assert_eq!(configuration["join_type"], "inner");
+        assert_eq!(configuration["left_event_time"], "authorized_at");
+        assert!(!configuration.contains_key("callable"));
+        let debug = format!("{operator:?}");
+        assert!(debug.contains("match"), "{debug}");
+    }
+
+    #[test]
+    fn spec_validation_rejects_invalid_declarations() {
+        let bounds =
+            JoinTimeBounds::new(Duration::from_secs(300), Duration::from_secs(60)).unwrap();
+        let limits = JoinStateLimits::new(100, 1_000_000, 1_000).unwrap();
+
+        let empty_keys = StreamJoinSpec::inner(
+            Vec::<String>::new(),
+            ["account_id"],
+            "authorized_at",
+            "paid_at",
+            bounds,
+            limits,
+        );
+        assert!(empty_keys.is_err());
+
+        let unequal = StreamJoinSpec::inner(
+            ["a", "b"],
+            ["account_id"],
+            "authorized_at",
+            "paid_at",
+            bounds,
+            limits,
+        );
+        assert!(unequal.is_err());
+
+        let duplicate = StreamJoinSpec::inner(
+            ["account_id", "account_id"],
+            ["account_id", "account_id"],
+            "authorized_at",
+            "paid_at",
+            bounds,
+            limits,
+        );
+        assert!(duplicate.is_err());
+
+        let empty_event_time = StreamJoinSpec::inner(
+            ["account_id"],
+            ["account_id"],
+            "",
+            "paid_at",
+            bounds,
+            limits,
+        );
+        assert!(empty_event_time.is_err());
+
+        let valid = StreamJoinSpec::inner(
+            ["account_id"],
+            ["account_id"],
+            "authorized_at",
+            "paid_at",
+            bounds,
+            limits,
+        )
+        .unwrap();
+        assert!(valid.clone().with_prefixes("same", "same").is_err());
+        assert!(valid.clone().with_prefixes("not valid", "right").is_err());
+
+        let prefixed = valid.with_prefixes("authorization", "payment").unwrap();
+        assert_eq!(prefixed.left_keys(), ["account_id"]);
+        assert_eq!(prefixed.right_keys(), ["account_id"]);
+        assert_eq!(prefixed.left_event_time(), "authorized_at");
+        assert_eq!(prefixed.right_event_time(), "paid_at");
+        assert_eq!(prefixed.left_prefix(), "authorization");
+        assert_eq!(prefixed.right_prefix(), "payment");
+        assert_eq!(prefixed.join_type(), StreamJoinType::Inner);
+        assert_eq!(prefixed.bounds().before(), Duration::from_secs(300));
+        assert_eq!(prefixed.bounds().after(), Duration::from_secs(60));
+        assert_eq!(prefixed.limits().max_state_rows_per_side(), 100);
+        assert_eq!(prefixed.limits().max_state_bytes_per_side(), 1_000_000);
+        assert_eq!(prefixed.limits().max_matches_per_input_batch(), 1_000);
+        assert!(format!("{prefixed:?}").contains("StreamJoinSpec"));
+    }
+
+    #[test]
+    fn serde_round_trips_and_rejects_unknown_or_wrong_kind_fields() {
+        let source = r#"{
+            "join_type": "inner",
+            "left_keys": ["account_id"],
+            "right_keys": ["account_id"],
+            "left_event_time": "authorized_at",
+            "right_event_time": "paid_at",
+            "bounds": {"before_micros": 300000000, "after_micros": 60000000},
+            "limits": {
+                "max_state_rows_per_side": 100,
+                "max_state_bytes_per_side": 1000000,
+                "max_matches_per_input_batch": 1000
+            }
+        }"#;
+        let parsed: StreamJoinSpec = serde_json::from_str(source).unwrap();
+        assert_eq!(parsed.left_prefix(), "left");
+        assert_eq!(parsed.right_prefix(), "right");
+        let encoded = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(encoded["bounds"]["before_micros"], 300_000_000);
+
+        let unknown = source.replace(
+            "\"join_type\": \"inner\",",
+            "\"join_type\": \"inner\", \"extra\": 1,",
+        );
+        assert!(serde_json::from_str::<StreamJoinSpec>(&unknown).is_err());
+
+        let outer_join = source.replace("\"inner\"", "\"outer\"");
+        assert!(serde_json::from_str::<StreamJoinSpec>(&outer_join).is_err());
+
+        let unknown_bound = source.replace(
+            "\"before_micros\": 300000000,",
+            "\"before_micros\": 300000000, \"extra\": 1,",
+        );
+        assert!(serde_json::from_str::<StreamJoinSpec>(&unknown_bound).is_err());
+
+        let unknown_limit = source.replace(
+            "\"max_matches_per_input_batch\": 1000",
+            "\"max_matches_per_input_batch\": 1000, \"extra\": 1",
+        );
+        assert!(serde_json::from_str::<StreamJoinSpec>(&unknown_limit).is_err());
+
+        let zero_limit = source.replace(
+            "\"max_state_rows_per_side\": 100",
+            "\"max_state_rows_per_side\": 0",
+        );
+        assert!(serde_json::from_str::<StreamJoinSpec>(&zero_limit).is_err());
+    }
+
+    #[tokio::test]
+    async fn event_time_columns_accept_every_timestamp_unit_and_reject_others() {
+        for (unit, _value) in [
+            (TimeUnit::Second, 1_i64),
+            (TimeUnit::Millisecond, 1_000),
+            (TimeUnit::Microsecond, 1_000_000),
+            (TimeUnit::Nanosecond, 1_000_000_000),
+        ] {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("account_id", DataType::Int64, false),
+                Field::new(
+                    "authorized_at",
+                    DataType::Timestamp(unit, Some("UTC".into())),
+                    false,
+                ),
+                Field::new("amount", DataType::Int64, true),
+            ]));
+            let operator = StreamJoinOperator::new("match", schema, right_schema(), spec());
+            assert!(operator.is_ok(), "unit {unit:?} must be supported");
+        }
+
+        let not_a_timestamp = Arc::new(Schema::new(vec![
+            Field::new("account_id", DataType::Int64, false),
+            Field::new("authorized_at", DataType::Int64, false),
+            Field::new("amount", DataType::Int64, true),
+        ]));
+        let rejected = StreamJoinOperator::new("match", not_a_timestamp, right_schema(), spec());
+        assert!(
+            rejected.is_err(),
+            "non-timestamp event time must be rejected"
+        );
+
+        let missing_key = Arc::new(Schema::new(vec![
+            Field::new("ledger_id", DataType::Int64, false),
+            Field::new(
+                "authorized_at",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                false,
+            ),
+        ]));
+        let rejected = StreamJoinOperator::new("match", missing_key, right_schema(), spec());
+        assert!(rejected.is_err(), "missing key column must be rejected");
+
+        let wrong_key_type = Arc::new(Schema::new(vec![
+            Field::new("account_id", DataType::Float64, false),
+            Field::new(
+                "authorized_at",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                false,
+            ),
+            Field::new("amount", DataType::Int64, true),
+        ]));
+        let rejected = StreamJoinOperator::new("match", wrong_key_type, right_schema(), spec());
+        assert!(rejected.is_err(), "unsupported key type must be rejected");
+
+        let zoned = Arc::new(Schema::new(vec![
+            Field::new("account_id", DataType::Int64, false),
+            Field::new(
+                "authorized_at",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("America/New_York".into())),
+                false,
+            ),
+            Field::new("amount", DataType::Int64, true),
+        ]));
+        let rejected = StreamJoinOperator::new("match", zoned, right_schema(), spec());
+        assert!(rejected.is_err(), "non-UTC timezone must be rejected");
+    }
+
+    #[tokio::test]
+    async fn variable_width_payloads_are_charged_and_limited_deterministically() {
+        let payload_schema = Arc::new(Schema::new(vec![
+            Field::new("account_id", DataType::Int64, false),
+            Field::new(
+                "authorized_at",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                false,
+            ),
+            Field::new("notes", DataType::Utf8, true),
+            Field::new("blob", DataType::Binary, true),
+            Field::new("tag", DataType::FixedSizeBinary(4), true),
+        ]));
+        let keys_schema = Arc::new(Schema::new(vec![
+            Field::new("account_id", DataType::Int64, false),
+            Field::new(
+                "paid_at",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                false,
+            ),
+            Field::new("status", DataType::Utf8, true),
+        ]));
+        let tiny = StreamJoinSpec::inner(
+            ["account_id"],
+            ["account_id"],
+            "authorized_at",
+            "paid_at",
+            JoinTimeBounds::new(Duration::from_secs(300), Duration::from_secs(60)).unwrap(),
+            JoinStateLimits::new(100, 96, 1_000).unwrap(),
+        )
+        .unwrap();
+        let mut operator =
+            StreamJoinOperator::new("match", Arc::clone(&payload_schema), keys_schema, tiny)
+                .unwrap();
+        let job_context = job();
+        let context = StreamOperatorContext::new(&job_context, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+
+        let batch = Batch::table(
+            vec![
+                RecordBatch::try_new(
+                    payload_schema,
+                    vec![
+                        Arc::new(Int64Array::from(vec![7])),
+                        Arc::new(TimestampMicrosecondArray::from(vec![0]).with_timezone("UTC")),
+                        Arc::new(StringArray::from(vec!["0123456789"])),
+                        Arc::new(BinaryArray::from_opt_vec(vec![Some(&[0_u8; 8][..])])),
+                        Arc::new(
+                            FixedSizeBinaryArray::try_from_sparse_iter_with_size(
+                                vec![Some([1_u8; 4])].into_iter(),
+                                4,
+                            )
+                            .unwrap(),
+                        ),
+                    ],
+                )
+                .unwrap(),
+            ],
+            BatchMetadata::default(),
+        )
+        .unwrap();
+
+        let failure = operator
+            .process_data("left", batch, &context, &mut collector)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            reason_of(&failure),
+            Some(crate::StreamingFailureReason::JoinStateLimitExceeded)
+        );
+        let metadata = checkpoint_metadata(&mut operator, 1);
+        assert_eq!(metadata["metrics"]["left"]["retained_rows"], 0);
+    }
 }
