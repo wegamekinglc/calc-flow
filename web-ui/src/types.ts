@@ -124,3 +124,12 @@ export const blankProject = (): ProjectCreateRequest => ({
   sinks: [],
   state: { root: '.calc-flow-state', retention: 3 },
 });
+
+/** A fixture accessor that fails loudly instead of asserting presence. */
+export const at = <T>(items: readonly T[], index = 0): T => {
+  const item = items[index];
+  if (item === undefined) {
+    throw new Error(`fixture item ${index} is missing`);
+  }
+  return item;
+};

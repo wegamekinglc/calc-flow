@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
+import { at } from '../types';
 import {
   DataSourceEditor,
   type DataSourceEditorProps,
@@ -94,7 +95,7 @@ describe('DataSourceEditor', () => {
         {...initialProps}
         drafts={[
           { key: 'left-key', dataText: '[{"value":7}]', error: null },
-          initialProps.drafts[1]!,
+          at(initialProps.drafts, 1),
         ]}
       />,
     );

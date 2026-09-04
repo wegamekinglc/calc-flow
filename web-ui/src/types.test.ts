@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { blankProject } from './types';
+import { at, blankProject } from './types';
 
 describe('v3 project transforms', () => {
   it('creates a semantically valid portable v3 expression project', () => {
@@ -9,7 +9,7 @@ describe('v3 project transforms', () => {
     expect(project.format_version).toBe(3);
     expect(project).not.toHaveProperty('$defs');
     expect(project.id).toMatch(/^[A-Za-z][A-Za-z0-9_-]*$/);
-    expect(project.graph.nodes[0]!.operator).toEqual({
+    expect(at(project.graph.nodes).operator).toEqual({
       kind: 'expression',
       expression: 'total = a + b',
       select: [],

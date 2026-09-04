@@ -1,13 +1,13 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
-import { blankProject } from '../types';
+import { at, blankProject } from '../types';
 import { NodeInspector } from './NodeInspector';
 import { inspectLoweredNode } from './projectInspectionModel';
 
 describe('NodeInspector', () => {
   it('updates a nested v2 expression operator with a trusted UDF reference', () => {
-    const node = blankProject().graph.nodes[0]!;
+    const node = at(blankProject().graph.nodes);
     const onChange = vi.fn();
 
     render(
@@ -57,7 +57,7 @@ describe('NodeInspector', () => {
   });
 
   it('shows only configured schema ports for an external source', () => {
-    const base = blankProject().graph.nodes[0]!;
+    const base = at(blankProject().graph.nodes);
     const node = {
       ...base,
       input_ports: [],
@@ -96,7 +96,7 @@ describe('NodeInspector', () => {
   });
 
   it('shows only configured schema ports for an external sink', () => {
-    const base = blankProject().graph.nodes[0]!;
+    const base = at(blankProject().graph.nodes);
     const node = {
       ...base,
       input_ports: [
@@ -133,7 +133,7 @@ describe('NodeInspector', () => {
   });
 
   it('emits semantic edits for independent SQL alias rows', () => {
-    const base = blankProject().graph.nodes[0]!;
+    const base = at(blankProject().graph.nodes);
     const node = {
       ...base,
       operator: {
@@ -180,7 +180,7 @@ describe('NodeInspector', () => {
   });
 
   it('serializes bounded integers for stream join numeric fields', () => {
-    const base = blankProject().graph.nodes[0]!;
+    const base = at(blankProject().graph.nodes);
     const node = {
       ...base,
       operator: {
@@ -249,7 +249,7 @@ describe('NodeInspector', () => {
   });
 
   it('shows the required output port for stream join nodes without declared ports', () => {
-    const base = blankProject().graph.nodes[0]!;
+    const base = at(blankProject().graph.nodes);
     const node = {
       ...base,
       id: 'join',
@@ -296,7 +296,7 @@ describe('NodeInspector', () => {
 
   it('shows read-only facts from the strict lowered project', () => {
     const project = blankProject();
-    const node = project.graph.nodes[0]!;
+    const node = at(project.graph.nodes);
 
     render(
       <NodeInspector
