@@ -773,3 +773,349 @@ fn install_partition_values(
         values[column.index] = dictionary_values[column.index].clone();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use datafusion::arrow::datatypes::TimeUnit;
+    use serde_json::{Value, json};
+
+    use super::*;
+    use crate::operator::rolling::{RollingSpec, compile_spec};
+
+    fn input_schema() -> Schema {
+        Schema::new(vec![
+            Field::new(
+                "event_time",
+                DataType::Timestamp(TimeUnit::Microsecond, Some(Arc::from("UTC"))),
+                false,
+            ),
+            Field::new("symbol", DataType::Utf8, false),
+            Field::new("sequence", DataType::UInt64, false),
+            Field::new("price", DataType::Float64, true),
+            Field::new("label", DataType::Utf8, true),
+        ])
+    }
+
+    fn compiled(output: &Value, stable_v2: bool) -> CompiledRollingSpec {
+        let state_layout_version = if output["kind"] == "ewma" { 2 } else { 1 };
+        let mut document = json!({
+            "configuration_version": 1,
+            "state_layout_version": state_layout_version,
+            "partition_by": ["symbol"],
+            "event_time": "event_time",
+            "sequence_by": ["sequence"],
+            "outputs": [output],
+            "allowed_lateness_micros": 0,
+            "late_policy": {"kind": "error", "scope": "envelope"},
+            "value_policy": "stateful_numeric_v1"
+        });
+        if stable_v2 {
+            document["numerical_profile"] = json!("stable_v2");
+        }
+        let spec: RollingSpec = serde_json::from_value(document).unwrap();
+        compile_spec(&spec, &input_schema()).unwrap()
+    }
+
+    fn mean_compiled(stable_v2: bool) -> CompiledRollingSpec {
+        compiled(
+            &json!({
+                "kind": "mean",
+                "primitive_version": 1,
+                "input": "price",
+                "output": "mean_price",
+                "frame": {"kind": "rows", "size": 2},
+                "min_periods": 1
+            }),
+            stable_v2,
+        )
+    }
+
+    fn ewma_compiled() -> CompiledRollingSpec {
+        compiled(
+            &json!({
+                "kind": "ewma",
+                "primitive_version": 1,
+                "input": "price",
+                "output": "ema_price",
+                "span": 3,
+                "min_periods": 1
+            }),
+            false,
+        )
+    }
+
+    fn entity_values(symbol: &str) -> Vec<ScalarValue> {
+        vec![
+            ScalarValue::TimestampMicrosecond(None, Some(Arc::from("UTC"))),
+            ScalarValue::Utf8(Some(symbol.to_owned())),
+            ScalarValue::UInt64(None),
+            ScalarValue::Float64(None),
+            ScalarValue::Utf8(None),
+        ]
+    }
+
+    fn row_values(event_time: i64, sequence: u64, price: f64) -> Vec<ScalarValue> {
+        vec![
+            ScalarValue::TimestampMicrosecond(Some(event_time), Some(Arc::from("UTC"))),
+            ScalarValue::Utf8(None),
+            ScalarValue::UInt64(Some(sequence)),
+            ScalarValue::Float64(Some(price)),
+            ScalarValue::Utf8(None),
+        ]
+    }
+
+    fn decoder<'a>(schema: &'a Schema, compiled: &'a CompiledRollingSpec) -> StateDecoder<'a> {
+        StateDecoder::new(schema, compiled, history_projection(compiled))
+    }
+
+    #[test]
+    fn entity_dictionary_is_fail_closed_and_profile_aware() {
+        let schema = input_schema();
+        let stable = mean_compiled(false);
+        let mut state = decoder(&schema, &stable);
+        state
+            .decode_entity(0, None, None, entity_values("b"))
+            .unwrap();
+        assert!(
+            state
+                .decode_entity(1, None, None, entity_values("a"))
+                .is_err()
+        );
+
+        let mut noncontiguous = decoder(&schema, &stable);
+        assert!(
+            noncontiguous
+                .decode_entity(1, None, None, entity_values("a"))
+                .is_err()
+        );
+        let mut payload = decoder(&schema, &stable);
+        assert!(
+            payload
+                .decode_entity(0, None, Some((0, 1, 1.0)), entity_values("a"))
+                .is_err()
+        );
+        let mut stable_position = decoder(&schema, &stable);
+        assert!(
+            stable_position
+                .decode_entity(0, Some(1), None, entity_values("a"))
+                .is_err()
+        );
+
+        let preview = mean_compiled(true);
+        let mut missing_count = decoder(&schema, &preview);
+        assert!(
+            missing_count
+                .decode_entity(0, None, None, entity_values("a"))
+                .is_err()
+        );
+        missing_count
+            .decode_entity(0, Some(64), None, entity_values("a"))
+            .unwrap();
+        assert!(missing_count.finish().is_err());
+    }
+
+    #[test]
+    fn history_rows_validate_projection_identity_order_and_position() {
+        let schema = input_schema();
+        let compiled = mean_compiled(false);
+        let mut missing_position = decoder(&schema, &compiled);
+        missing_position
+            .decode_entity(0, None, None, entity_values("a"))
+            .unwrap();
+        assert!(
+            missing_position
+                .decode_history(0, None, None, row_values(1, 1, 10.0))
+                .is_err()
+        );
+        assert!(
+            missing_position
+                .decode_history(0, Some(0), Some((0, 1, 1.0)), row_values(1, 1, 10.0))
+                .is_err()
+        );
+
+        let mut invalid_projection = decoder(&schema, &compiled);
+        invalid_projection
+            .decode_entity(0, None, None, entity_values("a"))
+            .unwrap();
+        let mut repeated_partition = row_values(1, 1, 10.0);
+        repeated_partition[1] = ScalarValue::Utf8(Some("a".to_owned()));
+        assert!(
+            invalid_projection
+                .decode_history(0, Some(0), None, repeated_partition)
+                .is_err()
+        );
+        let mut unprojected = row_values(1, 1, 10.0);
+        unprojected[4] = ScalarValue::Utf8(Some("unexpected".to_owned()));
+        assert!(
+            invalid_projection
+                .decode_history(0, Some(0), None, unprojected)
+                .is_err()
+        );
+        assert!(
+            invalid_projection
+                .decode_history(1, Some(0), None, row_values(1, 1, 10.0))
+                .is_err()
+        );
+
+        let mut positions = decoder(&schema, &compiled);
+        positions
+            .decode_entity(0, None, None, entity_values("a"))
+            .unwrap();
+        positions
+            .decode_history(0, Some(0), None, row_values(1, 1, 10.0))
+            .unwrap();
+        assert!(
+            positions
+                .decode_history(0, Some(2), None, row_values(2, 2, 20.0))
+                .is_err()
+        );
+
+        let mut entity_order = decoder(&schema, &compiled);
+        entity_order
+            .decode_entity(0, None, None, entity_values("a"))
+            .unwrap();
+        entity_order
+            .decode_entity(1, None, None, entity_values("b"))
+            .unwrap();
+        entity_order
+            .decode_history(1, Some(0), None, row_values(2, 1, 20.0))
+            .unwrap();
+        assert!(
+            entity_order
+                .decode_history(0, Some(0), None, row_values(1, 1, 10.0))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn buffer_rows_validate_payload_partition_and_canonical_identity() {
+        let schema = input_schema();
+        let compiled = mean_compiled(false);
+        let mut state = decoder(&schema, &compiled);
+        state
+            .decode_entity(0, None, None, entity_values("a"))
+            .unwrap();
+        assert!(
+            state
+                .decode_buffer(0, Some(0), None, row_values(1, 1, 10.0))
+                .is_err()
+        );
+        assert!(
+            state
+                .decode_buffer(0, None, Some((0, 1, 1.0)), row_values(1, 1, 10.0))
+                .is_err()
+        );
+        let mut repeated_partition = row_values(1, 1, 10.0);
+        repeated_partition[1] = ScalarValue::Utf8(Some("a".to_owned()));
+        assert!(
+            state
+                .decode_buffer(0, None, None, repeated_partition)
+                .is_err()
+        );
+        assert!(
+            state
+                .decode_buffer(1, None, None, row_values(1, 1, 10.0))
+                .is_err()
+        );
+
+        state
+            .decode_buffer(0, None, None, row_values(2, 2, 20.0))
+            .unwrap();
+        assert!(
+            state
+                .decode_buffer(0, None, None, row_values(1, 1, 10.0))
+                .is_err()
+        );
+        assert_eq!(state.finish().unwrap().buffer.len(), 1);
+    }
+
+    #[test]
+    fn ewma_rows_validate_shape_group_order_and_uniqueness() {
+        let schema = input_schema();
+        let compiled = ewma_compiled();
+        let nulls = null_values(&schema);
+        let mut state = decoder(&schema, &compiled);
+        state
+            .decode_entity(0, None, None, entity_values("a"))
+            .unwrap();
+        assert!(state.decode_ewma(0, None, None, &nulls).is_err());
+        assert!(
+            state
+                .decode_ewma(0, None, Some((0, 0, 1.0)), &nulls)
+                .is_err()
+        );
+        assert!(
+            state
+                .decode_ewma(0, Some(0), Some((0, 1, 1.0)), &nulls)
+                .is_err()
+        );
+        assert!(
+            state
+                .decode_ewma(0, None, Some((1, 1, 1.0)), &nulls)
+                .is_err()
+        );
+        let mut populated = nulls.clone();
+        populated[3] = ScalarValue::Float64(Some(1.0));
+        assert!(
+            state
+                .decode_ewma(0, None, Some((0, 1, 1.0)), &populated)
+                .is_err()
+        );
+
+        state.last_ewma = None;
+        state
+            .decode_ewma(0, None, Some((0, 2, 12.5)), &nulls)
+            .unwrap();
+        assert!(
+            state
+                .decode_ewma(0, None, Some((0, 2, 12.5)), &nulls)
+                .is_err()
+        );
+        state.last_ewma = None;
+        assert!(
+            state
+                .decode_ewma(0, None, Some((0, 2, 12.5)), &nulls)
+                .is_err()
+        );
+        let decoded = state.finish().unwrap();
+        assert_eq!(decoded.histories.by_entity.len(), 1);
+    }
+
+    #[test]
+    fn row_decoder_rejects_null_keys_unknown_kind_and_partial_ewma_payload() {
+        let input_schema = input_schema();
+        let compiled = mean_compiled(false);
+        let schema = Arc::new(Schema::new(state_fields(&input_schema)));
+        let mut columns = EncodedColumns::new(&input_schema);
+        columns.push(99, 0, None, entity_values("a"), None);
+        let record = columns.finish(schema).unwrap();
+        let arrays = StateArrays::new(&record, input_schema.fields().len()).unwrap();
+        let mut state = decoder(&input_schema, &compiled);
+        assert!(state.decode_row(&record, &arrays, 0).is_err());
+
+        let groups = UInt64Array::from(vec![Some(0)]);
+        let counts = UInt64Array::from(vec![None]);
+        let values = Float64Array::from(vec![Some(1.0)]);
+        let partial = StateArrays {
+            kinds: arrays.kinds,
+            entity_ids: arrays.entity_ids,
+            positions: arrays.positions,
+            groups: &groups,
+            counts: &counts,
+            values: &values,
+        };
+        assert!(partial.ewma(0).is_err());
+
+        let kinds = UInt8Array::from(vec![None]);
+        let ids = UInt64Array::from(vec![Some(0)]);
+        let null_keys = StateArrays {
+            kinds: &kinds,
+            entity_ids: &ids,
+            positions: arrays.positions,
+            groups: arrays.groups,
+            counts: arrays.counts,
+            values: arrays.values,
+        };
+        assert!(state.decode_row(&record, &null_keys, 0).is_err());
+    }
+}

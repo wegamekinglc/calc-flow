@@ -18,7 +18,11 @@ from calc_flow.symbolic import (
     table_input,
     ts,
 )
-from calc_flow.symbolic.lower import lower_program_document
+from calc_flow.symbolic.lower import (
+    _fused_float_leaf,
+    _rolling_input_name,
+    lower_program_document,
+)
 
 
 def _ordered() -> TableExpr:
@@ -78,6 +82,26 @@ def _quotes_batch() -> pa.Table:
         },
         schema=schema,
     )
+
+
+def test_fused_rolling_leaf_validation_is_fail_closed() -> None:
+    quotes = _ordered()
+    row_local = quotes["x"] + 1.0
+    with pytest.raises(CompileError, match="was not materialized"):
+        _rolling_input_name(row_local._node, {}, "graph.nodes.rolling")
+
+    mean = ts.mean(quotes["x"], window=rows(2))
+    with pytest.raises(CompileError, match="not in the input schema"):
+        _fused_float_leaf(mean._node, {}, {}, "graph.nodes.rolling")
+
+    variance = ts.variance(quotes["x"], window=rows(2), ddof=0)
+    declaration = _fused_float_leaf(
+        variance._node,
+        {},
+        {"x": Field("x", "float64", nullable=False)},
+        "graph.nodes.rolling",
+    )
+    assert declaration["ddof"] == 0
 
 
 def test_lag_delta_lower_to_one_rolling_node_with_the_frozen_shape() -> None:

@@ -2936,3 +2936,645 @@ fn append_dispersion(
 fn nanos(duration: Duration) -> u64 {
     u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use datafusion::arrow::{
+        array::{Array, Float64Array, StringArray},
+        datatypes::{Field, TimeUnit},
+    };
+
+    use super::*;
+
+    fn schema() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![
+            Field::new(
+                "event_time",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                true,
+            ),
+            Field::new("sequence", DataType::UInt64, true),
+            Field::new("symbol", DataType::Utf8, false),
+            Field::new("price", DataType::Float64, true),
+        ]))
+    }
+
+    fn batch(
+        event_times: Vec<Option<i64>>,
+        sequences: Vec<Option<u64>>,
+        symbols: Vec<&str>,
+        prices: Vec<Option<f64>>,
+    ) -> RecordBatch {
+        RecordBatch::try_new(
+            schema(),
+            vec![
+                Arc::new(TimestampMicrosecondArray::from(event_times)),
+                Arc::new(UInt64Array::from(sequences)),
+                Arc::new(StringArray::from(symbols)),
+                Arc::new(Float64Array::from(prices)),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn plan(
+        groups: Vec<TypedGroupPlan>,
+        outputs: Vec<TypedOutputPlan>,
+        numerical_profile: RollingNumericalProfile,
+    ) -> RollingKernelPlan {
+        RollingKernelPlan {
+            version: ROLLING_KERNEL_PLAN_VERSION,
+            state_layout_version: 3,
+            numerical_profile,
+            selection: KernelSelection::OrderedPrimitive,
+            complexity: KernelComplexity::AmortizedConstant,
+            event_time_index: 0,
+            order_columns: vec![0, 1],
+            partition_columns: vec![2],
+            sequence_columns: vec![1],
+            groups,
+            outputs,
+            fallback_reason: None,
+            estimated_state_bytes_per_entity: 0,
+            fingerprint: "test-kernel".to_owned(),
+        }
+    }
+
+    fn numeric_plan(profile: RollingNumericalProfile) -> RollingKernelPlan {
+        plan(
+            vec![TypedGroupPlan::Numeric {
+                input_index: 3,
+                frame: TypedFrame::Rows(2),
+            }],
+            vec![TypedOutputPlan {
+                group: 0,
+                kind: TypedOutputKind::Statistic(Statistic::Mean),
+                storage: OutputStorage::Float64,
+                min_periods: 1,
+                ddof: 0,
+            }],
+            profile,
+        )
+    }
+
+    #[test]
+    fn restored_typed_state_validates_and_seeds_recurrence_metadata() {
+        let kernel = plan(
+            vec![
+                TypedGroupPlan::Numeric {
+                    input_index: 3,
+                    frame: TypedFrame::Rows(64),
+                },
+                TypedGroupPlan::Ewma {
+                    input_index: 3,
+                    alpha: 0.5,
+                },
+            ],
+            Vec::new(),
+            RollingNumericalProfile::StableV2Preview,
+        );
+        let entities = batch(
+            vec![Some(1), Some(2)],
+            vec![Some(1), Some(1)],
+            vec!["a", "b"],
+            vec![None, None],
+        );
+        let seeds = vec![vec![None, Some((3, 12.5))], vec![None, None]];
+        let seeded = kernel
+            .seed_restored_state(
+                &RollingKernelState::default(),
+                &entities,
+                &[64, 7],
+                &seeds,
+                "r",
+            )
+            .unwrap();
+
+        assert_eq!(seeded.states.len(), 2);
+        assert_eq!(seeded.states[0].transition_count, 64);
+        let TypedWindowState::Ewma(ewma) = seeded.states[0].groups[1] else {
+            panic!("expected EWMA state")
+        };
+        assert_eq!((ewma.valid_count, ewma.value), (3, 12.5));
+
+        assert!(
+            kernel
+                .seed_restored_state(&RollingKernelState::default(), &entities, &[1], &seeds, "r",)
+                .is_err()
+        );
+        assert!(
+            kernel
+                .seed_restored_state(
+                    &RollingKernelState::default(),
+                    &entities.slice(0, 1),
+                    &[1],
+                    &[vec![None]],
+                    "r",
+                )
+                .is_err()
+        );
+        assert!(
+            kernel
+                .seed_restored_state(
+                    &RollingKernelState::default(),
+                    &entities.slice(0, 1),
+                    &[1],
+                    &[vec![Some((1, 1.0)), None]],
+                    "r",
+                )
+                .is_err()
+        );
+        assert!(
+            kernel
+                .seed_restored_state(
+                    &RollingKernelState::default(),
+                    &entities.slice(0, 1),
+                    &[1],
+                    &[vec![None, Some((0, 1.0))]],
+                    "r",
+                )
+                .is_err()
+        );
+
+        let foreign = RollingKernelState {
+            kernel_fingerprint: Some("foreign".to_owned()),
+            ..RollingKernelState::default()
+        };
+        assert!(
+            kernel
+                .seed_restored_state(&foreign, &entities, &[1, 1], &seeds, "r")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn canonical_order_contract_covers_batch_and_stream_boundaries() {
+        let kernel = numeric_plan(RollingNumericalProfile::StableV1);
+        let first = batch(vec![Some(1)], vec![Some(1)], vec!["a"], vec![Some(1.0)]);
+        let first_output = kernel.open_and_fill(&first, "r").unwrap().unwrap();
+
+        let duplicate = kernel.update_and_fill(&first_output.state, &first, "r");
+        assert!(duplicate.is_err());
+        assert!(
+            kernel
+                .update_stream_and_fill(&first_output.state, &first, "r")
+                .unwrap()
+                .is_some()
+        );
+
+        let duplicate_within_batch = batch(
+            vec![Some(1), Some(1)],
+            vec![Some(1), Some(1)],
+            vec!["a", "a"],
+            vec![Some(1.0), Some(2.0)],
+        );
+        assert!(kernel.open_and_fill(&duplicate_within_batch, "r").is_err());
+
+        let unsorted = batch(
+            vec![Some(2), Some(1)],
+            vec![Some(2), Some(1)],
+            vec!["a", "a"],
+            vec![Some(2.0), Some(1.0)],
+        );
+        assert!(kernel.open_and_fill(&unsorted, "r").unwrap().is_none());
+
+        let null_time = batch(vec![None], vec![Some(1)], vec!["a"], vec![Some(1.0)]);
+        assert!(kernel.open_and_fill(&null_time, "r").is_err());
+        let null_sequence = batch(vec![Some(1)], vec![None], vec!["a"], vec![Some(1.0)]);
+        assert!(kernel.open_and_fill(&null_sequence, "r").is_err());
+
+        let mut general = kernel;
+        general.selection = KernelSelection::General;
+        assert!(general.open_and_fill(&first, "r").unwrap().is_none());
+    }
+
+    #[test]
+    fn stable_preview_refolds_numeric_and_pair_windows() {
+        assert!(stable_v2_rebase_due(1, 1, true));
+        assert!(!stable_v2_rebase_due(1, 1, false));
+        assert!(stable_v2_rebase_due(64, 64, false));
+
+        let finite =
+            stable_v2_float64_accumulator([1.0e12, 1.0e12 + 0.25, 1.0e12 + 0.5].into_iter(), "r")
+                .unwrap();
+        assert_eq!(finite.valid_count, 3);
+        assert!(finite.m2 > 0.0);
+        assert!(matches!(
+            stable_v2_float64_accumulator([f64::INFINITY].into_iter(), "r")
+                .unwrap()
+                .sum,
+            Some(SumState::Float(value)) if value == f64::INFINITY
+        ));
+        assert!(matches!(
+            stable_v2_float64_accumulator([f64::NEG_INFINITY].into_iter(), "r")
+                .unwrap()
+                .sum,
+            Some(SumState::Float(value)) if value == f64::NEG_INFINITY
+        ));
+        let mixed =
+            stable_v2_float64_accumulator([f64::INFINITY, f64::NEG_INFINITY].into_iter(), "r")
+                .unwrap();
+        assert!(matches!(mixed.sum, Some(SumState::Float(value)) if value.is_nan()));
+
+        let pair = stable_v2_pair_accumulator(
+            [
+                (1.0e12, -1.0e12),
+                (1.0e12 + 1.0, -1.0e12 + 2.0),
+                (f64::INFINITY, 3.0),
+            ]
+            .into_iter(),
+            "r",
+        )
+        .unwrap();
+        assert_eq!(pair.valid_count, 3);
+        assert_eq!(pair.pos_inf_x, 1);
+        assert!(pair.co_moment > 0.0);
+
+        let mut numeric = Float64NumericState::new(TypedFrame::Rows(64), 64);
+        for transition in 1_i32..=64 {
+            numeric
+                .update(
+                    i64::from(transition),
+                    Some(1.0e12 + f64::from(transition)),
+                    RollingNumericalProfile::StableV2Preview,
+                    u64::try_from(transition).unwrap(),
+                    "r",
+                )
+                .unwrap();
+        }
+        assert_eq!(numeric.values.len(), 64);
+
+        let mut pairs = Float64PairState::new(TypedFrame::Rows(64), 64);
+        for transition in 1_i32..=64 {
+            pairs
+                .update(
+                    i64::from(transition),
+                    Some((f64::from(transition), f64::from(transition * 2))),
+                    RollingNumericalProfile::StableV2Preview,
+                    u64::try_from(transition).unwrap(),
+                    "r",
+                )
+                .unwrap();
+        }
+        assert_eq!(pairs.values.len(), 64);
+        assert!(pairs.accumulator.co_moment > 0.0);
+    }
+
+    #[test]
+    fn primitive_state_updates_preserve_expiration_and_type_invariants() {
+        let mut signed = ExactNumericState::new(TypedFrame::Rows(1), SumClass::Signed, 2);
+        signed.update(1, Some(ExactValue::Signed(4)), "r").unwrap();
+        signed.update(2, Some(ExactValue::Signed(-1)), "r").unwrap();
+        assert!(matches!(signed.accumulator.sum, Some(SumState::Signed(-1))));
+
+        let mut unsigned = ExactNumericState::new(TypedFrame::Duration(2), SumClass::Unsigned, 0);
+        unsigned
+            .update(1, Some(ExactValue::Unsigned(4)), "r")
+            .unwrap();
+        unsigned
+            .update(3, Some(ExactValue::Unsigned(2)), "r")
+            .unwrap();
+        assert!(matches!(
+            unsigned.accumulator.sum,
+            Some(SumState::Unsigned(2))
+        ));
+
+        let mut extrema = TypedExtremaState::new(TypedFrame::Rows(2), false, 3);
+        extrema
+            .update(1, Some(ExtremaValue::Signed(4)), "r")
+            .unwrap();
+        extrema
+            .update(2, Some(ExtremaValue::Signed(2)), "r")
+            .unwrap();
+        extrema.update(3, None, "r").unwrap();
+        assert!(matches!(
+            extrema.candidates.front(),
+            Some((_, ExtremaValue::Signed(2)))
+        ));
+        assert!(
+            ExtremaValue::Signed(1)
+                .total_cmp(ExtremaValue::Unsigned(1))
+                .is_err()
+        );
+
+        let mut ewma = TypedEwmaState::new(0.5);
+        ewma.update(None, "r").unwrap();
+        ewma.update(Some(10.0), "r").unwrap();
+        ewma.update(Some(14.0), "r").unwrap();
+        assert_eq!((ewma.valid_count, ewma.value), (2, 12.0));
+
+        let mut pair = Float64PairState::new(TypedFrame::Duration(2), 0);
+        pair.update(
+            1,
+            Some((1.0, 2.0)),
+            RollingNumericalProfile::StableV1,
+            1,
+            "r",
+        )
+        .unwrap();
+        pair.update(
+            3,
+            Some((3.0, 6.0)),
+            RollingNumericalProfile::StableV1,
+            2,
+            "r",
+        )
+        .unwrap();
+        assert_eq!(pair.accumulator.valid_count, 1);
+    }
+
+    #[test]
+    fn accumulator_boundaries_fail_closed_without_wraparound() {
+        let mut ewma = TypedEwmaState {
+            alpha: 0.5,
+            valid_count: u64::MAX,
+            value: 1.0,
+        };
+        assert!(ewma.update(Some(2.0), "r").is_err());
+
+        let mut wrong_float = WindowAccumulator::new(SumClass::Signed);
+        assert!(add_float64(&mut wrong_float, 1.0, "r").is_err());
+        let mut empty_float = WindowAccumulator::new(SumClass::Float);
+        assert!(remove_float64(&mut empty_float, 1.0).is_err());
+        let mut wrong_remove = WindowAccumulator::new(SumClass::Signed);
+        wrong_remove.valid_count = 1;
+        assert!(remove_float64(&mut wrong_remove, 1.0).is_err());
+
+        let mut signed = WindowAccumulator::new(SumClass::Signed);
+        assert!(add_exact(&mut signed, ExactValue::Unsigned(1), "r").is_err());
+        let mut unsigned = WindowAccumulator::new(SumClass::Unsigned);
+        assert!(remove_exact(&mut unsigned, ExactValue::Unsigned(1)).is_err());
+        unsigned.valid_count = 1;
+        assert!(remove_exact(&mut unsigned, ExactValue::Unsigned(1)).is_err());
+        let mut mismatched = WindowAccumulator::new(SumClass::Signed);
+        mismatched.valid_count = 1;
+        assert!(remove_exact(&mut mismatched, ExactValue::Unsigned(1)).is_err());
+
+        let mut pair = PairAccumulator {
+            valid_count: u64::MAX,
+            ..PairAccumulator::default()
+        };
+        assert!(add_pair_float64(&mut pair, 1.0, 2.0, "r").is_err());
+        let mut empty_pair = PairAccumulator::default();
+        assert!(remove_pair_float64(&mut empty_pair, 1.0, 2.0).is_err());
+        add_pair_float64(&mut empty_pair, f64::INFINITY, f64::NEG_INFINITY, "r").unwrap();
+        remove_pair_float64(&mut empty_pair, f64::INFINITY, f64::NEG_INFINITY).unwrap();
+        assert_eq!(empty_pair.valid_count, 0);
+        assert_eq!((empty_pair.pos_inf_x, empty_pair.neg_inf_y), (0, 0));
+        assert_eq!(
+            (
+                empty_pair.mean_x,
+                empty_pair.mean_y,
+                empty_pair.co_moment,
+                empty_pair.m2_x,
+                empty_pair.m2_y,
+            ),
+            (0.0, 0.0, 0.0, 0.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn typed_readouts_and_builders_enforce_state_shape_contracts() {
+        let mean = TypedOutputPlan {
+            group: 0,
+            kind: TypedOutputKind::Statistic(Statistic::Mean),
+            storage: OutputStorage::Float64,
+            min_periods: 1,
+            ddof: 0,
+        };
+        let mut numeric = Float64NumericState::new(TypedFrame::Rows(2), 2);
+        numeric
+            .update(1, Some(4.0), RollingNumericalProfile::StableV1, 1, "r")
+            .unwrap();
+        let states = vec![TypedWindowState::Numeric(numeric.clone())];
+
+        let mut wrong_builder = DerivedBuilder::new(
+            TypedOutputPlan {
+                storage: OutputStorage::Count,
+                ..mean
+            },
+            1,
+        );
+        assert!(wrong_builder.append(&states, &mean, "r").is_err());
+        let mut out_of_bounds = DerivedBuilder::new(mean, 1);
+        assert!(
+            out_of_bounds
+                .append(&states, &TypedOutputPlan { group: 1, ..mean }, "r")
+                .is_err()
+        );
+
+        let minimum_two = TypedOutputPlan {
+            min_periods: 2,
+            ..mean
+        };
+        let mut null_builder = DerivedBuilder::new(minimum_two, 1);
+        null_builder.append(&states, &minimum_two, "r").unwrap();
+        assert_eq!(null_builder.finish().unwrap().null_count(), 1);
+
+        let bad_ewma_readout = TypedFloatReadout {
+            group: 0,
+            kind: TypedFloatReadoutKind::Ewma,
+            min_periods: 1,
+            ddof: 0,
+        };
+        assert!(read_typed_float(&states, bad_ewma_readout).is_err());
+        assert!(
+            read_typed_float(
+                &states,
+                TypedFloatReadout {
+                    group: 1,
+                    ..bad_ewma_readout
+                }
+            )
+            .is_err()
+        );
+        let extrema_state =
+            TypedWindowState::Extrema(TypedExtremaState::new(TypedFrame::Rows(1), false, 1));
+        assert!(
+            read_typed_float(
+                &[extrema_state],
+                TypedFloatReadout {
+                    group: 0,
+                    kind: TypedFloatReadoutKind::Mean,
+                    min_periods: 0,
+                    ddof: 0,
+                }
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn typed_builders_reject_mismatched_accumulator_storage() {
+        let mut signed = ExactNumericState::new(TypedFrame::Rows(2), SumClass::Signed, 2);
+        signed.update(1, Some(ExactValue::Signed(4)), "r").unwrap();
+        let signed_sum_output = TypedOutputPlan {
+            group: 0,
+            kind: TypedOutputKind::Statistic(Statistic::Sum),
+            storage: OutputStorage::Int64,
+            min_periods: 1,
+            ddof: 0,
+        };
+        let mut signed_sum = DerivedBuilder::new(signed_sum_output, 1);
+        signed_sum
+            .append(&[TypedWindowState::Exact(signed)], &signed_sum_output, "r")
+            .unwrap();
+        assert_eq!(signed_sum.finish().unwrap().len(), 1);
+
+        let mut wrong_extrema = TypedExtremaState::new(TypedFrame::Rows(1), false, 1);
+        wrong_extrema
+            .candidates
+            .push_back((0, ExtremaValue::Unsigned(1)));
+        assert!(append_signed_extrema(&mut Int64Builder::new(), &wrong_extrema).is_err());
+        assert!(append_float_extrema(&mut Float64Builder::new(), &wrong_extrema).is_err());
+        wrong_extrema.candidates.clear();
+        wrong_extrema
+            .candidates
+            .push_back((0, ExtremaValue::Signed(1)));
+        assert!(append_unsigned_extrema(&mut UInt64Builder::new(), &wrong_extrema).is_err());
+    }
+
+    #[test]
+    fn typed_pair_and_float_builders_reject_invalid_output_kinds() {
+        let mut numeric = Float64NumericState::new(TypedFrame::Rows(2), 2);
+        numeric
+            .update(1, Some(4.0), RollingNumericalProfile::StableV1, 1, "r")
+            .unwrap();
+        let bad_ewma_readout = TypedFloatReadout {
+            group: 0,
+            kind: TypedFloatReadoutKind::Ewma,
+            min_periods: 1,
+            ddof: 0,
+        };
+        let mut pair = PairAccumulator::default();
+        let mut pair_builder = Float64Builder::new();
+        for kind in [
+            TypedOutputKind::Statistic(Statistic::Mean),
+            TypedOutputKind::Ewma,
+            TypedOutputKind::Difference {
+                left: bad_ewma_readout,
+                right: bad_ewma_readout,
+            },
+        ] {
+            pair.valid_count = 1;
+            assert!(
+                append_pair(
+                    &mut pair_builder,
+                    &pair,
+                    &TypedOutputPlan {
+                        group: 0,
+                        kind,
+                        storage: OutputStorage::Float64,
+                        min_periods: 1,
+                        ddof: 0,
+                    },
+                )
+                .is_err()
+            );
+        }
+        pair.valid_count = 0;
+        append_pair(
+            &mut pair_builder,
+            &pair,
+            &TypedOutputPlan {
+                group: 0,
+                kind: TypedOutputKind::Covariance,
+                storage: OutputStorage::Float64,
+                min_periods: 0,
+                ddof: 0,
+            },
+        )
+        .unwrap();
+        pair.valid_count = 1;
+        pair.pos_inf_x = 1;
+        append_pair(
+            &mut pair_builder,
+            &pair,
+            &TypedOutputPlan {
+                group: 0,
+                kind: TypedOutputKind::Correlation,
+                storage: OutputStorage::Float64,
+                min_periods: 1,
+                ddof: 0,
+            },
+        )
+        .unwrap();
+
+        let mut invalid_float = WindowAccumulator::new(SumClass::Signed);
+        invalid_float.valid_count = 1;
+        assert!(append_sum(&mut Float64Builder::new(), &invalid_float).is_err());
+        assert!(
+            append_float(
+                &mut Float64Builder::new(),
+                &numeric.accumulator,
+                Statistic::Count,
+                0,
+            )
+            .is_err()
+        );
+        assert!(
+            append_exact_float(
+                &mut Float64Builder::new(),
+                &invalid_float,
+                Statistic::Sum,
+                0,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn typed_compilation_rejects_non_numeric_and_invalid_group_shapes() {
+        let all_types = Schema::new(vec![
+            Field::new("i8", DataType::Int8, true),
+            Field::new("i16", DataType::Int16, true),
+            Field::new("i32", DataType::Int32, true),
+            Field::new("i64", DataType::Int64, true),
+            Field::new("u8", DataType::UInt8, true),
+            Field::new("u16", DataType::UInt16, true),
+            Field::new("u32", DataType::UInt32, true),
+            Field::new("u64", DataType::UInt64, true),
+            Field::new("f32", DataType::Float32, true),
+            Field::new("f64", DataType::Float64, true),
+            Field::new("text", DataType::Utf8, true),
+        ]);
+        for (index, storage) in [
+            OutputStorage::Int8,
+            OutputStorage::Int16,
+            OutputStorage::Int32,
+            OutputStorage::Int64,
+            OutputStorage::UInt8,
+            OutputStorage::UInt16,
+            OutputStorage::UInt32,
+            OutputStorage::UInt64,
+            OutputStorage::Float32,
+            OutputStorage::Float64,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(
+                extrema_storage(all_types.field(index).data_type()).unwrap(),
+                storage
+            );
+            require_numeric_type(&all_types, index).unwrap();
+        }
+        assert!(extrema_storage(&DataType::Utf8).is_err());
+        assert!(require_numeric_type(&all_types, 10).is_err());
+        assert!(
+            compile_typed_plan(&all_types, &[], &[])
+                .unwrap_err()
+                .contains("at least one")
+        );
+        assert!(
+            extrema_group_input(
+                &(Arc::new(UInt64Array::from(vec![1])) as ArrayRef),
+                OutputStorage::Count,
+                "r",
+            )
+            .is_err()
+        );
+    }
+}

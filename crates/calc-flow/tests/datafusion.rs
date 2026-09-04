@@ -266,6 +266,89 @@ async fn unsupported_sql_window_stays_on_the_datafusion_fallback() {
 }
 
 #[tokio::test]
+async fn rolling_sql_rewrites_all_compatible_windows_in_one_stage() {
+    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+    let tables = BTreeMap::from([("input".to_owned(), rolling_input())]);
+
+    let output = runtime
+        .sql(
+            "SELECT \
+             avg(price) OVER (PARTITION BY symbol ORDER BY event_time, sequence \
+             ROWS BETWEEN CURRENT ROW AND CURRENT ROW) AS current_price, \
+             avg(price) OVER (PARTITION BY symbol ORDER BY event_time, sequence \
+             ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS sma_2 \
+             FROM input",
+            &tables,
+            Some("rolling_sql_fused"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(output.num_rows(), 5);
+    let metrics = runtime.metrics();
+    assert_eq!(metrics[0].rolling_candidate_windows, 2);
+    assert_eq!(metrics[0].rolling_rewritten_windows, 2);
+    assert!(metrics[0].rolling_fallback_reasons.is_empty());
+    assert!(metrics[0].physical_plan.contains("windows=2"));
+}
+
+#[tokio::test]
+async fn rolling_sql_reports_each_fail_closed_logical_fallback() {
+    let cases = [
+        (
+            "avg(price + 1.0) OVER (PARTITION BY symbol ORDER BY event_time, sequence \
+             ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)",
+            "avg_argument_is_not_one_column",
+        ),
+        (
+            "avg(price) OVER (ORDER BY event_time, sequence \
+             ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)",
+            "partition_keys_are_not_simple_columns",
+        ),
+        (
+            "avg(price) OVER (PARTITION BY symbol ORDER BY event_time DESC, sequence \
+             ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)",
+            "ordering_is_not_simple_ascending_columns",
+        ),
+        (
+            "avg(price) OVER (PARTITION BY upper(symbol) ORDER BY event_time, sequence \
+             ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)",
+            "partition_keys_are_not_simple_columns",
+        ),
+        (
+            "avg(price) OVER (PARTITION BY symbol ORDER BY event_time, sequence \
+             ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING)",
+            "window_frame_is_not_bounded_rows_to_current_row",
+        ),
+        (
+            "first_value(price) OVER (PARTITION BY symbol ORDER BY event_time, sequence \
+             ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)",
+            "window_function_is_not_an_aggregate",
+        ),
+    ];
+
+    for (expression, expected_reason) in cases {
+        let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+        let tables = BTreeMap::from([("input".to_owned(), rolling_input())]);
+        let output = runtime
+            .sql(
+                &format!("SELECT {expression} AS rolling_value FROM input"),
+                &tables,
+                Some("rolling_sql_fallback_matrix"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(output.num_rows(), 5);
+        let metrics = runtime.metrics();
+        assert_eq!(metrics[0].rolling_candidate_windows, 1);
+        assert_eq!(metrics[0].rolling_rewritten_windows, 0);
+        assert_eq!(metrics[0].rolling_fallback_reasons, [expected_reason]);
+        assert!(!metrics[0].physical_plan.contains("CalcFlowRollingExec"));
+    }
+}
+
+#[tokio::test]
 async fn failed_query_deregisters_aliases_before_the_next_query() {
     let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
     let tables = BTreeMap::from([("input".into(), input(vec![1]))]);
