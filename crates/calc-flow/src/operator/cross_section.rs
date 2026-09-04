@@ -1623,28 +1623,40 @@ struct CompiledCrossSectionOutput {
 
 #[derive(Clone)]
 enum CompiledEvaluation {
-    OrderStatistic {
+    Rank {
         direction: SortDirection,
         tie_method: RankTieMethod,
         null_placement: NullPlacement,
         min_samples: u64,
-        percentile: bool,
     },
-    Statistic {
+    Percentile {
+        direction: SortDirection,
+        tie_method: RankTieMethod,
+        null_placement: NullPlacement,
+        min_samples: u64,
+    },
+    Moment {
         min_samples: u64,
         ddof: u8,
-        zscore: bool,
+    },
+    ZScore {
+        min_samples: u64,
+        ddof: u8,
     },
     Winsorize {
         min_samples: u64,
         lower: f64,
         upper: f64,
     },
-    Selection {
+    TopSelection {
         count: u64,
         include_ties: bool,
         min_samples: u64,
-        top: bool,
+    },
+    BottomSelection {
+        count: u64,
+        include_ties: bool,
+        min_samples: u64,
     },
     MeanFill {
         min_samples: u64,
@@ -1934,42 +1946,57 @@ fn compute_group(
             .entry(output.input_index)
             .or_insert_with(|| PreparedCrossSectionColumn::new(rows, output.input_index));
         let column = match &output.evaluation {
-            CompiledEvaluation::OrderStatistic {
+            CompiledEvaluation::Rank {
                 direction,
                 tie_method,
                 null_placement,
                 min_samples,
-                percentile,
-            } => float64_scalars(order_statistic_column_prepared(
-                prepared,
-                *direction,
-                *tie_method,
-                *null_placement,
-                *min_samples,
-                *percentile,
-            )),
-            CompiledEvaluation::Statistic {
+            }
+            | CompiledEvaluation::Percentile {
+                direction,
+                tie_method,
+                null_placement,
                 min_samples,
-                ddof,
-                zscore,
-            } => float64_scalars(statistic_column_with_accumulator(
-                &prepared.samples,
-                prepared.accumulator,
-                *min_samples,
-                *ddof,
-                *zscore,
-            )),
+            } => {
+                let percentile = matches!(output.evaluation, CompiledEvaluation::Percentile { .. });
+                float64_scalars(order_statistic_column_prepared(
+                    prepared,
+                    *direction,
+                    *tie_method,
+                    *null_placement,
+                    *min_samples,
+                    percentile,
+                ))
+            }
+            CompiledEvaluation::Moment { min_samples, ddof }
+            | CompiledEvaluation::ZScore { min_samples, ddof } => {
+                let zscore = matches!(output.evaluation, CompiledEvaluation::ZScore { .. });
+                float64_scalars(statistic_column_with_accumulator(
+                    &prepared.samples,
+                    prepared.accumulator,
+                    *min_samples,
+                    *ddof,
+                    zscore,
+                ))
+            }
             CompiledEvaluation::Winsorize {
                 min_samples,
                 lower,
                 upper,
             } => winsorize_column(prepared, *min_samples, *lower, *upper),
-            CompiledEvaluation::Selection {
+            CompiledEvaluation::TopSelection {
                 count,
                 include_ties,
                 min_samples,
-                top,
-            } => selection_column(prepared, *count, *include_ties, *min_samples, *top),
+            }
+            | CompiledEvaluation::BottomSelection {
+                count,
+                include_ties,
+                min_samples,
+            } => {
+                let top = matches!(output.evaluation, CompiledEvaluation::TopSelection { .. });
+                selection_column(prepared, *count, *include_ties, *min_samples, top)
+            }
             CompiledEvaluation::MeanFill { min_samples } => {
                 mean_fill_column(prepared, *min_samples)
             }
@@ -2879,31 +2906,33 @@ fn compile_evaluation(output: &CrossSectionOutputSpec) -> CompiledEvaluation {
             null_placement,
             min_samples,
             ..
-        }
-        | CrossSectionOutputSpec::Percentile {
+        } => CompiledEvaluation::Rank {
+            direction: *direction,
+            tie_method: *tie_method,
+            null_placement: *null_placement,
+            min_samples: *min_samples,
+        },
+        CrossSectionOutputSpec::Percentile {
             direction,
             tie_method,
             null_placement,
             min_samples,
             ..
-        } => CompiledEvaluation::OrderStatistic {
+        } => CompiledEvaluation::Percentile {
             direction: *direction,
             tie_method: *tie_method,
             null_placement: *null_placement,
             min_samples: *min_samples,
-            percentile: matches!(output, CrossSectionOutputSpec::Percentile { .. }),
         },
-        CrossSectionOutputSpec::Demean { min_samples, .. } => CompiledEvaluation::Statistic {
+        CrossSectionOutputSpec::Demean { min_samples, .. } => CompiledEvaluation::Moment {
             min_samples: *min_samples,
             ddof: 0,
-            zscore: false,
         },
         CrossSectionOutputSpec::Zscore {
             min_samples, ddof, ..
-        } => CompiledEvaluation::Statistic {
+        } => CompiledEvaluation::ZScore {
             min_samples: *min_samples,
             ddof: *ddof,
-            zscore: true,
         },
         CrossSectionOutputSpec::Winsorize {
             min_samples,
@@ -2920,17 +2949,20 @@ fn compile_evaluation(output: &CrossSectionOutputSpec) -> CompiledEvaluation {
             include_ties,
             min_samples,
             ..
-        }
-        | CrossSectionOutputSpec::Bottom {
+        } => CompiledEvaluation::TopSelection {
+            count: *count,
+            include_ties: *include_ties,
+            min_samples: *min_samples,
+        },
+        CrossSectionOutputSpec::Bottom {
             count,
             include_ties,
             min_samples,
             ..
-        } => CompiledEvaluation::Selection {
+        } => CompiledEvaluation::BottomSelection {
             count: *count,
             include_ties: *include_ties,
             min_samples: *min_samples,
-            top: matches!(output, CrossSectionOutputSpec::Top { .. }),
         },
         CrossSectionOutputSpec::MeanFill { min_samples, .. } => CompiledEvaluation::MeanFill {
             min_samples: *min_samples,
