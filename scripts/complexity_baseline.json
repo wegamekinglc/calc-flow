@@ -37,88 +37,88 @@
     "web-ui/backend/src/calc_flow_studio/run_manager.py": 6
   },
   "ruff_complexity": {
-    "D:/dev/github/calc-flow/benchmarks/array_support.py": {
+    "benchmarks/array_support.py": {
       "PLR0913": 1
     },
-    "D:/dev/github/calc-flow/benchmarks/rolling_indicator_comparison.py": {
+    "benchmarks/rolling_indicator_comparison.py": {
       "PLR0913": 3
     },
-    "D:/dev/github/calc-flow/benchmarks/support.py": {
+    "benchmarks/support.py": {
       "PLR0913": 1
     },
-    "D:/dev/github/calc-flow/benchmarks/symbolic_support.py": {
+    "benchmarks/symbolic_support.py": {
       "PLR0913": 1
     },
-    "D:/dev/github/calc-flow/python/calc_flow/array.py": {
+    "python/calc_flow/array.py": {
       "C901": 2
     },
-    "D:/dev/github/calc-flow/python/calc_flow/config.py": {
+    "python/calc_flow/config.py": {
       "C901": 1,
       "PLR0912": 1,
       "PLR0913": 1
     },
-    "D:/dev/github/calc-flow/python/calc_flow/pipeline.py": {
+    "python/calc_flow/pipeline.py": {
       "PLR0913": 6
     },
-    "D:/dev/github/calc-flow/python/calc_flow/runtime.py": {
+    "python/calc_flow/runtime.py": {
       "PLR0913": 1
     },
-    "D:/dev/github/calc-flow/python/calc_flow/symbolic/analyzer.py": {
+    "python/calc_flow/symbolic/analyzer.py": {
       "PLR0913": 5
     },
-    "D:/dev/github/calc-flow/python/calc_flow/symbolic/expr.py": {
+    "python/calc_flow/symbolic/expr.py": {
       "PLR0913": 3
     },
-    "D:/dev/github/calc-flow/python/calc_flow/symbolic/lower.py": {
+    "python/calc_flow/symbolic/lower.py": {
       "C901": 4,
       "PLR0912": 3,
       "PLR0913": 15,
       "PLR0915": 3
     },
-    "D:/dev/github/calc-flow/python/calc_flow/symbolic/ops.py": {
+    "python/calc_flow/symbolic/ops.py": {
       "PLR0913": 4
     },
-    "D:/dev/github/calc-flow/python/tests/a6_cross_surface_worker.py": {
+    "python/tests/a6_cross_surface_worker.py": {
       "C901": 1
     },
-    "D:/dev/github/calc-flow/python/tests/test_array.py": {
+    "python/tests/test_array.py": {
       "PLR0915": 1
     },
-    "D:/dev/github/calc-flow/python/tests/test_continuous_runtime.py": {
+    "python/tests/test_continuous_runtime.py": {
       "C901": 4,
       "PLR0915": 1
     },
-    "D:/dev/github/calc-flow/python/tests/test_udf.py": {
+    "python/tests/test_udf.py": {
       "PLR0913": 1
     },
-    "D:/dev/github/calc-flow/scripts/m5_checkpoint_benchmark.py": {
+    "scripts/m5_checkpoint_benchmark.py": {
       "PLR0913": 2
     },
-    "D:/dev/github/calc-flow/scripts/verify_python_release.py": {
+    "scripts/verify_python_release.py": {
       "C901": 2
     },
-    "D:/dev/github/calc-flow/web-ui/backend/src/calc_flow_studio/app.py": {
+    "web-ui/backend/src/calc_flow_studio/app.py": {
       "PLR0913": 1
     },
-    "D:/dev/github/calc-flow/web-ui/backend/src/calc_flow_studio/routes.py": {
+    "web-ui/backend/src/calc_flow_studio/routes.py": {
       "C901": 2,
       "PLR0915": 2
     },
-    "D:/dev/github/calc-flow/web-ui/backend/src/calc_flow_studio/run_manager.py": {
+    "web-ui/backend/src/calc_flow_studio/run_manager.py": {
       "C901": 5,
       "PLR0912": 3,
       "PLR0913": 1,
       "PLR0915": 3
     },
-    "D:/dev/github/calc-flow/web-ui/backend/tests/test_app.py": {
+    "web-ui/backend/tests/test_app.py": {
       "C901": 1,
       "PLR0915": 1
     },
-    "D:/dev/github/calc-flow/web-ui/backend/tests/test_run_manager.py": {
+    "web-ui/backend/tests/test_run_manager.py": {
       "C901": 2,
       "PLR0915": 2
     },
-    "D:/dev/github/calc-flow/web-ui/scripts/web_ui_process.py": {
+    "web-ui/scripts/web_ui_process.py": {
       "PLR0913": 1
     }
   }

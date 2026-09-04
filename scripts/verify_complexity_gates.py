@@ -100,7 +100,15 @@ def run_ruff_complexity() -> dict[str, dict[str, int]]:
     findings = json.loads(completed.stdout or "[]")
     counts: dict[str, dict[str, int]] = {}
     for finding in findings:
-        file_name = Path(str(finding.get("filename", ""))).as_posix()
+        file_path = Path(str(finding.get("filename", "")))
+        if file_path.is_absolute():
+            # Ruff reports absolute paths on some platforms; baseline keys are
+            # always repository-relative.
+            try:
+                file_path = file_path.relative_to(REPO_ROOT)
+            except ValueError:
+                continue
+        file_name = file_path.as_posix()
         code = str(finding.get("code") or "")
         if not code or not file_name:
             continue

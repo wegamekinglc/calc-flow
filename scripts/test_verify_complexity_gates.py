@@ -115,8 +115,19 @@ class TestRuffParsing(unittest.TestCase):
         payload = json.dumps(
             [
                 {"filename": "python/calc_flow/array.py", "code": "C901"},
-                {"filename": "python/calc_flow/array.py", "code": "C901"},
+                {
+                    "filename": str(
+                        gates.REPO_ROOT / "python" / "calc_flow" / "array.py"
+                    ),
+                    "code": "C901",
+                },
                 {"filename": "python/calc_flow/pipeline.py", "code": "PLR0913"},
+                {
+                    "filename": str(
+                        Path("/definitely-not-the-repo/outside.py").resolve()
+                    ),
+                    "code": "C901",
+                },
             ]
         )
         completed = type(
