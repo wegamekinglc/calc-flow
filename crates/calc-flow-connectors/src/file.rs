@@ -261,68 +261,15 @@ impl FileSource {
         ))
     }
 
-    fn discover(&mut self) -> Result<()> {
+    async fn discover(&mut self) -> Result<()> {
         let path = self.config.path.clone();
-        let metadata = std::fs::symlink_metadata(&path)
-            .map_err(|error| Self::fail("open", &path, &error.to_string()))?;
-        if metadata.file_type().is_symlink() {
-            return Err(Self::fail(
-                "open",
-                &path,
-                "symlinks are rejected; name a regular file or directory",
-            ));
-        }
-        let files = if metadata.is_dir() {
-            self.discover_directory(&path)?
-        } else if metadata.is_file() {
-            vec![path.clone()]
-        } else {
-            return Err(Self::fail(
-                "open",
-                &path,
-                "path is neither a regular file nor a directory",
-            ));
-        };
+        let expected = self.config.format.expected_extension();
+        let discover_path = path.clone();
+        let files = tokio::task::spawn_blocking(move || discover_files(&discover_path, expected))
+            .await
+            .map_err(|error| Self::fail("open", &path, &error.to_string()))??;
         self.files = files;
         Ok(())
-    }
-
-    fn discover_directory(&self, directory: &Path) -> Result<Vec<PathBuf>> {
-        let expected = self.config.format.expected_extension();
-        let mut names: Vec<PathBuf> = Vec::new();
-        for entry in std::fs::read_dir(directory)
-            .map_err(|error| Self::fail("open", directory, &error.to_string()))?
-        {
-            let entry = entry.map_err(|error| Self::fail("open", directory, &error.to_string()))?;
-            let file_type = entry
-                .file_type()
-                .map_err(|error| Self::fail("open", directory, &error.to_string()))?;
-            let path = entry.path();
-            if file_type.is_symlink() {
-                return Err(Self::fail("open", &path, "symlinked entries are rejected"));
-            }
-            if !file_type.is_file() {
-                return Err(Self::fail(
-                    "open",
-                    &path,
-                    "directory entries must be regular files; subdirectories are rejected",
-                ));
-            }
-            let extension = path
-                .extension()
-                .and_then(|value| value.to_str())
-                .unwrap_or_default();
-            if !extension.eq_ignore_ascii_case(expected) {
-                return Err(Self::fail(
-                    "open",
-                    &path,
-                    &format!("unexpected extension; the format requires .{expected} files"),
-                ));
-            }
-            names.push(path);
-        }
-        names.sort();
-        Ok(names)
     }
 
     fn cursor_for(&self, file_index: usize, row: u64) -> Result<Cursor> {
@@ -530,6 +477,71 @@ fn relabel(path: &Path, sequence: u64) -> Result<calc_flow::BatchMetadata> {
     )
 }
 
+fn discover_files(path: &Path, expected: &str) -> Result<Vec<PathBuf>> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| FileSource::fail("open", path, &error.to_string()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(FileSource::fail(
+            "open",
+            path,
+            "symlinks are rejected; name a regular file or directory",
+        ));
+    }
+    if metadata.is_dir() {
+        discover_directory(path, expected)
+    } else if metadata.is_file() {
+        Ok(vec![path.to_path_buf()])
+    } else {
+        Err(FileSource::fail(
+            "open",
+            path,
+            "path is neither a regular file nor a directory",
+        ))
+    }
+}
+
+fn discover_directory(directory: &Path, expected: &str) -> Result<Vec<PathBuf>> {
+    let mut names: Vec<PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(directory)
+        .map_err(|error| FileSource::fail("open", directory, &error.to_string()))?
+    {
+        let entry =
+            entry.map_err(|error| FileSource::fail("open", directory, &error.to_string()))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| FileSource::fail("open", directory, &error.to_string()))?;
+        let path = entry.path();
+        if file_type.is_symlink() {
+            return Err(FileSource::fail(
+                "open",
+                &path,
+                "symlinked entries are rejected",
+            ));
+        }
+        if !file_type.is_file() {
+            return Err(FileSource::fail(
+                "open",
+                &path,
+                "directory entries must be regular files; subdirectories are rejected",
+            ));
+        }
+        let extension = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+        if !extension.eq_ignore_ascii_case(expected) {
+            return Err(FileSource::fail(
+                "open",
+                &path,
+                &format!("unexpected extension; the format requires .{expected} files"),
+            ));
+        }
+        names.push(path);
+    }
+    names.sort();
+    Ok(names)
+}
+
 fn split_lines(bytes: &[u8]) -> Vec<Vec<u8>> {
     bytes
         .split(|byte| *byte == b'\n')
@@ -545,7 +557,7 @@ impl StreamSource for FileSource {
     }
 
     async fn open(&mut self, cursor: Option<Cursor>) -> Result<()> {
-        self.discover()?;
+        self.discover().await?;
         self.file_index = 0;
         self.row_offset = 0;
         self.line_cache = None;
