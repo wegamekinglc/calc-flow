@@ -66,7 +66,6 @@ export function PanelResizeHandle({
           startX: event.clientX,
           startValue: value,
         };
-        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- jsdom lacks pointer capture
         event.currentTarget.setPointerCapture?.(event.pointerId);
       }}
       onPointerMove={(event) => {
@@ -78,10 +77,8 @@ export function PanelResizeHandle({
       onPointerUp={(event) => {
         if (drag.current?.pointerId !== event.pointerId) return;
         drag.current = null;
-        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- jsdom lacks pointer capture
         if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
-          // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- jsdom lacks pointer capture
-          event.currentTarget.releasePointerCapture?.(event.pointerId);
+            event.currentTarget.releasePointerCapture?.(event.pointerId);
         }
       }}
       onPointerCancel={() => {

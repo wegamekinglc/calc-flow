@@ -35,7 +35,6 @@ function JsonEditor({ label, value, onChange }: JsonEditorProps) {
   const [error, setError] = useState('');
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- resets the local edit when the canonical JSON changes
     setText(canonical);
   }, [canonical]);
 

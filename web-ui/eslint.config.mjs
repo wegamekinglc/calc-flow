@@ -49,6 +49,27 @@ export default tseslint.config(
     },
   },
   {
+    // Known sync-state-from-props patterns; each site documents its reason
+    // at the effect. Waived here instead of inline so analyzers without the
+    // react-hooks plugin never meet an unknown rule name in a comment.
+    files: [
+      'src/components/DataSourceEditor.tsx',
+      'src/components/InputAliasEditor.tsx',
+      'src/components/StreamConfigEditor.tsx',
+      'src/components/panelLayout.ts',
+    ],
+    rules: {
+      'react-hooks/set-state-in-effect': 'off',
+    },
+  },
+  {
+    // jsdom implements none of the pointer-capture APIs these calls guard.
+    files: ['src/components/PanelResizeHandle.tsx'],
+    rules: {
+      '@typescript-eslint/no-unnecessary-condition': 'off',
+    },
+  },
+  {
     files: ['e2e/**/*.ts', 'playwright.config.ts'],
     ...tseslint.configs.disableTypeChecked,
   },
