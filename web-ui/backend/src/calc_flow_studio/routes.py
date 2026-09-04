@@ -161,10 +161,10 @@ async def _runtime_validation_report(
         )
     except CalcFlowError as error:
         raise native_error(error, operation="validate") from error
-    normalized = dict(report) if type(report) is dict else report
+    normalized = dict(report) if isinstance(report, dict) else report
     if isinstance(normalized, dict) and "kind" not in normalized:
         valid = normalized.get("valid")
-        if type(valid) is bool:
+        if isinstance(valid, bool):
             normalized["kind"] = "valid" if valid else "invalid"
     try:
         return _VALIDATION_REPORT_ADAPTER.validate_python(normalized)
@@ -242,11 +242,11 @@ def register_project_routes(
     )
     async def import_project(
         request: Request,
-        format: str = Query(pattern="^(json|yaml)$"),
+        format_name: str = Query(alias="format", pattern="^(json|yaml)$"),
         replace: bool = False,
     ) -> ProjectDocument:
         content = await bounded_request_body(request)
-        parser = import_project_json if format == "json" else import_project_yaml
+        parser = import_project_json if format_name == "json" else import_project_yaml
         try:
             project = await run_in_threadpool(parser, content)
             await validate_for_storage(project)
@@ -298,16 +298,20 @@ def register_project_routes(
     @app.get(f"{API_PREFIX}/projects/{{project_id}}/export")
     async def export_project(
         project_id: str,
-        format: str = Query(default="json", pattern="^(json|yaml)$"),
+        format_name: str = Query(
+            default="json", alias="format", pattern="^(json|yaml)$"
+        ),
     ) -> PlainTextResponse:
         project = await stored_project(project_id)
-        serializer = export_project_json if format == "json" else export_project_yaml
+        serializer = (
+            export_project_json if format_name == "json" else export_project_yaml
+        )
         try:
             document = await run_in_threadpool(serializer, project)
         except CalcFlowError as error:
             raise native_error(error, operation="export") from error
-        media_type = "application/json" if format == "json" else "application/yaml"
-        filename = quote(f"{project_id}.{format}", safe="")
+        media_type = "application/json" if format_name == "json" else "application/yaml"
+        filename = quote(f"{project_id}.{format_name}", safe="")
         return PlainTextResponse(
             document,
             media_type=media_type,

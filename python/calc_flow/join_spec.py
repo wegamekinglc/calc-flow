@@ -43,7 +43,7 @@ class JoinStateLimits:
             "max_matches_per_input_batch",
         ):
             value = getattr(self, field_name)
-            if type(value) is not int:
+            if value.__class__ is not int:
                 raise TypeError(f"{field_name} must be an exact int")
             if not 1 <= value <= STREAM_JOIN_MAX_SAFE_JSON_INTEGER:
                 raise ValueError(
@@ -98,7 +98,9 @@ def require_distinct_prefixes(left_prefix: str, right_prefix: str) -> None:
 
 
 def timedelta_micros(value: timedelta, field_name: str) -> int:
-    if type(value) is not timedelta:
+    # Exact-type checks: bool is an int subclass and timedelta subclasses
+    # must not satisfy the wire contract, so compare classes directly.
+    if value.__class__ is not timedelta:
         raise TypeError(f"{field_name} must be an exact datetime.timedelta")
     micros = (
         value.days * 86_400_000_000 + value.seconds * 1_000_000 + value.microseconds
