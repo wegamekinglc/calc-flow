@@ -181,8 +181,8 @@ impl PipelineBuilder {
             NodeOperator::Window(_) => OperatorCheckpointCapability::CheckpointedStateful {
                 state_version: crate::operator::WINDOW_STATE_LAYOUT_VERSION,
             },
-            NodeOperator::Rolling(_) => OperatorCheckpointCapability::CheckpointedStateful {
-                state_version: crate::operator::ROLLING_STATE_LAYOUT_VERSION,
+            NodeOperator::Rolling(operator) => OperatorCheckpointCapability::CheckpointedStateful {
+                state_version: operator.state_layout_version(),
             },
             NodeOperator::CrossSection(_) => OperatorCheckpointCapability::CheckpointedStateful {
                 state_version: crate::operator::CROSS_SECTION_STATE_LAYOUT_VERSION,

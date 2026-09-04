@@ -749,6 +749,89 @@ def _rolling_frame(subtree: Node, path: str, kind: str, /) -> dict[str, object]:
     return {"kind": "rows", "size": 1 if size is None else size}
 
 
+_FUSED_FLOAT_ROLLING_LEAVES: Final = frozenset({"mean", "variance", "stddev", "ewma"})
+
+
+def _fused_difference_outputs(
+    segment: _Segment, occurrences: tuple[Node, ...], /
+) -> tuple[tuple[str, Node], ...]:
+    """Return final ``left - right`` expressions safe for one state stage."""
+
+    ready = {node.digest for node in occurrences}
+    return tuple(
+        (name, tree)
+        for name, tree in segment.env
+        if tree.op.name == "sub"
+        and len(tree.args) == 2
+        and all(
+            argument.op.name in _FUSED_FLOAT_ROLLING_LEAVES and argument.digest in ready
+            for argument in tree.args
+        )
+    )
+
+
+def _rolling_input_name(
+    argument: Node, materializations: dict[str, str], path: str, /
+) -> str:
+    if argument.op.name == "column_ref":
+        return _cstr(argument.attr("name"))
+    name = materializations.get(argument.digest)
+    if name is None:
+        errors.raise_compile(
+            path,
+            errors.SCHEMA_MISMATCH,
+            "fused rolling input was not materialized for the state stage",
+        )
+    return name
+
+
+def _fused_float_leaf(
+    subtree: Node,
+    materializations: dict[str, str],
+    input_types: dict[str, Field],
+    path: str,
+    /,
+) -> dict[str, object]:
+    kind = subtree.op.name
+    input_name = _rolling_input_name(subtree.args[0], materializations, path)
+    if input_name not in input_types:
+        errors.raise_compile(
+            path,
+            errors.SCHEMA_MISMATCH,
+            f"rolling {kind} argument column {input_name!r} is not in the input schema",
+        )
+    if kind == "ewma":
+        return {
+            "kind": kind,
+            "primitive_version": 1,
+            "input": input_name,
+            "span": _cint(subtree.attr("span")),
+            "min_periods": _cint(subtree.attr("min_periods")) or 1,
+        }
+    declaration: dict[str, object] = {
+        "kind": kind,
+        "primitive_version": 1,
+        "input": input_name,
+        "frame": _rolling_frame(subtree, path, kind),
+        "min_periods": _cint(subtree.attr("min_periods")) or 1,
+    }
+    if kind in _ROLLING_DDOF_PRIMITIVES:
+        ddof = _cint(subtree.attr("ddof"))
+        declaration["ddof"] = 1 if ddof is None else ddof
+    return declaration
+
+
+def _rolling_declaration_requires_ewma(declaration: dict[str, object], /) -> bool:
+    if declaration["kind"] == "ewma":
+        return True
+    if declaration["kind"] != "difference":
+        return False
+    return any(
+        isinstance(leaf, dict) and leaf.get("kind") == "ewma"
+        for leaf in (declaration["left"], declaration["right"])
+    )
+
+
 # Rolling planning validates every lag/delta/aggregate occurrence with
 # stable, declaration-ordered error paths before emitting the frozen node
 # shape.
@@ -782,6 +865,17 @@ def _plan_rolling_stage(
         for name, tree in segment.env
         if tree.op.name in _ROLLING_PRIMITIVES
     }
+    fused_differences = _fused_difference_outputs(segment, occurrences)
+    fused_leaf_digests = {
+        argument.digest for _, tree in fused_differences for argument in tree.args
+    }
+    fused_roots = {tree.digest: name for name, tree in fused_differences}
+    unfused_leaf_digests = {
+        subtree.digest
+        for _, tree in segment.env
+        for subtree in _find_rolling(_replace_materialized(tree, fused_roots))
+    }
+    hidden_fused_leaf_digests = fused_leaf_digests - unfused_leaf_digests
     used_names = set(input_types) | {name for name, _ in segment.env}
     stage_fragment = "" if stage_count == 1 else f"{stage_number}_"
     stage_suffix = "" if stage_count == 1 else f"_{stage_number}"
@@ -809,6 +903,8 @@ def _plan_rolling_stage(
     declarations: list[dict[str, object]] = []
     derived_fields: list[Field] = []
     for index, subtree in enumerate(occurrences):
+        if subtree.digest in hidden_fused_leaf_digests:
+            continue
         kind = subtree.op.name
         name = whole_feature.get(subtree.digest)
         if name is None:
@@ -891,6 +987,29 @@ def _plan_rolling_stage(
             )
         )
 
+    for name, tree in fused_differences:
+        replacements[tree.digest] = name
+        declarations.append(
+            {
+                "kind": "difference",
+                "primitive_version": 1,
+                "left": _fused_float_leaf(
+                    tree.args[0],
+                    materializations,
+                    input_types,
+                    f"{path}.{name}.left",
+                ),
+                "right": _fused_float_leaf(
+                    tree.args[1],
+                    materializations,
+                    input_types,
+                    f"{path}.{name}.right",
+                ),
+                "output": name,
+            }
+        )
+        derived_fields.append(Field(name, "float64", nullable=True))
+
     node_id = f"{output_name}__cf_rolling{stage_suffix}"
     node: dict[str, object] = {
         "id": node_id,
@@ -899,7 +1018,12 @@ def _plan_rolling_stage(
             "spec": {
                 "configuration_version": 1,
                 "state_layout_version": (
-                    2 if any(item["kind"] == "ewma" for item in declarations) else 1
+                    2
+                    if any(
+                        _rolling_declaration_requires_ewma(item)
+                        for item in declarations
+                    )
+                    else 1
                 ),
                 "partition_by": list(entity_by),
                 "event_time": event_time,

@@ -23,6 +23,14 @@ from calc_flow.symbolic import (
     ts,
 )
 from calc_flow.symbolic.lower import _compile_cache_key, lower_program_document
+from calc_flow.symbolic.optimizer import (
+    _rolling_group_key,
+    _rolling_input_columns,
+    _rolling_kernel_fallback,
+    _rolling_kernel_line,
+    _rolling_leaf_outputs,
+    _rolling_spec_outputs,
+)
 
 
 def _ordered() -> TableExpr:
@@ -148,6 +156,50 @@ def test_compatible_rolling_outputs_share_one_state_stage() -> None:
         7.0,
     ]
     program.compile_stream(Runtime())
+
+
+def test_rolling_kernel_explain_helpers_fail_closed_on_unknown_shapes() -> None:
+    field_types = {"x": "float64", "label": "string"}
+
+    assert _rolling_leaf_outputs(None) == ()
+    pair = {
+        "kind": "correlation",
+        "left": "x",
+        "right": "label",
+        "frame": {"kind": "rows", "size": 3},
+    }
+    assert _rolling_group_key(pair) == (
+        "pair",
+        "x",
+        "label",
+        "rows",
+        3,
+    )
+    assert _rolling_input_columns(pair, "pair") == ("x", "label")
+    assert _rolling_kernel_fallback(pair, field_types) == (
+        "primitive_correlation_requires_numeric_column_label"
+    )
+    assert _rolling_kernel_fallback({"kind": "unknown"}, field_types) == (
+        "primitive_unknown_missing_from_census"
+    )
+    assert _rolling_kernel_fallback({"kind": "lag", "input": "x"}, field_types) == (
+        "primitive_lag_has_no_typed_transition"
+    )
+    assert (
+        _rolling_kernel_fallback(
+            {
+                "kind": "difference",
+                "left": {"kind": "mean", "input": "x"},
+                "right": {"kind": "unknown", "input": "x"},
+            },
+            field_types,
+        )
+        == "primitive_unknown_missing_from_census"
+    )
+
+    malformed = {"id": "rolling", "operator": {"kind": "rolling", "spec": {}}}
+    assert _rolling_spec_outputs(malformed) is None
+    assert _rolling_kernel_line(malformed) is None
 
 
 def test_filter_is_not_moved_across_a_rolling_finality_boundary() -> None:
@@ -312,6 +364,11 @@ def test_explain_reports_deterministic_optimization_and_cost_facts() -> None:
     assert "  optimization" in explanation
     assert "    cse materializations 1" in explanation
     assert "    rolling state_stages 1 shared_outputs 1" in explanation
+    assert (
+        "    rolling kernel output__cf_rolling selected=ordered_primitive"
+        " profile=stable_v1 complexity=amortized_constant"
+        " order=ts,symbol,seq shared_state_groups=1 fallback=none" in explanation
+    )
     assert "  costs" in explanation
     assert "    state output__cf_rolling rows=5" in explanation
     assert "    copies none" in explanation

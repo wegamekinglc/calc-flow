@@ -55,6 +55,41 @@ def _benchmark(paired_samples: list[dict[str, object]]) -> dict[str, object]:
     }
 
 
+def _rolling_benchmark(
+    paired_samples: list[dict[str, object]], *, finite_rows: int = 100
+) -> dict[str, object]:
+    return {
+        "name": "test_rolling_kernel_sma20",
+        "stats": {
+            "mean": 2.0,
+            "rounds": len(paired_samples),
+            "data": [2.0] * len(paired_samples),
+        },
+        "extra_info": {
+            "scenario": "rolling_kernel_sma20",
+            "comparison_contract": "same-process-alternating-v1",
+            "workload_contract": "rolling-kernel-paired-v1",
+            "scale": "overhead",
+            "input_rows": 100,
+            "output_rows": 100,
+            "machine_fingerprint": "a" * 64,
+            "dependency_fingerprint": "b" * 64,
+            "workload_fingerprint": "c" * 64,
+            "oracle": "independent_direct_window_v1",
+            "oracle_checked_rows": 100,
+            "oracle_finite_rows": finite_rows,
+            "oracle_rtol": 1e-10,
+            "oracle_atol": 1e-10,
+            "optimized_kernel": "ordered_primitive",
+            "optimized_shared_state_groups": 1,
+            "reference_rolling_rewrites": 0,
+            "fast_window": None,
+            "slow_window": 20,
+            "paired_samples": paired_samples,
+        },
+    }
+
+
 def _write_report(
     path: Path,
     paired_samples: list[dict[str, object]] | None,
@@ -183,6 +218,71 @@ class TestCompareReports(unittest.TestCase):
                 compare_reports(
                     (clean, dirty), scenarios=("sce05_row_local_20_columns",)
                 )
+
+    def test_expected_commit_mismatch_fails_closed(self) -> None:
+        with TemporaryDirectory() as raw:
+            report = Path(raw) / "report.json"
+            _write_report(report, _pairs([1.0] * 20, [1.0] * 20))
+
+            with self.assertRaisesRegex(ValueError, "expected commit"):
+                compare_reports(
+                    (report,),
+                    scenarios=("sce05_row_local_20_columns",),
+                    expected_commit="2" * 40,
+                )
+
+    def test_rolling_oracle_and_non_vacuity_are_required(self) -> None:
+        with TemporaryDirectory() as raw:
+            report = Path(raw) / "report.json"
+            pairs = _pairs([1.0] * 60, [0.5] * 60)
+            report.write_text(
+                json.dumps(
+                    {
+                        "commit_info": {"id": _COMMIT, "dirty": False},
+                        "machine_info": _MACHINE,
+                        "benchmarks": [_rolling_benchmark(pairs)],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            summary = compare_reports(
+                (report,),
+                scenarios=("rolling_kernel_sma20",),
+                expected_commit=_COMMIT,
+                bootstrap_resamples=2_000,
+            )
+            self.assertEqual(summary["decision"], "pass")
+
+            report.write_text(
+                json.dumps(
+                    {
+                        "commit_info": {"id": _COMMIT, "dirty": False},
+                        "machine_info": _MACHINE,
+                        "benchmarks": [_rolling_benchmark(pairs, finite_rows=0)],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "no finite oracle outputs"):
+                compare_reports((report,), scenarios=("rolling_kernel_sma20",))
+
+    def test_rolling_gate_requires_sixty_pairs(self) -> None:
+        with TemporaryDirectory() as raw:
+            report = Path(raw) / "report.json"
+            pairs = _pairs([1.0] * 20, [0.5] * 20)
+            report.write_text(
+                json.dumps(
+                    {
+                        "commit_info": {"id": _COMMIT, "dirty": False},
+                        "machine_info": _MACHINE,
+                        "benchmarks": [_rolling_benchmark(pairs)],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "at least 60 paired samples"):
+                compare_reports((report,), scenarios=("rolling_kernel_sma20",))
 
     def test_machine_and_workload_mismatch_fail_closed(self) -> None:
         with TemporaryDirectory() as raw:

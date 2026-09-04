@@ -12,6 +12,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from calc_flow.symbolic._generated_rolling_kernels import (
+    ROLLING_KERNEL_CAPABILITIES,
+)
 from calc_flow.symbolic.nodes import CStr, Node, build
 
 _TRIVIAL = frozenset({"column_ref", "literal"})
@@ -31,6 +34,20 @@ _FIXED_TYPE_BYTES = {
     "timestamp[us]": 8,
     "timestamp[us, UTC]": 8,
 }
+_PRIMITIVE_NUMERIC_TYPES = frozenset(
+    {
+        "int8",
+        "int16",
+        "int32",
+        "int64",
+        "uint8",
+        "uint16",
+        "uint32",
+        "uint64",
+        "float32",
+        "float64",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,6 +258,10 @@ def _rolling_output_bounds(
 ) -> tuple[tuple[int, ...], tuple[int, ...]]:
     if not isinstance(output, dict):
         return (), ()
+    if output.get("kind") == "difference":
+        left_rows, left_durations = _rolling_output_bounds(output.get("left"))
+        right_rows, right_durations = _rolling_output_bounds(output.get("right"))
+        return (*left_rows, *right_rows), (*left_durations, *right_durations)
     periods = output.get("periods")
     row_bounds = (periods + 1,) if isinstance(periods, int) else ()
     frame_rows, duration_bounds = _frame_bounds(output.get("frame"))
@@ -376,6 +397,158 @@ def _state_output_count(items: list[dict[str, object]], /) -> int:
     return count
 
 
+def _rolling_fusion_count(items: list[dict[str, object]], /) -> int:
+    count = 0
+    for item in items:
+        operator = item["operator"]
+        spec = operator.get("spec") if isinstance(operator, dict) else None
+        outputs = spec.get("outputs") if isinstance(spec, dict) else None
+        if isinstance(outputs, list):
+            count += sum(
+                isinstance(output, dict) and output.get("kind") == "difference"
+                for output in outputs
+            )
+    return count
+
+
+def _rolling_leaf_outputs(output: object, /) -> tuple[dict[str, object], ...]:
+    if not isinstance(output, dict):
+        return ()
+    if output.get("kind") != "difference":
+        return (output,)
+    return (
+        *_rolling_leaf_outputs(output.get("left")),
+        *_rolling_leaf_outputs(output.get("right")),
+    )
+
+
+def _rolling_frame_key(output: dict[str, object], /) -> tuple[object, object]:
+    frame = output.get("frame")
+    if not isinstance(frame, dict):
+        return (None, None)
+    kind = frame.get("kind")
+    coordinate = frame.get("size") if kind == "rows" else frame.get("micros")
+    return kind, coordinate
+
+
+def _rolling_group_key(output: dict[str, object], /) -> tuple[object, ...] | None:
+    kind = output.get("kind")
+    frame = _rolling_frame_key(output)
+    if kind in {"count", "sum", "mean", "variance", "stddev"}:
+        return "numeric", output.get("input"), *frame
+    if kind in {"min", "max"}:
+        return "extrema", kind, output.get("input"), *frame
+    if kind in {"covariance", "correlation"}:
+        return "pair", output.get("left"), output.get("right"), *frame
+    if kind == "ewma":
+        return "ewma", output.get("input"), output.get("span")
+    return None
+
+
+def _first_rolling_fallback(
+    outputs: tuple[dict[str, object], ...], field_types: dict[str, object], /
+) -> str | None:
+    for output in outputs:
+        fallback = _rolling_kernel_fallback(output, field_types)
+        if fallback is not None:
+            return fallback
+    return None
+
+
+def _rolling_input_columns(
+    output: dict[str, object], transition: object, /
+) -> tuple[object, ...]:
+    if transition == "pair":
+        return output.get("left"), output.get("right")
+    return (output.get("input"),)
+
+
+def _rolling_numeric_fallback(
+    kind: object,
+    columns: tuple[object, ...],
+    field_types: dict[str, object],
+    /,
+) -> str | None:
+    for column in columns:
+        data_type = field_types.get(column) if isinstance(column, str) else None
+        if data_type not in _PRIMITIVE_NUMERIC_TYPES:
+            return f"primitive_{kind}_requires_numeric_column_{column}"
+    return None
+
+
+def _rolling_kernel_fallback(
+    output: dict[str, object], field_types: dict[str, object], /
+) -> str | None:
+    kind = output.get("kind")
+    capability = ROLLING_KERNEL_CAPABILITIES.get(kind)
+    if capability is None:
+        return f"primitive_{kind}_missing_from_census"
+    transition = capability[0]
+    if transition is None:
+        return f"primitive_{kind}_has_no_typed_transition"
+    if kind == "difference":
+        return _first_rolling_fallback(_rolling_leaf_outputs(output), field_types)
+    return _rolling_numeric_fallback(
+        kind, _rolling_input_columns(output, transition), field_types
+    )
+
+
+def _rolling_spec_outputs(
+    node: dict[str, object], /
+) -> tuple[dict[str, object], tuple[dict[str, object], ...]] | None:
+    operator = node.get("operator")
+    spec = operator.get("spec") if isinstance(operator, dict) else None
+    raw_outputs = spec.get("outputs") if isinstance(spec, dict) else None
+    if not isinstance(spec, dict) or not isinstance(raw_outputs, list):
+        return None
+    return spec, tuple(output for output in raw_outputs if isinstance(output, dict))
+
+
+def _rolling_field_types(node: dict[str, object], /) -> dict[str, object]:
+    return {
+        str(field.get("name")): field.get("data_type")
+        for field in _input_schema_fields(node)
+    }
+
+
+def _rolling_state_groups(
+    outputs: tuple[dict[str, object], ...], /
+) -> set[tuple[object, ...]]:
+    groups: set[tuple[object, ...]] = set()
+    for output in outputs:
+        for leaf in _rolling_leaf_outputs(output):
+            key = _rolling_group_key(leaf)
+            if key is not None:
+                groups.add(key)
+    return groups
+
+
+def _rolling_order(spec: dict[str, object], /) -> str:
+    values = (
+        spec.get("event_time"),
+        *(spec.get("partition_by") or []),
+        *(spec.get("sequence_by") or []),
+    )
+    return ",".join(str(value) for value in values)
+
+
+def _rolling_kernel_line(node: dict[str, object], /) -> str | None:
+    plan = _rolling_spec_outputs(node)
+    if plan is None:
+        return None
+    spec, outputs = plan
+    groups = _rolling_state_groups(outputs)
+    fallback = _first_rolling_fallback(outputs, _rolling_field_types(node))
+    selected = "ordered_primitive" if fallback is None and groups else "general"
+    complexity = "amortized_constant" if selected == "ordered_primitive" else "general"
+    profile = spec.get("numerical_profile", "stable_v1")
+    return (
+        f"    rolling kernel {node['id']} selected={selected}"
+        f" profile={profile} complexity={complexity} order={_rolling_order(spec)}"
+        f" shared_state_groups={len(groups)} fallback={fallback or 'none'}"
+    )
+
+
 def _cost_lines(
     nodes: list[dict[str, object]],
     renderer: Callable[[dict[str, object]], str | None],
@@ -404,19 +577,23 @@ def explain_optimization(document: dict[str, object], /) -> tuple[str, ...]:
         f"    cse materializations {cse_count}",
         "    rolling state_stages"
         f" {len(rolling)} shared_outputs {_state_output_count(rolling)}",
+        "    rolling fused_outputs"
+        f" {_rolling_fusion_count(rolling)} hidden_materializations 0",
         "    cross_section grouping_stages"
         f" {len(cross_section)} shared_outputs {_state_output_count(cross_section)}",
         f"    stream_join state_stages {len(stream_join)}",
         f"    array fused_stages {len(external)} provider_calls_per_microbatch"
         f" {len(external)}",
-        "  costs",
     )
+    kernels = _cost_lines(rolling, _rolling_kernel_line)
     state = _cost_lines(nodes, _state_cost)
     static_weight_bytes = _static_weight_bytes(document)
     copies = _cost_lines(nodes, lambda node: _copy_cost(node, static_weight_bytes))
     providers = _cost_lines(nodes, _provider_cost)
     return (
         *lines,
+        *(kernels or ("    rolling kernels none",)),
+        "  costs",
         *(state or ("    state none",)),
         *(copies or ("    copies none",)),
         *(providers or ("    providers none",)),

@@ -106,6 +106,19 @@ execution. The canonical SQL example is
 [`crates/calc-flow/examples/sql_join.rs`](../crates/calc-flow/examples/sql_join.rs),
 which joins `orders` to `fees` for `net = amount - fee`:
 
+The run-scoped physical planner has one fail-closed rolling extension. A
+bounded ascending `AVG(Float64) OVER (PARTITION BY simple_columns ORDER BY
+non_null_timestamp_us, non_null_sequence... ROWS n PRECEDING ... CURRENT
+ROW)` may execute through the crate-private `CalcFlowRollingExec`; it reuses
+the same typed `RollingKernelPlan` transition as `RollingOperator`. Filters,
+`DISTINCT`, explicit null treatment, descending or expression order keys,
+`RANGE`/`GROUPS`, future or unbounded frames, other aggregates and unsupported
+types remain on DataFusion's standard window executor. `DataFusionQueryMetric`
+reports the candidate/rewrite counts, stable fallback reasons, configured and
+effective partition counts, and the physical plan. Configured parallelism is
+adapted downward below 65,536 input rows per useful partition so small queries
+stay single-partition; it is never increased above `target_partitions`.
+
 ```rust
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -187,7 +200,10 @@ output column names, a positive frame, and `min_periods`, with `variance` and
 name, a positive frame, `min_periods`, and `ddof`. Kind `ewma` carries
 input/output names, a positive `span`, and positive `min_periods`; it emits nullable `float64` from the
 unadjusted `alpha = 2 / (span + 1)` recurrence and shares constant state by
-`(input, span)`.
+`(input, span)`. Kind `difference` embeds two `mean`, `variance`, `stddev`, or
+`ewma` readouts and one output name. The leaves create and share state but are
+not output columns; the operator writes their nullable `float64` difference
+directly.
 
 A frame is `rows(size)` —
 the `size` rows through the current row of the entity total order — or
@@ -197,12 +213,29 @@ ordered by `sequence_by`. `configuration_version` and `state_layout_version`
 must equal `ROLLING_CONFIGURATION_VERSION` (1). Existing rolling declarations
 use `ROLLING_STATE_LAYOUT_VERSION` (1), while any EWMA declaration requires
 `ROLLING_EWMA_STATE_LAYOUT_VERSION` (2) so checkpoint segments persist the
-valid count and exact binary64 accumulator. `allowed_lateness_micros` and a
+valid count and exact binary64 accumulator. These declaration versions remain
+stable in project documents and configuration fingerprints. Current operators
+write `ROLLING_COLUMNAR_STATE_LAYOUT_VERSION` (3): one deterministic entity
+dictionary, projected retained history, a columnar reorder buffer, recurrence
+state, and kernel/numerical fingerprints. Restore continues to read the
+declaration's v1/v2 layout, while newly emitted descriptors and pipeline
+capabilities report writer layout v3. `allowed_lateness_micros` and a
 `LatePolicySpec` of `Error` (envelope scope) or `Drop` (metrics version 1)
 classify late rows
 against the input watermark, and `RollingValuePolicy` is the frozen
 `stateful_numeric_v1`, which preserves a null or NaN current or referenced
-value. Validation rejects unknown fields, empty or duplicate keys, duplicate
+value.
+
+`numerical_profile` is optional. Its default `stable_v1` is omitted from the
+canonical configuration, preserving existing project and checkpoint hashes.
+The explicit `stable_v2` value is a preview: floating numeric and pair windows
+periodically rebuild from retained values with shifted compensated sums. The
+per-entity transition count is stored in the existing nullable columnar-state
+position field, so the cadence survives checkpoint recovery without changing
+the layout-v3 field schema. The profile is part of both configuration and
+kernel fingerprints, and restore rejects a profile mismatch.
+
+Validation rejects unknown fields, empty or duplicate keys, duplicate
 or input-colliding output names, nullable or floating sequence columns,
 non-numeric `delta`, `ewma`, `sum`, `mean`, `variance`, `stddev`, `covariance`,
 and `correlation` inputs, `min` and `max` inputs outside the total-order types
@@ -225,6 +258,7 @@ table:
 | `mean` / `variance` / `stddev` | numeric          | `float64`         |
 | `min` / `max`                  | total order      | input type        |
 | `covariance` / `correlation`   | numeric pair     | `float64`         |
+| `difference`                   | float readouts   | `float64`         |
 
 Aggregates count valid samples — values that are neither null nor NaN;
 infinities are numeric samples and count toward `min_periods`. A window with

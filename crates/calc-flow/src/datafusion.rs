@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
         Arc, OnceLock,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -10,9 +10,12 @@ use std::{
 use datafusion::{
     arrow::record_batch::RecordBatch,
     datasource::MemTable,
-    execution::context::{SessionConfig, SessionContext},
+    execution::{
+        context::{SessionConfig, SessionContext},
+        session_state::SessionStateBuilder,
+    },
     logical_expr::ScalarUDF,
-    physical_plan::displayable,
+    physical_plan::{common::collect as collect_stream, displayable, execute_stream},
 };
 use parking_lot::Mutex;
 use schemars::JsonSchema;
@@ -21,6 +24,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::{
     Batch, BatchMetadata, CalcFlowError, Result, UdfKind, UdfReference, UdfRegistrySnapshot,
+    datafusion_rolling::{CalcFlowQueryPlanner, RollingRewriteAudit},
     expression::{sql_projection, validate_select_query},
     validate_selected_udfs,
 };
@@ -63,9 +67,20 @@ impl DataFusionConfig {
 pub struct DataFusionQueryMetric {
     pub query_id: u64,
     pub node_id: Option<String>,
+    pub sql_parse_ns: u64,
+    pub logical_planning_ns: u64,
+    pub physical_planning_ns: u64,
+    pub physical_planning_count: u32,
     pub planning_ns: u64,
+    pub stream_open_ns: u64,
     pub execution_ns: u64,
+    pub collect_ns: u64,
     pub output_rows: usize,
+    pub configured_target_partitions: usize,
+    pub effective_target_partitions: usize,
+    pub rolling_candidate_windows: usize,
+    pub rolling_rewritten_windows: usize,
+    pub rolling_fallback_reasons: Vec<String>,
     pub logical_plan: String,
     pub physical_plan: String,
 }
@@ -77,6 +92,8 @@ pub struct DataFusionRuntime {
     query_lock: AsyncMutex<()>,
     metrics: Mutex<Vec<DataFusionQueryMetric>>,
     next_query: AtomicU64,
+    effective_target_partitions: AtomicUsize,
+    rolling_rewrite_audit: Arc<RollingRewriteAudit>,
     closed: AtomicBool,
 }
 
@@ -96,6 +113,8 @@ impl DataFusionRuntime {
             query_lock: AsyncMutex::new(()),
             metrics: Mutex::new(Vec::new()),
             next_query: AtomicU64::new(1),
+            effective_target_partitions: AtomicUsize::new(0),
+            rolling_rewrite_audit: Arc::new(RollingRewriteAudit::default()),
             closed: AtomicBool::new(false),
         })
     }
@@ -192,36 +211,53 @@ impl DataFusionRuntime {
                 message: "must not be empty".into(),
             });
         }
+        let parse_start = Instant::now();
         let query = validate_select_query(query)?;
+        let sql_parse_ns = nanos(parse_start.elapsed());
         // Declared before registrations so alias cleanup runs before unlock.
         let _query_guard = self.query_lock.lock().await;
         self.ensure_open()?;
-        let context = self.context();
+        let input_rows = tables.values().fold(0_usize, |total, batch| {
+            total.saturating_add(batch.num_rows())
+        });
+        let context = self.context_for_rows(input_rows);
         let mut registrations = TableRegistrations::new(context);
         for (alias, batch) in tables {
             registrations.register(alias, batch, node_id)?;
         }
 
-        let planning_start = Instant::now();
+        let logical_planning_start = Instant::now();
         let dataframe = context
             .sql(&query)
             .await
             .map_err(|error| datafusion_error(node_id, error))?;
         let logical_plan = dataframe.logical_plan().display_indent_schema().to_string();
+        let logical_planning_ns = nanos(logical_planning_start.elapsed());
+
+        let physical_planning_start = Instant::now();
         let physical_plan = dataframe
             .create_physical_plan()
             .await
             .map_err(|error| datafusion_error(node_id, error))?;
-        let physical_plan = displayable(physical_plan.as_ref()).indent(true).to_string();
-        let planning_ns = nanos(planning_start.elapsed());
+        let physical_plan_text = displayable(physical_plan.as_ref()).indent(true).to_string();
+        let rolling_audit = self.rolling_rewrite_audit.snapshot();
+        let physical_planning_ns = nanos(physical_planning_start.elapsed());
+        let planning_ns = sql_parse_ns
+            .saturating_add(logical_planning_ns)
+            .saturating_add(physical_planning_ns);
 
         let execution_start = Instant::now();
-        let result_schema = Arc::new(dataframe.schema().as_arrow().clone());
-        let batches = dataframe
-            .collect()
+        let result_schema = physical_plan.schema();
+        let stream = execute_stream(physical_plan, Arc::new(dataframe.task_ctx()))
+            .map_err(|error| datafusion_error(node_id, error))?;
+        let stream_open_ns = nanos(execution_start.elapsed());
+
+        let collect_start = Instant::now();
+        let batches = collect_stream(stream)
             .await
             .map_err(|error| datafusion_error(node_id, error))?;
-        let execution_ns = nanos(execution_start.elapsed());
+        let collect_ns = nanos(collect_start.elapsed());
+        let execution_ns = stream_open_ns.saturating_add(collect_ns);
         // A zero-row result (for example an INNER JOIN with no key-equal
         // pairs) collects to zero RecordBatches; represent it as one
         // zero-row batch, exactly as the Batch::table contract prescribes.
@@ -235,11 +271,22 @@ impl DataFusionRuntime {
         self.metrics.lock().push(DataFusionQueryMetric {
             query_id: self.next_query.fetch_add(1, Ordering::Relaxed),
             node_id: node_id.map(str::to_owned),
+            sql_parse_ns,
+            logical_planning_ns,
+            physical_planning_ns,
+            physical_planning_count: 1,
             planning_ns,
+            stream_open_ns,
             execution_ns,
+            collect_ns,
             output_rows,
+            configured_target_partitions: self.config.target_partitions,
+            effective_target_partitions: self.effective_target_partitions.load(Ordering::Acquire),
+            rolling_candidate_windows: rolling_audit.candidate_windows,
+            rolling_rewritten_windows: rolling_audit.rewritten_windows,
+            rolling_fallback_reasons: rolling_audit.fallback_reasons,
             logical_plan,
-            physical_plan,
+            physical_plan: physical_plan_text,
         });
         Ok(output)
     }
@@ -252,12 +299,28 @@ impl DataFusionRuntime {
         self.closed.store(true, Ordering::Release);
     }
 
+    #[cfg(test)]
     fn context(&self) -> &SessionContext {
+        self.context_for_rows(0)
+    }
+
+    fn context_for_rows(&self, input_rows: usize) -> &SessionContext {
         self.context.get_or_init(|| {
+            let target_partitions =
+                adaptive_target_partitions(self.config.target_partitions, input_rows);
+            self.effective_target_partitions
+                .store(target_partitions, Ordering::Release);
             let session = SessionConfig::new()
                 .with_batch_size(self.config.batch_size)
-                .with_target_partitions(self.config.target_partitions);
-            let context = SessionContext::new_with_config(session);
+                .with_target_partitions(target_partitions);
+            let state = SessionStateBuilder::new()
+                .with_config(session)
+                .with_default_features()
+                .with_query_planner(Arc::new(CalcFlowQueryPlanner::new(Arc::clone(
+                    &self.rolling_rewrite_audit,
+                ))))
+                .build();
+            let context = SessionContext::new_with_state(state);
             for (_, udf) in &self.selected_udfs {
                 context.register_udf(udf.as_ref().clone());
             }
@@ -275,6 +338,19 @@ impl DataFusionRuntime {
             Ok(())
         }
     }
+}
+
+const MIN_ROWS_PER_DATAFUSION_PARTITION: usize = 65_536;
+
+fn adaptive_target_partitions(configured: usize, input_rows: usize) -> usize {
+    if configured == 1 || input_rows == 0 {
+        return 1;
+    }
+    configured.min(
+        input_rows
+            .div_ceil(MIN_ROWS_PER_DATAFUSION_PARTITION)
+            .max(1),
+    )
 }
 
 fn validate_udf_sql_namespace<'a>(

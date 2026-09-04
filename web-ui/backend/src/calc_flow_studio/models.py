@@ -526,9 +526,20 @@ class NodeTimingPreview(StrictModel):
 class DataFusionMetricPreview(StrictModel):
     query_id: StrictInt = Field(ge=0)
     node_id: str | None
+    sql_parse_ns: StrictInt = Field(ge=0)
+    logical_planning_ns: StrictInt = Field(ge=0)
+    physical_planning_ns: StrictInt = Field(ge=0)
+    physical_planning_count: StrictInt = Field(ge=1)
     planning_ns: StrictInt = Field(ge=0)
+    stream_open_ns: StrictInt = Field(ge=0)
     execution_ns: StrictInt = Field(ge=0)
+    collect_ns: StrictInt = Field(ge=0)
     output_rows: StrictInt = Field(ge=0)
+    configured_target_partitions: StrictInt = Field(ge=1)
+    effective_target_partitions: StrictInt = Field(ge=1)
+    rolling_candidate_windows: StrictInt = Field(ge=0)
+    rolling_rewritten_windows: StrictInt = Field(ge=0)
+    rolling_fallback_reasons: tuple[str, ...]
     logical_plan: str
     physical_plan: str
 

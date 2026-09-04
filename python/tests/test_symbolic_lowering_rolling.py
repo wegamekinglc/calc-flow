@@ -18,7 +18,11 @@ from calc_flow.symbolic import (
     table_input,
     ts,
 )
-from calc_flow.symbolic.lower import lower_program_document
+from calc_flow.symbolic.lower import (
+    _fused_float_leaf,
+    _rolling_input_name,
+    lower_program_document,
+)
 
 
 def _ordered() -> TableExpr:
@@ -78,6 +82,26 @@ def _quotes_batch() -> pa.Table:
         },
         schema=schema,
     )
+
+
+def test_fused_rolling_leaf_validation_is_fail_closed() -> None:
+    quotes = _ordered()
+    row_local = quotes["x"] + 1.0
+    with pytest.raises(CompileError, match="was not materialized"):
+        _rolling_input_name(row_local._node, {}, "graph.nodes.rolling")
+
+    mean = ts.mean(quotes["x"], window=rows(2))
+    with pytest.raises(CompileError, match="not in the input schema"):
+        _fused_float_leaf(mean._node, {}, {}, "graph.nodes.rolling")
+
+    variance = ts.variance(quotes["x"], window=rows(2), ddof=0)
+    declaration = _fused_float_leaf(
+        variance._node,
+        {},
+        {"x": Field("x", "float64", nullable=False)},
+        "graph.nodes.rolling",
+    )
+    assert declaration["ddof"] == 0
 
 
 def test_lag_delta_lower_to_one_rolling_node_with_the_frozen_shape() -> None:
@@ -152,6 +176,9 @@ def test_lag_delta_lower_to_one_rolling_node_with_the_frozen_shape() -> None:
             "target_port": "input",
         }
     ) in graph["edges"]  # type: ignore[index]
+    explanation = program.explain(Runtime(), mode="batch")
+    assert "rolling kernel signals__cf_rolling selected=general" in explanation
+    assert "fallback=primitive_lag_has_no_typed_transition" in explanation
 
 
 def test_ewma_and_macd_lower_to_shared_layout_two_state() -> None:
@@ -172,11 +199,62 @@ def test_ewma_and_macd_lower_to_shared_layout_two_state() -> None:
     spec = rolling[0]["operator"]["spec"]  # type: ignore[index]
     assert spec["state_layout_version"] == 2
     outputs = spec["outputs"]
-    assert [output["kind"] for output in outputs] == ["ewma", "ewma", "ewma"]
-    assert [output["span"] for output in outputs] == [3, 2, 4]
+    assert [output["kind"] for output in outputs] == ["ewma", "difference"]
+    assert outputs[0]["span"] == 3
     assert outputs[0]["output"] in {"ema", "same_ema"}
+    assert outputs[1]["left"]["span"] == 2
+    assert outputs[1]["right"]["span"] == 4
+    assert outputs[1]["output"] == "macd"
     assert all("frame" not in output for output in outputs)
-    assert all(output["min_periods"] > 0 for output in outputs)
+
+
+def test_dual_mean_difference_is_written_without_hidden_rolling_columns() -> None:
+    quotes = _ordered()
+    spread = ts.mean(quotes["x"], window=rows(2)) - ts.mean(quotes["x"], window=rows(4))
+    program = _program([("spread", spread)])
+
+    document = lower_program_document(program, Runtime(), "batch")
+
+    (rolling,) = _rolling_nodes(document)
+    spec = rolling["operator"]["spec"]
+    assert spec["outputs"] == [
+        {
+            "kind": "difference",
+            "primitive_version": 1,
+            "left": {
+                "kind": "mean",
+                "primitive_version": 1,
+                "input": "x",
+                "frame": {"kind": "rows", "size": 2},
+                "min_periods": 1,
+            },
+            "right": {
+                "kind": "mean",
+                "primitive_version": 1,
+                "input": "x",
+                "frame": {"kind": "rows", "size": 4},
+                "min_periods": 1,
+            },
+            "output": "spread",
+        }
+    ]
+    output_fields = rolling["output_ports"][0]["schema"]
+    assert [field["name"] for field in output_fields] == [
+        "ts",
+        "symbol",
+        "seq",
+        "x",
+        "v",
+        "spread",
+    ]
+    assert all("__cf_roll_" not in field["name"] for field in output_fields)
+    explanation = program.explain(Runtime(), mode="batch")
+    assert "    rolling fused_outputs 1 hidden_materializations 0" in explanation
+    assert (
+        "rolling kernel signals__cf_rolling selected=ordered_primitive" in explanation
+    )
+    assert "shared_state_groups=2 fallback=none" in explanation
+    assert "    state signals__cf_rolling rows=4" in explanation
 
 
 def test_stream_lowering_carries_the_lateness_arguments() -> None:

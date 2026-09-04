@@ -1,0 +1,268 @@
+"""Generate fail-closed Rust and Python rolling-kernel capability metadata."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+SOURCE = ROOT / "crates" / "calc-flow" / "rolling-kernels.json"
+RUST_TARGET = (
+    ROOT
+    / "crates"
+    / "calc-flow"
+    / "src"
+    / "operator"
+    / "rolling"
+    / "generated_kernel_manifest.rs"
+)
+PYTHON_TARGET = (
+    ROOT / "python" / "calc_flow" / "symbolic" / "_generated_rolling_kernels.py"
+)
+
+EXPECTED_PRIMITIVES = (
+    "lag",
+    "delta",
+    "count",
+    "sum",
+    "mean",
+    "variance",
+    "stddev",
+    "min",
+    "max",
+    "covariance",
+    "correlation",
+    "ewma",
+    "difference",
+)
+TRANSITIONS = {
+    "numeric": "Numeric",
+    "extrema": "Extrema",
+    "pair": "Pair",
+    "ewma": "Ewma",
+    "fused_difference": "FusedDifference",
+}
+COMPLEXITIES = {
+    "amortized_constant": "AmortizedConstant",
+    "general": "General",
+}
+FIELDS = {
+    "primitive",
+    "batch",
+    "stream",
+    "datafusion",
+    "typed_transition",
+    "complexity",
+}
+
+
+def _load(path: Path) -> list[dict[str, object]]:
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict) or set(raw) != {"schema_version", "kernels"}:
+        raise ValueError("kernel manifest must contain only schema_version and kernels")
+    if raw["schema_version"] != 1:
+        raise ValueError("kernel manifest schema_version must equal 1")
+    kernels = raw["kernels"]
+    if not isinstance(kernels, list):
+        raise ValueError("kernel manifest kernels must be a list")
+    return [_validate_kernel(index, value) for index, value in enumerate(kernels)]
+
+
+def _validate_kernel_shape(index: int, value: object) -> dict[str, object]:
+    if not isinstance(value, dict) or set(value) != FIELDS:
+        raise ValueError(f"kernel {index} must contain exactly {sorted(FIELDS)}")
+    primitive = value["primitive"]
+    if not isinstance(primitive, str) or not primitive:
+        raise ValueError(f"kernel {index} primitive must be a non-empty string")
+    return value
+
+
+def _validate_kernel_support_flags(value: dict[str, object]) -> None:
+    primitive = value["primitive"]
+    for field in ("batch", "stream", "datafusion"):
+        if type(value[field]) is not bool:
+            raise ValueError(f"kernel {primitive!r} {field} must be boolean")
+
+
+def _validate_kernel_transition(value: dict[str, object]) -> object:
+    primitive = value["primitive"]
+    transition = value["typed_transition"]
+    if transition is not None and transition not in TRANSITIONS:
+        raise ValueError(f"kernel {primitive!r} has unknown typed transition")
+    if transition is not None and (not value["batch"] or not value["stream"]):
+        raise ValueError(
+            f"kernel {primitive!r} typed transition requires batch and stream support"
+        )
+    if value["datafusion"] and transition is None:
+        raise ValueError(
+            f"kernel {primitive!r} DataFusion support requires a typed transition"
+        )
+    return transition
+
+
+def _validate_kernel_complexity(
+    value: dict[str, object], transition: object, /
+) -> None:
+    primitive = value["primitive"]
+    if value["complexity"] not in COMPLEXITIES:
+        raise ValueError(f"kernel {primitive!r} has unknown complexity")
+    if transition is not None and value["complexity"] != "amortized_constant":
+        raise ValueError(
+            f"kernel {primitive!r} typed transition must advertise amortized_constant"
+        )
+
+
+def _validate_kernel(index: int, value: object) -> dict[str, object]:
+    kernel = _validate_kernel_shape(index, value)
+    _validate_kernel_support_flags(kernel)
+    transition = _validate_kernel_transition(kernel)
+    _validate_kernel_complexity(kernel, transition)
+    return kernel
+
+
+def _rust_bool(value: object) -> str:
+    return "true" if value is True else "false"
+
+
+def render(path: Path = SOURCE) -> str:
+    """Validate the census and render its checked-in Rust representation."""
+
+    kernels = _load(path)
+    primitives = tuple(str(kernel["primitive"]) for kernel in kernels)
+    if primitives != EXPECTED_PRIMITIVES:
+        raise ValueError(
+            "kernel manifest primitives and order must equal "
+            f"{list(EXPECTED_PRIMITIVES)}"
+        )
+    rows = []
+    for kernel in kernels:
+        transition = kernel["typed_transition"]
+        transition_rust = (
+            "None"
+            if transition is None
+            else f"Some(GeneratedTransition::{TRANSITIONS[str(transition)]})"
+        )
+        rows.append(
+            "    GeneratedKernelCapability {\n"
+            f'        primitive: "{kernel["primitive"]}",\n'
+            f"        batch: {_rust_bool(kernel['batch'])},\n"
+            f"        stream: {_rust_bool(kernel['stream'])},\n"
+            f"        datafusion: {_rust_bool(kernel['datafusion'])},\n"
+            f"        typed_transition: {transition_rust},\n"
+            "        complexity: "
+            f"GeneratedComplexity::{COMPLEXITIES[str(kernel['complexity'])]},\n"
+            "    },"
+        )
+    body = "\n".join(rows)
+    header = (
+        "// @generated by scripts/generate_rolling_kernel_manifest.py; do not edit."
+    )
+    return f"""{header}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum GeneratedTransition {{
+    Numeric,
+    Extrema,
+    Pair,
+    Ewma,
+    FusedDifference,
+}}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum GeneratedComplexity {{
+    AmortizedConstant,
+    General,
+}}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct GeneratedKernelCapability {{
+    pub primitive: &'static str,
+    pub batch: bool,
+    pub stream: bool,
+    pub datafusion: bool,
+    pub typed_transition: Option<GeneratedTransition>,
+    pub complexity: GeneratedComplexity,
+}}
+
+pub(super) const GENERATED_KERNEL_CAPABILITIES: &[GeneratedKernelCapability] = &[
+{body}
+];
+
+pub(super) fn generated_kernel_capability(
+    primitive: &str,
+) -> Option<&'static GeneratedKernelCapability> {{
+    GENERATED_KERNEL_CAPABILITIES
+        .iter()
+        .find(|capability| capability.primitive == primitive)
+}}
+"""
+
+
+def render_python(path: Path = SOURCE) -> str:
+    """Validate the census and render immutable Python explain metadata."""
+
+    kernels = _load(path)
+    primitives = tuple(str(kernel["primitive"]) for kernel in kernels)
+    if primitives != EXPECTED_PRIMITIVES:
+        raise ValueError(
+            "kernel manifest primitives and order must equal "
+            f"{list(EXPECTED_PRIMITIVES)}"
+        )
+    rows = []
+    for kernel in kernels:
+        transition = kernel["typed_transition"]
+        transition_literal = "None" if transition is None else json.dumps(transition)
+        rows.append(
+            f'        "{kernel["primitive"]}": ('
+            f"{transition_literal}, {json.dumps(kernel['complexity'])}, "
+            f"{kernel['datafusion']!r}),"
+        )
+    body = "\n".join(rows)
+    return f"""# @generated by scripts/generate_rolling_kernel_manifest.py; do not edit.
+
+from __future__ import annotations
+
+from types import MappingProxyType
+
+ROLLING_KERNEL_CAPABILITIES = MappingProxyType(
+    {{
+{body}
+    }}
+)
+"""
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--check", action="store_true")
+    arguments = parser.parse_args(argv)
+    try:
+        generated_rust = render()
+        generated_python = render_python()
+        if arguments.check:
+            stale = (
+                not RUST_TARGET.exists()
+                or RUST_TARGET.read_text(encoding="utf-8") != generated_rust
+                or not PYTHON_TARGET.exists()
+                or PYTHON_TARGET.read_text(encoding="utf-8") != generated_python
+            )
+            if stale:
+                print(
+                    "rolling kernel manifest is stale; run "
+                    "python scripts/generate_rolling_kernel_manifest.py",
+                    file=sys.stderr,
+                )
+                return 1
+        else:
+            RUST_TARGET.write_text(generated_rust, encoding="utf-8")
+            PYTHON_TARGET.write_text(generated_python, encoding="utf-8")
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        print(f"invalid rolling kernel manifest: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

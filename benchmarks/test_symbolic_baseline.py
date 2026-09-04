@@ -952,8 +952,12 @@ def test_sce16_exponential_indicator_pair(
     hand_built_plan = PipelineBuilder._from_json(
         _sce16_hand_built_project_json()
     ).compile_batch()
-    symbolic_plan = _sce16_symbolic_program().compile_batch(Runtime())
-    assert hand_built_plan.fingerprint == symbolic_plan.fingerprint
+    symbolic_program = _sce16_symbolic_program()
+    runtime = Runtime()
+    explanation = symbolic_program.explain(runtime, mode="batch")
+    assert "rolling fused_outputs 1 hidden_materializations 0" in explanation
+    assert "shared_state_groups=2 fallback=none" in explanation
+    symbolic_plan = symbolic_program.compile_batch(runtime)
     inputs = {"input": _utc_quote_batch()}
 
     hand_built_output = hand_built_plan.execute(inputs).outputs["output"].to_pyarrow()
@@ -979,6 +983,7 @@ def test_sce16_exponential_indicator_pair(
             "entities": workload.entities,
             "ewma_spans": [12, 26],
             "native_accumulators": 2,
+            "fused_outputs": 1,
             "paired_samples": paired_samples,
         },
     )

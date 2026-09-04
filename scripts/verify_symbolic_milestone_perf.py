@@ -28,8 +28,11 @@ DEFAULT_THRESHOLD = 0.05
 DEFAULT_BOOTSTRAP_RESAMPLES = 20_000
 BOOTSTRAP_SEED = 20_260_829
 MIN_PAIRED_SAMPLES = 20
+ROLLING_MIN_PAIRED_SAMPLES = 60
 GIT_SHA = re.compile(r"[0-9a-f]{40}")
+FINGERPRINT = re.compile(r"[0-9a-f]{64}")
 COMPARISON_CONTRACT = "same-process-alternating-v1"
+ROLLING_SCENARIOS = frozenset({"rolling_kernel_sma20", "rolling_kernel_dual_sma_5_20"})
 
 Decision = Literal["pass", "fail", "inconclusive"]
 
@@ -122,11 +125,104 @@ def _workload(extra: Mapping[str, object], path: Path) -> dict[str, object]:
         )
     if extra["comparison_contract"] != COMPARISON_CONTRACT:
         raise ValueError(f"benchmark report {path} has unsupported comparison contract")
+    if extra["scenario"] in ROLLING_SCENARIOS:
+        _validate_rolling_evidence(extra, path)
     return {
         key: value
         for key, value in sorted(extra.items())
         if key not in _VOLATILE_EXTRA_FIELDS
     }
+
+
+def _require_rolling_evidence(extra: Mapping[str, object], path: Path) -> None:
+    required = {
+        "machine_fingerprint",
+        "dependency_fingerprint",
+        "workload_fingerprint",
+        "oracle",
+        "oracle_checked_rows",
+        "oracle_finite_rows",
+        "oracle_rtol",
+        "oracle_atol",
+        "optimized_kernel",
+        "optimized_shared_state_groups",
+        "reference_rolling_rewrites",
+        "fast_window",
+        "slow_window",
+    }
+    missing = sorted(required - set(extra))
+    if missing:
+        raise ValueError(
+            f"rolling benchmark report {path} lacks evidence: {', '.join(missing)}"
+        )
+
+
+def _validate_rolling_fingerprints(extra: Mapping[str, object], path: Path) -> None:
+    for field in (
+        "machine_fingerprint",
+        "dependency_fingerprint",
+        "workload_fingerprint",
+    ):
+        value = extra[field]
+        if not isinstance(value, str) or FINGERPRINT.fullmatch(value) is None:
+            raise ValueError(f"rolling benchmark report {path} has invalid {field}")
+
+
+def _validate_rolling_oracle_rows(extra: Mapping[str, object], path: Path) -> None:
+    checked_rows = extra["oracle_checked_rows"]
+    finite_rows = extra["oracle_finite_rows"]
+    if (
+        type(checked_rows) is not int
+        or checked_rows <= 0
+        or checked_rows != extra["input_rows"]
+        or checked_rows != extra["output_rows"]
+    ):
+        raise ValueError(f"rolling benchmark report {path} has vacuous oracle coverage")
+    if type(finite_rows) is not int or not 0 < finite_rows <= checked_rows:
+        raise ValueError(
+            f"rolling benchmark report {path} has no finite oracle outputs"
+        )
+
+
+def _validate_rolling_oracle(extra: Mapping[str, object], path: Path) -> None:
+    if extra["oracle"] != "independent_direct_window_v1":
+        raise ValueError(f"rolling benchmark report {path} has an unknown oracle")
+
+
+def _validate_rolling_tolerances(extra: Mapping[str, object], path: Path) -> None:
+    for field in ("oracle_rtol", "oracle_atol"):
+        value = extra[field]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int | float)
+            or not math.isfinite(float(value))
+            or not 0.0 <= float(value) <= 1e-10
+        ):
+            raise ValueError(f"rolling benchmark report {path} has invalid {field}")
+
+
+def _validate_rolling_kernel_evidence(
+    extra: Mapping[str, object], path: Path, scenario: str
+) -> None:
+    expected_fast = 5 if scenario == "rolling_kernel_dual_sma_5_20" else None
+    expected_groups = 2 if expected_fast is not None else 1
+    if (
+        extra["optimized_kernel"] != "ordered_primitive"
+        or extra["optimized_shared_state_groups"] != expected_groups
+        or extra["reference_rolling_rewrites"] != 0
+        or extra["slow_window"] != 20
+        or extra["fast_window"] != expected_fast
+    ):
+        raise ValueError(f"rolling benchmark report {path} has invalid kernel evidence")
+
+
+def _validate_rolling_evidence(extra: Mapping[str, object], path: Path) -> None:
+    _require_rolling_evidence(extra, path)
+    _validate_rolling_fingerprints(extra, path)
+    _validate_rolling_oracle_rows(extra, path)
+    _validate_rolling_oracle(extra, path)
+    _validate_rolling_tolerances(extra, path)
+    _validate_rolling_kernel_evidence(extra, path, str(extra["scenario"]))
 
 
 def _seconds(value: object, path: Path) -> float:
@@ -327,10 +423,14 @@ def _scenario_result(
     bootstrap_resamples: int,
 ) -> tuple[dict[str, object], Decision]:
     pairs = evidence["pairs"]
-    if len(pairs) < MIN_PAIRED_SAMPLES:
+    minimum_pairs = (
+        ROLLING_MIN_PAIRED_SAMPLES
+        if scenario in ROLLING_SCENARIOS
+        else MIN_PAIRED_SAMPLES
+    )
+    if len(pairs) < minimum_pairs:
         raise ValueError(
-            f"scenario {scenario!r} requires at least "
-            f"{MIN_PAIRED_SAMPLES} paired samples"
+            f"scenario {scenario!r} requires at least {minimum_pairs} paired samples"
         )
     log_ratios = _paired_log_ratios(pairs)
     interval = _bootstrap_regression_interval(log_ratios, resamples=bootstrap_resamples)
@@ -365,10 +465,16 @@ def compare_reports(
     scenarios: Sequence[str],
     threshold: float = DEFAULT_THRESHOLD,
     bootstrap_resamples: int = DEFAULT_BOOTSTRAP_RESAMPLES,
+    expected_commit: str | None = None,
 ) -> dict[str, object]:
     """Validate reports and return a deterministic comparison summary."""
     _validate_comparison_request(report_paths, scenarios, threshold)
     commit_id, machine, reports = _validated_reports(report_paths)
+    if expected_commit is not None:
+        if GIT_SHA.fullmatch(expected_commit) is None:
+            raise ValueError("expected_commit must be a lowercase full git SHA")
+        if commit_id != expected_commit:
+            raise ValueError("benchmark reports do not match the expected commit")
     combined, report_digests = _combined_evidence(reports, scenarios)
     results = [
         _scenario_result(
@@ -402,6 +508,7 @@ def main() -> int:
         required=True,
         help="pytest-benchmark JSON report with alternating paired samples",
     )
+    parser.add_argument("--expected-commit")
     parser.add_argument(
         "--scenario",
         action="append",
@@ -426,6 +533,7 @@ def main() -> int:
             scenarios=options.scenario,
             threshold=options.threshold_percent / 100.0,
             bootstrap_resamples=options.bootstrap_resamples,
+            expected_commit=options.expected_commit,
         )
     except ValueError as error:
         print(f"Invalid symbolic performance evidence: {error}", file=sys.stderr)

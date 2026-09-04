@@ -2182,6 +2182,181 @@
               }
             ]
           },
+          "RollingFloatPrimitiveSpec": {
+            "description": "One Float64 rolling readout used only inside a fused derived output.\n\nThese leaves declare state semantics but have no output name, so the\noperator can share their accumulators without materializing intermediate\nArrow columns.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "Float64 mean over a row or duration frame.",
+                "properties": {
+                  "frame": {
+                    "$ref": "#/components/schemas/ProjectCreateRequest/$defs/RollingFrameSpec",
+                    "description": "Rolling frame."
+                  },
+                  "input": {
+                    "description": "Numeric input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "mean",
+                    "type": "string"
+                  },
+                  "min_periods": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "frame",
+                  "min_periods"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Float64 variance over a row or duration frame.",
+                "properties": {
+                  "ddof": {
+                    "description": "Degrees-of-freedom adjustment; must be `0` or `1`.",
+                    "format": "uint8",
+                    "maximum": 1.0,
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "frame": {
+                    "$ref": "#/components/schemas/ProjectCreateRequest/$defs/RollingFrameSpec",
+                    "description": "Rolling frame."
+                  },
+                  "input": {
+                    "description": "Numeric input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "variance",
+                    "type": "string"
+                  },
+                  "min_periods": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "frame",
+                  "min_periods",
+                  "ddof"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Float64 standard deviation over a row or duration frame.",
+                "properties": {
+                  "ddof": {
+                    "description": "Degrees-of-freedom adjustment; must be `0` or `1`.",
+                    "format": "uint8",
+                    "maximum": 1.0,
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "frame": {
+                    "$ref": "#/components/schemas/ProjectCreateRequest/$defs/RollingFrameSpec",
+                    "description": "Rolling frame."
+                  },
+                  "input": {
+                    "description": "Numeric input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "stddev",
+                    "type": "string"
+                  },
+                  "min_periods": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "frame",
+                  "min_periods",
+                  "ddof"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Unadjusted exponentially weighted moving average.",
+                "properties": {
+                  "input": {
+                    "description": "Numeric input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "ewma",
+                    "type": "string"
+                  },
+                  "min_periods": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "span": {
+                    "description": "Positive exponential span.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "span",
+                  "min_periods"
+                ],
+                "type": "object"
+              }
+            ]
+          },
           "RollingFrameSpec": {
             "description": "Rolling frame declaration (SCE-00 D5): a row-count frame or an\nevent-time duration frame.",
             "oneOf": [
@@ -2226,6 +2401,21 @@
                   "micros"
                 ],
                 "type": "object"
+              }
+            ]
+          },
+          "RollingNumericalProfile": {
+            "description": "Versioned floating-point behavior for rolling numeric transitions.\n\n`StableV1` remains the default and preserves the released operation order.\n`StableV2Preview` is an explicit opt-in experiment whose serialized name is\n`stable_v2`; it may not replace the default without a separate migration.",
+            "oneOf": [
+              {
+                "const": "stable_v1",
+                "description": "Released West/Welford add/remove behavior.",
+                "type": "string"
+              },
+              {
+                "const": "stable_v2",
+                "description": "Deterministically rebased, shifted-sum preview behavior.",
+                "type": "string"
               }
             ]
           },
@@ -2781,6 +2971,42 @@
                   "ddof"
                 ],
                 "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Difference of two Float64 rolling readouts, evaluated directly from\ntheir shared state without materializing either leaf.",
+                "properties": {
+                  "kind": {
+                    "const": "difference",
+                    "type": "string"
+                  },
+                  "left": {
+                    "$ref": "#/components/schemas/ProjectCreateRequest/$defs/RollingFloatPrimitiveSpec",
+                    "description": "Left rolling readout."
+                  },
+                  "output": {
+                    "description": "Output column name.",
+                    "type": "string"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "right": {
+                    "$ref": "#/components/schemas/ProjectCreateRequest/$defs/RollingFloatPrimitiveSpec",
+                    "description": "Right rolling readout."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "left",
+                  "right",
+                  "output"
+                ],
+                "type": "object"
               }
             ]
           },
@@ -2807,6 +3033,10 @@
               "late_policy": {
                 "$ref": "#/components/schemas/ProjectCreateRequest/$defs/LatePolicySpec",
                 "description": "Late-row policy."
+              },
+              "numerical_profile": {
+                "$ref": "#/components/schemas/ProjectCreateRequest/$defs/RollingNumericalProfile",
+                "description": "Versioned floating-point behavior. `stable_v1` is omitted from the\ncanonical configuration so existing project and checkpoint hashes stay\ncompatible; `stable_v2` is an explicit preview opt-in."
               },
               "outputs": {
                 "description": "Rolling outputs in semantic declaration order.",
@@ -4725,6 +4955,181 @@
               }
             ]
           },
+          "RollingFloatPrimitiveSpec": {
+            "description": "One Float64 rolling readout used only inside a fused derived output.\n\nThese leaves declare state semantics but have no output name, so the\noperator can share their accumulators without materializing intermediate\nArrow columns.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "Float64 mean over a row or duration frame.",
+                "properties": {
+                  "frame": {
+                    "$ref": "#/components/schemas/ProjectDocument/$defs/RollingFrameSpec",
+                    "description": "Rolling frame."
+                  },
+                  "input": {
+                    "description": "Numeric input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "mean",
+                    "type": "string"
+                  },
+                  "min_periods": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "frame",
+                  "min_periods"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Float64 variance over a row or duration frame.",
+                "properties": {
+                  "ddof": {
+                    "description": "Degrees-of-freedom adjustment; must be `0` or `1`.",
+                    "format": "uint8",
+                    "maximum": 1.0,
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "frame": {
+                    "$ref": "#/components/schemas/ProjectDocument/$defs/RollingFrameSpec",
+                    "description": "Rolling frame."
+                  },
+                  "input": {
+                    "description": "Numeric input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "variance",
+                    "type": "string"
+                  },
+                  "min_periods": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "frame",
+                  "min_periods",
+                  "ddof"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Float64 standard deviation over a row or duration frame.",
+                "properties": {
+                  "ddof": {
+                    "description": "Degrees-of-freedom adjustment; must be `0` or `1`.",
+                    "format": "uint8",
+                    "maximum": 1.0,
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "frame": {
+                    "$ref": "#/components/schemas/ProjectDocument/$defs/RollingFrameSpec",
+                    "description": "Rolling frame."
+                  },
+                  "input": {
+                    "description": "Numeric input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "stddev",
+                    "type": "string"
+                  },
+                  "min_periods": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "frame",
+                  "min_periods",
+                  "ddof"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Unadjusted exponentially weighted moving average.",
+                "properties": {
+                  "input": {
+                    "description": "Numeric input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "ewma",
+                    "type": "string"
+                  },
+                  "min_periods": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "span": {
+                    "description": "Positive exponential span.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "span",
+                  "min_periods"
+                ],
+                "type": "object"
+              }
+            ]
+          },
           "RollingFrameSpec": {
             "description": "Rolling frame declaration (SCE-00 D5): a row-count frame or an\nevent-time duration frame.",
             "oneOf": [
@@ -4769,6 +5174,21 @@
                   "micros"
                 ],
                 "type": "object"
+              }
+            ]
+          },
+          "RollingNumericalProfile": {
+            "description": "Versioned floating-point behavior for rolling numeric transitions.\n\n`StableV1` remains the default and preserves the released operation order.\n`StableV2Preview` is an explicit opt-in experiment whose serialized name is\n`stable_v2`; it may not replace the default without a separate migration.",
+            "oneOf": [
+              {
+                "const": "stable_v1",
+                "description": "Released West/Welford add/remove behavior.",
+                "type": "string"
+              },
+              {
+                "const": "stable_v2",
+                "description": "Deterministically rebased, shifted-sum preview behavior.",
+                "type": "string"
               }
             ]
           },
@@ -5324,6 +5744,42 @@
                   "ddof"
                 ],
                 "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Difference of two Float64 rolling readouts, evaluated directly from\ntheir shared state without materializing either leaf.",
+                "properties": {
+                  "kind": {
+                    "const": "difference",
+                    "type": "string"
+                  },
+                  "left": {
+                    "$ref": "#/components/schemas/ProjectDocument/$defs/RollingFloatPrimitiveSpec",
+                    "description": "Left rolling readout."
+                  },
+                  "output": {
+                    "description": "Output column name.",
+                    "type": "string"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "right": {
+                    "$ref": "#/components/schemas/ProjectDocument/$defs/RollingFloatPrimitiveSpec",
+                    "description": "Right rolling readout."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "left",
+                  "right",
+                  "output"
+                ],
+                "type": "object"
               }
             ]
           },
@@ -5350,6 +5806,10 @@
               "late_policy": {
                 "$ref": "#/components/schemas/ProjectDocument/$defs/LatePolicySpec",
                 "description": "Late-row policy."
+              },
+              "numerical_profile": {
+                "$ref": "#/components/schemas/ProjectDocument/$defs/RollingNumericalProfile",
+                "description": "Versioned floating-point behavior. `stable_v1` is omitted from the\ncanonical configuration so existing project and checkpoint hashes stay\ncompatible; `stable_v2` is an explicit preview opt-in."
               },
               "outputs": {
                 "description": "Rolling outputs in semantic declaration order.",

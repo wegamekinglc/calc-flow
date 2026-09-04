@@ -1114,6 +1114,95 @@ export interface components {
                 /** @description Rank tie method of an order-statistic output (SCE-00 D6). */
                 RankTieMethod: "average" | "min" | "max";
                 /**
+                 * @description One Float64 rolling readout used only inside a fused derived output.
+                 *
+                 *     These leaves declare state semantics but have no output name, so the
+                 *     operator can share their accumulators without materializing intermediate
+                 *     Arrow columns.
+                 */
+                RollingFloatPrimitiveSpec: {
+                    /** @description Rolling frame. */
+                    frame: components["schemas"]["ProjectCreateRequest"]["$defs"]["RollingFrameSpec"];
+                    /** @description Numeric input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "mean";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_periods: number;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /**
+                     * Format: uint8
+                     * @description Degrees-of-freedom adjustment; must be `0` or `1`.
+                     */
+                    ddof: number;
+                    /** @description Rolling frame. */
+                    frame: components["schemas"]["ProjectCreateRequest"]["$defs"]["RollingFrameSpec"];
+                    /** @description Numeric input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "variance";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_periods: number;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /**
+                     * Format: uint8
+                     * @description Degrees-of-freedom adjustment; must be `0` or `1`.
+                     */
+                    ddof: number;
+                    /** @description Rolling frame. */
+                    frame: components["schemas"]["ProjectCreateRequest"]["$defs"]["RollingFrameSpec"];
+                    /** @description Numeric input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "stddev";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_periods: number;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /** @description Numeric input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "ewma";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_periods: number;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                    /**
+                     * Format: uint64
+                     * @description Positive exponential span.
+                     */
+                    span: number;
+                };
+                /**
                  * @description Rolling frame declaration (SCE-00 D5): a row-count frame or an
                  *     event-time duration frame.
                  */
@@ -1134,6 +1223,14 @@ export interface components {
                      */
                     micros: number;
                 };
+                /**
+                 * @description Versioned floating-point behavior for rolling numeric transitions.
+                 *
+                 *     `StableV1` remains the default and preserves the released operation order.
+                 *     `StableV2Preview` is an explicit opt-in experiment whose serialized name is
+                 *     `stable_v2`; it may not replace the default without a separate migration.
+                 */
+                RollingNumericalProfile: "stable_v1" | "stable_v2";
                 /** @description One declared rolling output and its output column name. */
                 RollingOutputSpec: {
                     /** @description Input column name. */
@@ -1386,6 +1483,20 @@ export interface components {
                     primitive_version: number;
                     /** @description Right input column name. */
                     right: string;
+                } | {
+                    /** @constant */
+                    kind: "difference";
+                    /** @description Left rolling readout. */
+                    left: components["schemas"]["ProjectCreateRequest"]["$defs"]["RollingFloatPrimitiveSpec"];
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                    /** @description Right rolling readout. */
+                    right: components["schemas"]["ProjectCreateRequest"]["$defs"]["RollingFloatPrimitiveSpec"];
                 };
                 /** @description Data-only declaration of one native row-window rolling operation. */
                 RollingSpec: {
@@ -1404,6 +1515,12 @@ export interface components {
                     event_time: string;
                     /** @description Late-row policy. */
                     late_policy: components["schemas"]["ProjectCreateRequest"]["$defs"]["LatePolicySpec"];
+                    /**
+                     * @description Versioned floating-point behavior. `stable_v1` is omitted from the
+                     *     canonical configuration so existing project and checkpoint hashes stay
+                     *     compatible; `stable_v2` is an explicit preview opt-in.
+                     */
+                    numerical_profile?: components["schemas"]["ProjectCreateRequest"]["$defs"]["RollingNumericalProfile"];
                     /** @description Rolling outputs in semantic declaration order. */
                     outputs: components["schemas"]["ProjectCreateRequest"]["$defs"]["RollingOutputSpec"][];
                     /** @description Ordered non-empty entity partition key. */
@@ -2110,6 +2227,95 @@ export interface components {
                 /** @description Rank tie method of an order-statistic output (SCE-00 D6). */
                 RankTieMethod: "average" | "min" | "max";
                 /**
+                 * @description One Float64 rolling readout used only inside a fused derived output.
+                 *
+                 *     These leaves declare state semantics but have no output name, so the
+                 *     operator can share their accumulators without materializing intermediate
+                 *     Arrow columns.
+                 */
+                RollingFloatPrimitiveSpec: {
+                    /** @description Rolling frame. */
+                    frame: components["schemas"]["ProjectDocument"]["$defs"]["RollingFrameSpec"];
+                    /** @description Numeric input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "mean";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_periods: number;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /**
+                     * Format: uint8
+                     * @description Degrees-of-freedom adjustment; must be `0` or `1`.
+                     */
+                    ddof: number;
+                    /** @description Rolling frame. */
+                    frame: components["schemas"]["ProjectDocument"]["$defs"]["RollingFrameSpec"];
+                    /** @description Numeric input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "variance";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_periods: number;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /**
+                     * Format: uint8
+                     * @description Degrees-of-freedom adjustment; must be `0` or `1`.
+                     */
+                    ddof: number;
+                    /** @description Rolling frame. */
+                    frame: components["schemas"]["ProjectDocument"]["$defs"]["RollingFrameSpec"];
+                    /** @description Numeric input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "stddev";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_periods: number;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /** @description Numeric input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "ewma";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_periods: number;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                    /**
+                     * Format: uint64
+                     * @description Positive exponential span.
+                     */
+                    span: number;
+                };
+                /**
                  * @description Rolling frame declaration (SCE-00 D5): a row-count frame or an
                  *     event-time duration frame.
                  */
@@ -2130,6 +2336,14 @@ export interface components {
                      */
                     micros: number;
                 };
+                /**
+                 * @description Versioned floating-point behavior for rolling numeric transitions.
+                 *
+                 *     `StableV1` remains the default and preserves the released operation order.
+                 *     `StableV2Preview` is an explicit opt-in experiment whose serialized name is
+                 *     `stable_v2`; it may not replace the default without a separate migration.
+                 */
+                RollingNumericalProfile: "stable_v1" | "stable_v2";
                 /** @description One declared rolling output and its output column name. */
                 RollingOutputSpec: {
                     /** @description Input column name. */
@@ -2382,6 +2596,20 @@ export interface components {
                     primitive_version: number;
                     /** @description Right input column name. */
                     right: string;
+                } | {
+                    /** @constant */
+                    kind: "difference";
+                    /** @description Left rolling readout. */
+                    left: components["schemas"]["ProjectDocument"]["$defs"]["RollingFloatPrimitiveSpec"];
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                    /** @description Right rolling readout. */
+                    right: components["schemas"]["ProjectDocument"]["$defs"]["RollingFloatPrimitiveSpec"];
                 };
                 /** @description Data-only declaration of one native row-window rolling operation. */
                 RollingSpec: {
@@ -2400,6 +2628,12 @@ export interface components {
                     event_time: string;
                     /** @description Late-row policy. */
                     late_policy: components["schemas"]["ProjectDocument"]["$defs"]["LatePolicySpec"];
+                    /**
+                     * @description Versioned floating-point behavior. `stable_v1` is omitted from the
+                     *     canonical configuration so existing project and checkpoint hashes stay
+                     *     compatible; `stable_v2` is an explicit preview opt-in.
+                     */
+                    numerical_profile?: components["schemas"]["ProjectDocument"]["$defs"]["RollingNumericalProfile"];
                     /** @description Rolling outputs in semantic declaration order. */
                     outputs: components["schemas"]["ProjectDocument"]["$defs"]["RollingOutputSpec"][];
                     /** @description Ordered non-empty entity partition key. */

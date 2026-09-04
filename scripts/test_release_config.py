@@ -185,6 +185,9 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn("--criterion-dir", release_workflow)
         self.assertIn("--criterion-baseline exact-baseline", release_workflow)
         self.assertIn("--criterion-candidate exact-candidate", release_workflow)
+        self.assertIn("--scenario rolling_kernel_sma20", release_workflow)
+        self.assertIn("--scenario rolling_kernel_dual_sma_5_20", release_workflow)
+        self.assertIn('--expected-commit "${candidate_sha}"', release_workflow)
         self.assertEqual(release_workflow.count("provenance.json"), 3)
         self.assertIn('baseline_sha="$(git rev-parse', release_workflow)
         self.assertIn('candidate_sha="$(git rev-parse', release_workflow)
@@ -467,7 +470,8 @@ class ReleaseConfigTests(unittest.TestCase):
 
     def test_ci_and_release_execute_script_unit_tests(self) -> None:
         command = (
-            "python -m unittest scripts.test_run_rust_tests "
+            "python -m unittest scripts.test_generate_rolling_kernel_manifest "
+            "scripts.test_run_rust_tests "
             "scripts.test_run_rust_coverage "
             "scripts.test_classify_ci_changes "
             "scripts.test_build_python_release scripts.test_inspect_wheel "

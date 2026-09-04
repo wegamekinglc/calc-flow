@@ -1,0 +1,239 @@
+{
+  "contract": "rolling-indicator-comparison-v3",
+  "calc_flow": {
+    "commit": "b6bfeedd993cae9d400f162ddb8669c5fcf1d64e",
+    "dirty": false
+  },
+  "calc_flow_python": "3.13.9",
+  "finance_python": {
+    "commit": "3e33d3e70c3458b4c6dcf76b88df6148229b402c",
+    "event": "ready",
+    "fast_window": 5,
+    "finance_python_version": "0.9.10",
+    "indicator": "dual_sma_spread",
+    "numpy_version": "1.26.4",
+    "pandas_version": "1.5.3",
+    "python_version": "3.9.25",
+    "rows": 1000000
+  },
+  "ta_lib_python": {
+    "package_version": "0.7.1",
+    "c_library_version": "0.7.1 (Jul 16 2026 18:35:47)",
+    "release_tag": "v0.7.1",
+    "release_commit": "a9ff1b47b3ddbd57274116645d688c0ed677338b"
+  },
+  "machine": {
+    "platform": "Linux-5.15.167.4-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+    "processor": ""
+  },
+  "workload": {
+    "entities": 64,
+    "indicator": "dual_sma_spread",
+    "formula": "SMA(5) - SMA(20)",
+    "fast_window": 5,
+    "window": 20,
+    "rounds": 4,
+    "row_scales": [
+      100,
+      100000,
+      1000000
+    ],
+    "correctness_tolerance": {
+      "rtol": 1e-10,
+      "atol": 1e-10
+    },
+    "partial_window_methods": [
+      "incremental",
+      "sql_window",
+      "finance_python"
+    ],
+    "full_window_only_methods": [
+      "ta_lib"
+    ]
+  },
+  "results": [
+    {
+      "rows": 100,
+      "entities": 64,
+      "ta_lib_valid_rows": 0,
+      "iterations_per_sample": {
+        "incremental": 50,
+        "sql_window": 50,
+        "finance_python": 50,
+        "ta_lib": 200
+      },
+      "methods": {
+        "incremental": {
+          "median_seconds": 0.00040631055,
+          "minimum_seconds": 0.00039823638,
+          "maximum_seconds": 0.00044834480000000004,
+          "throughput_rows_per_second": 246117.16333725522,
+          "samples": [
+            0.00039823638,
+            0.00044834480000000004,
+            0.0004118922,
+            0.0004007289
+          ]
+        },
+        "sql_window": {
+          "median_seconds": 0.00099653341,
+          "minimum_seconds": 0.0009738717600000001,
+          "maximum_seconds": 0.00114494424,
+          "throughput_rows_per_second": 100347.86490500103,
+          "samples": [
+            0.0009742873400000001,
+            0.0010187794799999999,
+            0.00114494424,
+            0.0009738717600000001
+          ]
+        },
+        "finance_python": {
+          "median_seconds": 0.0028707932899999997,
+          "minimum_seconds": 0.00270313834,
+          "maximum_seconds": 0.00298186438,
+          "throughput_rows_per_second": 34833.57730712824,
+          "samples": [
+            0.0029784761,
+            0.00276311048,
+            0.00270313834,
+            0.00298186438
+          ]
+        },
+        "ta_lib": {
+          "median_seconds": 7.749149e-05,
+          "minimum_seconds": 7.707497500000001e-05,
+          "maximum_seconds": 8.019675500000001e-05,
+          "throughput_rows_per_second": 1290464.2819488952,
+          "samples": [
+            7.707497500000001e-05,
+            8.019675500000001e-05,
+            7.7770365e-05,
+            7.7212615e-05
+          ]
+        }
+      }
+    },
+    {
+      "rows": 100000,
+      "entities": 64,
+      "ta_lib_valid_rows": 98784,
+      "iterations_per_sample": {
+        "incremental": 1,
+        "sql_window": 1,
+        "finance_python": 1,
+        "ta_lib": 50
+      },
+      "methods": {
+        "incremental": {
+          "median_seconds": 0.009555171000000001,
+          "minimum_seconds": 0.008633766,
+          "maximum_seconds": 0.010400072,
+          "throughput_rows_per_second": 10465537.456106227,
+          "samples": [
+            0.009852558,
+            0.010400072,
+            0.008633766,
+            0.009257784
+          ]
+        },
+        "sql_window": {
+          "median_seconds": 0.0406624375,
+          "minimum_seconds": 0.03932187,
+          "maximum_seconds": 0.041440169,
+          "throughput_rows_per_second": 2459272.147666996,
+          "samples": [
+            0.040935298,
+            0.03932187,
+            0.040389577,
+            0.041440169
+          ]
+        },
+        "finance_python": {
+          "median_seconds": 0.09699687,
+          "minimum_seconds": 0.095454872,
+          "maximum_seconds": 0.10592959,
+          "throughput_rows_per_second": 1030961.1021469043,
+          "samples": [
+            0.095621425,
+            0.098372315,
+            0.10592959,
+            0.095454872
+          ]
+        },
+        "ta_lib": {
+          "median_seconds": 0.00049194802,
+          "minimum_seconds": 0.00047140918,
+          "maximum_seconds": 0.00051040172,
+          "throughput_rows_per_second": 203273508.44912437,
+          "samples": [
+            0.00049818364,
+            0.00051040172,
+            0.00047140918,
+            0.00048571240000000004
+          ]
+        }
+      }
+    },
+    {
+      "rows": 1000000,
+      "entities": 64,
+      "ta_lib_valid_rows": 998784,
+      "iterations_per_sample": {
+        "incremental": 1,
+        "sql_window": 1,
+        "finance_python": 1,
+        "ta_lib": 5
+      },
+      "methods": {
+        "incremental": {
+          "median_seconds": 0.090499058,
+          "minimum_seconds": 0.082907657,
+          "maximum_seconds": 0.093188195,
+          "throughput_rows_per_second": 11049838.772907449,
+          "samples": [
+            0.089484258,
+            0.093188195,
+            0.091513858,
+            0.082907657
+          ]
+        },
+        "sql_window": {
+          "median_seconds": 0.414649323,
+          "minimum_seconds": 0.410083619,
+          "maximum_seconds": 0.423871342,
+          "throughput_rows_per_second": 2411676.4324248033,
+          "samples": [
+            0.410083619,
+            0.417945952,
+            0.411352694,
+            0.423871342
+          ]
+        },
+        "finance_python": {
+          "median_seconds": 0.9404237535,
+          "minimum_seconds": 0.920758845,
+          "maximum_seconds": 0.96337344,
+          "throughput_rows_per_second": 1063350.427164641,
+          "samples": [
+            0.945729386,
+            0.920758845,
+            0.935118121,
+            0.96337344
+          ]
+        },
+        "ta_lib": {
+          "median_seconds": 0.0088301844,
+          "minimum_seconds": 0.0083035064,
+          "maximum_seconds": 0.009161561799999999,
+          "throughput_rows_per_second": 113247918.12954666,
+          "samples": [
+            0.0083035064,
+            0.008841529400000001,
+            0.009161561799999999,
+            0.0088188394
+          ]
+        }
+      }
+    }
+  ]
+}

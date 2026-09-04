@@ -1582,6 +1582,16 @@ def test_thread_worker_executes_rust_plan_with_bounded_result() -> None:
     assert result.metadata["run_id"]
     assert result.datafusion_metrics[0].query_id > 0
     assert result.datafusion_metrics[0].node_id == "calculate"
+    assert result.datafusion_metrics[0].physical_planning_count == 1
+    assert result.datafusion_metrics[0].planning_ns == (
+        result.datafusion_metrics[0].sql_parse_ns
+        + result.datafusion_metrics[0].logical_planning_ns
+        + result.datafusion_metrics[0].physical_planning_ns
+    )
+    assert result.datafusion_metrics[0].execution_ns == (
+        result.datafusion_metrics[0].stream_open_ns
+        + result.datafusion_metrics[0].collect_ns
+    )
     assert result.datafusion_metrics[0].logical_plan
     assert result.datafusion_metrics[0].physical_plan
     assert [event.type for event in manager.events(run.id)] == [
