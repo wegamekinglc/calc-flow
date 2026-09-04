@@ -12,6 +12,7 @@ mod channel;
 )]
 pub(crate) mod checkpoint;
 mod context;
+pub(crate) mod failure;
 #[allow(
     dead_code,
     reason = "runtime completion is owned behind the safe continuous facade"
