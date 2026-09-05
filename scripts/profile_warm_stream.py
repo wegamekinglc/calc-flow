@@ -22,6 +22,13 @@ import numpy as np
 REPOSITORY = Path(__file__).resolve().parents[1]
 HISTORY_ROWS = (10_240, 102_400, 1_024_000, 10_240_000)
 APPEND_ROWS = (64, 640, 6_400, 64_000)
+PHASE_NAMES = (
+    "enqueue_to_source_data",
+    "source_data_to_source_watermark",
+    "source_watermark_to_sink",
+    "sink_to_receive",
+    "to_pyarrow",
+)
 SOURCE_PATHS = (
     "crates",
     "python",
@@ -453,12 +460,48 @@ def _validate_sample(sample: dict[str, Any], expected_start: int) -> None:
         raise ValueError("paired workers did not advance equivalent correct states")
 
 
+def _phase_values(sample: dict[str, Any]) -> np.ndarray:
+    try:
+        values = np.asarray(
+            [sample["phases_seconds"][name] for name in PHASE_NAMES], dtype=float
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("sample must contain all numeric phase intervals") from error
+    if not np.isfinite(values).all() or np.any(values < 0):
+        raise ValueError("phase intervals must be finite and nonnegative")
+    if not np.isclose(values[:-1].sum(), sample["seconds"], rtol=1e-9, atol=1e-12):
+        raise ValueError("non-overlapping phase intervals must cover the timed sample")
+    if values[-1] > values[-2] + 1e-12:
+        raise ValueError("to_pyarrow must remain within the sink-to-receive interval")
+    return values
+
+
+def _phase_summary(samples: list[dict[str, Any]]) -> dict[str, Any]:
+    if not samples:
+        raise ValueError("phase summaries require samples")
+    values = np.asarray([_phase_values(sample) for sample in samples])
+    return {
+        name: {
+            "p50_seconds": float(np.median(values[:, index])),
+            "p95_seconds": float(np.percentile(values[:, index], 95)),
+        }
+        for index, name in enumerate(PHASE_NAMES)
+    }
+
+
 def _case_summary(measured: list[list[dict[str, Any]]], rows: int) -> dict[str, Any]:
-    return paired_summary(
+    latency = paired_summary(
         [sample["seconds"] for sample in measured[0]],
         [sample["seconds"] for sample in measured[1]],
         rows=rows,
     )
+    return {
+        **latency,
+        "phase_intervals": {
+            "baseline": _phase_summary(measured[0]),
+            "candidate": _phase_summary(measured[1]),
+        },
+    }
 
 
 async def _measure_case(
@@ -507,7 +550,39 @@ def markdown(report: dict[str, Any]) -> str:
             f"{right['p50_seconds'] * 1000:.3f} / {right['p95_seconds'] * 1000:.3f} | "
             f"{case['paired_speedup_median']:.2f}x ({low:.2f}–{high:.2f}) |"
         )
+    lines.extend(_phase_markdown(report["cases"]))
     return "\n".join(lines) + "\n"
+
+
+def _phase_markdown(cases: list[dict[str, Any]]) -> list[str]:
+    lines = [
+        "",
+        "## Callback interval breakdown",
+        "",
+        "Representative H=1,024,000 forced-GC cases; independent P50 values in ms.",
+        "These wall intervals include scheduling and waiting, not just CPU work.",
+        "Conversion is a subset of sink-to-receive and must not be added again.",
+        "Independent phase medians need not sum to the total latency median.",
+        "",
+        "| Indicator | Append | Build | Enqueue to source | Data to watermark "
+        "| Watermark to sink | Sink to receive | to_pyarrow subset |",
+        "| --------- | ------ | ----- | ----------------- | ----------------- "
+        "| ----------------- | --------------- | ----------------- |",
+    ]
+    for case in cases:
+        config = case["config"]
+        if config["history_rows"] != 1_024_000 or not case["collect_gc"]:
+            continue
+        for side in ("baseline", "candidate"):
+            phases = case["phase_intervals"][side]
+            durations = " | ".join(
+                f"{phases[name]['p50_seconds'] * 1000:.3f}" for name in PHASE_NAMES
+            )
+            lines.append(
+                f"| {config['indicator']} | {config['append_rows']:,} "
+                f"| {side} | {durations} |"
+            )
+    return lines
 
 
 async def _compatible_builds(paths: tuple[Path, Path]) -> list[dict[str, Any]]:

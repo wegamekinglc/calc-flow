@@ -54,8 +54,12 @@ uv run --extra benchmark python scripts/profile_warm_stream.py build \
 uv run --extra benchmark python scripts/profile_warm_stream.py compare \
   --baseline-build target/warm-baseline-wheels/build.json \
   --candidate-build target/warm-candidate-wheels/build.json \
-  --samples 30 --output target/warm-stream.json
+--samples 30 --output target/warm-stream.json
 ```
+
+The native warm-state workload and its regression tests do not require TA-Lib.
+That optional package is imported only when the separate cross-library
+comparison executes TA-Lib or checks its version.
 
 The build command runs Maturin in release mode, verifies that source identity
 did not change during the build, and records the source, lockfile, compiler,
@@ -80,6 +84,13 @@ interval. A speedup greater than one favors the candidate. The interval is
 not a guarantee for another machine, entity count, window size, or connector.
 P95 from small sample counts is exploratory; do not publish a five-pair smoke
 run as stable tail-latency evidence.
+
+The report summarizes callback intervals separately for both builds. JSON
+retains interval P50/P95 for every scenario; Markdown includes the interval
+P50s for the fixed 1,024,000-row history with forced collection. Each sample's
+four non-overlapping callback intervals must cover its total timed duration,
+and conversion must fit within the sink-to-receive interval. Independent
+interval medians need not add up to the total latency median.
 
 Callback wall intervals are not CPU attribution: work in different tasks can
 overlap. `to_pyarrow` is a subset of the sink-to-receive interval, so adding

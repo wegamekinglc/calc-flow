@@ -152,6 +152,24 @@ both Linux and Windows Python jobs; all 49 release/controller tests then pass.
 Local full-feature compilation uses the existing Anaconda curl headers through
 `C_INCLUDE_PATH`; no system packages or repository dependency policies changed.
 
+The full local harness subsequently passes all core unit/integration/example
+targets, connector tests, the core benchmark smoke, and all 109 binding tests.
+Opt-in connector container cases remain the combined-coverage job's scope.
+Workspace rustdoc passes with all features and warnings denied. The newly enabled native warm
+tests exposed a real Linux/Windows CI collection failure: shared helpers
+imported optional TA-Lib eagerly. A focused import-blocking test reproduces
+that failure, then passes after restricting TA-Lib imports to its own execution
+and version-check paths. All 12 warm/comparison tests pass.
+
+Two new phase-summary tests first fail for missing accounting validation, then
+pass with the implementation. The controller now rejects negative, non-finite,
+incomplete, or double-counted callback intervals and reports their P50/P95.
+All 17 controller tests pass. Interval medians and overlapping operator metrics
+are not additive CPU attribution. The Linux core parity job at `3d9c20c`
+failed during Rust toolchain installation with a `bin/cargo-clippy` conflict,
+before project compilation; a requested job retry was denied by tool policy.
+This infrastructure failure is distinct from the corrected TA-Lib dependency.
+
 ## Reproduction entrypoints
 
 `scripts/profile_warm_stream.py build` builds a release wheel and binds its
@@ -165,8 +183,7 @@ The full default matrix has seven distinct (history, append) points, two
 indicators, and forced/normal-GC modes. JSON retains individual callback phase
 intervals, raw samples, before/after operator metrics, P50/P95, and a seeded
 20,000-resample paired median-speedup interval. Final-head/full-matrix evidence,
-metric phase refinement, broader validation, and final report attachment are
-still pending.
+broader validation, and final report attachment are still pending.
 
 Every behavior change starts with an observed focused failing test. Record the
 commands and expected failures, then their passing reruns. Run Rust/Python,

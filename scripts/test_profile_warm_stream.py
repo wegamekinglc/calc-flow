@@ -17,6 +17,57 @@ from scripts.profile_warm_stream import matrix_points, paired_summary
 
 
 class WarmProfileTests(unittest.TestCase):
+    def test_phase_summary_preserves_conversion_as_a_subset(self) -> None:
+        first = {
+            "seconds": 0.010,
+            "phases_seconds": {
+                "enqueue_to_source_data": 0.001,
+                "source_data_to_source_watermark": 0.002,
+                "source_watermark_to_sink": 0.003,
+                "sink_to_receive": 0.004,
+                "to_pyarrow": 0.0005,
+            },
+        }
+        second = {
+            "seconds": 0.020,
+            "phases_seconds": {
+                name: value * 2 for name, value in first["phases_seconds"].items()
+            },
+        }
+        result = profile._phase_summary([first, second])
+        self.assertAlmostEqual(result["to_pyarrow"]["p50_seconds"], 0.00075)
+        self.assertAlmostEqual(result["sink_to_receive"]["p50_seconds"], 0.006)
+        self.assertAlmostEqual(result["sink_to_receive"]["p95_seconds"], 0.0078)
+        self.assertEqual(first["phases_seconds"]["to_pyarrow"], 0.0005)
+
+    def test_phase_summary_rejects_invalid_or_double_counted_boundaries(self) -> None:
+        phases = {
+            "enqueue_to_source_data": 1.0,
+            "source_data_to_source_watermark": 2.0,
+            "source_watermark_to_sink": 3.0,
+            "sink_to_receive": 4.0,
+            "to_pyarrow": 0.5,
+        }
+        for name, value in (
+            ("enqueue_to_source_data", -1),
+            ("source_data_to_source_watermark", float("nan")),
+            ("source_watermark_to_sink", 9),
+            ("to_pyarrow", 5),
+        ):
+            with self.assertRaises(ValueError):
+                profile._phase_summary(
+                    [
+                        {
+                            "seconds": 10,
+                            "phases_seconds": {**phases, name: value},
+                        }
+                    ]
+                )
+        with self.assertRaises(ValueError):
+            profile._phase_summary([{"seconds": 10, "phases_seconds": {}}])
+        with self.assertRaises(ValueError):
+            profile._phase_summary([])
+
     def test_python_launch_environment_selects_the_current_interpreter(self) -> None:
         supplied = {"PATH": "caller-path", "PYTHONPATH": "caller-modules"}
         with patch.object(

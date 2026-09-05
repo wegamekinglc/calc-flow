@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import runpy
+import sys
+from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
@@ -16,6 +19,17 @@ from benchmarks.warm_stream import (
     _summary,
     _validate_output,
 )
+
+
+def test_warm_shared_helpers_do_not_require_optional_talib(monkeypatch) -> None:
+    monkeypatch.setitem(sys.modules, "talib", None)
+    helpers = runpy.run_path(
+        str(Path(__file__).with_name("rolling_indicator_comparison.py"))
+    )
+    values = helpers["expected_rolling_mean"](
+        np.arange(64, dtype=np.float64), entities=64, window=20
+    )
+    np.testing.assert_array_equal(values, np.arange(64, dtype=np.float64))
 
 
 def test_warm_oracle_uses_only_window_context() -> None:
