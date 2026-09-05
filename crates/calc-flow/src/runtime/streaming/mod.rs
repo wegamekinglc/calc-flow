@@ -11,6 +11,7 @@ mod channel;
     reason = "checkpoint coordination exposes only the safe continuous facade"
 )]
 pub(crate) mod checkpoint;
+mod checkpoint_status;
 mod context;
 pub(crate) mod failure;
 #[allow(
