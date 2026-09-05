@@ -12,6 +12,7 @@ import sys
 import tempfile
 import zipfile
 from dataclasses import asdict
+from itertools import product
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,23 @@ import numpy as np
 REPOSITORY = Path(__file__).resolve().parents[1]
 HISTORY_ROWS = (10_240, 102_400, 1_024_000, 10_240_000)
 APPEND_ROWS = (64, 640, 6_400, 64_000)
+SOURCE_PATHS = (
+    "crates",
+    "python",
+    "Cargo.toml",
+    "Cargo.lock",
+    "pyproject.toml",
+    "rust-toolchain.toml",
+)
+SOURCE_LIST_COMMAND = (
+    "ls-files",
+    "--cached",
+    "--others",
+    "--exclude-standard",
+    "-z",
+    "--",
+    *SOURCE_PATHS,
+)
 
 
 def matrix_points(
@@ -55,10 +73,8 @@ def paired_summary(
         left.ndim != 1
         or right.shape != left.shape
         or len(left) < 2
-        or not np.isfinite(left).all()
-        or not np.isfinite(right).all()
-        or np.any(left <= 0)
-        or np.any(right <= 0)
+        or not _positive_finite(left)
+        or not _positive_finite(right)
         or rows <= 0
     ):
         raise ValueError(
@@ -75,6 +91,10 @@ def paired_summary(
         "paired_speedup_ci95": np.percentile(estimates, [2.5, 97.5]).tolist(),
         "bootstrap_resamples": 20_000,
     }
+
+
+def _positive_finite(values: np.ndarray) -> bool:
+    return bool(np.isfinite(values).all() and np.all(values > 0))
 
 
 def _sha256(path: Path) -> str:
@@ -95,42 +115,45 @@ def _wheel_native_sha256(path: Path) -> str:
             return hashlib.file_digest(native, "sha256").hexdigest()
 
 
-async def _command(argv: list[str], *, cwd: Path, env=None) -> str:
-    process = await asyncio.create_subprocess_exec(
-        *argv,
-        cwd=cwd,
-        env=env,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+async def _command_output(process: asyncio.subprocess.Process) -> str:
     stdout, stderr = await process.communicate()
     if process.returncode:
         raise RuntimeError(
-            f"{argv[0]} failed ({process.returncode}): {stderr.decode()}"
+            f"benchmark command failed ({process.returncode}): {stderr.decode()}"
         )
     return stdout.decode().strip()
 
 
-async def source_identity(source: Path) -> dict[str, Any]:
-    async def git(*args: str) -> str:
-        return await _command(["git", *args], cwd=source)
+async def _git(source: Path, *args: str) -> str:
+    if args not in (
+        SOURCE_LIST_COMMAND,
+        ("rev-parse", "HEAD"),
+        ("status", "--porcelain"),
+    ):
+        raise ValueError("unsupported git metadata command")
+    process = await asyncio.create_subprocess_exec(
+        "git",
+        *args,
+        cwd=source,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    return await _command_output(process)
 
-    paths = (
-        await git(
-            "ls-files",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "-z",
-            "--",
-            "crates",
-            "python",
-            "Cargo.toml",
-            "Cargo.lock",
-            "pyproject.toml",
-            "rust-toolchain.toml",
-        )
-    ).split("\0")
+
+async def _rustc_version(source: Path) -> str:
+    process = await asyncio.create_subprocess_exec(
+        "rustc",
+        "-Vv",
+        cwd=source,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    return await _command_output(process)
+
+
+async def source_identity(source: Path) -> dict[str, Any]:
+    paths = (await _git(source, *SOURCE_LIST_COMMAND)).split("\0")
     digest = hashlib.sha256()
     for name in sorted(set(paths) - {""}):
         path = source / name
@@ -138,8 +161,8 @@ async def source_identity(source: Path) -> dict[str, Any]:
         digest.update(path.read_bytes() if path.is_file() else b"<deleted>")
         digest.update(b"\0")
     return {
-        "git_sha": await git("rev-parse", "HEAD"),
-        "git_clean": not bool(await git("status", "--porcelain")),
+        "git_sha": await _git(source, "rev-parse", "HEAD"),
+        "git_clean": not bool(await _git(source, "status", "--porcelain")),
         "source_sha256": digest.hexdigest(),
         "cargo_lock_sha256": _sha256(source / "Cargo.lock"),
     }
@@ -167,7 +190,14 @@ async def build(args: argparse.Namespace) -> None:
     ]
     with (output / "build.log").open("wb") as log:
         process = await asyncio.create_subprocess_exec(
-            *command,
+            sys.executable,
+            "-m",
+            "maturin",
+            "build",
+            "--release",
+            "--locked",
+            "--out",
+            str(output),
             cwd=source,
             env=env,
             stdout=log,
@@ -189,7 +219,7 @@ async def build(args: argparse.Namespace) -> None:
         "native_sha256": _wheel_native_sha256(wheels[0]),
         "build_profile": "release",
         "command": command,
-        "rustc": await _command(["rustc", "-Vv"], cwd=source),
+        "rustc": await _rustc_version(source),
         "python": platform.python_version(),
     }
     path = output / "build.json"
@@ -223,20 +253,22 @@ class Worker:
     @classmethod
     async def start(cls, manifest: dict[str, Any], root: Path) -> Worker:
         site = root / "site"
-        await _command(
-            [
-                "uv",
-                "pip",
-                "install",
-                "--python",
-                sys.executable,
-                "--no-deps",
-                "--target",
-                str(site),
-                manifest["wheel"],
-            ],
+        wheel = Path(manifest["wheel"]).resolve(strict=True)
+        installer = await asyncio.create_subprocess_exec(
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            sys.executable,
+            "--no-deps",
+            "--target",
+            str(site),
+            str(wheel),
             cwd=REPOSITORY,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
+        await _command_output(installer)
         env = dict(
             os.environ,
             PYTHONPATH=os.pathsep.join((str(site), str(REPOSITORY))),
@@ -256,21 +288,24 @@ class Worker:
         return cls(process)
 
     async def request(self, **message: Any) -> dict[str, Any]:
-        assert self.process.stdin is not None and self.process.stdout is not None
+        if self.process.stdin is None or self.process.stdout is None:
+            raise RuntimeError("warm worker requires stdin and stdout pipes")
         self.process.stdin.write((json.dumps(message) + "\n").encode())
         await self.process.stdin.drain()
         response = await asyncio.wait_for(self.process.stdout.readline(), timeout=180)
         if not response:
             raise RuntimeError(f"warm worker exited: {await self.process.wait()}")
         parsed = json.loads(response)
+        if not isinstance(parsed, dict):
+            raise ValueError("warm worker response must be an object")
         if "error" in parsed:
             raise RuntimeError(parsed["error"])
         return parsed
 
     async def close(self) -> None:
         if self.process.returncode is None:
-            assert self.process.stdin is not None
-            self.process.stdin.close()
+            if self.process.stdin is not None:
+                self.process.stdin.close()
             try:
                 await asyncio.wait_for(self.process.wait(), timeout=30)
             except TimeoutError:
@@ -278,60 +313,113 @@ class Worker:
                 await self.process.wait()
 
 
-async def worker_main(root: Path) -> None:
+def _cpu_affinity() -> list[int] | None:
     import psutil
+
+    process = psutil.Process()
+    if not hasattr(process, "cpu_affinity"):
+        return None
+    try:
+        return process.cpu_affinity()
+    except (psutil.Error, NotImplementedError):
+        return None
+
+
+def _worker_environment() -> dict[str, Any]:
     import pyarrow as pa
 
     import calc_flow._native as native
-    from benchmarks.warm_stream import ScenarioConfig, WarmScenario
 
-    scenario = None
-    count = 0
+    return {
+        "python": platform.python_version(),
+        "numpy": np.__version__,
+        "pyarrow": pa.__version__,
+        "platform": platform.platform(),
+        "logical_cpus": os.cpu_count(),
+        "cpu_affinity": _cpu_affinity(),
+        "native_sha256": _sha256(Path(native.__file__)),
+    }
+
+
+class WorkerSession:
+    """Own and clean up a single worker's active streaming scenario."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.scenario = None
+        self.count = 0
+
+    async def start(self, config_values: dict[str, Any]) -> dict[str, Any]:
+        from benchmarks.warm_stream import ScenarioConfig, WarmScenario
+
+        if self.scenario is not None:
+            raise RuntimeError("previous warm scenario is still active")
+        config = ScenarioConfig(**config_values)
+        self.count += 1
+        self.scenario = await WarmScenario.start(
+            config, self.root / f"state-{self.count}"
+        )
+        return {"config": asdict(config), "warm_seconds": self.scenario.warm_seconds}
+
+    def active_scenario(self):
+        if self.scenario is None:
+            raise RuntimeError("warm scenario was not started")
+        return self.scenario
+
+    async def finish(self) -> dict[str, Any]:
+        import psutil
+
+        result = await self.active_scenario().finish()
+        result["rss_bytes"] = psutil.Process().memory_info().rss
+        self.scenario = None
+        return result
+
+    async def dispatch(self, message: dict[str, Any]) -> dict[str, Any]:
+        match message["operation"]:
+            case "hello":
+                return _worker_environment()
+            case "start":
+                return await self.start(message["config"])
+            case "sample":
+                return await self.active_scenario().sample(
+                    collect_gc=message["collect_gc"]
+                )
+            case "finish":
+                return await self.finish()
+            case _:
+                raise ValueError("unknown worker operation")
+
+    async def close(self) -> None:
+        if self.scenario is not None:
+            await self.scenario.job.cancel_async()
+            self.scenario = None
+
+
+async def worker_main(root: Path) -> None:
+    session = WorkerSession(root)
     try:
         while line := await asyncio.to_thread(sys.stdin.readline):
             message = json.loads(line)
-            match message["operation"]:
-                case "hello":
-                    result = {
-                        "python": platform.python_version(),
-                        "numpy": np.__version__,
-                        "pyarrow": pa.__version__,
-                        "platform": platform.platform(),
-                        "logical_cpus": os.cpu_count(),
-                        "cpu_affinity": psutil.Process().cpu_affinity()
-                        if hasattr(psutil.Process, "cpu_affinity")
-                        else None,
-                        "native_sha256": _sha256(Path(native.__file__)),
-                    }
-                case "start":
-                    if scenario is not None:
-                        raise RuntimeError("previous warm scenario is still active")
-                    config = ScenarioConfig(**message["config"])
-                    count += 1
-                    scenario = await WarmScenario.start(config, root / f"state-{count}")
-                    result = {
-                        "config": asdict(config),
-                        "warm_seconds": scenario.warm_seconds,
-                    }
-                case "sample":
-                    if scenario is None:
-                        raise RuntimeError("warm scenario was not started")
-                    result = await scenario.sample(collect_gc=message["collect_gc"])
-                case "finish":
-                    if scenario is None:
-                        raise RuntimeError("warm scenario was not started")
-                    result = await scenario.finish()
-                    result["rss_bytes"] = psutil.Process().memory_info().rss
-                    scenario = None
-                case _:
-                    raise ValueError("unknown worker operation")
+            result = await session.dispatch(message)
             print(json.dumps(result, allow_nan=False), flush=True)
     except Exception as error:
         print(json.dumps({"error": f"{type(error).__name__}: {error}"}), flush=True)
         raise
     finally:
-        if scenario is not None:
-            await scenario.job.cancel_async()
+        await session.close()
+
+
+def _validate_sample(sample: dict[str, Any], expected_start: int) -> None:
+    if sample["start_row"] != expected_start or not sample["correctness"]["passed"]:
+        raise ValueError("paired workers did not advance equivalent correct states")
+
+
+def _case_summary(measured: list[list[dict[str, Any]]], rows: int) -> dict[str, Any]:
+    return paired_summary(
+        [sample["seconds"] for sample in measured[0]],
+        [sample["seconds"] for sample in measured[1]],
+        rows=rows,
+    )
 
 
 async def _measure_case(
@@ -347,23 +435,15 @@ async def _measure_case(
                 operation="sample", collect_gc=collect_gc
             )
             expected = config["history_rows"] + index * config["append_rows"]
-            if sample["start_row"] != expected or not sample["correctness"]["passed"]:
-                raise ValueError(
-                    "paired workers did not advance equivalent correct states"
-                )
+            _validate_sample(sample, expected)
             measured[side].append(sample)
     terminal = [await worker.request(operation="finish") for worker in workers]
-    summary = paired_summary(
-        [sample["seconds"] for sample in measured[0]],
-        [sample["seconds"] for sample in measured[1]],
-        rows=config["append_rows"],
-    )
     return {
         "config": config,
         "collect_gc": collect_gc,
         "samples": measured,
         "terminal": terminal,
-        **summary,
+        **_case_summary(measured, config["append_rows"]),
     }
 
 
@@ -391,14 +471,90 @@ def markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-async def compare(args: argparse.Namespace) -> None:
-    manifests = [
-        await _load_build(path) for path in (args.baseline_build, args.candidate_build)
-    ]
+async def _compatible_builds(paths: tuple[Path, Path]) -> list[dict[str, Any]]:
+    manifests = [await _load_build(path) for path in paths]
     if manifests[0]["cargo_lock_sha256"] != manifests[1]["cargo_lock_sha256"]:
         raise ValueError("baseline and candidate dependencies differ")
     if any(manifests[0][key] != manifests[1][key] for key in ("rustc", "python")):
         raise ValueError("baseline and candidate build toolchains differ")
+    return manifests
+
+
+async def _worker_environments(
+    workers: list[Worker], manifests: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    environments = [await worker.request(operation="hello") for worker in workers]
+    for environment, manifest in zip(environments, manifests, strict=True):
+        if environment["native_sha256"] != manifest["native_sha256"]:
+            raise ValueError("worker loaded a different native module")
+    comparable = [
+        {key: value for key, value in env.items() if key != "native_sha256"}
+        for env in environments
+    ]
+    if comparable[0] != comparable[1]:
+        raise ValueError("worker machine or dependency fingerprints differ")
+    return environments
+
+
+def _new_report(
+    manifests: list[dict[str, Any]], environments: list[dict[str, Any]], samples: int
+) -> dict[str, Any]:
+    return {
+        "contract": "paired-warm-stream-v1",
+        "builds": manifests,
+        "environments": environments,
+        "sample_pairs": samples,
+        "harness_sha256": {
+            name: _sha256(REPOSITORY / name)
+            for name in (
+                "scripts/profile_warm_stream.py",
+                "benchmarks/warm_stream.py",
+                "benchmarks/rolling_indicator_comparison.py",
+            )
+        },
+        "timed_boundary": (
+            "prepared Data enqueue through source/task/channel, rolling, "
+            "watermark finalization, projection, sink and to_pyarrow; "
+            "excludes IPC, compile, startup, history, validation, "
+            "checkpoint, shutdown"
+        ),
+        "phase_note": (
+            "callback wall intervals overlap operator work; to_pyarrow "
+            "is contained in sink_to_receive; baseline operator "
+            "processing metrics omit watermark handling"
+        ),
+        "gc_note": (
+            "forced collection happens before timing; normal_gc does "
+            "not disable GC or remove IPC gaps between appends"
+        ),
+    }
+
+
+async def _measure_matrix(
+    args: argparse.Namespace, workers: list[Worker]
+) -> list[dict[str, Any]]:
+    points = matrix_points(tuple(args.history_rows), tuple(args.append_rows))
+    cases = []
+    for indicator, (history, append), mode in product(
+        args.indicators, points, args.gc_modes
+    ):
+        config = {
+            "history_rows": history,
+            "append_rows": append,
+            "indicator": indicator,
+        }
+        case = await _measure_case(workers, config, args.samples, mode == "forced")
+        cases.append(case)
+        print(
+            f"{indicator} H={history:,} N={append:,} GC={mode}: "
+            f"{case['paired_speedup_median']:.2f}x",
+            flush=True,
+        )
+    return cases
+
+
+async def compare(args: argparse.Namespace) -> None:
+    manifests = await _compatible_builds((args.baseline_build, args.candidate_build))
     output = args.output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     workers: list[Worker] = []
@@ -410,66 +566,11 @@ async def compare(args: argparse.Namespace) -> None:
                 root = Path(temporary) / str(index)
                 root.mkdir()
                 workers.append(await Worker.start(manifest, root))
-            environments = [
-                await worker.request(operation="hello") for worker in workers
-            ]
-            for environment, manifest in zip(environments, manifests, strict=True):
-                if environment["native_sha256"] != manifest["native_sha256"]:
-                    raise ValueError("worker loaded a different native module")
-            comparable = [
-                {key: value for key, value in env.items() if key != "native_sha256"}
-                for env in environments
-            ]
-            if comparable[0] != comparable[1]:
-                raise ValueError("worker machine or dependency fingerprints differ")
+            environments = await _worker_environments(workers, manifests)
             report = {
-                "contract": "paired-warm-stream-v1",
-                "builds": manifests,
-                "environments": environments,
-                "sample_pairs": args.samples,
-                "harness_sha256": {
-                    name: _sha256(REPOSITORY / name)
-                    for name in (
-                        "scripts/profile_warm_stream.py",
-                        "benchmarks/warm_stream.py",
-                        "benchmarks/rolling_indicator_comparison.py",
-                    )
-                },
-                "timed_boundary": (
-                    "prepared Data enqueue through source/task/channel, rolling, "
-                    "watermark finalization, projection, sink and to_pyarrow; "
-                    "excludes IPC, compile, startup, history, validation, "
-                    "checkpoint, shutdown"
-                ),
-                "phase_note": (
-                    "callback wall intervals overlap operator work; to_pyarrow "
-                    "is contained in sink_to_receive; baseline operator "
-                    "processing metrics omit watermark handling"
-                ),
-                "gc_note": (
-                    "forced collection happens before timing; normal_gc does "
-                    "not disable GC or remove IPC gaps between appends"
-                ),
-                "cases": [],
+                **_new_report(manifests, environments, args.samples),
+                "cases": await _measure_matrix(args, workers),
             }
-            points = matrix_points(tuple(args.history_rows), tuple(args.append_rows))
-            for indicator in args.indicators:
-                for history, append in points:
-                    for mode in args.gc_modes:
-                        config = {
-                            "history_rows": history,
-                            "append_rows": append,
-                            "indicator": indicator,
-                        }
-                        case = await _measure_case(
-                            workers, config, args.samples, mode == "forced"
-                        )
-                        report["cases"].append(case)
-                        print(
-                            f"{indicator} H={history:,} N={append:,} GC={mode}: "
-                            f"{case['paired_speedup_median']:.2f}x",
-                            flush=True,
-                        )
             output.write_text(
                 json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8"
             )

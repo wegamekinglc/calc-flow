@@ -233,28 +233,9 @@ impl PythonAwaitScheduler {
         state: &PythonAwaitState,
     ) -> PyResult<Bound<'py, PyAny>> {
         let asyncio = py.import(pyo3::intern!(py, "asyncio"))?;
-        let is_coroutine = py
-            .import(pyo3::intern!(py, "inspect"))?
-            .call_method1(pyo3::intern!(py, "iscoroutine"), (&awaitable,))?
-            .is_truthy()?;
         let event_loop = state.event_loop.object().bind(py);
-        if is_coroutine
-            && event_loop
-                .call_method0(pyo3::intern!(py, "get_task_factory"))?
-                .is_none()
-        {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item(pyo3::intern!(py, "loop"), event_loop)?;
-            // A queued cancellation must not start a previously unstarted
-            // coroutine. Task copies the dispatch callback's context, rather
-            // than trying to re-enter the Context currently running it.
-            kwargs.set_item(
-                pyo3::intern!(py, "eager_start"),
-                !state.cancel_requested.load(Ordering::Acquire),
-            )?;
-            asyncio
-                .getattr(pyo3::intern!(py, "Task"))?
-                .call((awaitable,), Some(&kwargs))
+        if Self::uses_default_coroutine_task(py, &awaitable, event_loop)? {
+            Self::eager_task(&asyncio, awaitable, state)
         } else {
             // Futures, custom awaitables, and configured task factories keep
             // their existing asyncio scheduling policy.
@@ -264,7 +245,41 @@ impl PythonAwaitScheduler {
         }
     }
 
-    fn schedule(&mut self, py: Python<'_>) -> PyResult<()> {
+    fn uses_default_coroutine_task(
+        py: Python<'_>,
+        awaitable: &Py<PyAny>,
+        event_loop: &Bound<'_, PyAny>,
+    ) -> PyResult<bool> {
+        let is_coroutine = py
+            .import(pyo3::intern!(py, "inspect"))?
+            .call_method1(pyo3::intern!(py, "iscoroutine"), (awaitable,))?
+            .is_truthy()?;
+        Ok(is_coroutine
+            && event_loop
+                .call_method0(pyo3::intern!(py, "get_task_factory"))?
+                .is_none())
+    }
+
+    fn eager_task<'py>(
+        asyncio: &Bound<'py, PyModule>,
+        awaitable: Py<PyAny>,
+        state: &PythonAwaitState,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let py = asyncio.py();
+        let kwargs = PyDict::new(py);
+        kwargs.set_item(pyo3::intern!(py, "loop"), state.event_loop.object())?;
+        // Task copies the dispatch context instead of re-entering it. A
+        // queued cancellation cannot start an unstarted coroutine eagerly.
+        kwargs.set_item(
+            pyo3::intern!(py, "eager_start"),
+            !state.cancel_requested.load(Ordering::Acquire),
+        )?;
+        asyncio
+            .getattr(pyo3::intern!(py, "Task"))?
+            .call((awaitable,), Some(&kwargs))
+    }
+
+    fn take_request(&mut self) -> PyResult<(Py<PyAny>, Arc<PythonAwaitState>)> {
         let awaitable = self
             .awaitable
             .take()
@@ -273,23 +288,47 @@ impl PythonAwaitScheduler {
             .state
             .clone()
             .ok_or_else(|| PyRuntimeError::new_err("Python await state was already scheduled"))?;
+        Ok((awaitable, state))
+    }
+
+    fn finish_if_ready(&mut self, task: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let py = task.py();
+        if !task.call_method0(pyo3::intern!(py, "done"))?.is_truthy()? {
+            return Ok(false);
+        }
+        let result = task
+            .call_method0(pyo3::intern!(py, "result"))
+            .map(Bound::unbind);
+        self.state.take();
+        self.completion.send(result);
+        Ok(true)
+    }
+
+    fn schedule(&mut self, py: Python<'_>) -> PyResult<()> {
+        let (awaitable, state) = self.take_request()?;
         let task = Self::create_task(py, awaitable, &state)?;
         if state.cancel_requested.load(Ordering::Acquire) {
             task.call_method0(pyo3::intern!(py, "cancel"))?;
         }
-        if task.call_method0(pyo3::intern!(py, "done"))?.is_truthy()? {
-            let result = task
-                .call_method0(pyo3::intern!(py, "result"))
-                .map(Bound::unbind);
-            self.state.take();
-            self.completion.send(result);
+        if self.finish_if_ready(&task)? {
             return Ok(());
         }
         state.register_task(task.clone().unbind());
+        self.install_completer(py, &task, &state)?;
+        self.state.take();
+        Ok(())
+    }
+
+    fn install_completer(
+        &self,
+        py: Python<'_>,
+        task: &Bound<'_, PyAny>,
+        state: &Arc<PythonAwaitState>,
+    ) -> PyResult<()> {
         let completer = match Py::new(
             py,
             PythonAwaitCompleter {
-                state: Some(Arc::clone(&state)),
+                state: Some(Arc::clone(state)),
                 completion: Arc::clone(&self.completion),
             },
         ) {
@@ -304,7 +343,6 @@ impl PythonAwaitScheduler {
             state.request_cancel();
             return Err(error);
         }
-        self.state.take();
         Ok(())
     }
 }
@@ -666,6 +704,58 @@ asyncio.run(exercise())
             .unwrap()
             .request_cancel();
         Ok(scheduler)
+    }
+
+    #[test]
+    fn custom_awaitables_keep_asyncio_suspension_and_task_factory_behavior() {
+        Python::initialize();
+        Python::attach(|py| {
+            let locals = PyDict::new(py);
+            locals
+                .set_item(
+                    "make_scheduler",
+                    wrap_pyfunction!(make_test_scheduler, py).unwrap(),
+                )
+                .unwrap();
+            py.run(
+                cr#"
+import asyncio
+events = []
+calls = []
+class CustomAwaitable:
+    def __init__(self, gate):
+        self.gate = gate
+    def __await__(self):
+        events.append("started")
+        yield from self.gate.__await__()
+        events.append("finished")
+        return 11
+def factory(loop, coro, **kwargs):
+    calls.append("factory")
+    return asyncio.Task(coro, loop=loop, **kwargs)
+async def exercise():
+    loop = asyncio.get_running_loop()
+    gate = loop.create_future()
+    loop.set_task_factory(factory)
+    try:
+        make_scheduler(CustomAwaitable(gate), loop)()
+        assert calls == ["factory"], calls
+        assert events == [], events
+        await asyncio.sleep(0)
+        assert events == ["started"], events
+        gate.set_result(None)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert events == ["started", "finished"], events
+    finally:
+        loop.set_task_factory(None)
+asyncio.run(exercise())
+"#,
+                Some(&locals),
+                None,
+            )
+            .unwrap();
+        });
     }
 
     #[test]

@@ -164,61 +164,50 @@ async def _push_and_receive(
 
 
 def _expected(
+    config: ScenarioConfig,
     *,
     start: int,
     rows: int,
-    entities: int,
-    indicator: str,
-    fast_window: int,
-    window: int,
 ) -> np.ndarray:
-    context_rows = min(start, (window - 1) * entities)
+    context_rows = min(start, (config.window - 1) * config.entities)
     context_start = start - context_rows
     sequence = np.arange(context_start, start + rows, dtype=np.uint64)
-    prices = _prices(sequence, entities)
-    if indicator == "dual_sma_spread":
+    prices = _prices(sequence, config.entities)
+    if config.indicator == "dual_sma_spread":
         values = expected_dual_sma_spread(
             prices,
-            entities=entities,
-            fast_window=fast_window,
-            slow_window=window,
+            entities=config.entities,
+            fast_window=config.fast_window,
+            slow_window=config.window,
         )
     else:
-        values = expected_rolling_mean(prices, entities=entities, window=window)
+        values = expected_rolling_mean(
+            prices, entities=config.entities, window=config.window
+        )
     return values[context_rows:]
 
 
 def _validate_output(
     table: pa.Table,
+    config: ScenarioConfig,
     *,
     start: int,
     rows: int,
-    entities: int,
-    indicator: str,
-    fast_window: int,
-    window: int,
 ) -> dict[str, Any]:
     if table.num_rows != rows:
         raise RuntimeError(f"expected {rows} output rows, observed {table.num_rows}")
     output_column = (
-        "dual_sma_spread" if indicator == "dual_sma_spread" else "moving_average"
+        "dual_sma_spread" if config.indicator == "dual_sma_spread" else "moving_average"
     )
     sequence = table["sequence"].combine_chunks().to_numpy(zero_copy_only=False)
     order = np.arange(rows)
     wanted_sequence = np.arange(start, start + rows, dtype=np.uint64)
     if not np.array_equal(sequence[order], wanted_sequence):
         raise RuntimeError("stream output sequence does not match appended rows")
-    if not table.select(SCHEMA.names).equals(_segment(start, rows, entities)):
+    if not table.select(SCHEMA.names).equals(_segment(start, rows, config.entities)):
         raise RuntimeError("stream output identity columns changed")
     actual = table[output_column].combine_chunks().to_numpy(zero_copy_only=False)[order]
-    expected = _expected(
-        start=start,
-        rows=rows,
-        entities=entities,
-        indicator=indicator,
-        fast_window=fast_window,
-        window=window,
-    )
+    expected = _expected(config, start=start, rows=rows)
     close = np.isclose(actual, expected, rtol=RTOL, atol=ATOL, equal_nan=True)
     absolute = np.abs(actual - expected)
     result = {
@@ -359,12 +348,9 @@ class WarmScenario:
     def validate(self, table: pa.Table, rows: int) -> dict[str, Any]:
         return _validate_output(
             table,
+            self.config,
             start=self.position,
             rows=rows,
-            entities=self.config.entities,
-            indicator=self.config.indicator,
-            window=self.config.window,
-            fast_window=self.config.fast_window,
         )
 
     async def sample(self, *, collect_gc: bool) -> dict[str, Any]:

@@ -328,31 +328,10 @@ impl RollingKernelPlan {
         let started = Instant::now();
         let rows = encode_rows(input, &self.partition_columns, node_id)?;
         let keys = encoded_keys(&rows, input.num_rows());
-        let mut local = RollingKernelState {
-            kernel_fingerprint: Some(self.fingerprint.clone()),
-            ..RollingKernelState::default()
-        };
-        for key in &keys {
-            if !local.entities.contains_key(key)
-                && let Some(&index) = state.entities.get(key)
-            {
-                local.entities.insert(key.clone(), local.states.len());
-                local.states.push(state.states[index].clone());
-            }
-        }
+        let mut local = state.touched_entities(&keys, &self.fingerprint);
         let entity_ids = local.resolve_entities(&keys, &self.groups);
         let entity_encode_ns = nanos(started.elapsed());
-        let last_identity = if input.num_rows() == 0 {
-            None
-        } else {
-            let last = input.slice(input.num_rows() - 1, 1);
-            Some(
-                encode_rows(&last, &self.order_columns, node_id)?
-                    .row(0)
-                    .data()
-                    .to_vec(),
-            )
-        };
+        let last_identity = self.last_ordered_identity(input, node_id)?;
         let execution = self.fill_typed(
             input,
             &entity_ids,
@@ -367,6 +346,19 @@ impl RollingKernelPlan {
             },
         )?;
         Ok(StreamKernelUpdate { execution })
+    }
+
+    fn last_ordered_identity(&self, input: &RecordBatch, node_id: &str) -> Result<Option<Vec<u8>>> {
+        let Some(index) = input.num_rows().checked_sub(1) else {
+            return Ok(None);
+        };
+        let last = input.slice(index, 1);
+        Ok(Some(
+            encode_rows(&last, &self.order_columns, node_id)?
+                .row(0)
+                .data()
+                .to_vec(),
+        ))
     }
 
     /// Proves strict ordering without extracting generic scalar values.
@@ -1001,6 +993,22 @@ fn cast_primitive(array: &ArrayRef, target: &DataType, node_id: &str) -> Result<
 }
 
 impl RollingKernelState {
+    fn touched_entities(&self, keys: &[Vec<u8>], fingerprint: &str) -> Self {
+        let mut local = Self {
+            kernel_fingerprint: Some(fingerprint.into()),
+            ..Self::default()
+        };
+        for key in keys {
+            if !local.entities.contains_key(key)
+                && let Some(&index) = self.entities.get(key)
+            {
+                local.entities.insert(key.clone(), local.states.len());
+                local.states.push(self.states[index].clone());
+            }
+        }
+        local
+    }
+
     fn resolve_entities(&mut self, keys: &[Vec<u8>], groups: &[TypedGroupPlan]) -> Vec<usize> {
         let mut counts = HashMap::<&[u8], usize>::new();
         for key in keys {

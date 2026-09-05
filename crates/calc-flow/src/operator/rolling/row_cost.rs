@@ -4,7 +4,8 @@
 //! Primitive and byte-array columns do not allocate a Batch per row.
 
 use datafusion::arrow::{
-    array::{BinaryArray, LargeBinaryArray, LargeStringArray, StringArray},
+    array::{Array, BinaryArray, LargeBinaryArray, LargeStringArray, OffsetSizeTrait, StringArray},
+    buffer::NullBuffer,
     datatypes::DataType,
     record_batch::RecordBatch,
 };
@@ -21,76 +22,120 @@ enum Offsets<'a> {
     Wide(&'a [i64]),
 }
 
-impl RowCosts {
-    pub(super) fn try_new(record: &RecordBatch) -> Result<Option<Self>> {
-        let mut fixed = 0_usize;
-        let mut variable = Vec::new();
-        let mut validity = Vec::new();
+fn fixed_width(data_type: &DataType) -> Option<usize> {
+    data_type.primitive_width().or(match data_type {
+        DataType::Null => Some(0),
+        DataType::Boolean => Some(1),
+        DataType::Utf8 | DataType::Binary => Some(4),
+        DataType::LargeUtf8 | DataType::LargeBinary => Some(8),
+        _ => None,
+    })
+}
+
+fn variable_offsets(column: &dyn Array) -> Option<Offsets<'_>> {
+    match column.data_type() {
+        DataType::Utf8 => Some(Offsets::Narrow(
+            column
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value_offsets(),
+        )),
+        DataType::Binary => Some(Offsets::Narrow(
+            column
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .unwrap()
+                .value_offsets(),
+        )),
+        DataType::LargeUtf8 => Some(Offsets::Wide(
+            column
+                .as_any()
+                .downcast_ref::<LargeStringArray>()
+                .unwrap()
+                .value_offsets(),
+        )),
+        DataType::LargeBinary => Some(Offsets::Wide(
+            column
+                .as_any()
+                .downcast_ref::<LargeBinaryArray>()
+                .unwrap()
+                .value_offsets(),
+        )),
+        _ => None,
+    }
+}
+
+fn add_offset_charges<O: OffsetSizeTrait>(rows: &mut [usize], offsets: &[O]) -> Result<()> {
+    for (cost, pair) in rows.iter_mut().zip(offsets.windows(2)) {
+        let width = (pair[1] - pair[0])
+            .to_usize()
+            .expect("validated Arrow offsets fit the address space");
+        *cost = checked_accumulate(*cost, width, "batch")?;
+    }
+    Ok(())
+}
+
+impl Offsets<'_> {
+    fn add_charges(&self, rows: &mut [usize]) -> Result<()> {
+        match self {
+            Self::Narrow(offsets) => add_offset_charges(rows, offsets),
+            Self::Wide(offsets) => add_offset_charges(rows, offsets),
+        }
+    }
+}
+
+#[derive(Default)]
+struct ColumnCharges<'a> {
+    fixed: usize,
+    variable: Vec<Offsets<'a>>,
+    validity: Vec<&'a NullBuffer>,
+}
+
+impl<'a> ColumnCharges<'a> {
+    fn read(record: &'a RecordBatch) -> Result<Option<Self>> {
+        let mut charges = Self::default();
         for column in record.columns() {
-            let width = if let Some(width) = column.data_type().primitive_width() {
-                width
-            } else {
-                match column.data_type() {
-                    DataType::Null => 0,
-                    DataType::Boolean => 1,
-                    DataType::Utf8 => {
-                        let array = column.as_any().downcast_ref::<StringArray>().unwrap();
-                        variable.push(Offsets::Narrow(array.value_offsets()));
-                        4
-                    }
-                    DataType::Binary => {
-                        let array = column.as_any().downcast_ref::<BinaryArray>().unwrap();
-                        variable.push(Offsets::Narrow(array.value_offsets()));
-                        4
-                    }
-                    DataType::LargeUtf8 => {
-                        let array = column.as_any().downcast_ref::<LargeStringArray>().unwrap();
-                        variable.push(Offsets::Wide(array.value_offsets()));
-                        8
-                    }
-                    DataType::LargeBinary => {
-                        let array = column.as_any().downcast_ref::<LargeBinaryArray>().unwrap();
-                        variable.push(Offsets::Wide(array.value_offsets()));
-                        8
-                    }
-                    _ => return Ok(None),
-                }
+            let Some(width) = fixed_width(column.data_type()) else {
+                return Ok(None);
             };
-            fixed = checked_accumulate(fixed, width, "batch")?;
-            if let Some(nulls) = column.nulls() {
-                validity.push(nulls);
-            }
+            charges.fixed = checked_accumulate(charges.fixed, width, "batch")?;
+            charges.variable.extend(variable_offsets(column.as_ref()));
+            charges.validity.extend(column.nulls());
         }
-        if variable.is_empty() && validity.is_empty() {
-            return Ok(Some(Self::Fixed(fixed)));
-        }
-        let mut rows = vec![fixed; record.num_rows()];
-        for offsets in variable {
-            match offsets {
-                Offsets::Narrow(offsets) => {
-                    for (cost, pair) in rows.iter_mut().zip(offsets.windows(2)) {
-                        let width = usize::try_from(pair[1] - pair[0])
-                            .expect("validated Arrow offsets are nonnegative");
-                        *cost = checked_accumulate(*cost, width, "batch")?;
-                    }
-                }
-                Offsets::Wide(offsets) => {
-                    for (cost, pair) in rows.iter_mut().zip(offsets.windows(2)) {
-                        let width = usize::try_from(pair[1] - pair[0])
-                            .expect("validated Arrow offsets fit the address space");
-                        *cost = checked_accumulate(*cost, width, "batch")?;
-                    }
-                }
-            }
-        }
-        // Arrow removes a zero-null bitmap when constructing the ArrayData
-        // of a one-row slice. Only a null row incurs the one-byte charge.
-        for nulls in validity {
+        Ok(Some(charges))
+    }
+
+    fn add_null_charges(&self, rows: &mut [usize]) -> Result<()> {
+        // Arrow removes a zero-null bitmap when constructing ArrayData for a
+        // one-row slice. Only a null row incurs the one-byte charge.
+        for nulls in &self.validity {
             for (cost, valid) in rows.iter_mut().zip(nulls.iter()) {
                 *cost = checked_accumulate(*cost, usize::from(!valid), "batch")?;
             }
         }
-        Ok(Some(Self::Variable(rows)))
+        Ok(())
+    }
+
+    fn materialize(&self, row_count: usize) -> Result<RowCosts> {
+        if self.variable.is_empty() && self.validity.is_empty() {
+            return Ok(RowCosts::Fixed(self.fixed));
+        }
+        let mut rows = vec![self.fixed; row_count];
+        for offsets in &self.variable {
+            offsets.add_charges(&mut rows)?;
+        }
+        self.add_null_charges(&mut rows)?;
+        Ok(RowCosts::Variable(rows))
+    }
+}
+
+impl RowCosts {
+    pub(super) fn try_new(record: &RecordBatch) -> Result<Option<Self>> {
+        let Some(charges) = ColumnCharges::read(record)? else {
+            return Ok(None);
+        };
+        charges.materialize(record.num_rows()).map(Some)
     }
 
     pub(super) fn get(&self, row: usize) -> usize {

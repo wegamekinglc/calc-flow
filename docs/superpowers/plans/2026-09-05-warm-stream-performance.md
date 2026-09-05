@@ -1,6 +1,10 @@
 # Warm streaming performance implementation
 
-Status: in progress. Base: `7f305dad9bfc2e2c9e4dda68565cbc564711d1a3`.
+Status: in progress. Original base: `7f305dad9bfc2e2c9e4dda68565cbc564711d1a3`.
+PR: <https://github.com/wegamekinglc/calc-flow/pull/242>.
+After publishing `00b86bc`, merge current main
+`9044501f99598b83f38ec37e60756c37b7bf6fb7` and rerun final evidence against
+that baseline. The baseline changed rolling/runner helpers and quality gates.
 
 ## Objective
 
@@ -95,6 +99,44 @@ Passing intermediate checks (not final-head acceptance):
   the uncontended core run passes 764 unit tests (four ignored) and all 53
   rolling integration tests (ordered: five, runner: two, state: 28, stream: 18).
   The projection reference checks and unchanged-history pointer check are green.
+- The complete 28-case, 30-pair matrix passed strict correctness at `00b86bc`
+  against the original base, with JSON/Markdown under
+  `target/warm-full-00b86bc.*`. At H=1,024,000, forced-GC SMA P50 is
+  1.784 -> 1.001 ms (64 rows) and 132.880 -> 9.464 ms (64,000 rows).
+  Dual SMA is 1.912 -> 1.065 ms and 139.149 -> 10.392 ms respectively.
+  Small-increment forecasts remain unmet. This report predates the new main
+  merge and is not final-base acceptance evidence.
+
+## Remaining review work
+
+Codacy on `00b86bc` reported 15 new findings. The current follow-up refactors
+them without increasing the complexity baseline or adding forgiveness markers:
+
+- Rust complexity: bridge `create_task`, kernel `prepare_ordered_stream`,
+  ordered buffer `take_closed` / `try_buffer_ordered` / `emit_ordered` /
+  `retained_histories`, and row cost `try_new`.
+- Python complexity: `paired_summary`, `worker_main`, `_measure_case`, and
+  `compare` in the profiling controller.
+- Replace production `assert` guards in worker pipe handling with explicit
+  errors. Make subprocess command boundaries statically owned and validate
+  arguments, retaining async I/O and shell-free execution.
+- Added initial/continuation wakeup failure, context failure, dispatcher clear,
+  and custom awaitable tests. All 15 bridge tests pass; combined coverage is
+  still required before declaring the surface complete.
+- Finish full repository gates and exact-head benchmark/report attachment,
+  then resolve review/CI/Codacy findings. The PR was externally changed to
+  non-draft while validation was pending; preserve that state.
+
+The follow-up passes workspace clippy with all targets and features, the
+complexity ratchet, Ruff check/format, six warm-scenario tests, and 13 controller
+tests. The controller tests include observed RED for command allowlisting,
+explicit missing-pipe errors, non-object responses, and unavailable CPU
+affinity before their GREEN implementations. The affinity fallback and matrix
+table alignment address the two initial review comments. Full Rust/Python
+gates and final-base release measurements remain pending.
+
+Local full-feature compilation uses the existing Anaconda curl headers through
+`C_INCLUDE_PATH`; no system packages or repository dependency policies changed.
 
 ## Reproduction entrypoints
 
@@ -109,7 +151,8 @@ The full default matrix has seven distinct (history, append) points, two
 indicators, and forced/normal-GC modes. JSON retains individual callback phase
 intervals, raw samples, before/after operator metrics, P50/P95, and a seeded
 20,000-resample paired median-speedup interval. Final-head/full-matrix evidence,
-metric phase refinement, lifecycle edge cases, and the PR are still pending.
+metric phase refinement, broader validation, and final report attachment are
+still pending.
 
 Every behavior change starts with an observed focused failing test. Record the
 commands and expected failures, then their passing reruns. Run Rust/Python,

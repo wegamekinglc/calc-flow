@@ -24,10 +24,10 @@ extra source events to improve the timing. Scheduled checkpoints are set to a
 
 The default matrix has 64 entities and seven distinct (history, append) pairs:
 
-| Dimension         | History rows                              | Appended rows             |
-| ----------------- | ----------------------------------------- | ------------------------- |
-| Historical depth  | 10,240 / 102,400 / 1,024,000 / 10,240,000   | 64                        |
-| Incremental size  | 1,024,000                                 | 64 / 640 / 6,400 / 64,000  |
+| Dimension        | History rows                           | Appended rows           |
+| ---------------- | -------------------------------------- | ----------------------- |
+| Historical depth | 10,240 / 102,400 / 1,024,000 / 10,240,000 | 64                      |
+| Incremental size | 1,024,000                              | 64 / 640 / 6,400 / 64,000 |
 
 Each pair runs SMA(20) and SMA(5) minus SMA(20), with both forced collection
 before each sample and normal Python GC. Normal GC is not disabled; the

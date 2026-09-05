@@ -21,12 +21,9 @@ from benchmarks.warm_stream import (
 def test_warm_oracle_uses_only_window_context() -> None:
     for indicator in ("rolling_mean", "dual_sma_spread"):
         values = _expected(
+            ScenarioConfig(indicator=indicator),
             start=1_024_000,
             rows=64,
-            entities=64,
-            indicator=indicator,
-            fast_window=5,
-            window=20,
         )
         assert values.shape == (64,)
         assert np.isfinite(values).all()
@@ -41,22 +38,17 @@ def test_warm_summary_reports_tail_latency_and_original_samples() -> None:
 
 
 def test_warm_validation_rejects_changed_identity_and_values() -> None:
+    config = ScenarioConfig()
     expected = _expected(
+        config,
         start=1_024,
         rows=64,
-        entities=64,
-        indicator="rolling_mean",
-        fast_window=5,
-        window=20,
     )
     table = _segment(1_024, 64, 64).append_column("moving_average", pa.array(expected))
     kwargs = dict(
+        config=config,
         start=1_024,
         rows=64,
-        entities=64,
-        indicator="rolling_mean",
-        fast_window=5,
-        window=20,
     )
     assert _validate_output(table, **kwargs)["passed"]
     broken = table.set_column(1, "sequence", pa.array(np.zeros(64, dtype=np.uint64)))

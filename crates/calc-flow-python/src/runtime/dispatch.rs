@@ -77,6 +77,213 @@ impl PythonAwaitDispatcher {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, atomic::Ordering};
+
+    use pyo3::types::PyDict;
+
+    use super::*;
+    use crate::runtime::{
+        PythonAwaitCompletion, PythonAwaitReceiver, PythonAwaitRegistry, PythonAwaitState,
+    };
+
+    fn fixture(py: Python<'_>) -> Bound<'_, PyDict> {
+        let locals = PyDict::new(py);
+        py.run(
+            cr#"
+import asyncio
+class LoopProxy:
+    def __init__(self):
+        self.error = RuntimeError("dispatch unavailable")
+        self.fail_submit = False
+        self.fail_continue = False
+        self.callback = None
+    def call_soon_threadsafe(self, callback):
+        if self.fail_submit:
+            raise self.error
+        self.callback = callback
+    def call_soon(self, callback):
+        if self.fail_continue:
+            raise self.error
+        self.callback = callback
+class BrokenContext:
+    def run(self, callback):
+        raise RuntimeError("context unavailable")
+event_loop = asyncio.new_event_loop()
+proxy = LoopProxy()
+"#,
+            Some(&locals),
+            None,
+        )
+        .unwrap();
+        locals
+    }
+
+    fn ready_scheduler(
+        py: Python<'_>,
+        event_loop: &Bound<'_, PyAny>,
+        registry: &Arc<PythonAwaitRegistry>,
+    ) -> (Py<PythonAwaitScheduler>, PythonAwaitReceiver) {
+        let future = event_loop.call_method0("create_future").unwrap();
+        future.call_method1("set_result", (7,)).unwrap();
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let scheduler = Py::new(
+            py,
+            PythonAwaitScheduler {
+                awaitable: Some(future.unbind()),
+                context: None,
+                state: Some(Arc::new(PythonAwaitState::new(event_loop.clone().unbind()))),
+                completion: Arc::new(PythonAwaitCompletion {
+                    sender: Mutex::new(Some(sender)),
+                    lease: Mutex::new(Some(registry.retain())),
+                }),
+            },
+        )
+        .unwrap();
+        (scheduler, receiver)
+    }
+
+    #[test]
+    fn failed_initial_wakeup_releases_pending_calls_and_can_be_retried() {
+        Python::initialize();
+        Python::attach(|py| {
+            let locals = fixture(py);
+            let event_loop = locals.get_item("event_loop").unwrap().unwrap();
+            let proxy = locals.get_item("proxy").unwrap().unwrap();
+            proxy.setattr("fail_submit", true).unwrap();
+            let dispatcher =
+                Bound::new(py, PythonAwaitDispatcher::new(proxy.clone().unbind())).unwrap();
+            let registry = Arc::new(PythonAwaitRegistry::new());
+            let (scheduler, mut receiver) = ready_scheduler(py, &event_loop, &registry);
+            let error = PythonAwaitDispatcher::submit(&dispatcher, scheduler).unwrap_err();
+            assert!(error.value(py).is(proxy.getattr("error").unwrap()));
+            let delivered = receiver.try_recv().unwrap().unwrap_err();
+            assert!(delivered.value(py).is(error.value(py)));
+            assert_eq!(registry.pending.load(Ordering::Acquire), 0);
+            proxy.setattr("fail_submit", false).unwrap();
+            let (scheduler, mut receiver) = ready_scheduler(py, &event_loop, &registry);
+            PythonAwaitDispatcher::submit(&dispatcher, scheduler).unwrap();
+            dispatcher.call0().unwrap();
+            assert_eq!(
+                receiver
+                    .try_recv()
+                    .unwrap()
+                    .unwrap()
+                    .extract::<u64>(py)
+                    .unwrap(),
+                7
+            );
+            assert_eq!(registry.pending.load(Ordering::Acquire), 0);
+            proxy.setattr("callback", py.None()).unwrap();
+            event_loop.call_method0("close").unwrap();
+        });
+    }
+
+    #[test]
+    fn failed_continuation_preserves_completed_results_and_fails_only_pending_calls() {
+        Python::initialize();
+        Python::attach(|py| {
+            let locals = fixture(py);
+            let event_loop = locals.get_item("event_loop").unwrap().unwrap();
+            let proxy = locals.get_item("proxy").unwrap().unwrap();
+            proxy.setattr("fail_continue", true).unwrap();
+            let dispatcher =
+                Bound::new(py, PythonAwaitDispatcher::new(proxy.clone().unbind())).unwrap();
+            let registry = Arc::new(PythonAwaitRegistry::new());
+            let mut receivers = Vec::new();
+            for _ in 0..=DISPATCH_BUDGET {
+                let (scheduler, receiver) = ready_scheduler(py, &event_loop, &registry);
+                PythonAwaitDispatcher::submit(&dispatcher, scheduler).unwrap();
+                receivers.push(receiver);
+            }
+            let error = dispatcher.call0().unwrap_err();
+            assert!(error.value(py).is(proxy.getattr("error").unwrap()));
+            for receiver in &mut receivers[..DISPATCH_BUDGET] {
+                assert_eq!(
+                    receiver
+                        .try_recv()
+                        .unwrap()
+                        .unwrap()
+                        .extract::<u64>(py)
+                        .unwrap(),
+                    7
+                );
+            }
+            let failed = receivers[DISPATCH_BUDGET].try_recv().unwrap().unwrap_err();
+            assert!(failed.value(py).is(error.value(py)));
+            assert_eq!(registry.pending.load(Ordering::Acquire), 0);
+            assert!(!dispatcher.borrow().queue.lock().scheduled);
+            proxy.setattr("callback", py.None()).unwrap();
+            event_loop.call_method0("close").unwrap();
+        });
+    }
+
+    #[test]
+    fn context_failure_completes_the_request_and_releases_its_lease() {
+        Python::initialize();
+        Python::attach(|py| {
+            let locals = fixture(py);
+            let event_loop = locals.get_item("event_loop").unwrap().unwrap();
+            let proxy = locals.get_item("proxy").unwrap().unwrap();
+            let dispatcher =
+                Bound::new(py, PythonAwaitDispatcher::new(proxy.clone().unbind())).unwrap();
+            let registry = Arc::new(PythonAwaitRegistry::new());
+            let (scheduler, mut receiver) = ready_scheduler(py, &event_loop, &registry);
+            scheduler.borrow_mut(py).context = Some(
+                locals
+                    .get_item("BrokenContext")
+                    .unwrap()
+                    .unwrap()
+                    .call0()
+                    .unwrap()
+                    .unbind(),
+            );
+            PythonAwaitDispatcher::submit(&dispatcher, scheduler).unwrap();
+            dispatcher.call0().unwrap();
+            let error = receiver.try_recv().unwrap().unwrap_err();
+            assert_eq!(
+                error.value(py).str().unwrap().to_str().unwrap(),
+                "context unavailable"
+            );
+            assert_eq!(registry.pending.load(Ordering::Acquire), 0);
+            proxy.setattr("callback", py.None()).unwrap();
+            event_loop.call_method0("close").unwrap();
+        });
+    }
+
+    #[test]
+    fn clearing_dispatcher_releases_pending_requests_and_rejects_later_submissions() {
+        Python::initialize();
+        Python::attach(|py| {
+            let locals = fixture(py);
+            let event_loop = locals.get_item("event_loop").unwrap().unwrap();
+            let proxy = locals.get_item("proxy").unwrap().unwrap();
+            let dispatcher =
+                Bound::new(py, PythonAwaitDispatcher::new(proxy.clone().unbind())).unwrap();
+            let registry = Arc::new(PythonAwaitRegistry::new());
+            let (scheduler, mut receiver) = ready_scheduler(py, &event_loop, &registry);
+            PythonAwaitDispatcher::submit(&dispatcher, scheduler).unwrap();
+            dispatcher.borrow_mut().__clear__();
+            assert_eq!(registry.pending.load(Ordering::Acquire), 0);
+            assert!(matches!(
+                receiver.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+            ));
+            let (scheduler, mut receiver) = ready_scheduler(py, &event_loop, &registry);
+            let error = PythonAwaitDispatcher::submit(&dispatcher, scheduler).unwrap_err();
+            assert!(error.to_string().contains("dispatcher was cleared"));
+            assert_eq!(registry.pending.load(Ordering::Acquire), 0);
+            assert!(matches!(
+                receiver.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+            ));
+            proxy.setattr("callback", py.None()).unwrap();
+            event_loop.call_method0("close").unwrap();
+        });
+    }
+}
+
 #[pymethods]
 impl PythonAwaitDispatcher {
     fn __call__(dispatcher: &Bound<'_, Self>) -> PyResult<()> {
