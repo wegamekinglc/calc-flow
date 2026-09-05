@@ -41,7 +41,10 @@ use tokio_postgres::config::{Host, SslMode as PgSslMode};
 use tokio_postgres::types::Type as PgType;
 use tokio_postgres::{Client, Row};
 
-use crate::database_types::{PgColumn, arrow_data_type, record_batch};
+use crate::database_types::{
+    PgColumn, arrow_data_type, epoch_days, parse_timestamp_text, parse_timestamptz_text,
+    record_batch,
+};
 use crate::postgresql::{
     ConnectionDriver, PgSlotPolicy, PgSourceMode, PostgresSourceConfig, settle_connection,
 };
@@ -1989,7 +1992,6 @@ fn cdc_column_array(column: &RelationColumn, values: &[Option<&[u8]>]) -> Result
             Ok(Arc::new(BinaryArray::from_opt_vec(values)))
         }
         PgType::DATE => {
-            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch is valid");
             let values = text
                 .iter()
                 .map(|value| {
@@ -1997,9 +1999,7 @@ fn cdc_column_array(column: &RelationColumn, values: &[Option<&[u8]>]) -> Result
                         .as_deref()
                         .map(|value| {
                             chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
-                                .map(|date| {
-                                    i32::try_from((date - epoch).num_days()).unwrap_or(i32::MAX)
-                                })
+                                .map(epoch_days)
                                 .map_err(|_| cdc_error("decode", "invalid date tuple value"))
                         })
                         .transpose()
@@ -2010,14 +2010,14 @@ fn cdc_column_array(column: &RelationColumn, values: &[Option<&[u8]>]) -> Result
         PgType::TIMESTAMP => {
             let values = text
                 .iter()
-                .map(|value| value.as_deref().map(parse_timestamp).transpose())
+                .map(|value| value.as_deref().map(parse_timestamp_text).transpose())
                 .collect::<Result<Vec<_>>>()?;
             Ok(Arc::new(TimestampMicrosecondArray::from(values)))
         }
         PgType::TIMESTAMPTZ => {
             let values = text
                 .iter()
-                .map(|value| value.as_deref().map(parse_timestamptz).transpose())
+                .map(|value| value.as_deref().map(parse_timestamptz_text).transpose())
                 .collect::<Result<Vec<_>>>()?;
             Ok(Arc::new(
                 TimestampMicrosecondArray::from(values).with_timezone_utc(),
@@ -2044,21 +2044,6 @@ fn cdc_column_array(column: &RelationColumn, values: &[Option<&[u8]>]) -> Result
             format!("unsupported PostgreSQL type {}", other.name()),
         )),
     }
-}
-
-fn parse_timestamp(value: &str) -> Result<i64> {
-    chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f")
-        .map(|value| value.and_utc().timestamp_micros())
-        .map_err(|_| cdc_error("decode", "invalid timestamp tuple value"))
-}
-
-fn parse_timestamptz(value: &str) -> Result<i64> {
-    for format in ["%Y-%m-%d %H:%M:%S%.f%#z", "%Y-%m-%d %H:%M:%S%.f %:z"] {
-        if let Ok(value) = chrono::DateTime::parse_from_str(value, format) {
-            return Ok(value.timestamp_micros());
-        }
-    }
-    Err(cdc_error("decode", "invalid timestamptz tuple value"))
 }
 
 #[cfg(test)]
