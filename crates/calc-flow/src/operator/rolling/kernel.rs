@@ -456,7 +456,7 @@ impl RollingKernelPlan {
                     group
                         .frame()
                         .map_or(0, TypedFrame::estimated_samples)
-                        .saturating_mul(size_of::<TimedFloat64Sample>()),
+                        .saturating_mul(size_of::<TimedSample<f64>>()),
                 ),
             )
         });
@@ -1710,30 +1710,92 @@ fn valid_float64_pair(
     valid_float64(left, row_index, false).zip(valid_float64(right, row_index, false))
 }
 
-#[derive(Clone, Debug)]
-struct Float64NumericState {
-    frame: TypedFrame,
-    values: VecDeque<TimedFloat64Sample>,
-    accumulator: WindowAccumulator,
+/// One timed sample in a sliding window queue.
+#[derive(Clone, Copy, Debug)]
+struct TimedSample<V> {
+    event_time: i64,
+    value: Option<V>,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct TimedFloat64Sample {
-    event_time: i64,
-    value: Option<f64>,
+/// The frame-bounded sample queue every typed numeric state shares.
+///
+/// Each state keeps its own accumulator; the queue owns only the push,
+/// expire, and front-removal mechanics so the Rows/Duration policy is
+/// written once. `expire` takes the per-state removal callback so the
+/// accumulator stays outside the generic.
+#[derive(Clone, Debug)]
+struct SlidingSampleQueue<V> {
+    frame: TypedFrame,
+    values: VecDeque<TimedSample<V>>,
+}
+
+impl<V: Copy> SlidingSampleQueue<V> {
+    fn new(frame: TypedFrame, entity_rows: usize) -> Self {
+        let capacity = frame.estimated_samples().min(entity_rows);
+        Self {
+            frame,
+            values: VecDeque::with_capacity(capacity),
+        }
+    }
+
+    fn push(&mut self, event_time: i64, value: Option<V>) {
+        self.values.push_back(TimedSample { event_time, value });
+    }
+
+    fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    fn expire(
+        &mut self,
+        event_time: i64,
+        mut on_remove: impl FnMut(V) -> Result<()>,
+    ) -> Result<()> {
+        match self.frame {
+            TypedFrame::Rows(window) => {
+                if self.values.len() > window {
+                    self.remove_front(&mut on_remove)?;
+                }
+            }
+            TypedFrame::Duration(micros) => {
+                let bound = i128::from(event_time) - i128::from(micros);
+                while self
+                    .values
+                    .front()
+                    .is_some_and(|sample| i128::from(sample.event_time) <= bound)
+                {
+                    self.remove_front(&mut on_remove)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn remove_front(&mut self, mut on_remove: impl FnMut(V) -> Result<()>) -> Result<()> {
+        if let Some(Some(value)) = self.values.pop_front().map(|sample| sample.value) {
+            on_remove(value)?;
+        }
+        Ok(())
+    }
+
+    /// Byte estimate with the caller's per-sample size so each state keeps
+    /// its historical accounting basis (the float state sizes by the bare
+    /// `Option<f64>`, not the full timed sample).
+    fn estimated_bytes(&self, state_bytes: usize, sample_bytes: usize) -> usize {
+        state_bytes + self.values.capacity() * sample_bytes
+    }
+}
+
+#[derive(Clone, Debug)]
+struct Float64NumericState {
+    samples: SlidingSampleQueue<f64>,
+    accumulator: WindowAccumulator,
 }
 
 #[derive(Clone, Debug)]
 struct ExactNumericState {
-    frame: TypedFrame,
-    values: VecDeque<TimedExactSample>,
+    samples: SlidingSampleQueue<ExactValue>,
     accumulator: WindowAccumulator,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct TimedExactSample {
-    event_time: i64,
-    value: Option<ExactValue>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1744,10 +1806,8 @@ enum ExactValue {
 
 impl ExactNumericState {
     fn new(frame: TypedFrame, sum_class: SumClass, entity_rows: usize) -> Self {
-        let capacity = frame.estimated_samples().min(entity_rows);
         Self {
-            frame,
-            values: VecDeque::with_capacity(capacity),
+            samples: SlidingSampleQueue::new(frame, entity_rows),
             accumulator: WindowAccumulator::new(sum_class),
         }
     }
@@ -1756,50 +1816,26 @@ impl ExactNumericState {
         if let Some(value) = value {
             add_exact(&mut self.accumulator, value, node_id)?;
         }
-        self.values
-            .push_back(TimedExactSample { event_time, value });
+        self.samples.push(event_time, value);
         self.expire(event_time)
     }
 
     fn expire(&mut self, event_time: i64) -> Result<()> {
-        match self.frame {
-            TypedFrame::Rows(window) => {
-                if self.values.len() > window {
-                    self.remove_front()?;
-                }
-            }
-            TypedFrame::Duration(micros) => {
-                let bound = i128::from(event_time) - i128::from(micros);
-                while self
-                    .values
-                    .front()
-                    .is_some_and(|sample| i128::from(sample.event_time) <= bound)
-                {
-                    self.remove_front()?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn remove_front(&mut self) -> Result<()> {
-        if let Some(Some(value)) = self.values.pop_front().map(|sample| sample.value) {
-            remove_exact(&mut self.accumulator, value)?;
-        }
-        Ok(())
+        let accumulator = &mut self.accumulator;
+        self.samples
+            .expire(event_time, |value| remove_exact(accumulator, value))
     }
 
     fn estimated_bytes(&self) -> usize {
-        size_of::<Self>() + self.values.capacity() * size_of::<TimedExactSample>()
+        self.samples
+            .estimated_bytes(size_of::<Self>(), size_of::<TimedSample<ExactValue>>())
     }
 }
 
 impl Float64NumericState {
     fn new(frame: TypedFrame, entity_rows: usize) -> Self {
-        let capacity = frame.estimated_samples().min(entity_rows);
         Self {
-            frame,
-            values: VecDeque::with_capacity(capacity),
+            samples: SlidingSampleQueue::new(frame, entity_rows),
             accumulator: WindowAccumulator::new(SumClass::Float),
         }
     }
@@ -1815,10 +1851,7 @@ impl Float64NumericState {
         if let Some(sample) = sample {
             add_float64(&mut self.accumulator, sample, node_id)?;
         }
-        self.values.push_back(TimedFloat64Sample {
-            event_time,
-            value: sample,
-        });
+        self.samples.push(event_time, sample);
         self.expire(event_time)?;
         self.repair_accumulator(numerical_profile, transition_count, node_id)
     }
@@ -1838,55 +1871,36 @@ impl Float64NumericState {
         if numerical_profile == RollingNumericalProfile::StableV2Preview
             && stable_v2_rebase_due(
                 transition_count,
-                self.values.len(),
+                self.samples.len(),
                 self.accumulator.is_non_finite(),
             )
         {
             self.rebase_stable_v2(node_id)?;
         } else if self.accumulator.is_non_finite() {
-            refold_float64(&mut self.accumulator, &self.values, node_id)?;
+            refold_float64(&mut self.accumulator, &self.samples.values, node_id)?;
         }
         Ok(())
     }
 
     fn rebase_stable_v2(&mut self, node_id: &str) -> Result<()> {
         self.accumulator = stable_v2_float64_accumulator(
-            self.values.iter().filter_map(|sample| sample.value),
+            self.samples.values.iter().filter_map(|sample| sample.value),
             node_id,
         )?;
         Ok(())
     }
 
     fn expire(&mut self, event_time: i64) -> Result<()> {
-        match self.frame {
-            TypedFrame::Rows(window) => {
-                if self.values.len() > window {
-                    self.remove_front()?;
-                }
-            }
-            TypedFrame::Duration(micros) => {
-                let bound = i128::from(event_time) - i128::from(micros);
-                while self
-                    .values
-                    .front()
-                    .is_some_and(|sample| i128::from(sample.event_time) <= bound)
-                {
-                    self.remove_front()?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn remove_front(&mut self) -> Result<()> {
-        if let Some(Some(expiring)) = self.values.pop_front().map(|sample| sample.value) {
-            remove_float64(&mut self.accumulator, expiring)?;
-        }
-        Ok(())
+        let accumulator = &mut self.accumulator;
+        self.samples
+            .expire(event_time, |value| remove_float64(accumulator, value))
     }
 
     fn estimated_bytes(&self) -> usize {
-        size_of::<Self>() + self.values.capacity() * size_of::<Option<f64>>()
+        // Historical basis: the float state sizes by the bare Option<f64>,
+        // not the full timed sample; preserve it exactly.
+        self.samples
+            .estimated_bytes(size_of::<Self>(), size_of::<Option<f64>>())
     }
 }
 
@@ -2036,23 +2050,14 @@ impl TypedExtremaState {
 
 #[derive(Clone, Debug)]
 struct Float64PairState {
-    frame: TypedFrame,
-    values: VecDeque<TimedPairSample>,
+    samples: SlidingSampleQueue<(f64, f64)>,
     accumulator: PairAccumulator,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct TimedPairSample {
-    event_time: i64,
-    value: Option<(f64, f64)>,
 }
 
 impl Float64PairState {
     fn new(frame: TypedFrame, entity_rows: usize) -> Self {
-        let capacity = frame.estimated_samples().min(entity_rows);
         Self {
-            frame,
-            values: VecDeque::with_capacity(capacity),
+            samples: SlidingSampleQueue::new(frame, entity_rows),
             accumulator: PairAccumulator::default(),
         }
     }
@@ -2068,7 +2073,7 @@ impl Float64PairState {
         if let Some((left, right)) = value {
             add_pair_float64(&mut self.accumulator, left, right, node_id)?;
         }
-        self.values.push_back(TimedPairSample { event_time, value });
+        self.samples.push(event_time, value);
         self.expire(event_time)?;
         self.repair_accumulator(numerical_profile, transition_count, node_id)
     }
@@ -2082,55 +2087,35 @@ impl Float64PairState {
         if numerical_profile == RollingNumericalProfile::StableV2Preview
             && stable_v2_rebase_due(
                 transition_count,
-                self.values.len(),
+                self.samples.len(),
                 self.accumulator.is_non_finite(),
             )
         {
             self.rebase_stable_v2(node_id)?;
         } else if self.accumulator.is_non_finite() {
-            refold_pair_float64(&mut self.accumulator, &self.values, node_id)?;
+            refold_pair_float64(&mut self.accumulator, &self.samples.values, node_id)?;
         }
         Ok(())
     }
 
     fn rebase_stable_v2(&mut self, node_id: &str) -> Result<()> {
         self.accumulator = stable_v2_pair_accumulator(
-            self.values.iter().filter_map(|sample| sample.value),
+            self.samples.values.iter().filter_map(|sample| sample.value),
             node_id,
         )?;
         Ok(())
     }
 
     fn expire(&mut self, event_time: i64) -> Result<()> {
-        match self.frame {
-            TypedFrame::Rows(window) => {
-                if self.values.len() > window {
-                    self.remove_front()?;
-                }
-            }
-            TypedFrame::Duration(micros) => {
-                let bound = i128::from(event_time) - i128::from(micros);
-                while self
-                    .values
-                    .front()
-                    .is_some_and(|sample| i128::from(sample.event_time) <= bound)
-                {
-                    self.remove_front()?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn remove_front(&mut self) -> Result<()> {
-        if let Some(Some((left, right))) = self.values.pop_front().map(|sample| sample.value) {
-            remove_pair_float64(&mut self.accumulator, left, right)?;
-        }
-        Ok(())
+        let accumulator = &mut self.accumulator;
+        self.samples.expire(event_time, |(left, right)| {
+            remove_pair_float64(accumulator, left, right)
+        })
     }
 
     fn estimated_bytes(&self) -> usize {
-        size_of::<Self>() + self.values.capacity() * size_of::<TimedPairSample>()
+        self.samples
+            .estimated_bytes(size_of::<Self>(), size_of::<TimedSample<(f64, f64)>>())
     }
 }
 
@@ -2245,7 +2230,7 @@ fn remove_float64(accumulator: &mut WindowAccumulator, sample: f64) -> Result<()
 
 fn refold_float64(
     accumulator: &mut WindowAccumulator,
-    values: &VecDeque<TimedFloat64Sample>,
+    values: &VecDeque<TimedSample<f64>>,
     node_id: &str,
 ) -> Result<()> {
     *accumulator = WindowAccumulator::new(SumClass::Float);
@@ -2446,7 +2431,7 @@ fn reset_pair_values(accumulator: &mut PairAccumulator) {
 
 fn refold_pair_float64(
     accumulator: &mut PairAccumulator,
-    values: &VecDeque<TimedPairSample>,
+    values: &VecDeque<TimedSample<(f64, f64)>>,
     node_id: &str,
 ) -> Result<()> {
     *accumulator = PairAccumulator::default();
@@ -3206,6 +3191,54 @@ mod tests {
     }
 
     #[test]
+    fn typed_state_estimated_bytes_keep_their_historical_accounting_basis() {
+        use std::mem::size_of;
+
+        let frame = TypedFrame::Rows(4);
+        let mut exact = ExactNumericState::new(frame, SumClass::Signed, 8);
+        let mut float = Float64NumericState::new(frame, 8);
+        let mut pair = Float64PairState::new(frame, 8);
+        for index in 0..4i64 {
+            #[allow(clippy::cast_precision_loss, reason = "fixture values 0..4")]
+            let step = index as f64;
+            let _ = exact.update(index, Some(ExactValue::Signed(index)), "node");
+            let _ = float.update(
+                index,
+                Some(step),
+                RollingNumericalProfile::StableV1,
+                0,
+                "node",
+            );
+            let _ = pair.update(
+                index,
+                Some((step, 1.0)),
+                RollingNumericalProfile::StableV1,
+                0,
+                "node",
+            );
+        }
+
+        // The exact and pair states size by the full timed sample; the float
+        // state historically sizes by the bare Option<f64>. The shared queue
+        // must preserve each basis exactly.
+        assert_eq!(
+            exact.estimated_bytes(),
+            size_of::<ExactNumericState>()
+                + exact.samples.values.capacity() * size_of::<TimedSample<ExactValue>>()
+        );
+        assert_eq!(
+            pair.estimated_bytes(),
+            size_of::<Float64PairState>()
+                + pair.samples.values.capacity() * size_of::<TimedSample<(f64, f64)>>()
+        );
+        assert_eq!(
+            float.estimated_bytes(),
+            size_of::<Float64NumericState>()
+                + float.samples.values.capacity() * size_of::<Option<f64>>()
+        );
+    }
+
+    #[test]
     fn restored_typed_state_validates_and_seeds_recurrence_metadata() {
         let kernel = plan(
             vec![
@@ -3390,7 +3423,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        assert_eq!(numeric.values.len(), 64);
+        assert_eq!(numeric.samples.len(), 64);
 
         let mut pairs = Float64PairState::new(TypedFrame::Rows(64), 64);
         for transition in 1_i32..=64 {
@@ -3404,7 +3437,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        assert_eq!(pairs.values.len(), 64);
+        assert_eq!(pairs.samples.len(), 64);
         assert!(pairs.accumulator.co_moment > 0.0);
     }
 
