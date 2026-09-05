@@ -141,6 +141,14 @@ current interpreter directory to a copied environment and rejects resolution
 to another executable. Two observed-RED tests verify interpreter binding and
 input-environment immutability. It does not rely on the caller's default Python.
 
+At `64b0dd8`, Codacy passes with no new findings. The candidate release wheel
+passes all 918 Python and warm-scenario tests. A two-pair launcher smoke validates
+both persistent workers against the pinned native hashes; its timing was taken
+during compilation and is not performance evidence. A final audit found that
+the new warm tests were not collected by the default CI command. A focused
+configuration test failed before wiring the scenario and controller tests into
+both Linux and Windows Python jobs; all 49 release/controller tests then pass.
+
 Local full-feature compilation uses the existing Anaconda curl headers through
 `C_INCLUDE_PATH`; no system packages or repository dependency policies changed.
 
