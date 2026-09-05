@@ -135,7 +135,7 @@ THREAT_MODEL: tuple[ThreatEntry, ...] = (
             "a slot ahead of durable state or a restart LSN whose WAL was recycled"
         ),
         evidence=(
-            "postgresql_cdc cursor_acknowledgement_is_monotonic_and_slot_bound; "
+            "postgresql_cdc cursor_ack_is_monotonic_and_slot_bound; "
             "postgresql_cdc preflight_slot"
         ),
     ),
@@ -271,7 +271,7 @@ THREAT_EVIDENCE: dict[str, tuple[EvidenceRef, ...]] = {
     "wal-retention-growth": (
         EvidenceRef(
             "crates/calc-flow-connectors/src/postgresql_cdc.rs",
-            "cursor_acknowledgement_is_monotonic_and_slot_bound",
+            "cursor_ack_is_monotonic_and_slot_bound",
         ),
     ),
     "database-ledger-forgery": (
