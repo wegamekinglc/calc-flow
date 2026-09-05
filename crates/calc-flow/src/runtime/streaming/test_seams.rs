@@ -15,7 +15,7 @@ use parking_lot::Mutex;
 use tokio::sync::Notify;
 
 #[cfg(unix)]
-use crate::state::ManifestParentSyncOsFailureProbe;
+use crate::state::{ManifestParentSyncOsFailureProbe, ManifestTransaction};
 use crate::{CalcFlowError, CancellationToken};
 
 #[cfg(test)]
