@@ -13,7 +13,7 @@ import shutil
 import sys
 import tempfile
 import zipfile
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from itertools import product
 from pathlib import Path
 from typing import Any
@@ -317,7 +317,9 @@ class Worker:
         self.process = process
 
     @classmethod
-    async def start(cls, manifest: dict[str, Any], root: Path) -> Worker:
+    async def start(
+        cls, manifest: dict[str, Any], root: Path, *, tokio_workers: int | None = None
+    ) -> Worker:
         site = root / "site"
         wheel = Path(manifest["wheel"]).resolve(strict=True)
         installer = await asyncio.create_subprocess_exec(
@@ -336,10 +338,13 @@ class Worker:
         )
         await _command_output(installer)
         env = _python_environment(
-            dict(
-                os.environ,
-                PYTHONPATH=os.pathsep.join((str(site), str(REPOSITORY))),
-                PYTHONDONTWRITEBYTECODE="1",
+            _configured_worker_environment(
+                dict(
+                    os.environ,
+                    PYTHONPATH=os.pathsep.join((str(site), str(REPOSITORY))),
+                    PYTHONDONTWRITEBYTECODE="1",
+                ),
+                tokio_workers,
             )
         )
         process = await asyncio.create_subprocess_exec(
@@ -382,6 +387,16 @@ class Worker:
                 await self.process.wait()
 
 
+def _configured_worker_environment(
+    environment: dict[str, str], workers: int | None
+) -> dict[str, str]:
+    if workers is None:
+        return dict(environment)
+    if type(workers) is not int or workers < 1:
+        raise ValueError("worker thread override must be a positive integer")
+    return {**environment, "TOKIO_WORKER_THREADS": str(workers)}
+
+
 def _cpu_affinity() -> list[int] | None:
     import psutil
 
@@ -407,6 +422,7 @@ def _worker_environment() -> dict[str, Any]:
         "logical_cpus": os.cpu_count(),
         "cpu_affinity": _cpu_affinity(),
         "native_sha256": _sha256(Path(native.__file__)),
+        "tokio_worker_threads": os.environ.get("TOKIO_WORKER_THREADS"),
     }
 
 
@@ -563,10 +579,17 @@ async def _measure_case(
 
 
 def markdown(report: dict[str, Any]) -> str:
+    thread_counts = report.get("worker_threads")
     lines = [
         "# Warm-state streaming profile",
         "",
         "Paired release builds; times include the full Python StreamingRunner path.",
+        (
+            f"Same-wheel configuration experiment: Tokio workers "
+            f"{thread_counts[0]} → {thread_counts[1]}."
+            if thread_counts
+            else "Engine comparison with unchanged scheduler configuration."
+        ),
         "",
         "| Indicator | History | Append | Active entities | Forced GC "
         "| Baseline P50 / P95 ms "
@@ -635,14 +658,23 @@ async def _compatible_builds(paths: tuple[Path, Path]) -> list[dict[str, Any]]:
 
 
 async def _worker_environments(
-    workers: list[Worker], manifests: list[dict[str, Any]]
+    workers: list[Worker],
+    manifests: list[dict[str, Any]],
+    *,
+    thread_counts: tuple[int, int] | None = None,
 ) -> list[dict[str, Any]]:
     environments = [await worker.request(operation="hello") for worker in workers]
     for environment, manifest in zip(environments, manifests, strict=True):
         if environment["native_sha256"] != manifest["native_sha256"]:
             raise ValueError("worker loaded a different native module")
+    excluded = {"native_sha256"}
+    if thread_counts is not None:
+        actual = [env.get("tokio_worker_threads") for env in environments]
+        if actual != [str(count) for count in thread_counts]:
+            raise ValueError("worker did not load the declared thread override")
+        excluded.add("tokio_worker_threads")
     comparable = [
-        {key: value for key, value in env.items() if key != "native_sha256"}
+        {key: value for key, value in env.items() if key not in excluded}
         for env in environments
     ]
     if comparable[0] != comparable[1]:
@@ -685,21 +717,33 @@ def _new_report(
     }
 
 
+@dataclass(frozen=True, slots=True)
+class WorkerPairOptions:
+    directory: Path
+    thread_counts: tuple[int, int] | None = None
+
+
 async def _fresh_case(
     manifests: list[dict[str, Any]],
     config: dict[str, Any],
     samples: int,
     collect_gc: bool,
-    parent: Path,
+    options: WorkerPairOptions,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    thread_counts = options.thread_counts
     workers: list[Worker] = []
-    with tempfile.TemporaryDirectory(prefix="warm-paired-", dir=parent) as temporary:
+    with tempfile.TemporaryDirectory(
+        prefix="warm-paired-", dir=options.directory
+    ) as temporary:
         try:
             for index, manifest in enumerate(manifests):
                 root = Path(temporary) / str(index)
                 root.mkdir()
-                workers.append(await Worker.start(manifest, root))
-            environments = await _worker_environments(workers, manifests)
+                count = None if thread_counts is None else thread_counts[index]
+                workers.append(await Worker.start(manifest, root, tokio_workers=count))
+            environments = await _worker_environments(
+                workers, manifests, thread_counts=thread_counts
+            )
             case = await _measure_case(workers, config, samples, collect_gc)
             return case, environments
         finally:
@@ -709,12 +753,24 @@ async def _fresh_case(
 
 async def compare(args: argparse.Namespace) -> None:
     manifests = await _compatible_builds((args.baseline_build, args.candidate_build))
+    counts = None if args.worker_threads is None else tuple(args.worker_threads)
+    if counts is not None and any(
+        manifests[0][key] != manifests[1][key]
+        for key in ("native_sha256", "wheel_sha256")
+    ):
+        raise ValueError(
+            "scheduler comparison requires the same native wheel on both sides"
+        )
     output = args.output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     report: dict[str, Any] = {}
     for config, mode in matrix_cases(args):
         case, environments = await _fresh_case(
-            manifests, config, args.samples, mode == "forced", output.parent
+            manifests,
+            config,
+            args.samples,
+            mode == "forced",
+            WorkerPairOptions(output.parent, counts),
         )
         if not report:
             report = {
@@ -722,6 +778,10 @@ async def compare(args: argparse.Namespace) -> None:
                 "worker_lifetime": "fresh process pair per case",
                 "case_order_seed": args.seed,
                 "callback_profiling": False,
+                "worker_threads": counts,
+                "comparison_kind": "engine"
+                if counts is None
+                else "same-wheel scheduler configuration",
                 "cases": [],
             }
         if environments != report["environments"]:
@@ -802,6 +862,9 @@ def main() -> None:
     paired.add_argument("--append-entities", type=int, nargs="+")
     paired.add_argument("--seed", type=int, default=20260905)
     paired.add_argument(
+        "--worker-threads", type=int, nargs=2, metavar=("BASELINE", "CANDIDATE")
+    )
+    paired.add_argument(
         "--indicators",
         nargs="+",
         choices=("rolling_mean", "dual_sma_spread"),
@@ -840,6 +903,8 @@ def main() -> None:
     else:
         if args.samples < 2:
             parser.error("at least two paired samples are required")
+        if args.worker_threads is not None and min(args.worker_threads) < 1:
+            parser.error("worker thread overrides must be positive")
         asyncio.run(compare(args))
 
 

@@ -17,6 +17,18 @@ from scripts.profile_warm_stream import matrix_points, paired_summary
 
 
 class WarmProfileTests(unittest.TestCase):
+    def test_worker_thread_override_is_explicit_validated_and_immutable(self) -> None:
+        original = {"TOKIO_WORKER_THREADS": "8", "PATH": "unchanged"}
+        configured = profile._configured_worker_environment(original, 1)
+        self.assertEqual(configured["TOKIO_WORKER_THREADS"], "1")
+        self.assertEqual(original["TOKIO_WORKER_THREADS"], "8")
+        self.assertEqual(
+            profile._configured_worker_environment(original, None), original
+        )
+        for value in (0, -1, True, 1.5):
+            with self.assertRaises(ValueError):
+                profile._configured_worker_environment(original, value)
+
     def test_sparse_matrix_is_seeded_and_keeps_layout_explicit(self) -> None:
         args = SimpleNamespace(
             history_rows=[128, 256],
@@ -153,6 +165,50 @@ class WarmProfileTests(unittest.TestCase):
 
 
 class WarmProcessTests(unittest.IsolatedAsyncioTestCase):
+    async def test_scheduler_comparison_rejects_different_python_wheels(self) -> None:
+        manifests = [
+            {"native_sha256": "same", "wheel_sha256": side}
+            for side in ("left", "right")
+        ]
+        args = SimpleNamespace(
+            baseline_build=Path("left"),
+            candidate_build=Path("right"),
+            worker_threads=(32, 1),
+        )
+        with (
+            patch.object(
+                profile, "_compatible_builds", AsyncMock(return_value=manifests)
+            ),
+            self.assertRaisesRegex(ValueError, "same native wheel"),
+        ):
+            await profile.compare(args)
+
+    async def test_scheduler_comparison_requires_the_exact_declared_thread_override(
+        self,
+    ) -> None:
+        workers = [
+            SimpleNamespace(
+                request=AsyncMock(
+                    return_value={
+                        "native_sha256": "same",
+                        "tokio_worker_threads": str(count),
+                    }
+                )
+            )
+            for count in (32, 1)
+        ]
+        manifests = [{"native_sha256": "same"}] * 2
+        result = await profile._worker_environments(
+            workers, manifests, thread_counts=(32, 1)
+        )
+        self.assertEqual(result[1]["tokio_worker_threads"], "1")
+        with self.assertRaisesRegex(ValueError, "thread override"):
+            await profile._worker_environments(
+                workers, manifests, thread_counts=(32, 2)
+            )
+        with self.assertRaisesRegex(ValueError, "fingerprints differ"):
+            await profile._worker_environments(workers, manifests)
+
     async def test_fresh_case_closes_both_workers_on_measurement_failure(self) -> None:
         workers = [SimpleNamespace(close=AsyncMock()) for _ in range(2)]
         with (
@@ -165,7 +221,9 @@ class WarmProcessTests(unittest.IsolatedAsyncioTestCase):
             ),
             self.assertRaisesRegex(ValueError, "invalid sample"),
         ):
-            await profile._fresh_case([{}, {}], {}, 2, False, Path("target"))
+            await profile._fresh_case(
+                [{}, {}], {}, 2, False, profile.WorkerPairOptions(Path("target"))
+            )
         for worker in workers:
             worker.close.assert_awaited_once()
 
