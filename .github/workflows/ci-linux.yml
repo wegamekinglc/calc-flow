@@ -497,100 +497,10 @@ jobs:
           if-no-files-found: error
           retention-days: 30
   benchmark-smoke:
-    name: Informational overhead benchmark smoke
-    needs:
-      - changes
-      - package
-      - lint-and-test
+    name: Complete benchmark suite
+    needs: changes
     if: needs.changes.outputs.docs_only != 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    env:
-      CALC_FLOW_BENCHMARK_SCALE: overhead
-      JAX_PLATFORMS: cpu
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version-file: .python-version
-      - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-        with:
-          enable-cache: true
-      - name: Download core distributions
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: python-distributions
-          path: dist
-      - name: Install benchmark dependencies
-        run: |
-          uv sync --extra benchmark --no-install-workspace
-          uv pip install --python .venv/bin/python --no-deps dist/calc_flow-*.whl
-      - name: Run benchmark scale
-        run: |
-          mkdir -p benchmark-results
-          uv run --no-sync pytest benchmarks -q --benchmark-only \
-            -m "not stream_lifecycle" \
-            --benchmark-json="benchmark-results/overhead.json"
-      - name: Upload benchmark report
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: benchmark-smoke-overhead
-          path: benchmark-results/overhead.json
-          if-no-files-found: error
-          retention-days: 30
-  stream-lifecycle-smoke:
-    name: Isolated stream lifecycle evidence smoke
-    needs:
-      - changes
-      - package
-      - lint-and-test
-    if: needs.changes.outputs.docs_only != 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    env:
-      CALC_FLOW_BENCHMARK_SCALE: overhead
-      JAX_PLATFORMS: cpu
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version-file: .python-version
-      - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-        with:
-          enable-cache: true
-      - name: Download core distributions
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: python-distributions
-          path: dist
-      - name: Install benchmark dependencies
-        run: |
-          uv sync --extra benchmark --no-install-workspace
-          uv pip install --python .venv/bin/python --no-deps dist/calc_flow-*.whl
-      - name: Run isolated lifecycle benchmark
-        run: |
-          mkdir -p benchmark-results
-          uv run --no-sync pytest \
-            benchmarks/test_symbolic_baseline.py::test_stream_window_checkpoint_and_recovery \
-            -q --benchmark-only \
-            --benchmark-json="benchmark-results/stream-lifecycle.json"
-      - name: Validate lifecycle evidence contract
-        run: >-
-          uv run --no-sync python scripts/verify_stream_lifecycle_evidence.py
-          benchmark-results/stream-lifecycle.json --minimum-rounds 20
-      - name: Upload stream lifecycle report
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: benchmark-stream-lifecycle-smoke
-          path: benchmark-results/stream-lifecycle.json
-          if-no-files-found: error
-          retention-days: 30
+    uses: ./.github/workflows/benchmark-suite.yml
   rust-core:
     name: Rust core parity
     needs: changes
@@ -833,7 +743,6 @@ jobs:
       - package
       - studio-package
       - benchmark-smoke
-      - stream-lifecycle-smoke
       - rust-core
       - rust-coverage
       - rust-supply-chain
@@ -853,7 +762,6 @@ jobs:
       PACKAGE_RESULT: ${{ needs.package.result }}
       STUDIO_PACKAGE_RESULT: ${{ needs.studio-package.result }}
       BENCHMARK_RESULT: ${{ needs.benchmark-smoke.result }}
-      STREAM_LIFECYCLE_RESULT: ${{ needs.stream-lifecycle-smoke.result }}
       RUST_CORE_RESULT: ${{ needs.rust-core.result }}
       RUST_COVERAGE_RESULT: ${{ needs.rust-coverage.result }}
       RUST_SUPPLY_CHAIN_RESULT: ${{ needs.rust-supply-chain.result }}
@@ -877,7 +785,6 @@ jobs:
             "$PACKAGE_RESULT" \
             "$STUDIO_PACKAGE_RESULT" \
             "$BENCHMARK_RESULT" \
-            "$STREAM_LIFECYCLE_RESULT" \
             "$RUST_CORE_RESULT" \
             "$RUST_COVERAGE_RESULT" \
             "$RUST_SUPPLY_CHAIN_RESULT" \

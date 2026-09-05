@@ -323,7 +323,8 @@ repository commands and constraints.
 - **[API reference](docs/api-reference.md)** — supported surfaces at a glance
 - **[Python release guide](docs/python-release.md)** — packaging, verification,
   Trusted Publishers, and the PyPI procedure
-- **[Benchmark harness](benchmarks/README.md)** — informational benchmarks
+- **[Benchmark suite](docs/benchmark-suite.md)** — complete CI tables, scale matrices,
+  external-engine comparisons and historical regression evidence
 - **[v2 release and migration](docs/v2-release.md)** — v1-to-v2 boundary (history)
 
 ## License

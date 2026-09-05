@@ -344,6 +344,7 @@ class ReleaseConfigTests(unittest.TestCase):
     def test_workflow_actions_are_sha_pinned(self) -> None:
         for name in (
             "benchmarks.yml",
+            "benchmark-suite.yml",
             "ci-linux.yml",
             "ci-windows.yml",
             "release.yml",
@@ -475,8 +476,8 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn("needs: changes", package)
         self.assertNotIn("needs: lint-and-test", package)
         self.assertIn("name: python-distributions", package)
-        self.assertGreaterEqual(workflow.count("name: Download core distributions"), 5)
-        self.assertGreaterEqual(workflow.count("--no-install-workspace"), 4)
+        self.assertEqual(workflow.count("name: Download core distributions"), 4)
+        self.assertGreaterEqual(workflow.count("--no-install-workspace"), 3)
         self.assertGreaterEqual(workflow.count("uv run --no-sync"), 5)
         self.assertIn("name: Download core distributions", studio_package)
         self.assertNotIn("\n          uv build\n", studio_package)
@@ -552,44 +553,36 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn(runner, agents)
         self.assertLess(agents.index(sync), agents.index(runner))
 
-    def test_pr_benchmark_smoke_uses_overhead_and_schedule_runs_all_scales(
-        self,
-    ) -> None:
-        support_tree = ast.parse(
+    def _legacy_scale_names(self) -> tuple[str, ...]:
+        support = ast.parse(
             (ROOT / "benchmarks/support.py").read_text(encoding="utf-8")
         )
-        scales_assignment = next(
-            node
-            for node in support_tree.body
+        scales = next(
+            node.value
+            for node in support.body
             if isinstance(node, ast.Assign)
             and any(
                 isinstance(target, ast.Name) and target.id == "SCALES"
                 for target in node.targets
             )
         )
-        self.assertIsInstance(scales_assignment.value, ast.Dict)
-        scales = [ast.literal_eval(key) for key in scales_assignment.value.keys]
+        return tuple(ast.literal_eval(key) for key in scales.keys)
 
-        workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
-        benchmark_job = workflow.split("  benchmark-smoke:\n", 1)[1].split(
-            "  rust-core:\n", 1
-        )[0]
-        scheduled = (ROOT / ".github/workflows/benchmarks.yml").read_text(
-            encoding="utf-8"
-        )
-        scheduled_job = scheduled.split("  benchmark:\n", 1)[1]
+    def test_pr_and_schedule_run_the_same_complete_catalog(self) -> None:
+        from scripts.benchmark_suite.catalog import LEGACY_SCALES, ROW_SCALES, shards
 
-        self.assertEqual(scales, ["overhead", "small", "standard", "nightly"])
-        self.assertNotIn("matrix:", benchmark_job)
-        self.assertIn("CALC_FLOW_BENCHMARK_SCALE: overhead", benchmark_job)
-        self.assertIn("JAX_PLATFORMS: cpu", benchmark_job)
-        self.assertIn(
-            '--benchmark-json="benchmark-results/overhead.json"',
-            benchmark_job,
+        names = self._legacy_scale_names()
+        automated = tuple(name for name in names if name != "nightly")
+        self.assertEqual(automated, LEGACY_SCALES)
+        self.assertNotIn("nightly", LEGACY_SCALES)
+        self.assertEqual(ROW_SCALES, tuple(10**n for n in range(1, 8)))
+        for name in ("ci-linux.yml", "benchmarks.yml"):
+            workflow = (ROOT / ".github/workflows" / name).read_text(encoding="utf-8")
+            self.assertIn("uses: ./.github/workflows/benchmark-suite.yml", workflow)
+        self.assertEqual(
+            {s["scale"] for s in shards() if s["family"] == "python"},
+            set(automated),
         )
-        self.assertIn("name: benchmark-smoke-overhead", benchmark_job)
-        self.assertIn("path: benchmark-results/overhead.json", benchmark_job)
-        self.assertIn(f"scale: [{', '.join(scales)}]", scheduled_job)
 
     def test_linux_ci_reports_parallel_coverage_to_coveralls(self) -> None:
         workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
@@ -617,61 +610,33 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn("parallel-finished: true", finish)
 
     def test_performance_workflows_cover_p1_and_p2_evidence(self) -> None:
-        workflow = (ROOT / ".github/workflows/benchmarks.yml").read_text(
-            encoding="utf-8"
-        )
-        rust_benchmark = workflow.split("  rust-benchmark:\n", 1)[1].split(
-            "  stream-lifecycle:\n", 1
-        )[0]
+        from scripts.benchmark_suite.catalog import shards
+        from scripts.benchmark_suite.legacy import pytest_arguments
+        from scripts.benchmark_suite.rust import bench_targets
 
-        cargo_bench_commands = [
-            line.strip()
-            for line in rust_benchmark.splitlines()
-            if line.strip().startswith("run: cargo bench ")
-        ]
+        families = {shard["family"] for shard in shards()}
+        self.assertTrue({"rust", "studio", "frontend", "lifecycle"} <= families)
         self.assertEqual(
-            cargo_bench_commands,
+            set(bench_targets(ROOT)),
+            {
+                "core",
+                "m4_state_window",
+                "stream_join_perf",
+                "allocation_regression",
+                "sql_datafusion_performance",
+            },
+        )
+        self.assertEqual(
+            pytest_arguments("lifecycle"),
             [
-                "run: cargo bench --locked -p calc-flow --bench core",
-                "run: cargo bench --locked -p calc-flow --bench stream_join_perf",
+                "benchmarks/test_symbolic_baseline.py::test_stream_window_checkpoint_and_recovery"
             ],
         )
-        self.assertIn(
-            "cargo test --locked -p calc-flow --bench allocation_regression\n"
-            "          --all-features",
-            rust_benchmark,
+        self.assertEqual(
+            pytest_arguments("studio"),
+            ["web-ui/backend/benchmarks/test_performance.py"],
         )
-        self.assertIn("scripts/write_criterion_provenance.py", rust_benchmark)
-        self.assertIn("target/criterion/benchmark-provenance.json", rust_benchmark)
-
-        stream_lifecycle = workflow.split("  stream-lifecycle:\n", 1)[1].split(
-            "  studio-benchmark:\n", 1
-        )[0]
-        self.assertIn("CALC_FLOW_BENCHMARK_SCALE: standard", stream_lifecycle)
-        self.assertIn(
-            "benchmarks/test_symbolic_baseline.py::"
-            "test_stream_window_checkpoint_and_recovery",
-            stream_lifecycle,
-        )
-        self.assertIn("scripts/verify_stream_lifecycle_evidence.py", stream_lifecycle)
-        self.assertIn("name: benchmark-stream-lifecycle-", stream_lifecycle)
-
-        studio = workflow.split("  studio-benchmark:\n", 1)[1].split(
-            "  frontend-benchmark:\n", 1
-        )[0]
-        self.assertIn("web-ui/backend/benchmarks/test_performance.py", studio)
-        self.assertIn("PYTHONPATH: .:web-ui/backend/src", studio)
-        frontend = workflow.split("  frontend-benchmark:\n", 1)[1].split(
-            "  benchmark:\n", 1
-        )[0]
-        self.assertIn("npm run benchmark", frontend)
-        self.assertIn("benchmark-results/frontend.txt", frontend)
-        self.assertIn('echo "git_sha=$(git rev-parse HEAD^{commit})"', frontend)
-        self.assertIn("sha256sum", frontend)
-
-        benchmark = workflow.split("  benchmark:\n", 1)[1]
-        self.assertIn('-m "not stream_lifecycle"', benchmark)
-
+        self.assertIn("not stream_lifecycle", pytest_arguments("python"))
         core = (ROOT / "crates/calc-flow/benches/core.rs").read_text(encoding="utf-8")
         for case in (
             "stream/channel_fanin_2",
@@ -679,8 +644,7 @@ class ReleaseConfigTests(unittest.TestCase):
             "stream/channel_fanin_8",
             "stream/backpressure_saturated",
         ):
-            with self.subTest(case=case):
-                self.assertIn(case, core)
+            self.assertIn(case, core)
 
     def test_linux_ci_executes_sql_datafusion_smoke_benchmark(self) -> None:
         workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
@@ -702,26 +666,18 @@ class ReleaseConfigTests(unittest.TestCase):
 
     def test_pr_and_release_isolate_stream_lifecycle_evidence(self) -> None:
         linux = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
-        benchmark = linux.split("  benchmark-smoke:\n", 1)[1].split(
-            "  stream-lifecycle-smoke:\n", 1
-        )[0]
-        self.assertIn('-m "not stream_lifecycle"', benchmark)
-        stream = linux.split("  stream-lifecycle-smoke:\n", 1)[1].split(
-            "  rust-core:\n", 1
-        )[0]
-        self.assertIn(
-            "benchmarks/test_symbolic_baseline.py::"
-            "test_stream_window_checkpoint_and_recovery",
-            stream,
-        )
-        self.assertIn("scripts/verify_stream_lifecycle_evidence.py", stream)
+        from scripts.benchmark_suite.catalog import shards
+        from scripts.benchmark_suite.legacy import pytest_arguments
+
+        self.assertIn("not stream_lifecycle", pytest_arguments("python"))
+        self.assertIn({"id": "lifecycle", "family": "lifecycle"}, shards())
         linux_gate = linux.split("  linux-gate:\n", 1)[1]
-        self.assertIn("- stream-lifecycle-smoke", linux_gate)
-        self.assertIn(
-            "STREAM_LIFECYCLE_RESULT: ${{ needs.stream-lifecycle-smoke.result }}",
-            linux_gate,
+        self.assertIn("- benchmark-smoke", linux_gate)
+        self.assertIn('"$BENCHMARK_RESULT"', linux_gate)
+        legacy = (ROOT / "scripts/benchmark_suite/legacy.py").read_text(
+            encoding="utf-8"
         )
-        self.assertIn('"$STREAM_LIFECYCLE_RESULT"', linux_gate)
+        self.assertIn("scripts/verify_stream_lifecycle_evidence.py", legacy)
 
         release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         exact_gate = release.split(

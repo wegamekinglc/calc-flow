@@ -1,14 +1,34 @@
 # Benchmarks
 
-Calc Flow benchmarks use deterministic Arrow and Array API inputs and export
-complete `pytest-benchmark` JSON reports. They are informational until at least
-20 comparable main-branch samples have been collected on stable runners.
+The [unified CI suite](../docs/benchmark-suite.md) runs the overhead, small and
+standard Python scales, all five Rust bench targets, Studio, frontend and
+isolated stream lifecycle measurements. It adds SQL/native-streaming and
+external-engine comparisons at every decade from 10 to 10,000,000 rows, plus warm-state
+incremental measurements. Every non-documentation Linux PR/main run publishes
+complete Markdown tables and raw artifacts, including failures.
+
+The slow legacy Python `nightly` scale is not part of the automated suite.
+The separate 10-to-10M engine and warm-state matrices remain enabled. Native
+streaming in the cross-library table starts from an already-ready runner with
+empty rolling state; runner startup and EOF/shutdown are outside its timer.
+Source/task/channel, rolling, watermarks and Arrow output remain included.
+
+New engine/warm base/head measurements have a same-runner, two-round +5%
+regression gate using paired-median confidence lower bounds. Complete tables
+retain confidence intervals and minimum ratios, including inconclusive results.
+Existing suite-block comparisons and external-library timings
+remain informational; their existing specialized correctness/evidence gates
+are preserved. These are different measurement contracts, not interchangeable
+historical samples.
 
 ## Layout
 
 | Path                                               | Contents                                                         |
-| -------------------------------------------------- | ---------------------------------------------------------------- |
+|----------------------------------------------------|------------------------------------------------------------------|
 | `support.py`                                       | Scale selection, metric recording, and identity fingerprints     |
+| `engine_comparison.py`, `engine_stream.py`         | Correctness-gated SQL, native stream and external-engine cases   |
+| `warm_stream.py`                                   | Actual warm StreamingRunner append-to-Arrow measurements         |
+| `requirements.lock`                                | Hash-pinned shared Linux benchmark dependencies                  |
 | `array_support.py`, `test_array_*.py`              | Array API kernel, provider, plan, and ownership scopes           |
 | `symbolic_support.py`, `test_symbolic_baseline.py` | Symbolic baselines, milestone pairs, and stream lifecycle        |
 | `test_datafusion.py`, `test_runtime.py`            | DataFusion operator scenarios and graph fan-out                  |
@@ -29,7 +49,7 @@ CALC_FLOW_BENCHMARK_SCALE=overhead \
   --benchmark-json=target/benchmark-results/overhead.json
 ```
 
-Available scales:
+Standalone scales (`nightly` is manual-only, not a CI suite shard):
 
 | Scale      | Table rows | Array elements | Matrix dimension |
 | ---------- | ---------: | -------------: | ---------------: |
@@ -102,9 +122,9 @@ them stable, improved, or regressed.
 
 Compare saved reports with `pytest-benchmark` after collecting compatible
 runner samples. Do not compare results across different machines, dependency
-versions, power modes, or benchmark scales. CI publishes these measurements as
-informational artifacts; it does not fail builds on benchmark deltas until at
-least 20 comparable main-branch samples exist on stable runners.
+versions, power modes, or benchmark scales. The unified CI suite publishes
+these array measurements as informational ABBA whole-suite block comparisons.
+It does not promote their deltas to the new engine/warm interleaved gate.
 
 ## Rolling indicator implementation comparison
 
@@ -265,8 +285,8 @@ batches, checkpoint, cancel, then restore from the durable checkpoint in a
 second runner. Cancelling drops the unconsumed half by design, so its output
 expectation counts only the windows accumulated before the checkpoint.
 
-The stream workload is capped at 50,000 rows regardless of scale so the
-`nightly` matrix stays bounded; every other dimension (seed, entity count,
+The stream workload is capped at 50,000 rows regardless of scale so manual
+`nightly` runs stay bounded; every other dimension (seed, entity count,
 batch size, window size) is fixed in `symbolic_support.py` and identical
 across scales, which keeps paired comparisons valid. The matmul scenarios
 likewise cap rows at 400,000 so the dense 20-column feature matrix stays
