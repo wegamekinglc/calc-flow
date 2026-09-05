@@ -312,12 +312,14 @@ def _summary(samples: list[float], rows: int) -> dict[str, Any]:
 
 
 def _validate_append_entities(active: int | None, entities: int) -> None:
-    if active is not None and (type(active) is not int or not 1 <= active <= entities):
+    if active is not None and (
+        active.__class__ is not int or not 1 <= active <= entities
+    ):
         raise ValueError("append_entities must be between one and entities")
 
 
 def _validate_positive_sizes(sizes: tuple[int, ...]) -> None:
-    if any(type(value) is not int or value <= 0 for value in sizes):
+    if any(value.__class__ is not int or value <= 0 for value in sizes):
         raise ValueError("scenario sizes must be positive integers")
 
 
