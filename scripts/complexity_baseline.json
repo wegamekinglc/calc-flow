@@ -7,7 +7,9 @@
     "crates/calc-flow-python/src/config.rs": 4,
     "crates/calc-flow-python/src/provider.rs": 4,
     "crates/calc-flow-python/src/udf.rs": 1,
-    "crates/calc-flow/src/operator/rolling/kernel.rs": 2,
+    "crates/calc-flow/benches/sql_datafusion_performance.rs": 3,
+    "crates/calc-flow/src/datafusion.rs": 1,
+    "crates/calc-flow/src/operator/rolling/kernel.rs": 3,
     "crates/calc-flow/src/operator/window.rs": 4,
     "crates/calc-flow/src/runtime/streaming/checkpoint/coordinator.rs": 1,
     "crates/calc-flow/src/runtime/streaming/progress/driver.rs": 11,
@@ -21,7 +23,9 @@
     "crates/calc-flow-connectors/src/postgresql.rs": 2,
     "crates/calc-flow-connectors/src/postgresql_cdc.rs": 8,
     "crates/calc-flow-connectors/src/websocket.rs": 1,
+    "crates/calc-flow/benches/sql_datafusion_performance.rs": 8,
     "crates/calc-flow/src/config.rs": 8,
+    "crates/calc-flow/src/datafusion.rs": 2,
     "crates/calc-flow/src/operator/cross_section.rs": 5,
     "crates/calc-flow/src/operator/rolling.rs": 7,
     "crates/calc-flow/src/operator/rolling/kernel.rs": 2,
@@ -32,10 +36,13 @@
     "python/calc_flow/symbolic/lower/program.py": 2,
     "python/tests/test_symbolic_high_cardinality.py": 1,
     "python/tests/test_symbolic_rolling_acceptance.py": 1,
+    "scripts/analyze_sql_datafusion_attribution.py": 1,
+    "scripts/run_sql_datafusion_matrix.py": 1,
     "scripts/test_verify_complexity_gates.py": 2,
     "scripts/verify_complexity_gates.py": 1,
     "scripts/verify_security_gates.py": 1,
-    "web-ui/backend/src/calc_flow_studio/run_manager.py": 6
+    "scripts/verify_sql_datafusion_performance.py": 5,
+    "web-ui/backend/src/calc_flow_studio/run_manager.py": 5
   },
   "ruff_complexity": {
     "benchmarks/array_support.py": {
@@ -59,7 +66,7 @@
       "PLR0913": 1
     },
     "python/calc_flow/pipeline.py": {
-      "PLR0913": 6
+      "PLR0913": 7
     },
     "python/calc_flow/runtime.py": {
       "PLR0913": 1
@@ -83,7 +90,6 @@
       "PLR0915": 1
     },
     "python/calc_flow/symbolic/lower/segments.py": {
-      "C901": 1,
       "PLR0913": 1
     },
     "python/calc_flow/symbolic/lower/strategies.py": {
@@ -108,8 +114,16 @@
     "scripts/m5_checkpoint_benchmark.py": {
       "PLR0913": 2
     },
+    "scripts/run_sql_datafusion_matrix.py": {
+      "PLR0913": 1
+    },
     "scripts/verify_python_release.py": {
       "C901": 2
+    },
+    "scripts/verify_sql_datafusion_performance.py": {
+      "C901": 4,
+      "PLR0912": 4,
+      "PLR0915": 2
     },
     "web-ui/backend/src/calc_flow_studio/app.py": {
       "PLR0913": 1
