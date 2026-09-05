@@ -18,6 +18,7 @@ use calc_flow::{
 };
 use serde_json::Value;
 
+use crate::options::required_string;
 use crate::parquet::ParquetCodec;
 
 /// The sink connector identity.
@@ -74,20 +75,6 @@ impl FileSinkConfig {
 
     fn final_dir(&self, epoch: Epoch) -> PathBuf {
         self.output_dir().join(format!("epoch={}", epoch.as_u64()))
-    }
-}
-
-fn required_string(options: &JsonMap, key: &str) -> Result<String> {
-    match options.get(key) {
-        Some(Value::String(value)) => Ok(value.clone()),
-        Some(_) => Err(calc_flow::CalcFlowError::InvalidArgument {
-            field: key.into(),
-            message: "option must be a string".into(),
-        }),
-        None => Err(calc_flow::CalcFlowError::InvalidArgument {
-            field: key.into(),
-            message: "option is required".into(),
-        }),
     }
 }
 

@@ -1,6 +1,7 @@
 //! Operator metadata, the batch/stream trait split, and provider factories.
 
 mod batch;
+mod checkpoint;
 mod cross_section;
 mod expression;
 mod join;

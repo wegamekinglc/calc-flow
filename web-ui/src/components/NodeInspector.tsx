@@ -10,6 +10,7 @@ import type {
   UdfReference,
 } from '../types';
 import type { LoweredNodeInspection } from './projectInspectionModel';
+import { derivedInputNames, derivedOutputNames } from '../portNamesModel';
 
 interface NodeInspectorProps {
   node: NodeConfig;
@@ -94,25 +95,14 @@ export function NodeInspector({
     if (node.operator.kind !== 'stream_join') return;
     patchNode({ operator: { ...node.operator, spec: { ...node.operator.spec, ...change } } });
   };
-  const declaredInputs = node.input_ports.map((port) => port.name);
-  const inputNames = declaredInputs.length
-    ? declaredInputs
-    : node.operator.kind === 'sql'
-      ? node.operator.aliases
-      : node.operator.kind === 'expression'
-        ? ['input']
-        : [];
-  const outputNames = node.output_ports.length
-    ? node.output_ports.map((port) => port.name)
-    : node.operator.kind === 'external' || node.operator.kind === 'stream_join'
-      ? []
-      : ['output'];
+  const inputNames = derivedInputNames(node);
+  const outputNames = derivedOutputNames(node);
   const isTable =
     node.operator.kind !== 'external'
     || ![...node.input_ports, ...node.output_ports].some((port) => port.kind === 'array');
   const matchingUdfs =
     node.operator.kind === 'expression' || node.operator.kind === 'sql'
-      ? udfs.filter((entry) => entry.kind === 'data_fusion_scalar')
+      ? udfs
       : [];
   const streamJoin = node.operator.kind === 'stream_join' ? node.operator : null;
 

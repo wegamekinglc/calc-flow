@@ -37,6 +37,7 @@ use crate::{
     state::{SegmentDescriptor, SegmentKind, StateInventory},
 };
 
+use super::checkpoint::{checkpoint_mismatch, compile_error, internal_error, state_format};
 use super::{
     BatchOperator, BatchOperatorContext, LateMetricDelta, LatePolicySpec, OperatorMetadata,
     StreamCollector, StreamOperator, StreamOperatorContext, accumulate_late_metrics,
@@ -704,7 +705,7 @@ impl StreamOperator for CrossSectionOperator {
             .is_some_and(|previous| epoch <= previous)
         {
             return Err(checkpoint_mismatch(
-                "cross-section checkpoint epoch did not advance strictly".into(),
+                "cross-section checkpoint epoch did not advance strictly",
             ));
         }
         let encoded = self.encode_state(epoch)?;
@@ -1004,7 +1005,7 @@ impl CrossSectionOperator {
         segment: &crate::StateSegment,
     ) -> Result<SegmentDescriptor> {
         let operator_id = self.state.operator_id.as_deref().ok_or_else(|| {
-            checkpoint_mismatch("cross-section segment is missing its operator identity".into())
+            checkpoint_mismatch("cross-section segment is missing its operator identity")
         })?;
         let relative_path = format!(
             "committed/{operator_id}/{:020}-{segment_id}.arrow",
@@ -1331,75 +1332,26 @@ fn validate_snapshot_metadata(
     }
     if metadata.configuration_hash != compiled.configuration_hash {
         return Err(checkpoint_mismatch(
-            "cross-section operator configuration hash does not match the compiled operator".into(),
+            "cross-section operator configuration hash does not match the compiled operator",
         ));
     }
     if metadata.state_schema_fingerprint != compiled.state_schema_fingerprint {
         return Err(checkpoint_mismatch(
-            "cross-section state schema fingerprint does not match the compiled operator".into(),
+            "cross-section state schema fingerprint does not match the compiled operator",
         ));
     }
-    let inventory = StateInventory::new(metadata.segment_inventory.clone())
-        .map_err(|error| checkpoint_mismatch(error.to_string()))?;
-    for descriptor in inventory.segments() {
-        if descriptor.state_layout_version != CROSS_SECTION_STATE_LAYOUT_VERSION
-            || descriptor.schema_fingerprint != compiled.state_schema_fingerprint
-        {
-            return Err(checkpoint_mismatch(
-                "cross-section segment inventory layout or schema does not match the compiled operator"
-                    .into(),
-            ));
-        }
-        if descriptor.handle.epoch() > metadata.epoch {
-            return Err(checkpoint_mismatch(
-                "cross-section segment inventory contains a future epoch".into(),
-            ));
-        }
-        if metadata.operator_id.as_deref() != Some(descriptor.handle.operator_id()) {
-            return Err(checkpoint_mismatch(
-                "cross-section segment inventory operator does not match snapshot metadata".into(),
-            ));
-        }
-    }
-    let expected_ids = inventory
-        .segments()
-        .iter()
-        .map(|descriptor| descriptor.handle.segment_id().to_owned())
-        .collect::<Vec<_>>();
-    let actual_ids = snapshot.segments.keys().cloned().collect::<Vec<_>>();
-    if expected_ids != actual_ids {
-        return Err(checkpoint_mismatch(
-            "cross-section snapshot segment IDs are missing, extra, duplicated, or non-canonical"
-                .into(),
-        ));
-    }
-    if !snapshot.segments.is_empty()
-        && (metadata.pipeline_fingerprint.is_none() || metadata.operator_id.is_none())
-    {
-        return Err(checkpoint_mismatch(
-            "cross-section segments require pipeline and operator identity metadata".into(),
-        ));
-    }
-    if let Some(fingerprint) = metadata.pipeline_fingerprint.as_deref()
-        && (fingerprint.len() != 64
-            || !fingerprint
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
-    {
-        return Err(checkpoint_mismatch(
-            "cross-section pipeline fingerprint is not lowercase SHA-256".into(),
-        ));
-    }
-    if metadata
-        .operator_id
-        .as_deref()
-        .is_some_and(|operator_id| operator_id.is_empty() || operator_id.contains('\0'))
-    {
-        return Err(checkpoint_mismatch(
-            "cross-section operator ID is empty or contains NUL".into(),
-        ));
-    }
-    Ok(inventory)
+    super::checkpoint::validate_inventory(
+        &super::checkpoint::SnapshotContract {
+            name: "cross-section",
+            state_layout_version: metadata.state_layout_version,
+            schema_fingerprint: &metadata.state_schema_fingerprint,
+            epoch: metadata.epoch,
+            pipeline_fingerprint: metadata.pipeline_fingerprint.as_deref(),
+            operator_id: metadata.operator_id.as_deref(),
+            segment_inventory: metadata.segment_inventory.clone(),
+        },
+        snapshot,
+    )
 }
 
 fn snapshot_segments(
@@ -1420,12 +1372,12 @@ fn snapshot_segments(
             let bytes = segment.bytes();
             if u64::try_from(bytes.len()).ok() != Some(descriptor.handle.byte_len()) {
                 return Err(checkpoint_mismatch(
-                    "cross-section snapshot segment byte length does not match its handle".into(),
+                    "cross-section snapshot segment byte length does not match its handle",
                 ));
             }
             if hex::encode(Sha256::digest(bytes)) != descriptor.handle.sha256() {
                 return Err(checkpoint_mismatch(
-                    "cross-section snapshot segment checksum does not match its handle".into(),
+                    "cross-section snapshot segment checksum does not match its handle",
                 ));
             }
             Ok(segment.bytes_arc())
@@ -1671,28 +1623,40 @@ struct CompiledCrossSectionOutput {
 
 #[derive(Clone)]
 enum CompiledEvaluation {
-    OrderStatistic {
+    Rank {
         direction: SortDirection,
         tie_method: RankTieMethod,
         null_placement: NullPlacement,
         min_samples: u64,
-        percentile: bool,
     },
-    Statistic {
+    Percentile {
+        direction: SortDirection,
+        tie_method: RankTieMethod,
+        null_placement: NullPlacement,
+        min_samples: u64,
+    },
+    Moment {
         min_samples: u64,
         ddof: u8,
-        zscore: bool,
+    },
+    ZScore {
+        min_samples: u64,
+        ddof: u8,
     },
     Winsorize {
         min_samples: u64,
         lower: f64,
         upper: f64,
     },
-    Selection {
+    TopSelection {
         count: u64,
         include_ties: bool,
         min_samples: u64,
-        top: bool,
+    },
+    BottomSelection {
+        count: u64,
+        include_ties: bool,
+        min_samples: u64,
     },
     MeanFill {
         min_samples: u64,
@@ -1982,42 +1946,57 @@ fn compute_group(
             .entry(output.input_index)
             .or_insert_with(|| PreparedCrossSectionColumn::new(rows, output.input_index));
         let column = match &output.evaluation {
-            CompiledEvaluation::OrderStatistic {
+            CompiledEvaluation::Rank {
                 direction,
                 tie_method,
                 null_placement,
                 min_samples,
-                percentile,
-            } => float64_scalars(order_statistic_column_prepared(
-                prepared,
-                *direction,
-                *tie_method,
-                *null_placement,
-                *min_samples,
-                *percentile,
-            )),
-            CompiledEvaluation::Statistic {
+            }
+            | CompiledEvaluation::Percentile {
+                direction,
+                tie_method,
+                null_placement,
                 min_samples,
-                ddof,
-                zscore,
-            } => float64_scalars(statistic_column_with_accumulator(
-                &prepared.samples,
-                prepared.accumulator,
-                *min_samples,
-                *ddof,
-                *zscore,
-            )),
+            } => {
+                let percentile = matches!(output.evaluation, CompiledEvaluation::Percentile { .. });
+                float64_scalars(order_statistic_column_prepared(
+                    prepared,
+                    *direction,
+                    *tie_method,
+                    *null_placement,
+                    *min_samples,
+                    percentile,
+                ))
+            }
+            CompiledEvaluation::Moment { min_samples, ddof }
+            | CompiledEvaluation::ZScore { min_samples, ddof } => {
+                let zscore = matches!(output.evaluation, CompiledEvaluation::ZScore { .. });
+                float64_scalars(statistic_column_with_accumulator(
+                    &prepared.samples,
+                    prepared.accumulator,
+                    *min_samples,
+                    *ddof,
+                    zscore,
+                ))
+            }
             CompiledEvaluation::Winsorize {
                 min_samples,
                 lower,
                 upper,
             } => winsorize_column(prepared, *min_samples, *lower, *upper),
-            CompiledEvaluation::Selection {
+            CompiledEvaluation::TopSelection {
                 count,
                 include_ties,
                 min_samples,
-                top,
-            } => selection_column(prepared, *count, *include_ties, *min_samples, *top),
+            }
+            | CompiledEvaluation::BottomSelection {
+                count,
+                include_ties,
+                min_samples,
+            } => {
+                let top = matches!(output.evaluation, CompiledEvaluation::TopSelection { .. });
+                selection_column(prepared, *count, *include_ties, *min_samples, top)
+            }
             CompiledEvaluation::MeanFill { min_samples } => {
                 mean_fill_column(prepared, *min_samples)
             }
@@ -2927,31 +2906,33 @@ fn compile_evaluation(output: &CrossSectionOutputSpec) -> CompiledEvaluation {
             null_placement,
             min_samples,
             ..
-        }
-        | CrossSectionOutputSpec::Percentile {
+        } => CompiledEvaluation::Rank {
+            direction: *direction,
+            tie_method: *tie_method,
+            null_placement: *null_placement,
+            min_samples: *min_samples,
+        },
+        CrossSectionOutputSpec::Percentile {
             direction,
             tie_method,
             null_placement,
             min_samples,
             ..
-        } => CompiledEvaluation::OrderStatistic {
+        } => CompiledEvaluation::Percentile {
             direction: *direction,
             tie_method: *tie_method,
             null_placement: *null_placement,
             min_samples: *min_samples,
-            percentile: matches!(output, CrossSectionOutputSpec::Percentile { .. }),
         },
-        CrossSectionOutputSpec::Demean { min_samples, .. } => CompiledEvaluation::Statistic {
+        CrossSectionOutputSpec::Demean { min_samples, .. } => CompiledEvaluation::Moment {
             min_samples: *min_samples,
             ddof: 0,
-            zscore: false,
         },
         CrossSectionOutputSpec::Zscore {
             min_samples, ddof, ..
-        } => CompiledEvaluation::Statistic {
+        } => CompiledEvaluation::ZScore {
             min_samples: *min_samples,
             ddof: *ddof,
-            zscore: true,
         },
         CrossSectionOutputSpec::Winsorize {
             min_samples,
@@ -2968,17 +2949,20 @@ fn compile_evaluation(output: &CrossSectionOutputSpec) -> CompiledEvaluation {
             include_ties,
             min_samples,
             ..
-        }
-        | CrossSectionOutputSpec::Bottom {
+        } => CompiledEvaluation::TopSelection {
+            count: *count,
+            include_ties: *include_ties,
+            min_samples: *min_samples,
+        },
+        CrossSectionOutputSpec::Bottom {
             count,
             include_ties,
             min_samples,
             ..
-        } => CompiledEvaluation::Selection {
+        } => CompiledEvaluation::BottomSelection {
             count: *count,
             include_ties: *include_ties,
             min_samples: *min_samples,
-            top: matches!(output, CrossSectionOutputSpec::Top { .. }),
         },
         CrossSectionOutputSpec::MeanFill { min_samples, .. } => CompiledEvaluation::MeanFill {
             min_samples: *min_samples,
@@ -3123,24 +3107,6 @@ fn operator_error(node_id: &str, message: &str) -> CalcFlowError {
         node_id: node_id.into(),
         message: message.into(),
     }
-}
-
-fn checkpoint_mismatch(message: String) -> CalcFlowError {
-    CalcFlowError::CheckpointMismatch { message }
-}
-
-fn internal_error(message: &str) -> CalcFlowError {
-    CalcFlowError::Internal {
-        message: message.into(),
-    }
-}
-
-fn state_format(message: String) -> CalcFlowError {
-    CalcFlowError::Format { message }
-}
-
-fn compile_error(message: String) -> CalcFlowError {
-    CalcFlowError::Compile { message }
 }
 
 fn format_error(error: &serde_json::Error) -> CalcFlowError {
@@ -3849,12 +3815,9 @@ mod tests {
             internal_error("test"),
             CalcFlowError::Internal { .. }
         ));
+        assert!(matches!(state_format("test"), CalcFlowError::Format { .. }));
         assert!(matches!(
-            state_format("test".into()),
-            CalcFlowError::Format { .. }
-        ));
-        assert!(matches!(
-            compile_error("test".into()),
+            compile_error("test"),
             CalcFlowError::Compile { .. }
         ));
     }

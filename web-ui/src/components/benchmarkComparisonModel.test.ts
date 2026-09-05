@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { at } from '../types';
 import {
   compareBenchmarkReports,
   parseBenchmarkReport,
@@ -126,7 +127,7 @@ describe('benchmark report compatibility', () => {
     expect(result.status).toBe('compatible');
     expect(result.issues).toEqual([]);
     expect(result.rows).toHaveLength(1);
-    expect(result.rows[0].status).toBe(status);
+    expect(at(result.rows).status).toBe(status);
   });
 
   it('rejects different machine identities with the same claimed fingerprint', () => {
@@ -304,7 +305,7 @@ describe('benchmark report compatibility', () => {
 
     expect(result.status).toBe('compatible');
     expect(result.rows).toHaveLength(1);
-    expect(result.rows[0].status).toBe('regression');
+    expect(at(result.rows).status).toBe('regression');
     expect(result.issues).toEqual([]);
   });
 

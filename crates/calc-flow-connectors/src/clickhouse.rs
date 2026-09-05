@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::time::Duration;
 
+use crate::options::{positive_option, required_string, u64_option};
 use async_trait::async_trait;
 use calc_flow::{
     ArrowFieldSpec, Batch, BatchMetadata, CalcFlowError, ConnectorCapabilities,
@@ -44,39 +45,6 @@ pub(crate) fn fail(operation: &str, detail: &str) -> CalcFlowError {
 ///
 /// Returns [`CalcFlowError::InvalidArgument`] for names that are not
 /// plain lowercase identifiers.
-pub(crate) fn required_string(options: &JsonMap, key: &str) -> Result<String> {
-    match options.get(key) {
-        Some(Value::String(value)) => Ok(value.clone()),
-        Some(_) => Err(CalcFlowError::InvalidArgument {
-            field: key.into(),
-            message: "option must be a string".into(),
-        }),
-        None => Err(CalcFlowError::InvalidArgument {
-            field: key.into(),
-            message: "option is required".into(),
-        }),
-    }
-}
-
-pub(crate) fn u64_option(options: &JsonMap, key: &str) -> Result<Option<u64>> {
-    match options.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::Number(number)) => {
-            number
-                .as_u64()
-                .map(Some)
-                .ok_or(CalcFlowError::InvalidArgument {
-                    field: key.into(),
-                    message: "option must be a non-negative integer".into(),
-                })
-        }
-        Some(_) => Err(CalcFlowError::InvalidArgument {
-            field: key.into(),
-            message: "option must be a non-negative integer".into(),
-        }),
-    }
-}
-
 /// Validates a `ClickHouse` identifier against the lowercase vocabulary.
 ///
 /// # Errors
@@ -223,18 +191,6 @@ impl ClickHouseSourceConfig {
             ),
             query_timeout: Duration::from_secs(query_timeout_seconds),
         })
-    }
-}
-
-fn positive_option(options: &JsonMap, key: &str, default: u64) -> Result<u64> {
-    let value = u64_option(options, key)?.unwrap_or(default);
-    if value == 0 {
-        Err(CalcFlowError::InvalidArgument {
-            field: key.into(),
-            message: "option must be greater than zero".into(),
-        })
-    } else {
-        Ok(value)
     }
 }
 

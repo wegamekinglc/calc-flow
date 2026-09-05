@@ -2,7 +2,6 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     future::Future,
     panic::AssertUnwindSafe,
-    path::PathBuf,
     pin::Pin,
     sync::{
         Arc,
@@ -26,7 +25,7 @@ use super::{
     ChannelMetrics, EdgeReceiver, EdgeSender,
     channel::edge_channel_with_metrics,
     checkpoint::{
-        ManagedCheckpointRuntime, OpenedManagedCheckpointRuntime,
+        ManagedCheckpointRuntime,
         coordinator::{
             CheckpointAck, CheckpointCoordinatorHandle, CheckpointEvent, CheckpointPhase,
             CheckpointRequest, ManualCheckpointFailure, ManualCheckpointFailureCategory,
@@ -66,8 +65,6 @@ use crate::pipeline::{
     OperatorCheckpointCapability, RuntimeSinkRoute, RuntimeSourceRoute, RuntimeStreamNode,
     StreamRuntimePlanParts,
 };
-#[cfg(all(test, unix))]
-use crate::state::ManifestParentSyncOsFailureProbe;
 #[cfg(test)]
 use crate::state::ManifestTransactionFaultPoint;
 use crate::{
@@ -80,464 +77,30 @@ use crate::{
     },
 };
 
+use super::failure::classify_failure_state;
+pub(crate) use super::failure::{
+    ContinuousJobOutcome, ContinuousJobState, DriverOwnership, FailureOrigin, LaunchDeliveryState,
+    LaunchId, RuntimeFailure, StartFailure, StartResult, TerminalCause, runner_shutdown_failure,
+};
+
+#[cfg(all(test, unix))]
+pub(crate) use super::test_seams::configure_test_manifest_transaction;
+#[cfg(test)]
+pub(crate) use super::test_seams::{
+    CheckpointFaultInjector, CheckpointFaultMode, CheckpointFaultPoint, CheckpointStartedTestGate,
+    TerminalCommitTestSeam, TestLaunchCheckpoint, TestLaunchProbe,
+};
+
 const CONNECTOR_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) use super::checkpoint_runtime::CheckpointRuntimeSpec;
+use super::checkpoint_runtime::{
+    CheckpointRuntimeStorage, OpenedCheckpointRuntime, ValidatedCheckpointRuntime,
+};
 
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CheckpointFaultPoint {
-    SourceAdmission,
-    SourceCut,
-    PartialAlignment,
-    StateStage,
-    SinkPreCommit,
-    ManifestWrite,
-    ManifestRename,
-    ManifestParentSync,
-    PartialSinkCommit,
-    CompletedCommit,
-    Retention,
-    Compaction,
-}
-
-#[cfg(test)]
-impl CheckpointFaultPoint {
-    pub(crate) const ALL: [Self; 12] = [
-        Self::SourceAdmission,
-        Self::SourceCut,
-        Self::PartialAlignment,
-        Self::StateStage,
-        Self::SinkPreCommit,
-        Self::ManifestWrite,
-        Self::ManifestRename,
-        Self::ManifestParentSync,
-        Self::PartialSinkCommit,
-        Self::CompletedCommit,
-        Self::Retention,
-        Self::Compaction,
-    ];
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CheckpointFaultMode {
-    Io,
-    Panic,
-    Cancel,
-    Restart,
-}
-
-#[cfg(test)]
-impl CheckpointFaultMode {
-    pub(crate) const ALL: [Self; 4] = [Self::Io, Self::Panic, Self::Cancel, Self::Restart];
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct CheckpointFault {
-    point: CheckpointFaultPoint,
-    mode: CheckpointFaultMode,
-}
-
-#[cfg(test)]
-#[derive(Default)]
-struct CheckpointFaultState {
-    armed: Option<CheckpointFault>,
-    trigger_count: usize,
-    cancellation_trigger_count: usize,
-    #[cfg(unix)]
-    parent_sync_os_failure_probe: ManifestParentSyncOsFailureProbe,
-}
-
-#[cfg(test)]
-#[derive(Clone, Default)]
-pub(crate) struct CheckpointFaultInjector(Arc<Mutex<CheckpointFaultState>>);
-
-#[cfg(test)]
-impl CheckpointFaultInjector {
-    fn armed(point: CheckpointFaultPoint, mode: CheckpointFaultMode) -> Self {
-        Self(Arc::new(Mutex::new(CheckpointFaultState {
-            armed: Some(CheckpointFault { point, mode }),
-            trigger_count: 0,
-            cancellation_trigger_count: 0,
-            #[cfg(unix)]
-            parent_sync_os_failure_probe: ManifestParentSyncOsFailureProbe::default(),
-        })))
-    }
-
-    fn trigger(
-        &self,
-        point: CheckpointFaultPoint,
-        cancellation: &CancellationToken,
-    ) -> crate::Result<()> {
-        let fault = {
-            let mut state = self.0.lock();
-            match state.armed {
-                Some(fault) if fault.point == point => {
-                    state.trigger_count += 1;
-                    if fault.mode == CheckpointFaultMode::Cancel {
-                        state.cancellation_trigger_count += 1;
-                    }
-                    state.armed.take()
-                }
-                _ => None,
-            }
-        };
-        let Some(fault) = fault else {
-            return Ok(());
-        };
-        match fault.mode {
-            CheckpointFaultMode::Io => Err(CalcFlowError::Io {
-                path: format!("/fault-injection/{point:?}/credential-canary"),
-                source: std::io::Error::other("injected checkpoint I/O fault"),
-            }),
-            CheckpointFaultMode::Panic => {
-                panic!("injected checkpoint panic at {point:?}")
-            }
-            CheckpointFaultMode::Cancel => {
-                cancellation.cancel();
-                Ok(())
-            }
-            CheckpointFaultMode::Restart => Err(CalcFlowError::Internal {
-                message: format!("injected checkpoint restart at {point:?}"),
-            }),
-        }
-    }
-
-    #[cfg(unix)]
-    fn is_armed(&self, point: CheckpointFaultPoint, mode: CheckpointFaultMode) -> bool {
-        self.0
-            .lock()
-            .armed
-            .is_some_and(|fault| fault.point == point && fault.mode == mode)
-    }
-
-    #[cfg(unix)]
-    fn parent_sync_os_failure_probe(&self) -> ManifestParentSyncOsFailureProbe {
-        self.0.lock().parent_sync_os_failure_probe.clone()
-    }
-
-    #[cfg(unix)]
-    pub(crate) fn parent_sync_os_failure_count(&self) -> usize {
-        self.0.lock().parent_sync_os_failure_probe.count()
-    }
-
-    pub(crate) fn trigger_count(&self) -> usize {
-        self.0.lock().trigger_count
-    }
-
-    pub(crate) fn cancellation_trigger_count(&self) -> usize {
-        self.0.lock().cancellation_trigger_count
-    }
-}
-
-#[cfg(test)]
-#[derive(Clone, Default)]
-pub(crate) struct CheckpointStartedTestGate {
-    entered: Arc<AtomicBool>,
-    entered_changed: Arc<Notify>,
-    released: Arc<AtomicBool>,
-    release_changed: Arc<Notify>,
-}
-
-#[cfg(test)]
-impl CheckpointStartedTestGate {
-    pub(crate) fn has_entered(&self) -> bool {
-        self.entered.load(Ordering::Acquire)
-    }
-
-    pub(crate) async fn wait_until_entered(&self) {
-        while !self.entered.load(Ordering::Acquire) {
-            let changed = self.entered_changed.notified();
-            if self.entered.load(Ordering::Acquire) {
-                break;
-            }
-            changed.await;
-        }
-    }
-
-    pub(crate) fn release(&self) {
-        self.released.store(true, Ordering::Release);
-        self.release_changed.notify_waiters();
-    }
-
-    async fn pause(&self) {
-        self.entered.store(true, Ordering::Release);
-        self.entered_changed.notify_waiters();
-        while !self.released.load(Ordering::Acquire) {
-            let changed = self.release_changed.notified();
-            if self.released.load(Ordering::Acquire) {
-                break;
-            }
-            changed.await;
-        }
-    }
-}
-
-pub(crate) struct CheckpointRuntimeSpec {
-    storage: CheckpointRuntimeStorage,
-    config: StreamRuntimeConfig,
-    #[cfg(test)]
-    faults: CheckpointFaultInjector,
-    #[cfg(test)]
-    started_gate: Option<CheckpointStartedTestGate>,
-}
-
-enum CheckpointRuntimeStorage {
-    LegacyParts {
-        state_backend: Arc<dyn StateBackend>,
-        manifest_root: PathBuf,
-    },
-    Managed(ManagedCheckpointRuntime),
-    #[cfg(test)]
-    ManagedTestParts {
-        state_backend: Arc<dyn StateBackend>,
-        manifest_root: PathBuf,
-    },
-}
-
-impl CheckpointRuntimeSpec {
-    pub(crate) fn new(
-        state_backend: Arc<dyn StateBackend>,
-        manifest_root: impl Into<PathBuf>,
-        config: StreamRuntimeConfig,
-    ) -> crate::Result<Self> {
-        validate_checkpoint_config(&config)?;
-        Ok(Self {
-            storage: CheckpointRuntimeStorage::LegacyParts {
-                state_backend,
-                manifest_root: manifest_root.into(),
-            },
-            config,
-            #[cfg(test)]
-            faults: CheckpointFaultInjector::default(),
-            #[cfg(test)]
-            started_gate: None,
-        })
-    }
-
-    fn managed(
-        storage: ManagedCheckpointRuntime,
-        config: StreamRuntimeConfig,
-    ) -> crate::Result<Self> {
-        validate_checkpoint_config(&config)?;
-        Ok(Self {
-            storage: CheckpointRuntimeStorage::Managed(storage),
-            config,
-            #[cfg(test)]
-            faults: CheckpointFaultInjector::default(),
-            #[cfg(test)]
-            started_gate: None,
-        })
-    }
-
-    #[cfg(test)]
-    fn managed_test_parts(
-        state_backend: Arc<dyn StateBackend>,
-        manifest_root: impl Into<PathBuf>,
-        config: StreamRuntimeConfig,
-    ) -> crate::Result<Self> {
-        validate_checkpoint_config(&config)?;
-        Ok(Self {
-            storage: CheckpointRuntimeStorage::ManagedTestParts {
-                state_backend,
-                manifest_root: manifest_root.into(),
-            },
-            config,
-            faults: CheckpointFaultInjector::default(),
-            started_gate: None,
-        })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_fault(
-        mut self,
-        point: CheckpointFaultPoint,
-        mode: CheckpointFaultMode,
-    ) -> Self {
-        self.faults = CheckpointFaultInjector::armed(point, mode);
-        self
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_fault_probe(
-        mut self,
-        point: CheckpointFaultPoint,
-        mode: CheckpointFaultMode,
-    ) -> (Self, CheckpointFaultInjector) {
-        let faults = CheckpointFaultInjector::armed(point, mode);
-        self.faults = faults.clone();
-        (self, faults)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_started_gate(mut self, gate: CheckpointStartedTestGate) -> Self {
-        self.started_gate = Some(gate);
-        self
-    }
-}
-
-fn validate_checkpoint_config(config: &StreamRuntimeConfig) -> crate::Result<()> {
-    config.validate()?;
-    if config.retained_epochs == 0 {
-        return Err(CalcFlowError::InvalidArgument {
-            field: "retained_epochs".into(),
-            message: "must be positive".into(),
-        });
-    }
-    Ok(())
-}
-
-struct ValidatedCheckpointRuntime {
-    spec: CheckpointRuntimeSpec,
-    identity: PreparedManifestIdentity,
-}
-
-struct OpenedCheckpointRuntime {
-    transaction: Arc<ManifestTransaction>,
-    _managed_storage: Option<OpenedManagedCheckpointRuntime>,
-    identity: PreparedManifestIdentity,
-    config: StreamRuntimeConfig,
-    selected: Option<SelectedManifest>,
-    next_epoch: Epoch,
-    status: CheckpointStatusHandle,
-    startup_orphans_removed: usize,
-    managed: bool,
-    #[cfg(test)]
-    faults: CheckpointFaultInjector,
-    #[cfg(test)]
-    started_gate: Option<CheckpointStartedTestGate>,
-}
-
-impl OpenedCheckpointRuntime {
-    #[cfg(test)]
-    fn inject_fault(
-        &self,
-        point: CheckpointFaultPoint,
-        cancellation: &CancellationToken,
-    ) -> crate::Result<bool> {
-        let trigger_count = self.faults.trigger_count();
-        self.faults.trigger(point, cancellation)?;
-        Ok(self.faults.trigger_count() != trigger_count && cancellation.is_cancelled())
-    }
-
-    #[cfg(test)]
-    async fn pause_after_started(&self) {
-        if let Some(gate) = &self.started_gate {
-            gate.pause().await;
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub(crate) enum FailureOrigin {
-    Preflight,
-    RunnerLifecycle,
-    OperatorEntry {
-        node_id: String,
-    },
-    SourceOpen {
-        binding_id: String,
-    },
-    SinkOpen {
-        output_id: String,
-        sink_id: String,
-    },
-    SourceClose {
-        binding_id: String,
-    },
-    SinkClose {
-        output_id: String,
-        sink_id: String,
-    },
-    SinkWrite {
-        output_id: String,
-        sink_id: String,
-    },
-    SinkCheckpoint {
-        output_id: String,
-        sink_id: String,
-    },
-    SinkIngress {
-        output_id: String,
-        edge_id: String,
-    },
-    Task {
-        task_id: TaskId,
-        task_name: String,
-    },
-    Metrics {
-        component_id: String,
-        counter: &'static str,
-    },
-}
-
-#[derive(Debug)]
-pub(crate) struct RuntimeFailure {
-    pub(crate) origin: FailureOrigin,
-    pub(crate) error: CalcFlowError,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct StartFailure {
-    pub(crate) primary: Arc<RuntimeFailure>,
-    pub(crate) diagnostic_id: Option<u64>,
-    pub(crate) cleanup_failures: Vec<Arc<RuntimeFailure>>,
-}
-
-pub(crate) fn runner_shutdown_failure(error: CalcFlowError) -> Arc<RuntimeFailure> {
-    Arc::new(RuntimeFailure {
-        origin: FailureOrigin::RunnerLifecycle,
-        error,
-    })
-}
-
-pub(crate) type StartResult<T> = Result<T, StartFailure>;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ContinuousJobState {
-    Running,
-    Draining,
-    Completed,
-    Cancelled,
-    Failed,
-    RecoveryRequired,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum TerminalCause {
-    NaturalEnd,
-    GracefulShutdown,
-    ExplicitCancel,
-    DeadlineExceeded,
-    TaskFailure { primary_task_id: TaskId },
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct ContinuousJobOutcome {
-    pub(crate) state: ContinuousJobState,
-    pub(crate) cause: TerminalCause,
-    pub(crate) errors: Vec<Arc<RuntimeFailure>>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum DriverOwnership {
-    CoreOwned,
-    Driving,
-    ReaperOwned,
-    Terminal,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum LaunchDeliveryState {
-    Provisional,
-    ReadyUnclaimed,
-    Claimed,
-    CancelRequested,
-    Failed,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub(crate) struct LaunchId(u64);
+use super::checkpoint_status::checkpoint_protocol_error;
+pub(crate) use super::checkpoint_status::{
+    CheckpointFailureCategory, CheckpointStatus, CheckpointStatusHandle,
+};
 
 struct JobCoreState {
     owner: DriverOwnership,
@@ -569,69 +132,6 @@ struct JobCore {
     launch_probe: Option<Arc<TestLaunchProbe>>,
 }
 
-#[cfg(test)]
-struct TerminalCommitTestSeam {
-    reached: tokio::sync::oneshot::Sender<()>,
-    release: tokio::sync::oneshot::Receiver<()>,
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TestLaunchCheckpoint {
-    AfterOperatorEntry,
-    LivePublished,
-}
-
-#[cfg(test)]
-struct TestLaunchProbe {
-    checkpoint: TestLaunchCheckpoint,
-    reached: AtomicBool,
-    released: AtomicBool,
-    changed: Notify,
-}
-
-#[cfg(test)]
-impl TestLaunchProbe {
-    fn new(checkpoint: TestLaunchCheckpoint) -> Self {
-        Self {
-            checkpoint,
-            reached: AtomicBool::new(false),
-            released: AtomicBool::new(false),
-            changed: Notify::new(),
-        }
-    }
-
-    async fn pause_at(&self, checkpoint: TestLaunchCheckpoint) {
-        if self.checkpoint != checkpoint {
-            return;
-        }
-        self.reached.store(true, Ordering::Release);
-        self.changed.notify_waiters();
-        loop {
-            let notified = self.changed.notified();
-            if self.released.load(Ordering::Acquire) {
-                return;
-            }
-            notified.await;
-        }
-    }
-
-    async fn wait_until_reached(&self) {
-        loop {
-            let notified = self.changed.notified();
-            if self.reached.load(Ordering::Acquire) {
-                return;
-            }
-            notified.await;
-        }
-    }
-
-    fn release(&self) {
-        self.released.store(true, Ordering::Release);
-        self.changed.notify_waiters();
-    }
-}
-
 #[derive(Default)]
 struct RuntimeStatus {
     tasks: TaskRegistry,
@@ -641,203 +141,6 @@ struct RuntimeStatus {
     sink_outputs: BTreeMap<String, String>,
     progress: Option<LiveProgressStatusHandle>,
     checkpoint: Option<CheckpointStatusHandle>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CheckpointFailureCategory {
-    Timeout,
-    Protocol,
-    Io,
-    Maintenance,
-    Runtime,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct CheckpointStatus {
-    pub(crate) current_epoch: Option<Epoch>,
-    pub(crate) phase: Option<CheckpointPhase>,
-    pub(crate) terminal: bool,
-    pub(crate) source_acknowledgements: usize,
-    pub(crate) operator_acknowledgements: usize,
-    pub(crate) sink_precommit_acknowledgements: usize,
-    pub(crate) sink_commit_acknowledgements: usize,
-    pub(crate) expected_sources: usize,
-    pub(crate) expected_operators: usize,
-    pub(crate) expected_sinks: usize,
-    pub(crate) elapsed: Option<Duration>,
-    pub(crate) last_completed_epoch: Option<Epoch>,
-    pub(crate) installed_unknown_epoch: Option<Epoch>,
-    pub(crate) failure_category: Option<CheckpointFailureCategory>,
-    pub(crate) runtime_config_changed: bool,
-}
-
-struct CheckpointStatusState {
-    snapshot: CheckpointStatus,
-    started: Option<tokio::time::Instant>,
-}
-
-#[derive(Clone)]
-struct CheckpointStatusHandle(Arc<Mutex<CheckpointStatusState>>);
-
-impl CheckpointStatusHandle {
-    fn new(identity: &PreparedManifestIdentity, selected: Option<&SelectedManifest>) -> Self {
-        Self(Arc::new(Mutex::new(CheckpointStatusState {
-            snapshot: CheckpointStatus {
-                current_epoch: None,
-                phase: None,
-                terminal: false,
-                source_acknowledgements: 0,
-                operator_acknowledgements: 0,
-                sink_precommit_acknowledgements: 0,
-                sink_commit_acknowledgements: 0,
-                expected_sources: identity.source_ids.len(),
-                expected_operators: identity.operator_ids.len(),
-                expected_sinks: identity.sink_ids.len(),
-                elapsed: None,
-                last_completed_epoch: selected.map(|selected| selected.manifest.epoch()),
-                installed_unknown_epoch: None,
-                failure_category: None,
-                runtime_config_changed: selected
-                    .is_some_and(|selected| selected.validation.runtime_config_changed),
-            },
-            started: None,
-        })))
-    }
-
-    fn snapshot(&self) -> CheckpointStatus {
-        let state = self.0.lock();
-        let mut snapshot = state.snapshot.clone();
-        snapshot.elapsed = state.started.map(|started| started.elapsed());
-        snapshot
-    }
-
-    fn set_expected(&self, sources: usize, operators: usize, sinks: usize) {
-        let mut state = self.0.lock();
-        state.snapshot.expected_sources = sources;
-        state.snapshot.expected_operators = operators;
-        state.snapshot.expected_sinks = sinks;
-    }
-
-    fn start(&self, epoch: Epoch, terminal: bool) {
-        let mut state = self.0.lock();
-        state.snapshot.current_epoch = Some(epoch);
-        state.snapshot.phase = Some(CheckpointPhase::Requested);
-        state.snapshot.terminal = terminal;
-        state.snapshot.source_acknowledgements = 0;
-        state.snapshot.operator_acknowledgements = 0;
-        state.snapshot.sink_precommit_acknowledgements = 0;
-        state.snapshot.sink_commit_acknowledgements = 0;
-        state.snapshot.installed_unknown_epoch = None;
-        state.snapshot.failure_category = None;
-        state.started = Some(tokio::time::Instant::now());
-    }
-
-    fn promote_terminal(&self, epoch: Epoch) -> crate::Result<()> {
-        let mut state = self.0.lock();
-        if state.snapshot.current_epoch != Some(epoch) {
-            return Err(checkpoint_protocol_error(
-                epoch,
-                "terminal promotion does not match the active checkpoint",
-            ));
-        }
-        state.snapshot.terminal = true;
-        Ok(())
-    }
-
-    fn advance(&self, epoch: Epoch, phase: CheckpointPhase) {
-        let mut state = self.0.lock();
-        if state.snapshot.current_epoch == Some(epoch) {
-            state.snapshot.phase = Some(phase);
-        }
-    }
-
-    fn acknowledge_sources(&self, epoch: Epoch, count: usize) {
-        self.acknowledge(epoch, |status| {
-            status.source_acknowledgements = count;
-        });
-    }
-
-    fn acknowledge_operators(&self, epoch: Epoch, count: usize) {
-        self.acknowledge(epoch, |status| {
-            status.operator_acknowledgements = count;
-        });
-    }
-
-    fn acknowledge_sink_precommits(&self, epoch: Epoch, count: usize) {
-        self.acknowledge(epoch, |status| {
-            status.sink_precommit_acknowledgements = count;
-        });
-    }
-
-    fn acknowledge_sink_commits(&self, epoch: Epoch, count: usize) {
-        self.acknowledge(epoch, |status| {
-            status.sink_commit_acknowledgements = count;
-        });
-    }
-
-    fn acknowledge(&self, epoch: Epoch, update: impl FnOnce(&mut CheckpointStatus)) {
-        let mut state = self.0.lock();
-        if state.snapshot.current_epoch == Some(epoch) {
-            update(&mut state.snapshot);
-        }
-    }
-
-    fn sinks_committed(&self, epoch: Epoch) {
-        let mut state = self.0.lock();
-        if state.snapshot.current_epoch == Some(epoch) {
-            state.snapshot.phase = Some(CheckpointPhase::SinksCommitted);
-            state.snapshot.last_completed_epoch = Some(epoch);
-            state.snapshot.installed_unknown_epoch = None;
-        }
-    }
-
-    fn installed_unknown(&self, epoch: Epoch) {
-        let mut state = self.0.lock();
-        if state.snapshot.current_epoch == Some(epoch) {
-            state.snapshot.installed_unknown_epoch = Some(epoch);
-            state.snapshot.failure_category = Some(CheckpointFailureCategory::Runtime);
-        }
-    }
-
-    fn complete(&self, epoch: Epoch) {
-        let mut state = self.0.lock();
-        if state.snapshot.current_epoch == Some(epoch) {
-            state.snapshot.current_epoch = None;
-            state.snapshot.phase = None;
-            state.snapshot.terminal = false;
-            state.snapshot.source_acknowledgements = 0;
-            state.snapshot.operator_acknowledgements = 0;
-            state.snapshot.sink_precommit_acknowledgements = 0;
-            state.snapshot.sink_commit_acknowledgements = 0;
-            state.snapshot.elapsed = None;
-            state.started = None;
-        }
-    }
-
-    fn fail(&self, category: CheckpointFailureCategory) {
-        let mut state = self.0.lock();
-        state.snapshot.failure_category = Some(category);
-    }
-
-    fn fail_if_unset(&self, category: CheckpointFailureCategory) {
-        let mut state = self.0.lock();
-        if state.snapshot.failure_category.is_none() {
-            state.snapshot.failure_category = Some(category);
-        }
-    }
-
-    fn cancel(&self) {
-        let mut state = self.0.lock();
-        state.snapshot.current_epoch = None;
-        state.snapshot.phase = None;
-        state.snapshot.terminal = false;
-        state.snapshot.source_acknowledgements = 0;
-        state.snapshot.operator_acknowledgements = 0;
-        state.snapshot.sink_precommit_acknowledgements = 0;
-        state.snapshot.sink_commit_acknowledgements = 0;
-        state.snapshot.elapsed = None;
-        state.started = None;
-    }
 }
 
 impl JobCore {
@@ -1800,7 +1103,7 @@ impl ContinuousRunner {
                 cleanup_failures: Vec::new(),
             }));
         };
-        let launch_id = LaunchId(launch_id);
+        let launch_id = LaunchId::new(launch_id);
         let job_id = validated.context.job_id();
         let status_projection = StatusProjection::new(&validated);
         let metrics = metrics_for_job(&validated);
@@ -3079,21 +2382,6 @@ async fn open_checkpoint_runtime(
         #[cfg(test)]
         started_gate: spec.started_gate,
     })
-}
-
-#[cfg(all(test, unix))]
-fn configure_test_manifest_transaction(
-    transaction: ManifestTransaction,
-    faults: &CheckpointFaultInjector,
-) -> ManifestTransaction {
-    if faults.is_armed(
-        CheckpointFaultPoint::ManifestParentSync,
-        CheckpointFaultMode::Io,
-    ) {
-        transaction.with_real_parent_sync_failure_for_test(faults.parent_sync_os_failure_probe())
-    } else {
-        transaction
-    }
 }
 
 fn sanitize_managed_preflight_error(
@@ -4990,12 +4278,6 @@ fn checkpoint_digest(value: &impl Serialize) -> crate::Result<String> {
     Ok(hex::encode(Sha256::digest(canonical.as_bytes())))
 }
 
-fn checkpoint_protocol_error(epoch: Epoch, message: &str) -> CalcFlowError {
-    CalcFlowError::Internal {
-        message: format!("checkpoint epoch {}: {message}", epoch.as_u64()),
-    }
-}
-
 fn checkpoint_channel_closed(channel: &str) -> CalcFlowError {
     CalcFlowError::Internal {
         message: format!("checkpoint {channel} channel closed"),
@@ -5198,32 +4480,6 @@ fn finish_running_report(
             errors,
         })),
         cleanup_failures: Vec::new(),
-    }
-}
-
-fn classify_failure_state(failure: &RuntimeFailure) -> ContinuousJobState {
-    let recoverable_origin = matches!(
-        &failure.origin,
-        FailureOrigin::SourceOpen { .. }
-            | FailureOrigin::SourceClose { .. }
-            | FailureOrigin::SinkOpen { .. }
-            | FailureOrigin::SinkClose { .. }
-            | FailureOrigin::SinkWrite { .. }
-            | FailureOrigin::SinkCheckpoint { .. }
-    ) || matches!(
-        &failure.origin,
-        FailureOrigin::Task { task_name, .. } if task_name.starts_with("source:")
-    );
-    let recoverable_error = matches!(
-        &failure.error,
-        CalcFlowError::Io { .. }
-            | CalcFlowError::ExternalProvider { .. }
-            | CalcFlowError::RecoveryRequired { .. }
-    );
-    if recoverable_origin && recoverable_error {
-        ContinuousJobState::RecoveryRequired
-    } else {
-        ContinuousJobState::Failed
     }
 }
 
@@ -9995,7 +9251,7 @@ mod tests {
     fn explicit_cancel_wins_over_deadline_at_the_single_arbiter_commit() {
         let (commands, _commands_rx) = mpsc::unbounded_channel();
         let core = JobCore::new(
-            LaunchId(0),
+            LaunchId::new(0),
             91,
             commands,
             MetricsRecorder::default(),
@@ -10061,7 +9317,7 @@ mod tests {
         };
 
         let report = finish_running_report(
-            LaunchId(0),
+            LaunchId::new(0),
             None,
             false,
             report,

@@ -97,11 +97,11 @@ async function requestText(
   const result = await response(path, init);
   const disposition = result.headers.get('Content-Disposition');
   const extended = disposition?.match(/filename\*\s*=\s*([^;]+)/i)?.[1]
-    .trim()
+    ?.trim()
     .replace(/^"|"$/g, '');
   let filename: string | null = null;
   if (extended) {
-    const encoded = extended.match(/^UTF-8''(.+)$/i)?.[1];
+    const encoded = /^UTF-8''(.+)$/i.exec(extended)?.[1];
     if (encoded) {
       try {
         filename = decodeURIComponent(encoded);
@@ -157,10 +157,6 @@ export const api = {
       decodeValidationReport,
       { method: 'POST' },
     ),
-  jobs: () => request<JobResponse[]>(`${API_PREFIX}/jobs`, (value) => {
-    if (!Array.isArray(value)) throw new ApiContractError('jobs: expected an array');
-    return value.map(decodeJobResponse);
-  }),
   startJob: (projectId: string) =>
     request<JobResponse>(`${API_PREFIX}/jobs`, decodeJobResponse, {
       method: 'POST',

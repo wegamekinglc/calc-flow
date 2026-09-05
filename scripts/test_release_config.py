@@ -233,8 +233,9 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertEqual(config.count(frozen_harness), 1)
         self.assertNotIn('  - "crates/calc-flow/benches/**"', config)
         self.assertTrue((ROOT / harness_path).is_file())
-        self.assertEqual(config.count('      - "web-ui/**"'), 1)
+        self.assertEqual(config.count('      - "web-ui/**"'), 2)
         self.assertIn("Biome's default Qwik", config)
+        self.assertIn("sandbox does not install", config)
         self.assertEqual(config.count('  - "web-ui/src/api/schema.d.ts"'), 1)
         legacy_issue_slug = "_".join(("dal", "38"))
         self.assertFalse(
@@ -480,7 +481,11 @@ class ReleaseConfigTests(unittest.TestCase):
             "scripts.test_verify_stream_lifecycle_evidence "
             "scripts.test_verify_symbolic_milestone_perf "
             "scripts.test_write_criterion_provenance "
-            "scripts.test_verify_security_gates"
+            "scripts.test_verify_complexity_gates "
+            "scripts.test_verify_security_gates "
+            "scripts.test_verify_sql_datafusion_performance "
+            "scripts.test_analyze_sql_datafusion_attribution "
+            "scripts.test_run_sql_datafusion_matrix"
         )
         windows_test = (
             "scripts.test_run_rust_tests.RustTestHarnessTests."

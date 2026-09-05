@@ -4479,31 +4479,17 @@ fn key_value_bytes(array: &dyn Array, row_index: usize) -> Result<Vec<u8>> {
                 })?,
             ]
         }
-        DataType::Int16 => primitive::<Int16Type>(array)?
-            .value(row_index)
-            .to_le_bytes()
-            .to_vec(),
-        DataType::Int32 | DataType::Date32 => primitive::<Int32Type>(array)?
-            .value(row_index)
-            .to_le_bytes()
-            .to_vec(),
-        DataType::Int64 | DataType::Date64 => primitive::<Int64Type>(array)?
-            .value(row_index)
-            .to_le_bytes()
-            .to_vec(),
         DataType::UInt8 => vec![primitive::<UInt8Type>(array)?.value(row_index)],
-        DataType::UInt16 => primitive::<UInt16Type>(array)?
-            .value(row_index)
-            .to_le_bytes()
-            .to_vec(),
-        DataType::UInt32 => primitive::<UInt32Type>(array)?
-            .value(row_index)
-            .to_le_bytes()
-            .to_vec(),
-        DataType::UInt64 => primitive::<UInt64Type>(array)?
-            .value(row_index)
-            .to_le_bytes()
-            .to_vec(),
+        DataType::Int16 => little_endian_key_bytes::<Int16Type>(array, row_index)?,
+        DataType::Int32 | DataType::Date32 => {
+            little_endian_key_bytes::<Int32Type>(array, row_index)?
+        }
+        DataType::Int64 | DataType::Date64 => {
+            little_endian_key_bytes::<Int64Type>(array, row_index)?
+        }
+        DataType::UInt16 => little_endian_key_bytes::<UInt16Type>(array, row_index)?,
+        DataType::UInt32 => little_endian_key_bytes::<UInt32Type>(array, row_index)?,
+        DataType::UInt64 => little_endian_key_bytes::<UInt64Type>(array, row_index)?,
         DataType::Utf8 => array
             .as_any()
             .downcast_ref::<StringArray>()
@@ -4524,6 +4510,33 @@ fn key_value_bytes(array: &dyn Array, row_index: usize) -> Result<Vec<u8>> {
             });
         }
     })
+}
+
+/// Little-endian key encoding shared by the fixed-width join key natives.
+trait KeyLeBytes {
+    fn key_le_bytes(self) -> Vec<u8>;
+}
+
+macro_rules! impl_key_le_bytes {
+    ($($native:ty),* $(,)?) => {
+        $(
+            impl KeyLeBytes for $native {
+                fn key_le_bytes(self) -> Vec<u8> {
+                    self.to_le_bytes().to_vec()
+                }
+            }
+        )*
+    };
+}
+
+impl_key_le_bytes!(i16, i32, i64, u16, u32, u64);
+
+fn little_endian_key_bytes<T>(array: &dyn Array, row_index: usize) -> Result<Vec<u8>>
+where
+    T: ArrowPrimitiveType,
+    T::Native: KeyLeBytes,
+{
+    Ok(primitive::<T>(array)?.value(row_index).key_le_bytes())
 }
 
 fn primitive<T>(array: &dyn Array) -> Result<&PrimitiveArray<T>>

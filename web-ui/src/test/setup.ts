@@ -5,16 +5,27 @@ import { afterEach } from 'vitest';
 afterEach(() => cleanup());
 
 class ResizeObserverStub {
-  observe() {}
-  unobserve() {}
-  disconnect() {}
+  observe() {
+    // jsdom has no ResizeObserver; observing is a no-op.
+    return;
+  }
+  unobserve() {
+    return;
+  }
+  disconnect() {
+    return;
+  }
 }
 
 Object.defineProperty(globalThis, 'ResizeObserver', { value: ResizeObserverStub });
 Object.defineProperty(globalThis, 'matchMedia', {
   value: () => ({
     matches: false,
-    addEventListener() {},
-    removeEventListener() {},
+    addEventListener() {
+      return;
+    },
+    removeEventListener() {
+      return;
+    },
   }),
 });

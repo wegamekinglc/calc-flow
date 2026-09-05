@@ -1,0 +1,153 @@
+{
+  "clippy_complexity_allows": {
+    "crates/calc-flow-connectors/src/database_types.rs": 1,
+    "crates/calc-flow-connectors/src/postgresql_cdc.rs": 1,
+    "crates/calc-flow-connectors/tests/clickhouse_connector.rs": 1,
+    "crates/calc-flow-connectors/tests/postgresql_connector.rs": 1,
+    "crates/calc-flow-python/src/config.rs": 4,
+    "crates/calc-flow-python/src/provider.rs": 4,
+    "crates/calc-flow-python/src/udf.rs": 1,
+    "crates/calc-flow/benches/sql_datafusion_performance.rs": 3,
+    "crates/calc-flow/src/datafusion.rs": 1,
+    "crates/calc-flow/src/operator/rolling/kernel.rs": 3,
+    "crates/calc-flow/src/operator/window.rs": 4,
+    "crates/calc-flow/src/runtime/streaming/checkpoint/coordinator.rs": 1,
+    "crates/calc-flow/src/runtime/streaming/progress/driver.rs": 11,
+    "crates/calc-flow/src/runtime/streaming/runner.rs": 26,
+    "crates/calc-flow/src/runtime/streaming/soak.rs": 16,
+    "crates/calc-flow/src/runtime/streaming/source_task.rs": 10
+  },
+  "lizard_forgives": {
+    "crates/calc-flow-connectors/src/database_types.rs": 1,
+    "crates/calc-flow-connectors/src/kafka.rs": 4,
+    "crates/calc-flow-connectors/src/postgresql.rs": 2,
+    "crates/calc-flow-connectors/src/postgresql_cdc.rs": 8,
+    "crates/calc-flow-connectors/src/websocket.rs": 1,
+    "crates/calc-flow/benches/sql_datafusion_performance.rs": 8,
+    "crates/calc-flow/src/config.rs": 8,
+    "crates/calc-flow/src/datafusion.rs": 2,
+    "crates/calc-flow/src/operator/cross_section.rs": 5,
+    "crates/calc-flow/src/operator/rolling.rs": 7,
+    "crates/calc-flow/src/operator/rolling/kernel.rs": 2,
+    "crates/calc-flow/src/operator/rolling/state_v3.rs": 5,
+    "crates/calc-flow/src/runtime/streaming/sink_task.rs": 1,
+    "crates/calc-flow/src/state/manifest.rs": 1,
+    "python/calc_flow/symbolic/lower/planners.py": 3,
+    "python/calc_flow/symbolic/lower/program.py": 2,
+    "python/tests/test_symbolic_high_cardinality.py": 1,
+    "python/tests/test_symbolic_rolling_acceptance.py": 1,
+    "scripts/analyze_sql_datafusion_attribution.py": 1,
+    "scripts/run_sql_datafusion_matrix.py": 1,
+    "scripts/test_verify_complexity_gates.py": 2,
+    "scripts/verify_complexity_gates.py": 1,
+    "scripts/verify_security_gates.py": 1,
+    "scripts/verify_sql_datafusion_performance.py": 5,
+    "web-ui/backend/src/calc_flow_studio/run_manager.py": 5
+  },
+  "ruff_complexity": {
+    "benchmarks/array_support.py": {
+      "PLR0913": 1
+    },
+    "benchmarks/rolling_indicator_comparison.py": {
+      "PLR0913": 3
+    },
+    "benchmarks/support.py": {
+      "PLR0913": 1
+    },
+    "benchmarks/symbolic_support.py": {
+      "PLR0913": 1
+    },
+    "python/calc_flow/array.py": {
+      "C901": 2
+    },
+    "python/calc_flow/config.py": {
+      "C901": 1,
+      "PLR0912": 1,
+      "PLR0913": 1
+    },
+    "python/calc_flow/pipeline.py": {
+      "PLR0913": 7
+    },
+    "python/calc_flow/runtime.py": {
+      "PLR0913": 1
+    },
+    "python/calc_flow/symbolic/analyzer.py": {
+      "PLR0913": 5
+    },
+    "python/calc_flow/symbolic/expr.py": {
+      "PLR0913": 3
+    },
+    "python/calc_flow/symbolic/lower/planners.py": {
+      "C901": 2,
+      "PLR0912": 2,
+      "PLR0913": 3,
+      "PLR0915": 2
+    },
+    "python/calc_flow/symbolic/lower/program.py": {
+      "C901": 1,
+      "PLR0912": 1,
+      "PLR0913": 1,
+      "PLR0915": 1
+    },
+    "python/calc_flow/symbolic/lower/segments.py": {
+      "PLR0913": 1
+    },
+    "python/calc_flow/symbolic/lower/strategies.py": {
+      "PLR0913": 10
+    },
+    "python/calc_flow/symbolic/ops.py": {
+      "PLR0913": 4
+    },
+    "python/tests/a6_cross_surface_worker.py": {
+      "C901": 1
+    },
+    "python/tests/test_array.py": {
+      "PLR0915": 1
+    },
+    "python/tests/test_continuous_runtime.py": {
+      "C901": 4,
+      "PLR0915": 1
+    },
+    "python/tests/test_udf.py": {
+      "PLR0913": 1
+    },
+    "scripts/m5_checkpoint_benchmark.py": {
+      "PLR0913": 2
+    },
+    "scripts/run_sql_datafusion_matrix.py": {
+      "PLR0913": 1
+    },
+    "scripts/verify_python_release.py": {
+      "C901": 2
+    },
+    "scripts/verify_sql_datafusion_performance.py": {
+      "C901": 4,
+      "PLR0912": 4,
+      "PLR0915": 2
+    },
+    "web-ui/backend/src/calc_flow_studio/app.py": {
+      "PLR0913": 1
+    },
+    "web-ui/backend/src/calc_flow_studio/routes.py": {
+      "C901": 2,
+      "PLR0915": 2
+    },
+    "web-ui/backend/src/calc_flow_studio/run_manager.py": {
+      "C901": 5,
+      "PLR0912": 3,
+      "PLR0913": 1,
+      "PLR0915": 3
+    },
+    "web-ui/backend/tests/test_app.py": {
+      "C901": 1,
+      "PLR0915": 1
+    },
+    "web-ui/backend/tests/test_run_manager.py": {
+      "C901": 2,
+      "PLR0915": 2
+    },
+    "web-ui/scripts/web_ui_process.py": {
+      "PLR0913": 1
+    }
+  }
+}

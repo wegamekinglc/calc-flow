@@ -5,7 +5,6 @@ type GeneratedProjectDocument = components['schemas']['ProjectDocument'];
 
 export type ProjectCreateRequest = Omit<GeneratedProjectCreateRequest, '$defs'>;
 export type ProjectDocument = Omit<GeneratedProjectDocument, '$defs'>;
-export type ProjectConfig = ProjectDocument;
 export type EditableProject = ProjectDocument;
 export type DataSourceSpec = GeneratedProjectDocument['$defs']['DataSourceSpec'];
 export type ProjectSummary = components['schemas']['ProjectSummary'];
@@ -135,18 +134,14 @@ export const blankProject = (): ProjectCreateRequest => ({
   state: { root: '.calc-flow-state', retention: 3 },
 });
 
-export const updateNodeOperator = (
-  project: EditableProject,
-  nodeId: string,
-  update: (operator: OperatorSpec) => OperatorSpec,
-): EditableProject => ({
-  ...project,
-  graph: {
-    ...project.graph,
-    nodes: project.graph.nodes.map((node) =>
-      node.id === nodeId
-        ? { ...node, operator: update(node.operator) }
-        : node,
-    ),
-  },
-});
+/** A fixture accessor that fails loudly instead of asserting presence. */
+export const at = <T>(items: readonly T[], index = 0): T => {
+  const item = items.at(index);
+  if (item === undefined) {
+    throw new Error(`fixture item ${index} is missing`);
+  }
+  return item;
+};
+
+/** The first element of a sequence, explicitly undefined when empty. */
+export const firstOf = <T>(items: readonly T[]): T | undefined => items.at(0);

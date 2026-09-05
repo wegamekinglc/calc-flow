@@ -538,7 +538,7 @@ const parseContract = (
   name: string,
   info: Record<string, unknown> | undefined,
 ): ContractIdentity | BenchmarkContractV2 | null => {
-  if (!info || info.benchmark_contract_version === undefined) return null;
+  if (info?.benchmark_contract_version === undefined) return null;
   const version = integer(
     info.benchmark_contract_version,
     name,
