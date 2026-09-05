@@ -316,6 +316,11 @@ def _validate_append_entities(active: int | None, entities: int) -> None:
         raise ValueError("append_entities must be between one and entities")
 
 
+def _validate_positive_sizes(sizes: tuple[int, ...]) -> None:
+    if any(type(value) is not int or value <= 0 for value in sizes):
+        raise ValueError("scenario sizes must be positive integers")
+
+
 @dataclass(frozen=True, slots=True)
 class ScenarioConfig:
     history_rows: int = 1_024_000
@@ -336,8 +341,7 @@ class ScenarioConfig:
             self.fast_window,
             self.history_segment_rows,
         )
-        if any(type(value) is not int or value <= 0 for value in sizes):
-            raise ValueError("scenario sizes must be positive integers")
+        _validate_positive_sizes(sizes)
         _validate_append_entities(self.append_entities, self.entities)
         ticks = (self.history_rows, self.history_segment_rows)
         if self.append_entities is None:
