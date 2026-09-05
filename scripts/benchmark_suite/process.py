@@ -44,9 +44,10 @@ async def command(
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open("wb") as output:
         # Callers supply fixed argv layouts for trusted benchmark tools/binaries.
-        # Resolve the executable once and never interpret arguments through a shell.
+        # Make its path absolute without dereferencing venv/rustup dispatch links.
+        # Never interpret arguments through a shell.
         process = await asyncio.create_subprocess_exec(  # nosemgrep
-            str(Path(executable).resolve()),
+            str(Path(executable).absolute()),
             *argv[1:],
             cwd=cwd,
             env=env,

@@ -263,6 +263,9 @@ async def measure_legacy(
         (output / "blocks.json").write_text(
             json.dumps(blocks, indent=2) + "\n", encoding="utf-8"
         )
-    report["cases"] = combine_blocks(shard, blocks)
+    try:
+        report["cases"] = combine_blocks(shard, blocks)
+    except ValueError as error:
+        report["errors"].append(str(error))
     report["expected_case_ids"] = [case["id"] for case in report["cases"]]
     return report

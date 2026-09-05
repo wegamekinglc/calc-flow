@@ -11,6 +11,36 @@ from scripts.benchmark_suite.process import child_environment, command
 
 
 class BenchmarkProcessTests(unittest.IsolatedAsyncioTestCase):
+    async def test_python_command_preserves_the_managed_interpreter_prefix(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            log = root / "python.log"
+            options = ["-S"] if sys.flags.no_site else []
+            await command(
+                [sys.executable, *options, "-c", "import sys; print(sys.prefix)"],
+                cwd=root,
+                log=log,
+            )
+            self.assertEqual(log.read_text(encoding="utf-8").strip(), sys.prefix)
+
+    async def test_executable_resolution_preserves_dispatch_symlinks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shim = root / "cargo"
+            shim.symlink_to(sys.executable)
+            with (
+                patch(
+                    "scripts.benchmark_suite.process.shutil.which",
+                    return_value=str(shim),
+                ),
+                patch(
+                    "scripts.benchmark_suite.process.asyncio.create_subprocess_exec"
+                ) as spawn,
+            ):
+                spawn.return_value.wait.return_value = 0
+                await command(["cargo", "--version"], cwd=root, log=root / "run.log")
+            self.assertEqual(spawn.call_args.args[0], str(shim))
+
     async def test_executable_is_resolved_without_a_shell(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -5,10 +5,37 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.benchmark_suite.legacy import _frontend_run
+from scripts.benchmark_suite.legacy import _frontend_run, measure_legacy
 
 
 class BenchmarkFrontendTests(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_legacy_blocks_retain_each_original_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with (
+                patch("scripts.benchmark_suite.legacy.validate_sources"),
+                patch("scripts.benchmark_suite.legacy._setup", return_value={}),
+                patch(
+                    "scripts.benchmark_suite.legacy.observe_workers", return_value={}
+                ),
+                patch(
+                    "scripts.benchmark_suite.legacy._frontend_run",
+                    side_effect=RuntimeError("missing benchmark dependency"),
+                ),
+            ):
+                report = await measure_legacy(
+                    {"id": "frontend", "family": "frontend"}, {}, root, root
+                )
+            self.assertEqual(report["cases"], [])
+            self.assertEqual(report["expected_case_ids"], [])
+            self.assertEqual(
+                sum(
+                    "missing benchmark dependency" in error
+                    for error in report["errors"]
+                ),
+                4,
+            )
+
     async def test_uses_checkout_local_static_runner_and_archives_its_report(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory)

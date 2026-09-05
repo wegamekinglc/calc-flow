@@ -22,7 +22,7 @@ def git_revision(revision: str) -> str:
     # dynamic-command scanners cannot track the fullmatch guard above.
     return subprocess.check_output(  # nosec B603  # nosemgrep
         [  # nosemgrep
-            str(Path(executable).resolve()),
+            str(Path(executable).absolute()),
             "rev-parse",
             "--verify",
             revision,
