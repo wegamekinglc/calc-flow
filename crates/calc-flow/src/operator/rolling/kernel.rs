@@ -1010,6 +1010,19 @@ impl RollingKernelState {
     }
 
     fn resolve_entities(&mut self, keys: &[Vec<u8>], groups: &[TypedGroupPlan]) -> Vec<usize> {
+        // Resident entities already own their window capacities. Counting
+        // their rows again cannot improve allocation sizing.
+        let mut resolved = Vec::with_capacity(keys.len());
+        for key in keys {
+            let Some(&entity_id) = self.entities.get(key) else {
+                return self.resolve_new_entities(keys, groups);
+            };
+            resolved.push(entity_id);
+        }
+        resolved
+    }
+
+    fn resolve_new_entities(&mut self, keys: &[Vec<u8>], groups: &[TypedGroupPlan]) -> Vec<usize> {
         let mut counts = HashMap::<&[u8], usize>::new();
         for key in keys {
             let count = counts.entry(key.as_slice()).or_default();
@@ -3096,6 +3109,21 @@ fn nanos(duration: Duration) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn resident_entity_resolution_allocates_only_the_result() {
+        let keys = (0_u8..64).map(|key| vec![key]).collect::<Vec<_>>();
+        let mut state = RollingKernelState::default();
+        let expected = state.resolve_entities(&keys, &[]);
+        let measured = allocation_counter::measure(|| {
+            assert_eq!(state.resolve_entities(&keys, &[]), expected);
+        });
+        assert_eq!(measured.count_total, 1);
+        let mixed = vec![vec![63], vec![64], vec![64], vec![0]];
+        assert_eq!(state.resolve_entities(&mixed, &[]), vec![63, 64, 64, 0]);
+        assert_eq!(state.states.len(), 65);
+        assert!(state.resolve_entities(&[], &[]).is_empty());
+    }
+
     use std::sync::Arc;
 
     use datafusion::arrow::{

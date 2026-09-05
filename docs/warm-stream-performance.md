@@ -22,7 +22,11 @@ validation, worker IPC, checkpoints, and shutdown remain outside timing.
 
 Baseline and candidate execute the same graph and input values in separate
 persistent Python processes. The controller alternates AB/BA order; both
-workers advance through the same appended row identities. Nothing prefetches
+workers advance through the same appended row identities. The current controller
+creates a fresh process pair for each scenario and shuffles scenario order with
+the recorded `--seed` (default `20260905`). The older two-round report used
+persistent workers across scenarios; its results are not silently relabeled.
+Nothing prefetches
 extra source events to improve the timing. Scheduled checkpoints are set to a
 24-hour interval so they do not overlap these bounded runs.
 
@@ -64,6 +68,59 @@ uv run --extra benchmark python scripts/profile_warm_stream.py compare \
 The native warm-state workload and its regression tests do not require TA-Lib.
 That optional package is imported only when the separate cross-library
 comparison executes TA-Lib or checks its version.
+
+### Small and sparse appends
+
+Pass `--append-entities` to select a separate sparse workload. History still
+contains all 64 entities; increments cycle over the selected active entities.
+Each appended row gets its own increasing timestamp, so even a one-row append
+can legally advance its watermark without closing a later row's timestamp.
+Prices retain the same deterministic sequence-based generator. The oracle
+uses only each entity's last window context, and is independently checked
+against complete per-entity histories across the warm/incremental boundary.
+
+```bash
+uv run --extra benchmark python scripts/profile_warm_stream.py compare \
+  --baseline-build target/warm-baseline-wheels/build.json \
+  --candidate-build target/warm-candidate-wheels/build.json \
+  --history-rows 1024000 --append-rows 1 4 16 64 \
+  --append-entities 1 4 16 64 --samples 30 \
+  --output target/small-appends.json
+```
+
+The sparse matrix is the Cartesian product of history, append and active-entity
+counts. Omitting `--append-entities` preserves the original seven-point matrix
+and complete-tick timestamps. These layouts must not be pooled together.
+
+### Opt-in callback diagnostics
+
+The private native job diagnostics are disabled by default. Enabling them
+records up to 1,024 completed or cancelled callback requests, evicts the oldest
+records at capacity and reports how many were dropped. Draining returns JSON
+and resets the buffer/counter; terminal root cleanup does not erase records.
+No Python objects are retained by this diagnostic buffer.
+
+```bash
+uv run --extra benchmark python scripts/profile_warm_stream.py diagnose \
+  --build target/warm-candidate-wheels/build.json \
+  --history-rows 1024000 --append-rows 64 --samples 30 --forced-gc \
+  --output target/callback-diagnostics.json
+```
+
+Offsets are nanoseconds relative to the start of one bridge call:
+`attached_ns` marks interpreter attachment; `queued_ns` follows callback
+creation, awaitability checks and scheduler construction; `dispatched_ns`
+marks entry into the captured Python loop; `completed_ns` precedes the
+completion-channel send; `elapsed_ns` marks Rust's return or cancellation.
+Missing boundaries stay null, with explicit ready/completed/failed/cancelled
+outcomes. Queue time includes submission and dispatch; completed-to-elapsed
+includes Rust resumption and cleanup. Source decoding happens afterwards.
+
+These are instrumented wall intervals, not CPU samples or authoritative
+speedup evidence. A prearmed source request may wait across input construction,
+GC, worker IPC or shutdown. Therefore its callback lifetime must not be summed
+as if it belonged entirely to one timed append. Run diagnostics separately
+from uninstrumented paired comparisons.
 
 The build command runs Maturin in release mode, verifies that source identity
 did not change during the build, and records the source, lockfile, compiler,

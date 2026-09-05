@@ -1,5 +1,5 @@
 use std::sync::{
-    Arc,
+    Arc, OnceLock,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
@@ -15,6 +15,8 @@ use crate::config::PythonRoot;
 
 mod dispatch;
 use dispatch::PythonAwaitDispatcher;
+mod profile;
+use profile::{CallbackProbe, CallbackProfile, CallbackTrace};
 
 fn provider_error(name: &str, error: impl std::fmt::Display) -> calc_flow::CalcFlowError {
     calc_flow::CalcFlowError::ExternalProvider {
@@ -28,6 +30,7 @@ fn provider_error(name: &str, error: impl std::fmt::Display) -> calc_flow::CalcF
 pub(crate) struct PythonAwaitRegistry {
     pending: AtomicU64,
     idle: tokio::sync::Notify,
+    profile: OnceLock<Arc<CallbackProfile>>,
 }
 
 pub(crate) struct PythonAsyncContext {
@@ -70,7 +73,20 @@ impl PythonAwaitRegistry {
         Self {
             pending: AtomicU64::new(0),
             idle: tokio::sync::Notify::new(),
+            profile: OnceLock::new(),
         }
+    }
+
+    pub(crate) fn enable_profiling(&self) {
+        self.profile
+            .get_or_init(|| Arc::new(CallbackProfile::default()));
+    }
+
+    pub(crate) fn take_profile(&self) -> serde_json::Result<String> {
+        self.profile.get().map_or_else(
+            || Ok("{\"records\":[],\"dropped\":0}".into()),
+            |profile| profile.take_json(),
+        )
     }
 
     fn retain(self: &Arc<Self>) -> PythonAwaitLease {
@@ -170,6 +186,7 @@ impl PythonAwaitState {
 struct PythonAwaitCompletion {
     sender: Mutex<Option<tokio::sync::oneshot::Sender<PyResult<Py<PyAny>>>>>,
     lease: Mutex<Option<PythonAwaitLease>>,
+    trace: Option<Arc<CallbackTrace>>,
 }
 
 impl PythonAwaitCompletion {
@@ -178,6 +195,9 @@ impl PythonAwaitCompletion {
         let lease = self.lease.lock().take();
         drop(lease);
         if let Some(sender) = sender {
+            if let Some(trace) = &self.trace {
+                trace.completed();
+            }
             let _ = sender.send(result);
         }
     }
@@ -350,6 +370,9 @@ impl PythonAwaitScheduler {
 #[pymethods]
 impl PythonAwaitScheduler {
     fn __call__(&mut self, py: Python<'_>) {
+        if let Some(trace) = &self.completion.trace {
+            trace.dispatched();
+        }
         let result = self.schedule(py);
         let context = self.context.take();
         drop(context);
@@ -410,98 +433,72 @@ impl Drop for PythonAwaitCancelGuard {
     }
 }
 
-pub(crate) async fn resolve_python_in_context(
-    value: Py<PyAny>,
-    callback_name: &str,
-    awaits: &Arc<PythonAwaitRegistry>,
-    context: &Arc<PythonAsyncContext>,
-) -> calc_flow::Result<Py<PyAny>> {
-    resolve_python_with_context(value, callback_name, awaits, Some(context)).await
-}
-
 type PythonAwaitReceiver = tokio::sync::oneshot::Receiver<PyResult<Py<PyAny>>>;
 
 fn is_python_awaitable(
+    py: Python<'_>,
     value: &Py<PyAny>,
-    context: Option<&Arc<PythonAsyncContext>>,
+    context: &PythonAsyncContext,
 ) -> PyResult<bool> {
-    Python::attach(|py| {
-        if let Some(context) = context {
-            return context
-                .is_awaitable
-                .object()
-                .bind(py)
-                .call1((value.bind(py),))?
-                .is_truthy();
-        }
-        py.import(pyo3::intern!(py, "inspect"))?
-            .getattr(pyo3::intern!(py, "isawaitable"))?
-            .call1((value.bind(py),))?
-            .is_truthy()
-    })
+    context
+        .is_awaitable
+        .object()
+        .bind(py)
+        .call1((value.bind(py),))?
+        .is_truthy()
 }
 
 fn python_async_context(
     py: Python<'_>,
-    context: Option<&Arc<PythonAsyncContext>>,
+    context: &PythonAsyncContext,
 ) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
-    if let Some(context) = context {
-        return Ok((
-            context.event_loop.object().clone_ref(py),
-            context
-                .context
-                .object()
-                .bind(py)
-                .call_method0(pyo3::intern!(py, "copy"))?
-                .unbind(),
-        ));
-    }
-    let locals = pyo3_async_runtimes::tokio::get_current_locals(py)?;
-    Ok((locals.event_loop(py).unbind(), locals.context(py).unbind()))
+    Ok((
+        context.event_loop.object().clone_ref(py),
+        context
+            .context
+            .object()
+            .bind(py)
+            .call_method0(pyo3::intern!(py, "copy"))?
+            .unbind(),
+    ))
 }
 
 fn schedule_python_await(
+    py: Python<'_>,
     value: Py<PyAny>,
     awaits: &Arc<PythonAwaitRegistry>,
-    context: Option<&Arc<PythonAsyncContext>>,
+    context: &PythonAsyncContext,
+    trace: Option<&Arc<CallbackTrace>>,
 ) -> PyResult<(PythonAwaitReceiver, PythonAwaitCancelGuard)> {
-    Python::attach(|py| {
-        let (event_loop, python_context) = python_async_context(py, context)?;
-        let state = Arc::new(PythonAwaitState::new(event_loop.clone_ref(py)));
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        let completion = Arc::new(PythonAwaitCompletion {
-            sender: Mutex::new(Some(sender)),
-            lease: Mutex::new(Some(awaits.retain())),
-        });
-        let scheduler = Py::new(
-            py,
-            PythonAwaitScheduler {
-                awaitable: Some(value),
-                context: Some(python_context.clone_ref(py)),
-                state: Some(Arc::clone(&state)),
-                completion,
-            },
-        )?;
-        if let Some(context) = context {
-            PythonAwaitDispatcher::submit(
-                context
-                    .dispatcher
-                    .object()
-                    .bind(py)
-                    .cast::<PythonAwaitDispatcher>()?,
-                scheduler,
-            )?;
-        } else {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item(pyo3::intern!(py, "context"), python_context)?;
-            event_loop.bind(py).call_method(
-                pyo3::intern!(py, "call_soon_threadsafe"),
-                (scheduler,),
-                Some(&kwargs),
-            )?;
-        }
-        Ok((receiver, PythonAwaitCancelGuard { state: Some(state) }))
-    })
+    let (event_loop, python_context) = python_async_context(py, context)?;
+    let state = Arc::new(PythonAwaitState::new(event_loop.clone_ref(py)));
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let completion = Arc::new(PythonAwaitCompletion {
+        sender: Mutex::new(Some(sender)),
+        lease: Mutex::new(Some(awaits.retain())),
+        trace: trace.cloned(),
+    });
+    let scheduler = Py::new(
+        py,
+        PythonAwaitScheduler {
+            awaitable: Some(value),
+            context: Some(python_context.clone_ref(py)),
+            state: Some(Arc::clone(&state)),
+            completion,
+        },
+    )?;
+    if let Some(trace) = trace {
+        trace.queued();
+    }
+    PythonAwaitDispatcher::submit(
+        context
+            .dispatcher
+            .object()
+            .bind(py)
+            .cast::<PythonAwaitDispatcher>()?,
+        scheduler,
+    )?;
+    Ok((receiver, PythonAwaitCancelGuard { state: Some(state) }))
 }
 
 async fn await_python_result(
@@ -517,22 +514,61 @@ async fn await_python_result(
     ))
 }
 
-async fn resolve_python_with_context(
-    value: Py<PyAny>,
+enum PreparedPythonCall {
+    Ready(Py<PyAny>),
+    Pending(PythonAwaitReceiver, PythonAwaitCancelGuard),
+}
+
+pub(crate) async fn call_python_in_context(
+    callback: impl FnOnce(Python<'_>) -> calc_flow::Result<Py<PyAny>> + Send,
     callback_name: &str,
     awaits: &Arc<PythonAwaitRegistry>,
-    context: Option<&Arc<PythonAsyncContext>>,
+    context: &PythonAsyncContext,
 ) -> calc_flow::Result<Py<PyAny>> {
-    if !is_python_awaitable(&value, context)
-        .map_err(|error| provider_error(callback_name, error))?
-    {
-        return Ok(value);
+    let mut probe = CallbackProbe::new(awaits.profile.get(), callback_name);
+    let prepared = Python::attach(|py| {
+        if let Some(trace) = &probe.trace {
+            trace.attached();
+        }
+        let value = callback(py)?;
+        if !is_python_awaitable(py, &value, context)
+            .map_err(|error| provider_error(callback_name, error))?
+        {
+            return Ok(PreparedPythonCall::Ready(value));
+        }
+        let (receiver, cancellation) =
+            schedule_python_await(py, value, awaits, context, probe.trace.as_ref())
+                .map_err(|error| provider_error(callback_name, error))?;
+        Ok(PreparedPythonCall::Pending(receiver, cancellation))
+    });
+    finish_python_call(prepared, &mut probe, callback_name).await
+}
+
+async fn finish_python_call(
+    prepared: calc_flow::Result<PreparedPythonCall>,
+    probe: &mut CallbackProbe,
+    callback_name: &str,
+) -> calc_flow::Result<Py<PyAny>> {
+    match prepared {
+        Ok(PreparedPythonCall::Ready(value)) => {
+            probe.finish("ready");
+            Ok(value)
+        }
+        Ok(PreparedPythonCall::Pending(receiver, mut cancellation)) => {
+            let result = await_python_result(receiver, &mut cancellation).await;
+            cancellation.disarm();
+            probe.finish(if result.is_ok() {
+                "completed"
+            } else {
+                "failed"
+            });
+            result.map_err(|error| provider_error(callback_name, error))
+        }
+        Err(error) => {
+            probe.finish("failed");
+            Err(error)
+        }
     }
-    let (receiver, mut cancellation) = schedule_python_await(value, awaits, context)
-        .map_err(|error| provider_error(callback_name, error))?;
-    let result = await_python_result(receiver, &mut cancellation).await;
-    cancellation.disarm();
-    result.map_err(|error| provider_error(callback_name, error))
 }
 
 pub(crate) fn python_json(
@@ -563,6 +599,49 @@ mod tests {
     use pyo3::types::PyDict;
 
     use super::*;
+
+    #[test]
+    fn callback_profile_keeps_ready_and_failed_outcomes_distinct() {
+        Python::initialize();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let profile = Arc::new(CallbackProfile::default());
+        let value = Python::attach(|py| PyDict::new(py).into_any().unbind());
+        let calls = [
+            Ok(PreparedPythonCall::Ready(value)),
+            Err(provider_error("preparation", "call failed")),
+            {
+                let (sender, receiver) = tokio::sync::oneshot::channel();
+                sender
+                    .send(Err(PyRuntimeError::new_err("await failed")))
+                    .unwrap();
+                Ok(PreparedPythonCall::Pending(
+                    receiver,
+                    PythonAwaitCancelGuard { state: None },
+                ))
+            },
+        ];
+        for (index, prepared) in calls.into_iter().enumerate() {
+            let mut probe = CallbackProbe::new(Some(&profile), "test");
+            let result = runtime.block_on(finish_python_call(prepared, &mut probe, "test"));
+            assert_eq!(result.is_ok(), index == 0);
+            if index == 1 {
+                assert!(
+                    matches!(result, Err(calc_flow::CalcFlowError::ExternalProvider { name, .. }) if name == "preparation")
+                );
+            }
+        }
+        let result: serde_json::Value =
+            serde_json::from_str(&profile.take_json().unwrap()).unwrap();
+        let outcomes = result["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|record| record["outcome"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(outcomes, vec!["ready", "failed", "failed"]);
+    }
 
     #[pyfunction]
     fn make_test_scheduler(
@@ -636,6 +715,7 @@ asyncio.run(exercise())
                 completion: Arc::new(PythonAwaitCompletion {
                     sender: Mutex::new(Some(sender)),
                     lease: Mutex::new(None),
+                    trace: None,
                 }),
             };
             scheduler.schedule(py).unwrap();
@@ -817,6 +897,7 @@ asyncio.run(exercise())
                 completion: Arc::new(PythonAwaitCompletion {
                     sender: Mutex::new(Some(sender)),
                     lease: Mutex::new(None),
+                    trace: None,
                 }),
             };
             scheduler.schedule(py).unwrap();
@@ -831,6 +912,7 @@ asyncio.run(exercise())
         Arc::new(PythonAwaitCompletion {
             sender: Mutex::new(Some(sender)),
             lease: Mutex::new(None),
+            trace: None,
         })
     }
 
@@ -842,7 +924,7 @@ asyncio.run(exercise())
         for _ in 0..count {
             let value = callback.call0()?.unbind();
             let (_receiver, mut cancellation) =
-                schedule_python_await(value, &awaits, Some(&context))?;
+                schedule_python_await(py, value, &awaits, &context, None)?;
             cancellation.disarm();
         }
         Ok(())

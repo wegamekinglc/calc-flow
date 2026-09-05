@@ -137,6 +137,7 @@ proxy = LoopProxy()
                 completion: Arc::new(PythonAwaitCompletion {
                     sender: Mutex::new(Some(sender)),
                     lease: Mutex::new(Some(registry.retain())),
+                    trace: None,
                 }),
             },
         )

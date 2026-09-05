@@ -17,6 +17,36 @@ from scripts.profile_warm_stream import matrix_points, paired_summary
 
 
 class WarmProfileTests(unittest.TestCase):
+    def test_sparse_matrix_is_seeded_and_keeps_layout_explicit(self) -> None:
+        args = SimpleNamespace(
+            history_rows=[128, 256],
+            append_rows=[1, 4],
+            append_entities=[1, 4],
+            indicators=["rolling_mean"],
+            gc_modes=["forced", "normal"],
+            seed=7,
+        )
+        cases = profile.matrix_cases(args)
+        self.assertEqual(len(cases), 16)
+        self.assertEqual(cases, profile.matrix_cases(args))
+        args.seed = 8
+        self.assertNotEqual(cases, profile.matrix_cases(args))
+        self.assertEqual({config["append_entities"] for config, _ in cases}, {1, 4})
+        self.assertEqual({config["history_rows"] for config, _ in cases}, {128, 256})
+
+    def test_original_matrix_never_silently_uses_sparse_timestamps(self) -> None:
+        args = SimpleNamespace(
+            history_rows=profile.HISTORY_ROWS,
+            append_rows=profile.APPEND_ROWS,
+            append_entities=None,
+            indicators=["rolling_mean", "dual_sma_spread"],
+            gc_modes=["forced", "normal"],
+            seed=7,
+        )
+        cases = profile.matrix_cases(args)
+        self.assertEqual(len(cases), 28)
+        self.assertTrue(all("append_entities" not in config for config, _ in cases))
+
     def test_phase_summary_preserves_conversion_as_a_subset(self) -> None:
         first = {
             "seconds": 0.010,
@@ -123,6 +153,22 @@ class WarmProfileTests(unittest.TestCase):
 
 
 class WarmProcessTests(unittest.IsolatedAsyncioTestCase):
+    async def test_fresh_case_closes_both_workers_on_measurement_failure(self) -> None:
+        workers = [SimpleNamespace(close=AsyncMock()) for _ in range(2)]
+        with (
+            patch.object(profile.Worker, "start", AsyncMock(side_effect=workers)),
+            patch.object(profile, "_worker_environments", AsyncMock(return_value=[])),
+            patch.object(
+                profile,
+                "_measure_case",
+                AsyncMock(side_effect=ValueError("invalid sample")),
+            ),
+            self.assertRaisesRegex(ValueError, "invalid sample"),
+        ):
+            await profile._fresh_case([{}, {}], {}, 2, False, Path("target"))
+        for worker in workers:
+            worker.close.assert_awaited_once()
+
     async def test_worker_fingerprint_rejects_a_different_loaded_native_module(
         self,
     ) -> None:

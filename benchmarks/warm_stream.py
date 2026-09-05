@@ -140,12 +140,40 @@ class _QueueSink:
         return await asyncio.wait_for(self._tables.get(), timeout=timeout)
 
 
-def _prepared_events(start: int, rows: int, entities: int) -> tuple[Data, Watermark]:
+def _input_table(config: ScenarioConfig, start: int, rows: int) -> pa.Table:
+    table = _segment(start, rows, config.entities)
+    if config.append_entities is None or start + rows <= config.history_rows:
+        return table
+    sequence = np.arange(start, start + rows, dtype=np.uint64)
+    appended = sequence >= config.history_rows
+    # Sparse appends have distinct timestamps, so a partial entity tick cannot
+    # close the timestamp of a later append before that append has arrived.
+    positions = np.where(appended, sequence, sequence // config.entities)
+    entity_index = np.where(
+        appended,
+        (sequence.astype(np.int64) - config.history_rows) % config.append_entities,
+        sequence % config.entities,
+    ).astype(np.int64)
+    symbols = np.asarray([f"S{index:03d}" for index in range(config.entities)])
+    table = table.set_column(
+        0,
+        SCHEMA.field(0),
+        pa.array(
+            BASE_MICROS + positions.astype(np.int64) * np.int64(1_000_000),
+            type=SCHEMA.field(0).type,
+        ),
+    )
+    return table.set_column(2, SCHEMA.field(2), pa.array(symbols[entity_index]))
+
+
+def _prepared_events(
+    config: ScenarioConfig, start: int, rows: int
+) -> tuple[Data, Watermark]:
     end = start + rows
     cursor = Cursor(end.to_bytes(8, "big"), {"offset": end})
-    data = Data(Batch.from_pyarrow(_segment(start, rows, entities)), cursor)
-    watermark_position = (end - 1) // entities
-    watermark = Watermark(BASE + timedelta(seconds=watermark_position))
+    table = _input_table(config, start, rows)
+    data = Data(Batch.from_pyarrow(table), cursor)
+    watermark = Watermark(table["event_time"][-1].as_py())
     return data, watermark
 
 
@@ -169,6 +197,8 @@ def _expected(
     start: int,
     rows: int,
 ) -> np.ndarray:
+    if config.append_entities is not None and start >= config.history_rows:
+        return _sparse_expected(config, start, rows)
     context_rows = min(start, (config.window - 1) * config.entities)
     context_start = start - context_rows
     sequence = np.arange(context_start, start + rows, dtype=np.uint64)
@@ -185,6 +215,44 @@ def _expected(
             prices, entities=config.entities, window=config.window
         )
     return values[context_rows:]
+
+
+def _entity_context(config: ScenarioConfig, first: int, entity: int) -> np.ndarray:
+    active = config.append_entities
+    previous = (first - config.history_rows - entity) // active
+    appended = min(config.window - 1, previous)
+    warm = min(config.window - 1 - appended, config.history_rows // config.entities)
+    last_warm = config.history_rows - config.entities + entity
+    return np.concatenate(
+        (
+            np.arange(
+                last_warm - (warm - 1) * config.entities,
+                last_warm + 1,
+                config.entities,
+                dtype=np.uint64,
+            ),
+            np.arange(first - appended * active, first, active, dtype=np.uint64),
+        )
+    )
+
+
+def _sparse_expected(config: ScenarioConfig, start: int, rows: int) -> np.ndarray:
+    sequence = np.arange(start, start + rows, dtype=np.uint64)
+    entities = (sequence - config.history_rows) % config.append_entities
+    expected = np.empty(rows, dtype=np.float64)
+    for entity in np.unique(entities):
+        positions = np.flatnonzero(entities == entity)
+        current = sequence[positions]
+        context = _entity_context(config, int(current[0]), int(entity))
+        prices = _prices(np.concatenate((context, current)), config.entities)
+        slow = expected_rolling_mean(prices, entities=1, window=config.window)
+        values = (
+            expected_rolling_mean(prices, entities=1, window=config.fast_window) - slow
+            if config.indicator == "dual_sma_spread"
+            else slow
+        )
+        expected[positions] = values[len(context) :]
+    return expected
 
 
 def _validate_output(
@@ -204,7 +272,7 @@ def _validate_output(
     wanted_sequence = np.arange(start, start + rows, dtype=np.uint64)
     if not np.array_equal(sequence[order], wanted_sequence):
         raise RuntimeError("stream output sequence does not match appended rows")
-    if not table.select(SCHEMA.names).equals(_segment(start, rows, config.entities)):
+    if not table.select(SCHEMA.names).equals(_input_table(config, start, rows)):
         raise RuntimeError("stream output identity columns changed")
     actual = table[output_column].combine_chunks().to_numpy(zero_copy_only=False)[order]
     expected = _expected(config, start=start, rows=rows)
@@ -251,6 +319,7 @@ class ScenarioConfig:
     window: int = 20
     fast_window: int = 5
     history_segment_rows: int = 64_000
+    append_entities: int | None = None
 
     def __post_init__(self) -> None:
         sizes = (
@@ -263,14 +332,15 @@ class ScenarioConfig:
         )
         if any(type(value) is not int or value <= 0 for value in sizes):
             raise ValueError("scenario sizes must be positive integers")
-        if any(
-            value % self.entities
-            for value in (
-                self.history_rows,
-                self.append_rows,
-                self.history_segment_rows,
-            )
+        if self.append_entities is not None and (
+            type(self.append_entities) is not int
+            or not 1 <= self.append_entities <= self.entities
         ):
+            raise ValueError("append_entities must be between one and entities")
+        ticks = (self.history_rows, self.history_segment_rows)
+        if self.append_entities is None:
+            ticks += (self.append_rows,)
+        if any(value % self.entities for value in ticks):
             raise ValueError(
                 "history and increments must contain complete entity ticks"
             )
@@ -330,9 +400,7 @@ class WarmScenario:
                 count = min(
                     config.history_segment_rows, config.history_rows - scenario.position
                 )
-                data, watermark = _prepared_events(
-                    scenario.position, count, config.entities
-                )
+                data, watermark = _prepared_events(config, scenario.position, count)
                 table, _elapsed = await _push_and_receive(source, sink, data, watermark)
                 scenario.validate(table, count)
                 scenario.position += count
@@ -355,9 +423,7 @@ class WarmScenario:
 
     async def sample(self, *, collect_gc: bool) -> dict[str, Any]:
         config = self.config
-        data, watermark = _prepared_events(
-            self.position, config.append_rows, config.entities
-        )
+        data, watermark = _prepared_events(config, self.position, config.append_rows)
         if collect_gc:
             gc.collect()
         started = time.perf_counter_ns()

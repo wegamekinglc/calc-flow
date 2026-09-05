@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import platform
+import random
 import shutil
 import sys
 import tempfile
@@ -58,6 +59,28 @@ def matrix_points(
             *((1_024_000, rows) for rows in append_rows),
         }
     )
+
+
+def matrix_cases(args: argparse.Namespace) -> list[tuple[dict[str, Any], str]]:
+    points = (
+        product(args.history_rows, args.append_rows)
+        if args.append_entities is not None
+        else matrix_points(tuple(args.history_rows), tuple(args.append_rows))
+    )
+    cases = []
+    for indicator, (history, append), active, mode in product(
+        args.indicators, points, args.append_entities or [None], args.gc_modes
+    ):
+        config = {
+            "history_rows": history,
+            "append_rows": append,
+            "indicator": indicator,
+        }
+        if active is not None:
+            config["append_entities"] = active
+        cases.append((config, mode))
+    random.Random(args.seed).shuffle(cases)
+    return cases
 
 
 def _summary(values: np.ndarray, rows: int) -> dict[str, Any]:
@@ -394,6 +417,7 @@ class WorkerSession:
         self.root = root
         self.scenario = None
         self.count = 0
+        self.profiling = False
 
     async def start(self, config_values: dict[str, Any]) -> dict[str, Any]:
         from benchmarks.warm_stream import ScenarioConfig, WarmScenario
@@ -416,8 +440,13 @@ class WorkerSession:
         import psutil
 
         result = await self.active_scenario().finish()
+        if self.profiling:
+            result["callback_profile"] = json.loads(
+                self.active_scenario().job._inner._take_callback_profile()
+            )
         result["rss_bytes"] = psutil.Process().memory_info().rss
         self.scenario = None
+        self.profiling = False
         return result
 
     async def dispatch(self, message: dict[str, Any]) -> dict[str, Any]:
@@ -432,6 +461,10 @@ class WorkerSession:
                 )
             case "finish":
                 return await self.finish()
+            case "enable_profile":
+                self.active_scenario().job._inner._enable_callback_profiling()
+                self.profiling = True
+                return {"enabled": True}
             case _:
                 raise ValueError("unknown worker operation")
 
@@ -535,9 +568,11 @@ def markdown(report: dict[str, Any]) -> str:
         "",
         "Paired release builds; times include the full Python StreamingRunner path.",
         "",
-        "| Indicator | History | Append | Forced GC | Baseline P50 / P95 ms "
+        "| Indicator | History | Append | Active entities | Forced GC "
+        "| Baseline P50 / P95 ms "
         "| Candidate P50 / P95 ms | Paired speedup (95% CI) |",
-        "| --------- | ------- | ------ | --------- | --------------------- "
+        "| --------- | ------- | ------ | --------------- | --------- "
+        "| --------------------- "
         "| ---------------------- | ----------------------- |",
     ]
     for case in report["cases"]:
@@ -545,7 +580,9 @@ def markdown(report: dict[str, Any]) -> str:
         low, high = case["paired_speedup_ci95"]
         lines.append(
             f"| {config['indicator']} | {config['history_rows']:,} "
-            f"| {config['append_rows']:,} | {case['collect_gc']} | "
+            f"| {config['append_rows']:,} "
+            f"| {config.get('append_entities', 'full tick')} "
+            f"| {case['collect_gc']} | "
             f"{left['p50_seconds'] * 1000:.3f} / {left['p95_seconds'] * 1000:.3f} | "
             f"{right['p50_seconds'] * 1000:.3f} / {right['p95_seconds'] * 1000:.3f} | "
             f"{case['paired_speedup_median']:.2f}x ({low:.2f}–{high:.2f}) |"
@@ -564,9 +601,11 @@ def _phase_markdown(cases: list[dict[str, Any]]) -> list[str]:
         "Conversion is a subset of sink-to-receive and must not be added again.",
         "Independent phase medians need not sum to the total latency median.",
         "",
-        "| Indicator | Append | Build | Enqueue to source | Data to watermark "
+        "| Indicator | Append | Active entities | Build "
+        "| Enqueue to source | Data to watermark "
         "| Watermark to sink | Sink to receive | to_pyarrow subset |",
-        "| --------- | ------ | ----- | ----------------- | ----------------- "
+        "| --------- | ------ | --------------- | ----- "
+        "| ----------------- | ----------------- "
         "| ----------------- | --------------- | ----------------- |",
     ]
     for case in cases:
@@ -580,6 +619,7 @@ def _phase_markdown(cases: list[dict[str, Any]]) -> list[str]:
             )
             lines.append(
                 f"| {config['indicator']} | {config['append_rows']:,} "
+                f"| {config.get('append_entities', 'full tick')} "
                 f"| {side} | {durations} |"
             )
     return lines
@@ -634,8 +674,9 @@ def _new_report(
         ),
         "phase_note": (
             "callback wall intervals overlap operator work; to_pyarrow "
-            "is contained in sink_to_receive; baseline operator "
-            "processing metrics omit watermark handling"
+            "is contained in sink_to_receive; operator counters span "
+            "post-warm through terminal handling, not individual timed samples; "
+            "metric accounting depends on the measured source revision"
         ),
         "gc_note": (
             "forced collection happens before timing; normal_gc does "
@@ -644,54 +685,104 @@ def _new_report(
     }
 
 
-async def _measure_matrix(
-    args: argparse.Namespace, workers: list[Worker]
-) -> list[dict[str, Any]]:
-    points = matrix_points(tuple(args.history_rows), tuple(args.append_rows))
-    cases = []
-    for indicator, (history, append), mode in product(
-        args.indicators, points, args.gc_modes
-    ):
-        config = {
-            "history_rows": history,
-            "append_rows": append,
-            "indicator": indicator,
-        }
-        case = await _measure_case(workers, config, args.samples, mode == "forced")
-        cases.append(case)
-        print(
-            f"{indicator} H={history:,} N={append:,} GC={mode}: "
-            f"{case['paired_speedup_median']:.2f}x",
-            flush=True,
-        )
-    return cases
-
-
-async def compare(args: argparse.Namespace) -> None:
-    manifests = await _compatible_builds((args.baseline_build, args.candidate_build))
-    output = args.output.resolve()
-    output.parent.mkdir(parents=True, exist_ok=True)
+async def _fresh_case(
+    manifests: list[dict[str, Any]],
+    config: dict[str, Any],
+    samples: int,
+    collect_gc: bool,
+    parent: Path,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     workers: list[Worker] = []
-    with tempfile.TemporaryDirectory(
-        prefix="warm-paired-", dir=output.parent
-    ) as temporary:
+    with tempfile.TemporaryDirectory(prefix="warm-paired-", dir=parent) as temporary:
         try:
             for index, manifest in enumerate(manifests):
                 root = Path(temporary) / str(index)
                 root.mkdir()
                 workers.append(await Worker.start(manifest, root))
             environments = await _worker_environments(workers, manifests)
-            report = {
-                **_new_report(manifests, environments, args.samples),
-                "cases": await _measure_matrix(args, workers),
-            }
-            output.write_text(
-                json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8"
-            )
-            output.with_suffix(".md").write_text(markdown(report), encoding="utf-8")
+            case = await _measure_case(workers, config, samples, collect_gc)
+            return case, environments
         finally:
             for worker in workers:
                 await worker.close()
+
+
+async def compare(args: argparse.Namespace) -> None:
+    manifests = await _compatible_builds((args.baseline_build, args.candidate_build))
+    output = args.output.resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    report: dict[str, Any] = {}
+    for config, mode in matrix_cases(args):
+        case, environments = await _fresh_case(
+            manifests, config, args.samples, mode == "forced", output.parent
+        )
+        if not report:
+            report = {
+                **_new_report(manifests, environments, args.samples),
+                "worker_lifetime": "fresh process pair per case",
+                "case_order_seed": args.seed,
+                "callback_profiling": False,
+                "cases": [],
+            }
+        if environments != report["environments"]:
+            raise ValueError("worker fingerprints changed between cases")
+        report["cases"].append(case)
+        print(f"{config} GC={mode}: {case['paired_speedup_median']:.2f}x", flush=True)
+    if not report:
+        raise ValueError("benchmark matrix must not be empty")
+    output.write_text(
+        json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8"
+    )
+    output.with_suffix(".md").write_text(markdown(report), encoding="utf-8")
+
+
+async def diagnose(args: argparse.Namespace) -> None:
+    manifest = await _load_build(args.build)
+    output = args.output.resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    config = {
+        "history_rows": args.history_rows,
+        "append_rows": args.append_rows,
+        "append_entities": args.append_entities,
+        "indicator": args.indicator,
+    }
+    with tempfile.TemporaryDirectory(
+        prefix="warm-diagnostic-", dir=output.parent
+    ) as temporary:
+        worker = await Worker.start(manifest, Path(temporary))
+        try:
+            environments = await _worker_environments(
+                [worker, worker], [manifest, manifest]
+            )
+            await worker.request(operation="start", config=config)
+            await worker.request(operation="enable_profile")
+            samples = []
+            for index in range(args.samples):
+                sample = await worker.request(
+                    operation="sample", collect_gc=args.forced_gc
+                )
+                _validate_sample(sample, args.history_rows + index * args.append_rows)
+                samples.append(sample)
+            terminal = await worker.request(operation="finish")
+        finally:
+            await worker.close()
+    report = {
+        **_new_report([manifest], environments[:1], args.samples),
+        "contract": "warm-callback-diagnostics-v1",
+        "callback_profiling": True,
+        "config": config,
+        "collect_gc": args.forced_gc,
+        "sample_pairs": 0,
+        "samples": samples,
+        "terminal": terminal,
+        "diagnostic_note": "Instrumented wall times; "
+        "not performance evidence or CPU shares. "
+        "Requests may span prearmed source waits, IPC gaps, or terminal controls; "
+        "records are request-relative offsets, not aligned append-stage costs.",
+    }
+    output.write_text(
+        json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8"
+    )
 
 
 def main() -> None:
@@ -708,6 +799,8 @@ def main() -> None:
     paired.add_argument("--samples", type=int, default=30)
     paired.add_argument("--history-rows", type=int, nargs="*", default=HISTORY_ROWS)
     paired.add_argument("--append-rows", type=int, nargs="*", default=APPEND_ROWS)
+    paired.add_argument("--append-entities", type=int, nargs="+")
+    paired.add_argument("--seed", type=int, default=20260905)
     paired.add_argument(
         "--indicators",
         nargs="+",
@@ -722,11 +815,28 @@ def main() -> None:
     )
     worker = commands.add_parser("_worker")
     worker.add_argument("--root", type=Path, required=True)
+    diagnostic = commands.add_parser("diagnose")
+    diagnostic.add_argument("--build", type=Path, required=True)
+    diagnostic.add_argument("--output", type=Path, required=True)
+    diagnostic.add_argument("--history-rows", type=int, default=1_024_000)
+    diagnostic.add_argument("--append-rows", type=int, default=64)
+    diagnostic.add_argument("--append-entities", type=int)
+    diagnostic.add_argument(
+        "--indicator",
+        choices=("rolling_mean", "dual_sma_spread"),
+        default="rolling_mean",
+    )
+    diagnostic.add_argument("--samples", type=int, default=30)
+    diagnostic.add_argument("--forced-gc", action="store_true")
     args = parser.parse_args()
     if args.command == "build":
         asyncio.run(build(args))
     elif args.command == "_worker":
         asyncio.run(worker_main(args.root))
+    elif args.command == "diagnose":
+        if args.samples < 2:
+            parser.error("at least two diagnostic samples are required")
+        asyncio.run(diagnose(args))
     else:
         if args.samples < 2:
             parser.error("at least two paired samples are required")
