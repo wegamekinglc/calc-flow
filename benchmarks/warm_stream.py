@@ -173,7 +173,8 @@ def _prepared_events(
     cursor = Cursor(end.to_bytes(8, "big"), {"offset": end})
     table = _input_table(config, start, rows)
     data = Data(Batch.from_pyarrow(table), cursor)
-    watermark = Watermark(table["event_time"][-1].as_py())
+    micros = table["event_time"][-1].value - int(BASE_MICROS)
+    watermark = Watermark(BASE + timedelta(microseconds=micros))
     return data, watermark
 
 
@@ -310,6 +311,11 @@ def _summary(samples: list[float], rows: int) -> dict[str, Any]:
     }
 
 
+def _validate_append_entities(active: int | None, entities: int) -> None:
+    if active is not None and (type(active) is not int or not 1 <= active <= entities):
+        raise ValueError("append_entities must be between one and entities")
+
+
 @dataclass(frozen=True, slots=True)
 class ScenarioConfig:
     history_rows: int = 1_024_000
@@ -332,11 +338,7 @@ class ScenarioConfig:
         )
         if any(type(value) is not int or value <= 0 for value in sizes):
             raise ValueError("scenario sizes must be positive integers")
-        if self.append_entities is not None and (
-            type(self.append_entities) is not int
-            or not 1 <= self.append_entities <= self.entities
-        ):
-            raise ValueError("append_entities must be between one and entities")
+        _validate_append_entities(self.append_entities, self.entities)
         ticks = (self.history_rows, self.history_segment_rows)
         if self.append_entities is None:
             ticks += (self.append_rows,)

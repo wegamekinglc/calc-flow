@@ -6,6 +6,8 @@ import asyncio
 import json
 import runpy
 import sys
+import zoneinfo
+from datetime import timedelta
 from pathlib import Path
 
 import numpy as np
@@ -13,10 +15,12 @@ import pyarrow as pa
 import pytest
 
 from benchmarks.warm_stream import (
+    BASE,
     ScenarioConfig,
     WarmScenario,
     _expected,
     _input_table,
+    _prepared_events,
     _segment,
     _summary,
     _validate_output,
@@ -138,6 +142,21 @@ def test_sparse_configuration_rejects_invalid_active_entity_counts() -> None:
             ScenarioConfig(append_rows=1, append_entities=count)
 
 
+def test_prepared_watermarks_do_not_need_a_timezone_database(monkeypatch) -> None:
+    def missing_timezone(_name):
+        raise zoneinfo.ZoneInfoNotFoundError("no timezone database")
+
+    monkeypatch.setattr(zoneinfo, "ZoneInfo", missing_timezone)
+    for active, rows in ((None, 64), (1, 1), (64, 4)):
+        config = ScenarioConfig(
+            history_rows=128, append_entities=active, append_rows=rows
+        )
+        data, watermark = _prepared_events(config, 128, rows)
+        assert data.batch.num_rows == rows
+        seconds = (128 + rows - 1) // 64 if active is None else 128 + rows - 1
+        assert watermark.at == BASE + timedelta(seconds=seconds)
+
+
 @pytest.mark.parametrize("indicator", ("rolling_mean", "dual_sma_spread"))
 @pytest.mark.parametrize("active", (1, 4, 16, 64))
 def test_sparse_oracle_matches_full_per_entity_history(indicator, active) -> None:
@@ -145,7 +164,7 @@ def test_sparse_oracle_matches_full_per_entity_history(indicator, active) -> Non
         history_rows=128, append_rows=1, append_entities=active, indicator=indicator
     )
     total = config.history_rows + 32 * active + 7
-    table = _input_table(config, 0, total).to_pydict()
+    table = _input_table(config, 0, total).select(["symbol", "price"]).to_pydict()
     histories: dict[str, list[float]] = {}
     expected = []
     for symbol, price in zip(table["symbol"], table["price"], strict=True):

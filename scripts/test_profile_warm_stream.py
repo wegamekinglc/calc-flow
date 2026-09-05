@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -212,6 +213,7 @@ class WarmProcessTests(unittest.IsolatedAsyncioTestCase):
     async def test_fresh_case_closes_both_workers_on_measurement_failure(self) -> None:
         workers = [SimpleNamespace(close=AsyncMock()) for _ in range(2)]
         with (
+            tempfile.TemporaryDirectory() as temporary,
             patch.object(profile.Worker, "start", AsyncMock(side_effect=workers)),
             patch.object(profile, "_worker_environments", AsyncMock(return_value=[])),
             patch.object(
@@ -222,7 +224,7 @@ class WarmProcessTests(unittest.IsolatedAsyncioTestCase):
             self.assertRaisesRegex(ValueError, "invalid sample"),
         ):
             await profile._fresh_case(
-                [{}, {}], {}, 2, False, profile.WorkerPairOptions(Path("target"))
+                [{}, {}], {}, 2, False, profile.WorkerPairOptions(Path(temporary))
             )
         for worker in workers:
             worker.close.assert_awaited_once()

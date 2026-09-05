@@ -8,7 +8,6 @@ import hashlib
 import json
 import os
 import platform
-import random
 import shutil
 import sys
 import tempfile
@@ -79,8 +78,8 @@ def matrix_cases(args: argparse.Namespace) -> list[tuple[dict[str, Any], str]]:
         if active is not None:
             config["append_entities"] = active
         cases.append((config, mode))
-    random.Random(args.seed).shuffle(cases)
-    return cases
+    order = np.random.default_rng(args.seed).permutation(len(cases))
+    return [cases[int(index)] for index in order]
 
 
 def _summary(values: np.ndarray, rows: int) -> dict[str, Any]:
