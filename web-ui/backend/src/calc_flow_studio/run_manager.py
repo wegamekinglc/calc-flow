@@ -116,6 +116,14 @@ def _teardown_channel(channel: Any) -> None:
         channel.join_thread()
 
 
+def _lookup[T](registry: dict[str, T], key: str, label: str, /) -> T:
+    """Return one registered handle or raise the labeled KeyError."""
+    try:
+        return registry[key]
+    except KeyError as error:
+        raise KeyError(f"{label} {key!r} does not exist") from error
+
+
 def _stream_join_failure_reason(value: object) -> str | None:
     return (
         value
@@ -1743,17 +1751,7 @@ class RunManager:
         )
 
     def _event(self, run_id: str, event_type: str, message: str) -> None:
-        handle = self._require(run_id)
-        handle.events = (
-            *handle.events,
-            RunEvent(
-                sequence=len(handle.events),
-                timestamp=datetime.now(UTC),
-                type=event_type,
-                message=message[:4000],
-            ),
-        )
-        self._event_condition.notify_all()
+        self._emit_event(self._require(run_id), event_type, message[:4000])
 
     def _prune_history(self) -> None:
         if len(self._runs) < self._max_history:
@@ -1770,10 +1768,7 @@ class RunManager:
             self._runs.pop(handle.id, None)
 
     def _require(self, run_id: str) -> _RunHandle:
-        try:
-            return self._runs[run_id]
-        except KeyError as error:
-            raise KeyError(f"run {run_id!r} does not exist") from error
+        return _lookup(self._runs, run_id, "run")
 
     @staticmethod
     def _response(handle: _RunHandle) -> RunResponse:
@@ -1801,6 +1796,16 @@ class RunManager:
         handle.output_queue = None
         handle.monitor = None
         return worker, output_queue, monitor
+
+    @staticmethod
+    def _detach_job_resources(handle: _JobHandle) -> tuple[Any, Any, Any]:
+        """Detach a job's worker, queues, and monitor in one step."""
+        resources = (handle.worker, handle.commands, handle.output_queue)
+        handle.worker = None
+        handle.commands = None
+        handle.output_queue = None
+        handle.monitor = None
+        return resources
 
     def _cleanup_resources(
         self, worker: Any, output_queue: Any, *, terminate: bool
@@ -2032,24 +2037,17 @@ class RunManager:
                 "Job terminated",
                 state=status.value,
             )
-            worker, commands, output_queue = (
-                handle.worker,
-                handle.commands,
-                handle.output_queue,
-            )
-            handle.worker = None
-            handle.commands = None
-            handle.output_queue = None
-            handle.monitor = None
+            worker, commands, output_queue = self._detach_job_resources(handle)
         self._cleanup_job_resources(worker, commands, output_queue, terminate=terminate)
 
-    def _job_event(
+    def _emit_event(
         self,
-        handle: _JobHandle,
+        handle: _RunHandle | _JobHandle,
         event_type: str,
         message: str,
         **progress: object,
     ) -> None:
+        """Append one event to a handle and wake every waiter."""
         handle.events = (
             *handle.events,
             RunEvent(
@@ -2062,11 +2060,17 @@ class RunManager:
         )
         self._event_condition.notify_all()
 
+    def _job_event(
+        self,
+        handle: _JobHandle,
+        event_type: str,
+        message: str,
+        **progress: object,
+    ) -> None:
+        self._emit_event(handle, event_type, message, **progress)
+
     def _require_job(self, job_id: str) -> _JobHandle:
-        try:
-            return self._jobs[job_id]
-        except KeyError as error:
-            raise KeyError(f"job {job_id!r} does not exist") from error
+        return _lookup(self._jobs, job_id, "job")
 
     @staticmethod
     def _job_response(handle: _JobHandle) -> JobResponse:
