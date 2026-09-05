@@ -5,6 +5,14 @@ engine or Studio capabilities.
 
 ## 2026-09
 
+- 2026-09-05: Unify the complete Linux CI benchmark inventory and full-result
+  tables across all Python scales, Rust, Studio, frontend and stream lifecycle.
+  Add SQL/native-stream and DataFusion/Polars/TA-Lib comparisons from 10 to
+  10,000,000 rows, warm-state append cases, sealed release provenance and
+  repeat-confirmed base/head regression gates. Retain informational labels for
+  legacy block comparisons and external references, including raw failure
+  evidence and explicit missing-case reports.
+
 - 2026-09-05: Consolidate Python connector callback preparation into one
   interpreter attachment and skip row-count maps for resident rolling entities.
   Add opt-in bounded callback wall-clock diagnostics and legal sparse-entity

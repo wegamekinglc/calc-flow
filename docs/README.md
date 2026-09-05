@@ -58,7 +58,7 @@ below.
 - **[Examples](../examples/README.md)** — executable v3 Python examples
 - **[Rust examples](../crates/calc-flow/examples/README.md)** — executable
   `calc-flow` crate examples
-- **[Benchmarks](../benchmarks/README.md)** — informational benchmark harness
+- **[Benchmark suite](benchmark-suite.md)** — complete CI results and regression gates
 - **[Streaming engine research](research/2026-08-02-arroyo-risingwave-streaming-research.md)**
   — point-in-time Arroyo/RisingWave architecture research and Calc-Flow
   continuous-runtime recommendations

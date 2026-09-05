@@ -1,0 +1,227 @@
+name: Complete benchmark suite
+on:
+  workflow_call:
+    inputs:
+      baseline_sha:
+        type: string
+        default: ""
+        required: false
+  workflow_dispatch:
+    inputs:
+      baseline_sha:
+        description: Full baseline commit SHA (defaults to the first parent)
+        type: string
+        default: ""
+        required: false
+permissions:
+  contents: read
+env:
+  UV_PROJECT_ENVIRONMENT: target/benchmark-venv
+  UV_CACHE_DIR: ${{ github.workspace }}/target/uv-cache
+  CARGO_INCREMENTAL: "0"
+  CARGO_BUILD_JOBS: "2"
+jobs:
+  prepare:
+    name: Resolve complete benchmark catalog and refs
+    runs-on: ubuntu-latest
+    outputs:
+      base: ${{ steps.refs.outputs.base }}
+      head: ${{ steps.refs.outputs.head }}
+      matrix: ${{ steps.catalog.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - name: Resolve exact baseline and candidate
+        id: refs
+        env:
+          BENCHMARK_BASE_SHA: ${{ inputs.baseline_sha || github.event.pull_request.base.sha || github.event.before }}
+          BENCHMARK_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python -m scripts.benchmark_suite refs --github-output "$GITHUB_OUTPUT"
+      - name: Discover every benchmark shard
+        id: catalog
+        run: python -m scripts.benchmark_suite catalog --github-output "$GITHUB_OUTPUT"
+      - name: Test catalog, summary and workflow contracts
+        run: >-
+          python -m unittest scripts.test_benchmark_suite
+          scripts.test_benchmark_workflow scripts.test_benchmark_normalize
+          scripts.test_benchmark_aggregate scripts.test_benchmark_process
+          scripts.test_benchmark_refs
+          scripts.test_benchmark_rust
+
+  build:
+    name: Release benchmark wheel (${{ matrix.side }})
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        side: [baseline, candidate]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ needs.prepare.outputs.head }}
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ matrix.side == 'baseline' && needs.prepare.outputs.base || needs.prepare.outputs.head }}
+          path: target/source
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        with:
+          workspaces: target/source -> ../release/cargo
+          key: benchmark-${{ matrix.side }}
+      - name: Install identical locked build dependencies
+        run: |
+          uv venv target/benchmark-venv
+          uv pip sync --python target/benchmark-venv/bin/python \
+            --require-hashes benchmarks/requirements.lock
+      - name: Build and seal release wheel
+        run: >-
+          target/benchmark-venv/bin/python -m scripts.benchmark_suite build
+          --source target/source --output target/release
+      - name: Retain release wheel and provenance
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: benchmark-release-${{ matrix.side }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            target/release/*.whl
+            target/release/release.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Retain build diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: benchmark-build-${{ matrix.side }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/release/build.log
+          retention-days: 30
+
+  suite:
+    name: Benchmark ${{ matrix.id }}
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ needs.prepare.outputs.head }}
+          fetch-depth: 0
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ needs.prepare.outputs.base }}
+          path: target/base
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        if: matrix.family == 'frontend'
+        with:
+          node-version: 20.20.0
+      - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
+        if: matrix.family == 'rust'
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        if: matrix.family == 'rust'
+        with:
+          workspaces: . -> target/benchmark-rust-build
+          key: complete-benchmark-rust
+      - name: Install locked benchmark and Studio dependencies
+        run: |
+          uv venv target/benchmark-venv
+          uv pip sync --python target/benchmark-venv/bin/python \
+            --require-hashes benchmarks/requirements.lock
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: benchmark-release-baseline-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/releases/baseline
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: benchmark-release-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/releases/candidate
+      - name: Verify locked dependencies and benchmark adapters
+        if: matrix.id == 'engines-100'
+        run: |
+          uv pip compile pyproject.toml web-ui/backend/pyproject.toml \
+            --all-extras --no-emit-package calc-flow \
+            --no-emit-package calc-flow-studio --generate-hashes \
+            --output-file benchmarks/requirements.lock
+          git diff --exit-code -- benchmarks/requirements.lock
+          target/benchmark-venv/bin/python -m unittest scripts.test_benchmark_release
+          uv pip install --python target/benchmark-venv/bin/python --no-deps \
+            --target target/adapter-site target/releases/candidate/*.whl
+          PYTHONPATH=target/adapter-site:. POLARS_MAX_THREADS=32 \
+            TOKIO_WORKER_THREADS=32 JAX_PLATFORMS=cpu \
+            target/benchmark-venv/bin/python -m pytest \
+            benchmarks/test_engine_comparison.py -q
+      - name: Run all cases and compare versions on this runner
+        env:
+          BENCHMARK_SHARD: ${{ matrix.id }}
+        run: >-
+          target/benchmark-venv/bin/python -m scripts.benchmark_suite run
+          --shard "$BENCHMARK_SHARD"
+          --baseline target/releases/baseline/release.json
+          --candidate target/releases/candidate/release.json
+          --baseline-source target/base
+          --output target/benchmark-results
+      - name: Retain every measured result
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: benchmark-suite-${{ matrix.id }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            target/benchmark-results/**/*.json
+            target/benchmark-results/**/*.jsonl
+            target/benchmark-results/**/*.log
+            target/benchmark-results/**/*.md
+            !target/benchmark-results/**/site/**
+          if-no-files-found: error
+          retention-days: 30
+
+  summary:
+    name: Complete benchmark tables and regression gate
+    if: always()
+    needs: [prepare, build, suite]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        continue-on-error: true
+        with:
+          pattern: benchmark-suite-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/benchmark-inputs
+      - name: Publish the full table, then enforce completeness and regression
+        if: always()
+        env:
+          EXPECTED_BASE: ${{ needs.prepare.outputs.base }}
+          EXPECTED_HEAD: ${{ needs.prepare.outputs.head }}
+        run: >-
+          python -m scripts.benchmark_suite summarize
+          --input target/benchmark-inputs --output target/benchmark-summary
+          --expected-base "$EXPECTED_BASE" --expected-head "$EXPECTED_HEAD"
+          --github-summary "$GITHUB_STEP_SUMMARY"
+      - name: Retain complete consolidated report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: benchmark-complete-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/benchmark-summary
+          if-no-files-found: error
+          retention-days: 30

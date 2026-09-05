@@ -1,14 +1,26 @@
 # Benchmarks
 
-Calc Flow benchmarks use deterministic Arrow and Array API inputs and export
-complete `pytest-benchmark` JSON reports. They are informational until at least
-20 comparable main-branch samples have been collected on stable runners.
+The [unified CI suite](../docs/benchmark-suite.md) runs all four existing Python
+scales, all five Rust bench targets, Studio, frontend and isolated stream
+lifecycle measurements. It adds SQL/native-streaming and external-engine
+comparisons at every decade from 10 to 10,000,000 rows, plus warm-state
+incremental measurements. Every non-documentation Linux PR/main run publishes
+complete Markdown tables and raw artifacts, including failures.
+
+New engine/warm base/head measurements have a same-runner, two-round +5%
+regression gate. Existing suite-block comparisons and external-library timings
+remain informational; their existing specialized correctness/evidence gates
+are preserved. These are different measurement contracts, not interchangeable
+historical samples.
 
 ## Layout
 
 | Path                                               | Contents                                                         |
-| -------------------------------------------------- | ---------------------------------------------------------------- |
+|----------------------------------------------------|------------------------------------------------------------------|
 | `support.py`                                       | Scale selection, metric recording, and identity fingerprints     |
+| `engine_comparison.py`, `engine_stream.py`         | Correctness-gated SQL, native stream and external-engine cases   |
+| `warm_stream.py`                                   | Actual warm StreamingRunner append-to-Arrow measurements         |
+| `requirements.lock`                                | Hash-pinned shared Linux benchmark dependencies                  |
 | `array_support.py`, `test_array_*.py`              | Array API kernel, provider, plan, and ownership scopes           |
 | `symbolic_support.py`, `test_symbolic_baseline.py` | Symbolic baselines, milestone pairs, and stream lifecycle        |
 | `test_datafusion.py`, `test_runtime.py`            | DataFusion operator scenarios and graph fan-out                  |
@@ -102,9 +114,9 @@ them stable, improved, or regressed.
 
 Compare saved reports with `pytest-benchmark` after collecting compatible
 runner samples. Do not compare results across different machines, dependency
-versions, power modes, or benchmark scales. CI publishes these measurements as
-informational artifacts; it does not fail builds on benchmark deltas until at
-least 20 comparable main-branch samples exist on stable runners.
+versions, power modes, or benchmark scales. The unified CI suite publishes
+these array measurements as informational ABBA whole-suite block comparisons.
+It does not promote their deltas to the new engine/warm interleaved gate.
 
 ## Rolling indicator implementation comparison
 
