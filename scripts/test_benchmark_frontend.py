@@ -13,8 +13,9 @@ class BenchmarkFrontendTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory)
             frontend = source / "web-ui"
-            generated = frontend / "target/benchmark-suite/vitest.json"
+            generated = source / "target/benchmark-suite/vitest.json"
             generated.parent.mkdir(parents=True)
+            frontend.mkdir()
             generated.write_text('{"files": []}', encoding="utf-8")
             (frontend / "package-lock.json").write_text("{}", encoding="utf-8")
             output = source / "archived"

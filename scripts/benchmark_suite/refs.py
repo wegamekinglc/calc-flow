@@ -21,12 +21,12 @@ def git_revision(revision: str) -> str:
     # Fixed command, absolute executable, strict revision allowlist, and no shell;
     # dynamic-command scanners cannot track the fullmatch guard above.
     return subprocess.check_output(  # nosec B603  # nosemgrep
-        [
+        [  # nosemgrep
             str(Path(executable).resolve()),
             "rev-parse",
             "--verify",
             revision,
-        ],  # nosemgrep
+        ],
         cwd=ROOT,
         shell=False,
         text=True,

@@ -97,7 +97,7 @@ async def _frontend_run(source: Path, output: Path) -> dict:
         env=child_environment(),
     )
     shutil.copyfile(
-        frontend / "target/benchmark-suite/vitest.json", output / "vitest.json"
+        source / "target/benchmark-suite/vitest.json", output / "vitest.json"
     )
     rows = vitest_rows(output / "vitest.json")
     lock = hashlib.sha256(

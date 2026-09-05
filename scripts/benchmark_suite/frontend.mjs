@@ -4,11 +4,11 @@ import { startVitest } from "vitest/node";
 
 // Installed under each trusted checkout's node_modules/.cache by the adapter.
 // No request-selected module or output path is imported or opened.
-await mkdir("target/benchmark-suite", { recursive: true });
+await mkdir("../target/benchmark-suite", { recursive: true });
 const context = await startVitest("benchmark", [], {
   root: process.cwd(),
   watch: false,
-  benchmark: { includeSamples: true, outputJson: "target/benchmark-suite/vitest.json" },
+  benchmark: { includeSamples: true, outputJson: "../target/benchmark-suite/vitest.json" },
 });
 try {
   await retainSamples(context);
@@ -33,12 +33,12 @@ async function retainSamples(context) {
   const entries = [];
   for (const file of context.state.getFiles()) collect(file, entries);
   const samples = new Map(entries);
-  const report = JSON.parse(await readFile("target/benchmark-suite/vitest.json", "utf8"));
+  const report = JSON.parse(await readFile("../target/benchmark-suite/vitest.json", "utf8"));
   const count = attachSamples(report, samples);
   if (count === 0 || count !== samples.size) {
     throw new Error("Incomplete frontend benchmark inventory");
   }
-  await writeFile("target/benchmark-suite/vitest.json", `${JSON.stringify(report, null, 2)}\n`);
+  await writeFile("../target/benchmark-suite/vitest.json", `${JSON.stringify(report, null, 2)}\n`);
 }
 
 function attachSamples(report, samples) {
