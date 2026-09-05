@@ -1,8 +1,9 @@
-"""Cold StreamingRunner adapter: prebuilt input, real tasks and finalization."""
+"""Ready StreamingRunner adapter: empty state, real tasks and finalization."""
 
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import timedelta
 from pathlib import Path
 
@@ -69,23 +70,63 @@ def stream_events(table: pa.Table, entities: int) -> tuple:
     return (*events, None)
 
 
-class _CollectSink:
+class _ReadySource(_InteractiveSource):
     def __init__(self) -> None:
+        super().__init__(max_batch_rows=BATCH_ROWS)
+        self.ready = asyncio.Event()
+
+    async def next(self) -> Data | Watermark | None:
+        # The first poll proves that the runtime's startup data gate opened.
+        self.ready.set()
+        return await super().next()
+
+
+class _CollectSink:
+    def __init__(self, expected_rows: int) -> None:
+        self.expected_rows = expected_rows
+        self.rows = 0
         self.tables: list[pa.Table] = []
+        self.opened = asyncio.Event()
+        self.complete = asyncio.Event()
 
     async def open(self) -> None:
-        return None
+        self.opened.set()
 
     async def write(self, batch: Batch) -> None:
-        self.tables.append(batch.to_pyarrow())
+        table = batch.to_pyarrow()
+        self.tables.append(table)
+        self.rows += table.num_rows
+        if self.rows >= self.expected_rows:
+            self.complete.set()
 
     async def close(self) -> None:
         return None
 
 
-async def run_stream(plan, events: tuple, root: Path) -> pa.Table:
-    source = _InteractiveSource(max_batch_rows=BATCH_ROWS)
-    sink = _CollectSink()
+async def _measure_ready(
+    source: _ReadySource, sink: _CollectSink, events: tuple
+) -> tuple[pa.Table, float]:
+    await asyncio.wait_for(source.ready.wait(), timeout=30)
+    if not source.opened.is_set() or not sink.opened.is_set() or sink.rows:
+        raise RuntimeError("stream must be ready with empty state before timing")
+    started = time.perf_counter_ns()
+    for event in events:
+        await source.push(event)
+    await asyncio.wait_for(sink.complete.wait(), timeout=600)
+    if sink.rows != sink.expected_rows:
+        raise RuntimeError("stream output row count differs from the timed workload")
+    table = pa.concat_tables(sink.tables)
+    return table, (time.perf_counter_ns() - started) / 1e9
+
+
+async def run_stream(
+    plan, events: tuple, root: Path, expected_rows: int
+) -> tuple[pa.Table, float]:
+    if not events or events[-1] is not None:
+        raise ValueError("stream input must end with an EOF marker")
+    timed_events = events[:-1]
+    source = _ReadySource()
+    sink = _CollectSink(expected_rows)
     job = await StreamingRunner(
         plan,
         {"input": SourceBinding(source, watermark_policy=SourceProvidedWatermarks())},
@@ -97,11 +138,14 @@ async def run_stream(plan, events: tuple, root: Path) -> pa.Table:
         ),
     ).start_async()
     try:
-        for event in events:
-            await source.push(event)
+        table, seconds = await _measure_ready(source, sink, timed_events)
+        # Complete and verify the job, but do not time EOF/shutdown bookkeeping.
+        await source.push(None)
         outcome = await asyncio.wait_for(job.wait_async(), timeout=600)
         if outcome.state != "completed":
             raise RuntimeError(f"stream failed: {outcome.errors}")
-        return pa.concat_tables(sink.tables)
+        if sink.rows != expected_rows:
+            raise RuntimeError("stream output row count changed after the timed result")
+        return table, seconds
     finally:
         await job.cancel_async()

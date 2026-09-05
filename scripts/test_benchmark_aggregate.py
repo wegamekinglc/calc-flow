@@ -87,6 +87,19 @@ class BenchmarkAggregateTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 validate_fragment(report, BASE, HEAD)
 
+    def test_startup_inclusive_stream_evidence_is_not_comparable(self):
+        report = fragment()
+        case = next(c for c in report["cases"] if c["backend"] == "calc-flow-stream")
+        case["scope"] = "runner-start-to-drain-arrow"
+        with self.assertRaisesRegex(ValueError, "dimensions"):
+            validate_fragment(report, BASE, HEAD)
+
+    def test_startup_inclusive_contract_cannot_be_relabelled_as_ready(self):
+        report = fragment()
+        report["contract"] = "calc-flow-benchmark-suite-v1"
+        with self.assertRaisesRegex(ValueError, "contract"):
+            validate_fragment(report, BASE, HEAD)
+
     def test_invalid_allocation_values_fail_the_gate(self):
         for value in (-1, float("nan"), True, "0"):
             row = measured_case(

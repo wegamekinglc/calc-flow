@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 ROW_SCALES = tuple(10**power for power in range(1, 8))
-LEGACY_SCALES = ("overhead", "small", "standard", "nightly")
+LEGACY_SCALES = ("overhead", "small", "standard")
 SQL_CASES = ("projection", "filter", "group_by", "join", "sma20", "dual_sma")
 ROLLING_CASES = SQL_CASES[-2:]
 CAPABILITIES = {
@@ -15,7 +15,8 @@ CAPABILITIES = {
 }
 THREADS = 32
 BATCH_ROWS = 64_000
-CONTRACT = "calc-flow-benchmark-suite-v1"
+CONTRACT = "calc-flow-benchmark-suite-v2"
+STREAM_SCOPE = "ready-enqueue-to-arrow"
 
 
 def engine_cases(rows: int | None = None) -> list[dict]:
@@ -28,9 +29,7 @@ def engine_cases(rows: int | None = None) -> list[dict]:
             "scenario": scenario,
             "rows": size,
             "scope": (
-                "runner-start-to-drain-arrow"
-                if backend == "calc-flow-stream"
-                else "execute-to-arrow"
+                STREAM_SCOPE if backend == "calc-flow-stream" else "execute-to-arrow"
             ),
         }
         for size in sizes

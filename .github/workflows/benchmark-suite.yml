@@ -167,7 +167,7 @@ jobs:
           PYTHONPATH=target/adapter-site:. POLARS_MAX_THREADS=32 \
             TOKIO_WORKER_THREADS=32 JAX_PLATFORMS=cpu \
             target/benchmark-venv/bin/python -m pytest \
-            benchmarks/test_engine_comparison.py -q
+            benchmarks/test_engine_comparison.py benchmarks/test_engine_stream.py -q
       - name: Run all cases and compare versions on this runner
         env:
           BENCHMARK_SHARD: ${{ matrix.id }}

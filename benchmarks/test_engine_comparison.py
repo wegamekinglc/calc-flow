@@ -21,7 +21,7 @@ def test_sql_queries_reject_unknown_scenario_names():
 
 
 @pytest.mark.parametrize("scenario", ["sma20", "dual_sma"])
-def test_cold_stream_repeated_samples_use_fresh_execution_plans(scenario, tmp_path):
+def test_ready_stream_repeated_samples_use_fresh_execution_plans(scenario, tmp_path):
     case = next(
         case
         for case in engine_cases(10)
@@ -31,6 +31,25 @@ def test_cold_stream_repeated_samples_use_fresh_execution_plans(scenario, tmp_pa
     try:
         for _ in range(3):
             assert runner.sample()["correctness"]["passed"]
+    finally:
+        runner.close()
+
+
+@pytest.mark.parametrize("count", [64_001, 128_000])
+@pytest.mark.parametrize("scenario", ["sma20", "dual_sma"])
+def test_ready_stream_finalizes_every_chunk_before_eof(count, scenario, tmp_path):
+    case = next(
+        case
+        for case in engine_cases(count)
+        if case["backend"] == "calc-flow-stream" and case["scenario"] == scenario
+    )
+    runner = EngineCase(case, tmp_path)
+    try:
+        for _ in range(2):
+            sample = runner.sample()
+            assert sample["seconds"] > 0
+            assert sample["correctness"]["rows"] == count
+            assert sample["correctness"]["finite_rows"] > 0
     finally:
         runner.close()
 

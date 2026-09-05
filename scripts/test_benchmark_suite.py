@@ -56,17 +56,22 @@ class BenchmarkSuiteTests(unittest.TestCase):
         self.assertEqual(len({c["id"] for c in cases}), len(cases))
         self.assertTrue(all(c["rows"] > 0 for c in cases))
 
-    def test_shards_preserve_existing_scales_and_all_benchmark_families(self):
+    def test_shards_exclude_slow_nightly_scale_and_keep_all_families(self):
         matrix = shards()
         self.assertEqual(
             {s["scale"] for s in matrix if s["family"] == "python"},
-            {"overhead", "small", "standard", "nightly"},
+            {"overhead", "small", "standard"},
         )
         self.assertTrue(
             {"python", "engines", "warm", "rust", "studio", "frontend"}
             <= {s["family"] for s in matrix}
         )
         self.assertEqual(len(matrix), len({s["id"] for s in matrix}))
+        self.assertEqual(len(matrix), 21)
+
+    def test_native_stream_matrix_excludes_runner_startup(self):
+        cases = [c for c in engine_cases() if c["backend"] == "calc-flow-stream"]
+        self.assertEqual({c["scope"] for c in cases}, {"ready-enqueue-to-arrow"})
 
     def test_regression_requires_both_confirmation_rounds(self):
         failed = comparison(measured_case(candidate=[[1.1] * 10] * 2))
@@ -134,6 +139,21 @@ class BenchmarkSuiteTests(unittest.TestCase):
         self.assertIn("unsupported", report)
         self.assertIn("Polars", report)
         self.assertIn("missing", report)
+
+    def test_cross_library_table_declares_ready_runner_measurement(self):
+        report = render_report(
+            [measured_case(**case) for case in engine_cases(100)], []
+        )
+        self.assertIn("Native stream (ready)", report)
+        self.assertIn("excludes runner startup", report)
+        self.assertNotIn("includes runner startup/drain", report)
+
+    def test_cross_library_table_rejects_startup_inclusive_stream_samples(self):
+        case = next(c for c in engine_cases(100) if c["backend"] == "calc-flow-stream")
+        report = render_report(
+            [measured_case(**{**case, "scope": "runner-start-to-drain-arrow"})], []
+        )
+        self.assertIn("invalid scope", report.split("## Cross-library comparison")[1])
 
     def test_allocation_metrics_are_not_mislabeled_as_milliseconds(self):
         row = measured_case(

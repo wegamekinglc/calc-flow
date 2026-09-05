@@ -6,7 +6,7 @@ import math
 import statistics
 from collections import Counter
 
-from scripts.benchmark_suite.catalog import CAPABILITIES, SQL_CASES
+from scripts.benchmark_suite.catalog import CAPABILITIES, SQL_CASES, STREAM_SCOPE
 
 THRESHOLD_PERCENT = 5.0
 ROUNDS = 2
@@ -221,7 +221,10 @@ def render_report(cases: list[dict], errors: list[str]) -> str:
                 "## Cross-library comparison",
                 "",
                 "Head P50 milliseconds, same input and materialized Arrow output. "
-                "Native streaming includes runner startup/drain; other columns "
+                "Native streaming starts with empty rolling state on a ready runner "
+                "and excludes runner startup and shutdown; enqueue, tasks/channels, "
+                "rolling, watermarks and Arrow materialization remain timed. "
+                "Other columns "
                 "use their declared execute-to-Arrow boundaries. This is not a "
                 "kernel-only ranking. Ten-row SMA cases have no full-window outputs.",
                 "",
@@ -280,6 +283,8 @@ def _reference_cell(case: dict | None) -> str:
         return "missing"
     if case["status"] != "ok":
         return "error"
+    if case.get("backend") == "calc-flow-stream" and case.get("scope") != STREAM_SCOPE:
+        return "invalid scope"
     try:
         return _milliseconds(comparison(case)["head_p50"])
     except (KeyError, TypeError, ValueError):
@@ -302,7 +307,7 @@ def _cross_library_table(cases: list[dict]) -> str:
         [
             "Rows",
             "Scenario",
-            "Native stream",
+            "Native stream (ready)",
             "Calc Flow SQL",
             "DataFusion",
             "Polars",

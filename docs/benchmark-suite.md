@@ -10,13 +10,15 @@ supplemental nightly/weekly jobs; they are not missing required suite shards.
 ## Complete inventory
 
 The catalog is executable: `python -m scripts.benchmark_suite catalog` emits
-the same 22 shards consumed by CI. No scale is opt-in or nightly-only inside
-this suite. Dynamic pytest, Criterion and Vitest inventories preserve existing
-benchmark cases without maintaining a second hand-written case list.
+the same 21 shards consumed by CI. The slow legacy Python `nightly` scale is
+excluded from this suite, including its daily/manual workflow calls; overhead,
+small and standard remain. The separate engine and warm-state matrices still
+run every decade through 10M rows. Dynamic pytest, Criterion and Vitest
+inventories preserve benchmark cases without a second hand-written case list.
 
 | Family          | Dimensions                                                 | Cases per dimension                                   |
 |-----------------|------------------------------------------------------------|-------------------------------------------------------|
-| Existing Python | overhead 1k, small 10k, standard 100k, nightly 1M          | All existing non-lifecycle pytest benchmarks          |
+| Existing Python | overhead 1k, small 10k, standard 100k                      | All existing non-lifecycle pytest benchmarks          |
 | Engines         | 10, 100, 1k, 10k, 100k, 1M, 10M rows                       | 22 supported engine/scenario combinations             |
 | Warm streaming  | 10, 100, 1k, 10k, 100k, 1M, 10M history; append 64         | SMA(20), SMA(5) minus SMA(20)                         |
 | Warm append     | History 1M; append 1, 4, 16, 64, 640, 6,400, 64,000        | Both indicators; append 64 shared with history matrix |
@@ -67,22 +69,32 @@ first timed cursor is `H0 + append_rows`; subsequent appends advance it.
 Each raw sample records its exact `start_row`, checked against that sequence
 on both sides. Warm cases retain the existing decimal input fixture.
 
-| Scope                 | Included in measurement                                                                    | Excluded                                                   |
-|-----------------------|--------------------------------------------------------------------------------------------|------------------------------------------------------------|
-| Calc Flow SQL         | Plan execution, run session, registration, SQL planning/execution, output `to_pyarrow`     | Input construction, graph compilation, warm-up, validation |
-| Raw DataFusion        | Python `SessionContext`, table registration, SQL planning/collection, Arrow table          | Input construction, query text, warm-up, validation        |
-| Polars                | Lazy-plan collection and Arrow output                                                      | Arrow input conversion, lazy expression construction       |
-| TA-Lib                | Per-entity contiguous copies, SMA calls, composition, Arrow output                         | Input construction and validation                          |
-| Cold native streaming | Runner start, sources/tasks/channels, rolling, watermarks, drain, sink and Arrow output    | Plans and preconstructed input events                      |
-| Warm native streaming | Preconstructed data enqueue, live source/task/channel, rolling/finalization, sink to Arrow | Compilation, runner start, historical preload, validation  |
+| Scope                  | Included in measurement                                                                    | Excluded                                                    |
+|------------------------|--------------------------------------------------------------------------------------------|-------------------------------------------------------------|
+| Calc Flow SQL          | Plan execution, run session, registration, SQL planning/execution, output `to_pyarrow`     | Input construction, graph compilation, warm-up, validation  |
+| Raw DataFusion         | Python `SessionContext`, table registration, SQL planning/collection, Arrow table          | Input construction, query text, warm-up, validation         |
+| Polars                 | Lazy-plan collection and Arrow output                                                      | Arrow input conversion, lazy expression construction        |
+| TA-Lib                 | Per-entity contiguous copies, SMA calls, composition, Arrow output                         | Input construction and validation                           |
+| Ready native streaming | Input enqueue, sources/tasks/channels, rolling, watermarks, sink and combined Arrow output | Plans, input events, runner startup/readiness, EOF/shutdown |
+| Warm native streaming  | Preconstructed data enqueue, live source/task/channel, rolling/finalization, sink to Arrow | Compilation, runner start, historical preload, validation   |
 
 New SQL/raw-DataFusion target partitions, Tokio workers and Polars threads
 are fixed to 32. BLAS helper pools use one thread. Legacy fixtures retain
-their own query configuration and timing boundaries. Native stream startup
-and persistent warm append are separate workloads. A cold streaming plan is
-single-use, so each invocation compiles a fresh plan before starting its timer.
-Cross-library columns are
-application-boundary references, not interchangeable kernel measurements.
+their own query configuration and timing boundaries. Cross-library native
+streaming uses an already-started runner with **empty rolling state**. Each
+invocation compiles a fresh single-use plan, awaits runner startup and the
+source's first poll through the startup data gate, then starts the timer before
+enqueueing preconstructed data and watermarks. It stops after every expected
+row reaches the sink and the Arrow tables are combined. EOF, job completion
+checks and cancellation/cleanup happen afterward, outside timing; unexpected
+extra output during completion still fails the sample. No dummy data or history
+is preloaded. Persistent warm append remains a separate workload.
+
+Cross-library columns are application-boundary references, not interchangeable
+kernel measurements. The native column is labeled `Native stream (ready)`.
+Contract v2 rejects startup-inclusive v1 artifacts and mismatched native timing
+scopes. Both refs are remeasured with the same new boundary; older medians are
+not adjusted by subtracting a separately measured startup time.
 These settings describe target/pool sizes, not measured CPU utilization;
 TA-Lib calls remain sequential per-series operations.
 

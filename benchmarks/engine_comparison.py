@@ -205,11 +205,9 @@ class EngineCase:
         self.data = workload(case["rows"])
         self.expected = expected_output(self.data, scenario)
         self.loop = None
-        self.plan = None
         if backend == "calc-flow-stream":
             self.events = stream_events(self.data.table, self.data.entities)
             self.loop = asyncio.new_event_loop()
-            self.calculate = self._stream
         else:
             factory = {
                 "calc-flow-sql": _calc_flow,
@@ -221,8 +219,13 @@ class EngineCase:
 
     def _stream(self):
         self.count += 1
+        # Each single-use plan starts with empty rolling state. Compilation and
+        # runner startup both precede the adapter's ready-to-Arrow timer.
+        plan = stream_plan(self.case["scenario"])
         return self.loop.run_until_complete(
-            run_stream(self.plan, self.events, self.root / f"sample-{self.count}")
+            run_stream(
+                plan, self.events, self.root / f"sample-{self.count}", self.case["rows"]
+            )
         )
 
     def validate(self, result: pa.Table) -> dict:
@@ -258,12 +261,11 @@ class EngineCase:
 
     def sample(self) -> dict:
         if self.loop is not None:
-            # StreamingRunner consumes its plan. Recompile before each cold
-            # invocation, outside the advertised start-to-drain timed boundary.
-            self.plan = stream_plan(self.case["scenario"])
-        started = time.perf_counter_ns()
-        result = self.calculate()
-        seconds = (time.perf_counter_ns() - started) / 1e9
+            result, seconds = self._stream()
+        else:
+            started = time.perf_counter_ns()
+            result = self.calculate()
+            seconds = (time.perf_counter_ns() - started) / 1e9
         return {"seconds": seconds, "correctness": self.validate(result)}
 
     def close(self) -> None:
