@@ -144,6 +144,35 @@ fn column_array(column: &PgColumn, rows: &[Row], index: usize) -> Result<ArrayRe
     }
 }
 
+/// Days since the Unix epoch for one calendar date.
+pub(crate) fn epoch_days(date: chrono::NaiveDate) -> i32 {
+    let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch is valid");
+    i32::try_from((date - epoch).num_days()).unwrap_or(i32::MAX)
+}
+
+/// Parse one pgoutput text-format timestamp (no time zone).
+pub(crate) fn parse_timestamp_text(value: &str) -> Result<i64> {
+    chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f")
+        .map(|stamp| stamp.and_utc().timestamp_micros())
+        .map_err(|_| CalcFlowError::InvalidArgument {
+            field: "timestamp".into(),
+            message: "invalid timestamp tuple value".into(),
+        })
+}
+
+/// Parse one pgoutput text-format timestamptz (with time zone).
+pub(crate) fn parse_timestamptz_text(value: &str) -> Result<i64> {
+    for format in ["%Y-%m-%d %H:%M:%S%.f%#z", "%Y-%m-%d %H:%M:%S%.f %:z"] {
+        if let Ok(stamp) = chrono::DateTime::parse_from_str(value, format) {
+            return Ok(stamp.timestamp_micros());
+        }
+    }
+    Err(CalcFlowError::InvalidArgument {
+        field: "timestamptz".into(),
+        message: "invalid timestamptz tuple value".into(),
+    })
+}
+
 fn numeric_array(rows: &[Row], index: usize, name: &str) -> Result<ArrayRef> {
     let mut values = Vec::with_capacity(rows.len());
     for row in rows {
@@ -179,13 +208,12 @@ fn bytea_array(rows: &[Row], index: usize, name: &str) -> Result<ArrayRef> {
 }
 
 fn date_array(rows: &[Row], index: usize, name: &str) -> Result<ArrayRef> {
-    let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch is valid");
     let mut values = Vec::with_capacity(rows.len());
     for row in rows {
         let value: Option<chrono::NaiveDate> = row
             .try_get::<_, Option<chrono::NaiveDate>>(index)
             .map_err(cell_error(name))?;
-        values.push(value.map(|date| i32::try_from((date - epoch).num_days()).unwrap_or(i32::MAX)));
+        values.push(value.map(epoch_days));
     }
     Ok(Arc::new(Date32Array::from(values)) as ArrayRef)
 }
