@@ -18,7 +18,7 @@ use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 use tokio::{
     sync::{Notify, mpsc, watch},
-    task::{JoinHandle, JoinSet},
+    task::JoinSet,
 };
 
 use super::{
@@ -92,6 +92,10 @@ pub(crate) use super::test_seams::{
 };
 
 const CONNECTOR_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(test)]
+use super::registry::ABANDONED_RUNNER_WARNING;
+use super::registry::{RunnerCommand, RunnerCore, RunnerRegistryState};
+
 pub(crate) use super::checkpoint_runtime::CheckpointRuntimeSpec;
 use super::checkpoint_runtime::{
     CheckpointRuntimeStorage, OpenedCheckpointRuntime, ValidatedCheckpointRuntime,
@@ -111,7 +115,7 @@ struct JobCoreState {
     start_failure: Option<StartFailure>,
 }
 
-struct JobCore {
+pub(super) struct JobCore {
     launch_id: LaunchId,
     job_id: u64,
     pipeline_name: String,
@@ -725,7 +729,7 @@ struct RunnerDiagnosticsState {
 }
 
 #[derive(Default)]
-struct RunnerDiagnostics(Mutex<RunnerDiagnosticsState>);
+pub(super) struct RunnerDiagnostics(Mutex<RunnerDiagnosticsState>);
 
 impl RunnerDiagnostics {
     fn record(&self, launch_id: LaunchId, mut failures: Vec<Arc<RuntimeFailure>>) -> Option<u64> {
@@ -762,46 +766,6 @@ impl RunnerDiagnostics {
             diagnostics_overflowed: state.diagnostics_overflowed,
         }
     }
-}
-
-struct RunnerRegistryState {
-    provisional: Option<LaunchId>,
-    live_jobs: BTreeMap<LaunchId, Arc<JobCore>>,
-    reaper_jobs: BTreeSet<LaunchId>,
-    pending_start: Option<LaunchId>,
-    shutting_down: bool,
-}
-
-struct RunnerCore {
-    commands: mpsc::UnboundedSender<RunnerCommand>,
-    root_cancel: CancellationToken,
-    stop_after_first_job: bool,
-    registry: Mutex<RunnerRegistryState>,
-    driver: Mutex<Option<JoinHandle<()>>>,
-    diagnostics: RunnerDiagnostics,
-    next_launch_id: AtomicU64,
-    closed: AtomicBool,
-    changed: Notify,
-    #[cfg(test)]
-    abandonment_warnings: AtomicU64,
-    #[cfg(test)]
-    next_launch_probe: Mutex<Option<Arc<TestLaunchProbe>>>,
-    #[cfg(test)]
-    panic_lifecycle_after_shutdown: AtomicBool,
-}
-
-const ABANDONED_RUNNER_WARNING: &str =
-    "continuous runner dropped before shutdown completed; cancellation requested";
-
-enum RunnerCommand {
-    Start {
-        launch_id: LaunchId,
-        core: Arc<JobCore>,
-        job: Box<ValidatedContinuousJob>,
-        checkpoint: Option<Box<ValidatedCheckpointRuntime>>,
-    },
-    Wake(LaunchId),
-    Shutdown,
 }
 
 pub(crate) struct ContinuousRunner {
