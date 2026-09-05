@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import platform
+import shutil
 import sys
 import tempfile
 import zipfile
@@ -188,18 +189,32 @@ async def source_identity(source: Path) -> dict[str, Any]:
     }
 
 
+def _python_environment(environment: dict[str, str]) -> dict[str, str]:
+    """Use a static launcher name only when it resolves to this interpreter."""
+    executable = Path(sys.executable)
+    search_path = os.pathsep.join((str(executable.parent), environment.get("PATH", "")))
+    selected = shutil.which("python", path=search_path)
+    if selected is None or not Path(selected).samefile(executable):
+        raise ValueError(
+            "python launcher must resolve to the current Python interpreter"
+        )
+    return {**environment, "PATH": search_path}
+
+
 async def build(args: argparse.Namespace) -> None:
     source = args.source.resolve()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     before = await source_identity(source)
-    env = dict(
-        os.environ,
-        CARGO_TARGET_DIR=str(args.target.resolve()),
-        PYO3_PYTHON=sys.executable,
+    env = _python_environment(
+        dict(
+            os.environ,
+            CARGO_TARGET_DIR=str(args.target.resolve()),
+            PYO3_PYTHON=sys.executable,
+        )
     )
     command = [
-        sys.executable,
+        "python",
         "-m",
         "maturin",
         "build",
@@ -210,7 +225,7 @@ async def build(args: argparse.Namespace) -> None:
     ]
     with (output / "build.log").open("wb") as log:
         process = await asyncio.create_subprocess_exec(
-            sys.executable,
+            "python",
             "-m",
             "maturin",
             "build",
@@ -241,6 +256,7 @@ async def build(args: argparse.Namespace) -> None:
         "command": command,
         "rustc": await _rustc_version(source),
         "python": platform.python_version(),
+        "python_executable": sys.executable,
     }
     path = output / "build.json"
     path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
@@ -289,14 +305,17 @@ class Worker:
             stderr=asyncio.subprocess.PIPE,
         )
         await _command_output(installer)
-        env = dict(
-            os.environ,
-            PYTHONPATH=os.pathsep.join((str(site), str(REPOSITORY))),
-            PYTHONDONTWRITEBYTECODE="1",
+        env = _python_environment(
+            dict(
+                os.environ,
+                PYTHONPATH=os.pathsep.join((str(site), str(REPOSITORY))),
+                PYTHONDONTWRITEBYTECODE="1",
+            )
         )
         process = await asyncio.create_subprocess_exec(
-            sys.executable,
-            str(Path(__file__).resolve()),
+            "python",
+            "-m",
+            "scripts.profile_warm_stream",
             "_worker",
             "--root",
             str(root),

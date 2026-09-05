@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +17,27 @@ from scripts.profile_warm_stream import matrix_points, paired_summary
 
 
 class WarmProfileTests(unittest.TestCase):
+    def test_python_launch_environment_selects_the_current_interpreter(self) -> None:
+        supplied = {"PATH": "caller-path", "PYTHONPATH": "caller-modules"}
+        with patch.object(
+            profile.shutil, "which", return_value=sys.executable
+        ) as which:
+            environment = profile._python_environment(supplied)
+        self.assertEqual(environment["PYTHONPATH"], "caller-modules")
+        self.assertEqual(supplied["PATH"], "caller-path")
+        self.assertEqual(
+            environment["PATH"].split(os.pathsep)[0], str(Path(sys.executable).parent)
+        )
+        which.assert_called_once_with("python", path=environment["PATH"])
+
+    def test_python_launch_environment_rejects_a_different_interpreter(self) -> None:
+        for selected in (None, __file__):
+            with (
+                patch.object(profile.shutil, "which", return_value=selected),
+                self.assertRaisesRegex(ValueError, "current Python interpreter"),
+            ):
+                profile._python_environment({"PATH": "caller-path"})
+
     def test_affinity_unavailable_does_not_abort_worker_handshake(self) -> None:
         for error in (psutil.AccessDenied(pid=1), NotImplementedError()):
             process = Mock(cpu_affinity=Mock(side_effect=error))

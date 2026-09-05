@@ -128,12 +128,18 @@ them without increasing the complexity baseline or adding forgiveness markers:
   non-draft while validation was pending; preserve that state.
 
 The follow-up passes workspace clippy with all targets and features, the
-complexity ratchet, Ruff check/format, six warm-scenario tests, and 13 controller
+complexity ratchet, Ruff check/format, six warm-scenario tests, and 15 controller
 tests. The controller tests include observed RED for command allowlisting,
 explicit missing-pipe errors, non-object responses, and unavailable CPU
 affinity before their GREEN implementations. The affinity fallback and matrix
 table alignment address the two initial review comments. Full Rust/Python
 gates and final-base release measurements remain pending.
+
+The remaining subprocess findings are addressed with three static Git
+metadata commands and a static Python launcher. The launcher prepends the
+current interpreter directory to a copied environment and rejects resolution
+to another executable. Two observed-RED tests verify interpreter binding and
+input-environment immutability. It does not rely on the caller's default Python.
 
 Local full-feature compilation uses the existing Anaconda curl headers through
 `C_INCLUDE_PATH`; no system packages or repository dependency policies changed.
