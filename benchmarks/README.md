@@ -14,7 +14,9 @@ empty rolling state; runner startup and EOF/shutdown are outside its timer.
 Source/task/channel, rolling, watermarks and Arrow output remain included.
 
 New engine/warm base/head measurements have a same-runner, two-round +5%
-regression gate. Existing suite-block comparisons and external-library timings
+regression gate using paired-median confidence lower bounds. Complete tables
+retain confidence intervals and minimum ratios, including inconclusive results.
+Existing suite-block comparisons and external-library timings
 remain informational; their existing specialized correctness/evidence gates
 are preserved. These are different measurement contracts, not interchangeable
 historical samples.

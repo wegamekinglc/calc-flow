@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import unittest
+from copy import deepcopy
 from pathlib import Path
 
 from scripts.benchmark_suite.catalog import engine_cases, shards
@@ -79,6 +80,242 @@ class BenchmarkSuiteTests(unittest.TestCase):
         noisy = comparison(measured_case(candidate=[[1.1] * 10, [1.0] * 10]))
         self.assertEqual(noisy["verdict"], "inconclusive")
 
+    def test_paired_changes_keep_common_mode_host_drift(self):
+        baseline = list(range(1, 11))
+        candidate = [value * 1.1 for value in baseline]
+        row = measured_case(baseline=[baseline] * 2, candidate=[candidate] * 2)
+        original = deepcopy(row)
+        result = comparison(row)
+        self.assertEqual(row, original)
+        self.assertEqual(result["verdict"], "regression")
+        self.assertAlmostEqual(result["round_changes"][0], 10)
+        self.assertAlmostEqual(result["round_intervals"][0]["low"], 10)
+        unpaired = comparison({**row, "candidate": [candidate[::-1]] * 2})
+        self.assertEqual(unpaired["verdict"], "inconclusive")
+
+    def test_minimum_outlier_is_diagnostic_not_a_regression(self):
+        result = comparison(measured_case(baseline=[[0.5, *([1.0] * 9)]] * 2))
+        self.assertEqual(result["verdict"], "no-confirmed-regression")
+        self.assertGreater(result["round_min_changes"][0], 100)
+        self.assertAlmostEqual(result["round_changes"][0], 1)
+
+    def test_round_interval_uses_conservative_exact_order_statistics(self):
+        candidate = [1 + value / 100 for value in range(10)]
+        result = comparison(measured_case(candidate=[candidate] * 2))
+        interval = result["round_intervals"][0]
+        self.assertAlmostEqual(result["round_changes"][0], 4.5)
+        self.assertAlmostEqual(interval["low"], 1)
+        self.assertAlmostEqual(interval["high"], 8)
+        self.assertEqual(interval["coverage"], 1 - 22 / 1024)
+        self.assertGreaterEqual(interval["coverage"], 0.95)
+        self.assertEqual(result["verdict"], "inconclusive")
+
+    def test_confidence_confirmed_improvement_is_distinct(self):
+        self.assertEqual(
+            comparison(measured_case(candidate=[[0.9] * 10] * 2))["verdict"],
+            "improved",
+        )
+
+    def test_interval_rank_tracks_the_sample_count(self):
+        candidate = [1 + value / 100 for value in range(20)]
+        result = comparison(
+            measured_case(baseline=[[1.0] * 20] * 2, candidate=[candidate] * 2)
+        )
+        interval = result["round_intervals"][0]
+        self.assertAlmostEqual(interval["low"], 5)
+        self.assertAlmostEqual(interval["high"], 14)
+        self.assertEqual(interval["coverage"], 1 - 43400 / 1048576)
+
+    def test_nonfinite_paired_statistics_fail_even_when_not_the_minimum(self):
+        for candidate in ([1e308, *([1.0] * 9)], [1e306] * 10):
+            with (
+                self.subTest(candidate=candidate),
+                self.assertRaisesRegex(ValueError, "nonfinite"),
+            ):
+                comparison(measured_case(candidate=[candidate] * 2))
+
+    def test_report_shows_paired_uncertainty_and_original_minima(self):
+        report = render_report([measured_case()], [])
+        self.assertIn("Paired median [CI]", report)
+        self.assertIn("Round min changes", report)
+        self.assertIn("+1.00% [+1.00%, +1.00%]", report)
+        self.assertIn("97.85%", report)
+
+    def test_hosted_warm_samples_do_not_confirm_minimum_only_slowdowns(self):
+        # Unmodified seconds from run 33980036723, head 7d79fed, identical native
+        # hashes on both sides. Preserve all pairs, not only the winning minima.
+        fixtures = [
+            (
+                [
+                    [
+                        0.000834632,
+                        0.000611983,
+                        0.000601026,
+                        0.000614776,
+                        0.000655702,
+                        0.000688851,
+                        0.000687474,
+                        0.000708615,
+                        0.000625392,
+                        0.00066844,
+                    ],
+                    [
+                        0.000801208,
+                        0.000590956,
+                        0.000552128,
+                        0.000591861,
+                        0.000542284,
+                        0.000628185,
+                        0.00069511,
+                        0.000619403,
+                        0.000654415,
+                        0.000663018,
+                    ],
+                ],
+                [
+                    [
+                        0.000637691,
+                        0.000641491,
+                        0.000692922,
+                        0.000665302,
+                        0.000686693,
+                        0.000666188,
+                        0.000693614,
+                        0.000652211,
+                        0.000736917,
+                        0.000736933,
+                    ],
+                    [
+                        0.000616804,
+                        0.000669563,
+                        0.000684765,
+                        0.000612393,
+                        0.000729195,
+                        0.000576464,
+                        0.000639198,
+                        0.000651511,
+                        0.000744228,
+                        0.000695181,
+                    ],
+                ],
+            ),
+            (
+                [
+                    [
+                        0.000828516,
+                        0.00077526,
+                        0.000655489,
+                        0.000533343,
+                        0.000589528,
+                        0.000575238,
+                        0.000575045,
+                        0.000664482,
+                        0.000615912,
+                        0.00064654,
+                    ],
+                    [
+                        0.000887266,
+                        0.000653964,
+                        0.000662931,
+                        0.000627284,
+                        0.000628888,
+                        0.000658046,
+                        0.000617793,
+                        0.000676106,
+                        0.000542814,
+                        0.000677755,
+                    ],
+                ],
+                [
+                    [
+                        0.000677313,
+                        0.000673748,
+                        0.000725492,
+                        0.000663151,
+                        0.000660619,
+                        0.000576434,
+                        0.000615753,
+                        0.000630328,
+                        0.00065082,
+                        0.000650959,
+                    ],
+                    [
+                        0.000679059,
+                        0.000617977,
+                        0.000711817,
+                        0.000619823,
+                        0.000655059,
+                        0.000661222,
+                        0.000599594,
+                        0.0006466,
+                        0.000630907,
+                        0.00058105,
+                    ],
+                ],
+            ),
+            (
+                [
+                    [
+                        0.000863417,
+                        0.000745512,
+                        0.000651253,
+                        0.000595508,
+                        0.000702348,
+                        0.000683986,
+                        0.000647896,
+                        0.000672762,
+                        0.000676189,
+                        0.000642566,
+                    ],
+                    [
+                        0.000893984,
+                        0.000608563,
+                        0.000790922,
+                        0.000665388,
+                        0.000633459,
+                        0.000677041,
+                        0.000627818,
+                        0.000640973,
+                        0.000699562,
+                        0.000699582,
+                    ],
+                ],
+                [
+                    [
+                        0.000731642,
+                        0.000684454,
+                        0.000737015,
+                        0.000710169,
+                        0.000693902,
+                        0.00070393,
+                        0.000672272,
+                        0.000626987,
+                        0.000680566,
+                        0.000669206,
+                    ],
+                    [
+                        0.000654498,
+                        0.000639361,
+                        0.000831487,
+                        0.000640963,
+                        0.000739317,
+                        0.000662564,
+                        0.000688511,
+                        0.000688502,
+                        0.000651984,
+                        0.000728068,
+                    ],
+                ],
+            ),
+        ]
+        for baseline, candidate in fixtures:
+            with self.subTest(baseline=baseline[0][0]):
+                result = comparison(
+                    measured_case(baseline=baseline, candidate=candidate)
+                )
+                self.assertEqual(result["verdict"], "inconclusive")
+                self.assertTrue(all(value > 5 for value in result["round_min_changes"]))
+
     def test_external_comparison_is_not_a_version_regression(self):
         row = measured_case(backend="ta-lib", baseline=[], comparison="external")
         self.assertEqual(comparison(row)["verdict"], "external-reference")
@@ -99,6 +336,7 @@ class BenchmarkSuiteTests(unittest.TestCase):
     def test_informational_blocks_are_not_called_paired(self):
         row = measured_case(comparison="suite-blocks", candidate=[[1.2] * 10] * 2)
         self.assertEqual(comparison(row)["verdict"], "informational-slowdown")
+        self.assertEqual(comparison(row)["round_intervals"], [])
 
     def test_missing_baseline_is_explicit_new_coverage(self):
         self.assertEqual(

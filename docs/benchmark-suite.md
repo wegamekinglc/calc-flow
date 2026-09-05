@@ -92,9 +92,10 @@ is preloaded. Persistent warm append remains a separate workload.
 
 Cross-library columns are application-boundary references, not interchangeable
 kernel measurements. The native column is labeled `Native stream (ready)`.
-Contract v2 rejects startup-inclusive v1 artifacts and mismatched native timing
-scopes. Both refs are remeasured with the same new boundary; older medians are
-not adjusted by subtracting a separately measured startup time.
+Contract v3 rejects startup-inclusive v1 artifacts, minimum-only v2 reports and
+mismatched native timing scopes. Both refs are remeasured with the same new
+boundary; older medians are not adjusted by subtracting a separately measured
+startup time.
 These settings describe target/pool sizes, not measured CPU utilization;
 TA-Lib calls remain sequential per-series operations.
 
@@ -113,15 +114,29 @@ For every Calc Flow engine/warm case:
    machine/thread identities and workload dimensions; warm up outside timing.
 3. Collect ten pairs in alternating AB/BA order. Warm workers advance through
    exactly the same input cursors. No forced GC is included in the interval.
-4. Repeat with a fresh worker pair. Compare round minima and retain every
-   original sample; show combined P50/P95 and throughput separately.
+4. Repeat with a fresh worker pair. Retain every original pair; estimate each
+   round's median of `100 * (candidate_i / baseline_i - 1)` and its interval.
+   Show combined P50/P95, throughput and round minimum ratios separately.
 
-The gate fails when **both** round minimum candidate/base ratios exceed 1.05.
-One slow round is `inconclusive`; neither slow round is
-`no-confirmed-regression`, not proof of equivalence. This repeat-confirmed
-best-of-N rule is not a confidence interval and does not eliminate hosted-runner
-noise. External libraries are measured references, never fake historical
-baselines. Existing pytest/Criterion/Vitest suites run ABBA whole-suite
+For each round, use a conservative exact 95% median confidence interval from
+binomial order statistics, without interpolation or bootstrap randomness.
+With ten pairs its bounds are the second and ninth sorted changes, giving
+97.85% coverage under independent pairs with a common change distribution.
+This construction follows [NIST TN 2119, section 5.3](https://nvlpubs.nist.gov/nistpubs/TechnicalNotes/NIST.TN.2119.pdf).
+Alternating AB/BA mitigates drift but does not prove independence or remove
+hosted-runner autocorrelation. Coverage is per round, not simultaneous over
+the complete matrix; a median interval does not bound tail latency.
+
+The gate fails only when **both** round confidence lower bounds exceed +5%.
+If any upper bound exceeds +5% without both lower bounds exceeding it, the
+result is `inconclusive`. Both upper bounds below -5% indicate `improved`;
+otherwise the result is `no-confirmed-regression`, not proof of equivalence.
+Minimum ratios remain diagnostic: comparing unrelated best samples can signal
+a slowdown even with identical binaries and nearly unchanged P50 values.
+The fixed +5% threshold, two-round sample budget and correctness checks remain
+unchanged; CI does not retry measurements to select a passing timing result.
+External libraries are measured references, never fake historical baselines.
+Existing pytest/Criterion/Vitest suites run ABBA whole-suite
 blocks. Their deltas remain informational because those blocks are not
 per-call paired observations. Allocation counters have a separate unit-correct
 table and are not mislabeled as milliseconds.
@@ -129,7 +144,8 @@ table and are not mislabeled as milliseconds.
 ## Reports and failure behavior
 
 The final always-run job publishes all result rows, with dimensions, timing
-scope, base/head P50, P95, rows/s, percentage change, round changes and verdict.
+scope, base/head P50, P95, rows/s, percentage change, diagnostic round minima,
+paired round medians with confidence bounds, and verdict.
 A second table places all five engine implementations side by side. No top-N
 filtering is applied. Build, measurement and summary artifacts retain raw
 JSON/JSONL samples, original runner formats, stdout/stderr, release/native and

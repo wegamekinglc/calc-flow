@@ -94,11 +94,15 @@ class BenchmarkAggregateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "dimensions"):
             validate_fragment(report, BASE, HEAD)
 
-    def test_startup_inclusive_contract_cannot_be_relabelled_as_ready(self):
-        report = fragment()
-        report["contract"] = "calc-flow-benchmark-suite-v1"
-        with self.assertRaisesRegex(ValueError, "contract"):
-            validate_fragment(report, BASE, HEAD)
+    def test_older_timing_and_minimum_only_contracts_are_rejected(self):
+        for version in (1, 2):
+            report = fragment()
+            report["contract"] = f"calc-flow-benchmark-suite-v{version}"
+            with (
+                self.subTest(version=version),
+                self.assertRaisesRegex(ValueError, "contract"),
+            ):
+                validate_fragment(report, BASE, HEAD)
 
     def test_invalid_allocation_values_fail_the_gate(self):
         for value in (-1, float("nan"), True, "0"):
@@ -109,6 +113,15 @@ class BenchmarkAggregateTests(unittest.TestCase):
                 candidate_value=value,
             )
             self.assertTrue(case_failures([row]))
+
+    def test_gate_rederives_intervals_instead_of_trusting_stored_verdict(self):
+        row = measured_case(
+            candidate=[[1.1] * 10] * 2,
+            result={"verdict": "no-confirmed-regression", "round_intervals": []},
+        )
+        self.assertIn("regression", case_failures([row])[0])
+        row = measured_case(result={"verdict": "regression"})
+        self.assertEqual(case_failures([row]), [])
 
     def test_wrong_comparison_kind_is_not_a_historical_pass(self):
         report = fragment()

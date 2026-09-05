@@ -15,7 +15,7 @@ CAPABILITIES = {
 }
 THREADS = 32
 BATCH_ROWS = 64_000
-CONTRACT = "calc-flow-benchmark-suite-v2"
+CONTRACT = "calc-flow-benchmark-suite-v3"
 STREAM_SCOPE = "ready-enqueue-to-arrow"
 
 

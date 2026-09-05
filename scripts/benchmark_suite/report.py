@@ -7,6 +7,7 @@ import statistics
 from collections import Counter
 
 from scripts.benchmark_suite.catalog import CAPABILITIES, SQL_CASES, STREAM_SCOPE
+from scripts.benchmark_suite.statistics import paired_round
 
 THRESHOLD_PERCENT = 5.0
 ROUNDS = 2
@@ -47,17 +48,14 @@ def _percentile(values: list[float], quantile: float) -> float:
     return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
 
 
-def _verdict(kind: str, changes: list[float]) -> str:
+def _paired_verdict(intervals: list[dict]) -> str:
     # Protect the exact +5% endpoint from ratio/subtraction roundoff.
     threshold = THRESHOLD_PERCENT + 1e-12
-    slow = [change > threshold for change in changes]
-    if kind == "suite-blocks":
-        return "informational-slowdown" if all(slow) else "informational"
-    if all(slow):
+    if all(interval["low"] > threshold for interval in intervals):
         return "regression"
-    if any(slow):
+    if any(interval["high"] > threshold for interval in intervals):
         return "inconclusive"
-    if all(change < -threshold for change in changes):
+    if all(interval["high"] < -threshold for interval in intervals):
         return "improved"
     return "no-confirmed-regression"
 
@@ -74,6 +72,8 @@ def _head_statistics(case: dict, head: list[float]) -> dict:
         "base_p50": None,
         "change_percent": None,
         "round_changes": [],
+        "round_min_changes": [],
+        "round_intervals": [],
     }
 
 
@@ -110,15 +110,39 @@ def _historical_statistics(case: dict, result: dict, minimum: int) -> dict:
             **result,
             "base_p50": statistics.median(base),
             "change_percent": 100 * (result["head_p50"] / statistics.median(base) - 1),
-            "round_changes": changes,
-            "verdict": _verdict(kind, changes),
+            "round_min_changes": changes,
+            **_round_statistics(case, changes),
         }
     )
 
 
+def _round_statistics(case: dict, minima: list[float]) -> dict:
+    if case["comparison"] == "suite-blocks":
+        slow = all(change > THRESHOLD_PERCENT + 1e-12 for change in minima)
+        return {
+            "round_changes": minima,
+            "round_intervals": [],
+            "verdict": "informational-slowdown" if slow else "informational",
+        }
+    intervals = [
+        paired_round(left, right)
+        for left, right in zip(case["baseline"], case["candidate"], strict=True)
+    ]
+    return {
+        "round_changes": [interval["median"] for interval in intervals],
+        "round_intervals": intervals,
+        "verdict": _paired_verdict(intervals),
+    }
+
+
 def _checked_statistics(result: dict) -> dict:
     values = [value for value in result.values() if type(value) in (int, float)]
-    if any(not math.isfinite(value) for value in [*values, *result["round_changes"]]):
+    values.extend(result["round_changes"])
+    values.extend(result["round_min_changes"])
+    values.extend(
+        value for item in result["round_intervals"] for value in item.values()
+    )
+    if any(not math.isfinite(value) for value in values):
         raise ValueError("derived benchmark statistics are nonfinite")
     return result
 
@@ -150,11 +174,13 @@ def _result_row(case: dict) -> list[object]:
     if case["status"] != "ok":
         return [
             *prefix,
-            *("—" for _ in range(6)),
+            *("—" for _ in range(7)),
             "error",
         ]
     result = comparison(case)
-    changes = ", ".join(f"{value:+.2f}%" for value in result["round_changes"]) or "—"
+    changes = (
+        ", ".join(f"{value:+.2f}%" for value in result["round_min_changes"]) or "—"
+    )
     change = result["change_percent"]
     throughput = result["rows_per_second"]
     return [
@@ -165,8 +191,19 @@ def _result_row(case: dict) -> list[object]:
         f"{throughput:,.0f}" if throughput is not None else "—",
         f"{change:+.2f}%" if change is not None else "—",
         changes,
+        _paired_cell(result["round_intervals"]),
         result["verdict"],
     ]
+
+
+def _paired_cell(intervals: list[dict]) -> str:
+    return (
+        "; ".join(
+            f"{item['median']:+.2f}% [{item['low']:+.2f}%, {item['high']:+.2f}%]"
+            for item in intervals
+        )
+        or "—"
+    )
 
 
 def render_report(cases: list[dict], errors: list[str]) -> str:
@@ -188,6 +225,7 @@ def render_report(cases: list[dict], errors: list[str]) -> str:
         "Rows/s",
         "Change",
         "Round min changes",
+        "Paired median [CI]",
         "Result",
     ]
     parts = [
@@ -197,8 +235,10 @@ def render_report(cases: list[dict], errors: list[str]) -> str:
         "No top-N filtering.",
         "",
         "Historical engine/warm gates use two rounds of ten interleaved samples; "
-        "both round minima must exceed +5% to fail. This is a repeat-confirmed "
-        "best-of-N gate, not a confidence interval or a claim of equivalence.",
+        "both paired-median confidence lower bounds must exceed +5% to fail. "
+        "The conservative exact 95% order-statistic interval has 97.85% coverage "
+        "at ten pairs under the iid assumption. Intervals crossing +5% are "
+        "inconclusive, not proof of equivalence. Round minima remain diagnostic.",
         "Existing suite-block comparisons and cross-library references "
         "are informational.",
         "",
