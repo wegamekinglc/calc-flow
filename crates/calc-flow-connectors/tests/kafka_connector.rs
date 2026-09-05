@@ -200,7 +200,7 @@ fn kafka_roundtrip_and_transactional_exactly_once() {
                 .with_segments(segments),
             )
             .await
-            .expect("committed marker suppresses replay after lost acknowledgement");
+            .expect("committed marker suppresses replay after lost ack");
         recovery_sink
             .close()
             .await

@@ -286,7 +286,7 @@ impl DurableCursorAcknowledger for ManifestInspectingAcknowledger {
                 .is_file()
         {
             return Err(CalcFlowError::Internal {
-                message: "durable source acknowledgement preceded manifest publication".into(),
+                message: "durable source ack preceded manifest publication".into(),
             });
         }
         self.log.lock().unwrap().push("source-ack");
@@ -369,7 +369,7 @@ impl TransactionalStreamSink for AckOrderingSink {
     async fn commit(&mut self, _epoch: calc_flow::Epoch, _pre_commit: &JsonMap) -> Result<()> {
         if self.log.lock().unwrap().last() != Some(&"source-ack") {
             return Err(CalcFlowError::Internal {
-                message: "sink commit preceded durable source acknowledgement".into(),
+                message: "sink commit preceded durable source ack".into(),
             });
         }
         self.log.lock().unwrap().push("sink-commit");

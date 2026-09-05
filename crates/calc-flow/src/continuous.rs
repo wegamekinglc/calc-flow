@@ -369,7 +369,7 @@ pub trait DurableCursorAcknowledger: Send + Sync {
     /// # Errors
     ///
     /// Returns a safe connector error without advancing the external cursor
-    /// when the acknowledgement cannot be applied.
+    /// when the ack cannot be applied.
     async fn acknowledge(&self, cursor: &Cursor) -> Result<()>;
 }
 

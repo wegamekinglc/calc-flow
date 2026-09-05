@@ -2488,7 +2488,7 @@ struct RuntimeTaskProgress {
 
 #[derive(Clone)]
 struct OperatorCheckpointRegistration {
-    acknowledgements: mpsc::Sender<OperatorCheckpointAck>,
+    acks: mpsc::Sender<OperatorCheckpointAck>,
     transaction: Arc<ManifestTransaction>,
     terminal_ready: mpsc::Sender<String>,
     terminal_commands: Arc<Mutex<BTreeMap<String, mpsc::Receiver<OperatorCheckpointCommand>>>>,
@@ -2501,7 +2501,7 @@ struct OperatorCheckpointRegistration {
 impl OperatorCheckpointRegistration {
     fn port(&self, node_id: &str) -> OperatorCheckpointPort {
         OperatorCheckpointPort {
-            acknowledgements: self.acknowledgements.clone(),
+            acks: self.acks.clone(),
             transaction: Some(Arc::clone(&self.transaction)),
             terminal: Some(OperatorTerminalPort {
                 ready: self.terminal_ready.clone(),
@@ -2525,11 +2525,11 @@ impl OperatorCheckpointRegistration {
 
 struct LiveCheckpointChannels {
     operator: OperatorCheckpointRegistration,
-    operator_acknowledgements: mpsc::Receiver<OperatorCheckpointAck>,
+    operator_acks: mpsc::Receiver<OperatorCheckpointAck>,
     operator_terminal_ready: mpsc::Receiver<String>,
     operator_commands: BTreeMap<String, mpsc::Sender<OperatorCheckpointCommand>>,
-    sink_acknowledgement_sender: mpsc::Sender<SinkCheckpointAck>,
-    sink_acknowledgements: mpsc::Receiver<SinkCheckpointAck>,
+    sink_ack_sender: mpsc::Sender<SinkCheckpointAck>,
+    sink_acks: mpsc::Receiver<SinkCheckpointAck>,
     sink_finalization_sender: Option<mpsc::Sender<SinkFinalizeAck>>,
     sink_finalizations: mpsc::Receiver<SinkFinalizeAck>,
     sink_terminal_ready_sender: mpsc::Sender<String>,
@@ -2575,7 +2575,7 @@ impl LiveCheckpointChannels {
         }
         Self {
             operator: OperatorCheckpointRegistration {
-                acknowledgements: operator_tx,
+                acks: operator_tx,
                 transaction,
                 terminal_ready: operator_terminal_tx,
                 terminal_commands: Arc::new(Mutex::new(operator_command_receivers)),
@@ -2584,11 +2584,11 @@ impl LiveCheckpointChannels {
                 #[cfg(test)]
                 fault_cancellation,
             },
-            operator_acknowledgements: operator_rx,
+            operator_acks: operator_rx,
             operator_terminal_ready: operator_terminal_rx,
             operator_commands,
-            sink_acknowledgement_sender: sink_tx,
-            sink_acknowledgements: sink_rx,
+            sink_ack_sender: sink_tx,
+            sink_acks: sink_rx,
             sink_finalization_sender: Some(finalization_tx),
             sink_finalizations: finalization_rx,
             sink_terminal_ready_sender: sink_terminal_tx,
@@ -2611,7 +2611,7 @@ impl LiveCheckpointChannels {
         };
         SinkCheckpointPort {
             initial_epoch,
-            acknowledgements: self.sink_acknowledgement_sender.clone(),
+            acks: self.sink_ack_sender.clone(),
             commands: self
                 .sink_command_receivers
                 .remove(output_id)
@@ -2831,39 +2831,38 @@ async fn await_operator_entry(
     ack_rx: &mut mpsc::UnboundedReceiver<super::operator_task::OperatorEntryAck>,
     supervisor: &mut TaskSupervisor,
 ) -> Result<(), EntryFailure> {
-    let mut acknowledgements = Vec::with_capacity(node_count);
+    let mut acks = Vec::with_capacity(node_count);
     for _ in 0..node_count {
-        let acknowledgement = tokio::select! {
+        let ack = tokio::select! {
             biased;
             () = core.launch_cancel.cancelled() => None,
-            acknowledgement = ack_rx.recv() => acknowledgement,
+            ack = ack_rx.recv() => ack,
         };
-        let Some(acknowledgement) = acknowledgement else {
+        let Some(ack) = ack else {
             break;
         };
-        acknowledgements.push(acknowledgement);
+        acks.push(ack);
     }
-    let entry_failure =
-        if acknowledgements.len() != node_count && !core.launch_cancel.is_cancelled() {
-            Some(Arc::new(RuntimeFailure {
-                origin: FailureOrigin::Preflight,
-                error: CalcFlowError::Internal {
-                    message: "operator entry acknowledgement channel closed early".into(),
-                },
-            }))
-        } else {
-            acknowledgements.sort_by(|left, right| left.node_id.cmp(&right.node_id));
-            acknowledgements.into_iter().find_map(|acknowledgement| {
-                acknowledgement.result.err().map(|error| {
-                    Arc::new(RuntimeFailure {
-                        origin: FailureOrigin::OperatorEntry {
-                            node_id: acknowledgement.node_id,
-                        },
-                        error,
-                    })
+    let entry_failure = if acks.len() != node_count && !core.launch_cancel.is_cancelled() {
+        Some(Arc::new(RuntimeFailure {
+            origin: FailureOrigin::Preflight,
+            error: CalcFlowError::Internal {
+                message: "operator entry ack channel closed early".into(),
+            },
+        }))
+    } else {
+        acks.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+        acks.into_iter().find_map(|ack| {
+            ack.result.err().map(|error| {
+                Arc::new(RuntimeFailure {
+                    origin: FailureOrigin::OperatorEntry {
+                        node_id: ack.node_id,
+                    },
+                    error,
                 })
             })
-        };
+        })
+    };
     if let Some(primary) = entry_failure {
         return fail_registered_entry(supervisor, EntryFailure::Failed(primary)).await;
     }
@@ -3216,7 +3215,7 @@ impl EpochManifestAssembly {
         } else {
             Err(checkpoint_protocol_error(
                 epoch,
-                "acknowledgement does not match the active manifest assembly",
+                "ack does not match the active manifest assembly",
             ))
         }
     }
@@ -3294,7 +3293,7 @@ impl EpochManifestAssembly {
 
 #[allow(
     clippy::too_many_lines,
-    reason = "the checkpoint task is the single owner of epoch events, acknowledgements, and manifest publication"
+    reason = "the checkpoint task is the single owner of epoch events, acks, and manifest publication"
 )]
 async fn run_live_checkpoint_task(inputs: LiveCheckpointTaskInputs) -> crate::Result<()> {
     let LiveCheckpointTaskInputs {
@@ -3468,13 +3467,13 @@ async fn run_live_checkpoint_task(inputs: LiveCheckpointTaskInputs) -> crate::Re
                     break Err(error);
                 }
             }
-            acknowledgement = channels.operator_acknowledgements.recv(),
+            ack = channels.operator_acks.recv(),
                 if !assembly.manifest_durable => {
-                let Some(acknowledgement) = acknowledgement else {
-                    break Err(checkpoint_channel_closed("operator acknowledgements"));
+                let Some(ack) = ack else {
+                    break Err(checkpoint_channel_closed("operator acks"));
                 };
                 if let Err(error) = accept_operator_ack(
-                    acknowledgement,
+                    ack,
                     &coordinator,
                     &mut assembly,
                     &checkpoint.status,
@@ -3482,13 +3481,13 @@ async fn run_live_checkpoint_task(inputs: LiveCheckpointTaskInputs) -> crate::Re
                     break Err(error);
                 }
             }
-            acknowledgement = channels.sink_acknowledgements.recv(),
+            ack = channels.sink_acks.recv(),
                 if !assembly.manifest_durable => {
-                let Some(acknowledgement) = acknowledgement else {
-                    break Err(checkpoint_channel_closed("sink acknowledgements"));
+                let Some(ack) = ack else {
+                    break Err(checkpoint_channel_closed("sink acks"));
                 };
                 if let Err(error) = accept_sink_ack(
-                    acknowledgement,
+                    ack,
                     &coordinator,
                     &mut assembly,
                     &checkpoint.status,
@@ -4077,52 +4076,52 @@ fn abort_checkpoint_sources(sources: &BTreeMap<String, SourceProgress>, epoch: E
 }
 
 async fn accept_operator_ack(
-    acknowledgement: OperatorCheckpointAck,
+    ack: OperatorCheckpointAck,
     coordinator: &CheckpointCoordinatorHandle,
     assembly: &mut EpochManifestAssembly,
     status: &CheckpointStatusHandle,
 ) -> crate::Result<()> {
-    assembly.expect_epoch(acknowledgement.epoch)?;
+    assembly.expect_epoch(ack.epoch)?;
     insert_identical(
         &mut assembly.operators,
-        &acknowledgement.node_id,
-        acknowledgement.state.clone(),
-        acknowledgement.epoch,
+        &ack.node_id,
+        ack.state.clone(),
+        ack.epoch,
         "operator",
     )?;
     coordinator
         .ack(CheckpointAck::operator(
-            &acknowledgement.node_id,
-            acknowledgement.epoch,
-            &checkpoint_digest(&acknowledgement.state)?,
+            &ack.node_id,
+            ack.epoch,
+            &checkpoint_digest(&ack.state)?,
         ))
         .await?;
-    status.acknowledge_operators(acknowledgement.epoch, assembly.operators.len());
+    status.acknowledge_operators(ack.epoch, assembly.operators.len());
     Ok(())
 }
 
 async fn accept_sink_ack(
-    acknowledgement: SinkCheckpointAck,
+    ack: SinkCheckpointAck,
     coordinator: &CheckpointCoordinatorHandle,
     assembly: &mut EpochManifestAssembly,
     status: &CheckpointStatusHandle,
 ) -> crate::Result<()> {
-    assembly.expect_epoch(acknowledgement.epoch)?;
+    assembly.expect_epoch(ack.epoch)?;
     insert_identical(
         &mut assembly.sink_outputs,
-        &acknowledgement.output_id,
-        acknowledgement.sinks.clone(),
-        acknowledgement.epoch,
+        &ack.output_id,
+        ack.sinks.clone(),
+        ack.epoch,
         "sink output",
     )?;
     coordinator
         .ack(CheckpointAck::sink_precommit(
-            &acknowledgement.output_id,
-            acknowledgement.epoch,
-            &checkpoint_digest(&acknowledgement.sinks)?,
+            &ack.output_id,
+            ack.epoch,
+            &checkpoint_digest(&ack.sinks)?,
         ))
         .await?;
-    status.acknowledge_sink_precommits(acknowledgement.epoch, assembly.sink_outputs.len());
+    status.acknowledge_sink_precommits(ack.epoch, assembly.sink_outputs.len());
     Ok(())
 }
 
@@ -4157,7 +4156,7 @@ fn insert_identical<T: Clone + Eq>(
         Some(previous) if previous == &value => Ok(()),
         Some(_) => Err(checkpoint_protocol_error(
             epoch,
-            &format!("conflicting duplicate {kind} acknowledgement for {id:?}"),
+            &format!("conflicting duplicate {kind} ack for {id:?}"),
         )),
         None => {
             entries.insert(id.into(), value);
@@ -13791,10 +13790,10 @@ mod tests {
             Some(CheckpointFailureCategory::Maintenance)
         );
         assert!(failed_checkpoint.elapsed.is_some());
-        assert_eq!(failed_checkpoint.source_acknowledgements, 1);
-        assert_eq!(failed_checkpoint.operator_acknowledgements, 1);
-        assert_eq!(failed_checkpoint.sink_precommit_acknowledgements, 1);
-        assert_eq!(failed_checkpoint.sink_commit_acknowledgements, 1);
+        assert_eq!(failed_checkpoint.source_acks, 1);
+        assert_eq!(failed_checkpoint.operator_acks, 1);
+        assert_eq!(failed_checkpoint.sink_precommit_acks, 1);
+        assert_eq!(failed_checkpoint.sink_commit_acks, 1);
         let failed_metrics = job.status().metrics.checkpoints;
         assert_eq!(failed_metrics.requested, 1);
         assert_eq!(failed_metrics.completed, 1);
