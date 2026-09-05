@@ -125,7 +125,11 @@ def register_capability_routes(
     @app.get(f"{API_PREFIX}/schema/project")
     def get_project_schema() -> dict[str, object]:
         schema = json.loads(project_json_schema())
-        assert isinstance(schema, dict)
+        if not isinstance(schema, dict):
+            raise http_error(
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+                "the embedded project schema is not a JSON object",
+            )
         return schema
 
     @app.get(
@@ -152,20 +156,16 @@ def _project_summary(project: ProjectDocument) -> ProjectSummary:
     )
 
 
-async def _runtime_validation_report(
-    project: ProjectDocument, runtime: RuntimeProtocol
-) -> ValidationReport:
-    try:
-        report = await run_in_threadpool(
-            runtime.validation_report, project.canonical_json()
-        )
-    except CalcFlowError as error:
-        raise native_error(error, operation="validate") from error
+def _normalized_report(report: object) -> object:
     normalized = dict(report) if isinstance(report, dict) else report
     if isinstance(normalized, dict) and "kind" not in normalized:
         valid = normalized.get("valid")
         if isinstance(valid, bool):
             normalized["kind"] = "valid" if valid else "invalid"
+    return normalized
+
+
+def _decode_report(normalized: object) -> ValidationReport:
     try:
         return _VALIDATION_REPORT_ADAPTER.validate_python(normalized)
     except ValidationError as error:
@@ -179,6 +179,18 @@ async def _runtime_validation_report(
             "runtime validation report violates the v1 contract at "
             f"{location}: {first['msg']}",
         ) from error
+
+
+async def _runtime_validation_report(
+    project: ProjectDocument, runtime: RuntimeProtocol
+) -> ValidationReport:
+    try:
+        report = await run_in_threadpool(
+            runtime.validation_report, project.canonical_json()
+        )
+    except CalcFlowError as error:
+        raise native_error(error, operation="validate") from error
+    return _decode_report(_normalized_report(report))
 
 
 def register_project_routes(

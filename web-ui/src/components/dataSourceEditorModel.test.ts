@@ -41,7 +41,10 @@ describe('data source editor helpers', () => {
     const drafts = createDataSourceDrafts(allSources, () => crypto.randomUUID()).map(
       (draft, index) => ({
         ...draft,
-        dataText: ['[{"value":3}]', '{"value":4}', 'value\n5\n', 'YXJyb3c='][index]!,
+        dataText: at(
+          ['[{"value":3}]', '{"value":4}', 'value\n5\n', 'YXJyb3c='],
+          index,
+        ),
         error: 'old error',
       }),
     );

@@ -69,10 +69,11 @@ export function PanelResizeHandle({
         event.currentTarget.setPointerCapture?.(event.pointerId);
       }}
       onPointerMove={(event) => {
-        if (drag.current?.pointerId !== event.pointerId) return;
-        const physicalDelta = event.clientX - drag.current!.startX;
+        const active = drag.current;
+        if (active?.pointerId !== event.pointerId) return;
+        const physicalDelta = event.clientX - active.startX;
         const valueDelta = grow === 'start' ? physicalDelta : -physicalDelta;
-        emit(drag.current.startValue + valueDelta);
+        emit(active.startValue + valueDelta);
       }}
       onPointerUp={(event) => {
         if (drag.current?.pointerId !== event.pointerId) return;

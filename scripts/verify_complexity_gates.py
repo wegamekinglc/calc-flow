@@ -98,6 +98,14 @@ def run_ruff_complexity() -> dict[str, dict[str, int]]:
             f"{completed.stderr.strip()}"
         )
     findings = json.loads(completed.stdout or "[]")
+    return _group_ruff_findings(findings)
+
+
+def _group_ruff_findings(
+    findings: list[dict[str, object]],
+) -> dict[str, dict[str, int]]:
+    """Group ruff findings by repository-relative file and rule code."""
+
     counts: dict[str, dict[str, int]] = {}
     for finding in findings:
         file_path = Path(str(finding.get("filename", "")))

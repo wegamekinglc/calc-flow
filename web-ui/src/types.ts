@@ -127,9 +127,12 @@ export const blankProject = (): ProjectCreateRequest => ({
 
 /** A fixture accessor that fails loudly instead of asserting presence. */
 export const at = <T>(items: readonly T[], index = 0): T => {
-  const item = items[index];
+  const item = items.at(index);
   if (item === undefined) {
     throw new Error(`fixture item ${index} is missing`);
   }
   return item;
 };
+
+/** The first element of a sequence, explicitly undefined when empty. */
+export const firstOf = <T>(items: readonly T[]): T | undefined => items.at(0);

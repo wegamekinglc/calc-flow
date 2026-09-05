@@ -454,31 +454,39 @@ def _check_expression_capability(
     for operator in capabilities.operators:
         if operator.kind != "expression":
             continue
-        if mode not in operator.modes:
-            errors.raise_compile(
-                program.name,
-                errors.CAPABILITY_MISMATCH,
-                f"the expression operator does not support {mode} mode in the"
-                " selected capability snapshot",
-            )
-        if mode == "stream" and (
-            operator.finality == "unproven"
-            or not operator.microbatch_invariant
-            or not operator.deterministic
-            or not operator.replay_safe
-        ):
-            errors.raise_compile(
-                program.name,
-                errors.CAPABILITY_MISMATCH,
-                "the expression operator does not prove stream lifecycle facts"
-                " in the selected capability snapshot",
-            )
+        _require_mode_support(program, operator, mode)
+        _require_stream_facts(program, operator, mode)
         return analyzer, capabilities
     errors.raise_compile(
         program.name,
         errors.CAPABILITY_MISMATCH,
         "the capability snapshot does not offer the expression operator",
     )
+
+
+def _require_mode_support(program: Program, operator: object, mode: str, /) -> None:
+    if mode not in operator.modes:  # type: ignore[attr-defined]
+        errors.raise_compile(
+            program.name,
+            errors.CAPABILITY_MISMATCH,
+            f"the expression operator does not support {mode} mode in the"
+            " selected capability snapshot",
+        )
+
+
+def _require_stream_facts(program: Program, operator: object, mode: str, /) -> None:
+    if mode == "stream" and (
+        operator.finality == "unproven"  # type: ignore[attr-defined]
+        or not operator.microbatch_invariant  # type: ignore[attr-defined]
+        or not operator.deterministic  # type: ignore[attr-defined]
+        or not operator.replay_safe  # type: ignore[attr-defined]
+    ):
+        errors.raise_compile(
+            program.name,
+            errors.CAPABILITY_MISMATCH,
+            "the expression operator does not prove stream lifecycle facts"
+            " in the selected capability snapshot",
+        )
 
 
 def _program_needs_rolling(program: Program, /) -> bool:

@@ -44,6 +44,7 @@ import {
 } from './components/dataSourceEditorModel';
 import { editSqlInputAliases } from './components/inputAliasEditorModel';
 import { derivedInputNames, derivedOutputNames } from './portNamesModel';
+import { firstOf } from './types';
 import { isJobActive } from './jobStatusModel';
 import {
   PANEL_LIMITS,
@@ -298,8 +299,8 @@ export default function App() {
         setCatalog(loadedCatalog);
         setCapabilities(loadedCapabilities);
         setProjects(loadedProjects);
-        const [firstProject] = loadedProjects;
-        if (firstProject) {
+        const firstProject = firstOf(loadedProjects);
+        if (firstProject !== undefined) {
           const loaded = await api.project(firstProject.id);
           if (aborted()) return;
           replaceEditableProject(loaded, true);
@@ -703,8 +704,8 @@ export default function App() {
     void run(async () => {
       await api.deleteProject(project.id);
       const remaining = await refreshProjects();
-      const [nextProject] = remaining;
-      if (nextProject) await loadProject(nextProject.id);
+      const nextProject = firstOf(remaining);
+      if (nextProject !== undefined) await loadProject(nextProject.id);
       else newProject();
       setMessage('Project deleted');
     });

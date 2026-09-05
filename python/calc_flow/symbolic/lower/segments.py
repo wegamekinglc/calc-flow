@@ -189,63 +189,83 @@ def _reject_primitive(path: str, node: Node, /) -> None:
 def _resolve_table(node: Node, path: str, /) -> _Segment:
     name = node.op.name
     if name == "table_input":
-        fields = _schema_fields(node.attr("schema"))
-        return _Segment(
-            node,
-            tuple(field.name for field in fields),
-            tuple((field.name, _base_ref(field.name)) for field in fields),
-            None,
-        )
+        return _resolve_table_input(node)
     if name == "project":
-        child = _resolve_table(node.args[0], f"{path}.project.value")
-        env = dict(child.env)
-        columns = _cstr_seq(node.attr("columns"))
-        return _Segment(
-            child.input_node,
-            columns,
-            tuple((field, env[field]) for field in columns),
-            child.predicate,
-            child.post_predicate,
-        )
+        return _resolve_project(node, path)
     if name == "filter":
-        child = _resolve_table(node.args[0], f"{path}.filter.value")
-        predicate = _inline(node.args[1], dict(child.env), f"{path}.filter.predicate")
-        if (
-            _segment_has_rolling(child)
-            or any(True for _ in _find_rolling(predicate))
-            or _segment_has_cross_section(child)
-            or any(True for _ in _find_cross_section(predicate))
-        ):
-            combined = (
-                predicate
-                if child.post_predicate is None
-                else build("and", (child.post_predicate, predicate), {})
-            )
-            return _Segment(
-                child.input_node, child.fields, child.env, child.predicate, combined
-            )
+        return _resolve_filter(node, path)
+    if name == "with_columns":
+        return _resolve_with_columns(node, path)
+    _reject_primitive(path, node)
+
+
+def _resolve_table_input(node: Node, /) -> _Segment:
+    fields = _schema_fields(node.attr("schema"))
+    return _Segment(
+        node,
+        tuple(field.name for field in fields),
+        tuple((field.name, _base_ref(field.name)) for field in fields),
+        None,
+    )
+
+
+def _resolve_project(node: Node, path: str, /) -> _Segment:
+    child = _resolve_table(node.args[0], f"{path}.project.value")
+    env = dict(child.env)
+    columns = _cstr_seq(node.attr("columns"))
+    return _Segment(
+        child.input_node,
+        columns,
+        tuple((field, env[field]) for field in columns),
+        child.predicate,
+        child.post_predicate,
+    )
+
+
+def _filter_needs_stateful_tail(child: _Segment, predicate: Node, /) -> bool:
+    return (
+        _segment_has_rolling(child)
+        or any(True for _ in _find_rolling(predicate))
+        or _segment_has_cross_section(child)
+        or any(True for _ in _find_cross_section(predicate))
+    )
+
+
+def _resolve_filter(node: Node, path: str, /) -> _Segment:
+    child = _resolve_table(node.args[0], f"{path}.filter.value")
+    predicate = _inline(node.args[1], dict(child.env), f"{path}.filter.predicate")
+    if _filter_needs_stateful_tail(child, predicate):
         combined = (
             predicate
-            if child.predicate is None
-            else build("and", (child.predicate, predicate), {})
+            if child.post_predicate is None
+            else build("and", (child.post_predicate, predicate), {})
         )
         return _Segment(
-            child.input_node, child.fields, child.env, combined, child.post_predicate
+            child.input_node, child.fields, child.env, child.predicate, combined
         )
-    if name == "with_columns":
-        child = _resolve_table(node.args[0], f"{path}.with_columns.value")
-        env = dict(child.env)
-        names = _cstr_seq(node.attr("names"))
-        for index, feature in enumerate(names):
-            env[feature] = _inline(node.args[index + 1], env, f"{path}.{feature}")
-        return _Segment(
-            child.input_node,
-            (*child.fields, *names),
-            tuple(env.items()),
-            child.predicate,
-            child.post_predicate,
-        )
-    _reject_primitive(path, node)
+    combined = (
+        predicate
+        if child.predicate is None
+        else build("and", (child.predicate, predicate), {})
+    )
+    return _Segment(
+        child.input_node, child.fields, child.env, combined, child.post_predicate
+    )
+
+
+def _resolve_with_columns(node: Node, path: str, /) -> _Segment:
+    child = _resolve_table(node.args[0], f"{path}.with_columns.value")
+    env = dict(child.env)
+    names = _cstr_seq(node.attr("names"))
+    for index, feature in enumerate(names):
+        env[feature] = _inline(node.args[index + 1], env, f"{path}.{feature}")
+    return _Segment(
+        child.input_node,
+        (*child.fields, *names),
+        tuple(env.items()),
+        child.predicate,
+        child.post_predicate,
+    )
 
 
 def _segment_has_rolling(segment: _Segment, /) -> bool:
@@ -324,8 +344,8 @@ def _cast_target(node: Node, path: str, /) -> str:
     return target
 
 
-def _sql(node: Node, /) -> str:
-    name = node.op.name
+def _sql_operator(name: str, node: Node, /) -> str | None:
+    """Render the single-operand and fixed-shape SQL operators."""
     if name == "column_ref":
         return _quote_identifier(_cstr(node.attr("name")))
     if name == "literal":
@@ -336,6 +356,14 @@ def _sql(node: Node, /) -> str:
         return f"(-{_sql(node.args[0])})"
     if name == "not":
         return f"(NOT {_sql(node.args[0])})"
+    return None
+
+
+def _sql(node: Node, /) -> str:
+    name = node.op.name
+    simple = _sql_operator(name, node)
+    if simple is not None:
+        return simple
     if name == "where":
         return (
             f"(CASE WHEN {_sql(node.args[0])} THEN {_sql(node.args[1])}"
