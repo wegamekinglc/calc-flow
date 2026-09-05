@@ -61,6 +61,8 @@ pub(crate) mod source_task;
     reason = "task supervision is an internal continuous-runtime detail"
 )]
 mod supervisor;
+#[cfg(test)]
+mod test_seams;
 
 pub use channel::{ChannelMetrics, EdgeReceiver, EdgeSender, EnvelopeCost, edge_channel};
 pub use context::StreamJobContext;

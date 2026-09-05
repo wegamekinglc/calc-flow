@@ -86,198 +86,15 @@ pub(crate) use super::failure::{
     LaunchId, RuntimeFailure, StartFailure, StartResult, TerminalCause, runner_shutdown_failure,
 };
 
+#[cfg(all(test, unix))]
+pub(crate) use super::test_seams::configure_test_manifest_transaction;
+#[cfg(test)]
+pub(crate) use super::test_seams::{
+    CheckpointFaultInjector, CheckpointFaultMode, CheckpointFaultPoint, CheckpointStartedTestGate,
+    TerminalCommitTestSeam, TestLaunchCheckpoint, TestLaunchProbe,
+};
+
 const CONNECTOR_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CheckpointFaultPoint {
-    SourceAdmission,
-    SourceCut,
-    PartialAlignment,
-    StateStage,
-    SinkPreCommit,
-    ManifestWrite,
-    ManifestRename,
-    ManifestParentSync,
-    PartialSinkCommit,
-    CompletedCommit,
-    Retention,
-    Compaction,
-}
-
-#[cfg(test)]
-impl CheckpointFaultPoint {
-    pub(crate) const ALL: [Self; 12] = [
-        Self::SourceAdmission,
-        Self::SourceCut,
-        Self::PartialAlignment,
-        Self::StateStage,
-        Self::SinkPreCommit,
-        Self::ManifestWrite,
-        Self::ManifestRename,
-        Self::ManifestParentSync,
-        Self::PartialSinkCommit,
-        Self::CompletedCommit,
-        Self::Retention,
-        Self::Compaction,
-    ];
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CheckpointFaultMode {
-    Io,
-    Panic,
-    Cancel,
-    Restart,
-}
-
-#[cfg(test)]
-impl CheckpointFaultMode {
-    pub(crate) const ALL: [Self; 4] = [Self::Io, Self::Panic, Self::Cancel, Self::Restart];
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct CheckpointFault {
-    point: CheckpointFaultPoint,
-    mode: CheckpointFaultMode,
-}
-
-#[cfg(test)]
-#[derive(Default)]
-struct CheckpointFaultState {
-    armed: Option<CheckpointFault>,
-    trigger_count: usize,
-    cancellation_trigger_count: usize,
-    #[cfg(unix)]
-    parent_sync_os_failure_probe: ManifestParentSyncOsFailureProbe,
-}
-
-#[cfg(test)]
-#[derive(Clone, Default)]
-pub(crate) struct CheckpointFaultInjector(Arc<Mutex<CheckpointFaultState>>);
-
-#[cfg(test)]
-impl CheckpointFaultInjector {
-    fn armed(point: CheckpointFaultPoint, mode: CheckpointFaultMode) -> Self {
-        Self(Arc::new(Mutex::new(CheckpointFaultState {
-            armed: Some(CheckpointFault { point, mode }),
-            trigger_count: 0,
-            cancellation_trigger_count: 0,
-            #[cfg(unix)]
-            parent_sync_os_failure_probe: ManifestParentSyncOsFailureProbe::default(),
-        })))
-    }
-
-    fn trigger(
-        &self,
-        point: CheckpointFaultPoint,
-        cancellation: &CancellationToken,
-    ) -> crate::Result<()> {
-        let fault = {
-            let mut state = self.0.lock();
-            match state.armed {
-                Some(fault) if fault.point == point => {
-                    state.trigger_count += 1;
-                    if fault.mode == CheckpointFaultMode::Cancel {
-                        state.cancellation_trigger_count += 1;
-                    }
-                    state.armed.take()
-                }
-                _ => None,
-            }
-        };
-        let Some(fault) = fault else {
-            return Ok(());
-        };
-        match fault.mode {
-            CheckpointFaultMode::Io => Err(CalcFlowError::Io {
-                path: format!("/fault-injection/{point:?}/credential-canary"),
-                source: std::io::Error::other("injected checkpoint I/O fault"),
-            }),
-            CheckpointFaultMode::Panic => {
-                panic!("injected checkpoint panic at {point:?}")
-            }
-            CheckpointFaultMode::Cancel => {
-                cancellation.cancel();
-                Ok(())
-            }
-            CheckpointFaultMode::Restart => Err(CalcFlowError::Internal {
-                message: format!("injected checkpoint restart at {point:?}"),
-            }),
-        }
-    }
-
-    #[cfg(unix)]
-    fn is_armed(&self, point: CheckpointFaultPoint, mode: CheckpointFaultMode) -> bool {
-        self.0
-            .lock()
-            .armed
-            .is_some_and(|fault| fault.point == point && fault.mode == mode)
-    }
-
-    #[cfg(unix)]
-    fn parent_sync_os_failure_probe(&self) -> ManifestParentSyncOsFailureProbe {
-        self.0.lock().parent_sync_os_failure_probe.clone()
-    }
-
-    #[cfg(unix)]
-    pub(crate) fn parent_sync_os_failure_count(&self) -> usize {
-        self.0.lock().parent_sync_os_failure_probe.count()
-    }
-
-    pub(crate) fn trigger_count(&self) -> usize {
-        self.0.lock().trigger_count
-    }
-
-    pub(crate) fn cancellation_trigger_count(&self) -> usize {
-        self.0.lock().cancellation_trigger_count
-    }
-}
-
-#[cfg(test)]
-#[derive(Clone, Default)]
-pub(crate) struct CheckpointStartedTestGate {
-    entered: Arc<AtomicBool>,
-    entered_changed: Arc<Notify>,
-    released: Arc<AtomicBool>,
-    release_changed: Arc<Notify>,
-}
-
-#[cfg(test)]
-impl CheckpointStartedTestGate {
-    pub(crate) fn has_entered(&self) -> bool {
-        self.entered.load(Ordering::Acquire)
-    }
-
-    pub(crate) async fn wait_until_entered(&self) {
-        while !self.entered.load(Ordering::Acquire) {
-            let changed = self.entered_changed.notified();
-            if self.entered.load(Ordering::Acquire) {
-                break;
-            }
-            changed.await;
-        }
-    }
-
-    pub(crate) fn release(&self) {
-        self.released.store(true, Ordering::Release);
-        self.release_changed.notify_waiters();
-    }
-
-    async fn pause(&self) {
-        self.entered.store(true, Ordering::Release);
-        self.entered_changed.notify_waiters();
-        while !self.released.load(Ordering::Acquire) {
-            let changed = self.release_changed.notified();
-            if self.released.load(Ordering::Acquire) {
-                break;
-            }
-            changed.await;
-        }
-    }
-}
 
 pub(crate) struct CheckpointRuntimeSpec {
     storage: CheckpointRuntimeStorage,
@@ -462,69 +279,6 @@ struct JobCore {
     terminal_commit_seam: Mutex<Option<TerminalCommitTestSeam>>,
     #[cfg(test)]
     launch_probe: Option<Arc<TestLaunchProbe>>,
-}
-
-#[cfg(test)]
-struct TerminalCommitTestSeam {
-    reached: tokio::sync::oneshot::Sender<()>,
-    release: tokio::sync::oneshot::Receiver<()>,
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TestLaunchCheckpoint {
-    AfterOperatorEntry,
-    LivePublished,
-}
-
-#[cfg(test)]
-struct TestLaunchProbe {
-    checkpoint: TestLaunchCheckpoint,
-    reached: AtomicBool,
-    released: AtomicBool,
-    changed: Notify,
-}
-
-#[cfg(test)]
-impl TestLaunchProbe {
-    fn new(checkpoint: TestLaunchCheckpoint) -> Self {
-        Self {
-            checkpoint,
-            reached: AtomicBool::new(false),
-            released: AtomicBool::new(false),
-            changed: Notify::new(),
-        }
-    }
-
-    async fn pause_at(&self, checkpoint: TestLaunchCheckpoint) {
-        if self.checkpoint != checkpoint {
-            return;
-        }
-        self.reached.store(true, Ordering::Release);
-        self.changed.notify_waiters();
-        loop {
-            let notified = self.changed.notified();
-            if self.released.load(Ordering::Acquire) {
-                return;
-            }
-            notified.await;
-        }
-    }
-
-    async fn wait_until_reached(&self) {
-        loop {
-            let notified = self.changed.notified();
-            if self.reached.load(Ordering::Acquire) {
-                return;
-            }
-            notified.await;
-        }
-    }
-
-    fn release(&self) {
-        self.released.store(true, Ordering::Release);
-        self.changed.notify_waiters();
-    }
 }
 
 #[derive(Default)]
@@ -2974,21 +2728,6 @@ async fn open_checkpoint_runtime(
         #[cfg(test)]
         started_gate: spec.started_gate,
     })
-}
-
-#[cfg(all(test, unix))]
-fn configure_test_manifest_transaction(
-    transaction: ManifestTransaction,
-    faults: &CheckpointFaultInjector,
-) -> ManifestTransaction {
-    if faults.is_armed(
-        CheckpointFaultPoint::ManifestParentSync,
-        CheckpointFaultMode::Io,
-    ) {
-        transaction.with_real_parent_sync_failure_for_test(faults.parent_sync_os_failure_probe())
-    } else {
-        transaction
-    }
 }
 
 fn sanitize_managed_preflight_error(
