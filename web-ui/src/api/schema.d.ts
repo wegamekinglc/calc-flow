@@ -880,15 +880,52 @@ export interface components {
                 DataFusionConfig: {
                     /**
                      * Format: uint
+                     * @description Target Arrow batch size used by the `DataFusion` session.
                      * @default 8192
                      */
                     batch_size: number;
                     /**
+                     * @description Collects plan strings and recursively traversed physical metrics.
+                     * @default true
+                     */
+                    collect_diagnostics: boolean;
+                    /**
+                     * @description Enables the fail-closed bounded SQL `AVG` rolling rewrite.
+                     * @default true
+                     */
+                    enable_rolling_rewrite: boolean;
+                    /**
                      * Format: uint
+                     * @description Maximum requested partitions in automatic mode.
+                     * @default 32
+                     */
+                    max_partitions: number;
+                    /**
+                     * Format: uint
+                     * @description Minimum input rows assigned to each useful partition.
+                     * @default 65536
+                     */
+                    min_rows_per_partition: number;
+                    /**
+                     * @description Fixed or conservative automatic partition selection.
+                     * @default fixed
+                     */
+                    parallelism_mode: components["schemas"]["ProjectCreateRequest"]["$defs"]["DataFusionParallelismMode"];
+                    /**
+                     * Format: uint
+                     * @description Inputs below this row count remain single-partition in automatic mode.
+                     * @default 10001
+                     */
+                    small_rows_threshold: number;
+                    /**
+                     * Format: uint
+                     * @description Requested partitions in [`DataFusionParallelismMode::Fixed`] mode.
                      * @default 1
                      */
                     target_partitions: number;
                 };
+                /** @description Selects the requested `DataFusion` partition policy. */
+                DataFusionParallelismMode: "fixed" | "auto";
                 DataSourceSpec: {
                     data: unknown;
                     format: string;
@@ -1012,6 +1049,12 @@ export interface components {
                     /**
                      * @default {
                      *       "batch_size": 8192,
+                     *       "collect_diagnostics": true,
+                     *       "enable_rolling_rewrite": true,
+                     *       "max_partitions": 32,
+                     *       "min_rows_per_partition": 65536,
+                     *       "parallelism_mode": "fixed",
+                     *       "small_rows_threshold": 10001,
                      *       "target_partitions": 1
                      *     }
                      */
@@ -1993,15 +2036,52 @@ export interface components {
                 DataFusionConfig: {
                     /**
                      * Format: uint
+                     * @description Target Arrow batch size used by the `DataFusion` session.
                      * @default 8192
                      */
                     batch_size: number;
                     /**
+                     * @description Collects plan strings and recursively traversed physical metrics.
+                     * @default true
+                     */
+                    collect_diagnostics: boolean;
+                    /**
+                     * @description Enables the fail-closed bounded SQL `AVG` rolling rewrite.
+                     * @default true
+                     */
+                    enable_rolling_rewrite: boolean;
+                    /**
                      * Format: uint
+                     * @description Maximum requested partitions in automatic mode.
+                     * @default 32
+                     */
+                    max_partitions: number;
+                    /**
+                     * Format: uint
+                     * @description Minimum input rows assigned to each useful partition.
+                     * @default 65536
+                     */
+                    min_rows_per_partition: number;
+                    /**
+                     * @description Fixed or conservative automatic partition selection.
+                     * @default fixed
+                     */
+                    parallelism_mode: components["schemas"]["ProjectDocument"]["$defs"]["DataFusionParallelismMode"];
+                    /**
+                     * Format: uint
+                     * @description Inputs below this row count remain single-partition in automatic mode.
+                     * @default 10001
+                     */
+                    small_rows_threshold: number;
+                    /**
+                     * Format: uint
+                     * @description Requested partitions in [`DataFusionParallelismMode::Fixed`] mode.
                      * @default 1
                      */
                     target_partitions: number;
                 };
+                /** @description Selects the requested `DataFusion` partition policy. */
+                DataFusionParallelismMode: "fixed" | "auto";
                 DataSourceSpec: {
                     data: unknown;
                     format: string;
@@ -2125,6 +2205,12 @@ export interface components {
                     /**
                      * @default {
                      *       "batch_size": 8192,
+                     *       "collect_diagnostics": true,
+                     *       "enable_rolling_rewrite": true,
+                     *       "max_partitions": 32,
+                     *       "min_rows_per_partition": 65536,
+                     *       "parallelism_mode": "fixed",
+                     *       "small_rows_threshold": 10001,
                      *       "target_partitions": 1
                      *     }
                      */

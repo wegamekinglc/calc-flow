@@ -551,7 +551,6 @@ export const decodeValidationReport = (value: unknown): ValidationReport => {
   return value as ValidationReport;
 };
 
-
 const nullableStringAt = (value: unknown, path: string): void => {
   if (value !== null) stringAt(value, path);
 };

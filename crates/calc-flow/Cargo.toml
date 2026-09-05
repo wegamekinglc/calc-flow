@@ -52,5 +52,9 @@ harness = false
 name = "stream_join_perf"
 harness = false
 
+[[bench]]
+name = "sql_datafusion_performance"
+harness = false
+
 [lints]
 workspace = true

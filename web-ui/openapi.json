@@ -1463,18 +1463,71 @@
             "properties": {
               "batch_size": {
                 "default": 8192,
+                "description": "Target Arrow batch size used by the `DataFusion` session.",
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "collect_diagnostics": {
+                "default": true,
+                "description": "Collects plan strings and recursively traversed physical metrics.",
+                "type": "boolean"
+              },
+              "enable_rolling_rewrite": {
+                "default": true,
+                "description": "Enables the fail-closed bounded SQL `AVG` rolling rewrite.",
+                "type": "boolean"
+              },
+              "max_partitions": {
+                "default": 32,
+                "description": "Maximum requested partitions in automatic mode.",
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "min_rows_per_partition": {
+                "default": 65536,
+                "description": "Minimum input rows assigned to each useful partition.",
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "parallelism_mode": {
+                "$ref": "#/components/schemas/ProjectCreateRequest/$defs/DataFusionParallelismMode",
+                "default": "fixed",
+                "description": "Fixed or conservative automatic partition selection."
+              },
+              "small_rows_threshold": {
+                "default": 10001,
+                "description": "Inputs below this row count remain single-partition in automatic mode.",
                 "format": "uint",
                 "minimum": 0.0,
                 "type": "integer"
               },
               "target_partitions": {
                 "default": 1,
+                "description": "Requested partitions in [`DataFusionParallelismMode::Fixed`] mode.",
                 "format": "uint",
                 "minimum": 0.0,
                 "type": "integer"
               }
             },
             "type": "object"
+          },
+          "DataFusionParallelismMode": {
+            "description": "Selects the requested `DataFusion` partition policy.",
+            "oneOf": [
+              {
+                "const": "fixed",
+                "description": "Preserve the explicit `target_partitions` request, subject only to the\nconfigured minimum rows per partition.",
+                "type": "string"
+              },
+              {
+                "const": "auto",
+                "description": "Choose a conservative partition count from host capacity, row count,\nand trusted input entity statistics.",
+                "type": "string"
+              }
+            ]
           },
           "DataSourceSpec": {
             "additionalProperties": false,
@@ -1911,6 +1964,12 @@
                 "$ref": "#/components/schemas/ProjectCreateRequest/$defs/DataFusionConfig",
                 "default": {
                   "batch_size": 8192,
+                  "collect_diagnostics": true,
+                  "enable_rolling_rewrite": true,
+                  "max_partitions": 32,
+                  "min_rows_per_partition": 65536,
+                  "parallelism_mode": "fixed",
+                  "small_rows_threshold": 10001,
                   "target_partitions": 1
                 }
               },
@@ -4236,18 +4295,71 @@
             "properties": {
               "batch_size": {
                 "default": 8192,
+                "description": "Target Arrow batch size used by the `DataFusion` session.",
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "collect_diagnostics": {
+                "default": true,
+                "description": "Collects plan strings and recursively traversed physical metrics.",
+                "type": "boolean"
+              },
+              "enable_rolling_rewrite": {
+                "default": true,
+                "description": "Enables the fail-closed bounded SQL `AVG` rolling rewrite.",
+                "type": "boolean"
+              },
+              "max_partitions": {
+                "default": 32,
+                "description": "Maximum requested partitions in automatic mode.",
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "min_rows_per_partition": {
+                "default": 65536,
+                "description": "Minimum input rows assigned to each useful partition.",
+                "format": "uint",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "parallelism_mode": {
+                "$ref": "#/components/schemas/ProjectDocument/$defs/DataFusionParallelismMode",
+                "default": "fixed",
+                "description": "Fixed or conservative automatic partition selection."
+              },
+              "small_rows_threshold": {
+                "default": 10001,
+                "description": "Inputs below this row count remain single-partition in automatic mode.",
                 "format": "uint",
                 "minimum": 0.0,
                 "type": "integer"
               },
               "target_partitions": {
                 "default": 1,
+                "description": "Requested partitions in [`DataFusionParallelismMode::Fixed`] mode.",
                 "format": "uint",
                 "minimum": 0.0,
                 "type": "integer"
               }
             },
             "type": "object"
+          },
+          "DataFusionParallelismMode": {
+            "description": "Selects the requested `DataFusion` partition policy.",
+            "oneOf": [
+              {
+                "const": "fixed",
+                "description": "Preserve the explicit `target_partitions` request, subject only to the\nconfigured minimum rows per partition.",
+                "type": "string"
+              },
+              {
+                "const": "auto",
+                "description": "Choose a conservative partition count from host capacity, row count,\nand trusted input entity statistics.",
+                "type": "string"
+              }
+            ]
           },
           "DataSourceSpec": {
             "additionalProperties": false,
@@ -4684,6 +4796,12 @@
                 "$ref": "#/components/schemas/ProjectDocument/$defs/DataFusionConfig",
                 "default": {
                   "batch_size": 8192,
+                  "collect_diagnostics": true,
+                  "enable_rolling_rewrite": true,
+                  "max_partitions": 32,
+                  "min_rows_per_partition": 65536,
+                  "parallelism_mode": "fixed",
+                  "small_rows_threshold": 10001,
                   "target_partitions": 1
                 }
               },

@@ -399,19 +399,25 @@ impl BatchExecutionPlan {
         if let Some(runtime) = &mut runtime {
             runtime.close();
         }
-        let datafusion_metrics = runtime
+        let mut datafusion_metrics = runtime
             .as_ref()
             .map_or_else(Vec::new, DataFusionRuntime::metrics);
         let (outputs, node_timings) = execution?;
+        let run_result_start = Instant::now();
+        let metadata = RunMetadata {
+            run_id: context.run_id().into(),
+            pipeline_name: self.name.clone(),
+            pipeline_fingerprint: self.fingerprint.clone(),
+        };
+        let run_result_ns = nanos(run_result_start.elapsed());
+        if let Some(metric) = datafusion_metrics.last_mut() {
+            metric.run_result_ns = run_result_ns;
+        }
         Ok(RunResult {
             outputs,
             node_timings,
             datafusion_metrics,
-            metadata: RunMetadata {
-                run_id: context.run_id().into(),
-                pipeline_name: self.name.clone(),
-                pipeline_fingerprint: self.fingerprint.clone(),
-            },
+            metadata,
             context,
         })
     }

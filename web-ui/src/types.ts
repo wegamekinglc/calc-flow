@@ -107,7 +107,16 @@ export const blankProject = (): ProjectCreateRequest => ({
       },
     ],
     edges: [],
-    datafusion: { batch_size: 8192, target_partitions: 1 },
+    datafusion: {
+      batch_size: 8192,
+      target_partitions: 1,
+      parallelism_mode: 'fixed',
+      max_partitions: 32,
+      min_rows_per_partition: 65536,
+      small_rows_threshold: 10001,
+      enable_rolling_rewrite: true,
+      collect_diagnostics: true,
+    },
   },
   data_sources: [
     {

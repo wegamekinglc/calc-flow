@@ -53,6 +53,12 @@ const FROZEN_FILES: [&str; 3] = [
 const DATAFUSION_CONFIG: DataFusionConfig = DataFusionConfig {
     batch_size: 1_024,
     target_partitions: 1,
+    parallelism_mode: calc_flow::DataFusionParallelismMode::Fixed,
+    max_partitions: 32,
+    min_rows_per_partition: 65_536,
+    small_rows_threshold: 10_001,
+    enable_rolling_rewrite: true,
+    collect_diagnostics: true,
 };
 
 #[derive(Debug)]

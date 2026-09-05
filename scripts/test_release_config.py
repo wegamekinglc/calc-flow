@@ -482,7 +482,10 @@ class ReleaseConfigTests(unittest.TestCase):
             "scripts.test_verify_symbolic_milestone_perf "
             "scripts.test_write_criterion_provenance "
             "scripts.test_verify_complexity_gates "
-            "scripts.test_verify_security_gates"
+            "scripts.test_verify_security_gates "
+            "scripts.test_verify_sql_datafusion_performance "
+            "scripts.test_analyze_sql_datafusion_attribution "
+            "scripts.test_run_sql_datafusion_matrix"
         )
         windows_test = (
             "scripts.test_run_rust_tests.RustTestHarnessTests."
@@ -666,6 +669,24 @@ class ReleaseConfigTests(unittest.TestCase):
         ):
             with self.subTest(case=case):
                 self.assertIn(case, core)
+
+    def test_linux_ci_executes_sql_datafusion_smoke_benchmark(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
+        smoke = workflow.split(
+            "      - name: Validate SQL/DataFusion comparison smoke\n", 1
+        )[1].split("      - run: RUSTDOCFLAGS=", 1)[0]
+
+        self.assertIn(
+            "cargo bench --locked -p calc-flow --bench sql_datafusion_performance --",
+            smoke,
+        )
+        self.assertNotIn("cargo test", smoke)
+        evidence_path = (
+            '"${GITHUB_WORKSPACE}/benchmark-results/sql-datafusion-smoke.json"'
+        )
+        self.assertIn('mkdir -p "${GITHUB_WORKSPACE}/benchmark-results"', smoke)
+        self.assertEqual(smoke.count(evidence_path), 2)
+        self.assertIn("scripts/verify_sql_datafusion_performance.py", smoke)
 
     def test_pr_and_release_isolate_stream_lifecycle_evidence(self) -> None:
         linux = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")

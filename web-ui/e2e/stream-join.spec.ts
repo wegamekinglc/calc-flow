@@ -250,6 +250,16 @@ async function resetProject(
 }
 
 test.describe('stream Join studio workflow', () => {
+  test.afterEach(async ({ request }) => {
+    for (const id of [
+      `stream_join_edit_${runTag}`,
+      `stream_join_run_${runTag}`,
+      `stream_join_fail_${runTag}`,
+    ]) {
+      await request.delete(`${projectsUrl}/${id}`);
+    }
+  });
+
   test('edits, validates, saves, and reloads the saved Join->Window graph', async ({
     page,
     request,
@@ -347,10 +357,8 @@ test.describe('stream Join studio workflow', () => {
     await resetProject(request, fixture);
 
     await page.goto('/');
+    await expect(page.getByText('Build the flow')).toBeVisible();
     const project = page.getByLabel('Project', { exact: true });
-    await expect
-      .poll(async () => project.locator('option').count())
-      .toBeGreaterThan(1);
     await project.selectOption(fixture.id);
 
     const start = page.getByRole('button', { name: /Start job/ });
@@ -407,10 +415,8 @@ test.describe('stream Join studio workflow', () => {
     await resetProject(request, fixture);
 
     await page.goto('/');
+    await expect(page.getByText('Build the flow')).toBeVisible();
     const picker = page.getByLabel('Project', { exact: true });
-    await expect
-      .poll(async () => picker.locator('option').count())
-      .toBeGreaterThan(1);
     await picker.selectOption(fixture.id);
     const start = page.getByRole('button', { name: /Start job/ });
     await start.click();

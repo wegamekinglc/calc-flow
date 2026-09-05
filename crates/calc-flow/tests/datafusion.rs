@@ -63,6 +63,67 @@ fn rolling_input() -> Batch {
     Batch::table(vec![record], BatchMetadata::default()).unwrap()
 }
 
+fn rolling_utc_input() -> Batch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            "event_time",
+            DataType::Timestamp(TimeUnit::Microsecond, Some(Arc::from("UTC"))),
+            false,
+        ),
+        Field::new("sequence", DataType::UInt64, false),
+        Field::new("symbol", DataType::Utf8, false),
+        Field::new("price", DataType::Float64, true),
+    ]));
+    let record = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(TimestampMicrosecondArray::from(vec![1, 1, 2, 2, 3]).with_timezone("UTC")),
+            Arc::new(UInt64Array::from(vec![1, 1, 2, 2, 3])),
+            Arc::new(StringArray::from(vec!["a", "b", "a", "b", "a"])),
+            Arc::new(Float64Array::from(vec![1.0, 10.0, 3.0, 14.0, 5.0])),
+        ],
+    )
+    .unwrap();
+    Batch::table(vec![record], BatchMetadata::default()).unwrap()
+}
+
+fn rolling_semantic_input() -> Batch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            "event_time",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            false,
+        ),
+        Field::new("sequence", DataType::UInt64, false),
+        Field::new("symbol", DataType::Utf8, false),
+        Field::new("price", DataType::Float64, true),
+    ]));
+    let record = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(TimestampMicrosecondArray::from(vec![
+                2, 1, 2, 1, 3, 2, 4, 4,
+            ])),
+            Arc::new(UInt64Array::from(vec![3, 1, 2, 1, 3, 2, 4, 4])),
+            Arc::new(StringArray::from(vec![
+                "a", "a", "a", "b", "b", "b", "a", "b",
+            ])),
+            Arc::new(Float64Array::from(vec![
+                Some(f64::INFINITY),
+                Some(1.0),
+                Some(f64::NAN),
+                None,
+                None,
+                None,
+                Some(f64::NEG_INFINITY),
+                None,
+            ])),
+        ],
+    )
+    .unwrap();
+    Batch::table(vec![record], BatchMetadata::default()).unwrap()
+}
+
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/v1")
@@ -120,12 +181,27 @@ async fn runtime_evaluates_v1_assignment_and_collects_metrics() {
     assert_eq!(metrics[0].output_rows, 2);
     assert_eq!(metrics[0].physical_planning_count, 1);
     assert!(metrics[0].sql_parse_ns > 0);
+    assert!(metrics[0].runtime_acquire_ns > 0);
+    assert!(metrics[0].session_state_create_ns > 0);
+    assert!(metrics[0].input_adapter_ns > 0);
+    assert!(metrics[0].table_register_ns > 0);
     assert!(metrics[0].logical_planning_ns > 0);
     assert!(metrics[0].physical_planning_ns > 0);
     assert!(metrics[0].planning_ns > 0);
     assert!(metrics[0].stream_open_ns > 0);
+    assert!(metrics[0].execution_to_first_batch_ns > 0);
     assert!(metrics[0].execution_ns > 0);
     assert!(metrics[0].collect_ns > 0);
+    // Reusing a non-empty RecordBatch vector is a no-copy operation and can
+    // complete within one timer tick, especially on Windows. Its u64 metric
+    // therefore permits a truthful zero-duration sample.
+    assert!(metrics[0].audit_ns > 0);
+    assert!(metrics[0].physical_plan_string_ns > 0);
+    assert_eq!(metrics[0].output_partition_rows.iter().sum::<usize>(), 2);
+    assert_eq!(
+        metrics[0].output_partition_rows.len(),
+        metrics[0].output_partition_count
+    );
     assert_eq!(
         metrics[0].planning_ns,
         metrics[0]
@@ -177,6 +253,7 @@ async fn bounded_float64_avg_uses_the_shared_rolling_physical_kernel() {
     let runtime = DataFusionRuntime::new(DataFusionConfig {
         batch_size: 2,
         target_partitions: 4,
+        ..DataFusionConfig::default()
     })
     .unwrap();
     let tables = BTreeMap::from([("input".to_owned(), rolling_input())]);
@@ -235,6 +312,37 @@ async fn bounded_float64_avg_uses_the_shared_rolling_physical_kernel() {
     assert_eq!(metrics[0].effective_target_partitions, 1);
     assert_eq!(metrics[0].rolling_candidate_windows, 1);
     assert_eq!(metrics[0].rolling_rewritten_windows, 1);
+    assert_eq!(metrics[0].window_operator_count, 1);
+    assert_eq!(metrics[0].window_partition_count, 1);
+    assert_eq!(metrics[0].window_partition_rows, [output.num_rows()]);
+    assert!(metrics[0].rolling_fallback_reasons.is_empty());
+    assert!(metrics[0].physical_plan.contains("CalcFlowRollingExec"));
+    assert_eq!(
+        metrics[0].output_partition_rows.iter().sum::<usize>(),
+        output.num_rows()
+    );
+}
+
+#[tokio::test]
+async fn bounded_float64_avg_rewrites_utc_event_time() {
+    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+    let tables = BTreeMap::from([("input".to_owned(), rolling_utc_input())]);
+
+    let output = runtime
+        .sql(
+            "SELECT event_time, sequence, symbol, price, \
+             avg(price) OVER (PARTITION BY symbol ORDER BY event_time, sequence \
+             ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS sma_2 FROM input",
+            &tables,
+            Some("rolling_sql_utc"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(output.num_rows(), 5);
+    let metrics = runtime.metrics();
+    assert_eq!(metrics[0].rolling_candidate_windows, 1);
+    assert_eq!(metrics[0].rolling_rewritten_windows, 1);
     assert!(metrics[0].rolling_fallback_reasons.is_empty());
     assert!(metrics[0].physical_plan.contains("CalcFlowRollingExec"));
 }
@@ -266,6 +374,36 @@ async fn unsupported_sql_window_stays_on_the_datafusion_fallback() {
 }
 
 #[tokio::test]
+async fn runtime_flags_disable_rewrite_and_expensive_plan_strings() {
+    let runtime = DataFusionRuntime::new(DataFusionConfig {
+        enable_rolling_rewrite: false,
+        collect_diagnostics: false,
+        ..DataFusionConfig::default()
+    })
+    .unwrap();
+    let tables = BTreeMap::from([("input".to_owned(), rolling_input())]);
+
+    let output = runtime
+        .sql(
+            "SELECT avg(price) OVER (PARTITION BY symbol ORDER BY event_time, sequence \
+             ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS sma_2 FROM input",
+            &tables,
+            Some("rolling_sql_flags"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(output.num_rows(), 5);
+    let metrics = runtime.metrics();
+    assert!(!metrics[0].rolling_rewrite_enabled);
+    assert!(!metrics[0].diagnostics_collected);
+    assert_eq!(metrics[0].rolling_rewritten_windows, 0);
+    assert!(metrics[0].logical_plan.is_empty());
+    assert!(metrics[0].physical_plan.is_empty());
+    assert_eq!(metrics[0].physical_plan_string_ns, 0);
+}
+
+#[tokio::test]
 async fn rolling_sql_rewrites_all_compatible_windows_in_one_stage() {
     let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
     let tables = BTreeMap::from([("input".to_owned(), rolling_input())]);
@@ -290,6 +428,39 @@ async fn rolling_sql_rewrites_all_compatible_windows_in_one_stage() {
     assert_eq!(metrics[0].rolling_rewritten_windows, 2);
     assert!(metrics[0].rolling_fallback_reasons.is_empty());
     assert!(metrics[0].physical_plan.contains("windows=2"));
+}
+
+#[tokio::test]
+async fn rolling_rewrite_matches_datafusion_boundary_semantics() {
+    let query = "SELECT event_time, sequence, symbol, price, \
+        avg(price) OVER (PARTITION BY symbol ORDER BY event_time, sequence \
+        ROWS BETWEEN CURRENT ROW AND CURRENT ROW) AS w1, \
+        avg(price) OVER (PARTITION BY symbol ORDER BY event_time, sequence \
+        ROWS BETWEEN 9 PRECEDING AND CURRENT ROW) AS w10 FROM input";
+    let tables = BTreeMap::from([("input".to_owned(), rolling_semantic_input())]);
+    let rewritten = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+    let fallback = DataFusionRuntime::new(DataFusionConfig {
+        enable_rolling_rewrite: false,
+        ..DataFusionConfig::default()
+    })
+    .unwrap();
+
+    let rewritten = rewritten
+        .sql(query, &tables, Some("rewrite"))
+        .await
+        .unwrap();
+    let fallback = fallback
+        .sql(query, &tables, Some("fallback"))
+        .await
+        .unwrap();
+
+    let rewritten = rewritten.table_payload().unwrap();
+    let fallback = fallback.table_payload().unwrap();
+    assert_eq!(rewritten.schema(), fallback.schema());
+    assert_eq!(
+        concat_batches(rewritten.schema(), rewritten.batches()).unwrap(),
+        concat_batches(fallback.schema(), fallback.batches()).unwrap()
+    );
 }
 
 #[tokio::test]
@@ -377,6 +548,12 @@ async fn failed_query_deregisters_aliases_before_the_next_query() {
             .is_ok()
     );
     assert_eq!(runtime.metrics().len(), 2);
+    assert!(runtime.metrics()[0].parallelism_decision_reused);
+    assert!(runtime.metrics()[1].parallelism_decision_reused);
+    assert_eq!(
+        runtime.metrics()[1].decision_active_entities_source,
+        "missing"
+    );
 }
 
 #[tokio::test]
@@ -412,6 +589,7 @@ async fn overlapping_evaluations_isolate_the_input_alias() {
         DataFusionRuntime::new(DataFusionConfig {
             batch_size: 8_192,
             target_partitions: 4,
+            ..DataFusionConfig::default()
         })
         .unwrap(),
     );
@@ -519,10 +697,24 @@ fn config_rejects_zero_batch_size_and_target_partitions() {
         DataFusionConfig {
             batch_size: 0,
             target_partitions: 1,
+            ..DataFusionConfig::default()
         },
         DataFusionConfig {
             batch_size: 8_192,
             target_partitions: 0,
+            ..DataFusionConfig::default()
+        },
+        DataFusionConfig {
+            max_partitions: 0,
+            ..DataFusionConfig::default()
+        },
+        DataFusionConfig {
+            min_rows_per_partition: 0,
+            ..DataFusionConfig::default()
+        },
+        DataFusionConfig {
+            small_rows_threshold: 0,
+            ..DataFusionConfig::default()
         },
     ] {
         assert!(matches!(

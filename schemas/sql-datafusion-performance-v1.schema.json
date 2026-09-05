@@ -1,0 +1,593 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "sql-datafusion-performance-v1.schema.json",
+  "title": "Calc Flow SQL and DataFusion performance evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "git_sha",
+    "profile",
+    "environment",
+    "cases"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "git_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "profile": {
+      "enum": [
+        "serial-control",
+        "matched-adaptive",
+        "p32-saturation",
+        "matrix",
+        "attribution"
+      ]
+    },
+    "environment": {
+      "$ref": "#/$defs/environment"
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/case"
+      }
+    }
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "positiveInteger": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "nonNegativeInteger": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "nonNegativeNumber": {
+      "type": "number",
+      "minimum": 0
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "machine_fingerprint",
+        "dependency_fingerprint",
+        "workload_fingerprint",
+        "datafusion_version",
+        "arrow_version",
+        "build_profile",
+        "allocator",
+        "os",
+        "arch",
+        "cpu_model",
+        "available_parallelism",
+        "rust_version",
+        "git_dirty"
+      ],
+      "properties": {
+        "machine_fingerprint": {
+          "$ref": "#/$defs/digest"
+        },
+        "dependency_fingerprint": {
+          "$ref": "#/$defs/digest"
+        },
+        "workload_fingerprint": {
+          "$ref": "#/$defs/digest"
+        },
+        "datafusion_version": {
+          "const": "54.0.0"
+        },
+        "arrow_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "build_profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "allocator": {
+          "type": "string",
+          "minLength": 1
+        },
+        "os": {
+          "type": "string",
+          "minLength": 1
+        },
+        "arch": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cpu_model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "available_parallelism": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "rust_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "git_dirty": {
+          "type": "boolean"
+        }
+      }
+    },
+    "phaseMedians": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runtime_acquire",
+        "session_state_create",
+        "input_adapter",
+        "table_register",
+        "sql_parse",
+        "logical_optimize",
+        "physical_plan",
+        "execution_to_first_batch",
+        "execution_remaining",
+        "collect_or_coalesce",
+        "output_arrow_wrap",
+        "audit",
+        "metrics_traversal",
+        "physical_plan_string",
+        "batch_envelope",
+        "run_result",
+        "run_session_envelope"
+      ],
+      "properties": {
+        "runtime_acquire": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "session_state_create": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "input_adapter": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "table_register": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "sql_parse": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "logical_optimize": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "physical_plan": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "execution_to_first_batch": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "execution_remaining": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "collect_or_coalesce": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "output_arrow_wrap": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "audit": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "metrics_traversal": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "physical_plan_string": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "batch_envelope": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "run_result": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "run_session_envelope": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        }
+      }
+    },
+    "phaseSamples": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runtime_acquire",
+        "session_state_create",
+        "input_adapter",
+        "table_register",
+        "sql_parse",
+        "logical_optimize",
+        "physical_plan",
+        "execution_to_first_batch",
+        "execution_remaining",
+        "collect_or_coalesce",
+        "output_arrow_wrap",
+        "audit",
+        "metrics_traversal",
+        "physical_plan_string",
+        "batch_envelope",
+        "run_result",
+        "run_session_envelope"
+      ],
+      "properties": {
+        "runtime_acquire": { "$ref": "#/$defs/nonNegativeSamples" },
+        "session_state_create": { "$ref": "#/$defs/nonNegativeSamples" },
+        "input_adapter": { "$ref": "#/$defs/nonNegativeSamples" },
+        "table_register": { "$ref": "#/$defs/nonNegativeSamples" },
+        "sql_parse": { "$ref": "#/$defs/nonNegativeSamples" },
+        "logical_optimize": { "$ref": "#/$defs/nonNegativeSamples" },
+        "physical_plan": { "$ref": "#/$defs/nonNegativeSamples" },
+        "execution_to_first_batch": { "$ref": "#/$defs/nonNegativeSamples" },
+        "execution_remaining": { "$ref": "#/$defs/nonNegativeSamples" },
+        "collect_or_coalesce": { "$ref": "#/$defs/nonNegativeSamples" },
+        "output_arrow_wrap": { "$ref": "#/$defs/nonNegativeSamples" },
+        "audit": { "$ref": "#/$defs/nonNegativeSamples" },
+        "metrics_traversal": { "$ref": "#/$defs/nonNegativeSamples" },
+        "physical_plan_string": { "$ref": "#/$defs/nonNegativeSamples" },
+        "batch_envelope": { "$ref": "#/$defs/nonNegativeSamples" },
+        "run_result": { "$ref": "#/$defs/nonNegativeSamples" },
+        "run_session_envelope": { "$ref": "#/$defs/nonNegativeSamples" }
+      }
+    },
+    "nonNegativeSamples": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/nonNegativeNumber"
+      }
+    },
+    "engine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "parallelism_mode",
+        "configured_partitions",
+        "requested_partitions",
+        "decision_input_rows",
+        "decision_active_entities",
+        "decision_active_entities_source",
+        "partition_limit_reason",
+        "batch_size",
+        "input_logical_partitions",
+        "input_batch_rows",
+        "normalized_plan_hash",
+        "bounded_window_agg_count",
+        "samples_ms",
+        "median_ms",
+        "p25_ms",
+        "p75_ms",
+        "mad_ms",
+        "cv",
+        "cpu_time_ms",
+        "peak_rss_bytes",
+        "spill_bytes",
+        "empty_partitions",
+        "partition_rows",
+        "partition_skew",
+        "window_compute_ms",
+        "repartition_sort_compute_ms",
+        "window_operator_count",
+        "repartition_operator_count",
+        "sort_operator_count",
+        "coalesce_operator_count",
+        "phase_medians_ms",
+        "phase_samples_ms"
+      ],
+      "properties": {
+        "parallelism_mode": {
+          "enum": [
+            "fixed",
+            "auto"
+          ]
+        },
+        "configured_partitions": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "requested_partitions": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "effective_partitions": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "available_parallelism": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "max_partitions": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "min_rows_per_partition": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "small_rows_threshold": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "parallelism_decision_reused": {
+          "type": "boolean"
+        },
+        "decision_input_rows": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "decision_active_entities": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "decision_active_entities_source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "partition_limit_reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "batch_size": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "input_logical_partitions": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "input_batch_rows": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/positiveInteger"
+          }
+        },
+        "normalized_plan_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "bounded_window_agg_count": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "samples_ms": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          }
+        },
+        "median_ms": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "p25_ms": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "p75_ms": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "mad_ms": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "cv": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "cpu_time_ms": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "peak_rss_bytes": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "spill_bytes": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "empty_partitions": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "partition_rows": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/nonNegativeInteger"
+          }
+        },
+        "partition_skew": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "window_compute_ms": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "repartition_sort_compute_ms": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "window_operator_count": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "repartition_operator_count": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "sort_operator_count": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "coalesce_operator_count": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "phase_medians_ms": {
+          "$ref": "#/$defs/phaseMedians"
+        },
+        "phase_samples_ms": {
+          "$ref": "#/$defs/phaseSamples"
+        }
+      }
+    },
+    "correctness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "rows",
+        "keys",
+        "order",
+        "null_nan_mask",
+        "values",
+        "rtol",
+        "atol"
+      ],
+      "properties": {
+        "schema": {
+          "const": true
+        },
+        "rows": {
+          "const": true
+        },
+        "keys": {
+          "const": true
+        },
+        "order": {
+          "const": true
+        },
+        "null_nan_mask": {
+          "const": true
+        },
+        "values": {
+          "const": true
+        },
+        "rtol": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1e-10
+        },
+        "atol": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1e-10
+        }
+      }
+    },
+    "comparability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "comparable",
+        "mismatches"
+      ],
+      "properties": {
+        "comparable": {
+          "type": "boolean"
+        },
+        "mismatches": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "configured_partitions",
+              "effective_partitions",
+              "batch_size",
+              "input_logical_partitions",
+              "input_batch_rows",
+              "normalized_plan_hash"
+            ]
+          }
+        }
+      }
+    },
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "rows",
+        "active_entities",
+        "window",
+        "warmups",
+        "rolling_rewrite_enabled",
+        "sample_order",
+        "calc_flow",
+        "raw_datafusion",
+        "paired_ratios",
+        "paired_ratio_median",
+        "paired_ratio_ci_low",
+        "paired_ratio_ci_high",
+        "correctness",
+        "comparability",
+        "speedup_conclusion"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rows": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "active_entities": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "window": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "warmups": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "rolling_rewrite_enabled": {
+          "const": false
+        },
+        "sample_order": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "enum": [
+              "ab",
+              "ba"
+            ]
+          }
+        },
+        "calc_flow": {
+          "$ref": "#/$defs/engine"
+        },
+        "raw_datafusion": {
+          "$ref": "#/$defs/engine"
+        },
+        "paired_ratios": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          }
+        },
+        "paired_ratio_median": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "paired_ratio_ci_low": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "paired_ratio_ci_high": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "correctness": {
+          "$ref": "#/$defs/correctness"
+        },
+        "comparability": {
+          "$ref": "#/$defs/comparability"
+        },
+        "speedup_conclusion": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}
