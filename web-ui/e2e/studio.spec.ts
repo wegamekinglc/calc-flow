@@ -7,7 +7,6 @@ import {
 } from '@playwright/test';
 import {
   mkdir,
-  readFile,
   readdir,
   rm,
   writeFile,
@@ -339,6 +338,11 @@ test.describe('Data Source dialog and toolbar layout', () => {
       await page.setViewportSize(viewport);
       await page.goto('/');
       await expect(page.getByText('Build the flow')).toBeVisible();
+      // Another spec may create and select a persisted project through the
+      // shared E2E backend. Establish this layout test's blank-project state
+      // explicitly so file-level workers cannot race its precondition.
+      await page.getByRole('button', { name: 'New', exact: true }).click();
+      await expect(page.getByLabel('Project', { exact: true })).toHaveValue('');
       await expectToolbarInsideViewport(page);
 
       const opener = page.getByRole('button', { name: 'Edit data source sample' });
@@ -420,6 +424,7 @@ test.describe('Data Source dialog and toolbar layout', () => {
 test('persists and validates a DataFusion UDF graph without browser code', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByText('Build the flow')).toBeVisible();
+  await page.getByRole('button', { name: 'New', exact: true }).click();
   await expect(page.getByText('double_value', { exact: true })).toBeVisible();
 
   await page.getByLabel('DataFusion expression').fill('doubled = double_value(a)');
@@ -430,8 +435,12 @@ test('persists and validates a DataFusion UDF graph without browser code', async
 
   const projects = await page.request.get('http://127.0.0.1:8765/api/v3/projects');
   expect(projects.ok()).toBeTruthy();
-  const [summary] = await projects.json();
-  expect(summary.id).toMatch(/^project_[0-9a-f]{32}$/);
+  const summaries: { id: string }[] = await projects.json();
+  const summary = summaries.find(({ id }) => /^project_[0-9a-f]{32}$/.test(id));
+  expect(summary).toBeDefined();
+  if (summary === undefined) {
+    throw new Error('created project summary is missing');
+  }
   const project = await page.request.get(
     `http://127.0.0.1:8765/api/v3/projects/${summary.id}`,
   );
@@ -458,14 +467,17 @@ test('persists and validates a DataFusion UDF graph without browser code', async
   await page.getByRole('button', { name: 'Export JSON' }).click({ force: true });
   const download = await downloadPromise;
   expect(download.suggestedFilename()).toBe(`${summary.id}.json`);
-  const downloadPath = await download.path();
-  expect(downloadPath).not.toBeNull();
+  const downloadStream = await download.createReadStream();
+  const downloadChunks: Buffer[] = [];
+  for await (const chunk of downloadStream) {
+    downloadChunks.push(Buffer.from(chunk));
+  }
 
   page.once('dialog', (dialog) => dialog.accept());
   await page.getByLabel('Import project').setInputFiles({
     name: download.suggestedFilename(),
     mimeType: 'application/json',
-    buffer: await readFile(downloadPath!),
+    buffer: Buffer.concat(downloadChunks),
   });
   await expect(page.getByText('Project imported')).toBeVisible();
 
@@ -473,7 +485,8 @@ test('persists and validates a DataFusion UDF graph without browser code', async
   await page.getByRole('button', { name: 'Delete', exact: true }).click({ force: true });
   await expect(page.getByText('Project deleted')).toBeVisible();
   const remaining = await page.request.get('http://127.0.0.1:8765/api/v3/projects');
-  expect(await remaining.json()).toEqual([]);
+  const remainingSummaries: { id: string }[] = await remaining.json();
+  expect(remainingSummaries.map(({ id }) => id)).not.toContain(summary.id);
 });
 
 test('starts and observes a persistent continuous file job', async ({ page, request }) => {
@@ -608,6 +621,7 @@ test.describe('persisted two-source SQL join', () => {
     ]);
 
     await page.reload();
+    await page.getByLabel('Project', { exact: true }).selectOption('two_source_e2e');
     await expect(page.getByLabel('Project', { exact: true })).toHaveValue('two_source_e2e');
     await expect.poll(() => panelWidth(page, '.toolbox')).toBeCloseTo(toolboxWidth, 0);
     await expect.poll(() => panelWidth(page, '.inspector')).toBeCloseTo(inspectorWidth, 0);

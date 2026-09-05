@@ -526,17 +526,60 @@ class NodeTimingPreview(StrictModel):
 class DataFusionMetricPreview(StrictModel):
     query_id: StrictInt = Field(ge=0)
     node_id: str | None
+    runtime_acquire_ns: StrictInt = Field(ge=0)
+    session_state_create_ns: StrictInt = Field(ge=0)
+    input_adapter_ns: StrictInt = Field(ge=0)
+    table_register_ns: StrictInt = Field(ge=0)
     sql_parse_ns: StrictInt = Field(ge=0)
     logical_planning_ns: StrictInt = Field(ge=0)
     physical_planning_ns: StrictInt = Field(ge=0)
     physical_planning_count: StrictInt = Field(ge=1)
     planning_ns: StrictInt = Field(ge=0)
     stream_open_ns: StrictInt = Field(ge=0)
+    execution_to_first_batch_ns: StrictInt = Field(ge=0)
+    execution_remaining_ns: StrictInt = Field(ge=0)
     execution_ns: StrictInt = Field(ge=0)
     collect_ns: StrictInt = Field(ge=0)
+    output_arrow_wrap_ns: StrictInt = Field(ge=0)
+    audit_ns: StrictInt = Field(ge=0)
+    metrics_traversal_ns: StrictInt = Field(ge=0)
+    logical_plan_string_ns: StrictInt = Field(ge=0)
+    physical_plan_string_ns: StrictInt = Field(ge=0)
+    batch_envelope_ns: StrictInt = Field(ge=0)
+    run_result_ns: StrictInt = Field(ge=0)
+    physical_metric_count: StrictInt = Field(ge=0)
+    output_partition_count: StrictInt = Field(ge=0)
+    output_partition_rows: tuple[StrictInt, ...]
+    window_partition_count: StrictInt = Field(ge=0)
+    window_partition_rows: tuple[StrictInt, ...]
+    spill_bytes: StrictInt = Field(ge=0)
+    elapsed_compute_ns: StrictInt = Field(ge=0)
+    window_compute_ns: StrictInt = Field(ge=0)
+    repartition_sort_compute_ns: StrictInt = Field(ge=0)
+    window_operator_count: StrictInt = Field(ge=0)
+    repartition_operator_count: StrictInt = Field(ge=0)
+    sort_operator_count: StrictInt = Field(ge=0)
+    coalesce_operator_count: StrictInt = Field(ge=0)
     output_rows: StrictInt = Field(ge=0)
+    configured_batch_size: StrictInt = Field(ge=1)
+    parallelism_mode: Literal["fixed", "auto"]
     configured_target_partitions: StrictInt = Field(ge=1)
+    requested_target_partitions: StrictInt = Field(ge=1)
     effective_target_partitions: StrictInt = Field(ge=1)
+    available_parallelism: StrictInt = Field(ge=1)
+    max_partitions: StrictInt = Field(ge=1)
+    min_rows_per_partition: StrictInt = Field(ge=1)
+    small_rows_threshold: StrictInt = Field(ge=1)
+    parallelism_decision_reused: StrictBool
+    decision_input_rows: StrictInt = Field(ge=0)
+    decision_active_entities: StrictInt | None = Field(default=None, ge=1)
+    decision_active_entities_source: str
+    input_rows: StrictInt = Field(ge=0)
+    active_entities: StrictInt | None = Field(default=None, ge=1)
+    active_entities_source: str
+    partition_limit_reason: str
+    rolling_rewrite_enabled: StrictBool
+    diagnostics_collected: StrictBool
     rolling_candidate_windows: StrictInt = Field(ge=0)
     rolling_rewritten_windows: StrictInt = Field(ge=0)
     rolling_fallback_reasons: tuple[str, ...]

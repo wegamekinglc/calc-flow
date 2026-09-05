@@ -5,6 +5,9 @@ export default defineConfig({
   timeout: 45_000,
   expect: { timeout: 8_000 },
   fullyParallel: false,
+  // Both spec files intentionally exercise one stateful Studio backend and
+  // project directory, so file-level workers must not mutate it concurrently.
+  workers: 1,
   retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI ? 'github' : 'list',
   use: {

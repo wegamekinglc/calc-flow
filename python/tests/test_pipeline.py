@@ -288,6 +288,49 @@ def test_project_json_helpers_are_canonical_strict_and_defaulted() -> None:
         validate_project_json(json.dumps({**minimal, "callable": "os.system"}))
 
 
+def test_datafusion_configuration_is_functional_and_exposes_auto_controls() -> None:
+    original = PipelineBuilder("auto-datafusion")
+    configured = original.with_datafusion_config(
+        batch_size=16_384,
+        target_partitions=8,
+        parallelism_mode="auto",
+        max_partitions=16,
+        min_rows_per_partition=32_768,
+        small_rows_threshold=10_001,
+        enable_rolling_rewrite=False,
+        collect_diagnostics=False,
+    )
+
+    assert "datafusion" not in original.project["graph"]
+    assert configured.project["graph"]["datafusion"] == {
+        "batch_size": 16_384,
+        "target_partitions": 8,
+        "parallelism_mode": "auto",
+        "max_partitions": 16,
+        "min_rows_per_partition": 32_768,
+        "small_rows_threshold": 10_001,
+        "enable_rolling_rewrite": False,
+        "collect_diagnostics": False,
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("batch_size", 0, "positive integer"),
+        ("max_partitions", True, "positive integer"),
+        ("parallelism_mode", "dynamic", "fixed or auto"),
+        ("enable_rolling_rewrite", 1, "exact bool"),
+    ],
+)
+def test_datafusion_configuration_rejects_invalid_values(
+    field: str, value: object, error: str
+) -> None:
+    arguments: dict[str, object] = {field: value}
+    with pytest.raises((TypeError, ValueError), match=error):
+        PipelineBuilder("invalid-datafusion").with_datafusion_config(**arguments)
+
+
 def test_compile_and_execution_failures_keep_declared_exception_types() -> None:
     cyclic = (
         PipelineBuilder("cycle")

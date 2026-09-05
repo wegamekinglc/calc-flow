@@ -623,17 +623,60 @@ const resultAt = (value: unknown, path: string): void => {
       exactKeys(metric, [
         'query_id',
         'node_id',
+        'runtime_acquire_ns',
+        'session_state_create_ns',
+        'input_adapter_ns',
+        'table_register_ns',
         'sql_parse_ns',
         'logical_planning_ns',
         'physical_planning_ns',
         'physical_planning_count',
         'planning_ns',
         'stream_open_ns',
+        'execution_to_first_batch_ns',
+        'execution_remaining_ns',
         'execution_ns',
         'collect_ns',
+        'output_arrow_wrap_ns',
+        'audit_ns',
+        'metrics_traversal_ns',
+        'logical_plan_string_ns',
+        'physical_plan_string_ns',
+        'batch_envelope_ns',
+        'run_result_ns',
+        'physical_metric_count',
+        'output_partition_count',
+        'output_partition_rows',
+        'window_partition_count',
+        'window_partition_rows',
+        'spill_bytes',
+        'elapsed_compute_ns',
+        'window_compute_ns',
+        'repartition_sort_compute_ns',
+        'window_operator_count',
+        'repartition_operator_count',
+        'sort_operator_count',
+        'coalesce_operator_count',
         'output_rows',
+        'configured_batch_size',
+        'parallelism_mode',
         'configured_target_partitions',
+        'requested_target_partitions',
         'effective_target_partitions',
+        'available_parallelism',
+        'max_partitions',
+        'min_rows_per_partition',
+        'small_rows_threshold',
+        'parallelism_decision_reused',
+        'decision_input_rows',
+        'decision_active_entities',
+        'decision_active_entities_source',
+        'input_rows',
+        'active_entities',
+        'active_entities_source',
+        'partition_limit_reason',
+        'rolling_rewrite_enabled',
+        'diagnostics_collected',
         'rolling_candidate_windows',
         'rolling_rewritten_windows',
         'rolling_fallback_reasons',
@@ -642,17 +685,77 @@ const resultAt = (value: unknown, path: string): void => {
       ], itemPath);
       integerAt(metric.query_id, `${itemPath}.query_id`);
       if (metric.node_id !== null) stringAt(metric.node_id, `${itemPath}.node_id`);
+      integerAt(metric.runtime_acquire_ns, `${itemPath}.runtime_acquire_ns`);
+      integerAt(metric.session_state_create_ns, `${itemPath}.session_state_create_ns`);
+      integerAt(metric.input_adapter_ns, `${itemPath}.input_adapter_ns`);
+      integerAt(metric.table_register_ns, `${itemPath}.table_register_ns`);
       integerAt(metric.sql_parse_ns, `${itemPath}.sql_parse_ns`);
       integerAt(metric.logical_planning_ns, `${itemPath}.logical_planning_ns`);
       integerAt(metric.physical_planning_ns, `${itemPath}.physical_planning_ns`);
       integerAt(metric.physical_planning_count, `${itemPath}.physical_planning_count`);
       integerAt(metric.planning_ns, `${itemPath}.planning_ns`);
       integerAt(metric.stream_open_ns, `${itemPath}.stream_open_ns`);
+      integerAt(metric.execution_to_first_batch_ns, `${itemPath}.execution_to_first_batch_ns`);
+      integerAt(metric.execution_remaining_ns, `${itemPath}.execution_remaining_ns`);
       integerAt(metric.execution_ns, `${itemPath}.execution_ns`);
       integerAt(metric.collect_ns, `${itemPath}.collect_ns`);
+      integerAt(metric.output_arrow_wrap_ns, `${itemPath}.output_arrow_wrap_ns`);
+      integerAt(metric.audit_ns, `${itemPath}.audit_ns`);
+      integerAt(metric.metrics_traversal_ns, `${itemPath}.metrics_traversal_ns`);
+      integerAt(metric.logical_plan_string_ns, `${itemPath}.logical_plan_string_ns`);
+      integerAt(metric.physical_plan_string_ns, `${itemPath}.physical_plan_string_ns`);
+      integerAt(metric.batch_envelope_ns, `${itemPath}.batch_envelope_ns`);
+      integerAt(metric.run_result_ns, `${itemPath}.run_result_ns`);
+      integerAt(metric.physical_metric_count, `${itemPath}.physical_metric_count`);
+      integerAt(metric.output_partition_count, `${itemPath}.output_partition_count`);
+      arrayAt(metric.output_partition_rows, `${itemPath}.output_partition_rows`)
+        .forEach((rows, partition) => integerAt(
+          rows,
+          `${itemPath}.output_partition_rows[${partition}]`,
+        ));
+      integerAt(metric.window_partition_count, `${itemPath}.window_partition_count`);
+      arrayAt(metric.window_partition_rows, `${itemPath}.window_partition_rows`)
+        .forEach((rows, partition) => integerAt(
+          rows,
+          `${itemPath}.window_partition_rows[${partition}]`,
+        ));
+      integerAt(metric.spill_bytes, `${itemPath}.spill_bytes`);
+      integerAt(metric.elapsed_compute_ns, `${itemPath}.elapsed_compute_ns`);
+      integerAt(metric.window_compute_ns, `${itemPath}.window_compute_ns`);
+      integerAt(metric.repartition_sort_compute_ns, `${itemPath}.repartition_sort_compute_ns`);
+      integerAt(metric.window_operator_count, `${itemPath}.window_operator_count`);
+      integerAt(metric.repartition_operator_count, `${itemPath}.repartition_operator_count`);
+      integerAt(metric.sort_operator_count, `${itemPath}.sort_operator_count`);
+      integerAt(metric.coalesce_operator_count, `${itemPath}.coalesce_operator_count`);
       integerAt(metric.output_rows, `${itemPath}.output_rows`);
+      integerAt(metric.configured_batch_size, `${itemPath}.configured_batch_size`);
+      if (metric.parallelism_mode !== 'fixed' && metric.parallelism_mode !== 'auto') {
+        throw new Error(`${itemPath}.parallelism_mode must be fixed or auto`);
+      }
       integerAt(metric.configured_target_partitions, `${itemPath}.configured_target_partitions`);
+      integerAt(metric.requested_target_partitions, `${itemPath}.requested_target_partitions`);
       integerAt(metric.effective_target_partitions, `${itemPath}.effective_target_partitions`);
+      integerAt(metric.available_parallelism, `${itemPath}.available_parallelism`);
+      integerAt(metric.max_partitions, `${itemPath}.max_partitions`);
+      integerAt(metric.min_rows_per_partition, `${itemPath}.min_rows_per_partition`);
+      integerAt(metric.small_rows_threshold, `${itemPath}.small_rows_threshold`);
+      booleanAt(metric.parallelism_decision_reused, `${itemPath}.parallelism_decision_reused`);
+      integerAt(metric.decision_input_rows, `${itemPath}.decision_input_rows`);
+      if (metric.decision_active_entities !== null) {
+        integerAt(metric.decision_active_entities, `${itemPath}.decision_active_entities`);
+      }
+      stringAt(
+        metric.decision_active_entities_source,
+        `${itemPath}.decision_active_entities_source`,
+      );
+      integerAt(metric.input_rows, `${itemPath}.input_rows`);
+      if (metric.active_entities !== null) {
+        integerAt(metric.active_entities, `${itemPath}.active_entities`);
+      }
+      stringAt(metric.active_entities_source, `${itemPath}.active_entities_source`);
+      stringAt(metric.partition_limit_reason, `${itemPath}.partition_limit_reason`);
+      booleanAt(metric.rolling_rewrite_enabled, `${itemPath}.rolling_rewrite_enabled`);
+      booleanAt(metric.diagnostics_collected, `${itemPath}.diagnostics_collected`);
       integerAt(metric.rolling_candidate_windows, `${itemPath}.rolling_candidate_windows`);
       integerAt(metric.rolling_rewritten_windows, `${itemPath}.rolling_rewritten_windows`);
       arrayAt(metric.rolling_fallback_reasons, `${itemPath}.rolling_fallback_reasons`)
