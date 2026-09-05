@@ -11,7 +11,10 @@ mod channel;
     reason = "checkpoint coordination exposes only the safe continuous facade"
 )]
 pub(crate) mod checkpoint;
+mod checkpoint_runtime;
+mod checkpoint_status;
 mod context;
+pub(crate) mod failure;
 #[allow(
     dead_code,
     reason = "runtime completion is owned behind the safe continuous facade"
@@ -60,6 +63,8 @@ pub(crate) mod source_task;
     reason = "task supervision is an internal continuous-runtime detail"
 )]
 mod supervisor;
+#[cfg(test)]
+mod test_seams;
 
 pub use channel::{ChannelMetrics, EdgeReceiver, EdgeSender, EnvelopeCost, edge_channel};
 pub use context::StreamJobContext;

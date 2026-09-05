@@ -35,6 +35,7 @@ use crate::{
     state::{SegmentDescriptor, SegmentKind, StateInventory, StateOperation, fold_state_segments},
 };
 
+use super::checkpoint::{checkpoint_mismatch, compile_error, internal_error, state_format};
 use super::{LateMetricDelta, OperatorMetadata, accumulate_late_metrics, validate_operator_name};
 
 /// Maximum number of concrete hopping-window assignments for one input row.
@@ -671,7 +672,7 @@ impl WindowAggregateOperator {
             )
         })
         .await
-        .map_err(|error| internal_error(&format!("window state encoder task failed: {error}")))?
+        .map_err(|error| internal_error(format!("window state encoder task failed: {error}")))?
         .map(Some)
     }
 
@@ -1032,7 +1033,7 @@ impl StreamOperator for WindowAggregateOperator {
             .is_some_and(|previous| epoch <= previous)
         {
             return Err(checkpoint_mismatch(
-                "window checkpoint epoch did not advance strictly".into(),
+                "window checkpoint epoch did not advance strictly",
             ));
         }
         let prepared = self.prepare_snapshot_segments(epoch)?;
@@ -1127,7 +1128,7 @@ impl WindowAggregateOperator {
         segment: &crate::StateSegment,
     ) -> Result<SegmentDescriptor> {
         let operator_id = self.state.operator_id.as_deref().ok_or_else(|| {
-            checkpoint_mismatch("window segment is missing its operator identity".into())
+            checkpoint_mismatch("window segment is missing its operator identity")
         })?;
         let relative_path = format!(
             "committed/{operator_id}/{:020}-{segment_id}.arrow",
@@ -1187,7 +1188,7 @@ impl WindowAggregateOperator {
         for (segment_id, segment) in new_segments {
             if retained.insert(segment_id, segment).is_some() {
                 return Err(checkpoint_mismatch(
-                    "window checkpoint produced a duplicate segment ID".into(),
+                    "window checkpoint produced a duplicate segment ID",
                 ));
             }
         }
@@ -1199,7 +1200,7 @@ impl WindowAggregateOperator {
         let actual_ids = retained.keys().map(String::as_str).collect::<Vec<_>>();
         if expected_ids != actual_ids {
             return Err(checkpoint_mismatch(
-                "window checkpoint segment data does not match its inventory".into(),
+                "window checkpoint segment data does not match its inventory",
             ));
         }
         Ok(retained)
@@ -1317,12 +1318,12 @@ fn snapshot_segments(
 fn validate_snapshot_segment_bytes(descriptor: &SegmentDescriptor, bytes: &[u8]) -> Result<()> {
     if u64::try_from(bytes.len()).ok() != Some(descriptor.handle.byte_len()) {
         return Err(checkpoint_mismatch(
-            "window snapshot segment byte length does not match its handle".into(),
+            "window snapshot segment byte length does not match its handle",
         ));
     }
     if hex::encode(Sha256::digest(bytes)) != descriptor.handle.sha256() {
         return Err(checkpoint_mismatch(
-            "window snapshot segment checksum does not match its handle".into(),
+            "window snapshot segment checksum does not match its handle",
         ));
     }
     Ok(())
@@ -2389,12 +2390,6 @@ fn operator_error(node_id: &str, message: &str) -> CalcFlowError {
     }
 }
 
-fn internal_error(message: &str) -> CalcFlowError {
-    CalcFlowError::Internal {
-        message: message.into(),
-    }
-}
-
 fn compile_spec(
     input_schema: &Schema,
     spec: &WindowSpec,
@@ -2896,12 +2891,12 @@ fn validate_snapshot_header(
     }
     if metadata.configuration_hash != compiled.configuration_hash {
         return Err(checkpoint_mismatch(
-            "window operator configuration hash does not match the compiled operator".into(),
+            "window operator configuration hash does not match the compiled operator",
         ));
     }
     if metadata.state_schema_fingerprint != compiled.state_schema_fingerprint {
         return Err(checkpoint_mismatch(
-            "window state schema fingerprint does not match the compiled operator".into(),
+            "window state schema fingerprint does not match the compiled operator",
         ));
     }
     Ok(())
@@ -2919,7 +2914,7 @@ fn validate_snapshot_segment_set(
     let actual_ids = snapshot.segments.keys().cloned().collect::<Vec<_>>();
     if expected_ids != actual_ids {
         return Err(checkpoint_mismatch(
-            "window snapshot segment IDs are missing, extra, duplicated, or non-canonical".into(),
+            "window snapshot segment IDs are missing, extra, duplicated, or non-canonical",
         ));
     }
     Ok(())
@@ -2933,7 +2928,7 @@ fn validate_snapshot_identity(
         && (metadata.pipeline_fingerprint.is_none() || metadata.operator_id.is_none())
     {
         return Err(checkpoint_mismatch(
-            "window segments require pipeline and operator identity metadata".into(),
+            "window segments require pipeline and operator identity metadata",
         ));
     }
     validate_snapshot_pipeline_fingerprint(metadata.pipeline_fingerprint.as_deref())?;
@@ -2948,7 +2943,7 @@ fn validate_snapshot_pipeline_fingerprint(fingerprint: Option<&str>) -> Result<(
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
     {
         return Err(checkpoint_mismatch(
-            "window pipeline fingerprint is not lowercase SHA-256".into(),
+            "window pipeline fingerprint is not lowercase SHA-256",
         ));
     }
     Ok(())
@@ -2957,7 +2952,7 @@ fn validate_snapshot_pipeline_fingerprint(fingerprint: Option<&str>) -> Result<(
 fn validate_snapshot_operator_id(operator_id: Option<&str>) -> Result<()> {
     if operator_id.is_some_and(|operator_id| operator_id.is_empty() || operator_id.contains('\0')) {
         return Err(checkpoint_mismatch(
-            "window operator ID is empty or contains NUL".into(),
+            "window operator ID is empty or contains NUL",
         ));
     }
     Ok(())
@@ -2973,18 +2968,17 @@ fn validate_snapshot_inventory(
             || descriptor.schema_fingerprint != compiled.state_schema_fingerprint
         {
             return Err(checkpoint_mismatch(
-                "window segment inventory layout or schema does not match the compiled operator"
-                    .into(),
+                "window segment inventory layout or schema does not match the compiled operator",
             ));
         }
         if descriptor.handle.epoch() > metadata.epoch {
             return Err(checkpoint_mismatch(
-                "window segment inventory contains a future epoch".into(),
+                "window segment inventory contains a future epoch",
             ));
         }
         if metadata.operator_id.as_deref() != Some(descriptor.handle.operator_id()) {
             return Err(checkpoint_mismatch(
-                "window segment inventory operator does not match snapshot metadata".into(),
+                "window segment inventory operator does not match snapshot metadata",
             ));
         }
     }
@@ -3001,11 +2995,10 @@ fn decode_state_segments(
     if segments.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let pipeline_fingerprint = pipeline_fingerprint.ok_or_else(|| {
-        checkpoint_mismatch("window state is missing its pipeline fingerprint".into())
-    })?;
+    let pipeline_fingerprint = pipeline_fingerprint
+        .ok_or_else(|| checkpoint_mismatch("window state is missing its pipeline fingerprint"))?;
     let operator_id = operator_id
-        .ok_or_else(|| checkpoint_mismatch("window state is missing its operator ID".into()))?;
+        .ok_or_else(|| checkpoint_mismatch("window state is missing its operator ID"))?;
     let expected_schema = state_schema(spec, compiled, pipeline_fingerprint, operator_id);
     let decoded = segments
         .iter()
@@ -3047,7 +3040,7 @@ fn decode_state_segment(
         .map_err(|error| state_format(format!("window state IPC is invalid: {error}")))?;
     if reader.schema().as_ref() != expected_schema {
         return Err(checkpoint_mismatch(
-            "window state Arrow schema or metadata does not match the compiled operator".into(),
+            "window state Arrow schema or metadata does not match the compiled operator",
         ));
     }
     if reader.num_batches() != 1 {
@@ -3123,7 +3116,7 @@ fn decode_state_segment(
         let encoded_group = encode_group_values(&group_values, compiled)?;
         if encoded_group != key.stable_group_key {
             return Err(checkpoint_mismatch(
-                "window state stable group key does not match its declared group values".into(),
+                "window state stable group key does not match its declared group values",
             ));
         }
 
@@ -3316,7 +3309,7 @@ fn validate_restored_window_key(key: &WindowKey, compiled: &CompiledWindowSpec) 
         || start.rem_euclid(i128::from(compiled.geometry.slide_micros)) != 0
     {
         return Err(checkpoint_mismatch(
-            "window state key does not match the compiled geometry".into(),
+            "window state key does not match the compiled geometry",
         ));
     }
     Ok(())
@@ -3562,20 +3555,6 @@ fn is_reserved_output(value: &str) -> bool {
 fn invalid_argument(field: &str, message: &str) -> CalcFlowError {
     CalcFlowError::InvalidArgument {
         field: field.into(),
-        message: message.into(),
-    }
-}
-
-fn compile_error(message: String) -> CalcFlowError {
-    CalcFlowError::Compile { message }
-}
-
-fn checkpoint_mismatch(message: String) -> CalcFlowError {
-    CalcFlowError::CheckpointMismatch { message }
-}
-
-fn state_format(message: impl Into<String>) -> CalcFlowError {
-    CalcFlowError::Format {
         message: message.into(),
     }
 }

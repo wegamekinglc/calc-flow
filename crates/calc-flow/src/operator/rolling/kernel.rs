@@ -2692,7 +2692,7 @@ fn finish_with_storage(array: ArrayRef, storage: OutputStorage) -> Result<ArrayR
         return Ok(array);
     }
     cast(&array, &data_type).map_err(|error| {
-        internal_error(&format!(
+        internal_error(format!(
             "typed rolling output cast to {data_type} failed: {error}"
         ))
     })

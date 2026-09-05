@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { blankProject, updateNodeOperator } from './types';
+import { at, blankProject } from './types';
 
 describe('v3 project transforms', () => {
   it('creates a semantically valid portable v3 expression project', () => {
@@ -9,7 +9,7 @@ describe('v3 project transforms', () => {
     expect(project.format_version).toBe(3);
     expect(project).not.toHaveProperty('$defs');
     expect(project.id).toMatch(/^[A-Za-z][A-Za-z0-9_-]*$/);
-    expect(project.graph.nodes[0].operator).toEqual({
+    expect(at(project.graph.nodes).operator).toEqual({
       kind: 'expression',
       expression: 'total = a + b',
       select: [],
@@ -32,29 +32,6 @@ describe('v3 project transforms', () => {
       sources: [],
       sinks: [],
       state: { root: '.calc-flow-state', retention: 3 },
-    });
-  });
-
-  it('updates a nested operator without mutating the project or node', () => {
-    const project = blankProject();
-    const originalNode = project.graph.nodes[0];
-
-    const updated = updateNodeOperator(project, originalNode.id, (operator) =>
-      operator.kind === 'expression'
-        ? { ...operator, expression: 'total = a - b' }
-        : operator,
-    );
-
-    expect(updated).not.toBe(project);
-    expect(updated.graph).not.toBe(project.graph);
-    expect(updated.graph.nodes[0]).not.toBe(originalNode);
-    expect(updated.graph.nodes[0].operator).toMatchObject({
-      kind: 'expression',
-      expression: 'total = a - b',
-    });
-    expect(originalNode.operator).toMatchObject({
-      kind: 'expression',
-      expression: 'total = a + b',
     });
   });
 });

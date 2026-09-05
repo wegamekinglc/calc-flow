@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import App, { ARROW_TYPES, connectProject, flowNodeData } from './App';
-import { blankProject } from './types';
+import { at, blankProject } from './types';
 
 const response = (body: unknown, status = 200) =>
   Promise.resolve(
@@ -178,7 +178,7 @@ describe('Calc Flow Studio', () => {
   });
 
   it('maps external graph handles from configured ports without defaults', () => {
-    const base = blankProject().graph.nodes[0];
+    const base = at(blankProject().graph.nodes);
     const source = {
       ...base,
       input_ports: [],
@@ -282,7 +282,7 @@ describe('Calc Flow Studio', () => {
 
   it('persists a SQL alias rename across its schema port and incoming edge', async () => {
     const base = blankProject();
-    const expression = base.graph.nodes[0];
+    const expression = at(base.graph.nodes);
     const loadedProject = {
       ...base,
       id: 'alias_project',
@@ -369,10 +369,10 @@ describe('Calc Flow Studio', () => {
       schema: [{ name: 'id', data_type: 'int64', nullable: false }],
     });
     expect(saved.graph.edges[1].target_port).toBe('rhs');
-    expect(loadedProject.graph.nodes[0].operator).toMatchObject({
+    expect(at(loadedProject.graph.nodes).operator).toMatchObject({
       aliases: ['left', 'right'],
     });
-    expect(loadedProject.graph.edges[1].target_port).toBe('right');
+    expect(at(loadedProject.graph.edges, 1).target_port).toBe('right');
   });
 
   it('creates an unsaved draft before validating it', async () => {
@@ -571,14 +571,14 @@ describe('Calc Flow Studio', () => {
     expect(container.querySelector('.status-pill')).toHaveTextContent('pending');
 
     act(() => {
-      FakeEventSource.instances[0].emit('state');
+      at(FakeEventSource.instances).emit('state');
     });
 
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(
       "job.status: expected 'pending' or 'running' or 'completed' or 'failed' or 'cancelled'",
     ));
     expect(container.querySelector('.status-pill')).not.toBeInTheDocument();
-    expect(FakeEventSource.instances[0].close).toHaveBeenCalledOnce();
+    expect(at(FakeEventSource.instances).close).toHaveBeenCalledOnce();
   });
 
   it('blocks every persistence action when a source draft is invalid', async () => {

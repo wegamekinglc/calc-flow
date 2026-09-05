@@ -2,13 +2,8 @@ import { useEffect } from 'react';
 import type { Dispatch } from 'react';
 
 import { api, ApiContractError } from '../api/client';
+import { isTerminalJobStatus } from '../jobStatusModel';
 import type { JobEvent, JobResponse } from '../types';
-
-const terminalStatuses = new Set<JobResponse['status']>([
-  'completed',
-  'failed',
-  'cancelled',
-]);
 
 const eventTypes = ['state', 'progress', 'checkpoint', 'terminal'];
 
@@ -22,6 +17,9 @@ export function useJobEvents(
     if (!jobId) return;
 
     let active = true;
+    // Read the cancellation flag through a helper: control-flow narrowing must
+    // not carry across the awaited job request, where stop() may clear it.
+    const isLive = (): boolean => active;
     let closed = false;
     let consecutiveErrors = 0;
     let refreshRevision = 0;
@@ -44,19 +42,19 @@ export function useJobEvents(
     };
 
     const refresh = async (): Promise<boolean> => {
-      if (!active) return true;
+      if (!isLive()) return true;
       const revision = ++refreshRevision;
       try {
         const current = await api.job(jobId);
-        if (!active) return true;
+        if (!isLive()) return true;
         if (revision !== refreshRevision) return false;
         onUpdate(current);
-        if (terminalStatuses.has(current.status)) {
+        if (isTerminalJobStatus(current.status)) {
           stop();
           return true;
         }
       } catch (error) {
-        if (!active) return true;
+        if (!isLive()) return true;
         if (revision !== refreshRevision) return false;
         if (error instanceof ApiContractError) {
           stop();
@@ -69,9 +67,9 @@ export function useJobEvents(
     };
 
     const poll = async () => {
-      if (!active) return;
+      if (!isLive()) return;
       if (await refresh()) return;
-      if (!active) return;
+      if (!isLive()) return;
       pollTimer = window.setTimeout(() => {
         pollTimer = undefined;
         void poll();

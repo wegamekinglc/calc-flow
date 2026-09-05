@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { blankProject } from '../types';
 import { api, ApiContractError, ApiError } from './client';
+import { at } from '../types';
 
 const job = (status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled') => ({
   id: 'job-1',
@@ -180,7 +181,7 @@ describe('API client', () => {
       'POST',
       'POST',
     ]);
-    expect(JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body))).toEqual({
+    expect(JSON.parse(String((at(fetchMock.mock.calls)[1] as RequestInit).body))).toEqual({
       project_id: 'project-1',
     });
   });
@@ -194,8 +195,8 @@ describe('API client', () => {
 
     await api.createProject(created);
 
-    const init = fetchMock.mock.calls[0][1] as RequestInit;
-    expect(fetchMock.mock.calls[0][0]).toBe('/api/v3/projects');
+    const init = at(fetchMock.mock.calls)[1] as RequestInit;
+    expect(at(fetchMock.mock.calls)[0]).toBe('/api/v3/projects');
     expect(init.method).toBe('POST');
     expect(JSON.parse(String(init.body))).toEqual(created);
   });

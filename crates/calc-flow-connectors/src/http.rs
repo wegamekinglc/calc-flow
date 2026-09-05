@@ -22,6 +22,7 @@ use calc_flow::{
 use serde_json::Value;
 
 use crate::json_lines::JsonLinesCodec;
+use crate::options::{positive_option, u64_option};
 
 /// The connector implementation version.
 pub const IDENTITY_VERSION: &str = "2.0.0";
@@ -136,37 +137,6 @@ impl HttpSourceConfig {
                 100,
             )?),
         })
-    }
-}
-
-fn positive_option(options: &JsonMap, key: &str, default: u64) -> Result<u64> {
-    let value = u64_option(options, key)?.unwrap_or(default);
-    if value == 0 {
-        Err(CalcFlowError::InvalidArgument {
-            field: key.into(),
-            message: "option must be greater than zero".into(),
-        })
-    } else {
-        Ok(value)
-    }
-}
-
-fn u64_option(options: &JsonMap, key: &str) -> Result<Option<u64>> {
-    match options.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::Number(number)) => {
-            number
-                .as_u64()
-                .map(Some)
-                .ok_or(CalcFlowError::InvalidArgument {
-                    field: key.into(),
-                    message: "option must be a non-negative integer".into(),
-                })
-        }
-        Some(_) => Err(CalcFlowError::InvalidArgument {
-            field: key.into(),
-            message: "option must be a non-negative integer".into(),
-        }),
     }
 }
 
