@@ -66,8 +66,6 @@ use crate::pipeline::{
     OperatorCheckpointCapability, RuntimeSinkRoute, RuntimeSourceRoute, RuntimeStreamNode,
     StreamRuntimePlanParts,
 };
-#[cfg(all(test, unix))]
-use crate::state::ManifestParentSyncOsFailureProbe;
 #[cfg(test)]
 use crate::state::ManifestTransactionFaultPoint;
 use crate::{
