@@ -1,7 +1,7 @@
 //! The streaming runner's checkpoint status accounting.
 //!
 //! `CheckpointStatus`, its private state, and the `CheckpointStatusHandle`
-//! every acknowledgement path updates moved verbatim from `runner.rs`;
+//! every ack path updates moved verbatim from `runner.rs`;
 //! `runner` re-exports the names so projection and runner call sites keep
 //! their paths. `CheckpointFailureCategory` moved along because it is part
 //! of the status snapshot contract.
@@ -30,10 +30,10 @@ pub(crate) struct CheckpointStatus {
     pub(crate) current_epoch: Option<Epoch>,
     pub(crate) phase: Option<CheckpointPhase>,
     pub(crate) terminal: bool,
-    pub(crate) source_acknowledgements: usize,
-    pub(crate) operator_acknowledgements: usize,
-    pub(crate) sink_precommit_acknowledgements: usize,
-    pub(crate) sink_commit_acknowledgements: usize,
+    pub(crate) source_acks: usize,
+    pub(crate) operator_acks: usize,
+    pub(crate) sink_precommit_acks: usize,
+    pub(crate) sink_commit_acks: usize,
     pub(crate) expected_sources: usize,
     pub(crate) expected_operators: usize,
     pub(crate) expected_sinks: usize,
@@ -62,10 +62,10 @@ impl CheckpointStatusHandle {
                 current_epoch: None,
                 phase: None,
                 terminal: false,
-                source_acknowledgements: 0,
-                operator_acknowledgements: 0,
-                sink_precommit_acknowledgements: 0,
-                sink_commit_acknowledgements: 0,
+                source_acks: 0,
+                operator_acks: 0,
+                sink_precommit_acks: 0,
+                sink_commit_acks: 0,
                 expected_sources: identity.source_ids.len(),
                 expected_operators: identity.operator_ids.len(),
                 expected_sinks: identity.sink_ids.len(),
@@ -99,10 +99,10 @@ impl CheckpointStatusHandle {
         state.snapshot.current_epoch = Some(epoch);
         state.snapshot.phase = Some(CheckpointPhase::Requested);
         state.snapshot.terminal = terminal;
-        state.snapshot.source_acknowledgements = 0;
-        state.snapshot.operator_acknowledgements = 0;
-        state.snapshot.sink_precommit_acknowledgements = 0;
-        state.snapshot.sink_commit_acknowledgements = 0;
+        state.snapshot.source_acks = 0;
+        state.snapshot.operator_acks = 0;
+        state.snapshot.sink_precommit_acks = 0;
+        state.snapshot.sink_commit_acks = 0;
         state.snapshot.installed_unknown_epoch = None;
         state.snapshot.failure_category = None;
         state.started = Some(tokio::time::Instant::now());
@@ -129,25 +129,25 @@ impl CheckpointStatusHandle {
 
     pub(super) fn acknowledge_sources(&self, epoch: Epoch, count: usize) {
         self.acknowledge(epoch, |status| {
-            status.source_acknowledgements = count;
+            status.source_acks = count;
         });
     }
 
     pub(super) fn acknowledge_operators(&self, epoch: Epoch, count: usize) {
         self.acknowledge(epoch, |status| {
-            status.operator_acknowledgements = count;
+            status.operator_acks = count;
         });
     }
 
     pub(super) fn acknowledge_sink_precommits(&self, epoch: Epoch, count: usize) {
         self.acknowledge(epoch, |status| {
-            status.sink_precommit_acknowledgements = count;
+            status.sink_precommit_acks = count;
         });
     }
 
     pub(super) fn acknowledge_sink_commits(&self, epoch: Epoch, count: usize) {
         self.acknowledge(epoch, |status| {
-            status.sink_commit_acknowledgements = count;
+            status.sink_commit_acks = count;
         });
     }
 
@@ -181,10 +181,10 @@ impl CheckpointStatusHandle {
             state.snapshot.current_epoch = None;
             state.snapshot.phase = None;
             state.snapshot.terminal = false;
-            state.snapshot.source_acknowledgements = 0;
-            state.snapshot.operator_acknowledgements = 0;
-            state.snapshot.sink_precommit_acknowledgements = 0;
-            state.snapshot.sink_commit_acknowledgements = 0;
+            state.snapshot.source_acks = 0;
+            state.snapshot.operator_acks = 0;
+            state.snapshot.sink_precommit_acks = 0;
+            state.snapshot.sink_commit_acks = 0;
             state.snapshot.elapsed = None;
             state.started = None;
         }
@@ -207,10 +207,10 @@ impl CheckpointStatusHandle {
         state.snapshot.current_epoch = None;
         state.snapshot.phase = None;
         state.snapshot.terminal = false;
-        state.snapshot.source_acknowledgements = 0;
-        state.snapshot.operator_acknowledgements = 0;
-        state.snapshot.sink_precommit_acknowledgements = 0;
-        state.snapshot.sink_commit_acknowledgements = 0;
+        state.snapshot.source_acks = 0;
+        state.snapshot.operator_acks = 0;
+        state.snapshot.sink_precommit_acks = 0;
+        state.snapshot.sink_commit_acks = 0;
         state.snapshot.elapsed = None;
         state.started = None;
     }

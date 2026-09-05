@@ -439,7 +439,7 @@ fn snapshot_reads_and_transactional_sink_commits() {
             .get(0);
         assert_eq!(ledger, 1, "the epoch ledger entry committed");
 
-        // Reconcile a lost commit acknowledgement in a newly opened sink with
+        // Reconcile a lost commit ack in a newly opened sink with
         // the exact durable manifest metadata and committed state segment.
         sink.close().await.expect("closes first sink");
         let sink_config = PostgresSinkConfig::from_options(&sink_options("transactional"))

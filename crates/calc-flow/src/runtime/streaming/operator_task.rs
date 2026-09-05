@@ -40,7 +40,7 @@ pub(crate) struct OperatorCheckpointAck {
 }
 
 pub(crate) struct OperatorCheckpointPort {
-    pub(crate) acknowledgements: mpsc::Sender<OperatorCheckpointAck>,
+    pub(crate) acks: mpsc::Sender<OperatorCheckpointAck>,
     pub(crate) transaction: Option<Arc<crate::state::ManifestTransaction>>,
     pub(crate) terminal: Option<OperatorTerminalPort>,
     #[cfg(test)]
@@ -239,7 +239,7 @@ fn reset_and_acknowledge(
         ),
         None => Ok(OperatorInputProgress::new(inputs.ingresses.keys())),
     });
-    let (acknowledgement_result, input_progress) = match preparation_result {
+    let (ack_result, input_progress) = match preparation_result {
         Ok(input_progress) => (Ok(()), Some(input_progress)),
         Err(error) => (Err(error), None),
     };
@@ -249,7 +249,7 @@ fn reset_and_acknowledge(
         .entry_ack
         .send(OperatorEntryAck {
             node_id: inputs.node_id.clone(),
-            result: acknowledgement_result,
+            result: ack_result,
         })
         .map_err(|_| CalcFlowError::Internal {
             message: dropped_message,
@@ -288,13 +288,10 @@ fn restore_ingress_completion(inputs: &mut OperatorTaskInputs, succeeded: bool) 
 
 fn dropped_ack_message(inputs: &OperatorTaskInputs, succeeded: bool) -> String {
     if succeeded {
-        format!(
-            "operator {:?} entry acknowledgement was dropped",
-            inputs.node_id
-        )
+        format!("operator {:?} entry ack was dropped", inputs.node_id)
     } else {
         format!(
-            "operator {:?} failed reset after its acknowledgement was dropped",
+            "operator {:?} failed reset after its ack was dropped",
             inputs.node_id
         )
     }
@@ -421,8 +418,8 @@ async fn complete_terminal_checkpoint(
             ),
         });
     };
-    let acknowledgement = capture_operator_checkpoint(inputs, input_progress, epoch).await?;
-    send_operator_checkpoint_ack(inputs, acknowledgement).await
+    let ack = capture_operator_checkpoint(inputs, input_progress, epoch).await?;
+    send_operator_checkpoint_ack(inputs, ack).await
 }
 
 async fn receive_operator_message(
@@ -714,8 +711,8 @@ async fn complete_barrier_if_ready(
         .active_epoch()
         .expect("ready operator alignment always has an active epoch");
     let next_epoch = epoch.next()?;
-    let acknowledgement = capture_operator_checkpoint(inputs, input_progress, epoch).await?;
-    send_operator_checkpoint_ack(inputs, acknowledgement).await?;
+    let ack = capture_operator_checkpoint(inputs, input_progress, epoch).await?;
+    send_operator_checkpoint_ack(inputs, ack).await?;
     forward_control(
         &mut inputs.outputs,
         StreamMessage::barrier(epoch),
@@ -797,13 +794,13 @@ async fn capture_operator_checkpoint(
 
 async fn send_operator_checkpoint_ack(
     inputs: &OperatorTaskInputs,
-    acknowledgement: OperatorCheckpointAck,
+    ack: OperatorCheckpointAck,
 ) -> Result<()> {
-    let acknowledgements = inputs
+    let acks = inputs
         .checkpoint
         .as_ref()
-        .expect("checkpoint acknowledgement requires its task port")
-        .acknowledgements
+        .expect("checkpoint ack requires its task port")
+        .acks
         .clone();
     tokio::select! {
         biased;
@@ -812,10 +809,10 @@ async fn send_operator_checkpoint_ack(
                 run_id: inputs.context.job().job_id().to_string(),
             });
         }
-        result = acknowledgements.send(acknowledgement) => result.map_err(|_| {
+        result = acks.send(ack) => result.map_err(|_| {
             CalcFlowError::Internal {
                 message: format!(
-                    "operator {:?} checkpoint acknowledgement channel closed",
+                    "operator {:?} checkpoint ack channel closed",
                     inputs.node_id
                 ),
             }
@@ -1989,7 +1986,7 @@ pub(super) mod tests {
             .recv()
             .await
             .ok_or_else(|| CalcFlowError::Internal {
-                message: "benchmark alignment omitted its checkpoint acknowledgement".into(),
+                message: "benchmark alignment omitted its checkpoint ack".into(),
             })
     }
 
@@ -2043,7 +2040,7 @@ pub(super) mod tests {
             checkpoint_capability,
             output_port,
             Some(OperatorCheckpointPort {
-                acknowledgements: checkpoint_tx,
+                acks: checkpoint_tx,
                 transaction,
                 terminal: None,
                 alignment_fault: None,
@@ -2062,13 +2059,13 @@ pub(super) mod tests {
         pub(crate) async fn measure(mut self) -> Result<BenchmarkAlignmentReport> {
             let epoch = crate::Epoch::INITIAL;
             send_benchmark_alignment_inputs(&mut self.harness, self.batches, epoch).await?;
-            let acknowledgement = receive_benchmark_alignment_ack(&mut self.checkpoint).await?;
+            let ack = receive_benchmark_alignment_ack(&mut self.checkpoint).await?;
             let (data_before_barrier, barriers) =
                 collect_benchmark_alignment_output(&mut self.harness.outputs[0], epoch).await?;
             finish_benchmark_alignment_harness(&mut self.harness).await?;
             Ok(BenchmarkAlignmentReport {
                 data_before_barrier,
-                state_segments: acknowledgement.state.segments.len(),
+                state_segments: ack.state.segments.len(),
                 barriers,
             })
         }
@@ -2237,8 +2234,8 @@ pub(super) mod tests {
 
     async fn start(harness: &mut Harness) {
         harness.entry.send(true).unwrap();
-        let acknowledgement = harness.ack.recv().await.unwrap();
-        acknowledgement.result.unwrap();
+        let ack = harness.ack.recv().await.unwrap();
+        ack.result.unwrap();
         harness.data.send(true).unwrap();
     }
 
@@ -2400,7 +2397,7 @@ pub(super) mod tests {
             CompiledStreamOperator::External(Box::new(operator)),
             output_port,
             Some(OperatorCheckpointPort {
-                acknowledgements: checkpoint_tx,
+                acks: checkpoint_tx,
                 transaction: None,
                 terminal: None,
                 alignment_fault: None,
@@ -2459,11 +2456,11 @@ pub(super) mod tests {
             .send(StreamMessage::barrier(epoch))
             .await
             .unwrap();
-        let acknowledgement = checkpoint_rx.recv().await.unwrap();
-        assert_eq!(acknowledgement.node_id, "node");
-        assert_eq!(acknowledgement.epoch, epoch);
-        assert!(acknowledgement.state.inline_metadata.is_empty());
-        assert!(acknowledgement.state.segments.is_empty());
+        let ack = checkpoint_rx.recv().await.unwrap();
+        assert_eq!(ack.node_id, "node");
+        assert_eq!(ack.epoch, epoch);
+        assert!(ack.state.inline_metadata.is_empty());
+        assert!(ack.state.segments.is_empty());
         assert_eq!(
             harness.outputs[0]
                 .recv()
@@ -2515,7 +2512,7 @@ pub(super) mod tests {
             CompiledStreamOperator::External(Box::new(operator)),
             output_port,
             Some(OperatorCheckpointPort {
-                acknowledgements: checkpoint_tx,
+                acks: checkpoint_tx,
                 transaction: None,
                 terminal: None,
                 alignment_fault: Some(Arc::new(|| {
@@ -2569,7 +2566,7 @@ pub(super) mod tests {
             CompiledStreamOperator::External(Box::new(operator)),
             output_port,
             Some(OperatorCheckpointPort {
-                acknowledgements: checkpoint_tx,
+                acks: checkpoint_tx,
                 transaction: None,
                 terminal: None,
                 alignment_fault: None,
@@ -2657,7 +2654,7 @@ pub(super) mod tests {
             CompiledStreamOperator::External(Box::new(operator)),
             output_port,
             Some(OperatorCheckpointPort {
-                acknowledgements: checkpoint_tx,
+                acks: checkpoint_tx,
                 transaction: None,
                 terminal: None,
                 alignment_fault: None,
@@ -2681,17 +2678,17 @@ pub(super) mod tests {
             .await
             .unwrap();
 
-        let acknowledgement = tokio::time::timeout(Duration::from_secs(1), checkpoint_rx.recv())
+        let ack = tokio::time::timeout(Duration::from_secs(1), checkpoint_rx.recv())
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(acknowledgement.epoch, epoch);
+        assert_eq!(ack.epoch, epoch);
         assert_eq!(
-            acknowledgement.state.progress["left"].state,
+            ack.state.progress["left"].state,
             ManifestIngressState::Active
         );
         assert_eq!(
-            acknowledgement.state.progress["right"].state,
+            ack.state.progress["right"].state,
             ManifestIngressState::Ended
         );
         assert_eq!(
@@ -2727,7 +2724,7 @@ pub(super) mod tests {
             OperatorCheckpointCapability::CheckpointedStateful { state_version: 1 },
             output_port,
             Some(OperatorCheckpointPort {
-                acknowledgements: checkpoint_tx,
+                acks: checkpoint_tx,
                 transaction: None,
                 terminal: None,
                 alignment_fault: None,
@@ -2834,7 +2831,7 @@ pub(super) mod tests {
             CompiledStreamOperator::External(Box::new(operator)),
             output_port,
             Some(OperatorCheckpointPort {
-                acknowledgements: checkpoint_tx,
+                acks: checkpoint_tx,
                 transaction: None,
                 terminal: None,
                 alignment_fault: None,
@@ -2902,10 +2899,10 @@ pub(super) mod tests {
         );
 
         harness.entry.send(true).unwrap();
-        let acknowledgement = harness.ack.recv().await.unwrap();
+        let ack = harness.ack.recv().await.unwrap();
 
         assert!(matches!(
-            acknowledgement.result,
+            ack.result,
             Err(CalcFlowError::CheckpointMismatch { .. })
         ));
         assert!(harness.supervisor.join_all().await.errors.is_empty());

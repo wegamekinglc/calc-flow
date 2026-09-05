@@ -70,7 +70,7 @@ pub(crate) struct PostgresCdcSource {
     last_commit_lsn: u64,
     durable_lsn_tx: watch::Sender<u64>,
     durable_lsn_rx: watch::Receiver<u64>,
-    acknowledgement: Arc<CdcAcknowledger>,
+    ack: Arc<CdcAcknowledger>,
     checkpoint_gate: Arc<CdcCheckpointGate>,
     snapshot_client: Option<Client>,
     snapshot_driver: Option<ConnectionDriver>,
@@ -97,7 +97,7 @@ impl PostgresCdcSource {
             schema: SourceSchema::Exact(configured_cdc_schema(&config)?),
             native_watermarks: calc_flow::NativeWatermarkCapability::NeverEmits,
         };
-        let acknowledgement = Arc::new(CdcAcknowledger {
+        let ack = Arc::new(CdcAcknowledger {
             slot: config.slot.clone().expect("logical CDC validates a slot"),
             last_acknowledged: Mutex::new(0),
             durable_lsn_tx: durable_lsn_tx.clone(),
@@ -119,7 +119,7 @@ impl PostgresCdcSource {
             last_commit_lsn: 0,
             durable_lsn_tx,
             durable_lsn_rx,
-            acknowledgement,
+            ack,
             checkpoint_gate,
             snapshot_client: None,
             snapshot_driver: None,
@@ -799,7 +799,7 @@ impl StreamSource for PostgresCdcSource {
     }
 
     fn durable_cursor_acknowledger(&self) -> Option<Arc<dyn DurableCursorAcknowledger>> {
-        Some(self.acknowledgement.clone())
+        Some(self.ack.clone())
     }
 
     fn checkpoint_gate(&self) -> Option<Arc<dyn SourceCheckpointGate>> {
@@ -2204,7 +2204,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cursor_acknowledgement_is_monotonic_and_slot_bound() {
+    async fn cursor_ack_is_monotonic_and_slot_bound() {
         let (tx, mut rx) = watch::channel(0);
         let ack = CdcAcknowledger {
             slot: "orders_slot".into(),

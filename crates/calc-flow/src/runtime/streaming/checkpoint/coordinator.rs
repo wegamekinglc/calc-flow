@@ -501,28 +501,22 @@ async fn apply_command(
 
 fn validate_ack(state: &EpochState, expected: &ParticipantSet, ack: &CheckpointAck) -> Result<()> {
     if ack.epoch != state.epoch {
-        return Err(protocol_error(
-            state.epoch,
-            "acknowledgement epoch does not match",
-        ));
+        return Err(protocol_error(state.epoch, "ack epoch does not match"));
     }
     if !valid_ack_digest(&ack.canonical_digest) {
-        return Err(protocol_error(
-            state.epoch,
-            "acknowledgement digest is not bounded",
-        ));
+        return Err(protocol_error(state.epoch, "ack digest is not bounded"));
     }
     if ack.kind == AckKind::SinkCommit && state.phase != CheckpointPhase::ManifestDurable {
         return Err(protocol_error(
             state.epoch,
-            "sink commit acknowledgement precedes manifest durability",
+            "sink commit ack precedes manifest durability",
         ));
     }
     if !is_expected_participant(expected, ack) {
         return Err(protocol_error(
             state.epoch,
             &format!(
-                "{} acknowledgement participant {:?} is foreign",
+                "{} ack participant {:?} is foreign",
                 ack_kind_name(ack.kind),
                 ack.participant_id
             ),
@@ -558,10 +552,7 @@ fn is_identical_duplicate(state: &EpochState, ack: &CheckpointAck) -> Result<boo
     let previous = ack_map(state, ack.kind).get(&ack.participant_id);
     match previous {
         Some(previous) if previous == ack => Ok(true),
-        Some(_) => Err(protocol_error(
-            state.epoch,
-            "conflicting duplicate acknowledgement",
-        )),
+        Some(_) => Err(protocol_error(state.epoch, "conflicting duplicate ack")),
         None => Ok(false),
     }
 }

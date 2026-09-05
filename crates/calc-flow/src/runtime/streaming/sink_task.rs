@@ -121,7 +121,7 @@ pub(crate) enum SinkCheckpointCommand {
 
 pub(crate) struct SinkCheckpointPort {
     pub(crate) initial_epoch: Epoch,
-    pub(crate) acknowledgements: mpsc::Sender<SinkCheckpointAck>,
+    pub(crate) acks: mpsc::Sender<SinkCheckpointAck>,
     pub(crate) commands: mpsc::Receiver<SinkCheckpointCommand>,
     pub(crate) finalizations: mpsc::Sender<SinkFinalizeAck>,
     pub(crate) terminal_ready: Option<mpsc::Sender<String>>,
@@ -599,7 +599,7 @@ async fn process_checkpoint_barrier(
             return SinkLoopStep::CheckpointFailed { sink_id, error };
         }
     };
-    let acknowledgement = SinkCheckpointAck {
+    let ack = SinkCheckpointAck {
         output_id: inputs.output_id.clone(),
         epoch,
         sinks: prepared.clone(),
@@ -608,11 +608,7 @@ async fn process_checkpoint_barrier(
         .checkpoint
         .as_mut()
         .expect("checkpoint-enabled sink retains its port");
-    let sent = checkpoint
-        .acknowledgements
-        .send(acknowledgement)
-        .await
-        .is_ok();
+    let sent = checkpoint.acks.send(ack).await.is_ok();
     if !sent {
         abort_all(inputs, epoch, &prepared, task_id).await;
         inputs.epoch_owner.settle(epoch);
@@ -679,7 +675,7 @@ async fn process_terminal_checkpoint(inputs: &mut SinkTaskInputs, task_id: TaskI
             return SinkLoopStep::CheckpointFailed { sink_id, error };
         }
     };
-    let acknowledgement = SinkCheckpointAck {
+    let ack = SinkCheckpointAck {
         output_id: inputs.output_id.clone(),
         epoch,
         sinks: prepared.clone(),
@@ -689,11 +685,7 @@ async fn process_terminal_checkpoint(inputs: &mut SinkTaskInputs, task_id: TaskI
             .checkpoint
             .as_mut()
             .expect("terminal sink retains its checkpoint port");
-        checkpoint
-            .acknowledgements
-            .send(acknowledgement)
-            .await
-            .is_ok()
+        checkpoint.acks.send(ack).await.is_ok()
     };
     if !sent {
         abort_all(inputs, epoch, &prepared, task_id).await;
@@ -1369,7 +1361,7 @@ mod tests {
     }
 
     #[test]
-    fn pre_commit_metadata_is_canonical_and_bounded_before_acknowledgement() {
+    fn pre_commit_metadata_is_canonical_and_bounded_before_ack() {
         validate_pre_commit_metadata(
             "sink",
             &BTreeMap::from([("prepared".into(), serde_json::json!(1))]),
@@ -1743,7 +1735,7 @@ mod tests {
             vec![validated_transactional_sink("tx", &log, &closes)],
             Some(SinkCheckpointPort {
                 initial_epoch: crate::Epoch::INITIAL,
-                acknowledgements: ack_tx,
+                acks: ack_tx,
                 commands: command_rx,
                 finalizations: finalize_tx,
                 terminal_ready: None,
@@ -1762,11 +1754,11 @@ mod tests {
             .await
             .unwrap();
 
-        let acknowledgement = ack_rx.recv().await.unwrap();
-        assert_eq!(acknowledgement.output_id, "output");
-        assert_eq!(acknowledgement.epoch, crate::Epoch::INITIAL);
+        let ack = ack_rx.recv().await.unwrap();
+        assert_eq!(ack.output_id, "output");
+        assert_eq!(ack.epoch, crate::Epoch::INITIAL);
         assert_eq!(
-            acknowledgement.sinks["tx"].pre_commit.as_ref().unwrap()["prepared"],
+            ack.sinks["tx"].pre_commit.as_ref().unwrap()["prepared"],
             serde_json::json!(1)
         );
         assert_eq!(
@@ -1813,7 +1805,7 @@ mod tests {
             )],
             Some(SinkCheckpointPort {
                 initial_epoch: crate::Epoch::INITIAL,
-                acknowledgements: ack_tx,
+                acks: ack_tx,
                 commands: command_rx,
                 finalizations: finalize_tx,
                 terminal_ready: None,
@@ -1827,9 +1819,9 @@ mod tests {
             .await
             .unwrap();
 
-        let acknowledgement = ack_rx.recv().await.unwrap();
+        let ack = ack_rx.recv().await.unwrap();
         assert_eq!(
-            acknowledgement.sinks["deduplicated"].delivery,
+            ack.sinks["deduplicated"].delivery,
             SinkDeliveryManifest::EpochIdempotent {
                 mechanism: "epoch-ledger".into(),
                 retention: RetentionClass::Unbounded,
@@ -1864,7 +1856,7 @@ mod tests {
                 .into(),
             Some(SinkCheckpointPort {
                 initial_epoch: crate::Epoch::INITIAL,
-                acknowledgements: ack_tx,
+                acks: ack_tx,
                 commands: command_rx,
                 finalizations: finalize_tx,
                 terminal_ready: None,
@@ -1910,7 +1902,7 @@ mod tests {
             }],
             Some(SinkCheckpointPort {
                 initial_epoch: crate::Epoch::INITIAL,
-                acknowledgements: ack_tx,
+                acks: ack_tx,
                 commands: command_rx,
                 finalizations: finalize_tx,
                 terminal_ready: None,
@@ -1923,12 +1915,9 @@ mod tests {
             .send(StreamMessage::barrier(crate::Epoch::INITIAL))
             .await
             .unwrap();
-        let acknowledgement = ack_rx.recv().await.unwrap();
+        let ack = ack_rx.recv().await.unwrap();
         assert_eq!(
-            acknowledgement.sinks["redacted"]
-                .pre_commit
-                .as_ref()
-                .unwrap()["token"],
+            ack.sinks["redacted"].pre_commit.as_ref().unwrap()["token"],
             serde_json::json!(PRECOMMIT_SENTINEL)
         );
 
@@ -1954,7 +1943,7 @@ mod tests {
             vec![validated_transactional_sink("tx", &log, &closes)],
             Some(SinkCheckpointPort {
                 initial_epoch: crate::Epoch::INITIAL,
-                acknowledgements: ack_tx,
+                acks: ack_tx,
                 commands: command_rx,
                 finalizations: finalize_tx,
                 terminal_ready: None,
@@ -1992,7 +1981,7 @@ mod tests {
             vec![validated_transactional_sink("tx", &log, &closes)],
             Some(SinkCheckpointPort {
                 initial_epoch: crate::Epoch::INITIAL,
-                acknowledgements: ack_tx,
+                acks: ack_tx,
                 commands: command_rx,
                 finalizations: finalize_tx,
                 terminal_ready: None,
@@ -2034,7 +2023,7 @@ mod tests {
             vec![validated_transactional_sink("tx", &log, &closes)],
             Some(SinkCheckpointPort {
                 initial_epoch: crate::Epoch::INITIAL,
-                acknowledgements: ack_tx,
+                acks: ack_tx,
                 commands: command_rx,
                 finalizations: finalize_tx,
                 terminal_ready: None,
@@ -2077,7 +2066,7 @@ mod tests {
             )],
             Some(SinkCheckpointPort {
                 initial_epoch: crate::Epoch::INITIAL,
-                acknowledgements: ack_tx,
+                acks: ack_tx,
                 commands: command_rx,
                 finalizations: finalize_tx,
                 terminal_ready: None,
@@ -2122,7 +2111,7 @@ mod tests {
             )],
             Some(SinkCheckpointPort {
                 initial_epoch: crate::Epoch::INITIAL,
-                acknowledgements: ack_tx,
+                acks: ack_tx,
                 commands: command_rx,
                 finalizations: finalize_tx,
                 terminal_ready: Some(terminal_ready_tx),
@@ -2179,7 +2168,7 @@ mod tests {
             vec![live_sink("a", false), live_sink("b", true)],
             Some(SinkCheckpointPort {
                 initial_epoch: crate::Epoch::INITIAL,
-                acknowledgements: ack_tx,
+                acks: ack_tx,
                 commands: command_rx,
                 finalizations: finalize_tx,
                 terminal_ready: None,
@@ -2192,7 +2181,7 @@ mod tests {
             .send(StreamMessage::barrier(crate::Epoch::INITIAL))
             .await
             .unwrap();
-        let acknowledgement = ack_rx.recv().await.unwrap();
+        let ack = ack_rx.recv().await.unwrap();
         command_tx
             .send(SinkCheckpointCommand::ManifestDurable(
                 crate::Epoch::INITIAL,
@@ -2230,7 +2219,7 @@ mod tests {
             recovery_status: crate::RecoveryStatus::Final,
             sources: BTreeMap::new(),
             operators: BTreeMap::new(),
-            sinks: acknowledgement.sinks,
+            sinks: ack.sinks,
             static_inputs: BTreeMap::new(),
         })
         .unwrap();
@@ -2467,7 +2456,7 @@ mod tests {
             }],
             Some(SinkCheckpointPort {
                 initial_epoch: crate::Epoch::INITIAL,
-                acknowledgements: ack_tx,
+                acks: ack_tx,
                 commands: command_rx,
                 finalizations: finalize_tx,
                 terminal_ready: None,
@@ -2511,7 +2500,7 @@ mod tests {
             }],
             Some(SinkCheckpointPort {
                 initial_epoch: crate::Epoch::INITIAL,
-                acknowledgements: ack_tx,
+                acks: ack_tx,
                 commands: command_rx,
                 finalizations: finalize_tx,
                 terminal_ready: None,
@@ -2665,7 +2654,7 @@ mod tests {
             vec![validated_transactional_sink("tx", &log, &closes)],
             Some(SinkCheckpointPort {
                 initial_epoch: crate::Epoch::INITIAL,
-                acknowledgements: ack_tx,
+                acks: ack_tx,
                 commands: command_rx,
                 finalizations: finalize_tx,
                 terminal_ready: None,
@@ -2711,7 +2700,7 @@ mod tests {
             vec![validated_transactional_sink("tx", &log, &closes)],
             Some(SinkCheckpointPort {
                 initial_epoch: crate::Epoch::INITIAL,
-                acknowledgements: ack_tx,
+                acks: ack_tx,
                 commands: command_rx,
                 finalizations: finalize_tx,
                 terminal_ready: None,
