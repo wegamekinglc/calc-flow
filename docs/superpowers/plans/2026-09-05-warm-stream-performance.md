@@ -1,10 +1,13 @@
 # Warm streaming performance implementation
 
-Status: in progress. Original base: `7f305dad9bfc2e2c9e4dda68565cbc564711d1a3`.
+Status: implementation and measured report complete; live remote gates are
+tracked in the PR, not frozen in this implementation snapshot.
+Original base: `7f305dad9bfc2e2c9e4dda68565cbc564711d1a3`.
 PR: <https://github.com/wegamekinglc/calc-flow/pull/242>.
-After publishing `00b86bc`, merge current main
-`9044501f99598b83f38ec37e60756c37b7bf6fb7` and rerun final evidence against
-that baseline. The baseline changed rolling/runner helpers and quality gates.
+After publishing `00b86bc`, main
+`9044501f99598b83f38ec37e60756c37b7bf6fb7` was merged and final evidence rerun
+against that pinned baseline. The baseline changed rolling/runner helpers and
+quality gates. See the [final measured report](../../warm-stream-results-39a0c7f.md).
 
 ## Objective
 
@@ -17,21 +20,24 @@ separately; changing the benchmark is not an engine speedup.
 
 ## Deliverables
 
-- [ ] P0: measure data and watermark handling, source/sink boundaries, queueing,
+- [x] P0: measure data and watermark handling, source/sink boundaries, queueing,
   and rolling phases; add reproducible warm-state benchmark and correctness gates.
-- [ ] P1: eliminate unnecessary SQL planning for identity, column selection,
+- [x] P1: eliminate unnecessary SQL planning for identity, column selection,
   and rename projections, preserving schemas, metadata, errors, and ordering.
-- [ ] P2: use columnar ordered rolling ingestion/finalization, with a validated
+- [x] P2: use columnar ordered rolling ingestion/finalization, with a validated
   fast path and an equivalent general path for unordered inputs.
-- [ ] P3: bound updates by touched entities and retained window suffixes; avoid
+- [x] P3: bound updates by touched entities and retained window suffixes; avoid
   full row materialization and unnecessary whole-state copying.
-- [ ] P4: reduce Python/Rust scheduling and callback allocation without weakening
+- [x] P4: reduce Python/Rust scheduling and callback allocation without weakening
   event ordering, backpressure, cancellation, or connector lifecycle ownership.
-- [ ] Compare baseline and candidate release builds on the same machine across
+- [x] Compare baseline and candidate release builds on the same machine across
   10,240 / 102,400 / 1,024,000 / 10,240,000 history rows and
   64 / 640 / 6,400 / 64,000 appended rows, for SMA and dual SMA with 64 entities.
-- [ ] Document measured P50/P95, uncertainty, provenance, limits, and regressions.
-- [ ] Pass relevant repository validation and publish one reviewable pull request.
+- [x] Document measured P50/P95, uncertainty, provenance, limits, and regressions.
+- [x] Publish one PR with local validation results and visible live remote gates.
+
+Final handoff still requires the published head's applicable CI/coverage/review
+gates to pass. The implementation checklist does not certify pending CI.
 
 ## Semantic constraints
 
@@ -155,8 +161,8 @@ Local full-feature compilation uses the existing Anaconda curl headers through
 The full local harness subsequently passes all core unit/integration/example
 targets, connector tests, the core benchmark smoke, and all 109 binding tests.
 Opt-in connector container cases remain the combined-coverage job's scope.
-Workspace rustdoc passes with all features and warnings denied. The newly enabled native warm
-tests exposed a real Linux/Windows CI collection failure: shared helpers
+Workspace rustdoc passes with all features and warnings denied. The newly
+enabled native warm tests exposed a real Linux/Windows CI collection failure: shared helpers
 imported optional TA-Lib eagerly. A focused import-blocking test reproduces
 that failure, then passes after restricting TA-Lib imports to its own execution
 and version-check paths. All 12 warm/comparison tests pass.
@@ -170,6 +176,16 @@ failed during Rust toolchain installation with a `bin/cargo-clippy` conflict,
 before project compilation; a requested job retry was denied by tool policy.
 This infrastructure failure is distinct from the corrected TA-Lib dependency.
 
+At measured code commit `39a0c7f`, all 919 Python/warm tests pass locally and
+Codacy passes remotely with no findings. The final 28-case matrix against
+`9044501` has 30 AB/BA sample pairs per case, all strict correctness checks
+passing, and 56 completed scenarios. No local compiles/tests overlapped timing.
+The report-only follow-up retains unchanged production and harness hashes.
+Raw evidence lives in `benchmarks/rolling/warm-stream-39a0c7f.json`; the readable
+report includes P50/P95, bootstrap intervals, phase interpretation, and the
+missed 64-row forecast. Its full-round forced-GC SMA P50 at H=1,024,000 is
+0.931 ms for 64 rows and 8.810 ms for 64,000 rows.
+
 ## Reproduction entrypoints
 
 `scripts/profile_warm_stream.py build` builds a release wheel and binds its
@@ -182,8 +198,8 @@ checks every warm and measured batch against the numerical/identity oracle.
 The full default matrix has seven distinct (history, append) points, two
 indicators, and forced/normal-GC modes. JSON retains individual callback phase
 intervals, raw samples, before/after operator metrics, P50/P95, and a seeded
-20,000-resample paired median-speedup interval. Final-head/full-matrix evidence,
-broader validation, and final report attachment are still pending.
+20,000-resample paired median-speedup interval. The final matrix and report
+are attached; current remote validation remains visible on the single PR.
 
 Every behavior change starts with an observed focused failing test. Record the
 commands and expected failures, then their passing reruns. Run Rust/Python,

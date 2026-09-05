@@ -5,6 +5,10 @@ long-lived native rolling operator. It is not a standalone kernel benchmark,
 and it is not directly interchangeable with a TA-Lib array call or a SQL query
 over a complete historical table.
 
+The [measured two-round report](warm-stream-results-39a0c7f.md) compares clean
+release builds at `9044501` and `39a0c7f`, with all raw samples and explicit
+forecast misses. Later report-only commits do not change the measured engine.
+
 ## What is measured
 
 Each scenario starts one runner, feeds and validates historical data, and
