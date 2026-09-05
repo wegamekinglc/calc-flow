@@ -2,7 +2,6 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     future::Future,
     panic::AssertUnwindSafe,
-    path::PathBuf,
     pin::Pin,
     sync::{
         Arc,
@@ -26,7 +25,7 @@ use super::{
     ChannelMetrics, EdgeReceiver, EdgeSender,
     channel::edge_channel_with_metrics,
     checkpoint::{
-        ManagedCheckpointRuntime, OpenedManagedCheckpointRuntime,
+        ManagedCheckpointRuntime,
         coordinator::{
             CheckpointAck, CheckpointCoordinatorHandle, CheckpointEvent, CheckpointPhase,
             CheckpointRequest, ManualCheckpointFailure, ManualCheckpointFailureCategory,
@@ -93,165 +92,15 @@ pub(crate) use super::test_seams::{
 };
 
 const CONNECTOR_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) use super::checkpoint_runtime::CheckpointRuntimeSpec;
+use super::checkpoint_runtime::{
+    CheckpointRuntimeStorage, OpenedCheckpointRuntime, ValidatedCheckpointRuntime,
+};
+
 use super::checkpoint_status::checkpoint_protocol_error;
 pub(crate) use super::checkpoint_status::{
     CheckpointFailureCategory, CheckpointStatus, CheckpointStatusHandle,
 };
-
-pub(crate) struct CheckpointRuntimeSpec {
-    storage: CheckpointRuntimeStorage,
-    config: StreamRuntimeConfig,
-    #[cfg(test)]
-    faults: CheckpointFaultInjector,
-    #[cfg(test)]
-    started_gate: Option<CheckpointStartedTestGate>,
-}
-
-enum CheckpointRuntimeStorage {
-    LegacyParts {
-        state_backend: Arc<dyn StateBackend>,
-        manifest_root: PathBuf,
-    },
-    Managed(ManagedCheckpointRuntime),
-    #[cfg(test)]
-    ManagedTestParts {
-        state_backend: Arc<dyn StateBackend>,
-        manifest_root: PathBuf,
-    },
-}
-
-impl CheckpointRuntimeSpec {
-    pub(crate) fn new(
-        state_backend: Arc<dyn StateBackend>,
-        manifest_root: impl Into<PathBuf>,
-        config: StreamRuntimeConfig,
-    ) -> crate::Result<Self> {
-        validate_checkpoint_config(&config)?;
-        Ok(Self {
-            storage: CheckpointRuntimeStorage::LegacyParts {
-                state_backend,
-                manifest_root: manifest_root.into(),
-            },
-            config,
-            #[cfg(test)]
-            faults: CheckpointFaultInjector::default(),
-            #[cfg(test)]
-            started_gate: None,
-        })
-    }
-
-    fn managed(
-        storage: ManagedCheckpointRuntime,
-        config: StreamRuntimeConfig,
-    ) -> crate::Result<Self> {
-        validate_checkpoint_config(&config)?;
-        Ok(Self {
-            storage: CheckpointRuntimeStorage::Managed(storage),
-            config,
-            #[cfg(test)]
-            faults: CheckpointFaultInjector::default(),
-            #[cfg(test)]
-            started_gate: None,
-        })
-    }
-
-    #[cfg(test)]
-    fn managed_test_parts(
-        state_backend: Arc<dyn StateBackend>,
-        manifest_root: impl Into<PathBuf>,
-        config: StreamRuntimeConfig,
-    ) -> crate::Result<Self> {
-        validate_checkpoint_config(&config)?;
-        Ok(Self {
-            storage: CheckpointRuntimeStorage::ManagedTestParts {
-                state_backend,
-                manifest_root: manifest_root.into(),
-            },
-            config,
-            faults: CheckpointFaultInjector::default(),
-            started_gate: None,
-        })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_fault(
-        mut self,
-        point: CheckpointFaultPoint,
-        mode: CheckpointFaultMode,
-    ) -> Self {
-        self.faults = CheckpointFaultInjector::armed(point, mode);
-        self
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_fault_probe(
-        mut self,
-        point: CheckpointFaultPoint,
-        mode: CheckpointFaultMode,
-    ) -> (Self, CheckpointFaultInjector) {
-        let faults = CheckpointFaultInjector::armed(point, mode);
-        self.faults = faults.clone();
-        (self, faults)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_started_gate(mut self, gate: CheckpointStartedTestGate) -> Self {
-        self.started_gate = Some(gate);
-        self
-    }
-}
-
-fn validate_checkpoint_config(config: &StreamRuntimeConfig) -> crate::Result<()> {
-    config.validate()?;
-    if config.retained_epochs == 0 {
-        return Err(CalcFlowError::InvalidArgument {
-            field: "retained_epochs".into(),
-            message: "must be positive".into(),
-        });
-    }
-    Ok(())
-}
-
-struct ValidatedCheckpointRuntime {
-    spec: CheckpointRuntimeSpec,
-    identity: PreparedManifestIdentity,
-}
-
-struct OpenedCheckpointRuntime {
-    transaction: Arc<ManifestTransaction>,
-    _managed_storage: Option<OpenedManagedCheckpointRuntime>,
-    identity: PreparedManifestIdentity,
-    config: StreamRuntimeConfig,
-    selected: Option<SelectedManifest>,
-    next_epoch: Epoch,
-    status: CheckpointStatusHandle,
-    startup_orphans_removed: usize,
-    managed: bool,
-    #[cfg(test)]
-    faults: CheckpointFaultInjector,
-    #[cfg(test)]
-    started_gate: Option<CheckpointStartedTestGate>,
-}
-
-impl OpenedCheckpointRuntime {
-    #[cfg(test)]
-    fn inject_fault(
-        &self,
-        point: CheckpointFaultPoint,
-        cancellation: &CancellationToken,
-    ) -> crate::Result<bool> {
-        let trigger_count = self.faults.trigger_count();
-        self.faults.trigger(point, cancellation)?;
-        Ok(self.faults.trigger_count() != trigger_count && cancellation.is_cancelled())
-    }
-
-    #[cfg(test)]
-    async fn pause_after_started(&self) {
-        if let Some(gate) = &self.started_gate {
-            gate.pause().await;
-        }
-    }
-}
 
 struct JobCoreState {
     owner: DriverOwnership,
