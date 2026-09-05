@@ -41,6 +41,7 @@ pub(crate) mod progress;
     reason = "projection includes crate-only helpers for lifecycle and manual-checkpoint errors"
 )]
 pub(crate) mod projection;
+mod registry;
 #[allow(
     dead_code,
     reason = "the internal runner is owned exclusively by the public one-shot facade"
