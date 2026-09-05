@@ -125,19 +125,39 @@ async def _command_output(process: asyncio.subprocess.Process) -> str:
 
 
 async def _git(source: Path, *args: str) -> str:
-    if args not in (
-        SOURCE_LIST_COMMAND,
-        ("rev-parse", "HEAD"),
-        ("status", "--porcelain"),
-    ):
-        raise ValueError("unsupported git metadata command")
-    process = await asyncio.create_subprocess_exec(
-        "git",
-        *args,
-        cwd=source,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+    options = {
+        "cwd": source,
+        "stdout": asyncio.subprocess.PIPE,
+        "stderr": asyncio.subprocess.PIPE,
+    }
+    match args:
+        case ("rev-parse", "HEAD"):
+            process = await asyncio.create_subprocess_exec(
+                "git", "rev-parse", "HEAD", **options
+            )
+        case ("status", "--porcelain"):
+            process = await asyncio.create_subprocess_exec(
+                "git", "status", "--porcelain", **options
+            )
+        case _ if args == SOURCE_LIST_COMMAND:
+            process = await asyncio.create_subprocess_exec(
+                "git",
+                "ls-files",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "-z",
+                "--",
+                "crates",
+                "python",
+                "Cargo.toml",
+                "Cargo.lock",
+                "pyproject.toml",
+                "rust-toolchain.toml",
+                **options,
+            )
+        case _:
+            raise ValueError("unsupported git metadata command")
     return await _command_output(process)
 
 
