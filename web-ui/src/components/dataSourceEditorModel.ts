@@ -61,7 +61,7 @@ export const materializeDataSources = (
   }));
   const first = invalid.values().next().value as number | undefined;
   if (first !== undefined) {
-    const label = sources[first]?.id ?? `#${first + 1}`;
+    const label = sources.at(first)?.id ?? `#${first + 1}`;
     return {
       ok: false,
       message: `Data source ${label} contains invalid inline JSON`,

@@ -25,6 +25,7 @@ describe('useBusyAction', () => {
 
     await act(async () => {
       await result.current.run(async () => {
+        await Promise.resolve();
         throw new Error('job rejected');
       });
     });
