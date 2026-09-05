@@ -515,6 +515,37 @@ category, and runtime-config mismatch flag. It has no cursor/pre-commit
 payload, state bytes, filesystem path, row, attribute, secret, or arbitrary
 metric label. Epoch values remain status fields rather than metric labels.
 
+Operator `processing_duration` includes successful Data and watermark handlers,
+including collector waits inside those handlers. The additional
+`watermark_processing_duration` is the watermark-handler subset, not an
+independent duration to add to the total. Python status exposes these as
+`processing_duration_micros` and `watermark_processing_duration_micros`.
+Failed handlers and end-of-input callbacks are not included. These elapsed
+durations are not CPU-time measurements and are not additive across concurrent
+operators. In particular, rolling finalization happens in the watermark
+handler, not necessarily in the Data handler.
+
+For canonical ordered input and supported bounded typed row windows, rolling
+buffers immutable Arrow batches until finality and computes directly from
+their columns. It stages touched-entity kernel updates and newly retained
+history rows, then commits them after successful output emission. Unchanged
+retained rows are not cloned. Overlapping, unordered, or late envelopes and
+unsupported window/type shapes use the existing general path. Checkpointing
+materializes pending columnar buffers into the existing durable layout;
+watermark, lateness, duplicate, null, output-budget, and recovery semantics
+remain unchanged.
+
+Column-only stream projections reuse Arrow arrays without SQL planning.
+Arithmetic, filters, unsupported projections, and their errors retain the SQL
+path. The Python connector bridge dispatches ready callbacks through one
+job-scoped wakeup, yielding after at most 64 requests. Native coroutines may
+start eagerly on the captured Python loop when no custom task factory is
+installed; arbitrary awaitables and custom factories keep their scheduling
+policy. Completed futures return without another completion-callback turn.
+Per-request context copies, cancellation ownership, source polling order, and
+bounded runtime backpressure remain in force; the bridge does not prefetch
+source events.
+
 The short stress suite covers 100 deterministic gate schedules plus sustained
 zero-cost idle, watermark, and empty-data pressure. The universal
 non-checkpoint soak remains the ignored crate-private

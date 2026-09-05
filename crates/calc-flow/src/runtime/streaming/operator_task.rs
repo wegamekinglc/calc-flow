@@ -897,6 +897,7 @@ async fn dispatch_watermark_handler(
     input_watermark: Option<EventTime>,
     ingress_progress: IngressProgressSnapshot,
 ) -> Result<()> {
+    let processing_timer = inputs.metrics.timer();
     let output_budget = effective_output_budget(&inputs.outputs);
     let late_metrics: Arc<dyn LateMetricSink> = Arc::new(inputs.progress.clone());
     let context = StreamOperatorContext::for_task(
@@ -919,7 +920,10 @@ async fn dispatch_watermark_handler(
     inputs
         .operator
         .on_watermark(watermark, &context, &mut collector)
-        .await
+        .await?;
+    inputs
+        .metrics
+        .record_operator_watermark(&inputs.node_id, &processing_timer)
 }
 
 fn effective_output_budget(outputs: &BTreeMap<String, Vec<EdgeSender>>) -> EdgeBudget {
@@ -1410,6 +1414,77 @@ pub(super) mod tests {
             BatchMetadata::new(source, sequence, BTreeMap::new()).unwrap(),
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn watermark_processing_is_measured_without_a_data_message() {
+        struct StepClock(AtomicUsize);
+        impl crate::runtime::streaming::metrics::MetricsClock for StepClock {
+            fn now(&self) -> Duration {
+                Duration::from_nanos(u64::try_from(self.0.fetch_add(17, Ordering::SeqCst)).unwrap())
+            }
+        }
+        let metrics = super::MetricsRecorder::with_clock(
+            [],
+            [],
+            ["node".into()],
+            [],
+            Arc::new(StepClock(AtomicUsize::new(0))),
+        );
+        let watermarks = Arc::new(AtomicUsize::new(0));
+        let operator = ProbeOperator {
+            input_ports: vec![],
+            output_ports: vec![],
+            behavior: Behavior::Forward,
+            watermarks: Arc::clone(&watermarks),
+            ends: Arc::new(AtomicUsize::new(0)),
+            observed: Arc::new(Mutex::new(Vec::new())),
+        };
+        let job = StreamJobContext::new(
+            7,
+            "fingerprint",
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        );
+        let (_entry, entry_gate) = watch::channel(true);
+        let (_data, data_gate) = watch::channel(true);
+        let (entry_ack, _ack) = mpsc::unbounded_channel();
+        let mut inputs = OperatorTaskInputs {
+            node_id: "node".into(),
+            operator: CompiledStreamOperator::External(Box::new(operator)),
+            checkpoint_capability: OperatorCheckpointCapability::Stateless,
+            ingresses: BTreeMap::new(),
+            outputs: BTreeMap::new(),
+            output_ports: BTreeMap::new(),
+            context: job.for_node("node").unwrap(),
+            progress: OperatorProgress::default(),
+            metrics: metrics.clone(),
+            entry_gate,
+            entry_ack,
+            data_gate,
+            launch_cancel: CancellationToken::new(),
+            checkpoint: None,
+            restore: None,
+        };
+        super::dispatch_watermark_handler(
+            &mut inputs,
+            "input",
+            EventTime::from_micros(1),
+            None,
+            IngressProgressSnapshot::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(watermarks.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            metrics.snapshot().nodes["node"].processing_duration,
+            Duration::from_nanos(17)
+        );
+        assert_eq!(
+            metrics.snapshot().nodes["node"].watermark_processing_duration,
+            Duration::from_nanos(17)
+        );
     }
 
     #[test]

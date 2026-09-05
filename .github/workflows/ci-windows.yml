@@ -111,7 +111,11 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev
       - name: Run Python tests
-        run: uv run pytest -q -n auto --dist load -p no:benchmark
+        run: >-
+          uv run pytest -q -n auto --dist load -p no:benchmark
+          python/tests benchmarks/test_warm_stream.py
+      - name: Verify warm profiling controller
+        run: uv run --no-sync python -m unittest scripts.test_profile_warm_stream
   # Clippy otherwise runs only on Linux CI, so cfg-gated code compiled out on
   # Linux (unix fsync stubs, Linux /proc soak evidence) regressed on Windows
   # unnoticed (DAL-167). Keep the gate scoped to the lint surface that carries

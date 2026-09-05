@@ -22,7 +22,7 @@ use crate::{
     batch::PyBatch,
     config::PythonRoot,
     pipeline::PyStreamExecutionPlan,
-    runtime::{PythonAsyncContext, PythonAwaitRegistry, python_json, resolve_python_in_context},
+    runtime::{PythonAsyncContext, PythonAwaitRegistry, call_python_in_context, python_json},
 };
 
 const SAFE_EXCEPTION_STORAGE: &str = "_calc_flow_safe_fields";
@@ -410,8 +410,8 @@ impl Drop for ConnectorOwnershipLease {
     }
 }
 
-async fn resolve_connector(
-    value: Py<PyAny>,
+async fn call_connector(
+    callback: impl FnOnce(Python<'_>) -> calc_flow::Result<Py<PyAny>> + Send,
     callback_name: &str,
     awaits: &Arc<PythonAwaitRegistry>,
     context: &Arc<Mutex<Option<Arc<PythonAsyncContext>>>>,
@@ -420,7 +420,7 @@ async fn resolve_connector(
         .lock()
         .clone()
         .ok_or_else(|| connector_error(callback_name, "Python event loop is unavailable"))?;
-    resolve_python_in_context(value, callback_name, awaits, &context).await
+    call_python_in_context(callback, callback_name, awaits, &context).await
 }
 
 impl PythonContinuousSource {
@@ -459,41 +459,56 @@ impl calc_flow::StreamSource for PythonContinuousSource {
         }
         let (source_id, order, payload) = source_cursor_arguments(cursor)
             .map_err(|error| connector_error("source.open", error))?;
-        let value = Python::attach(|py| {
-            self.binding
-                .object()
-                .bind(py)
-                .call_method1("_native_open", (source_id, order, payload))
-                .map(Bound::unbind)
-        })
-        .map_err(|error| connector_error("source.open", error))?;
-        resolve_connector(value, "source.open", &self.awaits, &self.context).await?;
+        call_connector(
+            |py| {
+                self.binding
+                    .object()
+                    .bind(py)
+                    .call_method1("_native_open", (source_id, order, payload))
+                    .map(Bound::unbind)
+                    .map_err(|error| connector_error("source.open", error))
+            },
+            "source.open",
+            &self.awaits,
+            &self.context,
+        )
+        .await?;
         Ok(())
     }
 
     async fn next(&mut self) -> calc_flow::Result<Option<calc_flow::SourceEvent>> {
-        let value = Python::attach(|py| {
-            self.binding
-                .object()
-                .bind(py)
-                .call_method0("_native_next")
-                .map(Bound::unbind)
-        })
-        .map_err(|error| connector_error("source.next", error))?;
-        let value = resolve_connector(value, "source.next", &self.awaits, &self.context).await?;
+        let value = call_connector(
+            |py| {
+                self.binding
+                    .object()
+                    .bind(py)
+                    .call_method0("_native_next")
+                    .map(Bound::unbind)
+                    .map_err(|error| connector_error("source.next", error))
+            },
+            "source.next",
+            &self.awaits,
+            &self.context,
+        )
+        .await?;
         decode_source_event(&value)
     }
 
     async fn close(&mut self) -> calc_flow::Result<()> {
-        let value = Python::attach(|py| {
-            self.binding
-                .object()
-                .bind(py)
-                .call_method0("_native_close")
-                .map(Bound::unbind)
-        })
-        .map_err(|error| connector_error("source.close", error))?;
-        resolve_connector(value, "source.close", &self.awaits, &self.context).await?;
+        call_connector(
+            |py| {
+                self.binding
+                    .object()
+                    .bind(py)
+                    .call_method0("_native_close")
+                    .map(Bound::unbind)
+                    .map_err(|error| connector_error("source.close", error))
+            },
+            "source.close",
+            &self.awaits,
+            &self.context,
+        )
+        .await?;
         Ok(())
     }
 }
@@ -507,37 +522,58 @@ struct PythonContinuousSink {
 
 impl PythonContinuousSink {
     async fn call0(&self, method: &str) -> calc_flow::Result<()> {
-        let value = Python::attach(|py| {
-            self.binding
-                .object()
-                .bind(py)
-                .call_method0(method)
-                .map(Bound::unbind)
-        })
-        .map_err(|error| connector_error(method, error))?;
-        resolve_connector(value, method, &self.awaits, &self.context).await?;
+        call_connector(
+            |py| {
+                self.binding
+                    .object()
+                    .bind(py)
+                    .call_method0(method)
+                    .map(Bound::unbind)
+                    .map_err(|error| connector_error(method, error))
+            },
+            method,
+            &self.awaits,
+            &self.context,
+        )
+        .await?;
         Ok(())
     }
 
     async fn call_args(&self, method: &str, args: Py<PyTuple>) -> calc_flow::Result<Py<PyAny>> {
-        let value = Python::attach(|py| {
-            self.binding
-                .object()
-                .bind(py)
-                .call_method1(method, args.bind(py))
-                .map(Bound::unbind)
-        })
-        .map_err(|error| connector_error(method, error))?;
-        resolve_connector(value, method, &self.awaits, &self.context).await
+        call_connector(
+            |py| {
+                self.binding
+                    .object()
+                    .bind(py)
+                    .call_method1(method, args.bind(py))
+                    .map(Bound::unbind)
+                    .map_err(|error| connector_error(method, error))
+            },
+            method,
+            &self.awaits,
+            &self.context,
+        )
+        .await
     }
 
     async fn write_batch(&self, batch: &calc_flow::Batch) -> calc_flow::Result<()> {
-        let args = Python::attach(|py| {
-            let batch = Py::new(py, PyBatch::from_inner_python(py, batch.clone())?)?;
-            PyTuple::new(py, [batch]).map(Bound::unbind)
-        })
-        .map_err(|error| connector_error("sink.write", error))?;
-        self.call_args("_native_write", args).await?;
+        call_connector(
+            |py| {
+                let batch = PyBatch::from_inner_python(py, batch.clone())
+                    .and_then(|batch| Py::new(py, batch))
+                    .map_err(|error| connector_error("sink.write", error))?;
+                self.binding
+                    .object()
+                    .bind(py)
+                    .call_method1("_native_write", (batch,))
+                    .map(Bound::unbind)
+                    .map_err(|error| connector_error("_native_write", error))
+            },
+            "_native_write",
+            &self.awaits,
+            &self.context,
+        )
+        .await?;
         Ok(())
     }
 }
@@ -1178,6 +1214,16 @@ impl PyStreamingJob {
         self.job().map(|job| job.id())
     }
 
+    fn _enable_callback_profiling(&self) {
+        self.awaits.enable_profiling();
+    }
+
+    fn _take_callback_profile(&self) -> PyResult<String> {
+        self.awaits
+            .take_profile()
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))
+    }
+
     fn status<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let job = self.job()?;
         let status = job_status_to_py(py, &job.status())?;
@@ -1760,6 +1806,7 @@ fn operator_status_to_py<'py>(
             "fanned_out_rows" => status.fanned_out_rows,
             "fanned_out_bytes" => status.fanned_out_bytes,
             "processing_duration_micros" => duration_micros(status.processing_duration),
+            "watermark_processing_duration_micros" => duration_micros(status.watermark_processing_duration),
             "errors" => status.errors,
             "ended" => status.ended,
             "late_rows" => status.late_rows,

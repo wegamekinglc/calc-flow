@@ -5,6 +5,23 @@ engine or Studio capabilities.
 
 ## 2026-09
 
+- 2026-09-05: Consolidate Python connector callback preparation into one
+  interpreter attachment and skip row-count maps for resident rolling entities.
+  Add opt-in bounded callback wall-clock diagnostics and legal sparse-entity
+  append workloads down to one row. Paired measurements now isolate each
+  scenario in fresh workers with seeded randomized scenario order.
+
+- 2026-09-05: Reduce warm-state streaming overhead with column-only Arrow
+  projections, validated columnar rolling finalization, exact column-wise
+  output byte charging, touched-entity state staging, and retained-history
+  append deltas. Preserve general-path fallback and checkpoint layouts. The
+  Python bridge coalesces ready dispatches and avoids extra loop turns for
+  immediately completed work while respecting custom task factories and
+  connector lifecycle ownership. Operator elapsed-time metrics now include
+  successful watermark handlers and expose their duration separately. Add
+  provenance-bound release builds and a paired persistent-runner benchmark
+  with strict numerical/identity checks and separate forced/normal-GC results.
+
 - 2026-09-04: Add reproducible SQL-versus-DataFusion performance controls and
   evidence gates. Project-v3 and the immutable Python builder now expose
   compatible fixed parallelism plus opt-in conservative auto partitioning,

@@ -264,8 +264,45 @@ struct OrderProof {
 #[derive(Debug)]
 pub(super) struct RollingKernelExecution {
     pub columns: Vec<ArrayRef>,
+    pub entity_ids: Vec<usize>,
     pub metrics: RollingKernelMetrics,
     pub state: RollingKernelState,
+}
+
+/// A transactional replacement of only the entities touched by a stream batch.
+pub(super) struct StreamKernelUpdate {
+    execution: RollingKernelExecution,
+}
+
+impl StreamKernelUpdate {
+    pub(super) fn entity_ids(&self) -> &[usize] {
+        &self.execution.entity_ids
+    }
+
+    pub(super) fn take_columns(&mut self) -> Vec<ArrayRef> {
+        std::mem::take(&mut self.execution.columns)
+    }
+
+    pub(super) fn commit(self, base: &mut RollingKernelState) {
+        let local = self.execution.state;
+        let mut keys = vec![Vec::new(); local.states.len()];
+        for (key, index) in local.entities {
+            keys[index] = key;
+        }
+        for (key, updated) in keys.into_iter().zip(local.states) {
+            if let Some(&index) = base.entities.get(&key) {
+                base.states[index] = updated;
+            } else {
+                let index = base.states.len();
+                base.entities.insert(key, index);
+                base.states.push(updated);
+            }
+        }
+        base.kernel_fingerprint = local.kernel_fingerprint;
+        if local.last_identity.is_some() {
+            base.last_identity = local.last_identity;
+        }
+    }
 }
 
 /// Opaque, cloneable transition state for one typed kernel plan.
@@ -278,6 +315,69 @@ pub(super) struct RollingKernelState {
 }
 
 impl RollingKernelPlan {
+    /// Prepares a private ordered-buffer transition without cloning resident
+    /// state for inactive entities. The caller has already validated order,
+    /// duplicates, required values, and finality while buffering these columns.
+    pub(super) fn prepare_ordered_stream(
+        &self,
+        state: &RollingKernelState,
+        input: &RecordBatch,
+        node_id: &str,
+    ) -> Result<StreamKernelUpdate> {
+        self.validate_state(state, node_id)?;
+        let started = Instant::now();
+        let rows = encode_rows(input, &self.partition_columns, node_id)?;
+        let keys = encoded_keys(&rows, input.num_rows());
+        let mut local = state.touched_entities(&keys, &self.fingerprint);
+        let entity_ids = local.resolve_entities(&keys, &self.groups);
+        let entity_encode_ns = nanos(started.elapsed());
+        let last_identity = self.last_ordered_identity(input, node_id)?;
+        let execution = self.fill_typed(
+            input,
+            &entity_ids,
+            local,
+            last_identity,
+            node_id,
+            RollingKernelMetrics {
+                entity_encode_ns,
+                input_rows: input.num_rows(),
+                output_rows: input.num_rows(),
+                ..RollingKernelMetrics::default()
+            },
+        )?;
+        Ok(StreamKernelUpdate { execution })
+    }
+
+    fn last_ordered_identity(&self, input: &RecordBatch, node_id: &str) -> Result<Option<Vec<u8>>> {
+        let Some(index) = input.num_rows().checked_sub(1) else {
+            return Ok(None);
+        };
+        let last = input.slice(index, 1);
+        Ok(Some(
+            encode_rows(&last, &self.order_columns, node_id)?
+                .row(0)
+                .data()
+                .to_vec(),
+        ))
+    }
+
+    /// Proves strict ordering without extracting generic scalar values.
+    pub(super) fn ordered_stream_bounds(
+        &self,
+        input: &RecordBatch,
+        node_id: &str,
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        self.validate_required_values(input, node_id)?;
+        let rows = encode_rows(input, &self.order_columns, node_id)?;
+        if !self.canonical_order_is_proven(input, &rows, None, node_id)? {
+            return Ok(None);
+        }
+        Ok(input
+            .num_rows()
+            .checked_sub(1)
+            .map(|last| (rows.row(0).data().to_vec(), rows.row(last).data().to_vec())))
+    }
+
     #[allow(
         clippy::too_many_arguments,
         reason = "the compiler boundary keeps every rolling semantic explicit"
@@ -767,6 +867,7 @@ impl RollingKernelPlan {
         metrics.state_bytes = state_bytes;
         Ok(RollingKernelExecution {
             columns,
+            entity_ids: entity_ids.to_vec(),
             metrics,
             state,
         })
@@ -892,7 +993,36 @@ fn cast_primitive(array: &ArrayRef, target: &DataType, node_id: &str) -> Result<
 }
 
 impl RollingKernelState {
+    fn touched_entities(&self, keys: &[Vec<u8>], fingerprint: &str) -> Self {
+        let mut local = Self {
+            kernel_fingerprint: Some(fingerprint.into()),
+            ..Self::default()
+        };
+        for key in keys {
+            if !local.entities.contains_key(key)
+                && let Some(&index) = self.entities.get(key)
+            {
+                local.entities.insert(key.clone(), local.states.len());
+                local.states.push(self.states[index].clone());
+            }
+        }
+        local
+    }
+
     fn resolve_entities(&mut self, keys: &[Vec<u8>], groups: &[TypedGroupPlan]) -> Vec<usize> {
+        // Resident entities already own their window capacities. Counting
+        // their rows again cannot improve allocation sizing.
+        let mut resolved = Vec::with_capacity(keys.len());
+        for key in keys {
+            let Some(&entity_id) = self.entities.get(key) else {
+                return self.resolve_new_entities(keys, groups);
+            };
+            resolved.push(entity_id);
+        }
+        resolved
+    }
+
+    fn resolve_new_entities(&mut self, keys: &[Vec<u8>], groups: &[TypedGroupPlan]) -> Vec<usize> {
         let mut counts = HashMap::<&[u8], usize>::new();
         for key in keys {
             let count = counts.entry(key.as_slice()).or_default();
@@ -2979,6 +3109,21 @@ fn nanos(duration: Duration) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn resident_entity_resolution_allocates_only_the_result() {
+        let keys = (0_u8..64).map(|key| vec![key]).collect::<Vec<_>>();
+        let mut state = RollingKernelState::default();
+        let expected = state.resolve_entities(&keys, &[]);
+        let measured = allocation_counter::measure(|| {
+            assert_eq!(state.resolve_entities(&keys, &[]), expected);
+        });
+        assert_eq!(measured.count_total, 1);
+        let mixed = vec![vec![63], vec![64], vec![64], vec![0]];
+        assert_eq!(state.resolve_entities(&mixed, &[]), vec![63, 64, 64, 0]);
+        assert_eq!(state.states.len(), 65);
+        assert!(state.resolve_entities(&[], &[]).is_empty());
+    }
+
     use std::sync::Arc;
 
     use datafusion::arrow::{

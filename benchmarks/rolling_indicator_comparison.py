@@ -39,7 +39,6 @@ from typing import Any
 
 import numpy as np
 import pyarrow as pa
-import talib
 
 from calc_flow import Batch, PipelineBuilder, Runtime
 from calc_flow.symbolic import FeatureSet, Field, Program, rows, table_input, ts
@@ -117,6 +116,8 @@ class TaLibMethod:
 
     def run(self) -> np.ndarray:
         """Calculate and restore timestamp-major order without mutating input."""
+        import talib
+
         output = np.empty(len(self.prices), dtype=np.float64)
         active_entities = min(self.entities, len(self.prices))
         for entity in range(active_entities):
@@ -826,6 +827,8 @@ def _markdown_table(results: list[dict[str, object]]) -> str:
 
 
 def main() -> None:
+    import talib
+
     args = _parse_args()
     if talib.__version__ != TA_LIB_PYTHON_VERSION:
         raise RuntimeError(

@@ -40,6 +40,18 @@ def _non_utf8_read_text_calls(tree: ast.AST) -> list[int]:
 
 
 class ReleaseConfigTests(unittest.TestCase):
+    def test_warm_stream_regressions_run_in_both_python_ci_jobs(self) -> None:
+        for name in ("ci-linux.yml", "ci-windows.yml"):
+            workflow = (ROOT / ".github/workflows" / name).read_text(encoding="utf-8")
+            self.assertTrue(
+                "python/tests benchmarks/test_warm_stream.py" in workflow,
+                f"{name} must execute warm streaming scenario tests",
+            )
+            self.assertTrue(
+                "python -m unittest scripts.test_profile_warm_stream" in workflow,
+                f"{name} must execute warm profiling controller tests",
+            )
+
     def test_current_python_surfaces_do_not_use_removed_compile_method(self) -> None:
         paths = [
             *sorted((ROOT / "benchmarks").glob("*.py")),
