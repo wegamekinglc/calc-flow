@@ -2742,10 +2742,18 @@ fn append_average_state_arrays(
 ) -> Result<()> {
     match input_type {
         DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
-            arrays.push(signed_average_state_array(operations, ordinal)?);
+            arrays.push(average_state_array(
+                operations,
+                ordinal,
+                AverageStateKind::Signed,
+            )?);
         }
         DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
-            arrays.push(unsigned_average_state_array(operations, ordinal)?);
+            arrays.push(average_state_array(
+                operations,
+                ordinal,
+                AverageStateKind::Unsigned,
+            )?);
         }
         DataType::Float32 | DataType::Float64 => {
             arrays.push(float_average_state_array(operations, ordinal, operator_id)?);
@@ -2756,40 +2764,50 @@ fn append_average_state_arrays(
     Ok(())
 }
 
-fn signed_average_state_array(
-    operations: &[StateOperationRow],
-    ordinal: usize,
-) -> Result<ArrayRef> {
-    let values = operations
-        .iter()
-        .map(
-            |row| match (&row.entry.aggregates[ordinal], row.tombstone) {
-                (_, true) => Ok(None),
-                (AccumulatorValue::SignedAverage { sum, .. }, false) => Ok(Some(sum.to_be_bytes())),
-                _ => Err(internal_error("signed average state type mismatch")),
-            },
-        )
-        .collect::<Result<Vec<_>>>()?;
-    fixed_average_state_array(values, "signed")
+/// Which fixed-width average family a state column carries.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AverageStateKind {
+    Signed,
+    Unsigned,
 }
 
-fn unsigned_average_state_array(
+impl AverageStateKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Signed => "signed",
+            Self::Unsigned => "unsigned",
+        }
+    }
+}
+
+fn average_state_array(
     operations: &[StateOperationRow],
     ordinal: usize,
+    kind: AverageStateKind,
 ) -> Result<ArrayRef> {
     let values = operations
         .iter()
         .map(
             |row| match (&row.entry.aggregates[ordinal], row.tombstone) {
                 (_, true) => Ok(None),
-                (AccumulatorValue::UnsignedAverage { sum, .. }, false) => {
+                (AccumulatorValue::SignedAverage { sum, .. }, false)
+                    if kind == AverageStateKind::Signed =>
+                {
                     Ok(Some(sum.to_be_bytes()))
                 }
-                _ => Err(internal_error("unsigned average state type mismatch")),
+                (AccumulatorValue::UnsignedAverage { sum, .. }, false)
+                    if kind == AverageStateKind::Unsigned =>
+                {
+                    Ok(Some(sum.to_be_bytes()))
+                }
+                _ => Err(internal_error(format!(
+                    "{} average state type mismatch",
+                    kind.label()
+                ))),
             },
         )
         .collect::<Result<Vec<_>>>()?;
-    fixed_average_state_array(values, "unsigned")
+    fixed_average_state_array(values, kind.label())
 }
 
 fn fixed_average_state_array(values: Vec<Option<[u8; 16]>>, label: &str) -> Result<ArrayRef> {
@@ -3152,9 +3170,8 @@ fn decode_state_segment(
 }
 
 #[allow(
-    clippy::too_many_lines,
     clippy::too_many_arguments,
-    reason = "state decoding names every durable aggregate coordinate and aggregate matrix branch explicitly"
+    reason = "state decoding names every durable aggregate coordinate explicitly"
 )]
 fn decode_accumulator_state(
     record: &RecordBatch,
@@ -3226,75 +3243,95 @@ fn decode_accumulator_state(
                 AccumulatorValue::Max(scalar)
             }
         }
-        AggregateFunction::Avg => {
-            let count_array = state_array::<UInt64Array>(
-                record,
-                column_index + 1,
-                &format!("_agg_{ordinal:04}_count"),
-            )?;
-            if value.is_null(row) || count_array.is_null(row) {
-                return Err(state_format(format!(
-                    "window average aggregate {ordinal} has null state"
-                )));
-            }
-            let count = count_array.value(row);
-            match compiled.input_type {
-                DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
-                    let bytes = value
-                        .as_any()
-                        .downcast_ref::<FixedSizeBinaryArray>()
-                        .ok_or_else(|| {
-                            state_format(format!(
-                                "window average aggregate {ordinal} has invalid binary state"
-                            ))
-                        })?
-                        .value(row)
-                        .try_into()
-                        .map_err(|_| state_format("signed average state is not 16 bytes"))?;
-                    AccumulatorValue::SignedAverage {
-                        sum: i128::from_be_bytes(bytes),
-                        count,
-                    }
-                }
-                DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
-                    let bytes = value
-                        .as_any()
-                        .downcast_ref::<FixedSizeBinaryArray>()
-                        .ok_or_else(|| {
-                            state_format(format!(
-                                "window average aggregate {ordinal} has invalid binary state"
-                            ))
-                        })?
-                        .value(row)
-                        .try_into()
-                        .map_err(|_| state_format("unsigned average state is not 16 bytes"))?;
-                    AccumulatorValue::UnsignedAverage {
-                        sum: u128::from_be_bytes(bytes),
-                        count,
-                    }
-                }
-                DataType::Float32 | DataType::Float64 => {
-                    let Some(ScalarValue::Float64(bits)) =
-                        scalar_at(value.as_ref(), &DataType::Float64, row, operator_id)
-                            .map_err(|error| state_format(error.to_string()))?
-                    else {
-                        return Err(state_format(format!(
-                            "window average aggregate {ordinal} has invalid float state"
-                        )));
-                    };
-                    AccumulatorValue::FloatAverage {
-                        sum: f64::from_bits(bits),
-                        count,
-                    }
-                }
-                _ => unreachable!("average input matrix validated at construction"),
-            }
-        }
+        AggregateFunction::Avg => decode_average_state(
+            record,
+            value.as_ref(),
+            row,
+            column_index,
+            &compiled.input_type,
+            operator_id,
+            ordinal,
+        )?,
     };
     Ok((
         Some(decoded),
         column_index + 1 + usize::from(function == AggregateFunction::Avg),
     ))
+}
+
+/// Decode one average aggregate's sum column and its adjacent count column.
+#[allow(clippy::too_many_arguments, reason = "names every durable coordinate")]
+fn decode_average_state(
+    record: &RecordBatch,
+    value: &dyn Array,
+    row: usize,
+    column_index: usize,
+    input_type: &DataType,
+    operator_id: &str,
+    ordinal: usize,
+) -> Result<AccumulatorValue> {
+    let count_array = state_array::<UInt64Array>(
+        record,
+        column_index + 1,
+        &format!("_agg_{ordinal:04}_count"),
+    )?;
+    if value.is_null(row) || count_array.is_null(row) {
+        return Err(state_format(format!(
+            "window average aggregate {ordinal} has null state"
+        )));
+    }
+    let count = count_array.value(row);
+    Ok(match input_type {
+        DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
+            let bytes = fixed_width_average_bytes(value, row, ordinal, "signed")?;
+            AccumulatorValue::SignedAverage {
+                sum: i128::from_be_bytes(bytes),
+                count,
+            }
+        }
+        DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
+            let bytes = fixed_width_average_bytes(value, row, ordinal, "unsigned")?;
+            AccumulatorValue::UnsignedAverage {
+                sum: u128::from_be_bytes(bytes),
+                count,
+            }
+        }
+        DataType::Float32 | DataType::Float64 => {
+            let Some(ScalarValue::Float64(bits)) =
+                scalar_at(value, &DataType::Float64, row, operator_id)
+                    .map_err(|error| state_format(error.to_string()))?
+            else {
+                return Err(state_format(format!(
+                    "window average aggregate {ordinal} has invalid float state"
+                )));
+            };
+            AccumulatorValue::FloatAverage {
+                sum: f64::from_bits(bits),
+                count,
+            }
+        }
+        _ => unreachable!("average input matrix validated at construction"),
+    })
+}
+
+/// Read one 16-byte big-endian average sum from a fixed-size binary column.
+fn fixed_width_average_bytes(
+    value: &dyn Array,
+    row: usize,
+    ordinal: usize,
+    kind: &str,
+) -> Result<[u8; 16]> {
+    value
+        .as_any()
+        .downcast_ref::<FixedSizeBinaryArray>()
+        .ok_or_else(|| {
+            state_format(format!(
+                "window average aggregate {ordinal} has invalid binary state"
+            ))
+        })?
+        .value(row)
+        .try_into()
+        .map_err(|_| state_format(format!("{kind} average state is not 16 bytes")))
 }
 
 fn validate_restored_window_key(key: &WindowKey, compiled: &CompiledWindowSpec) -> Result<()> {
