@@ -13,6 +13,9 @@ use pyo3::{
 
 use crate::config::PythonRoot;
 
+mod dispatch;
+use dispatch::PythonAwaitDispatcher;
+
 fn provider_error(name: &str, error: impl std::fmt::Display) -> calc_flow::CalcFlowError {
     calc_flow::CalcFlowError::ExternalProvider {
         provider: "python".into(),
@@ -30,6 +33,8 @@ pub(crate) struct PythonAwaitRegistry {
 pub(crate) struct PythonAsyncContext {
     event_loop: Arc<PythonRoot>,
     context: Arc<PythonRoot>,
+    dispatcher: Arc<PythonRoot>,
+    is_awaitable: Arc<PythonRoot>,
 }
 
 impl PythonAsyncContext {
@@ -40,15 +45,23 @@ impl PythonAsyncContext {
         let context = py
             .import(pyo3::intern!(py, "contextvars"))?
             .call_method0(pyo3::intern!(py, "copy_context"))?;
+        let dispatcher = Py::new(py, PythonAwaitDispatcher::new(event_loop.clone().unbind()))?;
+        let is_awaitable = py
+            .import(pyo3::intern!(py, "inspect"))?
+            .getattr(pyo3::intern!(py, "isawaitable"))?;
         Ok(Self {
             event_loop: Arc::new(PythonRoot::new(event_loop.unbind())),
             context: Arc::new(PythonRoot::new(context.unbind())),
+            dispatcher: Arc::new(PythonRoot::new(dispatcher.into_any())),
+            is_awaitable: Arc::new(PythonRoot::new(is_awaitable.unbind())),
         })
     }
 
     pub(crate) fn traverse(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
         visit.call(self.event_loop.object())?;
-        visit.call(self.context.object())
+        visit.call(self.context.object())?;
+        visit.call(self.dispatcher.object())?;
+        visit.call(self.is_awaitable.object())
     }
 }
 
@@ -213,6 +226,44 @@ struct PythonAwaitScheduler {
 }
 
 impl PythonAwaitScheduler {
+    /// Called only by the captured Python loop, never on a Tokio worker.
+    fn create_task<'py>(
+        py: Python<'py>,
+        awaitable: Py<PyAny>,
+        state: &PythonAwaitState,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let asyncio = py.import(pyo3::intern!(py, "asyncio"))?;
+        let is_coroutine = py
+            .import(pyo3::intern!(py, "inspect"))?
+            .call_method1(pyo3::intern!(py, "iscoroutine"), (&awaitable,))?
+            .is_truthy()?;
+        let event_loop = state.event_loop.object().bind(py);
+        if is_coroutine
+            && event_loop
+                .call_method0(pyo3::intern!(py, "get_task_factory"))?
+                .is_none()
+        {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item(pyo3::intern!(py, "loop"), event_loop)?;
+            // A queued cancellation must not start a previously unstarted
+            // coroutine. Task copies the dispatch callback's context, rather
+            // than trying to re-enter the Context currently running it.
+            kwargs.set_item(
+                pyo3::intern!(py, "eager_start"),
+                !state.cancel_requested.load(Ordering::Acquire),
+            )?;
+            asyncio
+                .getattr(pyo3::intern!(py, "Task"))?
+                .call((awaitable,), Some(&kwargs))
+        } else {
+            // Futures, custom awaitables, and configured task factories keep
+            // their existing asyncio scheduling policy.
+            asyncio
+                .getattr(pyo3::intern!(py, "ensure_future"))?
+                .call1((awaitable,))
+        }
+    }
+
     fn schedule(&mut self, py: Python<'_>) -> PyResult<()> {
         let awaitable = self
             .awaitable
@@ -220,12 +271,20 @@ impl PythonAwaitScheduler {
             .ok_or_else(|| PyRuntimeError::new_err("Python awaitable was already scheduled"))?;
         let state = self
             .state
-            .take()
+            .clone()
             .ok_or_else(|| PyRuntimeError::new_err("Python await state was already scheduled"))?;
-        let task = py
-            .import(pyo3::intern!(py, "asyncio"))?
-            .getattr(pyo3::intern!(py, "ensure_future"))?
-            .call1((awaitable,))?;
+        let task = Self::create_task(py, awaitable, &state)?;
+        if state.cancel_requested.load(Ordering::Acquire) {
+            task.call_method0(pyo3::intern!(py, "cancel"))?;
+        }
+        if task.call_method0(pyo3::intern!(py, "done"))?.is_truthy()? {
+            let result = task
+                .call_method0(pyo3::intern!(py, "result"))
+                .map(Bound::unbind);
+            self.state.take();
+            self.completion.send(result);
+            return Ok(());
+        }
         state.register_task(task.clone().unbind());
         let completer = match Py::new(
             py,
@@ -245,6 +304,7 @@ impl PythonAwaitScheduler {
             state.request_cancel();
             return Err(error);
         }
+        self.state.take();
         Ok(())
     }
 }
@@ -323,8 +383,19 @@ pub(crate) async fn resolve_python_in_context(
 
 type PythonAwaitReceiver = tokio::sync::oneshot::Receiver<PyResult<Py<PyAny>>>;
 
-fn is_python_awaitable(value: &Py<PyAny>) -> PyResult<bool> {
+fn is_python_awaitable(
+    value: &Py<PyAny>,
+    context: Option<&Arc<PythonAsyncContext>>,
+) -> PyResult<bool> {
     Python::attach(|py| {
+        if let Some(context) = context {
+            return context
+                .is_awaitable
+                .object()
+                .bind(py)
+                .call1((value.bind(py),))?
+                .is_truthy();
+        }
         py.import(pyo3::intern!(py, "inspect"))?
             .getattr(pyo3::intern!(py, "isawaitable"))?
             .call1((value.bind(py),))?
@@ -373,13 +444,24 @@ fn schedule_python_await(
                 completion,
             },
         )?;
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(pyo3::intern!(py, "context"), python_context)?;
-        event_loop.bind(py).call_method(
-            pyo3::intern!(py, "call_soon_threadsafe"),
-            (scheduler,),
-            Some(&kwargs),
-        )?;
+        if let Some(context) = context {
+            PythonAwaitDispatcher::submit(
+                context
+                    .dispatcher
+                    .object()
+                    .bind(py)
+                    .cast::<PythonAwaitDispatcher>()?,
+                scheduler,
+            )?;
+        } else {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item(pyo3::intern!(py, "context"), python_context)?;
+            event_loop.bind(py).call_method(
+                pyo3::intern!(py, "call_soon_threadsafe"),
+                (scheduler,),
+                Some(&kwargs),
+            )?;
+        }
         Ok((receiver, PythonAwaitCancelGuard { state: Some(state) }))
     })
 }
@@ -403,7 +485,9 @@ async fn resolve_python_with_context(
     awaits: &Arc<PythonAwaitRegistry>,
     context: Option<&Arc<PythonAsyncContext>>,
 ) -> calc_flow::Result<Py<PyAny>> {
-    if !is_python_awaitable(&value).map_err(|error| provider_error(callback_name, error))? {
+    if !is_python_awaitable(&value, context)
+        .map_err(|error| provider_error(callback_name, error))?
+    {
         return Ok(value);
     }
     let (receiver, mut cancellation) = schedule_python_await(value, awaits, context)
@@ -442,12 +526,325 @@ mod tests {
 
     use super::*;
 
+    #[pyfunction]
+    fn make_test_scheduler(
+        py: Python<'_>,
+        awaitable: Py<PyAny>,
+        event_loop: Py<PyAny>,
+    ) -> PyResult<Py<PythonAwaitScheduler>> {
+        let context = py
+            .import("contextvars")?
+            .call_method0("copy_context")?
+            .unbind();
+        Py::new(
+            py,
+            PythonAwaitScheduler {
+                awaitable: Some(awaitable),
+                context: Some(context),
+                state: Some(Arc::new(PythonAwaitState::new(event_loop))),
+                completion: completion(),
+            },
+        )
+    }
+
+    #[test]
+    fn ready_coroutine_finishes_in_the_bridge_dispatch_turn() {
+        Python::initialize();
+        Python::attach(|py| {
+            let locals = PyDict::new(py);
+            locals
+                .set_item(
+                    "make_scheduler",
+                    wrap_pyfunction!(make_test_scheduler, py).unwrap(),
+                )
+                .unwrap();
+            py.run(
+                cr#"
+import asyncio
+events = []
+async def ready():
+    events.append("ready")
+    return 42
+async def exercise():
+    loop = asyncio.get_running_loop()
+    loop.call_soon(make_scheduler(ready(), loop))
+    await asyncio.sleep(0)
+    assert events == ["ready"], events
+asyncio.run(exercise())
+"#,
+                Some(&locals),
+                None,
+            )
+            .unwrap();
+        });
+    }
+
+    #[test]
+    fn completed_future_is_delivered_without_an_extra_loop_turn() {
+        Python::initialize();
+        Python::attach(|py| {
+            let event_loop = py
+                .import("asyncio")
+                .unwrap()
+                .call_method0("new_event_loop")
+                .unwrap();
+            let future = event_loop.call_method0("create_future").unwrap();
+            future.call_method1("set_result", (42,)).unwrap();
+            let (sender, mut receiver) = tokio::sync::oneshot::channel();
+            let mut scheduler = PythonAwaitScheduler {
+                awaitable: Some(future.unbind()),
+                context: None,
+                state: Some(Arc::new(PythonAwaitState::new(event_loop.clone().unbind()))),
+                completion: Arc::new(PythonAwaitCompletion {
+                    sender: Mutex::new(Some(sender)),
+                    lease: Mutex::new(None),
+                }),
+            };
+            scheduler.schedule(py).unwrap();
+            let result = receiver.try_recv();
+            event_loop.call_method0("close").unwrap();
+            assert_eq!(
+                result.unwrap().unwrap().bind(py).extract::<i64>().unwrap(),
+                42
+            );
+        });
+    }
+
+    #[test]
+    fn configured_task_factory_keeps_its_scheduling_policy() {
+        Python::initialize();
+        Python::attach(|py| {
+            let locals = PyDict::new(py);
+            locals
+                .set_item(
+                    "make_scheduler",
+                    wrap_pyfunction!(make_test_scheduler, py).unwrap(),
+                )
+                .unwrap();
+            py.run(
+                cr#"
+import asyncio
+events = []
+calls = []
+async def ready():
+    events.append("ready")
+def factory(loop, coro, **kwargs):
+    calls.append("factory")
+    return asyncio.Task(coro, loop=loop, **kwargs)
+async def exercise():
+    loop = asyncio.get_running_loop()
+    loop.set_task_factory(factory)
+    try:
+        make_scheduler(ready(), loop)()
+        assert calls == ["factory"], calls
+        assert events == [], events
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert events == ["ready"], events
+    finally:
+        loop.set_task_factory(None)
+asyncio.run(exercise())
+"#,
+                Some(&locals),
+                None,
+            )
+            .unwrap();
+        });
+    }
+
+    #[pyfunction]
+    fn make_cancelled_scheduler(
+        py: Python<'_>,
+        awaitable: Py<PyAny>,
+        event_loop: Py<PyAny>,
+    ) -> PyResult<Py<PythonAwaitScheduler>> {
+        let scheduler = make_test_scheduler(py, awaitable, event_loop)?;
+        scheduler
+            .borrow(py)
+            .state
+            .as_ref()
+            .unwrap()
+            .request_cancel();
+        Ok(scheduler)
+    }
+
+    #[test]
+    fn queued_cancellation_never_starts_the_coroutine() {
+        Python::initialize();
+        Python::attach(|py| {
+            let locals = PyDict::new(py);
+            locals
+                .set_item(
+                    "make_scheduler",
+                    wrap_pyfunction!(make_cancelled_scheduler, py).unwrap(),
+                )
+                .unwrap();
+            py.run(
+                cr#"
+import asyncio
+events = []
+async def ready():
+    events.append("must not start")
+def factory(loop, coro, **kwargs):
+    return asyncio.Task(coro, loop=loop, **kwargs)
+async def exercise():
+    loop = asyncio.get_running_loop()
+    for policy in (None, factory):
+        loop.set_task_factory(policy)
+        make_scheduler(ready(), loop)()
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert events == [], events
+    loop.set_task_factory(None)
+asyncio.run(exercise())
+"#,
+                Some(&locals),
+                None,
+            )
+            .unwrap();
+        });
+    }
+
+    #[test]
+    fn completed_future_errors_keep_the_original_python_exception() {
+        Python::initialize();
+        Python::attach(|py| {
+            let event_loop = py
+                .import("asyncio")
+                .unwrap()
+                .call_method0("new_event_loop")
+                .unwrap();
+            let future = event_loop.call_method0("create_future").unwrap();
+            let error = pyo3::exceptions::PyValueError::new_err("callback failed");
+            future
+                .call_method1("set_exception", (error.value(py),))
+                .unwrap();
+            let (sender, mut receiver) = tokio::sync::oneshot::channel();
+            let mut scheduler = PythonAwaitScheduler {
+                awaitable: Some(future.unbind()),
+                context: None,
+                state: Some(Arc::new(PythonAwaitState::new(event_loop.clone().unbind()))),
+                completion: Arc::new(PythonAwaitCompletion {
+                    sender: Mutex::new(Some(sender)),
+                    lease: Mutex::new(None),
+                }),
+            };
+            scheduler.schedule(py).unwrap();
+            let actual = receiver.try_recv().unwrap().unwrap_err();
+            assert!(actual.value(py).is(error.value(py)));
+            event_loop.call_method0("close").unwrap();
+        });
+    }
+
     fn completion() -> Arc<PythonAwaitCompletion> {
         let (sender, _receiver) = tokio::sync::oneshot::channel();
         Arc::new(PythonAwaitCompletion {
             sender: Mutex::new(Some(sender)),
             lease: Mutex::new(None),
         })
+    }
+
+    #[pyfunction]
+    fn submit_test_callbacks(callback: &Bound<'_, PyAny>, count: usize) -> PyResult<()> {
+        let py = callback.py();
+        let context = Arc::new(PythonAsyncContext::capture(py)?);
+        let awaits = Arc::new(PythonAwaitRegistry::new());
+        for _ in 0..count {
+            let value = callback.call0()?.unbind();
+            let (_receiver, mut cancellation) =
+                schedule_python_await(value, &awaits, Some(&context))?;
+            cancellation.disarm();
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn ready_dispatches_share_one_wakeup_and_yield_between_bounded_groups() {
+        Python::initialize();
+        Python::attach(|py| {
+            let locals = PyDict::new(py);
+            locals
+                .set_item(
+                    "submit",
+                    wrap_pyfunction!(submit_test_callbacks, py).unwrap(),
+                )
+                .unwrap();
+            py.run(
+                cr#"
+import asyncio
+events = []
+wakeups = []
+async def ready():
+    events.append("ready")
+async def exercise():
+    loop = asyncio.get_running_loop()
+    original = loop.call_soon_threadsafe
+    def counted(*args, **kwargs):
+        wakeups.append(1)
+        return original(*args, **kwargs)
+    loop.call_soon_threadsafe = counted
+    try:
+        submit(ready, 129)
+        assert len(wakeups) == 1, len(wakeups)
+        await asyncio.sleep(0)
+        assert len(events) == 64, len(events)
+        await asyncio.sleep(0)
+        assert len(events) == 128, len(events)
+        await asyncio.sleep(0)
+        assert len(events) == 129, len(events)
+    finally:
+        loop.call_soon_threadsafe = original
+asyncio.run(exercise())
+"#,
+                Some(&locals),
+                None,
+            )
+            .unwrap();
+        });
+    }
+
+    #[test]
+    fn dispatch_keeps_independent_contexts_across_suspension_and_gc() {
+        Python::initialize();
+        Python::attach(|py| {
+            let locals = PyDict::new(py);
+            locals
+                .set_item(
+                    "submit",
+                    wrap_pyfunction!(submit_test_callbacks, py).unwrap(),
+                )
+                .unwrap();
+            py.run(
+                cr#"
+import asyncio
+import contextvars
+import gc
+value = contextvars.ContextVar("value", default="unset")
+events = []
+async def exercise():
+    gate = asyncio.Event()
+    async def ready():
+        assert value.get() == "captured", value.get()
+        value.set("private")
+        await gate.wait()
+        events.append(value.get())
+    value.set("captured")
+    submit(ready, 3)
+    value.set("caller")
+    await asyncio.sleep(0)
+    gc.collect()
+    gate.set()
+    for _ in range(3):
+        await asyncio.sleep(0)
+    assert events == ["private"] * 3, events
+    assert value.get() == "caller", value.get()
+asyncio.run(exercise())
+"#,
+                Some(&locals),
+                None,
+            )
+            .unwrap();
+        });
     }
 
     #[test]

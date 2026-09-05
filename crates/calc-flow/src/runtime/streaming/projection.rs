@@ -1047,7 +1047,10 @@ pub struct OperatorStatus {
     pub fanned_out_batches: u64,
     pub fanned_out_rows: u64,
     pub fanned_out_bytes: u64,
+    /// Total successful data and watermark handler time, including awaited emission.
     pub processing_duration: Duration,
+    /// Watermark-handler subset of `processing_duration`; includes rolling finalization.
+    pub watermark_processing_duration: Duration,
     pub errors: u64,
     pub ended: bool,
     pub late_rows: u64,
@@ -1353,6 +1356,7 @@ impl StatusProjection {
                         fanned_out_rows: metrics.fully_fanned_out_rows,
                         fanned_out_bytes: metrics.fully_fanned_out_bytes,
                         processing_duration: metrics.processing_duration,
+                        watermark_processing_duration: metrics.watermark_processing_duration,
                         errors: metrics.errors,
                         ended: progress.ended,
                         late_rows: metrics.late_rows,

@@ -33,6 +33,9 @@ below.
   matrices, capability failures, Studio inspection, and performance output
 - **[Rust API guide](rust-api.md)** — native batches, operators, graph
   compiler, UDF/provider registries, and recovery, with paired examples
+- **[Warm-state streaming performance](warm-stream-performance.md)** — paired
+  release builds, persistent incremental runners, latency/phase accounting,
+  correctness, and separate forced/normal-GC measurements
 - **[SQL and DataFusion performance](sql-datafusion-performance.md)** — fixed
   and auto parallelism, telemetry, evidence gates, canary, and rollback
 - **[API reference](api-reference.md)** — the supported surfaces at a glance:

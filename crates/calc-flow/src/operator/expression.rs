@@ -15,6 +15,10 @@ use super::{
     validate_builtin_port, validate_operator_name, validate_required_input,
 };
 
+mod projection;
+
+use projection::ColumnProjection;
+
 /// A `DataFusion` expression or projection operator.
 ///
 /// Implements both [`BatchOperator`] and [`StreamOperator`] (API note A2.4):
@@ -28,6 +32,7 @@ pub struct ExpressionOperator {
     select: Vec<String>,
     filter_expression: Option<String>,
     query: String,
+    column_projection: Option<ColumnProjection>,
     udfs: Vec<UdfReference>,
     input_ports: [Port; 1],
     output_ports: [Port; 1],
@@ -44,6 +49,7 @@ impl Clone for ExpressionOperator {
             select: self.select.clone(),
             filter_expression: self.filter_expression.clone(),
             query: self.query.clone(),
+            column_projection: self.column_projection.clone(),
             udfs: self.udfs.clone(),
             input_ports: self.input_ports.clone(),
             output_ports: self.output_ports.clone(),
@@ -103,12 +109,16 @@ impl ExpressionOperator {
         }
         let expression = has_expression.then(|| expression.into());
         let query = expression_query(expression.as_deref(), &select, filter_expression.as_deref())?;
+        let column_projection = (expression.is_none() && filter_expression.is_none())
+            .then(|| ColumnProjection::parse(&select))
+            .flatten();
         Ok(Self {
             name: name.into(),
             expression,
             select,
             filter_expression,
             query,
+            column_projection,
             udfs,
             input_ports: [table_port("input")?],
             output_ports: [table_port("output")?],
@@ -168,6 +178,11 @@ impl ExpressionOperator {
 
     async fn process_standalone(&mut self, batch: Batch) -> Result<Batch> {
         self.input_ports[0].validate(&batch, &format!("{}.input", self.name))?;
+        if let Some(projection) = &self.column_projection
+            && let Some(projected) = projection.apply(&batch, &self.name)?
+        {
+            return Ok(projected);
+        }
         let tables = BTreeMap::from([("input".into(), batch)]);
         let runtime = self.stream_state.runtime()?;
         runtime.sql(&self.query, &tables, Some(&self.name)).await
@@ -300,4 +315,176 @@ pub(crate) fn required_input<'a>(
         node_id: node_id.unwrap_or(operator).into(),
         message: format!("missing required input {input}"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use datafusion::arrow::{
+        array::{ArrayRef, Float64Array, StringArray},
+        datatypes::{DataType, Field, Schema},
+        record_batch::RecordBatch,
+    };
+
+    use super::*;
+    use crate::BatchMetadata;
+
+    fn projection_input() -> Batch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("Price", DataType::Float64, true),
+            Field::new("symbol", DataType::Utf8, false),
+        ]));
+        let record = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![Some(10.0), None])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["A", "B"])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        Batch::table(
+            vec![record],
+            BatchMetadata::new("quotes", 7, BTreeMap::new()).unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn stream_column_projection_reuses_arrow_buffers_without_sql_runtime() {
+        let input = projection_input();
+        let mut operator = ExpressionOperator::new(
+            "projection",
+            "",
+            vec![r#""symbol""#.into(), r#""Price" AS "last""#.into()],
+            None,
+            vec![],
+        )
+        .unwrap();
+        let output = operator.process_standalone(input.clone()).await.unwrap();
+        let record = &output.table_payload().unwrap().batches()[0];
+        let original = &input.table_payload().unwrap().batches()[0];
+        assert_eq!(record.schema().field(0).name(), "symbol");
+        assert_eq!(record.schema().field(1).name(), "last");
+        assert!(record.schema().field(1).is_nullable());
+        assert_eq!(record.column(1).null_count(), 1);
+        assert_eq!(output.metadata(), input.metadata());
+        assert!(Arc::ptr_eq(record.column(0), original.column(1)));
+        assert!(Arc::ptr_eq(record.column(1), original.column(0)));
+        assert!(!operator.stream_runtime_initialized());
+    }
+
+    #[tokio::test]
+    async fn stream_identity_projection_keeps_empty_batches_and_exact_schema() {
+        let input = projection_input();
+        let schema = input.table_payload().unwrap().schema().clone();
+        let empty = Batch::table(
+            vec![RecordBatch::new_empty(schema.clone())],
+            input.metadata().clone(),
+        )
+        .unwrap();
+        let mut operator = ExpressionOperator::new(
+            "projection",
+            "",
+            vec![r#""Price""#.into(), r#""symbol""#.into()],
+            None,
+            vec![],
+        )
+        .unwrap();
+        let output = operator.process_standalone(empty).await.unwrap();
+        assert_eq!(output.num_rows(), 0);
+        assert_eq!(output.table_payload().unwrap().schema(), &schema);
+        assert!(!operator.stream_runtime_initialized());
+    }
+
+    #[tokio::test]
+    async fn stream_computed_and_filtered_projections_keep_sql_semantics() {
+        for (select, filter) in [
+            (vec![r#""Price" + 1 AS next"#.into()], None),
+            (vec![r#""Price""#.into()], Some(r#""Price" > 5"#.into())),
+        ] {
+            let mut operator =
+                ExpressionOperator::new("projection", "", select, filter, vec![]).unwrap();
+            let result = operator
+                .process_standalone(projection_input())
+                .await
+                .unwrap();
+            assert!(result.num_rows() > 0);
+            assert!(operator.stream_runtime_initialized());
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_projection_schema_metadata_matches_the_sql_reference() {
+        let input = projection_input();
+        let record = &input.table_payload().unwrap().batches()[0];
+        let fields = record
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| {
+                field
+                    .as_ref()
+                    .clone()
+                    .with_metadata(std::collections::HashMap::from([(
+                        "unit".into(),
+                        "test".into(),
+                    )]))
+            })
+            .collect::<Vec<_>>();
+        let schema = Arc::new(Schema::new_with_metadata(
+            fields,
+            std::collections::HashMap::from([("origin".into(), "quotes".into())]),
+        ));
+        let input = Batch::table(
+            vec![RecordBatch::try_new(schema, record.columns().to_vec()).unwrap()],
+            input.metadata().clone(),
+        )
+        .unwrap();
+        for select in [
+            vec![
+                r#"input."Price" AS "quoted alias""#.into(),
+                "SYMBOL AS ticker".into(),
+            ],
+            vec![r#""Price""#.into(), "symbol".into()],
+        ] {
+            let mut fast = ExpressionOperator::new("projection", "", select, None, vec![]).unwrap();
+            let mut reference = fast.clone();
+            reference.column_projection = None;
+            let actual = fast.process_standalone(input.clone()).await.unwrap();
+            let expected = reference.process_standalone(input.clone()).await.unwrap();
+            assert_eq!(
+                actual.table_payload().unwrap().schema(),
+                expected.table_payload().unwrap().schema()
+            );
+            assert_eq!(
+                actual.table_payload().unwrap().batches(),
+                expected.table_payload().unwrap().batches()
+            );
+            assert_eq!(actual.metadata(), expected.metadata());
+            assert!(!fast.stream_runtime_initialized());
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_projection_invalid_names_keep_sql_errors() {
+        for select in [
+            vec!["missing".into()],
+            vec!["symbol AS dup".into(), r#""Price" AS dup"#.into()],
+        ] {
+            let mut fast = ExpressionOperator::new("projection", "", select, None, vec![]).unwrap();
+            let mut reference = fast.clone();
+            reference.column_projection = None;
+            let actual = fast
+                .process_standalone(projection_input())
+                .await
+                .unwrap_err();
+            let expected = reference
+                .process_standalone(projection_input())
+                .await
+                .unwrap_err();
+            assert_eq!(actual.to_string(), expected.to_string());
+            assert!(fast.stream_runtime_initialized());
+        }
+    }
 }

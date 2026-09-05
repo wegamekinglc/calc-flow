@@ -45,6 +45,8 @@ use super::{
 
 mod generated_kernel_manifest;
 mod kernel;
+mod ordered_stream;
+mod row_cost;
 mod state_v3;
 
 #[cfg(test)]
@@ -1056,6 +1058,7 @@ impl BatchOperator for RollingOperator {
 #[derive(Default)]
 struct RollingStreamState {
     buffer: BTreeMap<RowIdentity, BufferedRow>,
+    ordered: ordered_stream::OrderedStreamBuffer,
     histories: RollingHistories,
     last_input_watermark: Option<EventTime>,
     next_output_sequence: u64,
@@ -1139,6 +1142,11 @@ impl StreamOperator for RollingOperator {
             ));
         }
         let watermark = context.input_watermark();
+        if self.try_buffer_ordered(batch.table_payload()?, watermark)? {
+            self.install_context_identity(context);
+            return Ok(());
+        }
+        self.materialize_ordered_buffer()?;
         let rows = read_buffered_rows(batch.table_payload()?, &self.compiled, &self.name)?;
         let (accepted, metrics) = self.classify_envelope(rows, watermark, context.operator_id())?;
         let next_metrics = accumulate_late_metrics(self.state.metrics, metrics)?;
@@ -1177,9 +1185,19 @@ impl StreamOperator for RollingOperator {
                 "input watermark did not advance strictly",
             ));
         }
-        let closing = self.closing_keys(watermark.as_micros(), context.operator_id())?;
-        let rows = self.take_buffered(&closing);
-        self.emit_rows(rows, context, output).await?;
+        if self.state.ordered.is_empty() {
+            let closing = self.closing_keys(watermark.as_micros(), context.operator_id())?;
+            let rows = self.take_buffered(&closing);
+            self.emit_rows(rows, context, output).await?;
+        } else {
+            let records = self.state.ordered.take_closed(
+                watermark,
+                &self.compiled,
+                self.spec.allowed_lateness_micros,
+                context.operator_id(),
+            )?;
+            self.emit_ordered(records, context, output).await?;
+        }
         self.install_context_identity(context);
         self.state.last_input_watermark = Some(watermark);
         Ok(())
@@ -1197,8 +1215,13 @@ impl StreamOperator for RollingOperator {
         if self.state.ended {
             return Ok(());
         }
-        let rows = self.take_all_buffered();
-        self.emit_rows(rows, context, output).await?;
+        if self.state.ordered.is_empty() {
+            let rows = self.take_all_buffered();
+            self.emit_rows(rows, context, output).await?;
+        } else {
+            let records = self.state.ordered.take_all();
+            self.emit_ordered(records, context, output).await?;
+        }
         self.install_context_identity(context);
         self.state.ended = true;
         Ok(())
@@ -1217,6 +1240,7 @@ impl StreamOperator for RollingOperator {
                 "rolling checkpoint epoch did not advance strictly".into(),
             ));
         }
+        self.materialize_ordered_buffer()?;
         let encoded = self.encode_state(epoch)?;
         let (descriptor, segments) = match encoded {
             Some(prepared) => {
@@ -1273,6 +1297,7 @@ impl StreamOperator for RollingOperator {
         let restored = self.decode_state(&metadata, snapshot)?;
         self.state = RollingStreamState {
             buffer: restored.buffer,
+            ordered: ordered_stream::OrderedStreamBuffer::default(),
             histories: restored.histories,
             last_input_watermark: metadata.last_input_watermark,
             next_output_sequence: metadata.next_output_sequence,
@@ -2626,6 +2651,7 @@ fn chunk_output_record(
     first_sequence: u64,
     budget: crate::EdgeBudget,
 ) -> Result<Vec<Batch>> {
+    let row_costs = row_cost::RowCosts::try_new(record)?;
     let mut batches = Vec::new();
     let mut start = 0_usize;
     let mut sequence = first_sequence;
@@ -2633,12 +2659,14 @@ fn chunk_output_record(
         let mut end = start;
         let mut bytes = 0_usize;
         while end < record.num_rows() && end - start < budget.max_rows {
-            let row = record.slice(end, 1);
-            let row_batch = Batch::table(vec![row], BatchMetadata::default())
-                .map_err(|error| operator_error(operator_id, &error.to_string()))?;
-            let row_bytes = row_batch
-                .estimated_bytes()
-                .map_err(|error| operator_error(operator_id, &error.to_string()))?;
+            let row_bytes = if let Some(costs) = &row_costs {
+                costs.get(end)
+            } else {
+                let row = record.slice(end, 1);
+                Batch::table(vec![row], BatchMetadata::default())
+                    .and_then(|batch| batch.estimated_bytes())
+                    .map_err(|error| operator_error(operator_id, &error.to_string()))?
+            };
             if row_bytes > budget.max_bytes {
                 return Err(CalcFlowError::InvalidArgument {
                     field: "message.bytes".into(),
@@ -7959,6 +7987,178 @@ mod tests {
         }
         assert_eq!(second.metrics.entities, 2);
         assert_eq!(second.metrics.scalar_value_conversions, 0);
+    }
+
+    fn single_entity_history(operator: &RollingOperator) -> &VecDeque<Vec<ScalarValue>> {
+        &operator
+            .state
+            .histories
+            .by_entity
+            .values()
+            .next()
+            .unwrap()
+            .rows
+    }
+
+    #[tokio::test]
+    async fn ordered_stream_finalization_reuses_input_columns_and_keeps_incremental_state() {
+        use crate::{CancellationToken, StreamJobContext};
+
+        let spec = kernel_spec(json!([aggregate_output("mean", "price", "mean", 2)]));
+        let mut operator =
+            RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
+        let job = StreamJobContext::new(
+            7,
+            "fingerprint",
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        );
+        let mut collector = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        let first = float64_fast_record(&[(1, "a", 1, Some(1.0)), (2, "a", 2, Some(3.0))]);
+        let context = StreamOperatorContext::new(&job, "rolling", None);
+        operator
+            .process_data(
+                "input",
+                Batch::table(vec![first.clone()], BatchMetadata::default()).unwrap(),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        assert!(collector.drain("output").is_empty());
+        operator
+            .on_watermark(EventTime::from_micros(2), &context, &mut collector)
+            .await
+            .unwrap();
+        let emitted = collector.drain("output");
+        let record = &emitted[0]
+            .as_data()
+            .unwrap()
+            .table_payload()
+            .unwrap()
+            .batches()[0];
+        for column in 0..first.num_columns() {
+            assert_eq!(
+                record.column(column).to_data().buffers()[0].as_ptr(),
+                first.column(column).to_data().buffers()[0].as_ptr(),
+            );
+        }
+        assert_eq!(
+            record
+                .column(first.num_columns())
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .values()
+                .as_ref(),
+            &[1.0, 2.0],
+        );
+        let second = float64_fast_record(&[(3, "a", 3, Some(5.0))]);
+        let retained_row = single_entity_history(&operator).back().unwrap().as_ptr();
+        let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(2)));
+        operator
+            .process_data(
+                "input",
+                Batch::table(vec![second], BatchMetadata::default()).unwrap(),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        operator
+            .on_watermark(EventTime::from_micros(3), &context, &mut collector)
+            .await
+            .unwrap();
+        let emitted = collector.drain("output");
+        let record = &emitted[0]
+            .as_data()
+            .unwrap()
+            .table_payload()
+            .unwrap()
+            .batches()[0];
+        assert_eq!(
+            record
+                .column(first.num_columns())
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .values()
+                .as_ref(),
+            &[4.0]
+        );
+        assert_eq!(
+            single_entity_history(&operator).front().unwrap().as_ptr(),
+            retained_row,
+            "an unchanged retained row must not be cloned on append"
+        );
+    }
+
+    #[test]
+    fn warm_stream_finalization_allocations_depend_on_touched_entities() {
+        use crate::{CancellationToken, StreamJobContext};
+
+        fn allocations(entities: usize) -> u64 {
+            let spec = kernel_spec(json!([aggregate_output("mean", "price", "mean", 20)]));
+            let mut operator =
+                RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
+            let job = StreamJobContext::new(
+                7,
+                TEST_FINGERPRINT,
+                JsonMap::new(),
+                None,
+                CancellationToken::new(),
+            );
+            let symbols = (0..entities)
+                .map(|index| format!("e{index:06}"))
+                .collect::<Vec<_>>();
+            let rows = symbols
+                .iter()
+                .map(|symbol| (1, symbol.as_str(), 1, Some(1.0)))
+                .collect::<Vec<_>>();
+            let input = float64_fast_record(&rows);
+            let context = StreamOperatorContext::new(&job, "rolling", None);
+            let mut collector = crate::EdgeCollector::new(operator.output_ports().to_vec());
+            futures::executor::block_on(operator.process_data(
+                "input",
+                Batch::table(vec![input], BatchMetadata::default()).unwrap(),
+                &context,
+                &mut collector,
+            ))
+            .unwrap();
+            futures::executor::block_on(operator.on_watermark(
+                EventTime::from_micros(1),
+                &context,
+                &mut collector,
+            ))
+            .unwrap();
+            collector.drain("output");
+            let input = float64_fast_record(&[(2, symbols[0].as_str(), 2, Some(3.0))]);
+            let context =
+                StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(1)));
+            futures::executor::block_on(operator.process_data(
+                "input",
+                Batch::table(vec![input], BatchMetadata::default()).unwrap(),
+                &context,
+                &mut collector,
+            ))
+            .unwrap();
+            allocation_counter::measure(|| {
+                futures::executor::block_on(operator.on_watermark(
+                    EventTime::from_micros(2),
+                    &context,
+                    &mut collector,
+                ))
+                .unwrap();
+            })
+            .count_total
+        }
+        let small = allocations(4);
+        let large = allocations(4096);
+        assert!(
+            large <= small + 100,
+            "one touched entity: small={small}, large={large}"
+        );
     }
 
     #[test]

@@ -1760,6 +1760,7 @@ fn operator_status_to_py<'py>(
             "fanned_out_rows" => status.fanned_out_rows,
             "fanned_out_bytes" => status.fanned_out_bytes,
             "processing_duration_micros" => duration_micros(status.processing_duration),
+            "watermark_processing_duration_micros" => duration_micros(status.watermark_processing_duration),
             "errors" => status.errors,
             "ended" => status.ended,
             "late_rows" => status.late_rows,

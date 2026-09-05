@@ -67,6 +67,7 @@ pub(crate) struct OperatorMetrics {
     pub(crate) fully_fanned_out_rows: u64,
     pub(crate) fully_fanned_out_bytes: u64,
     pub(crate) processing_duration: Duration,
+    pub(crate) watermark_processing_duration: Duration,
     pub(crate) errors: u64,
     pub(crate) late_rows: u64,
     pub(crate) affected_batches: u64,
@@ -187,7 +188,7 @@ impl MetricsRecorder {
         )
     }
 
-    fn with_clock(
+    pub(super) fn with_clock(
         edges: impl IntoIterator<Item = (String, EdgeBudget)>,
         sources: impl IntoIterator<Item = String>,
         nodes: impl IntoIterator<Item = String>,
@@ -323,6 +324,29 @@ impl MetricsRecorder {
                 .processing_duration
                 .checked_add(elapsed)
                 .ok_or_else(|| metrics_error(node_id, "processing_duration", "counter overflow"))?;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn record_operator_watermark(
+        &self,
+        node_id: &str,
+        timer: &MetricsTimer,
+    ) -> Result<()> {
+        let elapsed = timer.elapsed(node_id, "watermark_processing_duration")?;
+        self.with_node(node_id, |metrics| {
+            let total = metrics
+                .processing_duration
+                .checked_add(elapsed)
+                .ok_or_else(|| metrics_error(node_id, "processing_duration", "counter overflow"))?;
+            let watermark = metrics
+                .watermark_processing_duration
+                .checked_add(elapsed)
+                .ok_or_else(|| {
+                    metrics_error(node_id, "watermark_processing_duration", "counter overflow")
+                })?;
+            metrics.processing_duration = total;
+            metrics.watermark_processing_duration = watermark;
             Ok(())
         })
     }

@@ -264,8 +264,45 @@ struct OrderProof {
 #[derive(Debug)]
 pub(super) struct RollingKernelExecution {
     pub columns: Vec<ArrayRef>,
+    pub entity_ids: Vec<usize>,
     pub metrics: RollingKernelMetrics,
     pub state: RollingKernelState,
+}
+
+/// A transactional replacement of only the entities touched by a stream batch.
+pub(super) struct StreamKernelUpdate {
+    execution: RollingKernelExecution,
+}
+
+impl StreamKernelUpdate {
+    pub(super) fn entity_ids(&self) -> &[usize] {
+        &self.execution.entity_ids
+    }
+
+    pub(super) fn take_columns(&mut self) -> Vec<ArrayRef> {
+        std::mem::take(&mut self.execution.columns)
+    }
+
+    pub(super) fn commit(self, base: &mut RollingKernelState) {
+        let local = self.execution.state;
+        let mut keys = vec![Vec::new(); local.states.len()];
+        for (key, index) in local.entities {
+            keys[index] = key;
+        }
+        for (key, updated) in keys.into_iter().zip(local.states) {
+            if let Some(&index) = base.entities.get(&key) {
+                base.states[index] = updated;
+            } else {
+                let index = base.states.len();
+                base.entities.insert(key, index);
+                base.states.push(updated);
+            }
+        }
+        base.kernel_fingerprint = local.kernel_fingerprint;
+        if local.last_identity.is_some() {
+            base.last_identity = local.last_identity;
+        }
+    }
 }
 
 /// Opaque, cloneable transition state for one typed kernel plan.
@@ -278,6 +315,77 @@ pub(super) struct RollingKernelState {
 }
 
 impl RollingKernelPlan {
+    /// Prepares a private ordered-buffer transition without cloning resident
+    /// state for inactive entities. The caller has already validated order,
+    /// duplicates, required values, and finality while buffering these columns.
+    pub(super) fn prepare_ordered_stream(
+        &self,
+        state: &RollingKernelState,
+        input: &RecordBatch,
+        node_id: &str,
+    ) -> Result<StreamKernelUpdate> {
+        self.validate_state(state, node_id)?;
+        let started = Instant::now();
+        let rows = encode_rows(input, &self.partition_columns, node_id)?;
+        let keys = encoded_keys(&rows, input.num_rows());
+        let mut local = RollingKernelState {
+            kernel_fingerprint: Some(self.fingerprint.clone()),
+            ..RollingKernelState::default()
+        };
+        for key in &keys {
+            if !local.entities.contains_key(key)
+                && let Some(&index) = state.entities.get(key)
+            {
+                local.entities.insert(key.clone(), local.states.len());
+                local.states.push(state.states[index].clone());
+            }
+        }
+        let entity_ids = local.resolve_entities(&keys, &self.groups);
+        let entity_encode_ns = nanos(started.elapsed());
+        let last_identity = if input.num_rows() == 0 {
+            None
+        } else {
+            let last = input.slice(input.num_rows() - 1, 1);
+            Some(
+                encode_rows(&last, &self.order_columns, node_id)?
+                    .row(0)
+                    .data()
+                    .to_vec(),
+            )
+        };
+        let execution = self.fill_typed(
+            input,
+            &entity_ids,
+            local,
+            last_identity,
+            node_id,
+            RollingKernelMetrics {
+                entity_encode_ns,
+                input_rows: input.num_rows(),
+                output_rows: input.num_rows(),
+                ..RollingKernelMetrics::default()
+            },
+        )?;
+        Ok(StreamKernelUpdate { execution })
+    }
+
+    /// Proves strict ordering without extracting generic scalar values.
+    pub(super) fn ordered_stream_bounds(
+        &self,
+        input: &RecordBatch,
+        node_id: &str,
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        self.validate_required_values(input, node_id)?;
+        let rows = encode_rows(input, &self.order_columns, node_id)?;
+        if !self.canonical_order_is_proven(input, &rows, None, node_id)? {
+            return Ok(None);
+        }
+        Ok(input
+            .num_rows()
+            .checked_sub(1)
+            .map(|last| (rows.row(0).data().to_vec(), rows.row(last).data().to_vec())))
+    }
+
     #[allow(
         clippy::too_many_arguments,
         reason = "the compiler boundary keeps every rolling semantic explicit"
@@ -767,6 +875,7 @@ impl RollingKernelPlan {
         metrics.state_bytes = state_bytes;
         Ok(RollingKernelExecution {
             columns,
+            entity_ids: entity_ids.to_vec(),
             metrics,
             state,
         })
