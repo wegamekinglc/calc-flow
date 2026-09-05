@@ -4,10 +4,22 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.benchmark_suite.refs import resolve_refs
+from scripts.benchmark_suite.refs import git_revision, resolve_refs
 
 
 class BenchmarkRefsTests(unittest.TestCase):
+    def test_revision_boundary_rejects_options_paths_and_shell_text(self):
+        for revision in ("--help", "HEAD", "../main", "HEAD; false"):
+            with (
+                self.subTest(revision=revision),
+                patch(
+                    "scripts.benchmark_suite.refs.subprocess.check_output"
+                ) as command,
+                self.assertRaisesRegex(ValueError, "unsupported benchmark revision"),
+            ):
+                git_revision(revision)
+            command.assert_not_called()
+
     def test_event_shas_are_resolved_without_shell_expansion(self):
         base, head = "a" * 40, "b" * 40
         with (

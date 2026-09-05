@@ -205,8 +205,8 @@ class EngineCase:
         self.data = workload(case["rows"])
         self.expected = expected_output(self.data, scenario)
         self.loop = None
+        self.plan = None
         if backend == "calc-flow-stream":
-            self.plan = stream_plan(scenario)
             self.events = stream_events(self.data.table, self.data.entities)
             self.loop = asyncio.new_event_loop()
             self.calculate = self._stream
@@ -257,6 +257,10 @@ class EngineCase:
         }
 
     def sample(self) -> dict:
+        if self.loop is not None:
+            # StreamingRunner consumes its plan. Recompile before each cold
+            # invocation, outside the advertised start-to-drain timed boundary.
+            self.plan = stream_plan(self.case["scenario"])
         started = time.perf_counter_ns()
         result = self.calculate()
         seconds = (time.perf_counter_ns() - started) / 1e9

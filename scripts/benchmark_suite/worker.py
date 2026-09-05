@@ -9,11 +9,11 @@ import sys
 from importlib.metadata import version
 from pathlib import Path
 
-from scripts.profile_warm_stream import _worker_environment
-
 
 def environment() -> dict:
     import polars as pl
+
+    from scripts.profile_warm_stream import _worker_environment
 
     return {
         **_worker_environment(),
@@ -97,10 +97,14 @@ def finish_case(active) -> dict:
     return outcome
 
 
-def dispatch(message: dict, active, root: Path):
-    operation = message["operation"]
+def _require_prepared(operation: str, active) -> None:
     if operation in ("sample", "finish") and active is None:
         raise ValueError("no active benchmark; prepare a case first")
+
+
+def dispatch(message: dict, active, root: Path):
+    operation = message["operation"]
+    _require_prepared(operation, active)
     match operation:
         case "hello":
             return environment(), active

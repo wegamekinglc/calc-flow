@@ -20,6 +20,21 @@ def test_sql_queries_reject_unknown_scenario_names():
         sql_query("sma20; DROP TABLE input")
 
 
+@pytest.mark.parametrize("scenario", ["sma20", "dual_sma"])
+def test_cold_stream_repeated_samples_use_fresh_execution_plans(scenario, tmp_path):
+    case = next(
+        case
+        for case in engine_cases(10)
+        if case["backend"] == "calc-flow-stream" and case["scenario"] == scenario
+    )
+    runner = EngineCase(case, tmp_path)
+    try:
+        for _ in range(3):
+            assert runner.sample()["correctness"]["passed"]
+    finally:
+        runner.close()
+
+
 def test_performance_prices_are_exact_eighths_with_bounded_magnitude():
     prices = workload(1_001).table["price"].to_numpy()
     assert np.all(prices * 8 == np.floor(prices * 8))

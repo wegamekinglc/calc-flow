@@ -18,20 +18,21 @@ try {
 // Vitest's JSON reporter deliberately removes samples, even with includeSamples.
 // Recover the actual observations from its completed task results, never from
 // median/mean estimates. Preserve the reporter's other fields unchanged.
-function collect(task, samples) {
+function collect(task, entries) {
   if (task.meta?.benchmark) {
     const values = task.result?.benchmark?.samples;
     if (task.result?.state !== "pass" || !values?.length) {
       throw new Error(`Incomplete benchmark samples: ${task.name}`);
     }
-    samples.set(task.id, [...values]);
+    entries.push([task.id, [...values]]);
   }
-  for (const child of task.tasks ?? []) collect(child, samples);
+  for (const child of task.tasks ?? []) collect(child, entries);
 }
 
 async function retainSamples(context) {
-  const samples = new Map();
-  for (const file of context.state.getFiles()) collect(file, samples);
+  const entries = [];
+  for (const file of context.state.getFiles()) collect(file, entries);
+  const samples = new Map(entries);
   const report = JSON.parse(await readFile("target/benchmark-suite/vitest.json", "utf8"));
   const count = attachSamples(report, samples);
   if (count === 0 || count !== samples.size) {

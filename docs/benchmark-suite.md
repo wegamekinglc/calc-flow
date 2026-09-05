@@ -79,7 +79,9 @@ on both sides. Warm cases retain the existing decimal input fixture.
 New SQL/raw-DataFusion target partitions, Tokio workers and Polars threads
 are fixed to 32. BLAS helper pools use one thread. Legacy fixtures retain
 their own query configuration and timing boundaries. Native stream startup
-and persistent warm append are separate workloads; cross-library columns are
+and persistent warm append are separate workloads. A cold streaming plan is
+single-use, so each invocation compiles a fresh plan before starting its timer.
+Cross-library columns are
 application-boundary references, not interchangeable kernel measurements.
 These settings describe target/pool sizes, not measured CPU utilization;
 TA-Lib calls remain sequential per-series operations.
