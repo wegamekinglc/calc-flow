@@ -3611,6 +3611,108 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_segment_bytes_round_trip_is_stable_across_decode_reencode() {
+        // Build a compiled spec over a tumbling sum window and hand-construct
+        // the state rows the codec carries; the operator stream path is not
+        // needed to guard the encoding itself.
+        let input_schema = Schema::new(vec![
+            Field::new(
+                "event_time",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                false,
+            ),
+            Field::new("amount", DataType::Int64, false),
+        ]);
+        let spec = WindowSpec::tumbling("event_time", Duration::from_secs(60))
+            .unwrap()
+            .aggregate(AggregateFunction::Sum, "amount", "total")
+            .unwrap();
+        let compiled = compile_spec(&input_schema, &spec, &JsonMap::new()).unwrap();
+
+        let operations = vec![
+            StateOperationRow {
+                key: WindowKey {
+                    start: EventTime::from_micros(0),
+                    end: EventTime::from_micros(60_000_000),
+                    stable_group_key: Vec::new(),
+                },
+                entry: AccumulatorRow {
+                    group_values: Vec::new(),
+                    aggregates: vec![AccumulatorValue::SignedSum(Some(150))],
+                },
+                tombstone: false,
+            },
+            StateOperationRow {
+                key: WindowKey {
+                    start: EventTime::from_micros(60_000_000),
+                    end: EventTime::from_micros(120_000_000),
+                    stable_group_key: Vec::new(),
+                },
+                entry: AccumulatorRow {
+                    group_values: Vec::new(),
+                    aggregates: vec![AccumulatorValue::SignedSum(Some(42))],
+                },
+                tombstone: false,
+            },
+        ];
+
+        let first_bytes =
+            encode_state_segment(&operations, &spec, &compiled, &"a".repeat(64), "window").unwrap();
+        assert!(!first_bytes.is_empty());
+
+        // Decoding must restore the exact rows in order.
+        let expected_schema = state_schema(&spec, &compiled, &"a".repeat(64), "window");
+        let restored =
+            decode_state_segment(&first_bytes, &spec, &compiled, &expected_schema, "window")
+                .unwrap();
+        assert_eq!(restored.len(), operations.len());
+        for ((key, row), original) in restored.iter().zip(&operations) {
+            assert_eq!(*key, original.key);
+            let entry = row.as_ref().expect("every live row carries an entry");
+            match (&entry.aggregates[..], &original.entry.aggregates[..]) {
+                ([AccumulatorValue::SignedSum(left)], [AccumulatorValue::SignedSum(right)]) => {
+                    assert_eq!(left, right);
+                }
+                _ => panic!("restored aggregate shape must match the encoded shape"),
+            }
+        }
+
+        // Re-encoding the same rows must reproduce identical bytes. This is
+        // the guard the planned codec consolidation must hold for every
+        // checkpoint ever written.
+        let second_bytes =
+            encode_state_segment(&operations, &spec, &compiled, &"a".repeat(64), "window").unwrap();
+        assert_eq!(
+            first_bytes, second_bytes,
+            "window checkpoint segment encoding must be deterministic byte-for-byte"
+        );
+
+        // A single-bit flip in the payload must not decode to the same rows.
+        let mut corrupted = first_bytes.clone();
+        let flip_at = corrupted.len() - 6;
+        corrupted[flip_at] ^= 0x01;
+        let decoded =
+            decode_state_segment(&corrupted, &spec, &compiled, &expected_schema, "window");
+        if let Ok(rows) = decoded {
+            let same = rows.len() == operations.len()
+                && rows.iter().zip(&operations).all(|((k, r), o)| {
+                    let aggregates_match = matches!(
+                        (r.as_ref().map(|e| &e.aggregates[..]), &o.entry.aggregates[..]),
+                        (
+                            Some([AccumulatorValue::SignedSum(left)]),
+                            [AccumulatorValue::SignedSum(right)],
+                        ) if left == right
+                    );
+                    *k == o.key && aggregates_match
+                });
+            assert!(
+                !same,
+                "a bit-flipped segment must not silently decode to the original rows"
+            );
+        }
+    }
+
+    #[test]
     fn checkpoint_segment_assembly_rejects_duplicate_and_missing_retained_data() {
         let mut operator = checkpoint_segment_operator();
         operator.state.operator_id = Some("window".into());
