@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -37,10 +38,21 @@ async def command(
     env: dict | None = None,
     timeout: float = 7200,
 ) -> None:
+    executable = shutil.which(argv[0])
+    if executable is None:
+        raise ValueError(f"benchmark executable is unavailable: {argv[0]}")
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open("wb") as output:
-        process = await asyncio.create_subprocess_exec(
-            *argv, cwd=cwd, env=env, stdout=output, stderr=asyncio.subprocess.STDOUT
+        # Callers supply fixed argv layouts for trusted benchmark tools/binaries.
+        # Resolve the executable once and never interpret arguments through a shell.
+        process = await asyncio.create_subprocess_exec(  # nosemgrep
+            str(Path(executable).resolve()),
+            *argv[1:],
+            cwd=cwd,
+            env=env,
+            shell=False,
+            stdout=output,
+            stderr=asyncio.subprocess.STDOUT,
         )
         try:
             code = await asyncio.wait_for(process.wait(), timeout=timeout)

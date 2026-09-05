@@ -18,16 +18,20 @@ def validate_shape(report: dict) -> dict:
     if any(not isinstance(error, str) for error in report["errors"]):
         raise ValueError("errors must be strings")
     for case in report["cases"]:
-        if not isinstance(case, dict) or not isinstance(case.get("id"), str):
-            raise ValueError("each result must have a string case id")
-        if not isinstance(case.get("scope"), str) or case.get("status") not in (
-            "ok",
-            "error",
-        ):
-            raise ValueError("each result must declare its status and timing scope")
-        if case.get("family") != shard["family"]:
-            raise ValueError("case family differs from its shard")
+        _validate_case_shape(case, shard)
     return shard
+
+
+def _validate_case_shape(case: dict, shard: dict) -> None:
+    if not isinstance(case, dict) or not isinstance(case.get("id"), str):
+        raise ValueError("each result must have a string case id")
+    if not isinstance(case.get("scope"), str) or case.get("status") not in (
+        "ok",
+        "error",
+    ):
+        raise ValueError("each result must declare its status and timing scope")
+    if case.get("family") != shard["family"]:
+        raise ValueError("case family differs from its shard")
 
 
 def validate_releases(releases: dict, base: str, head: str) -> None:
@@ -49,21 +53,29 @@ def _validate_round(case: dict, evidence: dict, releases: dict) -> None:
     )
     if set(evidence["samples"]) != sides:
         raise ValueError("measured worker roles differ from the comparison contract")
-    if set(evidence["completion"]) != sides or any(
-        evidence["completion"][side]["state"] != "completed" for side in sides
-    ):
-        raise ValueError("worker completion was not established")
+    _validate_completion(evidence["completion"], sides)
     if evidence["native_sha256"] != {
         side: releases[side]["native_sha256"] for side in sides
     }:
         raise ValueError("raw worker native hashes differ from release manifests")
     for samples in evidence["samples"].values():
-        if len(samples) != SAMPLES:
-            raise ValueError("confirmation round has an incomplete sample inventory")
-        if any(sample["correctness"]["passed"] is not True for sample in samples):
-            raise ValueError("a measured output failed correctness")
+        _validate_measurements(samples)
     if case["family"] == "warm":
         _validate_cursors(case, evidence)
+
+
+def _validate_completion(completion: dict, sides: set[str]) -> None:
+    if set(completion) != sides or any(
+        completion[side]["state"] != "completed" for side in sides
+    ):
+        raise ValueError("worker completion was not established")
+
+
+def _validate_measurements(samples: list[dict]) -> None:
+    if len(samples) != SAMPLES:
+        raise ValueError("confirmation round has an incomplete sample inventory")
+    if any(sample["correctness"]["passed"] is not True for sample in samples):
+        raise ValueError("a measured output failed correctness")
 
 
 def _validate_cursors(case: dict, evidence: dict) -> None:
@@ -85,17 +97,21 @@ def _validate_evidence(case: dict, releases: dict) -> None:
     ] != str(THREADS):
         raise ValueError("unexpected worker thread configuration")
     for side in ("baseline", "candidate"):
-        actual = [
-            [sample["seconds"] for sample in evidence["samples"].get(side, [])]
-            for evidence in rounds
-        ]
-        if side == "baseline" and case["comparison"] == "external":
-            actual = []
+        actual = _evidence_seconds(case, side)
         if actual != case[side]:
             raise ValueError("summary samples differ from raw worker evidence")
     for evidence in rounds:
         _validate_round(case, evidence, releases)
     comparison(case)
+
+
+def _evidence_seconds(case: dict, side: str) -> list[list[float]]:
+    if side == "baseline" and case["comparison"] == "external":
+        return []
+    return [
+        [sample["seconds"] for sample in evidence["samples"].get(side, [])]
+        for evidence in case["evidence"]
+    ]
 
 
 def _validate_catalog_cases(report: dict, shard: dict) -> None:
@@ -120,6 +136,12 @@ def validate_fragment(report: dict, base: str, head: str) -> None:
         raise ValueError(
             "measurement harness or dependency lock differs from the candidate"
         )
+    _validate_inventory(report, shard)
+    if shard["family"] in ("engines", "warm"):
+        _validate_catalog_cases(report, shard)
+
+
+def _validate_inventory(report: dict, shard: dict) -> None:
     expected = (
         [case["id"] for case in shard_cases(shard)]
         if shard["family"] in ("engines", "warm")
@@ -128,5 +150,3 @@ def validate_fragment(report: dict, base: str, head: str) -> None:
     if not expected:
         raise ValueError("benchmark inventory is empty")
     validate_shards(expected, [case["id"] for case in report["cases"]])
-    if shard["family"] in ("engines", "warm"):
-        _validate_catalog_cases(report, shard)

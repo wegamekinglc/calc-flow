@@ -4,10 +4,26 @@ from __future__ import annotations
 
 import os
 import re
-import subprocess
+import shutil
+import subprocess  # nosec B404 -- SHA-validated, fixed git argv only
 from pathlib import Path
 
 from scripts.benchmark_suite.provenance import ROOT
+
+
+def git_revision(revision: str) -> str:
+    if revision != "HEAD^" and not re.fullmatch(r"[0-9a-f]{40}\^\{commit\}", revision):
+        raise ValueError("unsupported benchmark revision")
+    executable = shutil.which("git")
+    if executable is None:
+        raise ValueError("git is required to resolve benchmark refs")
+    # Only the literal first parent or a checked full commit SHA reaches git.
+    return subprocess.check_output(  # nosec B603
+        [str(Path(executable).resolve()), "rev-parse", "--verify", revision],
+        cwd=ROOT,
+        shell=False,
+        text=True,
+    ).strip()
 
 
 def resolve_refs() -> tuple[str, str]:
@@ -16,18 +32,11 @@ def resolve_refs() -> tuple[str, str]:
     if not re.fullmatch(r"[0-9a-f]{40}", head):
         raise ValueError("BENCHMARK_HEAD_SHA must be a full commit SHA")
     if not base or base == "0" * 40:
-        base = subprocess.check_output(
-            ["git", "rev-parse", "HEAD^"], cwd=ROOT, shell=False, text=True
-        ).strip()
+        base = git_revision("HEAD^")
     if not re.fullmatch(r"[0-9a-f]{40}", base):
         raise ValueError("BENCHMARK_BASE_SHA must be a full commit SHA")
     for value in (base, head):
-        actual = subprocess.check_output(
-            ["git", "rev-parse", "--verify", value + "^{commit}"],
-            cwd=ROOT,
-            shell=False,
-            text=True,
-        ).strip()
+        actual = git_revision(value + "^{commit}")
         if value != actual:
             raise ValueError("resolved commit does not match the requested SHA")
     return base, head

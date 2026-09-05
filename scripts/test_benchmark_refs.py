@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from scripts.benchmark_suite.refs import resolve_refs
@@ -48,9 +49,9 @@ class BenchmarkRefsTests(unittest.TestCase):
             ) as command,
         ):
             self.assertEqual(resolve_refs(), (base, head))
-        self.assertEqual(
-            command.call_args_list[0].args[0], ["git", "rev-parse", "HEAD^"]
-        )
+        argv = command.call_args_list[0].args[0]
+        self.assertTrue(Path(argv[0]).is_absolute())
+        self.assertEqual(argv[1:], ["rev-parse", "--verify", "HEAD^"])
 
 
 if __name__ == "__main__":

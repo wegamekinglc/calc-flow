@@ -82,18 +82,8 @@ def expected_output(data: Workload, scenario: str) -> pa.Table:
     return pa.table({"sequence": sequence, "value": values})
 
 
-def _mean_sql(window: int) -> str:
-    frame = (
-        "PARTITION BY symbol ORDER BY event_time, sequence "
-        f"ROWS BETWEEN {window - 1} PRECEDING AND CURRENT ROW"
-    )
-    return (
-        f"CASE WHEN COUNT(price) OVER ({frame}) = {window} "
-        f"THEN AVG(price) OVER ({frame}) END"
-    )
-
-
 def sql_query(scenario: str) -> str:
+    # Closed, literal query catalog: scenario names never become SQL fragments.
     queries = {
         "projection": "SELECT sequence, price * 2 + 1 AS value FROM input",
         "filter": "SELECT sequence, price AS value FROM input WHERE sequence % 4 = 0",
@@ -102,12 +92,27 @@ def sql_query(scenario: str) -> str:
             "SELECT sequence, price * factor AS value "
             "FROM input JOIN dimension USING (symbol)"
         ),
+        "sma20": (
+            "SELECT event_time, sequence, symbol, price, "
+            "CASE WHEN COUNT(price) OVER slow = 20 "
+            "THEN AVG(price) OVER slow END AS value FROM input "
+            "WINDOW slow AS (PARTITION BY symbol ORDER BY event_time, sequence "
+            "ROWS BETWEEN 19 PRECEDING AND CURRENT ROW)"
+        ),
+        "dual_sma": (
+            "SELECT event_time, sequence, symbol, price, "
+            "CASE WHEN COUNT(price) OVER slow = 20 "
+            "THEN AVG(price) OVER fast - AVG(price) OVER slow END AS value FROM input "
+            "WINDOW slow AS (PARTITION BY symbol ORDER BY event_time, sequence "
+            "ROWS BETWEEN 19 PRECEDING AND CURRENT ROW), "
+            "fast AS (PARTITION BY symbol ORDER BY event_time, sequence "
+            "ROWS BETWEEN 4 PRECEDING AND CURRENT ROW)"
+        ),
     }
-    if scenario in queries:
+    try:
         return queries[scenario]
-    slow = _mean_sql(20)
-    value = slow if scenario == "sma20" else f"({_mean_sql(5)}) - ({slow})"
-    return f"SELECT event_time, sequence, symbol, price, {value} AS value FROM input"
+    except KeyError as error:
+        raise ValueError("unsupported SQL benchmark scenario") from error
 
 
 def _calc_flow(data: Workload, scenario: str):

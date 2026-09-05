@@ -151,49 +151,59 @@ async def allocation(binary: Path, source: Path, output: Path, side: str) -> dic
     return report
 
 
-def allocation_rows(reports: dict) -> list[dict]:
+def _validate_allocation_report(side: str, report: dict) -> None:
+    names = [case["name"] for case in report["cases"]]
+    if report["role"] != side or report["valid"] is not True:
+        raise ValueError("invalid allocation report or version role")
+    if not names or len(names) != len(set(names)):
+        raise ValueError("empty or duplicate allocation case inventory")
+
+
+def _allocation_metric(name: str, metric: str, sides: dict) -> dict:
+    values = {
+        side: [rep["normalized"][metric] for rep in cases[name]["repetitions"]]
+        for side, cases in sides.items()
+    }
+    return {
+        "id": f"rust/allocation/{name}/{metric}",
+        "family": "rust",
+        "backend": "calc-flow",
+        "scenario": name,
+        "scope": "allocation-counter",
+        "status": "ok",
+        "kind": "metric",
+        "metric": metric,
+        "baseline_value": min(values["baseline"]),
+        "candidate_value": min(values["candidate"]),
+        "correctness": True,
+    }
+
+
+def _allocation_case_index(reports: dict) -> dict:
     for side, report in reports.items():
-        names = [case["name"] for case in report["cases"]]
-        if report["role"] != side or report["valid"] is not True:
-            raise ValueError("invalid allocation report or version role")
-        if not names or len(names) != len(set(names)):
-            raise ValueError("empty or duplicate allocation case inventory")
+        _validate_allocation_report(side, report)
     sides = {
         side: {case["name"]: case for case in report["cases"]}
         for side, report in reports.items()
     }
     if set(sides["baseline"]) != set(sides["candidate"]):
         raise ValueError("allocation case sets differ")
+    return sides
+
+
+def allocation_rows(reports: dict) -> list[dict]:
+    sides = _allocation_case_index(reports)
     rows = []
     for name, case in sides["candidate"].items():
         if not case["valid"] or not sides["baseline"][name]["valid"]:
             raise ValueError(f"invalid allocation case {name}")
         for metric in ("calls_per_dispatch", "bytes_per_dispatch"):
-            values = {
-                side: [rep["normalized"][metric] for rep in cases[name]["repetitions"]]
-                for side, cases in sides.items()
-            }
-            rows.append(
-                {
-                    "id": f"rust/allocation/{name}/{metric}",
-                    "family": "rust",
-                    "backend": "calc-flow",
-                    "scenario": name,
-                    "scope": "allocation-counter",
-                    "status": "ok",
-                    "kind": "metric",
-                    "metric": metric,
-                    "baseline_value": min(values["baseline"]),
-                    "candidate_value": min(values["candidate"]),
-                    "correctness": True,
-                }
-            )
+            rows.append(_allocation_metric(name, metric, sides))
     return rows
 
 
-async def measure_rust(shard: dict, releases: dict, roots: dict, output: Path) -> dict:
-    shared = ROOT / "target/benchmark-rust-build"
-    provenance = {
+def _rust_provenance(roots: dict) -> dict:
+    return {
         side: build_provenance(
             source,
             [
@@ -203,6 +213,11 @@ async def measure_rust(shard: dict, releases: dict, roots: dict, output: Path) -
         )
         for side, source in roots.items()
     }
+
+
+async def measure_rust(shard: dict, releases: dict, roots: dict, output: Path) -> dict:
+    shared = ROOT / "target/benchmark-rust-build"
+    provenance = _rust_provenance(roots)
     binaries = {
         side: await build_binaries(source, output / side, shared)
         for side, source in roots.items()
@@ -214,42 +229,20 @@ async def measure_rust(shard: dict, releases: dict, roots: dict, output: Path) -
     blocks = {side: [] for side in roots}
     errors = []
     for index, side in enumerate(("baseline", "candidate", "candidate", "baseline")):
-        block = {}
-        for target, binary in binaries[side].items():
-            if target == "allocation_regression":
-                continue
-            destination = output / f"block-{index}-{side}" / target
-            try:
-                measured = await run_binary(target, binary, roots[side], destination)
-                identity = provenance[side]
-                fingerprints = {
-                    key: identity[key]
-                    for key in (
-                        "machine_fingerprint",
-                        "dependency_fingerprint",
-                        "workload_fingerprint",
-                    )
-                }
-                block.update(
-                    {
-                        name: {**row, "metadata": {**row["metadata"], **fingerprints}}
-                        for name, row in measured.items()
-                    }
-                )
-            except Exception as error:
-                errors.append(f"{side}/{target}: {error}")
+        block, failures = await _rust_block(
+            binaries[side],
+            roots[side],
+            output / f"block-{index}-{side}",
+            provenance[side],
+        )
+        errors.extend(f"{side}/{error}" for error in failures)
         blocks[side].append(block)
         (output / "blocks.json").write_text(
             json.dumps(blocks, indent=2) + "\n", encoding="utf-8"
         )
     cases = combine_blocks(shard, blocks)
     try:
-        reports = {
-            side: await allocation(
-                values["allocation_regression"], roots[side], output / side, side
-            )
-            for side, values in binaries.items()
-        }
+        reports = await _allocation_reports(binaries, roots, output)
         cases.extend(allocation_rows(reports))
     except Exception as error:
         errors.append(f"allocation_regression: {error}")
@@ -257,16 +250,59 @@ async def measure_rust(shard: dict, releases: dict, roots: dict, output: Path) -
         "contract": CONTRACT,
         "harness_sha256": harness_sha256(),
         "provenance": provenance,
-        "binary_sha256": {
-            side: {
-                name: hashlib.sha256(path.read_bytes()).hexdigest()
-                for name, path in values.items()
-            }
-            for side, values in binaries.items()
-        },
+        "binary_sha256": _binary_hashes(binaries),
         "shard": shard,
         "releases": releases,
         "cases": cases,
         "errors": errors,
         "expected_case_ids": [case["id"] for case in cases],
     }
+
+
+async def _allocation_reports(binaries: dict, roots: dict, output: Path) -> dict:
+    return {
+        side: await allocation(
+            values["allocation_regression"], roots[side], output / side, side
+        )
+        for side, values in binaries.items()
+    }
+
+
+def _binary_hashes(binaries: dict) -> dict:
+    return {
+        side: {
+            name: hashlib.sha256(path.read_bytes()).hexdigest()
+            for name, path in values.items()
+        }
+        for side, values in binaries.items()
+    }
+
+
+def _with_fingerprints(measured: dict, identity: dict) -> dict:
+    fingerprints = {
+        key: identity[key]
+        for key in (
+            "machine_fingerprint",
+            "dependency_fingerprint",
+            "workload_fingerprint",
+        )
+    }
+    return {
+        name: {**row, "metadata": {**row["metadata"], **fingerprints}}
+        for name, row in measured.items()
+    }
+
+
+async def _rust_block(
+    binaries: dict, source: Path, output: Path, identity: dict
+) -> tuple[dict, list[str]]:
+    block, errors = {}, []
+    for target, binary in binaries.items():
+        if target == "allocation_regression":
+            continue
+        try:
+            measured = await run_binary(target, binary, source, output / target)
+            block.update(_with_fingerprints(measured, identity))
+        except Exception as error:
+            errors.append(f"{target}: {error}")
+    return block, errors

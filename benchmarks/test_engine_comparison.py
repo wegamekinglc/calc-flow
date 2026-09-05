@@ -6,8 +6,18 @@ import numpy as np
 import pyarrow as pa
 import pytest
 
-from benchmarks.engine_comparison import EngineCase, expected_output, workload
+from benchmarks.engine_comparison import (
+    EngineCase,
+    expected_output,
+    sql_query,
+    workload,
+)
 from scripts.benchmark_suite.catalog import engine_cases
+
+
+def test_sql_queries_reject_unknown_scenario_names():
+    with pytest.raises(ValueError, match="unsupported SQL benchmark scenario"):
+        sql_query("sma20; DROP TABLE input")
 
 
 def test_performance_prices_are_exact_eighths_with_bounded_magnitude():

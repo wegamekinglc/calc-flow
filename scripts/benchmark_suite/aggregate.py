@@ -113,15 +113,18 @@ def collect(
         errors.append(str(error))
     for name in sorted(set(expected) - set(received)):
         cases.extend(unavailable_cases(get_shard(name), "shard artifact is missing"))
+    errors.extend(_duplicate_cases(cases))
+    errors.extend(case_failures(cases))
+    return cases, errors, reports
+
+
+def _duplicate_cases(cases: list[dict]) -> list[str]:
     duplicates = [
         name
         for name, count in Counter(case["id"] for case in cases).items()
         if count > 1
     ]
-    if duplicates:
-        errors.append(f"duplicate benchmark cases: {duplicates}")
-    errors.extend(case_failures(cases))
-    return cases, errors, reports
+    return [f"duplicate benchmark cases: {duplicates}"] if duplicates else []
 
 
 def _provenance(reports: list[dict], base: str, head: str) -> str:

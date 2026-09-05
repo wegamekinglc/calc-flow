@@ -65,10 +65,14 @@ async def _samples(workers: dict) -> dict:
             validate_sample(sample)
             collected[side].append(sample)
         if len(workers) == 2:
-            starts = [collected[side][-1].get("start_row") for side in order]
-            if starts[0] != starts[1]:
-                raise ValueError("warm base/head sample cursors differ")
+            _check_latest_cursors(collected)
     return collected
+
+
+def _check_latest_cursors(collected: dict) -> None:
+    starts = [samples[-1].get("start_row") for samples in collected.values()]
+    if starts[0] != starts[1]:
+        raise ValueError("warm base/head sample cursors differ")
 
 
 async def _round(case: dict, sites: dict, releases: dict, root: Path) -> dict:
@@ -99,11 +103,7 @@ async def _round(case: dict, sites: dict, releases: dict, root: Path) -> dict:
 
 async def measure_case(case: dict, sites: dict, releases: dict, root: Path) -> dict:
     external = not case["backend"].startswith("calc-flow")
-    selected = {
-        side: site
-        for side, site in sites.items()
-        if not external or side == "candidate"
-    }
+    selected = {"candidate": sites["candidate"]} if external else sites
     evidence = []
     try:
         for index in range(ROUNDS):
@@ -112,23 +112,7 @@ async def measure_case(case: dict, sites: dict, releases: dict, root: Path) -> d
             )
         if evidence[0]["environment"] != evidence[1]["environment"]:
             raise ValueError("confirmation-round environment changed")
-        row = {
-            **case,
-            "status": "ok",
-            "correctness": True,
-            "comparison": "external" if external else "interleaved",
-            "baseline": [
-                [sample["seconds"] for sample in round_["samples"]["baseline"]]
-                for round_ in evidence
-            ]
-            if not external
-            else [],
-            "candidate": [
-                [sample["seconds"] for sample in round_["samples"]["candidate"]]
-                for round_ in evidence
-            ],
-            "evidence": evidence,
-        }
+        row = _measured_row(case, evidence, external)
         return {**row, "result": comparison(row)}
     except Exception as error:
         return {
@@ -137,6 +121,24 @@ async def measure_case(case: dict, sites: dict, releases: dict, root: Path) -> d
             "error": f"{type(error).__name__}: {error}",
             "evidence": evidence,
         }
+
+
+def _sample_seconds(evidence: list[dict], side: str) -> list[list[float]]:
+    return [
+        [sample["seconds"] for sample in round_["samples"][side]] for round_ in evidence
+    ]
+
+
+def _measured_row(case: dict, evidence: list[dict], external: bool) -> dict:
+    return {
+        **case,
+        "status": "ok",
+        "correctness": True,
+        "comparison": "external" if external else "interleaved",
+        "baseline": [] if external else _sample_seconds(evidence, "baseline"),
+        "candidate": _sample_seconds(evidence, "candidate"),
+        "evidence": evidence,
+    }
 
 
 async def measure_shard(shard: dict, releases: dict, root: Path) -> dict:

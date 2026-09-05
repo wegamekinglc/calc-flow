@@ -553,9 +553,7 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn(runner, agents)
         self.assertLess(agents.index(sync), agents.index(runner))
 
-    def test_pr_and_schedule_run_the_same_complete_catalog(self) -> None:
-        from scripts.benchmark_suite.catalog import LEGACY_SCALES, ROW_SCALES, shards
-
+    def _legacy_scale_names(self) -> tuple[str, ...]:
         support = ast.parse(
             (ROOT / "benchmarks/support.py").read_text(encoding="utf-8")
         )
@@ -568,7 +566,12 @@ class ReleaseConfigTests(unittest.TestCase):
                 for target in node.targets
             )
         )
-        names = tuple(ast.literal_eval(key) for key in scales.keys)
+        return tuple(ast.literal_eval(key) for key in scales.keys)
+
+    def test_pr_and_schedule_run_the_same_complete_catalog(self) -> None:
+        from scripts.benchmark_suite.catalog import LEGACY_SCALES, ROW_SCALES, shards
+
+        names = self._legacy_scale_names()
         self.assertEqual(names, LEGACY_SCALES)
         self.assertEqual(ROW_SCALES, tuple(10**n for n in range(1, 8)))
         for name in ("ci-linux.yml", "benchmarks.yml"):

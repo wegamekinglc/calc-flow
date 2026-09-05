@@ -76,34 +76,42 @@ class WarmCase:
             self.loop.close()
 
 
-def dispatch(message: dict, active, root: Path):
+def prepare_case(case: dict, root: Path):
     from benchmarks.engine_comparison import EngineCase
 
-    match message["operation"]:
+    factory = WarmCase if case["family"] == "warm" else EngineCase
+    active = factory(case, root)
+    try:
+        warmup = active.sample()
+    except BaseException:
+        active.close()
+        raise
+    return {"warmup": warmup, "case": case}, active
+
+
+def finish_case(active) -> dict:
+    outcome = (
+        active.finish() if isinstance(active, WarmCase) else {"state": "completed"}
+    )
+    active.close()
+    return outcome
+
+
+def dispatch(message: dict, active, root: Path):
+    operation = message["operation"]
+    if operation in ("sample", "finish") and active is None:
+        raise ValueError("no active benchmark; prepare a case first")
+    match operation:
         case "hello":
             return environment(), active
         case "prepare":
             if active is not None:
                 raise ValueError("a benchmark is already active")
-            case = message["case"]
-            factory = WarmCase if case["family"] == "warm" else EngineCase
-            active = factory(case, root)
-            try:
-                warmup = active.sample()
-            except BaseException:
-                active.close()
-                raise
-            return {"warmup": warmup, "case": case}, active
+            return prepare_case(message["case"], root)
         case "sample":
             return active.sample(), active
         case "finish":
-            outcome = (
-                active.finish()
-                if isinstance(active, WarmCase)
-                else {"state": "completed"}
-            )
-            active.close()
-            return outcome, None
+            return finish_case(active), None
         case _:
             raise ValueError("unknown worker request")
 

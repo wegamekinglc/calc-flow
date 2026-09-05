@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import unittest
+from pathlib import Path
 
 from scripts.benchmark_suite.catalog import engine_cases, shards
 from scripts.benchmark_suite.report import comparison, render_report, validate_shards
@@ -25,6 +26,26 @@ def measured_case(**changes):
 
 
 class BenchmarkSuiteTests(unittest.TestCase):
+    def test_documented_tables_align_full_cell_separator_widths(self):
+        root = Path(__file__).resolve().parents[1]
+        documents = {
+            "docs/benchmark-suite.md": (0, 1, 2),
+            "benchmarks/README.md": (0,),
+        }
+        for name, indexes in documents.items():
+            blocks = (root / name).read_text(encoding="utf-8").split("\n\n")
+            tables = [block for block in blocks if block.startswith("|")]
+            for index in indexes:
+                with self.subTest(document=name, table=index):
+                    self._assert_aligned_table(tables[index])
+
+    def _assert_aligned_table(self, text):
+        rows = [line.split("|")[1:-1] for line in text.splitlines()]
+        widths = [len(cell) for cell in rows[0]]
+        self.assertEqual(rows[1], ["-" * width for width in widths])
+        for row in rows:
+            self.assertEqual([len(cell) for cell in row], widths)
+
     def test_engine_matrix_covers_every_decade_and_requested_library(self):
         cases = engine_cases()
         self.assertEqual({c["rows"] for c in cases}, {10**n for n in range(1, 8)})

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -85,16 +86,18 @@ async def _pytest_run(shard: dict, source: Path, site: Path, output: Path) -> di
 
 
 async def _frontend_run(source: Path, output: Path) -> dict:
+    frontend = source / "web-ui"
+    runner = frontend / "node_modules/.cache/calc-flow-benchmark.mjs"
+    runner.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(ROOT / "scripts/benchmark_suite/frontend.mjs", runner)
     await command(
-        [
-            "node",
-            str(ROOT / "scripts/benchmark_suite/frontend.mjs"),
-            str(source / "web-ui"),
-            str(output / "vitest.json"),
-        ],
-        cwd=source / "web-ui",
+        ["node", str(runner)],
+        cwd=frontend,
         log=output / "run.log",
         env=child_environment(),
+    )
+    shutil.copyfile(
+        frontend / "target/benchmark-suite/vitest.json", output / "vitest.json"
     )
     rows = vitest_rows(output / "vitest.json")
     lock = hashlib.sha256(
@@ -125,61 +128,68 @@ def combine_blocks(shard: dict, blocks: dict) -> list[dict]:
     names = sorted({name for block in available for name in block})
     result = []
     for name in names:
-        descriptor = next(block[name] for block in reversed(available) if name in block)
-        row = {
-            "id": f"{shard['id']}/{name}",
-            "family": shard["family"],
-            "backend": "calc-flow",
-            "scenario": name,
-            "rows": descriptor["rows"],
-            "scope": descriptor["scope"],
-            "metadata": descriptor["metadata"],
-        }
-        problem = block_problem(name, blocks)
-        if problem:
-            result.append(
-                {
-                    **row,
-                    "status": "error",
-                    "error": problem,
-                }
-            )
-            continue
-        row = {
-            **row,
-            "status": "ok",
-            "correctness": True,
-            "comparison": "suite-blocks",
-            **{
-                side: [block[name]["samples"] for block in values]
-                for side, values in blocks.items()
-            },
-        }
-        result.append({**row, "result": comparison(row)})
+        descriptor = _latest_descriptor(name, available)
+        result.append(_block_row(shard, name, descriptor, blocks))
     if not result:
         raise ValueError("legacy suite produced no cases")
     return result
 
 
-def block_problem(name: str, blocks: dict) -> str | None:
-    if any(
+def _latest_descriptor(name: str, available: list[dict]) -> dict:
+    return next(block[name] for block in reversed(available) if name in block)
+
+
+def _block_row(shard: dict, name: str, descriptor: dict, blocks: dict) -> dict:
+    row = {
+        "id": f"{shard['id']}/{name}",
+        "family": shard["family"],
+        "backend": "calc-flow",
+        "scenario": name,
+        "rows": descriptor["rows"],
+        "scope": descriptor["scope"],
+        "metadata": descriptor["metadata"],
+    }
+    problem = block_problem(name, blocks)
+    if problem:
+        return {**row, "status": "error", "error": problem}
+    row = {
+        **row,
+        "status": "ok",
+        "correctness": True,
+        "comparison": "suite-blocks",
+        **{
+            side: [block[name]["samples"] for block in values]
+            for side, values in blocks.items()
+        },
+    }
+    return {**row, "result": comparison(row)}
+
+
+def _missing_block(name: str, blocks: dict) -> bool:
+    return any(
         len(values) != 2 or any(name not in block for block in values)
         for values in blocks.values()
-    ):
+    )
+
+
+def block_problem(name: str, blocks: dict) -> str | None:
+    if _missing_block(name, blocks):
         return "benchmark missing from a base/head confirmation block"
     rows = [block[name] for values in blocks.values() for block in values]
     for key in ("rows", "scope"):
         if any(row[key] != rows[0][key] for row in rows):
             return f"benchmark {key} changed; no timing classification"
+    return _fingerprint_problem([row["metadata"] for row in rows])
+
+
+def _fingerprint_problem(metadata: list[dict]) -> str | None:
     for key in (
         "machine_fingerprint",
         "dependency_fingerprint",
         "workload_fingerprint",
         "benchmark_source_sha256",
     ):
-        if any(
-            row["metadata"].get(key) != rows[0]["metadata"].get(key) for row in rows
-        ):
+        if any(row.get(key) != metadata[0].get(key) for row in metadata):
             return f"benchmark {key} changed; no timing classification"
     return None
 

@@ -28,11 +28,15 @@ def checked_samples(rounds: list[list[float]], *, minimum: int = 1) -> list[floa
             f"expected two complete rounds with at least {minimum} samples"
         )
     samples = [value for values in rounds for value in values]
+    _validate_observations(samples)
+    return samples
+
+
+def _validate_observations(samples: list[float]) -> None:
     if any(type(value) not in (int, float) for value in samples):
         raise ValueError("benchmark samples must be numeric")
     if any(not math.isfinite(value) or value <= 0 for value in samples):
         raise ValueError("benchmark samples must be finite and positive")
-    return samples
 
 
 def _percentile(values: list[float], quantile: float) -> float:
@@ -58,14 +62,9 @@ def _verdict(kind: str, changes: list[float]) -> str:
     return "no-confirmed-regression"
 
 
-def comparison(case: dict) -> dict:
-    if case.get("correctness") is not True:
-        raise ValueError(f"{case['id']}: correctness was not established")
-    kind = case["comparison"]
-    minimum = SAMPLES if kind == "interleaved" else 1
-    head = checked_samples(case["candidate"], minimum=minimum)
+def _head_statistics(case: dict, head: list[float]) -> dict:
     median = statistics.median(head)
-    result = {
+    return {
         "head_p50": median,
         "head_p95": _percentile(head, 0.95),
         "head_min": min(head),
@@ -76,6 +75,15 @@ def comparison(case: dict) -> dict:
         "change_percent": None,
         "round_changes": [],
     }
+
+
+def comparison(case: dict) -> dict:
+    if case.get("correctness") is not True:
+        raise ValueError(f"{case['id']}: correctness was not established")
+    kind = case["comparison"]
+    minimum = SAMPLES if kind == "interleaved" else 1
+    head = checked_samples(case["candidate"], minimum=minimum)
+    result = _head_statistics(case, head)
     if not case["baseline"]:
         labels = {"external": "external-reference", "new": "new-coverage"}
         if kind not in labels:
@@ -83,6 +91,11 @@ def comparison(case: dict) -> dict:
         return _checked_statistics({**result, "verdict": labels[kind]})
     if kind not in ("interleaved", "suite-blocks"):
         raise ValueError("unexpected historical comparison kind")
+    return _historical_statistics(case, result, minimum)
+
+
+def _historical_statistics(case: dict, result: dict, minimum: int) -> dict:
+    kind = case["comparison"]
     base = checked_samples(case["baseline"], minimum=minimum)
     if kind == "interleaved" and [len(r) for r in case["baseline"]] != [
         len(r) for r in case["candidate"]
@@ -96,7 +109,7 @@ def comparison(case: dict) -> dict:
         {
             **result,
             "base_p50": statistics.median(base),
-            "change_percent": 100 * (median / statistics.median(base) - 1),
+            "change_percent": 100 * (result["head_p50"] / statistics.median(base) - 1),
             "round_changes": changes,
             "verdict": _verdict(kind, changes),
         }
@@ -162,14 +175,9 @@ def render_report(cases: list[dict], errors: list[str]) -> str:
     failures = list(errors)
     for case in sorted(cases, key=lambda item: item["id"]):
         target = metrics if case.get("kind") == "metric" else rows
-        formatter = _metric_row if case.get("kind") == "metric" else _result_row
-        if case["status"] != "ok":
-            failures.append(f"{case['id']}: {case.get('error', 'failed')}")
-        try:
-            target.append(formatter(case))
-        except (KeyError, TypeError, ValueError) as error:
-            failures.append(f"{case.get('id')}: {error}")
-            target.append(formatter({**case, "status": "error", "error": str(error)}))
+        formatted, problems = _format_case(case)
+        target.append(formatted)
+        failures.extend(problems)
     header = [
         "Case",
         "Dimensions",
@@ -232,6 +240,18 @@ def render_report(cases: list[dict], errors: list[str]) -> str:
     return "\n".join(parts) + "\n"
 
 
+def _format_case(case: dict) -> tuple[list[object], list[str]]:
+    formatter = _metric_row if case.get("kind") == "metric" else _result_row
+    failures = []
+    if case["status"] != "ok":
+        failures.append(f"{case['id']}: {case.get('error', 'failed')}")
+    try:
+        return formatter(case), failures
+    except (KeyError, TypeError, ValueError) as error:
+        failures.append(f"{case.get('id')}: {error}")
+        return formatter({**case, "status": "error", "error": str(error)}), failures
+
+
 def _metric_row(case: dict) -> list[object]:
     if case["status"] != "ok":
         return [case["id"], case.get("metric", "unknown"), "—", "—", "—", "error"]
@@ -273,18 +293,8 @@ def _cross_library_table(cases: list[dict]) -> str:
     index = {
         (case["rows"], case["scenario"], case["backend"]): case for case in selected
     }
-    backends = ("calc-flow-stream", "calc-flow-sql", "datafusion", "polars", "ta-lib")
     rows = [
-        [
-            size,
-            scenario,
-            *(
-                "unsupported"
-                if scenario not in CAPABILITIES[backend]
-                else _reference_cell(index.get((size, scenario, backend)))
-                for backend in backends
-            ),
-        ]
+        _cross_library_row(size, scenario, index)
         for size in sorted({case["rows"] for case in selected})
         for scenario in SQL_CASES
     ]
@@ -300,3 +310,17 @@ def _cross_library_table(cases: list[dict]) -> str:
         ],
         rows,
     )
+
+
+def _cross_library_row(size: int, scenario: str, index: dict) -> list[object]:
+    backends = ("calc-flow-stream", "calc-flow-sql", "datafusion", "polars", "ta-lib")
+    return [
+        size,
+        scenario,
+        *(
+            "unsupported"
+            if scenario not in CAPABILITIES[backend]
+            else _reference_cell(index.get((size, scenario, backend)))
+            for backend in backends
+        ),
+    ]
