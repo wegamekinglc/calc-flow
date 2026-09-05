@@ -666,12 +666,7 @@ async def _worker_environments(
     for environment, manifest in zip(environments, manifests, strict=True):
         if environment["native_sha256"] != manifest["native_sha256"]:
             raise ValueError("worker loaded a different native module")
-    excluded = {"native_sha256"}
-    if thread_counts is not None:
-        actual = [env.get("tokio_worker_threads") for env in environments]
-        if actual != [str(count) for count in thread_counts]:
-            raise ValueError("worker did not load the declared thread override")
-        excluded.add("tokio_worker_threads")
+    excluded = _allowed_fingerprint_differences(environments, thread_counts)
     comparable = [
         {key: value for key, value in env.items() if key not in excluded}
         for env in environments
@@ -679,6 +674,17 @@ async def _worker_environments(
     if comparable[0] != comparable[1]:
         raise ValueError("worker machine or dependency fingerprints differ")
     return environments
+
+
+def _allowed_fingerprint_differences(
+    environments: list[dict[str, Any]], thread_counts: tuple[int, int] | None
+) -> set[str]:
+    if thread_counts is None:
+        return {"native_sha256"}
+    actual = [env.get("tokio_worker_threads") for env in environments]
+    if actual != [str(count) for count in thread_counts]:
+        raise ValueError("worker did not load the declared thread override")
+    return {"native_sha256", "tokio_worker_threads"}
 
 
 def _new_report(
@@ -750,16 +756,24 @@ async def _fresh_case(
                 await worker.close()
 
 
-async def compare(args: argparse.Namespace) -> None:
-    manifests = await _compatible_builds((args.baseline_build, args.candidate_build))
-    counts = None if args.worker_threads is None else tuple(args.worker_threads)
-    if counts is not None and any(
+def _validate_scheduler_builds(
+    manifests: list[dict[str, Any]], counts: tuple[int, int] | None
+) -> None:
+    if counts is None:
+        return
+    if any(
         manifests[0][key] != manifests[1][key]
         for key in ("native_sha256", "wheel_sha256")
     ):
         raise ValueError(
             "scheduler comparison requires the same native wheel on both sides"
         )
+
+
+async def compare(args: argparse.Namespace) -> None:
+    manifests = await _compatible_builds((args.baseline_build, args.candidate_build))
+    counts = None if args.worker_threads is None else tuple(args.worker_threads)
+    _validate_scheduler_builds(manifests, counts)
     output = args.output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     report: dict[str, Any] = {}
