@@ -8,6 +8,9 @@ over a complete historical table.
 The [measured two-round report](warm-stream-results-39a0c7f.md) compares clean
 release builds at `9044501` and `39a0c7f`, with all raw samples and explicit
 forecast misses. Later report-only commits do not change the measured engine.
+The [small-append follow-up](small-append-results-818d69c.md) compares `6515f4d`
+with `818d69c`, explicitly records the mostly inconclusive small-row results,
+and separates same-wheel scheduler experiments from engine changes.
 
 ## What is measured
 
@@ -32,10 +35,10 @@ extra source events to improve the timing. Scheduled checkpoints are set to a
 
 The default matrix has 64 entities and seven distinct (history, append) pairs:
 
-| Dimension        | History rows                           | Appended rows           |
-| ---------------- | -------------------------------------- | ----------------------- |
-| Historical depth | 10,240 / 102,400 / 1,024,000 / 10,240,000 | 64                      |
-| Incremental size | 1,024,000                              | 64 / 640 / 6,400 / 64,000 |
+| Dimension        | History rows                              | Appended rows             |
+| ---------------- | ----------------------------------------- | ------------------------- |
+| Historical depth | 10,240 / 102,400 / 1,024,000 / 10,240,000 | 64                        |
+| Incremental size | 1,024,000                                 | 64 / 640 / 6,400 / 64,000 |
 
 Each pair runs SMA(20) and SMA(5) minus SMA(20), with both forced collection
 before each sample and normal Python GC. Normal GC is not disabled; the
@@ -121,6 +124,26 @@ speedup evidence. A prearmed source request may wait across input construction,
 GC, worker IPC or shutdown. Therefore its callback lifetime must not be summed
 as if it belonged entirely to one timed append. Run diagnostics separately
 from uninstrumented paired comparisons.
+
+### Explicit scheduler configuration comparisons
+
+Use the identical build manifest on both sides with `--worker-threads` to test
+Tokio worker counts. The comparator rejects different native or Python wheels
+and permits only the declared worker-count difference in child fingerprints.
+This option does not change Calc Flow defaults or SQL/DataFusion parallelism.
+
+```bash
+uv run --extra benchmark python scripts/profile_warm_stream.py compare \
+  --baseline-build target/warm-candidate-wheels/build.json \
+  --candidate-build target/warm-candidate-wheels/build.json \
+  --history-rows 1024000 --append-rows 64 --samples 30 \
+  --worker-threads 32 1 --output target/scheduler-32-to-1.json
+```
+
+Results from different worker counts are configuration experiments, not
+additional engine improvements. Test the application's full topology before
+choosing a smaller process-global pool; a single rolling pipeline does not
+represent concurrent jobs or wide graphs.
 
 The build command runs Maturin in release mode, verifies that source identity
 did not change during the build, and records the source, lockfile, compiler,
