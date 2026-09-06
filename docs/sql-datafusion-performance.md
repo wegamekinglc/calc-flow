@@ -1,9 +1,11 @@
 # SQL and DataFusion performance controls
 
+[Documentation](README.md) / 5.3 SQL performance
+
 Calc Flow executes table expressions and SQL with Apache DataFusion 54. The
-public configuration keeps the historical fixed single-partition behavior by
-default, exposes an opt-in conservative auto policy, and provides independent
-rollback switches for SQL rolling rewrites and diagnostic collection.
+default configuration uses one fixed partition. Applications can opt into
+conservative auto parallelism and independently control SQL rolling rewrites
+and diagnostic collection.
 
 ## Configuration
 
@@ -12,23 +14,21 @@ rollback switches for SQL rolling rewrites and diagnostic collection.
 `with_datafusion_config(...)` method.
 
 | Field                    | Default | Meaning                                                        |
-| ------------------------ | ------: | -------------------------------------------------------------- |
-| `batch_size`             |  `8192` | DataFusion execution batch size                                |
-| `target_partitions`      |     `1` | Requested count in `fixed` mode                                |
+|--------------------------|--------:|----------------------------------------------------------------|
+| `batch_size`             | `8192`  | DataFusion execution batch size                                |
+| `target_partitions`      | `1`     | Requested count in `fixed` mode                                |
 | `parallelism_mode`       | `fixed` | `fixed` preserves explicit behavior; `auto` uses trusted facts |
-| `max_partitions`         |    `32` | Upper bound for `auto`                                         |
+| `max_partitions`         | `32`    | Upper bound for `auto`                                         |
 | `min_rows_per_partition` | `65536` | Work cap used by both modes                                    |
 | `small_rows_threshold`   | `10001` | Smaller auto workloads remain p1                               |
-| `enable_rolling_rewrite` |  `true` | Enables the fail-closed bounded `AVG` rewrite                  |
-| `collect_diagnostics`    |  `true` | Collects plan strings and physical metric traversal            |
+| `enable_rolling_rewrite` | `true`  | Enables the fail-closed bounded `AVG` rewrite                  |
+| `collect_diagnostics`    | `true`  | Collects plan strings and physical metric traversal            |
 
 The project schema accepts non-negative numeric values for compatibility with
 external-only plans, which never create a DataFusion runtime. When a project
 does execute a table expression or SQL node, every numeric value is validated
-as positive before DataFusion is initialized. Existing project documents that
-omit the new fields retain their defaults. `parallelism_mode="auto"` is opt-in:
-the weekly P3 matrix and two stable candidate repeats must pass before changing
-the default.
+as positive before DataFusion is initialized. Omitted fields use their
+defaults. `parallelism_mode="auto"` is opt-in.
 
 Auto mode calculates:
 
@@ -55,7 +55,7 @@ are not required. Planning and execution continue unchanged, while plan strings
 are empty and the expensive traversal is skipped. Set
 `enable_rolling_rewrite=false` to route every SQL window through DataFusion's
 standard executor. Set `parallelism_mode="fixed", target_partitions=1` for the
-complete historical fallback.
+fixed single-partition execution.
 
 ## Fair benchmark and evidence gates
 
@@ -132,6 +132,6 @@ Rollback in this order:
 3. Set `collect_diagnostics=false` only to remove observational overhead; this
    does not change query results or physical planning.
 
-Cross-run session or plan caching and partition-preserving DAG envelopes are
-not enabled. They remain No-Go unless same-binary evidence independently meets
-their thresholds and their isolation/order contracts can be preserved.
+Cross-run DataFusion session or plan caching and partition-preserving DAG
+envelopes are not enabled. Python's symbolic runtime compile cache is a
+separate mechanism; see [symbolic compiler design](symbolic-design.md#compile-cache-and-inspection).

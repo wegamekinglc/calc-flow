@@ -1,26 +1,41 @@
 # Getting started with Calc Flow
 
+[Documentation](README.md) / 1. Installation
+
 Calc Flow 4.0 is a Rust-native calculation engine with a Python binding and an
 optional local Studio. This guide covers two installation paths:
 
 - install published packages when you want to use Calc Flow in an application;
 - build release artifacts from source when you want to develop Calc Flow or
-  run the repository version of Studio.
+  run Studio.
 
 Linux commands use Bash, Windows commands use native PowerShell, and WSL
-follows the Linux instructions. See the [architecture guide](introduction.md)
-for the engine boundaries and execution model.
+follows the Linux instructions. See the [introduction](introduction.md)
+for capabilities and the execution model.
+
+On this page:
+
+- [Choose an installation path](#choose-an-installation-path)
+- [Prerequisites](#prerequisites)
+- [Install published packages](#install-published-packages)
+- [Build and install from source](#build-and-install-from-source)
+- [Start and stop Studio](#start-and-stop-studio)
+- [Verify the installation](#verify-the-installation)
+- [Smoke-test the engine](#smoke-test-the-engine)
+- [Troubleshooting](#troubleshooting)
+- [Continue learning](#continue-learning)
 
 ## Choose an installation path
 
-Use published packages if you only need the Python API, Rust crate, or packaged
-Studio. This path does not require a repository checkout, a Rust compiler for
-Python wheels, or Node.js.
+Use published packages if you only need the Python API or Rust crate. This
+path does not require a repository checkout, a Rust compiler for Python wheels,
+or Node.js.
 
-Build from source if you are changing Calc Flow, need unreleased code, or want
-the managed API-plus-Vite Studio. The source flow builds non-editable core and
-Studio wheels so the API process and its spawned job workers import the
-same native extension from the prepared environment.
+Studio is not published to PyPI. [Build and install from source](#build-and-install-from-source)
+to run either packaged Studio or its managed API-plus-Vite development mode.
+The source flow builds non-editable core and Studio wheels so the API process
+and its spawned job workers import the same native extension from the prepared
+environment. Use it for unreleased code or Calc Flow development as well.
 
 ## Prerequisites
 
@@ -78,16 +93,6 @@ uv add "calc-flow-python[numpy]"
 uv add "calc-flow-python[jax]"
 ```
 
-Install the packaged Studio as an isolated command-line tool:
-
-```bash
-uv tool install calc-flow-studio
-calc-flow-web
-```
-
-Open `http://127.0.0.1:8765`. The packaged server serves the built frontend and
-the `/api/v3` API from the same loopback service. Stop it with `Ctrl+C`.
-
 ### Windows PowerShell
 
 ```powershell
@@ -99,15 +104,6 @@ uv add calc-flow-python
 uv add "calc-flow-python[numpy]"
 uv add "calc-flow-python[jax]"
 ```
-
-Install and start the packaged Studio:
-
-```powershell
-uv tool install calc-flow-studio
-calc-flow-web
-```
-
-Open `http://127.0.0.1:8765`. Stop the server with `Ctrl+C`.
 
 Rust applications add the published crate from their Cargo project:
 
@@ -215,6 +211,8 @@ frontend and API together at `http://127.0.0.1:8765`:
 ```bash
 uv run --no-sync --package calc-flow-studio calc-flow-web
 ```
+
+Stop the static server with `Ctrl+C`.
 
 The managed development mode starts the API at `http://127.0.0.1:8765` and
 Vite at `http://127.0.0.1:5173`. It stores logs and process state under
@@ -366,6 +364,15 @@ instance.
 Inspect `.calc-flow-web/api.log` for backend failures and
 `.calc-flow-web/studio.log` for npm or Vite failures. The managed launcher
 cleans up a partial start and leaves both logs in place.
+
+### Windows checkpoint examples cannot clean up their temporary directories
+
+Managed checkpoint paths include hashed lineage, operator, and segment names.
+They can exceed 260 characters beneath a checkout or user temporary directory.
+If Windows long-path support is disabled, Python cleanup can report a
+`WinError 145` even after a job completes successfully. Follow the
+[Windows temporary-path setup](../examples/README.md#prepare-and-run) to use
+an extended-length absolute `TEMP` and `TMP` for the example process.
 
 ## Continue learning
 

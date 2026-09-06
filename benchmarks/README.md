@@ -211,9 +211,9 @@ interpreter, while TA-Lib calls a much thinner C-backed API. Results from
 virtualized or changing-power hosts must not be generalized to production
 hardware.
 
-The full single-SMA and composed dual-SMA tables, their interpretation, and the
-TA-Lib-streaming-inspired engine roadmap are preserved in the
-[rolling and DataFusion upgrade plan](../docs/superpowers/plans/2026-09-04-ta-lib-streaming-rolling-engine-upgrade.md).
+Read [native rolling design](../docs/symbolic-design.md#native-rolling-state)
+and [SQL performance controls](../docs/sql-datafusion-performance.md) for the
+current implementation and measurement boundaries.
 The clean-commit reports with full provenance and raw samples are
 [`SMA(20)`](rolling/rolling-mean-0052da7.json) and
 [`SMA(5) - SMA(20)`](rolling/dual-sma-spread-0052da7.json).

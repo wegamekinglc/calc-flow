@@ -33,7 +33,13 @@ def main() -> None:
 
     run = plan.execute({"input": orders})
 
-    print(run.outputs["output"].to_pyarrow().to_pylist())
+    rows = run.outputs["output"].to_pyarrow().to_pylist()
+    if rows != [
+        {"order_id": "A-100", "gross": 30},
+        {"order_id": "A-102", "gross": 40},
+    ]:
+        raise RuntimeError(f"unexpected filtered orders: {rows}")
+    print(rows)
     print("node timings:", run.node_timings)
 
 

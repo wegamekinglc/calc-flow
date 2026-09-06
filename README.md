@@ -198,10 +198,8 @@ Python package is not a second engine.
 - Managed epoch checkpoints use `LocalStateBackend` segments and strict v3
   `CheckpointManifest` documents. Exactly-once compatibility is proved per
   requested output; ordinary sinks remain at least once.
-- The v2 micro-batch runner, formed-batch push runner, and public checkpoint
-  document store are removed without aliases.
 
-The canonical architecture is described in
+The capabilities and execution model are introduced in
 [docs/introduction.md](docs/introduction.md). The complete component and
 lifecycle design is in [docs/design.md](docs/design.md), and the practical
 continuous tutorial is [docs/streaming-guide.md](docs/streaming-guide.md).
@@ -258,14 +256,12 @@ The checked OpenAPI contract is
 [web-ui/openapi.json](web-ui/openapi.json); generated TypeScript request and
 response types are in `web-ui/src/api/schema.d.ts`.
 
-## Compatibility
+## Project contracts
 
-Calc Flow 4.0 accepts only strict project-v3 documents and exposes only the
-Studio `/api/v3` surface. It does not load project-v2 documents; see the
-[v2-to-v3 migration guide](docs/migration-v2-to-v3.md) before upgrading.
-Historical v1 behavior is preserved in
-[commit `c87324e`](https://github.com/wegamekinglc/calc-flow/tree/c87324ecaee30d8b883d3c30ae03704dee45f593)
-and as immutable semantic fixtures under `tests/fixtures/v1/`.
+Calc Flow 4.0 accepts strict project-v3 documents and exposes the Studio
+`/api/v3` surface. Read [projects and persistence](docs/projects-guide.md)
+for validation, serialization, and reloading a graph. Historical changes are
+recorded in [CHANGELOG.md](CHANGELOG.md).
 
 ## Development
 
@@ -311,22 +307,28 @@ repository commands and constraints.
 ## Documentation
 
 - **[Documentation index](docs/README.md)** — reading order for all published docs
-- **[Introduction](docs/introduction.md)** — architecture and data flow
-- **[Design and architecture](docs/design.md)** — component ownership and end-to-end design
+- **[Introduction](docs/introduction.md)** — capabilities, vocabulary, and execution modes
 - **[getting started](docs/getting-started.md)** — installation and smoke test
 - **[Executable examples](docs/examples.md)** — verified example matrix and runner
+- **[Batch calculations](docs/batch-guide.md)** — expressions, SQL, UDFs, and async execution
+- **[Arrays and matrices](docs/array-guide.md)** — NumPy/JAX and static weights
 - **[Continuous streaming](docs/streaming-guide.md)** — source-to-recovery tutorial
 - **[Connectors](docs/connectors.md)** — transport configuration and guarantees
+- **[Projects and persistence](docs/projects-guide.md)** — JSON/YAML and file stores
+- **[Studio](docs/studio-guide.md)** — local editing, inspection, and job controls
 - **[Python API](docs/python-api.md)** — Python surface and examples
 - **[Symbolic workflows](docs/symbolic-workflows.md)** — declaration-to-Studio
   batch, stream, recovery, static matrix, and performance workflows
 - **[Rust API](docs/rust-api.md)** — native surface and examples
 - **[API reference](docs/api-reference.md)** — supported surfaces at a glance
+- **[Symbolic API](docs/symbolic-api.md)** — declarations, analysis, and compile requirements
+- **[Design and architecture](docs/design.md)** — component ownership and execution design
+- **[Verification](docs/verification.md)** — documentation, examples, and implementation checks
 - **[Python release guide](docs/python-release.md)** — packaging, verification,
   Trusted Publishers, and the PyPI procedure
 - **[Benchmark suite](docs/benchmark-suite.md)** — complete CI tables, scale matrices,
   external-engine comparisons and historical regression evidence
-- **[v2 release and migration](docs/v2-release.md)** — v1-to-v2 boundary (history)
+- **[Changelog](CHANGELOG.md)** — the single history of changes
 
 ## License
 

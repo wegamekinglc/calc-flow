@@ -232,11 +232,12 @@ both after any route, model, or version change.
 
 Published docs live under [docs/](docs/) with a reading-order index in
 [docs/README.md](docs/README.md). Start with
-[docs/introduction.md](docs/introduction.md) for the architecture and data
-flow. Keep normative docs describing the current/latest state only; record
-fundamental changes in `CHANGELOG.md` and leave the historical release records
-(`docs/v1-final-api.md`, `docs/v2-release.md`, `docs/migration-v0.2.md`)
-untouched.
+[docs/introduction.md](docs/introduction.md) for capabilities and the execution
+model, and [docs/design.md](docs/design.md) for architecture. Keep normative
+docs describing the current state only; record historical changes in
+[CHANGELOG.md](CHANGELOG.md). Frozen release records and dated engineering
+documents are available in the
+[pinned documentation archive](https://github.com/wegamekinglc/calc-flow/tree/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs).
 
 ## Specialist agents
 

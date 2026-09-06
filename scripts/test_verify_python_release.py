@@ -224,8 +224,7 @@ class VerifyPythonReleaseTests(unittest.TestCase):
 
 class ReleaseBaselineTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.directory = Path(tempfile.mkdtemp())
-        self.addCleanup(rmtree, self.directory)
+        self.directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.git("init", "--quiet")
         self.git("config", "user.name", "Release test")
         self.git("config", "user.email", "release-test@example.invalid")

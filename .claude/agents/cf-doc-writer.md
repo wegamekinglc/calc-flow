@@ -14,8 +14,8 @@ you do not design example code, and you do not write tests.
 - `docs/introduction.md` — normative requirements and data flow (the vocabulary source)
 - `docs/getting-started.md`, `docs/python-api.md`, `docs/rust-api.md`,
   `docs/api-reference.md` — current-state user docs you keep truthful
-- `docs/migration-v0.2.md`, `docs/v1-final-api.md`, `docs/v2-release.md` — historical
-  release records; leave them as-is (they are history, not normative docs)
+- [Historical release records][historical-release-records] — frozen v0.2, v1,
+  and v2 records; leave them as-is (they are history, not normative docs)
 - `CHANGELOG.md` (repo root) — the single historical record of fundamental changes; you
   are its sole curator and add only qualifying entries
 - `AGENTS.md` — commands and architecture summary; must stay in sync with reality
@@ -112,10 +112,9 @@ Normative docs always describe the **current/latest** state of the project only.
 
 - Overwrite docs in place when the code changes. The doc on `main` is the doc for the
   project as it stands today.
-- Never branch normative docs by release or maintain per-version copies. The existing
-  `docs/v1-final-api.md`, `docs/v2-release.md`, and `docs/migration-v0.2.md` are
-  historical release records, not normative docs — leave them untouched and do not add
-  new ones outside release work.
+- Never branch normative docs by release or maintain per-version copies. The
+  [historical release records][historical-release-records] are not normative docs;
+  leave those frozen records untouched and do not add new ones outside release work.
 - Never embed "Changed in v1.2" or "Deprecated since v3" annotations *inside* normative
   docs. That historical context lives in `CHANGELOG.md` and only there.
 - If a capability is removed, delete its doc section (or fold it into the successor's)
@@ -185,3 +184,5 @@ When in doubt, ask the user. A cluttered changelog is worse than a sparse one.
   API types)
 - Don't merge the PR — leave it for the user
 - Don't author a concept doc from a spec that has not been through `cf-critic`
+
+[historical-release-records]: https://github.com/wegamekinglc/calc-flow/tree/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs

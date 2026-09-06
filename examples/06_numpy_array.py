@@ -27,7 +27,10 @@ def main() -> None:
     )
 
     run = plan.execute({"input": values})
-    print(run.outputs["output"].array.tolist())
+    centered = run.outputs["output"].array.tolist()
+    if centered != [-2.25, -1.25, 0.75, 2.75]:
+        raise RuntimeError(f"unexpected centered values: {centered}")
+    print(centered)
 
 
 if __name__ == "__main__":

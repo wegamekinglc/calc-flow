@@ -1,7 +1,23 @@
 # Rust API
 
+[Documentation](README.md) / 3.4 Rust API
+
 The `calc-flow` crate is the implementation of Calc Flow 4.0. Its public
 surface is re-exported from `calc_flow`; no Python process is required.
+
+On this page:
+
+- [Build and document](#build-and-document)
+- [Expression pipeline](#expression-pipeline)
+- [SQL operators](#sql-operators)
+- [Rolling windows](#rolling-windows)
+- [Cross-section statistics](#cross-section-statistics)
+- [Stream compilation and continuous runtime](#stream-compilation-and-continuous-runtime)
+- [Batches](#batches)
+- [UDFs and external providers](#udfs-and-external-providers)
+- [Continuous execution and recovery](#continuous-execution-and-recovery)
+- [Projects and stores](#projects-and-stores)
+- [Errors and cancellation](#errors-and-cancellation)
 
 ## Build and document
 
@@ -217,11 +233,11 @@ the `size` rows through the current row of the entity total order — or
 `duration(micros)`: the exact-width event-time interval `(t − micros, t]`,
 open at the lower bound and closed at the upper bound, with equal-time rows
 ordered by `sequence_by`. `configuration_version` and `state_layout_version`
-must equal `ROLLING_CONFIGURATION_VERSION` (1). Existing rolling declarations
-use `ROLLING_STATE_LAYOUT_VERSION` (1), while any EWMA declaration requires
-`ROLLING_EWMA_STATE_LAYOUT_VERSION` (2) so checkpoint segments persist the
-valid count and exact binary64 accumulator. These declaration versions remain
-stable in project documents and configuration fingerprints. Current operators
+use their validated declaration constants. `configuration_version` is
+`ROLLING_CONFIGURATION_VERSION` (1). Non-EWMA declarations use
+`ROLLING_STATE_LAYOUT_VERSION` (1), while any EWMA declaration requires
+`ROLLING_EWMA_STATE_LAYOUT_VERSION` (2). These values belong to project
+documents and configuration fingerprints. Current operators
 write `ROLLING_COLUMNAR_STATE_LAYOUT_VERSION` (3): one deterministic entity
 dictionary, projected retained history, a columnar reorder buffer, recurrence
 state, and kernel/numerical fingerprints. Restore continues to read the
@@ -256,7 +272,7 @@ keep the input type; the other aggregates follow the frozen output-type
 table:
 
 | Kind                           | Input            | Output type       |
-| ------------------------------ | ---------------- | ----------------- |
+|--------------------------------|------------------|-------------------|
 | `ewma`                         | numeric          | `float64`         |
 | `count`                        | any column       | `uint64`          |
 | `sum`                          | signed integer   | `int64`, checked  |
@@ -309,12 +325,11 @@ watermark passes each row's closing coordinate — its event time plus the
 allowed lateness — then emits the ordered final rows, rejecting the whole
 envelope under the `error` policy or dropping each late row and recording
 the late metrics under `drop`. Duplicate row identities are rejected. Rolling
-stream state checkpoints at the aligned epoch cut as an Arrow IPC segment
-with state version 1, and restore or reset reproduces the same ordered
-output rows: the segment stores only the retained history and buffered rows,
-and every accumulator — the sums, the West state, the infinity counts, the
-extrema queues, and the pair state — is rebuilt by the same ordered fold
-over those rows, so live, refolded, and restored states read identically.
+stream state checkpoints at the aligned epoch cut using columnar writer
+layout `3`. It stores projected history, buffered rows, and recurrence state;
+restore validates the schema and fingerprints before rebuilding the kernel.
+See [symbolic compiler design](symbolic-design.md#native-rolling-state) for
+the distinction between declaration versions and checkpoint writer layout.
 Sliding arithmetic that becomes non-finite re-folds the current window,
 keeping the classification exact at an O(frame) cost per row for those
 windows.
@@ -430,9 +445,8 @@ latching, and digest computation are deferred to `start`, where they happen
 exactly once before any source or operator lifecycle runs. The complete frozen
 static-input crate-root export set is `StaticInputSpec`, `StaticInputDigest`,
 `StaticMutability`, `STATIC_INPUT_DIGEST_VERSION`, `StaticArraySnapshot`, and
-`StaticArrayValues`. The complete SCE-13 export delta is exactly the last two
-types; `Batch::static_array_snapshot()` and its five read-only accessors are
-the associated inherent API. Declarations join the plan fingerprint;
+`StaticArrayValues`. `Batch::static_array_snapshot()` provides an owned
+snapshot with five read-only accessors. Declarations join the plan fingerprint;
 `CheckpointManifest` records one `StaticInputDigest` per name under its
 `static_inputs` field, omitted when empty. See
 [static inputs](streaming-guide.md#static-inputs) for the full per-job,
@@ -471,14 +485,12 @@ primary outcome.
 
 `StreamingRunner::start(self)` is one-shot and returns the sole
 `StreamingJob` owner. The job exposes synchronous status plus async checkpoint,
-shutdown, cancel, and wait operations. The old formed-batch push runner,
-`MicroBatchRunner`, v2 source/sink traits, and checkpoint-document store are
-removed without aliases. Public continuous lifecycle failures surface as
+shutdown, cancel, and wait operations. Public continuous lifecycle failures surface as
 `CalcFlowError::Streaming(StreamingError)`. Contained task panics use
 `StreamingErrorCategory::TaskPanicked`; internal task IDs and panic messages
 never cross the facade.
 
-`edge_channel` retains its public signature and `EdgeBudget` retains the fields
+`edge_channel` accepts an `EdgeBudget` with the fields
 `max_rows` and `max_bytes`. For `EdgeBudget::new(R, B)`, envelope count and
 charged rows are each independently capped at `R`, while charged bytes are
 capped at `B`. Direct callers must choose

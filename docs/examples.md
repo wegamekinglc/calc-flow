@@ -1,106 +1,54 @@
-# Executable examples
+# Example learning paths
 
-Calc Flow keeps examples executable, small, and aligned across Rust and Python.
-They are integration smoke tests for the public API, not pseudocode. Start with
-the batch examples, then use the continuous examples to learn source ownership,
-watermarks, checkpoints, and recovery.
+[Documentation](README.md) / 1. First programs
 
-## Prepare a checkout
+The runnable inventory, commands, dependencies, and expected results live in
+[examples/README.md](../examples/README.md). Choose a path below after
+[installation](getting-started.md). Every numbered Python file runs on its own;
+the learning order does not require importing or running an earlier example.
 
-```bash
-uv sync --extra dev
-uv run maturin develop
-```
+## Calculate a finite dataset
 
-The NumPy example needs the `numpy` extra. The development environment installs
-it. JAX is optional; the mixed table/array example reports a skip when JAX is
-not installed.
+Read the [batch guide](batch-guide.md) while running 01 → 02 → 03 → 05:
+calculate and filter order totals, join orders to fees, register a scalar
+function, then execute a plan in an asyncio application. Continue to
+[example 14](../examples/14_project_persistence.py) to save and reload the graph.
 
-Run every user-facing example with one command:
+Rust users can pair `expression_pipeline` with `sql_join`. The Rust expression
+program uses the small `[3, 7]` addition from the introduction; Python 01 uses
+order totals. The SQL programs share the same order/fee dataset.
 
-```bash
-JAX_PLATFORMS=cpu uv run python scripts/run_examples.py
-```
+## Calculate with arrays
 
-Select one language surface when iterating:
+Read the [array guide](array-guide.md) while running 06 → 07 → 11: center a
+NumPy array, multiply Arrow columns by NumPy/JAX weights, then reuse static
+weights in a symbolic batch or continuous program.
 
-```bash
-uv run python scripts/run_examples.py --surface python
-uv run python scripts/run_examples.py --surface rust
-```
+## Operate a recoverable stream
 
-Schema exporters are intentionally excluded from this runner because
-`gen_v3_schema` updates a checked-in generated file. Their commands remain in
-the [Rust example inventory](../crates/calc-flow/examples/README.md).
+Read the [streaming guide](streaming-guide.md) while running 04 → 08 → 10:
+own a source/sink lifecycle, recover a completed stream, then restore a
+multi-stage rolling calculation from a checkpoint taken during processing.
+Rust's `continuous_runtime` and `windowed_streaming` demonstrate the native
+traits and watermark-driven tumbling windows.
 
-## Python examples
+The examples use local application-owned connectors and temporary state
+directories. For Kafka, PostgreSQL, MySQL, ClickHouse, HTTP, WebSocket,
+files, or Parquet, use the data-only fragments in the [connector guide](connectors.md)
+and supply that transport's service and credentials separately.
 
-| File                                                                                      | What it proves                                                        |
-| ----------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
-| [`01_datafusion_pipeline.py`](../examples/01_datafusion_pipeline.py)                      | Immutable Arrow input, expressions, projection, filtering, timings    |
-| [`02_sql_join.py`](../examples/02_sql_join.py)                                            | Named inputs and one read-only DataFusion SQL join                    |
-| [`03_registered_udf.py`](../examples/03_registered_udf.py)                                | Trusted, versioned, explicitly selected scalar UDF                    |
-| [`04_continuous_runtime.py`](../examples/04_continuous_runtime.py)                        | One-shot runner, replay cursor, managed checkpoint, terminal wait     |
-| [`05_async_execution.py`](../examples/05_async_execution.py)                              | Async batch execution, settings, absolute deadline                    |
-| [`06_numpy_array.py`](../examples/06_numpy_array.py)                                      | Explicit NumPy registration and bounded array expression              |
-| [`07_array_and_dataframe.py`](../examples/07_array_and_dataframe.py)                      | Arrow-table to NumPy/JAX matrix multiplication without input mutation |
-| [`08_streaming_recovery.py`](../examples/08_streaming_recovery.py)                        | Durable terminal recovery without source reopen or duplicate output   |
-| [`09_symbolic_financial_features.py`](../examples/09_symbolic_financial_features.py)      | Composed rolling, RSI, and cross-section financial features           |
-| [`10_symbolic_streaming_recovery.py`](../examples/10_symbolic_streaming_recovery.py)      | Multi-stage symbolic checkpoint, recovery, and terminal restart       |
-| [`11_symbolic_static_matrix.py`](../examples/11_symbolic_static_matrix.py)                | Batch/stream static weights, copy facts, and provider failure         |
-| [`12_symbolic_stream_join.py`](../examples/12_symbolic_stream_join.py)                    | Two ordered symbolic inputs and one bounded native stream join        |
-| [`13_symbolic_relational_dag.py`](../examples/13_symbolic_relational_dag.py)              | Ordered nested joins lowered to two durable native state owners       |
+## Compose financial and relational calculations
 
-The Python continuous examples use application-owned in-memory connectors.
-Production transport configuration is data-only and covered by the
-[connector guide](connectors.md).
+Read [symbolic workflows](symbolic-workflows.md) while running 09 → 10 → 11
+for financial features, recovery, and matrices. Run 12 → 13 for a bounded
+two-stream match followed by an ordered nested join. Consult the
+[symbolic API](symbolic-api.md) for declaration and ordering requirements.
 
-## Rust examples
+## Use the local browser application
 
-| File                                                                            | What it proves                                                     |
-| ------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| [`expression_pipeline.rs`](../crates/calc-flow/examples/expression_pipeline.rs) | Native Arrow expression pipeline and async plan execution          |
-| [`sql_join.rs`](../crates/calc-flow/examples/sql_join.rs)                       | Multi-input read-only SQL                                          |
-| [`continuous_runtime.rs`](../crates/calc-flow/examples/continuous_runtime.rs)   | Public source/sink traits and owning continuous lifecycle          |
-| [`windowed_streaming.rs`](../crates/calc-flow/examples/windowed_streaming.rs)   | Source-provided watermark and stateful tumbling-window aggregation |
-| [`export_schema.rs`](../crates/calc-flow/examples/export_schema.rs)             | Print the canonical project-v3 JSON Schema                         |
-| [`gen_v3_schema.rs`](../crates/calc-flow/examples/gen_v3_schema.rs)             | Regenerate the checked-in project-v3 JSON Schema                   |
+Read the [Studio guide](studio-guide.md) to edit and inspect the same project
+format. Batch graphs and symbolic static-input declarations can be inspected;
+the job API requires a connector-backed stream project and does not accept
+live static values.
 
-The windowed example sends three rows followed by a one-minute watermark. The
-watermark closes `[00:00, 00:01)`, and end-of-input closes `[00:01, 00:02)`.
-The sink asserts both deterministic aggregates before printing them.
-
-## Which example should I copy?
-
-- For a synchronous Python calculation, start with `01_datafusion_pipeline.py`.
-- For an asyncio service, start with `05_async_execution.py`.
-- For an application-owned live source, start with
-  `04_continuous_runtime.py` and then read `08_streaming_recovery.py`.
-- For symbolic financial calculations, start with
-  `09_symbolic_financial_features.py`, then use
-  `10_symbolic_streaming_recovery.py` for continuous recovery or
-  `11_symbolic_static_matrix.py` for immutable model weights.
-- For a bounded match over two ordered symbolic streams, use
-  `12_symbolic_stream_join.py`; for independent or nested joins and explicit
-  post-join ordering, continue with `13_symbolic_relational_dag.py`.
-- For event-time aggregation in Rust, start with `windowed_streaming.rs`.
-- For Kafka, PostgreSQL, MySQL, ClickHouse, HTTP, WebSocket, files, or Parquet, use a
-  project-v3 connector binding from the [connector guide](connectors.md).
-- For a browser-managed local job, use [Calc Flow Studio](../web-ui/README.md).
-
-The [symbolic workflow guide](symbolic-workflows.md) connects the five
-symbolic examples to Studio inspection, NumPy/JAX selection, failure handling,
-and compile-time performance facts.
-
-## Verification contract
-
-The runner stops at the first failed example and preserves that process's exit
-code. Its command inventory is covered by:
-
-```bash
-python -m unittest scripts.test_run_examples
-```
-
-Rust formatting, Clippy, and rustdoc also compile the Rust example targets.
-Python linting covers the scripts themselves, while the example runner checks
-their end-to-end behavior against the installed native extension.
+Next: [batch calculations](batch-guide.md).

@@ -1,5 +1,7 @@
 # Symbolic computation workflows
 
+[Documentation](README.md) / 2.4 Symbolic workflows
+
 Calc Flow's symbolic API declares immutable calculations and lowers them into
 the same strict project-v3 graph that the native engine and Studio use. No
 Python callback or expression object captured by a symbolic declaration runs
@@ -10,9 +12,19 @@ symbolic compiler. This guide connects the public declarations to batch,
 continuous, recovery, array-provider, inspection, and performance workflows
 implemented in Calc Flow 4.0.
 
-The complete declaration reference is in the [Python API guide](python-api.md).
+The complete declaration reference is in the [symbolic API](symbolic-api.md).
 Use this guide to choose an executable example and understand the boundary
 between compile-time facts and runtime measurements.
+
+On this page:
+
+- [Compose and run financial features](#compose-and-run-financial-features)
+- [Run continuously and recover](#run-continuously-and-recover)
+- [Join two symbolic streams](#join-two-symbolic-streams)
+- [Use static matrices with NumPy or JAX](#use-static-matrices-with-numpy-or-jax)
+- [Read capability failures](#read-capability-failures)
+- [Interpret performance output](#interpret-performance-output)
+- [Inspect a lowered project in Studio](#inspect-a-lowered-project-in-studio)
 
 ## Compose and run financial features
 
@@ -46,8 +58,8 @@ and cross-section state when needed. The reference suite includes RSI's delta,
 positive/negative projection, rolling means, and final ratio, plus
 independently derived EMA and MACD vectors. EWMA uses exact first-valid-sample seeding and the
 unadjusted `alpha = 2 / (span + 1)` recurrence. Stream checkpoints persist its
-constant accumulator in rolling state layout v2 rather than approximating it
-from a retained row window.
+constant accumulator exactly; [native rolling state](symbolic-design.md#native-rolling-state)
+describes the declaration and writer layouts.
 
 Run it from a source checkout with:
 
@@ -95,7 +107,7 @@ The compiler lowers one native `stream_join@1`, so its watermarks, state
 eviction, match ordering, metrics, checkpoint v1 state, and recovery rules are
 the same ones used by `PipelineBuilder.stream_join`.
 
-Calls that omit output ordering preserve the SCE-17 terminal-join contract.
+A join without output ordering can be a terminal output or feed stateless work.
 For nested joins or downstream rolling/cross-section state, declare all of
 `output_entity_by`, `output_event_time`, and `output_sequence_by`. Analysis
 requires the prefixed left join keys, either prefixed join event time, and the
@@ -198,11 +210,5 @@ rejects that project with `422` because the REST contract intentionally has no
 field for live static values. Execute such a document through the Python
 stream runner, where `static_inputs` is an explicit application-owned mapping.
 
-## Artifact boundary
-
-Published wheels, sdists, and crates contain public runtime code, generated
-contracts, examples, and current documentation. Repository-only agent files,
-dated implementation plans/specifications under `docs/superpowers`, and design
-workspaces are not public package content. The release inspector enforces this
-boundary for every artifact; see the [Python release guide](python-release.md)
-for the complete build and isolated-install smoke procedure.
+For implementation details, continue with [symbolic compiler design](symbolic-design.md).
+For serialization, continue with [projects and persistence](projects-guide.md).

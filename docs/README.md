@@ -1,109 +1,76 @@
 # Calc Flow documentation
 
-This directory holds Calc Flow's published documentation and point-in-time
-engineering records. The current-state guides linked under **Start here**
-always reflect the latest state of the project on `main`; overwrite them in
-place when the code changes rather than maintaining per-release copies.
-Fundamental changes are recorded in the existing repo-root `CHANGELOG.md`, and
-the v1-to-v2 migration boundary is preserved in the historical records listed
-below.
+Read these pages in order for an introduction to Calc Flow 4.0, or choose the
+feature you need. Function guides explain usage with runnable examples. Design
+pages explain how the implementation provides those behaviors.
 
-## Start here
+## 1. Overview and first run
 
-- **[Getting started](getting-started.md)** — published-package and
-  from-source installation, Studio startup, and an install smoke test
-- **[Executable examples](examples.md)** — complete Python/Rust inventory,
-  one-command runner, expected behavior, and choosing an example to copy
-- **[Introduction](introduction.md)** — architecture, data contract, graph
-  compilation, table execution, optional array providers, and recovery
-- **[Design and architecture](design.md)** — component ownership, batch and
-  streaming data paths, checkpoint transactions, extension and security boundaries
-- **[Continuous streaming guide](streaming-guide.md)** — sources, cursors,
-  watermarks, windows, sinks, delivery, checkpoints, recovery, and operations
-- **[Stream message envelope](runtime-envelope.md)** — the v3 stream message
-  contract: typed messages, event-time progress, windows, state manifests and
-  backends, the operator emission boundary, and current delivery guarantees
-- **[Connectors and stream projects](connectors.md)** — exact connector
-  identities, delivery limits, project fragments, windows, and recovery
-- **[Python API guide](python-api.md)** — `PipelineBuilder`, batches, UDFs,
-  async execution, NumPy/JAX, symbolic declarations and static analysis,
-  projects, and runners
-- **[Symbolic workflows](symbolic-workflows.md)** — composed financial
-  features, batch/continuous execution, checkpoint recovery, static NumPy/JAX
-  matrices, capability failures, Studio inspection, and performance output
-- **[Rust API guide](rust-api.md)** — native batches, operators, graph
-  compiler, UDF/provider registries, and recovery, with paired examples
-- **[Warm-state streaming performance](warm-stream-performance.md)** — paired
-  release builds, persistent incremental runners, latency/phase accounting,
-  correctness, and separate forced/normal-GC measurements
-- **[SQL and DataFusion performance](sql-datafusion-performance.md)** — fixed
-  and auto parallelism, telemetry, evidence gates, canary, and rollback
-- **[API reference](api-reference.md)** — the supported surfaces at a glance:
-  Rust exports, Python members, and the Studio HTTP API
-- **[Python release guide](python-release.md)** — local packaging rehearsal,
-  artifact matrix verification, Trusted Publishers, and the PyPI procedure
+1. [Introduction](introduction.md): capabilities, vocabulary, and execution modes.
+2. [Getting started](getting-started.md): installation, a first calculation,
+   and starting Studio on Linux or Windows.
+3. [Example learning paths](examples.md): which programs to run next.
 
-## Project orientation
+## 2. Function guides
 
-- **[Repository README](../README.md)** — workspace entry point, quick starts,
-  architecture map, and examples
-- **[AGENTS.md](../AGENTS.md)** — the authoritative agent guide: commands,
-  coding style, architecture summary, test layout, and release invariants
-- **[CLAUDE.md](../CLAUDE.md)** — Claude Code operational guidance, kept in
-  step with AGENTS.md
-- **[Codex agent team](../.codex/agents/README.md)** — Codex-native roster,
-  workflow, artifact layout, and invocation examples
-- **[Claude agent team](../.claude/agents/README.md)** — preserved Claude
-  compatibility roster and workflow
-- **[Examples](../examples/README.md)** — executable v3 Python examples
-- **[Rust examples](../crates/calc-flow/examples/README.md)** — executable
-  `calc-flow` crate examples
-- **[Benchmark suite](benchmark-suite.md)** — complete CI results and regression gates
-- **[Streaming engine research](research/2026-08-02-arroyo-risingwave-streaming-research.md)**
-  — point-in-time Arroyo/RisingWave architecture research and Calc-Flow
-  continuous-runtime recommendations
-- **[Symbolic computation engine design](superpowers/specs/2026-08-22-symbolic-computation-engine-design.md)**
-  — point-in-time Python symbolic IR, batch/stream lowering, and native
-  operator design, paired with its
-  [phased implementation plan](superpowers/plans/2026-08-22-symbolic-computation-engine.md).
-  The immutable declaration and static-analysis layer is available today; see
-  the [Python API guide](python-api.md)
-- **[TA-Lib-inspired rolling engine upgrade plan](superpowers/plans/2026-09-04-ta-lib-streaming-rolling-engine-upgrade.md)**
-  — point-in-time performance evidence for single and composed rolling
-  indicators, analysis of TA-Lib's unreleased streaming API, and the phased
-  Arrow-native rolling/DataFusion 54 upgrade path
-- **[Project schema](../schemas/project-v3.schema.json)** — the canonical
-  generated v3 project contract
-- **[Studio README](../web-ui/README.md)** — the local calc-flow-studio
-  application
+1. [Batch calculations](batch-guide.md): expressions, filters, SQL joins,
+   registered UDFs, and async execution; examples 01, 02, 03, and 05.
+2. [Arrays and matrices](array-guide.md): NumPy/JAX registration, array
+   expressions, table-to-matrix multiplication, and static weights;
+   examples 06, 07, and 11.
+3. [Continuous streaming](streaming-guide.md): sources, sinks, event time,
+   windows, bounded joins, job controls, and recovery; examples 04, 08,
+   10, 12, and 13, plus the Rust window example.
+4. [Symbolic workflows](symbolic-workflows.md): financial features, analysis,
+   composition, and batch/stream execution; examples 09–13.
+5. [Projects and persistence](projects-guide.md): validate, serialize, save,
+   load, and execute a project; example 14.
+6. [Connectors](connectors.md): registered transports, project configuration,
+   secrets, and delivery limits.
+7. [Studio](studio-guide.md): edit projects, inspect calculations, and operate
+   local jobs.
 
-## Historical records
+## 3. API references
 
-These files are release history, not normative docs. They describe older
-surfaces and are preserved for audit; leave them untouched. The current
-(normative) docs above always override them.
+1. [API reference](api-reference.md): public surfaces, HTTP routes, errors,
+   and package/protocol versions.
+2. [Python API](python-api.md): builders, execution options, providers,
+   persistence, and runner methods.
+3. [Symbolic API](symbolic-api.md): declarations, ordering requirements,
+   analysis, and compilation.
+4. [Rust API](rust-api.md): native types, operators, traits, and examples.
 
-- **[v2 release guide](v2-release.md)** — the v1-to-v2 migration boundary,
-  package versions, upgrade checklist, and release artifacts. This is the
-  pointer for anyone moving from frozen Python v1 to Rust-native v2.
-- **[v1 final API](v1-final-api.md)** — the final Python v1 API reference.
-  The frozen v1 implementation is preserved in
-  [commit `c87324e`](https://github.com/wegamekinglc/calc-flow/tree/c87324ecaee30d8b883d3c30ae03704dee45f593).
-- **[v0.2 migration](migration-v0.2.md)** — the v0.1-to-v0.2 prototype
-  migration, predating v1.
-- **[Engineering records](superpowers/)** — dated design notes,
-  implementation plans, specifications, and hand-offs. These preserve the
-  decisions and execution state at the time they were written; they are not
-  current API or operational guidance.
+The [project schema](../schemas/project-v3.schema.json) and
+[OpenAPI document](../web-ui/openapi.json) define the serialized contracts.
 
-Immutable v1 semantic fixtures live under
-[`tests/fixtures/v1/`](../tests/fixtures/v1/) as historical parity evidence;
-they are not a v2 runtime or package path.
+## 4. Design and implementation
 
-## Conventions
+1. [Architecture](design.md): component ownership, data paths, stateful
+   operators, extension boundaries, and failure handling.
+2. [Stream runtime contract](runtime-envelope.md): messages, ordering,
+   backpressure, progress, checkpoint publication, and recovery invariants.
+3. [Symbolic compiler design](symbolic-design.md): analysis, lowering,
+   physical sharing, static values, and compile caching.
 
-All documentation uses GitHub-flavored Markdown: inline code with backticks,
-file paths relative to the document, and cross-references as relative links.
-Align table columns with pipes and pad separator rows so their dashes span the
-full column width. Docs describe what exists, not the design history that led
-there; cite the type, function, or file name rather than source line numbers.
+## 5. Development and operations
+
+1. [Verification](verification.md): checks for examples, documentation, and
+   each implementation surface.
+2. [Benchmark suite](benchmark-suite.md): workloads, correctness, timing
+   boundaries, reports, and regression gates.
+3. [SQL performance controls](sql-datafusion-performance.md): partitioning,
+   telemetry, rewrite limits, and measurements.
+4. [Warm-stream measurements](warm-stream-performance.md): persistent jobs,
+   sparse appends, latency interpretation, and reproduction.
+5. [Python release guide](python-release.md): packaging and publication.
+
+## History and maintenance
+
+[CHANGELOG.md](../CHANGELOG.md) is the single change history. Guides and design
+pages describe the implementation in this checkout; dated plans, migration
+narratives, and results for individual commits belong in history.
+
+Maintain one executable inventory in [examples/README.md](../examples/README.md).
+Each function guide links to its programs and explains inputs, operations,
+expected results, and limits. Keep implementation details in design pages.
+Update this reading order when adding a page.

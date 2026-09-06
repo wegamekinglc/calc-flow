@@ -5,10 +5,10 @@
 - Request: Cheng Li, 2026-08-06 — finish PR #83 as **M2 runtime internals
   complete**, using one universal 20-minute soak standard.
 - Milestone plan:
-  [`docs/superpowers/plans/2026-08-02-continuous-streaming-v3.md`](../../../docs/superpowers/plans/2026-08-02-continuous-streaming-v3.md),
+  [`docs/superpowers/plans/2026-08-02-continuous-streaming-v3.md`](https://github.com/wegamekinglc/calc-flow/blob/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs/superpowers/plans/2026-08-02-continuous-streaming-v3.md),
   tasks M2.1-M2.5 and the M2 merge gate.
 - Research basis:
-  [`docs/research/2026-08-02-arroyo-risingwave-streaming-research.md`](../../../docs/research/2026-08-02-arroyo-risingwave-streaming-research.md).
+  [`docs/research/2026-08-02-arroyo-risingwave-streaming-research.md`](https://github.com/wegamekinglc/calc-flow/blob/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs/research/2026-08-02-arroyo-risingwave-streaming-research.md).
 - Total semantic specification, controlling except for the explicit delta
   clauses below:
   [`continuous-streaming-runtime.md`](continuous-streaming-runtime.md).

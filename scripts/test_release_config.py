@@ -113,10 +113,7 @@ class ReleaseConfigTests(unittest.TestCase):
                     (ROOT / path).read_text(encoding="utf-8"),
                 )
 
-        audit_path = (
-            Path("docs/superpowers/audits")
-            / "2026-08-19-continuous-streaming-v3-current-main.md"
-        )
+        audit_path = Path("docs/verification.md")
         audit = (ROOT / audit_path).read_text(encoding="utf-8")
         self.assertIn(advisory, audit)
         self.assertIn("lockfile-only", audit.lower())
@@ -838,7 +835,6 @@ class ReleaseConfigTests(unittest.TestCase):
             self.assertIn(heading, guide)
 
         for command in (
-            "uv tool install calc-flow-studio",
             "cargo build --workspace --all-features --release",
             "maturin==1.14.1",
             "UV_TOOL_DIR",
@@ -849,6 +845,9 @@ class ReleaseConfigTests(unittest.TestCase):
             r".\web-ui\scripts\start_web_ui.ps1",
         ):
             self.assertIn(command, guide)
+
+        self.assertNotIn("uv tool install calc-flow-studio", guide)
+        self.assertIn("Studio is not published to PyPI", guide)
 
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("[getting started](docs/getting-started.md)", readme)

@@ -1,5 +1,7 @@
 # Python packaging and PyPI release
 
+[Documentation](README.md) / 5.5 Releases
+
 The repository workflow publishes only `calc-flow-python`. Install it with
 `pip install calc-flow-python` and import `calc_flow`. The Rust crate and
 GitHub repository retain the name `calc-flow`.

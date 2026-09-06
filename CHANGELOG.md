@@ -1,9 +1,23 @@
 # Changelog
 
-This file records fundamental changes to Calc Flow's public surfaces and
-engine or Studio capabilities.
+This is the single history of Calc Flow's public surfaces, engine and Studio
+capabilities, and documentation organization. Current usage and design are in
+the [documentation index](docs/README.md).
+
+Entries describe the state at their date, including superseded decisions and
+measurements. Use the current guides for supported behavior.
 
 ## 2026-09
+
+- 2026-09-06: Organize documentation from overview and first run through
+  function guides, API references, design, and development operations. Add
+  batch, array, project-persistence, and Studio guides tied to executable
+  examples; separate the symbolic API and compiler design. Add a JSON/YAML and
+  async file-store round-trip example and result assertions in introductory
+  programs. Consolidate historical narrative here. Dated plans, research,
+  audits, migration guides, and per-commit performance reports are retained in
+  [the documentation tree before this reorganization](https://github.com/wegamekinglc/calc-flow/tree/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs)
+  and Git history rather than the current documentation tree.
 
 - 2026-09-06: Publish the Python distribution as `calc-flow-python`, retaining
   `import calc_flow` and the `calc-flow` Rust crate. Restrict PyPI uploads to
@@ -441,7 +455,7 @@ engine or Studio capabilities.
   withdrawal below.
 
 - 2026-08-19: Withdraw M6/M7 acceptance pending the
-  [current-main audit](docs/superpowers/audits/2026-08-19-continuous-streaming-v3-current-main.md).
+  [current-main audit](https://github.com/wegamekinglc/calc-flow/blob/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs/superpowers/audits/2026-08-19-continuous-streaming-v3-current-main.md).
   The 2026-08-18 entries record merged, release-labelled slices, not completed
   milestone gates: the canonical project/PyO3/Python surface is still v2,
   registered connector lifecycles and database protocols are incomplete, and
@@ -573,6 +587,13 @@ engine or Studio capabilities.
   contract.
 
 ## 2026-07
+
+- Rust-native 2.0 replaces the Python v1 engine with the `calc-flow` crate
+  and PyO3 bindings. Core and Studio are separately packaged; table work uses
+  DataFusion and array providers are explicitly registered. Project and
+  checkpoint formats cross a breaking boundary with no automatic converter.
+  Earlier application code and saved documents must be recreated against the
+  native API; stateful processing restarts from a chosen source boundary.
 
 - Add a large, responsive Studio Data Source editor dialog with temporary
   per-source drafts. Inline JSON is validated and applied only on **Confirm**;

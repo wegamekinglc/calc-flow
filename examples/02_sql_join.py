@@ -31,7 +31,14 @@ def main() -> None:
         }
     )
 
-    print(run.outputs["output"].to_pyarrow().to_pylist())
+    rows = run.outputs["output"].to_pyarrow().to_pylist()
+    if rows != [
+        {"order_id": 1, "net": 70},
+        {"order_id": 2, "net": 108},
+        {"order_id": 3, "net": 36},
+    ]:
+        raise RuntimeError(f"unexpected joined orders: {rows}")
+    print(rows)
 
 
 if __name__ == "__main__":

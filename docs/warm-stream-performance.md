@@ -1,16 +1,15 @@
 # Warm-state streaming performance
 
+[Documentation](README.md) / 5.4 Warm-stream measurements
+
 This benchmark measures the production Python `StreamingRunner` path with a
 long-lived native rolling operator. It is not a standalone kernel benchmark,
 and it is not directly interchangeable with a TA-Lib array call or a SQL query
 over a complete historical table.
 
-The [measured two-round report](warm-stream-results-39a0c7f.md) compares clean
-release builds at `9044501` and `39a0c7f`, with all raw samples and explicit
-forecast misses. Later report-only commits do not change the measured engine.
-The [small-append follow-up](small-append-results-818d69c.md) compares `6515f4d`
-with `818d69c`, explicitly records the mostly inconclusive small-row results,
-and separates same-wheel scheduler experiments from engine changes.
+Use this guide to produce measurements for the revisions under investigation.
+The [benchmark suite](benchmark-suite.md) explains the complete CI matrix and
+regression gates. Keep individual measurement reports with their raw artifacts.
 
 ## What is measured
 
@@ -36,7 +35,7 @@ extra source events to improve the timing. Scheduled checkpoints are set to a
 The default matrix has 64 entities and seven distinct (history, append) pairs:
 
 | Dimension        | History rows                              | Appended rows             |
-| ---------------- | ----------------------------------------- | ------------------------- |
+|------------------|-------------------------------------------|---------------------------|
 | Historical depth | 10,240 / 102,400 / 1,024,000 / 10,240,000 | 64                        |
 | Incremental size | 1,024,000                                 | 64 / 640 / 6,400 / 64,000 |
 
@@ -179,19 +178,12 @@ interval medians need not add up to the total latency median.
 Callback wall intervals are not CPU attribution: work in different tasks can
 overlap. `to_pyarrow` is a subset of the sink-to-receive interval, so adding
 both double-counts conversion. Operator `processing_duration_micros` includes
-successful Data and watermark handlers in the candidate; the watermark subset
-is also available as `watermark_processing_duration_micros`. Older baseline
-metrics omit watermark handling and cannot be compared as if they measured
-the same total. End-handler time is excluded from these operator counters.
+successful Data and watermark handlers; the watermark subset is also available
+as `watermark_processing_duration_micros`. Compare baseline metrics only when
+their timing scope matches. End-handler time is excluded from these operator counters.
 
-The optimization keeps a validated ordered columnar path and an equivalent
-general fallback. It reduces row materialization, per-row output-budget
-allocations, whole-state cloning, unchanged retained-row copying, and redundant
-SQL work. The Python bridge coalesces ready wakeups and removes extra event-loop
-turns for immediately completed callbacks. Neither changes finality or the
-durable checkpoint layout. See [runtime-envelope.md](runtime-envelope.md) for
-the scheduling and metric contract.
-
-Pre-implementation latency ranges are hypotheses. The PR's measured report
-must explicitly identify targets reached, targets missed, uncertainty, and any
-remaining bottleneck; completing an optimization does not prove its forecast.
+The ordered columnar path and general fallback share finality and recovery
+semantics. See [runtime execution paths](runtime-envelope.md#execution-paths)
+for scheduling and [metrics](runtime-envelope.md#status-and-metrics) for timing
+scope. Reports should state measured values, uncertainty, and remaining
+bottlenecks; implementation choices alone do not establish a speedup.

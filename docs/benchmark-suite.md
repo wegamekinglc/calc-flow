@@ -1,35 +1,44 @@
 # Unified benchmark suite
 
-The suite follows DAL's [complete result reporting and repeated base/head
-comparison pattern](https://github.com/wegamekinglc/Derivatives-Algorithms-Lib/tree/master/.github/scripts).
+[Documentation](README.md) / 5.2 Benchmark suite
+
+The suite reports complete workloads and repeated base/head comparisons.
 `.github/workflows/benchmark-suite.yml` is the shared entrypoint for ordinary
 non-documentation Linux PR/main CI and daily/manual benchmarks. Windows keeps
 its existing correctness gates. SQL adaptive tuning experiments remain
 supplemental nightly/weekly jobs; they are not missing required suite shards.
 
+On this page:
+
+- [Complete inventory](#complete-inventory)
+- [Inputs, correctness and timing boundaries](#inputs-correctness-and-timing-boundaries)
+- [Revision comparisons and regression gate](#revision-comparisons-and-regression-gate)
+- [Reports and failure behavior](#reports-and-failure-behavior)
+- [Local reproduction](#local-reproduction)
+
 ## Complete inventory
 
 The catalog is executable: `python -m scripts.benchmark_suite catalog` emits
-the same 21 shards consumed by CI. The slow legacy Python `nightly` scale is
+the same 21 shards consumed by CI. The slow Python `nightly` scale is
 excluded from this suite, including its daily/manual workflow calls; overhead,
 small and standard remain. The separate engine and warm-state matrices still
 run every decade through 10M rows. Dynamic pytest, Criterion and Vitest
 inventories preserve benchmark cases without a second hand-written case list.
 
-| Family          | Dimensions                                                 | Cases per dimension                                   |
-|-----------------|------------------------------------------------------------|-------------------------------------------------------|
-| Existing Python | overhead 1k, small 10k, standard 100k                      | All existing non-lifecycle pytest benchmarks          |
-| Engines         | 10, 100, 1k, 10k, 100k, 1M, 10M rows                       | 22 supported engine/scenario combinations             |
-| Warm streaming  | 10, 100, 1k, 10k, 100k, 1M, 10M history; append 64         | SMA(20), SMA(5) minus SMA(20)                         |
-| Warm append     | History 1M; append 1, 4, 16, 64, 640, 6,400, 64,000        | Both indicators; append 64 shared with history matrix |
-| Rust            | Every `[[bench]]` target in the core crate                 | Core, allocation, state/window, join, SQL/DataFusion  |
-| Studio/frontend | Existing Python HTTP benchmarks and Vitest benchmark files | All collected benchmark cases                         |
-| Lifecycle       | Isolated checkpoint/recovery benchmark                     | Existing minimum-20-round evidence validation         |
+| Family          | Dimensions                                          | Cases per dimension                                   |
+|-----------------|-----------------------------------------------------|-------------------------------------------------------|
+| Python          | overhead 1k, small 10k, standard 100k               | All collected non-lifecycle pytest benchmarks         |
+| Engines         | 10, 100, 1k, 10k, 100k, 1M, 10M rows                | 22 supported engine/scenario combinations             |
+| Warm streaming  | 10, 100, 1k, 10k, 100k, 1M, 10M history; append 64  | SMA(20), SMA(5) minus SMA(20)                         |
+| Warm append     | History 1M; append 1, 4, 16, 64, 640, 6,400, 64,000 | Both indicators; append 64 shared with history matrix |
+| Rust            | Every `[[bench]]` target in the core crate          | Core, allocation, state/window, join, SQL/DataFusion  |
+| Studio/frontend | Python HTTP benchmarks and Vitest benchmark files   | All collected benchmark cases                         |
+| Lifecycle       | Isolated checkpoint/recovery benchmark              | Existing minimum-20-round evidence validation         |
 
-There are 154 new engine cases and 26 warm cases, in addition to the existing
-dynamically discovered cases. Warm cases use one entity to support one-row
-appends. They are not directly comparable to the older 64-entity,
-1,024,000-row history report. Existing Python array dimensions are unchanged.
+There are 154 engine cases and 26 warm cases, in addition to dynamically
+discovered cases. Warm cases use one entity to support one-row appends.
+Compare measurements only when entity count, history depth, append size,
+and timing boundaries match.
 
 | Backend          | Projection  | Filter      | Group by    | Join        | SMA(20) | Dual SMA |
 |------------------|-------------|-------------|-------------|-------------|---------|----------|
@@ -51,18 +60,15 @@ timestamp ordering, up to 64 entities, and 64,000-row input batches. Prices are
 bounded exact eighths: `100 + sequence % 257 / 8 + sequence % entities / 8`.
 This controls decimal accumulation drift in long rolling performance runs;
 it is not a claim of numerical accuracy on arbitrary decimal sequences.
-Existing decimal numerical regression fixtures and tolerances are unchanged.
-During local preflight, the previous decimal price fixture produced dual-SMA
-errors up to approximately `1.14e-10` in Calc Flow SQL/raw DataFusion and
-`2.56e-10` in TA-Lib at 10M rows. Those observations are a separate numerical
-stability finding, not a performance regression or a fixed engine bug.
+Decimal numerical regression fixtures are checked separately from the
+performance workload.
 Independent NumPy/direct-window oracles check every measured output, all
 payload columns, row counts, warm-up NaNs and finalization. Floating results
 use `rtol=1e-10`, `atol=1e-10`, `equal_nan=True`. Both engine-matrix SMA forms
 require a full 20-row slow window. Ten-row cases therefore have **zero finite SMA
 outputs**: they measure invocation/warm-up cost, not valid-output throughput.
 
-Warm cases retain the existing partial-window oracle and runner configuration.
+Warm cases retain the partial-window oracle and runner configuration.
 `H0` in the result table is the initial historical preload, not a restored
 snapshot before every sample. One untimed append warms the worker, so the
 first timed cursor is `H0 + append_rows`; subsequent appends advance it.
@@ -78,8 +84,8 @@ on both sides. Warm cases retain the existing decimal input fixture.
 | Ready native streaming | Input enqueue, sources/tasks/channels, rolling, watermarks, sink and combined Arrow output | Plans, input events, runner startup/readiness, EOF/shutdown |
 | Warm native streaming  | Preconstructed data enqueue, live source/task/channel, rolling/finalization, sink to Arrow | Compilation, runner start, historical preload, validation   |
 
-New SQL/raw-DataFusion target partitions, Tokio workers and Polars threads
-are fixed to 32. BLAS helper pools use one thread. Legacy fixtures retain
+SQL/raw-DataFusion target partitions, Tokio workers and Polars threads
+are fixed to 32. BLAS helper pools use one thread. The Python benchmark fixtures retain
 their own query configuration and timing boundaries. Cross-library native
 streaming uses an already-started runner with **empty rolling state**. Each
 invocation compiles a fresh single-use plan, awaits runner startup and the
@@ -92,14 +98,13 @@ is preloaded. Persistent warm append remains a separate workload.
 
 Cross-library columns are application-boundary references, not interchangeable
 kernel measurements. The native column is labeled `Native stream (ready)`.
-Contract v3 rejects startup-inclusive v1 artifacts, minimum-only v2 reports and
-mismatched native timing scopes. Both refs are remeasured with the same new
-boundary; older medians are not adjusted by subtracting a separately measured
-startup time.
+Report contract v3 validates the ready-runner timing scope and complete
+sample statistics. Both revisions must be measured with the same scope;
+do not subtract a separately measured startup time from another report.
 These settings describe target/pool sizes, not measured CPU utilization;
 TA-Lib calls remain sequential per-series operations.
 
-## Historical comparisons and regression gate
+## Revision comparisons and regression gate
 
 CI resolves immutable base/head commits before building clean release wheels.
 PRs compare the event's base SHA with its head SHA. Pushes use `before`;
@@ -136,7 +141,7 @@ a slowdown even with identical binaries and nearly unchanged P50 values.
 The fixed +5% threshold, two-round sample budget and correctness checks remain
 unchanged; CI does not retry measurements to select a passing timing result.
 External libraries are measured references, never fake historical baselines.
-Existing pytest/Criterion/Vitest suites run ABBA whole-suite
+The pytest/Criterion/Vitest suites run ABBA whole-suite
 blocks. Their deltas remain informational because those blocks are not
 per-call paired observations. Allocation counters have a separate unit-correct
 table and are not mislabeled as milliseconds.
@@ -166,7 +171,7 @@ collects its retained task samples and verifies their counts before export.
 Wrong/dirty releases, incompatible workload fingerprints, missing or duplicate
 cases/shards, changed confirmation environments, failed correctness and
 nonfinite observations all fail closed. Missing known catalog cases appear as
-error rows. If a legacy runner fails before discovery, its unavailable inventory
+error rows. If a suite runner fails before discovery, its unavailable inventory
 is explicitly shown rather than invented. The complete Markdown/JSON remains
 an artifact if it exceeds GitHub's step-summary size limit; overflow fails
 instead of silently truncating rows.
@@ -174,7 +179,7 @@ instead of silently truncating rows.
 ## Local reproduction
 
 Use clean candidate and baseline checkouts. Run the current candidate harness
-for both releases; it supplies the same new workload to old and new engines.
+for both releases; it supplies the same workload to both engine revisions.
 Generated files stay under `target/`, not in `python/calc_flow/`.
 
 ```bash

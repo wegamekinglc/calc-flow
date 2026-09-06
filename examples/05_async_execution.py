@@ -29,7 +29,10 @@ async def run() -> None:
     )
     print(await heartbeat)
     result = await execution
-    print(result.outputs["output"].to_pyarrow().to_pylist())
+    output = result.outputs["output"].to_pyarrow()
+    if output["total"].to_pylist() != [3, 7]:
+        raise RuntimeError(f"unexpected async totals: {output.to_pylist()}")
+    print(output.to_pylist())
 
 
 def main() -> None:
