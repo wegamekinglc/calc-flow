@@ -60,7 +60,9 @@ runpy.run_path(sys.argv[1], run_name="__main__")
 def test_example_rejects_incorrect_results_with_python_optimization(
     example: str, column: str
 ) -> None:
-    result = subprocess.run(  # nosec B603 -- fixed script and repository example list
+    # The managed interpreter, script, and parameterized example/column pairs are
+    # trusted test inputs. No external input or shell participates in this call.
+    result = subprocess.run(  # noqa: E501  # nosec B603  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit.dangerous-subprocess-use-audit
         [sys.executable, "-O", "-c", CORRUPTED_INPUT, f"examples/{example}", column],
         cwd=ROOT,
         capture_output=True,
