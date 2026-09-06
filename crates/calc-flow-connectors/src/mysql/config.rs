@@ -110,58 +110,10 @@ impl SourceConfig {
                 "assume_monotonic_cursor",
             ],
         )?;
-        let incremental = match options.get("mode").map(serde_json::Value::as_str) {
-            None | Some(Some("snapshot")) => false,
-            Some(Some("incremental_query")) => true,
-            _ => return Err(invalid("mode", "expected snapshot or incremental_query")),
-        };
-        let cursors = names(options, "cursor_columns")?;
-        let monotonic = bool_option(options, "assume_monotonic_cursor")?.unwrap_or(false);
-        if incremental && (cursors.is_empty() || !monotonic) {
-            return Err(invalid(
-                "cursor_columns",
-                "incremental_query requires cursor_columns and assume_monotonic_cursor=true",
-            ));
-        }
-        if !incremental && (!cursors.is_empty() || monotonic) {
-            return Err(invalid(
-                "cursor_columns",
-                "cursor options require incremental_query",
-            ));
-        }
-        let columns: Vec<ArrowFieldSpec> = options
-            .get("columns")
-            .map(|value| serde_json::from_value(value.clone()))
-            .transpose()
-            .map_err(|_| invalid("columns", "expected Arrow field specifications"))?
-            .unwrap_or_default();
-        let mut seen = BTreeSet::new();
-        for field in &columns {
-            identifier(&field.name)?;
-            if !seen.insert(field.name.to_ascii_lowercase()) {
-                return Err(invalid("columns", "duplicate column"));
-            }
-        }
-        crate::arrow_schema::schema_from_spec(&columns)?;
-        if !columns.is_empty()
-            && cursors
-                .iter()
-                .any(|name| !columns.iter().any(|field| &field.name == name))
-        {
-            return Err(invalid(
-                "columns",
-                "projection must include every cursor column",
-            ));
-        }
-        let rows = positive_option(options, "max_batch_rows", 8192)?;
-        let bytes = positive_option(options, "max_batch_bytes", 8 * 1024 * 1024)?;
-        let poll_ms = positive_option(options, "poll_interval_ms", 1000)?;
-        if rows > 1_000_000 || bytes > 1024 * 1024 * 1024 || poll_ms > 3_600_000 {
-            return Err(invalid(
-                "bounds",
-                "maximums are 1000000 rows, 1 GiB, and 3600000 poll milliseconds",
-            ));
-        }
+        let incremental = source_mode(options)?;
+        let cursors = source_cursors(options, incremental)?;
+        let columns = source_columns(options, &cursors)?;
+        let (rows, bytes, poll) = source_limits(options)?;
         Ok(Self {
             connection: ConnectionConfig::parse(options)?,
             incremental,
@@ -169,9 +121,91 @@ impl SourceConfig {
             columns,
             rows,
             bytes,
-            poll: Duration::from_millis(poll_ms),
+            poll,
         })
     }
+}
+
+fn source_mode(options: &JsonMap) -> Result<bool> {
+    match options.get("mode").map(serde_json::Value::as_str) {
+        None | Some(Some("snapshot")) => Ok(false),
+        Some(Some("incremental_query")) => Ok(true),
+        _ => Err(invalid("mode", "expected snapshot or incremental_query")),
+    }
+}
+
+fn source_cursors(options: &JsonMap, incremental: bool) -> Result<Vec<String>> {
+    let cursors = names(options, "cursor_columns")?;
+    let monotonic = bool_option(options, "assume_monotonic_cursor")?.unwrap_or(false);
+    validate_cursor_mode(incremental, &cursors, monotonic)?;
+    Ok(cursors)
+}
+
+fn validate_cursor_mode(incremental: bool, cursors: &[String], monotonic: bool) -> Result<()> {
+    if incremental && (cursors.is_empty() || !monotonic) {
+        return Err(invalid(
+            "cursor_columns",
+            "incremental_query requires cursor_columns and assume_monotonic_cursor=true",
+        ));
+    }
+    if !incremental && (!cursors.is_empty() || monotonic) {
+        return Err(invalid(
+            "cursor_columns",
+            "cursor options require incremental_query",
+        ));
+    }
+    Ok(())
+}
+
+fn source_columns(options: &JsonMap, cursors: &[String]) -> Result<Vec<ArrowFieldSpec>> {
+    let columns: Vec<ArrowFieldSpec> = options
+        .get("columns")
+        .map(|value| serde_json::from_value(value.clone()))
+        .transpose()
+        .map_err(|_| invalid("columns", "expected Arrow field specifications"))?
+        .unwrap_or_default();
+    validate_column_names(&columns)?;
+    crate::arrow_schema::schema_from_spec(&columns)?;
+    validate_cursor_projection(&columns, cursors)?;
+    Ok(columns)
+}
+
+fn validate_column_names(columns: &[ArrowFieldSpec]) -> Result<()> {
+    let mut seen = BTreeSet::new();
+    for field in columns {
+        identifier(&field.name)?;
+        if !seen.insert(field.name.to_ascii_lowercase()) {
+            return Err(invalid("columns", "duplicate column"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_cursor_projection(columns: &[ArrowFieldSpec], cursors: &[String]) -> Result<()> {
+    if !columns.is_empty()
+        && cursors
+            .iter()
+            .any(|name| !columns.iter().any(|field| &field.name == name))
+    {
+        return Err(invalid(
+            "columns",
+            "projection must include every cursor column",
+        ));
+    }
+    Ok(())
+}
+
+fn source_limits(options: &JsonMap) -> Result<(u64, u64, Duration)> {
+    let rows = positive_option(options, "max_batch_rows", 8192)?;
+    let bytes = positive_option(options, "max_batch_bytes", 8 * 1024 * 1024)?;
+    let poll_ms = positive_option(options, "poll_interval_ms", 1000)?;
+    if rows > 1_000_000 || bytes > 1024 * 1024 * 1024 || poll_ms > 3_600_000 {
+        return Err(invalid(
+            "bounds",
+            "maximums are 1000000 rows, 1 GiB, and 3600000 poll milliseconds",
+        ));
+    }
+    Ok((rows, bytes, Duration::from_millis(poll_ms)))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

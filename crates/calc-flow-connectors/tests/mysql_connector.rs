@@ -418,6 +418,50 @@ async fn mysql_append_upsert_and_failed_transaction_are_atomic() {
 
 #[tokio::test]
 #[ignore = "requires MySQL 8.4 and CALC_FLOW_CONNECTOR_CONTAINERS=1"]
+async fn mysql_statement_chunks_preserve_batch_atomicity() {
+    let url = test_url();
+    let mut conn = admin(&url).await;
+    conn.query_drop("DROP TABLE IF EXISTS mysql_chunks_test")
+        .await
+        .unwrap();
+    conn.query_drop(
+        "CREATE TABLE mysql_chunks_test (id BIGINT PRIMARY KEY, label TEXT NOT NULL) ENGINE=InnoDB",
+    )
+    .await
+    .unwrap();
+    let factory = MySqlSinkFactory::new();
+    let mut sink = factory
+        .open(&options("mysql_chunks_test", "append"), &url)
+        .await
+        .unwrap();
+    sink.open().await.unwrap();
+    let ids = (1..=1005).collect::<Vec<_>>();
+    sink.write(&batch(&ids, &vec!["chunked"; ids.len()]))
+        .await
+        .unwrap();
+    let stored: Vec<i64> = conn
+        .query("SELECT id FROM mysql_chunks_test ORDER BY id")
+        .await
+        .unwrap();
+    assert_eq!(stored, ids);
+    // The duplicate is in the second statement; the first statement must roll back too.
+    let conflicting = (1006..2006).chain([1]).collect::<Vec<_>>();
+    assert!(
+        sink.write(&batch(&conflicting, &vec!["rollback"; conflicting.len()]))
+            .await
+            .is_err()
+    );
+    sink.close().await.unwrap();
+    let stored: Vec<i64> = conn
+        .query("SELECT id FROM mysql_chunks_test ORDER BY id")
+        .await
+        .unwrap();
+    assert_eq!(stored, ids);
+    conn.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires MySQL 8.4 and CALC_FLOW_CONNECTOR_CONTAINERS=1"]
 async fn mysql_type_matrix_roundtrips_without_numeric_or_temporal_loss() {
     use arrow::array::{Array, Date32Array, TimestampMicrosecondArray};
     let url = test_url();

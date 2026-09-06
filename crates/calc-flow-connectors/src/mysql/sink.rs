@@ -9,7 +9,7 @@ use arrow::{
 };
 use async_trait::async_trait;
 use calc_flow::{Batch, Epoch, JsonMap, Result, SinkRecovery, StreamSink, TransactionalStreamSink};
-use mysql_async::{Conn, TxOpts, Value, prelude::Queryable};
+use mysql_async::{Conn, Transaction, TxOpts, Value, prelude::Queryable};
 use serde_json::json;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -74,21 +74,7 @@ impl MySqlSink {
         let columns: Vec<(String, String, String)> = database("open", self.config.connection.timeout, conn.exec(
             "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION", (LEDGER,)
         )).await?;
-        let expected = [
-            ("identity_hash", "binary(32)"),
-            ("epoch", "bigint unsigned"),
-            ("payload_hash", "binary(32)"),
-            ("rows_written", "bigint unsigned"),
-        ];
-        if columns.len() != expected.len()
-            || columns.iter().zip(expected).any(
-                |((name, kind, nullable), (expected_name, expected_type))| {
-                    name != expected_name || kind != expected_type || nullable != "NO"
-                },
-            )
-        {
-            return Err(fail("open", "epoch ledger schema is incompatible"));
-        }
+        validate_ledger_columns(&columns)?;
         let keys: Vec<String> = database("open", self.config.connection.timeout, conn.exec(
             "SELECT COLUMN_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = 'PRIMARY' ORDER BY SEQ_IN_INDEX", (LEDGER,)
         )).await?;
@@ -106,34 +92,9 @@ impl MySqlSink {
             .table_payload()
             .map_err(|_| fail("write", "MySQL sink requires table batches"))?;
         let schema = payload.schema();
-        if self
-            .schema
-            .as_ref()
-            .is_some_and(|current| current != schema)
-        {
-            return Err(fail("write", "Arrow schema changed within epoch"));
-        }
-        insert_sql(&self.config, schema.as_ref())?;
-        let rows = self
-            .rows
-            .checked_add(batch.num_rows() as u64)
-            .ok_or_else(|| fail("write", "epoch row overflow"))?;
-        let memory = self
-            .memory
-            .checked_add(
-                payload
-                    .batches()
-                    .iter()
-                    .map(|record| record.get_array_memory_size() as u64)
-                    .sum::<u64>(),
-            )
-            .ok_or_else(|| fail("write", "epoch byte overflow"))?;
-        if rows > self.config.rows || memory > self.config.bytes {
-            return Err(fail("write", "epoch exceeds configured bounds"));
-        }
-        for record in payload.batches() {
-            validate_record(record)?;
-        }
+        self.check_staging_schema(schema)?;
+        let (rows, memory) = self.staged_totals(batch.num_rows() as u64, payload.batches())?;
+        payload.batches().iter().try_for_each(validate_record)?;
         // Validate encoded size before publishing any change to owned state.
         let records = self
             .records
@@ -147,6 +108,37 @@ impl MySqlSink {
         self.rows = rows;
         self.memory = memory;
         Ok(())
+    }
+
+    fn check_staging_schema(&self, schema: &SchemaRef) -> Result<()> {
+        if self
+            .schema
+            .as_ref()
+            .is_some_and(|current| current != schema)
+        {
+            return Err(fail("write", "Arrow schema changed within epoch"));
+        }
+        insert_sql(&self.config, schema.as_ref(), 1).map(drop)
+    }
+
+    fn staged_totals(&self, added_rows: u64, records: &[RecordBatch]) -> Result<(u64, u64)> {
+        let rows = self
+            .rows
+            .checked_add(added_rows)
+            .ok_or_else(|| fail("write", "epoch row overflow"))?;
+        let memory = self
+            .memory
+            .checked_add(
+                records
+                    .iter()
+                    .map(|record| record.get_array_memory_size() as u64)
+                    .sum::<u64>(),
+            )
+            .ok_or_else(|| fail("write", "epoch byte overflow"))?;
+        if rows > self.config.rows || memory > self.config.bytes {
+            return Err(fail("write", "epoch exceeds configured bounds"));
+        }
+        Ok((rows, memory))
     }
 
     fn reset(&mut self) {
@@ -181,10 +173,31 @@ impl MySqlSink {
 
     fn validate_prepared(
         &self,
+        operation: &str,
         epoch: Epoch,
         evidence: &JsonMap,
         bytes: &[u8],
     ) -> Result<Vec<RecordBatch>> {
+        self.decode_prepared(epoch, evidence, bytes)
+            .map_err(|error| in_operation(operation, error))
+    }
+
+    fn decode_prepared(
+        &self,
+        epoch: Epoch,
+        evidence: &JsonMap,
+        bytes: &[u8],
+    ) -> Result<Vec<RecordBatch>> {
+        self.check_evidence(epoch, evidence, bytes)?;
+        let (schema, records, rows) = self.read_prepared(evidence, bytes)?;
+        crate::evidence::check_rows(evidence, rows).map_err(|error| fail("commit", &error))?;
+        if !schema.fields().is_empty() {
+            insert_sql(&self.config, &schema, 1)?;
+        }
+        Ok(records)
+    }
+
+    fn check_evidence(&self, epoch: Epoch, evidence: &JsonMap, bytes: &[u8]) -> Result<()> {
         let protocol = |error: String| fail("commit", &error);
         crate::evidence::check_identity(
             evidence,
@@ -200,6 +213,14 @@ impl MySqlSink {
         if bytes.len() as u64 > self.config.bytes {
             return Err(fail("recover", "prepared bytes exceed max_epoch_bytes"));
         }
+        Ok(())
+    }
+
+    fn read_prepared(
+        &self,
+        evidence: &JsonMap,
+        bytes: &[u8],
+    ) -> Result<(SchemaRef, Vec<RecordBatch>, u64)> {
         let reader = StreamReader::try_new(IoCursor::new(bytes), None)
             .map_err(|_| fail("recover", "invalid Arrow state segment"))?;
         let schema = reader.schema();
@@ -211,23 +232,24 @@ impl MySqlSink {
         let mut memory = 0_u64;
         for record in reader {
             let record = record.map_err(|_| fail("recover", "invalid Arrow state record"))?;
-            rows = rows
-                .checked_add(record.num_rows() as u64)
-                .ok_or_else(|| fail("recover", "row count overflow"))?;
-            memory = memory
-                .checked_add(record.get_array_memory_size() as u64)
-                .ok_or_else(|| fail("recover", "byte count overflow"))?;
-            if rows > self.config.rows || memory > self.config.bytes {
-                return Err(fail("recover", "prepared rows exceed epoch bounds"));
-            }
+            (rows, memory) = self.prepared_totals(&record, rows, memory)?;
             validate_record(&record)?;
             records.push(record);
         }
-        crate::evidence::check_rows(evidence, rows).map_err(protocol)?;
-        if !schema.fields().is_empty() {
-            insert_sql(&self.config, &schema)?;
+        Ok((schema, records, rows))
+    }
+
+    fn prepared_totals(&self, record: &RecordBatch, rows: u64, memory: u64) -> Result<(u64, u64)> {
+        let rows = rows
+            .checked_add(record.num_rows() as u64)
+            .ok_or_else(|| fail("recover", "row count overflow"))?;
+        let memory = memory
+            .checked_add(record.get_array_memory_size() as u64)
+            .ok_or_else(|| fail("recover", "byte count overflow"))?;
+        if rows > self.config.rows || memory > self.config.bytes {
+            return Err(fail("recover", "prepared rows exceed epoch bounds"));
         }
-        Ok(records)
+        Ok((rows, memory))
     }
 
     async fn commit_records(
@@ -243,53 +265,70 @@ impl MySqlSink {
         let timeout = self.config.connection.timeout;
         let mut tx = database("commit", timeout, conn.start_transaction(TxOpts::default())).await?;
         let write = if let Some(epoch) = epoch {
-            let identity = crate::evidence::sha256_hex(
-                serde_json::to_string(&(
-                    &self.config.pipeline,
-                    &self.config.output,
-                    &self.config.connection.table,
-                ))
-                .expect("string tuple serializes")
-                .as_bytes(),
-            );
-            let hash = crate::evidence::sha256_hex(bytes);
-            let rows = records
-                .iter()
-                .map(|record| record.num_rows() as u64)
-                .sum::<u64>();
-            let existing: Option<(Vec<u8>, u64)> = database("commit", timeout, tx.exec_first(
-                format!("SELECT payload_hash, rows_written FROM {LEDGER} WHERE identity_hash = UNHEX(?) AND epoch = ? FOR UPDATE"), (&identity, epoch.as_u64())
-            )).await?;
-            if let Some((recorded_hash, recorded_rows)) = existing {
-                if hex::encode(recorded_hash) != hash || recorded_rows != rows {
-                    return Err(fail(
-                        "commit",
-                        "epoch ledger conflicts with prepared content",
-                    ));
-                }
-                false
-            } else {
-                database("commit", timeout, tx.exec_drop(format!("INSERT INTO {LEDGER} (identity_hash, epoch, payload_hash, rows_written) VALUES (UNHEX(?), ?, UNHEX(?), ?)"), (&identity, epoch.as_u64(), &hash, rows))).await?;
-                true
-            }
+            self.claim_epoch(&mut tx, epoch, bytes, records).await?
         } else {
             true
         };
         if write {
-            for record in records {
-                let sql = insert_sql(&self.config, record.schema().as_ref())?;
-                for row in 0..record.num_rows() {
-                    let values = record
-                        .columns()
-                        .iter()
-                        .map(|array| types::cell(array, row))
-                        .collect::<Result<Vec<Value>>>()?;
-                    database("write", timeout, tx.exec_drop(&sql, values)).await?;
-                }
-            }
+            self.write_records(&mut tx, records).await?;
         }
         database("commit", timeout, tx.commit()).await?;
         self.conn = Some(conn);
+        Ok(())
+    }
+
+    async fn claim_epoch(
+        &self,
+        tx: &mut Transaction<'_>,
+        epoch: Epoch,
+        bytes: &[u8],
+        records: &[RecordBatch],
+    ) -> Result<bool> {
+        let identity = crate::evidence::sha256_hex(
+            serde_json::to_string(&(
+                &self.config.pipeline,
+                &self.config.output,
+                &self.config.connection.table,
+            ))
+            .expect("string tuple serializes")
+            .as_bytes(),
+        );
+        let hash = crate::evidence::sha256_hex(bytes);
+        let rows = records
+            .iter()
+            .map(|record| record.num_rows() as u64)
+            .sum::<u64>();
+        let timeout = self.config.connection.timeout;
+        let existing: Option<(Vec<u8>, u64)> = database("commit", timeout, tx.exec_first(
+            format!("SELECT payload_hash, rows_written FROM {LEDGER} WHERE identity_hash = UNHEX(?) AND epoch = ? FOR UPDATE"), (&identity, epoch.as_u64())
+        )).await?;
+        if let Some((recorded_hash, recorded_rows)) = existing {
+            if hex::encode(recorded_hash) != hash || recorded_rows != rows {
+                return Err(fail(
+                    "commit",
+                    "epoch ledger conflicts with prepared content",
+                ));
+            }
+            return Ok(false);
+        }
+        database("commit", timeout, tx.exec_drop(format!("INSERT INTO {LEDGER} (identity_hash, epoch, payload_hash, rows_written) VALUES (UNHEX(?), ?, UNHEX(?), ?)"), (&identity, epoch.as_u64(), &hash, rows))).await?;
+        Ok(true)
+    }
+
+    async fn write_records(&self, tx: &mut Transaction<'_>, records: &[RecordBatch]) -> Result<()> {
+        for record in records {
+            let mut start = 0;
+            while start < record.num_rows() {
+                let chunk = prepare_insert(&self.config, record, start)?;
+                database(
+                    "write",
+                    self.config.connection.timeout,
+                    tx.exec_drop(&chunk.sql, chunk.values),
+                )
+                .await?;
+                start = chunk.end;
+            }
+        }
         Ok(())
     }
 
@@ -303,7 +342,108 @@ impl MySqlSink {
     }
 }
 
-fn insert_sql(config: &SinkConfig, schema: &Schema) -> Result<String> {
+fn in_operation(operation: &str, error: calc_flow::CalcFlowError) -> calc_flow::CalcFlowError {
+    match error {
+        calc_flow::CalcFlowError::Connector(mut error) => {
+            error.operation =
+                calc_flow::ConnectorOperation::new(operation).expect("static operation");
+            calc_flow::CalcFlowError::Connector(error)
+        }
+        other => other,
+    }
+}
+
+fn validate_ledger_columns(columns: &[(String, String, String)]) -> Result<()> {
+    let expected = [
+        ("identity_hash", "binary(32)"),
+        ("epoch", "bigint unsigned"),
+        ("payload_hash", "binary(32)"),
+        ("rows_written", "bigint unsigned"),
+    ];
+    if columns.len() != expected.len()
+        || columns.iter().zip(expected).any(
+            |((name, kind, nullable), (expected_name, expected_type))| {
+                name != expected_name || kind != expected_type || nullable != "NO"
+            },
+        )
+    {
+        return Err(fail("open", "epoch ledger schema is incompatible"));
+    }
+    Ok(())
+}
+
+struct InsertChunk {
+    sql: String,
+    values: Vec<Value>,
+    end: usize,
+}
+
+struct InsertBuffer {
+    values: Vec<Value>,
+    bytes: u64,
+}
+
+impl InsertBuffer {
+    fn push_row(&mut self, values: Vec<Value>, limit: u64) -> bool {
+        // Bound the combined SQL/execute size conservatively: each parameter
+        // needs a placeholder, separators, a type tag, and a null-bitmap bit.
+        let added = values
+            .iter()
+            .map(|value| value.bin_len().saturating_add(6))
+            .fold(4, u64::saturating_add);
+        let bytes = self.bytes.saturating_add(added);
+        if bytes > limit {
+            return false;
+        }
+        self.values.extend(values);
+        self.bytes = bytes;
+        true
+    }
+}
+
+fn insert_row_limit(columns: usize) -> Result<usize> {
+    let parameter_limit = usize::from(u16::MAX);
+    if columns == 0 || columns > parameter_limit {
+        return Err(fail(
+            "write",
+            "column count exceeds MySQL statement parameter bounds",
+        ));
+    }
+    Ok((parameter_limit / columns).min(1000))
+}
+
+fn row_values(record: &RecordBatch, row: usize) -> Result<Vec<Value>> {
+    record
+        .columns()
+        .iter()
+        .map(|array| types::cell(array, row))
+        .collect()
+}
+
+fn prepare_insert(config: &SinkConfig, record: &RecordBatch, start: usize) -> Result<InsertChunk> {
+    let rows_limit = insert_row_limit(record.num_columns())?;
+    let sql = insert_sql(config, record.schema().as_ref(), 1)?;
+    let mut buffer = InsertBuffer {
+        values: Vec::new(),
+        bytes: sql.len() as u64 + 64,
+    };
+    for row in start..record.num_rows().min(start.saturating_add(rows_limit)) {
+        if !buffer.push_row(row_values(record, row)?, config.bytes) {
+            break;
+        }
+    }
+    let rows = buffer.values.len() / record.num_columns();
+    if rows == 0 {
+        return Err(fail("write", "row exceeds MySQL statement byte bounds"));
+    }
+    Ok(InsertChunk {
+        sql: insert_sql(config, record.schema().as_ref(), rows)?,
+        values: buffer.values,
+        end: start + rows,
+    })
+}
+
+fn insert_sql(config: &SinkConfig, schema: &Schema, rows: usize) -> Result<String> {
     if schema.fields().is_empty() {
         return Err(fail("write", "empty column list"));
     }
@@ -319,11 +459,12 @@ fn insert_sql(config: &SinkConfig, schema: &Schema) -> Result<String> {
             identifier(field.name())
         })
         .collect::<Result<Vec<_>>>()?;
+    let row = format!("({})", vec!["?"; names.len()].join(", "));
     let mut sql = format!(
-        "INSERT INTO {} ({}) VALUES ({})",
+        "INSERT INTO {} ({}) VALUES {}",
         identifier(&config.connection.table)?,
         names.join(", "),
-        vec!["?"; names.len()].join(", ")
+        vec![row; rows].join(", ")
     );
     if config.mode == SinkMode::Upsert {
         sql.push_str(" AS incoming ON DUPLICATE KEY UPDATE ");
@@ -456,8 +597,10 @@ impl TransactionalStreamSink for MySqlSink {
             .prepared
             .clone()
             .ok_or_else(|| fail("commit", "epoch has not been prepared"))?;
-        let records = self.validate_prepared(epoch, evidence, &bytes)?;
-        self.commit_records(&records, Some(epoch), &bytes).await?;
+        let records = self.validate_prepared("commit", epoch, evidence, &bytes)?;
+        self.commit_records(&records, Some(epoch), &bytes)
+            .await
+            .map_err(|error| in_operation("commit", error))?;
         self.reset();
         Ok(())
     }
@@ -476,9 +619,11 @@ impl TransactionalStreamSink for MySqlSink {
             .segments()
             .get(SEGMENT)
             .ok_or_else(|| fail("recover", "missing prepared Arrow segment"))?;
-        let records = self.validate_prepared(recovery.epoch(), recovery.pre_commit(), bytes)?;
+        let records =
+            self.validate_prepared("recover", recovery.epoch(), recovery.pre_commit(), bytes)?;
         self.commit_records(&records, Some(recovery.epoch()), bytes)
             .await
+            .map_err(|error| in_operation("recover", error))
     }
     async fn close(&mut self) -> Result<()> {
         self.close_connection().await
@@ -513,6 +658,93 @@ mod tests {
             calc_flow::BatchMetadata::default(),
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn prepared_validation_errors_report_the_calling_operation() {
+        let mut sink = sink();
+        sink.active = Some(Epoch::INITIAL);
+        sink.stage(&batch("id", vec![1])).unwrap();
+        let evidence = sink.pre_commit(Epoch::INITIAL).await.unwrap();
+        let segments = sink.pre_commit_segments(Epoch::INITIAL).await.unwrap();
+        let mut bad_schema = evidence.clone();
+        bad_schema.insert("schema_hash".into(), json!("0".repeat(64)));
+        let error = sink.commit(Epoch::INITIAL, &bad_schema).await.unwrap_err();
+        let calc_flow::CalcFlowError::Connector(error) = error else {
+            panic!("connector error expected")
+        };
+        assert_eq!(error.operation.to_string(), "commit");
+        sink.abort(Epoch::INITIAL, None).await.unwrap();
+        let mut bad_checksum = evidence;
+        bad_checksum.insert("segment_sha256".into(), json!("0".repeat(64)));
+        let recovery = SinkRecovery::from_parts(
+            Epoch::INITIAL,
+            false,
+            calc_flow::SinkDelivery::Transactional,
+            bad_checksum,
+        )
+        .with_segments(segments);
+        let error = sink.recover(&recovery).await.unwrap_err();
+        let calc_flow::CalcFlowError::Connector(error) = error else {
+            panic!("connector error expected")
+        };
+        assert_eq!(error.operation.to_string(), "recover");
+    }
+
+    #[test]
+    fn insert_chunks_preserve_values_and_bound_statement_rows() {
+        let input = batch("id", (0..1005).collect());
+        let record = &input.table_payload().unwrap().batches()[0];
+        let config = sink().config;
+        let first = prepare_insert(&config, record, 0).unwrap();
+        assert_eq!(first.end, 1000);
+        assert_eq!(first.sql.matches('?').count(), 1000);
+        assert_eq!(first.values, (0..1000).map(Value::Int).collect::<Vec<_>>());
+        let last = prepare_insert(&config, record, first.end).unwrap();
+        assert_eq!(last.end, 1005);
+        assert_eq!(
+            last.values,
+            (1000..1005).map(Value::Int).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn insert_chunks_respect_binary_packet_and_parameter_limits() {
+        let mut config = sink().config;
+        config.bytes = 1024;
+        let record = RecordBatch::try_from_iter([(
+            "payload",
+            Arc::new(arrow::array::StringArray::from(vec!["x".repeat(200); 20]))
+                as arrow::array::ArrayRef,
+        )])
+        .unwrap();
+        let chunk = prepare_insert(&config, &record, 0).unwrap();
+        assert!(chunk.end > 0 && chunk.end < record.num_rows());
+        let encoded = chunk
+            .values
+            .iter()
+            .map(|value| value.bin_len() + 3)
+            .sum::<u64>();
+        assert!(chunk.sql.len() as u64 + encoded + 64 <= config.bytes);
+        let oversized = RecordBatch::try_from_iter([(
+            "payload",
+            Arc::new(arrow::array::StringArray::from(vec!["x".repeat(2048)]))
+                as arrow::array::ArrayRef,
+        )])
+        .unwrap();
+        assert!(prepare_insert(&config, &oversized, 0).is_err());
+        config.bytes = 64 * 1024 * 1024;
+        let columns = (0..100).map(|i| {
+            (
+                format!("c{i}"),
+                Arc::new(Int64Array::from_iter_values(0..1000)) as arrow::array::ArrayRef,
+            )
+        });
+        let wide = RecordBatch::try_from_iter(columns).unwrap();
+        let chunk = prepare_insert(&config, &wide, 0).unwrap();
+        assert_eq!(chunk.end, 655);
+        assert_eq!(chunk.values.len(), 65_500);
+        assert_eq!(chunk.sql.matches('?').count(), chunk.values.len());
     }
 
     #[test]
@@ -558,7 +790,7 @@ mod tests {
         .unwrap();
         let evidence = sink.evidence(Epoch::INITIAL, &bytes);
         assert_eq!(
-            sink.validate_prepared(Epoch::INITIAL, &evidence, &bytes)
+            sink.validate_prepared("recover", Epoch::INITIAL, &evidence, &bytes)
                 .unwrap(),
             sink.records
         );
@@ -591,7 +823,7 @@ mod tests {
         let evidence = sink.pre_commit(Epoch::INITIAL).await.unwrap();
         let bytes = sink.prepared.clone().unwrap();
         assert!(
-            sink.validate_prepared(Epoch::INITIAL, &evidence, &bytes)
+            sink.validate_prepared("recover", Epoch::INITIAL, &evidence, &bytes)
                 .unwrap()
                 .is_empty()
         );
@@ -614,7 +846,7 @@ mod tests {
             json!(crate::evidence::sha256_hex(bytes)),
         );
         assert!(
-            sink.validate_prepared(Epoch::INITIAL, &malformed, bytes)
+            sink.validate_prepared("recover", Epoch::INITIAL, &malformed, bytes)
                 .is_err()
         );
     }

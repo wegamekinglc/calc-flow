@@ -168,7 +168,7 @@ fn transaction_str(value: calc_flow::TransactionSupport) -> String {
 #[cfg(all(test, feature = "connector-mysql"))]
 mod mysql_tests {
     #[test]
-    fn builtin_registry_resolves_mysql_without_optional_file_support() {
+    fn builtin_registry_resolves_mysql_and_shared_formats() {
         let mut registry = calc_flow::ConnectorRegistry::new();
         super::register_builtin_connectors(&mut registry).unwrap();
         let snapshot = registry.snapshot();

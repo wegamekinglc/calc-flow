@@ -68,95 +68,90 @@ impl MySqlSource {
         let rows: Vec<(String, String, String, String)> = database("schema", self.config.connection.timeout, conn.exec(
             "SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION", (&self.config.connection.table,)
         )).await?;
+        self.schema_from_columns(&rows)
+    }
+
+    fn schema_from_columns(&self, rows: &[(String, String, String, String)]) -> Result<SchemaRef> {
         let fields = rows
             .iter()
             .filter(|(name, _, _, _)| {
                 self.config.columns.is_empty()
                     || self.config.columns.iter().any(|field| &field.name == name)
             })
-            .map(|(name, kind, full, nullable)| {
-                identifier(name)?;
-                Ok(Field::new(
-                    name,
-                    types::data_type(kind, full)?,
-                    nullable == "YES",
-                ))
-            })
+            .map(mysql_field)
             .collect::<Result<Vec<_>>>()?;
+        let schema = Arc::new(Schema::new(self.project_fields(fields)?));
+        self.validate_declared_schema(&schema)?;
+        Ok(schema)
+    }
+
+    fn project_fields(&self, fields: Vec<Field>) -> Result<Vec<Field>> {
         if fields.is_empty() {
             return Err(fail("schema", "table projection is empty"));
         }
-        let fields = if self.config.columns.is_empty() {
-            fields
-        } else {
-            self.config
-                .columns
-                .iter()
-                .map(|spec| {
-                    fields
-                        .iter()
-                        .find(|field| field.name() == &spec.name)
-                        .cloned()
-                        .ok_or_else(|| fail("schema", "projection column is missing"))
-                })
-                .collect::<Result<Vec<_>>>()?
-        };
-        let schema = Arc::new(Schema::new(fields));
-        if !self.config.columns.is_empty()
-            && schema != crate::arrow_schema::schema_from_spec(&self.config.columns)?
-        {
+        if self.config.columns.is_empty() {
+            return Ok(fields);
+        }
+        self.config
+            .columns
+            .iter()
+            .map(|spec| {
+                fields
+                    .iter()
+                    .find(|field| field.name() == &spec.name)
+                    .cloned()
+                    .ok_or_else(|| fail("schema", "projection column is missing"))
+            })
+            .collect()
+    }
+
+    fn validate_declared_schema(&self, schema: &SchemaRef) -> Result<()> {
+        if self.config.columns.is_empty() {
+            return Ok(());
+        }
+        if schema != &crate::arrow_schema::schema_from_spec(&self.config.columns)? {
             return Err(fail(
                 "schema",
                 "table schema differs from the declared Arrow projection",
             ));
         }
-        Ok(schema)
+        Ok(())
     }
 
     async fn load_ordering(&mut self, conn: &mut Conn) -> Result<()> {
         let indexes: Vec<(String, Option<String>, Option<u64>)> = database("schema", self.config.connection.timeout, conn.exec(
             "SELECT INDEX_NAME, COLUMN_NAME, SUB_PART FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND NON_UNIQUE = 0 ORDER BY INDEX_NAME, SEQ_IN_INDEX", (&self.config.connection.table,)
         )).await?;
-        let mut unique: BTreeMap<String, Vec<Option<String>>> = BTreeMap::new();
-        for (index, name, prefix) in indexes {
-            unique
-                .entry(index)
-                .or_default()
-                .push(if prefix.is_none() { name } else { None });
-        }
-        if self.config.incremental {
-            self.ordering.clone_from(&self.config.cursors);
-            for name in &self.ordering {
-                let field = self
-                    .schema
-                    .field_with_name(name)
-                    .map_err(|_| fail("open", "cursor column is missing"))?;
-                if field.is_nullable() || !field.data_type().is_integer() {
-                    return Err(fail("open", "cursor columns must be non-null integers"));
-                }
-            }
-            if !unique.values().any(|names| {
-                !names.is_empty()
-                    && names.iter().all(|name| {
-                        name.as_ref()
-                            .is_some_and(|name| self.ordering.contains(name))
-                    })
-            }) {
-                return Err(fail(
-                    "open",
-                    "cursor must contain a complete unique index without prefix or expression columns",
-                ));
-            }
+        let mut unique = unique_indexes(indexes);
+        self.ordering = if self.config.incremental {
+            self.validate_incremental_ordering(&unique)?;
+            self.config.cursors.clone()
         } else {
-            self.ordering = unique
-                .remove("PRIMARY")
-                .ok_or_else(|| fail("open", "snapshot pagination requires a primary key"))?
-                .into_iter()
-                .map(|name| name.ok_or_else(|| fail("open", "unsupported primary key")))
-                .collect::<Result<_>>()?;
+            snapshot_ordering(&mut unique)?
+        };
+        self.ordering
+            .iter()
+            .try_for_each(|name| identifier(name).map(drop))
+    }
+
+    fn validate_incremental_ordering(&self, unique: &UniqueIndexes) -> Result<()> {
+        for name in &self.config.cursors {
+            let field = self
+                .schema
+                .field_with_name(name)
+                .map_err(|_| fail("open", "cursor column is missing"))?;
+            if field.is_nullable() || !field.data_type().is_integer() {
+                return Err(fail("open", "cursor columns must be non-null integers"));
+            }
         }
-        for name in &self.ordering {
-            identifier(name)?;
+        if !unique
+            .values()
+            .any(|names| complete_unique_index(names, &self.config.cursors))
+        {
+            return Err(fail(
+                "open",
+                "cursor must contain a complete unique index without prefix or expression columns",
+            ));
         }
         Ok(())
     }
@@ -165,12 +160,20 @@ impl MySqlSource {
         if !self.config.incremental {
             return Err(fail("recover", "snapshot transactions cannot be resumed"));
         }
-        let payload = cursor.payload();
-        let sequence = payload
+        let sequence = cursor
+            .payload()
             .get("sequence")
             .and_then(serde_json::Value::as_u64)
             .filter(|n| *n > 0)
             .ok_or_else(|| fail("recover", "invalid cursor sequence"))?;
+        self.validate_cursor_identity(cursor, sequence)?;
+        self.values = self.restore_values(cursor)?;
+        self.sequence = sequence;
+        Ok(())
+    }
+
+    fn validate_cursor_identity(&self, cursor: &Cursor, sequence: u64) -> Result<()> {
+        let payload = cursor.payload();
         if cursor.order() != sequence.to_be_bytes()
             || payload.get("table") != Some(&json!(self.config.connection.table))
             || payload.get("columns") != Some(&json!(self.ordering))
@@ -181,12 +184,17 @@ impl MySqlSource {
                 "cursor identity, schema, or order mismatch",
             ));
         }
-        let values = payload
+        Ok(())
+    }
+
+    fn restore_values(&self, cursor: &Cursor) -> Result<Vec<Value>> {
+        let values = cursor
+            .payload()
             .get("values")
             .and_then(serde_json::Value::as_array)
             .filter(|values| values.len() == self.ordering.len())
             .ok_or_else(|| fail("recover", "invalid cursor width"))?;
-        let values = values
+        values
             .iter()
             .zip(&self.ordering)
             .map(|(value, name)| {
@@ -195,19 +203,9 @@ impl MySqlSource {
                     .field_with_name(name)
                     .map_err(|_| fail("recover", "cursor field missing"))?
                     .data_type();
-                let candidate = if kind.is_unsigned_integer() {
-                    value.as_u64().map(Value::UInt)
-                } else {
-                    value.as_i64().map(Value::Int)
-                };
-                candidate
-                    .filter(|value| cursor_in_range(value, kind))
-                    .ok_or_else(|| fail("recover", "cursor integer out of range"))
+                restore_integer(value, kind)
             })
-            .collect::<Result<Vec<_>>>()?;
-        self.values = values;
-        self.sequence = sequence;
-        Ok(())
+            .collect()
     }
 
     fn schema_hash(&self) -> String {
@@ -285,23 +283,181 @@ impl MySqlSource {
         while let Some(row) =
             database("read", self.config.connection.timeout, result.next()).await?
         {
-            let size = (0..row.len())
-                .map(|index| match row.as_ref(index) {
-                    Some(Value::Bytes(bytes)) => bytes.len() as u64 + 32,
-                    _ => 32,
-                })
-                .sum::<u64>();
-            bytes = bytes
-                .checked_add(size)
-                .ok_or_else(|| fail("read", "batch byte count overflow"))?;
-            if bytes > self.config.bytes || rows.len() as u64 >= self.config.rows {
-                return Err(fail("read", "batch exceeds configured bounds"));
-            }
+            bytes = self.check_row_bounds(&row, bytes, rows.len())?;
             rows.push(row);
         }
         database("read", self.config.connection.timeout, result.drop_result()).await?;
         Ok(rows)
     }
+
+    fn check_row_bounds(&self, row: &Row, bytes: u64, rows: usize) -> Result<u64> {
+        let bytes = bytes
+            .checked_add(row_bytes(row))
+            .ok_or_else(|| fail("read", "batch byte count overflow"))?;
+        if bytes > self.config.bytes || rows as u64 >= self.config.rows {
+            return Err(fail("read", "batch exceeds configured bounds"));
+        }
+        Ok(bytes)
+    }
+
+    async fn open_connection(&mut self) -> Result<Conn> {
+        let url = self
+            .url
+            .take()
+            .ok_or_else(|| fail("open", "source has already been opened"))?;
+        let mut conn = connect(&url, &self.config.connection, self.config.bytes).await?;
+        require_innodb(
+            &mut conn,
+            &self.config.connection.table,
+            self.config.connection.timeout,
+        )
+        .await?;
+        Ok(conn)
+    }
+
+    async fn initialize(&mut self, conn: &mut Conn) -> Result<()> {
+        self.start_snapshot(conn).await?;
+        self.schema = self.load_schema(conn).await?;
+        self.load_ordering(conn).await
+    }
+
+    async fn start_snapshot(&self, conn: &mut Conn) -> Result<()> {
+        if self.config.incremental {
+            return Ok(());
+        }
+        database(
+            "open",
+            self.config.connection.timeout,
+            conn.query_drop("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"),
+        )
+        .await?;
+        database(
+            "open",
+            self.config.connection.timeout,
+            conn.query_drop("START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY"),
+        )
+        .await
+    }
+
+    async fn finish_page(&mut self, conn: &mut Conn, rows: &[Row]) -> Result<Option<SourceEvent>> {
+        if !rows.is_empty() {
+            return self.data_event(rows).map(Some);
+        }
+        self.idle = self.config.incremental;
+        self.exhausted = !self.config.incremental;
+        if self.exhausted {
+            database(
+                "read",
+                self.config.connection.timeout,
+                conn.query_drop("ROLLBACK"),
+            )
+            .await?;
+        }
+        Ok(self.idle.then_some(SourceEvent::Idle))
+    }
+
+    fn data_event(&mut self, rows: &[Row]) -> Result<SourceEvent> {
+        let record = types::record(rows, Arc::clone(&self.schema))?;
+        if record.get_array_memory_size() as u64 > self.config.bytes {
+            return Err(fail("read", "decoded batch exceeds max_batch_bytes"));
+        }
+        self.advance_position(rows)?;
+        let batch = Batch::table(
+            vec![record],
+            BatchMetadata::new("mysql", self.sequence, BTreeMap::new())?,
+        )?;
+        let cursor = self.cursor()?;
+        self.idle = false;
+        Ok(SourceEvent::Data { batch, cursor })
+    }
+
+    fn advance_position(&mut self, rows: &[Row]) -> Result<()> {
+        self.sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| fail("read", "cursor sequence exhausted"))?;
+        self.offset = self
+            .offset
+            .checked_add(rows.len() as u64)
+            .ok_or_else(|| fail("read", "snapshot offset exhausted"))?;
+        if self.config.incremental {
+            self.values = self.last_cursor_values(rows.last().expect("nonempty rows"))?;
+        }
+        Ok(())
+    }
+
+    fn last_cursor_values(&self, last: &Row) -> Result<Vec<Value>> {
+        self.ordering
+            .iter()
+            .map(|name| {
+                let index = self
+                    .schema
+                    .index_of(name)
+                    .map_err(|_| fail("read", "cursor column missing"))?;
+                last.as_ref(index)
+                    .cloned()
+                    .ok_or_else(|| fail("read", "cursor value missing"))
+            })
+            .collect()
+    }
+}
+
+type UniqueIndexes = BTreeMap<String, Vec<Option<String>>>;
+
+fn mysql_field((name, kind, full, nullable): &(String, String, String, String)) -> Result<Field> {
+    identifier(name)?;
+    Ok(Field::new(
+        name,
+        types::data_type(kind, full)?,
+        nullable == "YES",
+    ))
+}
+
+fn unique_indexes(indexes: Vec<(String, Option<String>, Option<u64>)>) -> UniqueIndexes {
+    let mut unique = UniqueIndexes::new();
+    for (index, name, prefix) in indexes {
+        unique
+            .entry(index)
+            .or_default()
+            .push(if prefix.is_none() { name } else { None });
+    }
+    unique
+}
+
+fn complete_unique_index(names: &[Option<String>], cursors: &[String]) -> bool {
+    !names.is_empty()
+        && names
+            .iter()
+            .all(|name| name.as_ref().is_some_and(|name| cursors.contains(name)))
+}
+
+fn snapshot_ordering(unique: &mut UniqueIndexes) -> Result<Vec<String>> {
+    unique
+        .remove("PRIMARY")
+        .ok_or_else(|| fail("open", "snapshot pagination requires a primary key"))?
+        .into_iter()
+        .map(|name| name.ok_or_else(|| fail("open", "unsupported primary key")))
+        .collect()
+}
+
+fn restore_integer(value: &serde_json::Value, kind: &DataType) -> Result<Value> {
+    let candidate = if kind.is_unsigned_integer() {
+        value.as_u64().map(Value::UInt)
+    } else {
+        value.as_i64().map(Value::Int)
+    };
+    candidate
+        .filter(|value| cursor_in_range(value, kind))
+        .ok_or_else(|| fail("recover", "cursor integer out of range"))
+}
+
+fn row_bytes(row: &Row) -> u64 {
+    (0..row.len())
+        .map(|index| match row.as_ref(index) {
+            Some(Value::Bytes(bytes)) => bytes.len() as u64 + 32,
+            _ => 32,
+        })
+        .sum()
 }
 
 fn cursor_in_range(value: &Value, kind: &DataType) -> bool {
@@ -326,33 +482,8 @@ impl StreamSource for MySqlSource {
         if cursor.is_some() && !self.config.incremental {
             return Err(fail("open", "snapshot transactions cannot be resumed"));
         }
-        let url = self
-            .url
-            .take()
-            .ok_or_else(|| fail("open", "source has already been opened"))?;
-        let mut conn = connect(&url, &self.config.connection, self.config.bytes).await?;
-        require_innodb(
-            &mut conn,
-            &self.config.connection.table,
-            self.config.connection.timeout,
-        )
-        .await?;
-        if !self.config.incremental {
-            database(
-                "open",
-                self.config.connection.timeout,
-                conn.query_drop("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"),
-            )
-            .await?;
-            database(
-                "open",
-                self.config.connection.timeout,
-                conn.query_drop("START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY"),
-            )
-            .await?;
-        }
-        self.schema = self.load_schema(&mut conn).await?;
-        self.load_ordering(&mut conn).await?;
+        let mut conn = self.open_connection().await?;
+        self.initialize(&mut conn).await?;
         if let Some(cursor) = cursor {
             self.restore(&cursor)?;
         }
@@ -376,56 +507,9 @@ impl StreamSource for MySqlSource {
             return Err(fail("read", "source schema changed"));
         }
         let rows = self.fetch(&mut conn).await?;
-        if rows.is_empty() {
-            self.idle = self.config.incremental;
-            self.exhausted = !self.config.incremental;
-            if self.exhausted {
-                database(
-                    "read",
-                    self.config.connection.timeout,
-                    conn.query_drop("ROLLBACK"),
-                )
-                .await?;
-            }
-            self.conn = Some(conn);
-            return Ok(self.idle.then_some(SourceEvent::Idle));
-        }
-        let record = types::record(&rows, Arc::clone(&self.schema))?;
-        if record.get_array_memory_size() as u64 > self.config.bytes {
-            return Err(fail("read", "decoded batch exceeds max_batch_bytes"));
-        }
-        self.sequence = self
-            .sequence
-            .checked_add(1)
-            .ok_or_else(|| fail("read", "cursor sequence exhausted"))?;
-        self.offset = self
-            .offset
-            .checked_add(rows.len() as u64)
-            .ok_or_else(|| fail("read", "snapshot offset exhausted"))?;
-        if self.config.incremental {
-            let last = rows.last().expect("nonempty rows");
-            self.values = self
-                .ordering
-                .iter()
-                .map(|name| {
-                    let index = self
-                        .schema
-                        .index_of(name)
-                        .map_err(|_| fail("read", "cursor column missing"))?;
-                    last.as_ref(index)
-                        .cloned()
-                        .ok_or_else(|| fail("read", "cursor value missing"))
-                })
-                .collect::<Result<_>>()?;
-        }
-        let batch = Batch::table(
-            vec![record],
-            BatchMetadata::new("mysql", self.sequence, BTreeMap::new())?,
-        )?;
-        let cursor = self.cursor()?;
-        self.idle = false;
+        let event = self.finish_page(&mut conn, &rows).await?;
         self.conn = Some(conn);
-        Ok(Some(SourceEvent::Data { batch, cursor }))
+        Ok(event)
     }
     async fn close(&mut self) -> Result<()> {
         self.url = None;

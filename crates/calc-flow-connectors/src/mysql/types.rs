@@ -104,6 +104,12 @@ fn column(rows: &[Row], index: usize, kind: &DataType) -> Result<ArrayRef> {
         DataType::UInt64 => primitive!(UInt64Array, u64),
         DataType::Float32 => primitive!(Float32Array, f32),
         DataType::Float64 => primitive!(Float64Array, f64),
+        _ => return structured_column(rows, index, kind),
+    })
+}
+
+fn structured_column(rows: &[Row], index: usize, kind: &DataType) -> Result<ArrayRef> {
+    Ok(match kind {
         DataType::Utf8 => Arc::new(StringArray::from(values(rows, index, text)?)),
         DataType::Binary => {
             let bytes = values(rows, index, |value| {
@@ -182,66 +188,116 @@ pub(super) fn validate_type(kind: &DataType) -> Result<()> {
     }
 }
 
+fn typed_array<T: Array + 'static>(array: &ArrayRef) -> Result<&T> {
+    array
+        .as_any()
+        .downcast_ref::<T>()
+        .ok_or_else(|| fail("write", "Arrow type mismatch"))
+}
+
 pub(super) fn cell(array: &ArrayRef, row: usize) -> Result<Value> {
     validate_type(array.data_type())?;
     if array.is_null(row) {
         return Ok(Value::NULL);
     }
-    macro_rules! get {
-        ($kind:ty) => {
-            array
-                .as_any()
-                .downcast_ref::<$kind>()
-                .ok_or_else(|| fail("write", "Arrow type mismatch"))?
-                .value(row)
-        };
+    if array.data_type().is_integer() {
+        return integer_cell(array, row);
     }
-    Ok(match array.data_type() {
-        DataType::Boolean => Value::Int(i64::from(get!(BooleanArray))),
-        DataType::Int8 => Value::Int(i64::from(get!(Int8Array))),
-        DataType::Int16 => Value::Int(i64::from(get!(Int16Array))),
-        DataType::Int32 => Value::Int(i64::from(get!(Int32Array))),
-        DataType::Int64 => Value::Int(get!(Int64Array)),
-        DataType::UInt8 => Value::UInt(u64::from(get!(UInt8Array))),
-        DataType::UInt16 => Value::UInt(u64::from(get!(UInt16Array))),
-        DataType::UInt32 => Value::UInt(u64::from(get!(UInt32Array))),
-        DataType::UInt64 => Value::UInt(get!(UInt64Array)),
-        DataType::Float32 => {
-            let value = get!(Float32Array);
-            if !value.is_finite() {
-                return Err(fail("write", "MySQL cannot store non-finite floats"));
-            }
-            Value::Float(value)
+    noninteger_cell(array, row)
+}
+
+fn integer_cell(array: &ArrayRef, row: usize) -> Result<Value> {
+    if array.data_type().is_unsigned_integer() {
+        return unsigned_cell(array, row);
+    }
+    signed_cell(array, row)
+}
+
+fn signed_cell(array: &ArrayRef, row: usize) -> Result<Value> {
+    let value = match array.data_type() {
+        DataType::Int8 => i64::from(typed_array::<Int8Array>(array)?.value(row)),
+        DataType::Int16 => i64::from(typed_array::<Int16Array>(array)?.value(row)),
+        DataType::Int32 => i64::from(typed_array::<Int32Array>(array)?.value(row)),
+        DataType::Int64 => typed_array::<Int64Array>(array)?.value(row),
+        _ => return Err(fail("write", "expected a signed integer")),
+    };
+    Ok(Value::Int(value))
+}
+
+fn unsigned_cell(array: &ArrayRef, row: usize) -> Result<Value> {
+    let value = match array.data_type() {
+        DataType::UInt8 => u64::from(typed_array::<UInt8Array>(array)?.value(row)),
+        DataType::UInt16 => u64::from(typed_array::<UInt16Array>(array)?.value(row)),
+        DataType::UInt32 => u64::from(typed_array::<UInt32Array>(array)?.value(row)),
+        DataType::UInt64 => typed_array::<UInt64Array>(array)?.value(row),
+        _ => return Err(fail("write", "expected an unsigned integer")),
+    };
+    Ok(Value::UInt(value))
+}
+
+fn noninteger_cell(array: &ArrayRef, row: usize) -> Result<Value> {
+    match array.data_type() {
+        DataType::Boolean => Ok(Value::Int(i64::from(
+            typed_array::<BooleanArray>(array)?.value(row),
+        ))),
+        DataType::Float32 | DataType::Float64 => float_cell(array, row),
+        DataType::Utf8 | DataType::Binary => bytes_cell(array, row),
+        DataType::Date32 | DataType::Timestamp(TimeUnit::Microsecond, _) => {
+            temporal_cell(array, row)
         }
-        DataType::Float64 => {
-            let value = get!(Float64Array);
-            if !value.is_finite() {
-                return Err(fail("write", "MySQL cannot store non-finite floats"));
-            }
-            Value::Double(value)
-        }
-        DataType::Utf8 => Value::Bytes(get!(StringArray).as_bytes().to_vec()),
-        DataType::Binary => Value::Bytes(get!(BinaryArray).to_vec()),
-        DataType::Date32 => {
-            let value = NaiveDate::from_ymd_opt(1970, 1, 1)
-                .expect("epoch")
-                .checked_add_signed(chrono::Duration::days(i64::from(get!(Date32Array))))
-                .and_then(|date| date.and_hms_opt(0, 0, 0))
-                .ok_or_else(|| fail("write", "date out of range"))?;
-            mysql_date(value)?
-        }
-        DataType::Timestamp(TimeUnit::Microsecond, _) => {
-            let value = chrono::DateTime::from_timestamp_micros(get!(TimestampMicrosecondArray))
-                .ok_or_else(|| fail("write", "timestamp out of range"))?;
-            mysql_date(value.naive_utc())?
-        }
-        DataType::Decimal128(_, _) => Value::Bytes(
+        DataType::Decimal128(_, _) => {
             arrow::util::display::array_value_to_string(array.as_ref(), row)
-                .map_err(|_| fail("write", "invalid decimal"))?
-                .into_bytes(),
-        ),
-        _ => return Err(fail("write", "unsupported Arrow column type")),
-    })
+                .map(|value| Value::Bytes(value.into_bytes()))
+                .map_err(|_| fail("write", "invalid decimal"))
+        }
+        _ => Err(fail("write", "unsupported Arrow column type")),
+    }
+}
+
+fn float_cell(array: &ArrayRef, row: usize) -> Result<Value> {
+    if array.data_type() == &DataType::Float32 {
+        let value = typed_array::<Float32Array>(array)?.value(row);
+        require_finite(f64::from(value))?;
+        return Ok(Value::Float(value));
+    }
+    let value = typed_array::<Float64Array>(array)?.value(row);
+    require_finite(value)?;
+    Ok(Value::Double(value))
+}
+
+fn require_finite(value: f64) -> Result<()> {
+    if !value.is_finite() {
+        return Err(fail("write", "MySQL cannot store non-finite floats"));
+    }
+    Ok(())
+}
+
+fn bytes_cell(array: &ArrayRef, row: usize) -> Result<Value> {
+    let bytes = if array.data_type() == &DataType::Utf8 {
+        typed_array::<StringArray>(array)?
+            .value(row)
+            .as_bytes()
+            .to_vec()
+    } else {
+        typed_array::<BinaryArray>(array)?.value(row).to_vec()
+    };
+    Ok(Value::Bytes(bytes))
+}
+
+fn temporal_cell(array: &ArrayRef, row: usize) -> Result<Value> {
+    if array.data_type() == &DataType::Date32 {
+        let days = typed_array::<Date32Array>(array)?.value(row);
+        let value = NaiveDate::from_ymd_opt(1970, 1, 1)
+            .expect("epoch")
+            .checked_add_signed(chrono::Duration::days(i64::from(days)))
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+            .ok_or_else(|| fail("write", "date out of range"))?;
+        return mysql_date(value);
+    }
+    let micros = typed_array::<TimestampMicrosecondArray>(array)?.value(row);
+    let value = chrono::DateTime::from_timestamp_micros(micros)
+        .ok_or_else(|| fail("write", "timestamp out of range"))?;
+    mysql_date(value.naive_utc())
 }
 
 #[cfg(test)]

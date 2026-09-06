@@ -309,7 +309,9 @@ Invalid/zero dates and non-finite sink floats fail closed. Unsigned 64-bit
 integers retain their full range in Arrow and checkpoint cursor payloads.
 
 Sink modes are `append` (default), `upsert`, and `transactional`. Append and
-upsert commit each batch atomically. Upsert uses MySQL's unique/primary key
+upsert commit each batch atomically, using multi-row statements capped at
+1000 rows and bounded by MySQL parameter limits and the configured byte budget.
+All statement chunks share the batch transaction. Upsert uses MySQL's unique/primary key
 conflict semantics and updates all supplied columns; it does not accept a
 PostgreSQL-style conflict target. Transactional mode stages bounded immutable
 Arrow segments, then inserts data and the epoch ledger in one InnoDB
