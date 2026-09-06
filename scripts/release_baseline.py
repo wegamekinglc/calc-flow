@@ -5,18 +5,25 @@ from __future__ import annotations
 
 import argparse
 import re
-import subprocess
+
+# Fixed Git commands with separate ref arguments; never invoke a shell.
+import subprocess  # nosec B404
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 _SHA_RE = re.compile(r"[0-9a-f]{40}")
+_RELEASE_TAG_RE = re.compile(
+    r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+)
 
 
 def _git(root: Path, *arguments: str) -> str:
-    result = subprocess.run(
+    # Ref arguments are namespaced or validated full SHAs.
+    result = subprocess.run(  # nosec B603
         ("git", *arguments),
         cwd=root,
+        shell=False,
         check=False,
         capture_output=True,
         text=True,
@@ -35,6 +42,10 @@ def _tag_baseline(
     if _git(root, "rev-parse", f"{ref}^{{commit}}") != candidate:
         raise ValueError("release tag must point at the candidate HEAD")
     message = _git(root, "for-each-ref", "--format=%(contents)", ref)
+    return _annotation_baseline(message, initial)
+
+
+def _annotation_baseline(message: str, initial: str | None) -> str | None:
     annotations = [
         line.removeprefix("Benchmark-Baseline:").strip()
         for line in message.splitlines()
@@ -54,7 +65,8 @@ def _previous_release(root: Path, candidate: str) -> str | None:
     previous_tags = [
         name
         for name in tags
-        if _git(root, "rev-parse", f"refs/tags/{name}^{{commit}}") != candidate
+        if _RELEASE_TAG_RE.fullmatch(name) is not None
+        and _git(root, "rev-parse", f"refs/tags/{name}^{{commit}}") != candidate
     ]
     if not previous_tags:
         return None

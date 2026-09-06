@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import io
-import subprocess
+import subprocess  # nosec B404
 import tempfile
 import unittest
 from email.message import Message
@@ -234,9 +234,11 @@ class ReleaseBaselineTests(unittest.TestCase):
         self.git("commit", "--allow-empty", "-m", "candidate")
 
     def git(self, *arguments: str) -> str:
+        # All arguments belong to the test fixture in this temporary repository.
         return subprocess.run(
             ("git", *arguments),
             cwd=self.directory,
+            shell=False,  # nosec B603
             check=True,
             capture_output=True,
             text=True,
@@ -245,6 +247,20 @@ class ReleaseBaselineTests(unittest.TestCase):
     def test_first_release_requires_an_explicit_baseline(self) -> None:
         with self.assertRaisesRegex(ValueError, "explicit initial baseline"):
             resolve_release_baseline(self.directory)
+
+    def test_diagnostic_tags_do_not_replace_a_release_baseline(self) -> None:
+        self.git("tag", "v4-diagnostic", self.baseline)
+        with self.assertRaisesRegex(ValueError, "explicit initial baseline"):
+            resolve_release_baseline(self.directory)
+
+    def test_tag_must_be_annotated_and_point_at_candidate(self) -> None:
+        self.git("tag", "v4.0.0")
+        with self.assertRaisesRegex(ValueError, "annotated"):
+            resolve_release_baseline(self.directory, tag="v4.0.0")
+
+        self.git("tag", "-a", "v4.0.1", self.baseline, "-m", "Wrong head")
+        with self.assertRaisesRegex(ValueError, "candidate HEAD"):
+            resolve_release_baseline(self.directory, tag="v4.0.1")
 
     def test_rehearsal_accepts_an_explicit_ancestor_sha(self) -> None:
         self.assertEqual(
