@@ -2,6 +2,10 @@ name: Release artifacts
 on:
   workflow_dispatch:
     inputs:
+      initial-baseline:
+        description: Full ancestor commit SHA for the first release rehearsal only
+        type: string
+        required: false
       allow-dependency-drift:
         description: >-
           Acknowledge an intended benchmark dependency change so the
@@ -67,8 +71,16 @@ jobs:
         env:
           CALC_FLOW_BENCHMARK_SCALE: overhead
           JAX_PLATFORMS: cpu
+          INITIAL_RELEASE_BASELINE: ${{ inputs['initial-baseline'] }}
         run: |
-          baseline_ref="$(git describe --tags --abbrev=0 HEAD^)"
+          baseline_args=()
+          if [[ -n "${INITIAL_RELEASE_BASELINE}" ]]; then
+            baseline_args+=(--initial-baseline "${INITIAL_RELEASE_BASELINE}")
+          fi
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            baseline_args+=(--tag "${GITHUB_REF_NAME}")
+          fi
+          baseline_ref="$(python scripts/release_baseline.py "${baseline_args[@]}")"
           test -n "${baseline_ref}"
           baseline_sha="$(git rev-parse "${baseline_ref}^{commit}")"
           candidate_sha="$(git rev-parse "HEAD^{commit}")"
@@ -238,7 +250,7 @@ jobs:
             wheel_python="wheel-smoke/bin/python"
           fi
           "${wheel_python}" -m pip install dist/*.whl
-          "${wheel_python}" -m pip show calc-flow
+          "${wheel_python}" -m pip show calc-flow-python
           "${wheel_python}" scripts/smoke_wheel.py
       - name: Upload wheel
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -308,10 +320,10 @@ jobs:
           uv build --project backend --wheel --out-dir ../dist
       - name: Install and inspect local wheels
         run: |
-          python scripts/inspect_wheel.py core-wheel dist/calc_flow-*.whl
+          python scripts/inspect_wheel.py core-wheel dist/calc_flow_python-*.whl
           python scripts/inspect_wheel.py studio-wheel dist/calc_flow_studio-*.whl
           python -m venv studio-smoke
-          python -m pip --python studio-smoke install dist/calc_flow-*.whl dist/calc_flow_studio-*.whl
+          python -m pip --python studio-smoke install dist/calc_flow_python-*.whl dist/calc_flow_studio-*.whl
           test -x studio-smoke/bin/calc-flow-web
           studio-smoke/bin/python - <<'PY'
           from importlib.metadata import requires
@@ -326,7 +338,7 @@ jobs:
           assert "/assets" in paths
           requirements = requires("calc-flow-studio") or []
           assert any(
-              requirement.lower().startswith("calc-flow")
+              requirement.lower().startswith("calc-flow-python")
               and ">=4.0.0" in requirement
               and "<5" in requirement
               for requirement in requirements
@@ -432,13 +444,13 @@ jobs:
           compression-level: 0
           retention-days: 90
   publish-python-core:
-    name: Publish calc-flow to PyPI
-    if: github.ref_type == 'tag'
+    name: Publish calc-flow-python to PyPI
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     needs: verify-python-release
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/project/calc-flow/
+      url: https://pypi.org/project/calc-flow-python/
     permissions:
       id-token: write
     steps:
@@ -458,32 +470,3 @@ jobs:
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
           packages-dir: release-dist/core
-  publish-python-studio:
-    name: Publish calc-flow-studio to PyPI
-    if: github.ref_type == 'tag'
-    needs:
-      - verify-python-release
-      - publish-python-core
-    runs-on: ubuntu-latest
-    environment:
-      name: pypi-studio
-      url: https://pypi.org/project/calc-flow-studio/
-    permissions:
-      id-token: write
-    steps:
-      - name: Download verified Python release bundle
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: verified-python-release
-          path: release-dist
-      - name: Verify exact release artifacts
-        working-directory: release-dist
-        shell: bash
-        run: |
-          sha256sum --check release-manifest.txt
-          test "$(find core studio -type f \( -name '*.whl' -o -name '*.tar.gz' \) | wc -l)" \
-            -eq "$(wc -l < release-manifest.txt)"
-      - name: Publish exact Studio artifact
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
-        with:
-          packages-dir: release-dist/studio

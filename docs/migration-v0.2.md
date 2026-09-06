@@ -164,8 +164,8 @@ The core installation contains PyArrow and DataFusion. Install only the array
 backend needed by the application:
 
 ```bash
-uv add "calc-flow[numpy]"
-uv add "calc-flow[jax]"
+uv add "calc-flow-python[numpy]"
+uv add "calc-flow-python[jax]"
 ```
 
 Development installs include both backends:

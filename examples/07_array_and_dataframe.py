@@ -88,7 +88,7 @@ def main() -> None:
     print("NumPy result:", run_numpy(source))
     jax_result = run_jax(source)
     if jax_result is None:
-        print("JAX result: skipped; install calc-flow[jax]")
+        print("JAX result: skipped; install calc-flow-python[jax]")
     else:
         print("JAX result:", jax_result)
 

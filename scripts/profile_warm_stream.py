@@ -271,7 +271,7 @@ async def build(args: argparse.Namespace) -> None:
             raise RuntimeError(f"release build failed; see {output / 'build.log'}")
     if before != await source_identity(source):
         raise RuntimeError("source changed during release build")
-    wheels = list(output.glob("calc_flow-*.whl"))
+    wheels = list(output.glob("calc_flow_python-*.whl"))
     if len(wheels) != 1:
         raise RuntimeError("build output must contain exactly one core wheel")
     manifest = {

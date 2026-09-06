@@ -33,7 +33,7 @@ class InspectWheelTests(unittest.TestCase):
     def _wheel_with(self, *names: str) -> Path:
         directory = Path(tempfile.mkdtemp())
         self.addCleanup(rmtree, directory)
-        wheel = directory / "calc_flow-2.0.0-cp313-abi3-linux_x86_64.whl"
+        wheel = directory / "calc_flow_python-2.0.0-cp313-abi3-linux_x86_64.whl"
         with ZipFile(wheel, "w") as archive:
             for name in names:
                 archive.writestr(name, self._fixture_bytes(name))
@@ -56,9 +56,9 @@ class InspectWheelTests(unittest.TestCase):
             "calc_flow/__init__.py",
             "calc_flow/_native.abi3.so",
             "calc_flow/runtime.py",
-            "calc_flow-2.0.0.dist-info/METADATA",
-            "calc_flow-2.0.0.dist-info/licenses/LICENSE",
-            "calc_flow-2.0.0.dist-info/sboms/calc-flow.cyclonedx.json",
+            "calc_flow_python-2.0.0.dist-info/METADATA",
+            "calc_flow_python-2.0.0.dist-info/licenses/LICENSE",
+            "calc_flow_python-2.0.0.dist-info/sboms/calc-flow.cyclonedx.json",
         )
 
         self.assertEqual(inspect_wheel(wheel), 6)
@@ -67,8 +67,8 @@ class InspectWheelTests(unittest.TestCase):
         wheel = self._wheel_with(
             "calc_flow/__init__.py",
             "calc_flow/_native.pyd",
-            "calc_flow-2.0.0.dist-info/METADATA",
-            "calc_flow-2.0.0.dist-info/licenses/LICENSE",
+            "calc_flow_python-2.0.0.dist-info/METADATA",
+            "calc_flow_python-2.0.0.dist-info/licenses/LICENSE",
         )
 
         self.assertEqual(inspect_wheel(wheel), 4)
@@ -77,7 +77,7 @@ class InspectWheelTests(unittest.TestCase):
         wheel = self._wheel_with(
             "calc_flow/__init__.py",
             "calc_flow/_native.abi3.so",
-            "calc_flow-2.0.0.dist-info/METADATA",
+            "calc_flow_python-2.0.0.dist-info/METADATA",
         )
 
         with self.assertRaisesRegex(ValueError, "missing Apache-2.0 license"):
@@ -87,11 +87,11 @@ class InspectWheelTests(unittest.TestCase):
         wheel = self._wheel_with(
             "calc_flow/__init__.py",
             "calc_flow/_native.abi3.so",
-            "calc_flow-2.0.0.dist-info/METADATA",
+            "calc_flow_python-2.0.0.dist-info/METADATA",
         )
         with ZipFile(wheel, "a") as archive:
             archive.writestr(
-                "calc_flow-2.0.0.dist-info/licenses/LICENSE", b"placeholder"
+                "calc_flow_python-2.0.0.dist-info/licenses/LICENSE", b"placeholder"
             )
 
         with self.assertRaisesRegex(ValueError, "invalid Apache-2.0 license"):
@@ -101,7 +101,7 @@ class InspectWheelTests(unittest.TestCase):
         wheel = self._wheel_with(
             "calc_flow/__init__.py",
             "calc_flow/_native.abi3.so",
-            "calc_flow-2.0.0.dist-info/licenses/LICENSE",
+            "calc_flow_python-2.0.0.dist-info/licenses/LICENSE",
             "web-ui/index.html",
         )
 
@@ -118,7 +118,7 @@ class InspectWheelTests(unittest.TestCase):
                 wheel = self._wheel_with(
                     "calc_flow/__init__.py",
                     "calc_flow/_native.abi3.so",
-                    "calc_flow-2.0.0.dist-info/licenses/LICENSE",
+                    "calc_flow_python-2.0.0.dist-info/licenses/LICENSE",
                     leaked_name,
                 )
 
@@ -129,7 +129,7 @@ class InspectWheelTests(unittest.TestCase):
         wheel = self._wheel_with(
             "calc_flow/__init__.py",
             "calc_flow/_native.abi3.so",
-            "calc_flow-2.0.0.dist-info/licenses/LICENSE",
+            "calc_flow_python-2.0.0.dist-info/licenses/LICENSE",
             "calc_flow/docs/superpowers/plans/symbolic-engine.md",
         )
 
@@ -140,8 +140,8 @@ class InspectWheelTests(unittest.TestCase):
         wheel = self._wheel_with(
             "calc_flow/__init__.py",
             "calc_flow/_native.abi3.so",
-            "calc_flow-2.0.0.dist-info/licenses/LICENSE",
-            "calc_flow-2.0.0.dist-info/docs/superpowers/plans/private.md",
+            "calc_flow_python-2.0.0.dist-info/licenses/LICENSE",
+            "calc_flow_python-2.0.0.dist-info/docs/superpowers/plans/private.md",
         )
 
         with self.assertRaisesRegex(ValueError, "forbidden wheel entry"):
@@ -151,8 +151,8 @@ class InspectWheelTests(unittest.TestCase):
         wheel = self._wheel_with(
             "calc_flow/__init__.py",
             "calc_flow/runtime.py",
-            "calc_flow-2.0.0.dist-info/METADATA",
-            "calc_flow-2.0.0.dist-info/licenses/LICENSE",
+            "calc_flow_python-2.0.0.dist-info/METADATA",
+            "calc_flow_python-2.0.0.dist-info/licenses/LICENSE",
         )
 
         with self.assertRaisesRegex(ValueError, "native module"):
@@ -162,8 +162,8 @@ class InspectWheelTests(unittest.TestCase):
         wheel = self._wheel_with(
             "calc_flow/__init__.py",
             "calc_flow/_native.abi3evil.so",
-            "calc_flow-2.0.0.dist-info/METADATA",
-            "calc_flow-2.0.0.dist-info/licenses/LICENSE",
+            "calc_flow_python-2.0.0.dist-info/METADATA",
+            "calc_flow_python-2.0.0.dist-info/licenses/LICENSE",
         )
 
         with self.assertRaisesRegex(ValueError, "native module"):
@@ -213,23 +213,23 @@ class InspectWheelTests(unittest.TestCase):
 
     def test_accepts_sdist_with_license_and_no_frozen_python(self) -> None:
         sdist = self._archive_with(
-            "calc_flow-2.0.0.tar.gz",
-            "calc_flow-2.0.0/LICENSE",
-            "calc_flow-2.0.0/Cargo.lock",
-            "calc_flow-2.0.0/pyproject.toml",
-            "calc_flow-2.0.0/crates/calc-flow/Cargo.toml",
-            "calc_flow-2.0.0/crates/calc-flow/src/lib.rs",
-            "calc_flow-2.0.0/crates/calc-flow-python/Cargo.toml",
-            "calc_flow-2.0.0/python/calc_flow/__init__.py",
+            "calc_flow_python-2.0.0.tar.gz",
+            "calc_flow_python-2.0.0/LICENSE",
+            "calc_flow_python-2.0.0/Cargo.lock",
+            "calc_flow_python-2.0.0/pyproject.toml",
+            "calc_flow_python-2.0.0/crates/calc-flow/Cargo.toml",
+            "calc_flow_python-2.0.0/crates/calc-flow/src/lib.rs",
+            "calc_flow_python-2.0.0/crates/calc-flow-python/Cargo.toml",
+            "calc_flow_python-2.0.0/python/calc_flow/__init__.py",
         )
 
         self.assertEqual(inspect_sdist(sdist), 7)
 
     def test_rejects_sdist_without_license(self) -> None:
         sdist = self._archive_with(
-            "calc_flow-2.0.0.tar.gz",
-            "calc_flow-2.0.0/Cargo.lock",
-            "calc_flow-2.0.0/crates/calc-flow/src/lib.rs",
+            "calc_flow_python-2.0.0.tar.gz",
+            "calc_flow_python-2.0.0/Cargo.lock",
+            "calc_flow_python-2.0.0/crates/calc-flow/src/lib.rs",
         )
 
         with self.assertRaisesRegex(ValueError, "missing Apache-2.0 license"):
@@ -237,13 +237,13 @@ class InspectWheelTests(unittest.TestCase):
 
     def test_rejects_sdist_without_essential_build_content(self) -> None:
         sdist = self._archive_with(
-            "calc_flow-2.0.0.tar.gz",
-            "calc_flow-2.0.0/LICENSE",
-            "calc_flow-2.0.0/Cargo.lock",
-            "calc_flow-2.0.0/crates/calc-flow/Cargo.toml",
-            "calc_flow-2.0.0/crates/calc-flow/src/lib.rs",
-            "calc_flow-2.0.0/crates/calc-flow-python/Cargo.toml",
-            "calc_flow-2.0.0/python/calc_flow/__init__.py",
+            "calc_flow_python-2.0.0.tar.gz",
+            "calc_flow_python-2.0.0/LICENSE",
+            "calc_flow_python-2.0.0/Cargo.lock",
+            "calc_flow_python-2.0.0/crates/calc-flow/Cargo.toml",
+            "calc_flow_python-2.0.0/crates/calc-flow/src/lib.rs",
+            "calc_flow_python-2.0.0/crates/calc-flow-python/Cargo.toml",
+            "calc_flow_python-2.0.0/python/calc_flow/__init__.py",
         )
 
         with self.assertRaisesRegex(ValueError, "missing sdist entries"):
@@ -251,15 +251,15 @@ class InspectWheelTests(unittest.TestCase):
 
     def test_rejects_repository_only_symbolic_plans_from_sdist(self) -> None:
         sdist = self._archive_with(
-            "calc_flow-2.0.0.tar.gz",
-            "calc_flow-2.0.0/LICENSE",
-            "calc_flow-2.0.0/Cargo.lock",
-            "calc_flow-2.0.0/pyproject.toml",
-            "calc_flow-2.0.0/crates/calc-flow/Cargo.toml",
-            "calc_flow-2.0.0/crates/calc-flow/src/lib.rs",
-            "calc_flow-2.0.0/crates/calc-flow-python/Cargo.toml",
-            "calc_flow-2.0.0/python/calc_flow/__init__.py",
-            "calc_flow-2.0.0/docs/superpowers/plans/symbolic-engine.md",
+            "calc_flow_python-2.0.0.tar.gz",
+            "calc_flow_python-2.0.0/LICENSE",
+            "calc_flow_python-2.0.0/Cargo.lock",
+            "calc_flow_python-2.0.0/pyproject.toml",
+            "calc_flow_python-2.0.0/crates/calc-flow/Cargo.toml",
+            "calc_flow_python-2.0.0/crates/calc-flow/src/lib.rs",
+            "calc_flow_python-2.0.0/crates/calc-flow-python/Cargo.toml",
+            "calc_flow_python-2.0.0/python/calc_flow/__init__.py",
+            "calc_flow_python-2.0.0/docs/superpowers/plans/symbolic-engine.md",
         )
 
         with self.assertRaisesRegex(ValueError, "forbidden sdist entry"):

@@ -133,15 +133,11 @@ def build_python_release(
         subprocess.run(step.command, cwd=step.cwd, check=True)
 
     core_wheel = _single_artifact(
-        sorted(
-            path
-            for path in output.glob("calc_flow-*.whl")
-            if not path.name.startswith("calc_flow_studio-")
-        ),
+        sorted(output.glob("calc_flow_python-*.whl")),
         "core wheel",
     )
     sdist = _single_artifact(
-        sorted(output.glob("calc_flow-*.tar.gz")),
+        sorted(output.glob("calc_flow_python-*.tar.gz")),
         "core source distribution",
     )
     studio_wheel = _single_artifact(

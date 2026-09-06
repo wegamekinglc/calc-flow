@@ -2,10 +2,10 @@
 
 Calc Flow has three supported surfaces:
 
-| Surface          | Package or path           | Purpose                                     |
-| ---------------- | ------------------------- | ------------------------------------------- |
+| Surface          | Package or path           | Purpose                                    |
+|------------------|---------------------------|--------------------------------------------|
 | Rust core        | `calc-flow = "4.0.0"`     | Native batches, graphs, execution, recovery |
-| Python binding   | `calc-flow==4.0.0`        | PyO3 engine access and Python integrations  |
+| Python binding   | `calc-flow-python==4.0.0` | PyO3 engine access and Python integrations  |
 | Local Studio API | `calc-flow-studio==4.0.0` | Loopback FastAPI service and React assets   |
 
 For examples and lifecycle detail, see the [executable example guide](examples.md),

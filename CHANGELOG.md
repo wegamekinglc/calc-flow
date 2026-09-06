@@ -5,6 +5,11 @@ engine or Studio capabilities.
 
 ## 2026-09
 
+- 2026-09-06: Publish the Python distribution as `calc-flow-python`, retaining
+  `import calc_flow` and the `calc-flow` Rust crate. Restrict PyPI uploads to
+  the core package, preserve Studio build/smoke validation, and require an
+  explicit ancestor performance baseline for the first release.
+
 - 2026-09-06: Add the opt-in MySQL connector with InnoDB consistent snapshots,
   monotonic integer cursor polling, parameterized append/upsert writes, and
   recoverable epoch-ledger transactions. Include verified TLS by default,
