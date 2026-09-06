@@ -12,10 +12,11 @@ format codecs (CSV, newline JSON) are always compiled. The default
 feature set is `file`.
 
 | Feature      | Surface                                                                   |
-| ------------ | ------------------------------------------------------------------------- |
+|--------------|---------------------------------------------------------------------------|
 | `file`       | Parquet codec, file/directory snapshot source, transactional Parquet sink |
 | `kafka`      | Kafka source and transactional sink                                       |
 | `postgresql` | Snapshot/polling and commit-ordered CDC sources, transactional sink       |
+| `mysql`      | InnoDB snapshot/polling source, append/upsert and epoch-ledger sinks      |
 | `clickhouse` | Bounded/polling source and deduplicating sink                             |
 | `http`       | Polling source with conditional-request validators                        |
 | `websocket`  | JSON-lines streaming source                                               |

@@ -35,8 +35,8 @@ builds wheels. An editable developer environment can instead use
 native installation.
 
 The stream examples use application-owned connectors, finite synthetic data,
-and temporary checkpoint roots. They require no Kafka, PostgreSQL, ClickHouse,
-or network service. Example 14 also uses a temporary directory. For a
+and temporary checkpoint roots. They require no Kafka, PostgreSQL, MySQL,
+ClickHouse, or network service. Example 14 also uses a temporary directory. For a
 constrained checkout, set `TMPDIR` on Linux or `TEMP` and `TMP` on Windows to
 an existing writable directory under `target/` before running.
 

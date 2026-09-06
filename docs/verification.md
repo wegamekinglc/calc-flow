@@ -46,7 +46,7 @@ The repository command groups cover:
 
 The Rust test harness must inherit the same managed Python environment used
 for PyO3 compilation, including NumPy, PyArrow, and interpreter library paths.
-Connector coverage requires running Kafka, PostgreSQL, and ClickHouse plus
+Connector coverage requires running Kafka, PostgreSQL, MySQL, and ClickHouse plus
 the environment variables listed in [AGENTS.md](../AGENTS.md#commands).
 Missing services are a blocked verification gate, not a passing coverage run.
 

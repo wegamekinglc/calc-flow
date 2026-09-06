@@ -19,6 +19,11 @@ measurements. Use the current guides for supported behavior.
   [the documentation tree before this reorganization](https://github.com/wegamekinglc/calc-flow/tree/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs)
   and Git history rather than the current documentation tree.
 
+- 2026-09-06: Add the opt-in MySQL connector with InnoDB consistent snapshots,
+  monotonic integer cursor polling, parameterized append/upsert writes, and
+  recoverable epoch-ledger transactions. Include verified TLS by default,
+  Python feature registration, and MySQL 8.4 container and coverage gates.
+
 - 2026-09-05: Unify the complete Linux CI benchmark inventory and full-result
   tables across all Python scales, Rust, Studio, frontend and stream lifecycle.
   Add SQL/native-stream and DataFusion/Polars/TA-Lib comparisons from 10 to

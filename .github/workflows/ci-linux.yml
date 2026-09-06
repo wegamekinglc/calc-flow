@@ -160,6 +160,37 @@ jobs:
           --test postgresql_connector --test postgresql_cdc
           -- --ignored --test-threads=1
 
+  connector-containers-mysql:
+    name: Connector containers (MySQL)
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: calcflow-test
+          MYSQL_DATABASE: calcflow
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h localhost -pcalcflow-test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      CALC_FLOW_CONNECTOR_CONTAINERS: "1"
+      CALC_FLOW_MYSQL_TEST_URL: mysql://root:calcflow-test@localhost:3306/calcflow
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+      - name: Run gated MySQL connector tests
+        run: >-
+          cargo test -p calc-flow-connectors --features mysql
+          --test mysql_connector -- --ignored --test-threads=1
+
   connector-containers-ch:
     name: Connector containers (ClickHouse)
     needs: changes
@@ -572,6 +603,18 @@ jobs:
     if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: calcflow-test
+          MYSQL_DATABASE: calcflow
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h localhost -pcalcflow-test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
       kafka:
         image: apache/kafka:3.9.0
         ports:
@@ -606,6 +649,7 @@ jobs:
       CALC_FLOW_CONNECTOR_CONTAINERS: "1"
       CALC_FLOW_KAFKA_BOOTSTRAP: localhost:9092
       CALC_FLOW_PG_TEST_URL: postgresql://postgres:postgres@localhost:5432/postgres
+      CALC_FLOW_MYSQL_TEST_URL: mysql://root:calcflow-test@localhost:3306/calcflow
       CH_TEST_URL: http://localhost:8123
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -736,6 +780,7 @@ jobs:
       - connector-containers
       - connector-containers-pg
       - connector-containers-ch
+      - connector-containers-mysql
       - lint-and-test
       - frontend
       - studio-backend
@@ -754,6 +799,7 @@ jobs:
       DOCS_RESULT: ${{ needs.docs-check.result }}
       CONNECTOR_KAFKA_RESULT: ${{ needs.connector-containers.result }}
       CONNECTOR_PG_RESULT: ${{ needs.connector-containers-pg.result }}
+      CONNECTOR_MYSQL_RESULT: ${{ needs.connector-containers-mysql.result }}
       CONNECTOR_CH_RESULT: ${{ needs.connector-containers-ch.result }}
       LINT_RESULT: ${{ needs.lint-and-test.result }}
       FRONTEND_RESULT: ${{ needs.frontend.result }}
@@ -778,6 +824,7 @@ jobs:
             "$CONNECTOR_KAFKA_RESULT" \
             "$CONNECTOR_PG_RESULT" \
             "$CONNECTOR_CH_RESULT" \
+            "$CONNECTOR_MYSQL_RESULT" \
             "$LINT_RESULT" \
             "$FRONTEND_RESULT" \
             "$STUDIO_BACKEND_RESULT" \

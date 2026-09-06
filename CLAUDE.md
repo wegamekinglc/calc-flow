@@ -39,6 +39,7 @@ uv run python scripts/run_rust_tests.py
 CALC_FLOW_CONNECTOR_CONTAINERS=1 \
   CALC_FLOW_KAFKA_BOOTSTRAP=localhost:9092 \
   CALC_FLOW_PG_TEST_URL=postgresql://postgres:postgres@localhost:5432/postgres \
+  CALC_FLOW_MYSQL_TEST_URL="${CALC_FLOW_MYSQL_TEST_URL:?set the MySQL test URL}" \
   CH_TEST_URL=http://localhost:8123 \
   uv run python scripts/run_rust_coverage.py
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps

@@ -82,6 +82,14 @@ def coverage_commands() -> tuple[tuple[str, ...], ...]:
             "--test-threads=1",
         ),
         (
+            *connector,
+            "--test",
+            "mysql_connector",
+            "--",
+            "--ignored",
+            "--test-threads=1",
+        ),
+        (
             "cargo",
             "llvm-cov",
             "report",
@@ -153,11 +161,12 @@ def instrumented_environment(environment: dict[str, str]) -> dict[str, str]:
 
 
 def require_connector_environment(environment: dict[str, str]) -> None:
-    """Fail before compilation when the three service gates are not enabled."""
+    """Fail before compilation when the four service gates are not enabled."""
     required = {
         "CALC_FLOW_CONNECTOR_CONTAINERS": "1",
         "CALC_FLOW_KAFKA_BOOTSTRAP": "",
         "CALC_FLOW_PG_TEST_URL": "",
+        "CALC_FLOW_MYSQL_TEST_URL": "",
         "CH_TEST_URL": "",
     }
     missing = [

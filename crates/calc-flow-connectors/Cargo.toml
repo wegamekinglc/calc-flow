@@ -11,6 +11,7 @@ repository.workspace = true
 
 [features]
 default = ["file"]
+mysql = ["dep:mysql_async", "dep:chrono", "dep:hex", "dep:sha2", "dep:rustls", "arrow/ipc"]
 file = ["dep:parquet"]
 kafka = ["dep:hex", "dep:rdkafka", "dep:serde", "dep:sha2"]
 clickhouse = ["dep:hex", "dep:reqwest", "dep:serde", "dep:sha2"]
@@ -38,6 +39,7 @@ postgresql = [
 ]
 
 [dependencies]
+mysql_async = { version = "=0.37.1", default-features = false, features = ["minimal-rust", "rustls-tls", "ring", "tls12"], optional = true }
 calc-flow = { path = "../calc-flow", version = "=4.0.0" }
 arrow = { version = "=58.3.0", default-features = false }
 arrow-csv = "=58.3.0"

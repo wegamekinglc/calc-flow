@@ -45,14 +45,14 @@ connectors <── trusted factories <──────────────
 state/checkpoints <── managed runtime <──────────────────────────────────┘
 ```
 
-| Component              | Owns                                                                 | Does not own                                      |
-|------------------------|----------------------------------------------------------------------|---------------------------------------------------|
-| `calc-flow`            | `Batch`, graph compile, DataFusion, plans, runners, state, manifests | Transport-specific clients or browser UI          |
-| `calc-flow-python`     | PyO3 classes and async bridges                                       | Alternative execution semantics                   |
-| `python/calc_flow`     | Functional builders, adapters, NumPy/JAX registration                | Serialized executable code                        |
-| `calc-flow-connectors` | File, Kafka, PostgreSQL, ClickHouse, HTTP, WebSocket implementations | Graph compilation or job supervision              |
-| `calc-flow-studio`     | Local process workers, resource limits, `/api/v3`, static assets     | Public-hosted multi-user service                  |
-| React Studio           | Project editing, job controls, SSE observation                       | Direct access to connector secrets or checkpoints |
+| Component              | Owns                                                                        | Does not own                                      |
+|------------------------|-----------------------------------------------------------------------------|---------------------------------------------------|
+| `calc-flow`            | `Batch`, graph compile, DataFusion, plans, runners, state, manifests        | Transport-specific clients or browser UI          |
+| `calc-flow-python`     | PyO3 classes and async bridges                                              | Alternative execution semantics                   |
+| `python/calc_flow`     | Functional builders, adapters, NumPy/JAX registration                       | Serialized executable code                        |
+| `calc-flow-connectors` | File, Kafka, PostgreSQL, MySQL, ClickHouse, HTTP, WebSocket implementations | Graph compilation or job supervision              |
+| `calc-flow-studio`     | Local process workers, resource limits, `/api/v3`, static assets            | Public-hosted multi-user service                  |
+| React Studio           | Project editing, job controls, SSE observation                              | Direct access to connector secrets or checkpoints |
 
 ## Stable contracts
 

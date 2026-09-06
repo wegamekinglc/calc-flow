@@ -33,9 +33,9 @@ Rust's `continuous_runtime` and `windowed_streaming` demonstrate the native
 traits and watermark-driven tumbling windows.
 
 The examples use local application-owned connectors and temporary state
-directories. To connect a real transport, use the data-only fragments in the
-[connector guide](connectors.md) and supply that transport's service and
-credentials separately.
+directories. For Kafka, PostgreSQL, MySQL, ClickHouse, HTTP, WebSocket,
+files, or Parquet, use the data-only fragments in the [connector guide](connectors.md)
+and supply that transport's service and credentials separately.
 
 ## Compose financial and relational calculations
 
