@@ -339,6 +339,22 @@ impl MySqlSource {
         .await
     }
 
+    async fn next_page(&mut self) -> Result<Option<SourceEvent>> {
+        // Own the connection across this operation: cancellation/error drops it
+        // instead of leaving a partially consumed result available for reuse.
+        let mut conn = self
+            .conn
+            .take()
+            .ok_or_else(|| fail("read", "source is not open"))?;
+        if self.load_schema(&mut conn).await? != self.schema {
+            return Err(fail("read", "source schema changed"));
+        }
+        let rows = self.fetch(&mut conn).await?;
+        let event = self.finish_page(&mut conn, &rows).await?;
+        self.conn = Some(conn);
+        Ok(event)
+    }
+
     async fn finish_page(&mut self, conn: &mut Conn, rows: &[Row]) -> Result<Option<SourceEvent>> {
         if !rows.is_empty() {
             return self.data_event(rows).map(Some);
@@ -497,19 +513,7 @@ impl StreamSource for MySqlSource {
         if self.idle {
             tokio::time::sleep(self.config.poll).await;
         }
-        // Own the connection across this operation: cancellation/error drops it
-        // instead of leaving a partially consumed result available for reuse.
-        let mut conn = self
-            .conn
-            .take()
-            .ok_or_else(|| fail("read", "source is not open"))?;
-        if self.load_schema(&mut conn).await? != self.schema {
-            return Err(fail("read", "source schema changed"));
-        }
-        let rows = self.fetch(&mut conn).await?;
-        let event = self.finish_page(&mut conn, &rows).await?;
-        self.conn = Some(conn);
-        Ok(event)
+        self.next_page().await
     }
     async fn close(&mut self) -> Result<()> {
         self.url = None;

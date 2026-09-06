@@ -264,17 +264,25 @@ impl MySqlSink {
             .ok_or_else(|| fail("commit", "sink is not open"))?;
         let timeout = self.config.connection.timeout;
         let mut tx = database("commit", timeout, conn.start_transaction(TxOpts::default())).await?;
-        let write = if let Some(epoch) = epoch {
-            self.claim_epoch(&mut tx, epoch, bytes, records).await?
-        } else {
-            true
-        };
-        if write {
+        if self.should_write(&mut tx, epoch, bytes, records).await? {
             self.write_records(&mut tx, records).await?;
         }
         database("commit", timeout, tx.commit()).await?;
         self.conn = Some(conn);
         Ok(())
+    }
+
+    async fn should_write(
+        &self,
+        tx: &mut Transaction<'_>,
+        epoch: Option<Epoch>,
+        bytes: &[u8],
+        records: &[RecordBatch],
+    ) -> Result<bool> {
+        match epoch {
+            Some(epoch) => self.claim_epoch(tx, epoch, bytes, records).await,
+            None => Ok(true),
+        }
     }
 
     async fn claim_epoch(

@@ -240,41 +240,56 @@ impl SinkConfig {
                 "max_epoch_bytes",
             ],
         )?;
-        let mode = match options.get("mode").map(serde_json::Value::as_str) {
-            None | Some(Some("append")) => SinkMode::Append,
-            Some(Some("upsert")) => SinkMode::Upsert,
-            Some(Some("transactional")) => SinkMode::Transactional,
-            _ => return Err(invalid("mode", "expected append, upsert, or transactional")),
-        };
-        let identity = |key| -> Result<String> {
-            if mode != SinkMode::Transactional {
-                return Ok(String::new());
-            }
-            let value = required_str(options, key)?;
-            if value.is_empty() || value.len() > 128 {
-                return Err(invalid(key, "expected 1 to 128 UTF-8 bytes"));
-            }
-            Ok(value.into())
-        };
-        let rows = positive_option(options, "max_epoch_rows", 100_000)?;
-        let bytes = positive_option(options, "max_epoch_bytes", 64 * 1024 * 1024)?;
-        if rows > 1_000_000 || !(1024..=1024 * 1024 * 1024).contains(&bytes) {
-            return Err(invalid(
-                "bounds",
-                "maximum 1000000 rows; bytes must be between 1024 and 1 GiB",
-            ));
-        }
-        let connection = ConnectionConfig::parse(options)?;
-        if connection.table.eq_ignore_ascii_case(super::sink::LEDGER) {
-            return Err(invalid("table", "the epoch ledger is reserved"));
-        }
+        let mode = sink_mode(options)?;
+        let (rows, bytes) = sink_limits(options)?;
+        let connection = sink_connection(options)?;
         Ok(Self {
             connection,
             mode,
-            pipeline: identity("pipeline")?,
-            output: identity("output")?,
+            pipeline: sink_identity(options, "pipeline", mode)?,
+            output: sink_identity(options, "output", mode)?,
             rows,
             bytes,
         })
     }
+}
+
+fn sink_mode(options: &JsonMap) -> Result<SinkMode> {
+    match options.get("mode").map(serde_json::Value::as_str) {
+        None | Some(Some("append")) => Ok(SinkMode::Append),
+        Some(Some("upsert")) => Ok(SinkMode::Upsert),
+        Some(Some("transactional")) => Ok(SinkMode::Transactional),
+        _ => Err(invalid("mode", "expected append, upsert, or transactional")),
+    }
+}
+
+fn sink_identity(options: &JsonMap, key: &str, mode: SinkMode) -> Result<String> {
+    if mode != SinkMode::Transactional {
+        return Ok(String::new());
+    }
+    let value = required_str(options, key)?;
+    if value.is_empty() || value.len() > 128 {
+        return Err(invalid(key, "expected 1 to 128 UTF-8 bytes"));
+    }
+    Ok(value.into())
+}
+
+fn sink_limits(options: &JsonMap) -> Result<(u64, u64)> {
+    let rows = positive_option(options, "max_epoch_rows", 100_000)?;
+    let bytes = positive_option(options, "max_epoch_bytes", 64 * 1024 * 1024)?;
+    if rows > 1_000_000 || !(1024..=1024 * 1024 * 1024).contains(&bytes) {
+        return Err(invalid(
+            "bounds",
+            "maximum 1000000 rows; bytes must be between 1024 and 1 GiB",
+        ));
+    }
+    Ok((rows, bytes))
+}
+
+fn sink_connection(options: &JsonMap) -> Result<ConnectionConfig> {
+    let connection = ConnectionConfig::parse(options)?;
+    if connection.table.eq_ignore_ascii_case(super::sink::LEDGER) {
+        return Err(invalid("table", "the epoch ledger is reserved"));
+    }
+    Ok(connection)
 }
