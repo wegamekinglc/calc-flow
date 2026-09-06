@@ -25,9 +25,8 @@ class WarmProfileTests(unittest.TestCase):
                 (directory / "pyproject.toml").write_text(
                     f'[project]\nname = "{project_name}"\n', encoding="utf-8"
                 )
-                wheel = directory / (
-                    f"{project_name.replace('-', '_')}-4.0.0-cp313-abi3-linux_x86_64.whl"
-                )
+                distribution = project_name.replace("-", "_")
+                wheel = directory / f"{distribution}-4.0.0-cp313-abi3-linux_x86_64.whl"
                 wheel.touch()
                 (directory / "calc_flow_studio-4.0.0-py3-none-any.whl").touch()
                 self.assertEqual(profile._core_wheel(directory, directory), wheel)
