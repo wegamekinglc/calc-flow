@@ -33,9 +33,18 @@
 
 pub mod arrow_schema;
 pub mod csv;
-#[cfg(any(feature = "clickhouse", feature = "kafka", feature = "postgresql"))]
+#[cfg(any(
+    feature = "clickhouse",
+    feature = "kafka",
+    feature = "postgresql",
+    feature = "mysql"
+))]
 mod evidence;
 pub mod json_lines;
+#[cfg(feature = "mysql")]
+pub mod mysql;
+#[cfg(feature = "mysql")]
+pub use mysql::{MySqlSinkFactory, MySqlSourceFactory, register_mysql_connectors};
 mod options;
 #[cfg(feature = "file")]
 pub mod parquet;

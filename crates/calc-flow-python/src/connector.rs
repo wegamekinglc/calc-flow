@@ -110,6 +110,7 @@ pub(crate) fn register_builtin_connectors(
         any(
             feature = "connector-kafka",
             feature = "connector-postgresql",
+            feature = "connector-mysql",
             feature = "connector-clickhouse",
             feature = "connector-http",
             feature = "connector-websocket"
@@ -127,6 +128,8 @@ pub(crate) fn register_builtin_connectors(
     calc_flow_connectors::register_websocket_connectors(registry)?;
     #[cfg(feature = "connector-postgresql")]
     calc_flow_connectors::register_postgresql_connectors(registry)?;
+    #[cfg(feature = "connector-mysql")]
+    calc_flow_connectors::register_mysql_connectors(registry)?;
 
     Ok(())
 }
@@ -159,6 +162,28 @@ fn transaction_str(value: calc_flow::TransactionSupport) -> String {
         calc_flow::TransactionSupport::PreCommitCommit => "pre_commit_commit".into(),
         calc_flow::TransactionSupport::LedgerIdempotent => "ledger_idempotent".into(),
         calc_flow::TransactionSupport::RetryDeduplicated => "retry_deduplicated".into(),
+    }
+}
+
+#[cfg(all(test, feature = "connector-mysql"))]
+mod mysql_tests {
+    #[test]
+    fn builtin_registry_resolves_mysql_without_optional_file_support() {
+        let mut registry = calc_flow::ConnectorRegistry::new();
+        super::register_builtin_connectors(&mut registry).unwrap();
+        let snapshot = registry.snapshot();
+        let identity =
+            calc_flow::ConnectorIdentity::new("calc-flow-connectors", "mysql", "1.0.0").unwrap();
+        let source = snapshot.resolve_source(&identity).unwrap();
+        assert!(source.descriptor().capabilities.polling);
+        assert!(!source.descriptor().capabilities.cdc);
+        assert!(snapshot.resolve_sink(&identity).is_ok());
+        assert!(
+            snapshot
+                .format_identities()
+                .iter()
+                .any(|format| format.name.to_string() == "json")
+        );
     }
 }
 

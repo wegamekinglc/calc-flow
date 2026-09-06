@@ -84,7 +84,7 @@ The sink asserts both deterministic aggregates before printing them.
   `12_symbolic_stream_join.py`; for independent or nested joins and explicit
   post-join ordering, continue with `13_symbolic_relational_dag.py`.
 - For event-time aggregation in Rust, start with `windowed_streaming.rs`.
-- For Kafka, PostgreSQL, ClickHouse, HTTP, WebSocket, files, or Parquet, use a
+- For Kafka, PostgreSQL, MySQL, ClickHouse, HTTP, WebSocket, files, or Parquet, use a
   project-v3 connector binding from the [connector guide](connectors.md).
 - For a browser-managed local job, use [Calc Flow Studio](../web-ui/README.md).
 
