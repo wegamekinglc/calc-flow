@@ -475,16 +475,24 @@ fn insert_sql(config: &SinkConfig, schema: &Schema, rows: usize) -> Result<Strin
         vec![row; rows].join(", ")
     );
     if config.mode == SinkMode::Upsert {
-        sql.push_str(" AS incoming ON DUPLICATE KEY UPDATE ");
-        sql.push_str(
-            &names
-                .iter()
-                .map(|name| format!("{name} = incoming.{name}"))
-                .collect::<Vec<_>>()
-                .join(", "),
-        );
+        sql.push_str(&upsert_clause(&config.connection.table, &names));
     }
     Ok(sql)
+}
+
+fn upsert_clause(table: &str, columns: &[String]) -> String {
+    // MySQL requires a new-row alias that differs from the target table.
+    let alias = if table.eq_ignore_ascii_case("incoming") {
+        "calc_flow_inserted"
+    } else {
+        "incoming"
+    };
+    let assignments = columns
+        .iter()
+        .map(|name| format!("{name} = {alias}.{name}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(" AS {alias} ON DUPLICATE KEY UPDATE {assignments}")
 }
 
 fn validate_record(record: &RecordBatch) -> Result<()> {

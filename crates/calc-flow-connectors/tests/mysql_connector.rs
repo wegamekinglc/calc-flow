@@ -364,42 +364,39 @@ async fn mysql_transaction_recovery_is_idempotent_and_rejects_changed_evidence()
 #[tokio::test]
 #[ignore = "requires MySQL 8.4 and CALC_FLOW_CONNECTOR_CONTAINERS=1"]
 async fn mysql_append_upsert_and_failed_transaction_are_atomic() {
+    for table in ["mysql_append_test", "incoming"] {
+        check_append_upsert_atomicity(table).await;
+    }
+}
+
+async fn check_append_upsert_atomicity(table: &str) {
     let url = test_url();
     let mut conn = admin(&url).await;
-    conn.query_drop("DROP TABLE IF EXISTS mysql_append_test")
+    conn.query_drop(format!("DROP TABLE IF EXISTS `{table}`"))
         .await
         .unwrap();
-    conn.query_drop(
-        "CREATE TABLE mysql_append_test (id BIGINT PRIMARY KEY, label TEXT NOT NULL) ENGINE=InnoDB",
-    )
+    conn.query_drop(format!(
+        "CREATE TABLE `{table}` (id BIGINT PRIMARY KEY, label TEXT NOT NULL) ENGINE=InnoDB"
+    ))
     .await
     .unwrap();
     let factory = MySqlSinkFactory::new();
-    let mut sink = factory
-        .open(&options("mysql_append_test", "append"), &url)
-        .await
-        .unwrap();
+    let mut sink = factory.open(&options(table, "append"), &url).await.unwrap();
     sink.open().await.unwrap();
     sink.write(&batch(&[1], &["before"])).await.unwrap();
     sink.close().await.unwrap();
-    let mut sink = factory
-        .open(&options("mysql_append_test", "upsert"), &url)
-        .await
-        .unwrap();
+    let mut sink = factory.open(&options(table, "upsert"), &url).await.unwrap();
     sink.open().await.unwrap();
     sink.write(&batch(&[1, 2], &["after", "new"]))
         .await
         .unwrap();
     sink.close().await.unwrap();
     let rows: Vec<(i64, String)> = conn
-        .query("SELECT id,label FROM mysql_append_test ORDER BY id")
+        .query(format!("SELECT id,label FROM `{table}` ORDER BY id"))
         .await
         .unwrap();
     assert_eq!(rows, vec![(1, "after".into()), (2, "new".into())]);
-    let mut sink = factory
-        .open(&options("mysql_append_test", "append"), &url)
-        .await
-        .unwrap();
+    let mut sink = factory.open(&options(table, "append"), &url).await.unwrap();
     sink.open().await.unwrap();
     let error = sink
         .write(&batch(&[3, 1], &["rolled-back-secret", "duplicate-secret"]))
@@ -409,7 +406,7 @@ async fn mysql_append_upsert_and_failed_transaction_are_atomic() {
     assert!(!error.contains("secret"));
     sink.close().await.unwrap();
     let count: Option<u64> = conn
-        .query_first("SELECT COUNT(*) FROM mysql_append_test")
+        .query_first(format!("SELECT COUNT(*) FROM `{table}`"))
         .await
         .unwrap();
     assert_eq!(count, Some(2));
