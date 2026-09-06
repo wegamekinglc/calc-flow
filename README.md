@@ -163,9 +163,9 @@ The frontend talks to the backend over the `/api/v3` REST contract only; the
 Python package is not a second engine.
 
 | Path                           | Purpose                                                                                                                                  |
-| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
+|--------------------------------|------------------------------------------------------------------------------------------------------------------------------------------|
 | `crates/calc-flow/`            | Native core: batches, ports/operators, graph compiler, DataFusion runtime, UDF/provider registries, runners, checkpoints, project stores |
-| `crates/calc-flow-connectors/` | Trusted file, Kafka, PostgreSQL, ClickHouse, HTTP, and WebSocket connectors behind feature gates                                         |
+| `crates/calc-flow-connectors/` | Trusted file, Kafka, PostgreSQL, MySQL, ClickHouse, HTTP, and WebSocket connectors behind feature gates                                  |
 | `crates/calc-flow-python/`     | PyO3 binding exposing the core as `calc_flow._native`                                                                                    |
 | `python/calc_flow/`            | Pure-Python public API, functional `PipelineBuilder`, runner/store adapters, NumPy/JAX provider registration, exception hierarchy        |
 | `web-ui/backend/`              | `calc-flow-studio` FastAPI service under `/api/v3`, loopback-bound, spawned bounded continuous-job workers                               |
@@ -280,6 +280,7 @@ uv run python scripts/run_rust_tests.py
 CALC_FLOW_CONNECTOR_CONTAINERS=1 \
   CALC_FLOW_KAFKA_BOOTSTRAP=localhost:9092 \
   CALC_FLOW_PG_TEST_URL=postgresql://postgres:postgres@localhost:5432/postgres \
+  CALC_FLOW_MYSQL_TEST_URL=mysql://root:calcflow-test@localhost:3306/calcflow \
   CH_TEST_URL=http://localhost:8123 \
   uv run python scripts/run_rust_coverage.py
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps

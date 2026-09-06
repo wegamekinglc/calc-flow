@@ -140,7 +140,7 @@ jobs:
       - name: Run Windows clippy (connectors, non-kafka)
         run: >-
           cargo clippy -p calc-flow-connectors --all-targets
-          --no-default-features --features file,clickhouse,http,websocket,postgresql
+          --no-default-features --features file,clickhouse,http,websocket,postgresql,mysql
           -- -D warnings
   windows-gate:
     name: Windows CI gate

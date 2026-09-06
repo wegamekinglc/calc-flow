@@ -52,6 +52,7 @@ jobs:
           scripts.test_benchmark_aggregate scripts.test_benchmark_process
           scripts.test_benchmark_refs
           scripts.test_benchmark_rust
+          scripts.test_benchmark_rust_provenance
           scripts.test_benchmark_worker
           scripts.test_benchmark_frontend
 

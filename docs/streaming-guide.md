@@ -2,7 +2,7 @@
 
 Calc Flow continuous jobs consume async sources, execute a compiled stream
 graph, publish to async sinks, and recover from managed checkpoints. Use this
-guide for application-owned connectors. For Kafka, PostgreSQL, ClickHouse,
+guide for application-owned connectors. For Kafka, PostgreSQL, MySQL, ClickHouse,
 HTTP, WebSocket, files, and Parquet, combine it with the
 [connector and stream-project guide](connectors.md).
 

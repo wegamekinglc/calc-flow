@@ -24,6 +24,7 @@ def connector_environment() -> dict[str, str]:
         "CALC_FLOW_CONNECTOR_CONTAINERS": "1",
         "CALC_FLOW_KAFKA_BOOTSTRAP": "localhost:9092",
         "CALC_FLOW_PG_TEST_URL": "postgresql://localhost/postgres",
+        "CALC_FLOW_MYSQL_TEST_URL": "mysql://localhost/calcflow",
         "CH_TEST_URL": "http://localhost:8123",
     }
 
@@ -32,7 +33,7 @@ class RustCoverageRunnerTests(unittest.TestCase):
     def test_plan_accumulates_all_real_connector_tests_before_enforcement(self) -> None:
         commands = coverage_commands()
 
-        self.assertEqual(len(commands), 8)
+        self.assertEqual(len(commands), 9)
         self.assertEqual(
             commands[0], ("cargo", "test", "--workspace", "--all-features")
         )
@@ -52,7 +53,7 @@ class RustCoverageRunnerTests(unittest.TestCase):
         self.assertEqual(
             [
                 target
-                for command in commands[3:6]
+                for command in commands[3:7]
                 for index, target in enumerate(command)
                 if index > 0 and command[index - 1] == "--test"
             ],
@@ -61,9 +62,10 @@ class RustCoverageRunnerTests(unittest.TestCase):
                 "postgresql_connector",
                 "postgresql_cdc",
                 "clickhouse_connector",
+                "mysql_connector",
             ],
         )
-        for command in commands[3:6]:
+        for command in commands[3:7]:
             self.assertIn("--ignored", command)
         export, enforce = commands[-2:]
         self.assertEqual(export[0:3], ("cargo", "llvm-cov", "report"))
@@ -80,6 +82,7 @@ class RustCoverageRunnerTests(unittest.TestCase):
         with self.assertRaisesRegex(
             SystemExit,
             "CALC_FLOW_CONNECTOR_CONTAINERS, CALC_FLOW_KAFKA_BOOTSTRAP, "
+            "CALC_FLOW_MYSQL_TEST_URL, "
             "CALC_FLOW_PG_TEST_URL, CH_TEST_URL",
         ):
             require_connector_environment({})
@@ -135,7 +138,7 @@ class RustCoverageRunnerTests(unittest.TestCase):
 
         run(environment)
 
-        self.assertEqual(execute.call_count, 10)
+        self.assertEqual(execute.call_count, 11)
         self.assertEqual(execute.call_args_list[0].args, (SHOW_ENV_COMMAND,))
         self.assertEqual(
             execute.call_args_list[0].kwargs,
