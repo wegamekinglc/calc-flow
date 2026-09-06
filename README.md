@@ -16,14 +16,14 @@ local FastAPI and React application.
 Python 3.13 or newer:
 
 ```bash
-uv add calc-flow
+uv add calc-flow-python
 ```
 
 Optional array providers:
 
 ```bash
-uv add "calc-flow[numpy]"
-uv add "calc-flow[jax]"
+uv add "calc-flow-python[numpy]"
+uv add "calc-flow-python[jax]"
 ```
 
 Rust:

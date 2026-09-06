@@ -6,7 +6,7 @@ For a guided first calculation, read [batch calculations](batch-guide.md).
 This page describes methods and their contracts; the larger symbolic surface
 has its own [reference](symbolic-api.md).
 
-The `calc-flow==4.0.0` Python package is a PyO3 binding to the Rust engine plus
+The `calc-flow-python==4.0.0` Python package is a PyO3 binding to the Rust engine plus
 small functional adapters. Python 3.13 or newer is required.
 
 On this page:
@@ -28,9 +28,9 @@ On this page:
 ## Install and develop
 
 ```bash
-uv add calc-flow
-uv add "calc-flow[numpy]"  # optional
-uv add "calc-flow[jax]"    # optional
+uv add calc-flow-python
+uv add "calc-flow-python[numpy]"  # optional
+uv add "calc-flow-python[jax]"    # optional
 ```
 
 From a source checkout:

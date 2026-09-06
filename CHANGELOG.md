@@ -19,6 +19,11 @@ measurements. Use the current guides for supported behavior.
   [the documentation tree before this reorganization](https://github.com/wegamekinglc/calc-flow/tree/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs)
   and Git history rather than the current documentation tree.
 
+- 2026-09-06: Publish the Python distribution as `calc-flow-python`, retaining
+  `import calc_flow` and the `calc-flow` Rust crate. Restrict PyPI uploads to
+  the core package, preserve Studio build/smoke validation, and require an
+  explicit ancestor performance baseline for the first release.
+
 - 2026-09-06: Add the opt-in MySQL connector with InnoDB consistent snapshots,
   monotonic integer cursor polling, parameterized append/upsert writes, and
   recoverable epoch-ledger transactions. Include verified TLS by default,

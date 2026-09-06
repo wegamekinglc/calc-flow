@@ -7,7 +7,7 @@ optional local Studio. This guide covers two installation paths:
 
 - install published packages when you want to use Calc Flow in an application;
 - build release artifacts from source when you want to develop Calc Flow or
-  run the repository version of Studio.
+  run Studio.
 
 Linux commands use Bash, Windows commands use native PowerShell, and WSL
 follows the Linux instructions. See the [introduction](introduction.md)
@@ -27,14 +27,15 @@ On this page:
 
 ## Choose an installation path
 
-Use published packages if you only need the Python API, Rust crate, or packaged
-Studio. This path does not require a repository checkout, a Rust compiler for
-Python wheels, or Node.js.
+Use published packages if you only need the Python API or Rust crate. This
+path does not require a repository checkout, a Rust compiler for Python wheels,
+or Node.js.
 
-Build from source if you are changing Calc Flow, need unreleased code, or want
-the managed API-plus-Vite Studio. The source flow builds non-editable core and
-Studio wheels so the API process and its spawned job workers import the
-same native extension from the prepared environment.
+Studio is not published to PyPI. [Build and install from source](#build-and-install-from-source)
+to run either packaged Studio or its managed API-plus-Vite development mode.
+The source flow builds non-editable core and Studio wheels so the API process
+and its spawned job workers import the same native extension from the prepared
+environment. Use it for unreleased code or Calc Flow development as well.
 
 ## Prerequisites
 
@@ -85,43 +86,24 @@ providers your application uses.
 ```bash
 uv init calc-flow-example
 cd calc-flow-example
-uv add calc-flow
+uv add calc-flow-python
 
 # Optional providers
-uv add "calc-flow[numpy]"
-uv add "calc-flow[jax]"
+uv add "calc-flow-python[numpy]"
+uv add "calc-flow-python[jax]"
 ```
-
-Install the packaged Studio as an isolated command-line tool:
-
-```bash
-uv tool install calc-flow-studio
-calc-flow-web
-```
-
-Open `http://127.0.0.1:8765`. The packaged server serves the built frontend and
-the `/api/v3` API from the same loopback service. Stop it with `Ctrl+C`.
 
 ### Windows PowerShell
 
 ```powershell
 uv init calc-flow-example
 Set-Location calc-flow-example
-uv add calc-flow
+uv add calc-flow-python
 
 # Optional providers
-uv add "calc-flow[numpy]"
-uv add "calc-flow[jax]"
+uv add "calc-flow-python[numpy]"
+uv add "calc-flow-python[jax]"
 ```
-
-Install and start the packaged Studio:
-
-```powershell
-uv tool install calc-flow-studio
-calc-flow-web
-```
-
-Open `http://127.0.0.1:8765`. Stop the server with `Ctrl+C`.
 
 Rust applications add the published crate from their Cargo project:
 
@@ -168,7 +150,7 @@ uv build --project web-ui/backend --wheel --out-dir target/wheels
 # Install both wheels into the repository environment.
 uv venv --python 3.13
 uv pip install --python .venv/bin/python \
-  target/wheels/calc_flow-*.whl \
+  target/wheels/calc_flow_python-*.whl \
   target/wheels/calc_flow_studio-*.whl
 ```
 
@@ -201,7 +183,7 @@ uv build --project web-ui/backend --wheel --out-dir target\wheels
 # Install both wheels into the repository environment.
 uv venv --python 3.13
 $coreWheel = (
-    Get-ChildItem target\wheels\calc_flow-*.whl |
+    Get-ChildItem target\wheels\calc_flow_python-*.whl |
         Sort-Object LastWriteTime |
         Select-Object -Last 1
 ).FullName
@@ -229,6 +211,8 @@ frontend and API together at `http://127.0.0.1:8765`:
 ```bash
 uv run --no-sync --package calc-flow-studio calc-flow-web
 ```
+
+Stop the static server with `Ctrl+C`.
 
 The managed development mode starts the API at `http://127.0.0.1:8765` and
 Vite at `http://127.0.0.1:5173`. It stores logs and process state under

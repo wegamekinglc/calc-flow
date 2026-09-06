@@ -7,7 +7,7 @@ is standalone; the [learning paths](../docs/examples.md) group them by task.
 
 ## Prepare and run
 
-From a checkout with the core package built and installed, run one program:
+From a checkout with `calc-flow-python` built and installed, run one program:
 
 ```bash
 uv run --no-sync python examples/01_datafusion_pipeline.py
@@ -25,7 +25,7 @@ These commands work in Bash and PowerShell. The runner defaults JAX to CPU
 when `JAX_PLATFORMS` is unset. NumPy is required by examples 06, 07, and 11;
 JAX is optional in 07, which prints an explicit skip when it is unavailable.
 The `dev` extra installs both providers. For individual application installs,
-use `calc-flow[numpy]` or `calc-flow[jax]` as needed.
+use `calc-flow-python[numpy]` or `calc-flow-python[jax]` as needed.
 
 The [source installation](../docs/getting-started.md#build-and-install-from-source)
 builds wheels. An editable developer environment can instead use

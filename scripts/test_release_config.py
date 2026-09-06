@@ -154,8 +154,10 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertEqual(workspace["workspace"]["package"]["version"], "4.0.0")
         self.assertEqual(binding["dependencies"]["calc-flow"]["version"], "=4.0.0")
         self.assertEqual(package["project"]["version"], "4.0.0")
+        self.assertEqual(package["project"]["name"], "calc-flow-python")
+        self.assertEqual(package["tool"]["maturin"]["module-name"], "calc_flow._native")
         self.assertEqual(studio["project"]["version"], "4.0.0")
-        self.assertIn("calc-flow>=4.0.0,<5", studio["project"]["dependencies"])
+        self.assertIn("calc-flow-python>=4.0.0,<5", studio["project"]["dependencies"])
         self.assertEqual(frontend["version"], "4.0.0")
         self.assertEqual(frontend_lock["version"], "4.0.0")
         self.assertEqual(frontend_lock["packages"][""]["version"], "4.0.0")
@@ -285,13 +287,20 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn('git cat-file -t "${GITHUB_REF}"', workflow)
         self.assertIn("  verify-python-release:\n", workflow)
         self.assertIn("name: verified-python-release", workflow)
-        self.assertEqual(workflow.count("sha256sum --check release-manifest.txt"), 2)
-        self.assertEqual(workflow.count("uses: pypa/gh-action-pypi-publish@"), 2)
-        self.assertEqual(workflow.count("id-token: write"), 2)
+        self.assertEqual(workflow.count("sha256sum --check release-manifest.txt"), 1)
+        self.assertEqual(workflow.count("uses: pypa/gh-action-pypi-publish@"), 1)
+        self.assertEqual(workflow.count("id-token: write"), 1)
         self.assertIn("name: pypi\n", workflow)
-        self.assertIn("name: pypi-studio\n", workflow)
-        self.assertIn("url: https://pypi.org/project/calc-flow/", workflow)
-        self.assertIn("url: https://pypi.org/project/calc-flow-studio/", workflow)
+        self.assertNotIn("name: pypi-studio\n", workflow)
+        self.assertIn("url: https://pypi.org/project/calc-flow-python/", workflow)
+        self.assertNotIn("  publish-python-studio:\n", workflow)
+        self.assertIn("packages-dir: release-dist/core", workflow)
+        self.assertNotIn("packages-dir: release-dist/studio", workflow)
+        self.assertIn(
+            "if: github.event_name == 'push' && github.ref_type == 'tag'", workflow
+        )
+        self.assertIn("python scripts/release_baseline.py", workflow)
+        self.assertIn("initial-baseline:", workflow)
         self.assertNotIn("skip-existing", workflow)
 
         verify_job = workflow.split("  verify-python-release:\n", 1)[1].split(
@@ -310,7 +319,7 @@ class ReleaseConfigTests(unittest.TestCase):
             "python scripts/build_python_release.py --clean",
             "python scripts/verify_python_release.py",
             "`pypi`",
-            "`pypi-studio`",
+            "Studio is not uploaded",
             "release.yml",
             "git tag -a v<version>",
             "PyPI versions and files are immutable",
@@ -337,6 +346,29 @@ class ReleaseConfigTests(unittest.TestCase):
         }
 
         self.assertEqual(collisions, {})
+
+    def test_public_package_tables_have_full_width_separators(self) -> None:
+        for path in ("docs/api-reference.md", "docs/python-release.md"):
+            source = (ROOT / path).read_text(encoding="utf-8")
+            table = next(
+                block for block in source.split("\n\n") if block.startswith("|")
+            )
+            rows = table.splitlines()
+            with self.subTest(path=path):
+                self.assertEqual(
+                    len(
+                        {
+                            tuple(
+                                index for index, char in enumerate(row) if char == "|"
+                            )
+                            for row in rows
+                        }
+                    ),
+                    1,
+                )
+                self.assertTrue(
+                    all(set(cell) == {"-"} for cell in rows[1].split("|")[1:-1])
+                )
 
     def test_workflow_actions_are_sha_pinned(self) -> None:
         for name in (
@@ -726,11 +758,11 @@ class ReleaseConfigTests(unittest.TestCase):
             "README.md": ("Calc Flow 4.0", 'calc-flow = "4.0.0"'),
             "docs/api-reference.md": (
                 "Calc Flow 4.0 API reference",
-                "`calc-flow==4.0.0`",
+                "`calc-flow-python==4.0.0`",
                 "Project format version `3`",
             ),
             "docs/getting-started.md": ("cargo add calc-flow@4.0.0",),
-            "docs/python-api.md": ("`calc-flow==4.0.0`",),
+            "docs/python-api.md": ("`calc-flow-python==4.0.0`",),
             "docs/rust-api.md": ("Calc Flow 4.0", "cargo add calc-flow@4.0.0"),
         }
         stale_package_claims = (
@@ -787,7 +819,6 @@ class ReleaseConfigTests(unittest.TestCase):
             self.assertIn(heading, guide)
 
         for command in (
-            "uv tool install calc-flow-studio",
             "cargo build --workspace --all-features --release",
             "maturin==1.14.1",
             "UV_TOOL_DIR",
@@ -798,6 +829,9 @@ class ReleaseConfigTests(unittest.TestCase):
             r".\web-ui\scripts\start_web_ui.ps1",
         ):
             self.assertIn(command, guide)
+
+        self.assertNotIn("uv tool install calc-flow-studio", guide)
+        self.assertIn("Studio is not published to PyPI", guide)
 
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("[getting started](docs/getting-started.md)", readme)

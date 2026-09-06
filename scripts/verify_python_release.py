@@ -90,8 +90,8 @@ def project_configuration(root: Path = ROOT) -> ReleaseConfig:
         "binding.dependencies.calc-flow-connectors",
     )
 
-    if package.get("name") != "calc-flow":
-        raise ValueError("pyproject.toml project.name must equal 'calc-flow'")
+    if package.get("name") != "calc-flow-python":
+        raise ValueError("pyproject.toml project.name must equal 'calc-flow-python'")
     if studio.get("name") != "calc-flow-studio":
         raise ValueError(
             "web-ui/backend/pyproject.toml project.name must equal 'calc-flow-studio'"
@@ -148,9 +148,12 @@ def project_configuration(root: Path = ROOT) -> ReleaseConfig:
         if dependency.lower().startswith("calc-flow")
     ]
     if len(studio_requirements) != 1:
-        raise ValueError("Studio must declare exactly one calc-flow requirement")
+        raise ValueError("Studio must declare exactly one calc-flow-python requirement")
     studio_requirement = studio_requirements[0]
-    if f">={version}" not in studio_requirement or "<5" not in studio_requirement:
+    if _normalized_requirement(studio_requirement) != (
+        "calc-flow-python",
+        tuple(sorted((f">={version}", "<5"))),
+    ):
         raise ValueError(
             f"Studio requirement {studio_requirement!r} does not cover "
             f"{version} within v4"
@@ -188,8 +191,7 @@ def validate_versions(
     if tag is not None and tag != expected_tag:
         raise ValueError(f"release tag {tag!r} must equal {expected_tag!r}")
     if check_pypi:
-        for project in ("calc-flow", "calc-flow-studio"):
-            ensure_version_is_new_on_pypi(project, config.version)
+        ensure_version_is_new_on_pypi("calc-flow-python", config.version)
     return config
 
 
@@ -323,7 +325,7 @@ def _validate_native_extension(path: Path, names: list[str], target: str) -> Non
 def validate_core_wheel(path: Path, config: ReleaseConfig) -> tuple[str, str]:
     inspect_wheel(path)
     distribution, version, python_tag, abi_tag, platform_tag = _wheel_parts(path)
-    if distribution != "calc_flow":
+    if distribution != "calc_flow_python":
         raise ValueError(f"{path.name}: unexpected distribution {distribution!r}")
     if version != config.version:
         raise ValueError(f"{path.name}: version {version!r} != {config.version!r}")
@@ -341,7 +343,7 @@ def validate_core_wheel(path: Path, config: ReleaseConfig) -> tuple[str, str]:
         _validate_native_extension(path, names, target)
         metadata = _metadata_from_wheel(path, archive, dist_info, "METADATA")
         wheel_metadata = _metadata_from_wheel(path, archive, dist_info, "WHEEL")
-    _validate_project_metadata(path, metadata, name="calc-flow", config=config)
+    _validate_project_metadata(path, metadata, name="calc-flow-python", config=config)
     expected_tags = tuple(
         f"{python_tag}-{abi_tag}-{platform}" for platform in platform_tag.split(".")
     )
@@ -406,7 +408,7 @@ def validate_studio_wheel(path: Path, config: ReleaseConfig) -> str:
 
 
 def validate_sdist(path: Path, config: ReleaseConfig) -> str:
-    expected_name = f"calc_flow-{config.version}.tar.gz"
+    expected_name = f"calc_flow_python-{config.version}.tar.gz"
     if path.name != expected_name:
         raise ValueError(f"source distribution {path.name!r} != {expected_name!r}")
     inspect_sdist(path)
@@ -430,7 +432,7 @@ def validate_release(
 
     wheels = sorted(dist_dir.rglob("*.whl"))
     sdists = sorted(dist_dir.rglob("*.tar.gz"))
-    core_wheels = [path for path in wheels if path.name.startswith("calc_flow-")]
+    core_wheels = [path for path in wheels if path.name.startswith("calc_flow_python-")]
     studio_wheels = [
         path for path in wheels if path.name.startswith("calc_flow_studio-")
     ]

@@ -250,7 +250,7 @@ jobs:
       - name: Install dependencies
         run: |
           uv sync --extra dev --no-install-workspace
-          uv pip install --python .venv/bin/python --no-deps dist/calc_flow-*.whl
+          uv pip install --python .venv/bin/python --no-deps dist/calc_flow_python-*.whl
       - name: Run Ruff
         run: uv run --no-sync ruff check .
       - name: Verify complexity gates
@@ -338,7 +338,7 @@ jobs:
       - name: Install studio dependencies
         run: |
           uv sync --package calc-flow-studio --extra dev --no-install-workspace
-          uv pip install --python .venv/bin/python --no-deps dist/calc_flow-*.whl
+          uv pip install --python .venv/bin/python --no-deps dist/calc_flow_python-*.whl
           uv pip install --python .venv/bin/python --no-deps --editable web-ui/backend
           cd web-ui && npm ci
       - name: Run studio backend coverage
@@ -397,7 +397,7 @@ jobs:
         working-directory: .
         run: |
           uv sync --package calc-flow-studio --no-install-workspace
-          uv pip install --python .venv/bin/python --no-deps dist/calc_flow-*.whl
+          uv pip install --python .venv/bin/python --no-deps dist/calc_flow_python-*.whl
           uv pip install --python .venv/bin/python --no-deps --editable web-ui/backend
       - name: Set up Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -436,8 +436,8 @@ jobs:
         run: |
           python -m unittest scripts.test_generate_rolling_kernel_manifest scripts.test_run_rust_tests scripts.test_run_rust_coverage scripts.test_classify_ci_changes scripts.test_build_python_release scripts.test_inspect_wheel scripts.test_release_config scripts.test_verify_python_release scripts.test_verify_perf_gates scripts.test_verify_stream_lifecycle_evidence scripts.test_verify_symbolic_milestone_perf scripts.test_write_criterion_provenance scripts.test_verify_complexity_gates scripts.test_verify_security_gates scripts.test_verify_sql_datafusion_performance scripts.test_analyze_sql_datafusion_attribution scripts.test_run_sql_datafusion_matrix
           uv build
-          python scripts/inspect_wheel.py core-wheel dist/calc_flow-*.whl
-          python scripts/inspect_wheel.py sdist dist/calc_flow-*.tar.gz
+          python scripts/inspect_wheel.py core-wheel dist/calc_flow_python-*.whl
+          python scripts/inspect_wheel.py sdist dist/calc_flow_python-*.tar.gz
       - name: Install and execute the wheel in isolation
         run: |
           wheel="$(find dist -maxdepth 1 -name '*.whl' -print -quit)"
@@ -492,7 +492,7 @@ jobs:
         run: |
           uv venv /tmp/calc-flow-studio-wheel
           uv pip install --python /tmp/calc-flow-studio-wheel/bin/python \
-            dist/calc_flow-*.whl dist/calc_flow_studio-*.whl
+            dist/calc_flow_python-*.whl dist/calc_flow_studio-*.whl
           test -x /tmp/calc-flow-studio-wheel/bin/calc-flow-web
           /tmp/calc-flow-studio-wheel/bin/python - <<'PY'
           from importlib.metadata import requires
@@ -507,12 +507,12 @@ jobs:
           assert "/" in paths
           assert "/assets" in paths
           assert not hasattr(calc_flow, "web")
-          core_requirements = requires("calc-flow") or []
+          core_requirements = requires("calc-flow-python") or []
           studio_requirements = requires("calc-flow-studio") or []
           assert not any("fastapi" in item.lower() for item in core_requirements)
           assert not any("uvicorn" in item.lower() for item in core_requirements)
           assert any(
-              item.lower().startswith("calc-flow")
+              item.lower().startswith("calc-flow-python")
               and ">=4.0.0" in item
               and "<5" in item
               for item in studio_requirements

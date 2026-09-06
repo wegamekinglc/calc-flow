@@ -140,7 +140,7 @@ used for analysis, explanation, and compilation:
 runtime = Runtime()
 register_numpy(runtime)  # declarations use backend="numpy"
 
-# Or install calc-flow[jax], use backend="jax", and register JAX.
+# Or install calc-flow-python[jax], use backend="jax", and register JAX.
 register_jax(runtime)
 ```
 
