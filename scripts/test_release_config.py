@@ -350,6 +350,29 @@ class ReleaseConfigTests(unittest.TestCase):
 
         self.assertEqual(collisions, {})
 
+    def test_public_package_tables_have_full_width_separators(self) -> None:
+        for path in ("docs/api-reference.md", "docs/python-release.md"):
+            source = (ROOT / path).read_text(encoding="utf-8")
+            table = next(
+                block for block in source.split("\n\n") if block.startswith("|")
+            )
+            rows = table.splitlines()
+            with self.subTest(path=path):
+                self.assertEqual(
+                    len(
+                        {
+                            tuple(
+                                index for index, char in enumerate(row) if char == "|"
+                            )
+                            for row in rows
+                        }
+                    ),
+                    1,
+                )
+                self.assertTrue(
+                    all(set(cell) == {"-"} for cell in rows[1].split("|")[1:-1])
+                )
+
     def test_workflow_actions_are_sha_pinned(self) -> None:
         for name in (
             "benchmarks.yml",
