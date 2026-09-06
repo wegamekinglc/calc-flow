@@ -141,6 +141,16 @@ blocks. Their deltas remain informational because those blocks are not
 per-call paired observations. Allocation counters have a separate unit-correct
 table and are not mislabeled as milliseconds.
 
+The Rust suite retains the full `Cargo.lock` hash for provenance, while its
+comparison fingerprint covers the registry packages actually compiled for
+each benchmark, their lockfile checksums, enabled features, target kinds,
+profiles, and Rust/Cargo versions. The inventory comes from Cargo's
+[compiler-artifact messages](https://doc.rust-lang.org/cargo/reference/external-tools.html#artifact-messages),
+including cache hits. Unused optional connector dependencies can change without
+invalidating a core-only comparison. Changes to compiled dependencies still
+fail closed, as do incomplete build logs or unsupported dependency sources.
+The core package's source revision remains bound to the release identity.
+
 ## Reports and failure behavior
 
 The final always-run job publishes all result rows, with dimensions, timing

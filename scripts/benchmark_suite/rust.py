@@ -13,6 +13,7 @@ from scripts.benchmark_suite.legacy import combine_blocks
 from scripts.benchmark_suite.normalize import criterion_rows, read_json
 from scripts.benchmark_suite.process import ROOT, child_environment, command
 from scripts.benchmark_suite.provenance import harness_sha256
+from scripts.benchmark_suite.rust_provenance import with_compiled_dependencies
 from scripts.verify_sql_datafusion_performance import verify_report
 from scripts.write_criterion_provenance import build_provenance
 
@@ -202,14 +203,21 @@ def allocation_rows(reports: dict) -> list[dict]:
     return rows
 
 
-def _rust_provenance(roots: dict) -> dict:
+def _rust_provenance(roots: dict, output: Path) -> dict:
     return {
-        side: build_provenance(
+        side: with_compiled_dependencies(
+            build_provenance(
+                source,
+                [
+                    Path(f"crates/calc-flow/benches/{name}.rs")
+                    for name in bench_targets(source)
+                ],
+            ),
             source,
-            [
-                Path(f"crates/calc-flow/benches/{name}.rs")
+            {
+                name: output / side / f"build-{name}.jsonl"
                 for name in bench_targets(source)
-            ],
+            },
         )
         for side, source in roots.items()
     }
@@ -217,11 +225,11 @@ def _rust_provenance(roots: dict) -> dict:
 
 async def measure_rust(shard: dict, releases: dict, roots: dict, output: Path) -> dict:
     shared = ROOT / "target/benchmark-rust-build"
-    provenance = _rust_provenance(roots)
     binaries = {
         side: await build_binaries(source, output / side, shared)
         for side, source in roots.items()
     }
+    provenance = _rust_provenance(roots, output)
     if set(binaries["baseline"]) != set(binaries["candidate"]):
         raise ValueError(
             "Rust benchmark targets changed; an explicit migration is required"
@@ -280,12 +288,9 @@ def _binary_hashes(binaries: dict) -> dict:
 
 def _with_fingerprints(measured: dict, identity: dict) -> dict:
     fingerprints = {
-        key: identity[key]
-        for key in (
-            "machine_fingerprint",
-            "dependency_fingerprint",
-            "workload_fingerprint",
-        )
+        "machine_fingerprint": identity["machine_fingerprint"],
+        "dependency_fingerprint": identity["compiled_dependency_fingerprint"],
+        "workload_fingerprint": identity["workload_fingerprint"],
     }
     return {
         name: {**row, "metadata": {**row["metadata"], **fingerprints}}
