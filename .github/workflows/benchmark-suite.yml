@@ -158,7 +158,7 @@ jobs:
         if: matrix.id == 'engines-100'
         run: |
           uv pip compile pyproject.toml web-ui/backend/pyproject.toml \
-            --all-extras --no-emit-package calc-flow \
+            --all-extras --no-emit-package calc-flow-python \
             --no-emit-package calc-flow-studio --generate-hashes \
             --output-file benchmarks/requirements.lock
           git diff --exit-code -- benchmarks/requirements.lock

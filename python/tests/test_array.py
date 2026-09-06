@@ -96,7 +96,7 @@ namespace["main"]()
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.splitlines() == [
         "NumPy result: [[6.0, 10.0], [2.0, 12.0], [8.0, 10.0]]",
-        "JAX result: skipped; install calc-flow[jax]",
+        "JAX result: skipped; install calc-flow-python[jax]",
     ]
 
 

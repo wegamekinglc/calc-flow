@@ -8,9 +8,11 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import sys
 import tempfile
+import tomllib
 import zipfile
 from dataclasses import asdict, dataclass
 from itertools import product
@@ -230,6 +232,16 @@ def _python_environment(environment: dict[str, str]) -> dict[str, str]:
     return {**environment, "PATH": search_path}
 
 
+def _core_wheel(source: Path, output: Path) -> Path:
+    with (source / "pyproject.toml").open("rb") as stream:
+        project = tomllib.load(stream)["project"]
+    distribution = re.sub(r"[-_.]+", "_", project["name"]).lower()
+    wheels = list(output.glob(f"{distribution}-*.whl"))
+    if len(wheels) != 1:
+        raise RuntimeError("build output must contain exactly one core wheel")
+    return wheels[0]
+
+
 async def build(args: argparse.Namespace) -> None:
     source = args.source.resolve()
     output = args.output.resolve()
@@ -271,16 +283,14 @@ async def build(args: argparse.Namespace) -> None:
             raise RuntimeError(f"release build failed; see {output / 'build.log'}")
     if before != await source_identity(source):
         raise RuntimeError("source changed during release build")
-    wheels = list(output.glob("calc_flow-*.whl"))
-    if len(wheels) != 1:
-        raise RuntimeError("build output must contain exactly one core wheel")
+    wheel = _core_wheel(source, output)
     manifest = {
         "contract": "warm-stream-build-v1",
         "source": str(source),
         **before,
-        "wheel": str(wheels[0]),
-        "wheel_sha256": _sha256(wheels[0]),
-        "native_sha256": _wheel_native_sha256(wheels[0]),
+        "wheel": str(wheel),
+        "wheel_sha256": _sha256(wheel),
+        "native_sha256": _wheel_native_sha256(wheel),
         "build_profile": "release",
         "command": command,
         "rustc": await _rustc_version(source),

@@ -71,11 +71,11 @@ providers your application uses.
 ```bash
 uv init calc-flow-example
 cd calc-flow-example
-uv add calc-flow
+uv add calc-flow-python
 
 # Optional providers
-uv add "calc-flow[numpy]"
-uv add "calc-flow[jax]"
+uv add "calc-flow-python[numpy]"
+uv add "calc-flow-python[jax]"
 ```
 
 Install the packaged Studio as an isolated command-line tool:
@@ -93,11 +93,11 @@ the `/api/v3` API from the same loopback service. Stop it with `Ctrl+C`.
 ```powershell
 uv init calc-flow-example
 Set-Location calc-flow-example
-uv add calc-flow
+uv add calc-flow-python
 
 # Optional providers
-uv add "calc-flow[numpy]"
-uv add "calc-flow[jax]"
+uv add "calc-flow-python[numpy]"
+uv add "calc-flow-python[jax]"
 ```
 
 Install and start the packaged Studio:
@@ -154,7 +154,7 @@ uv build --project web-ui/backend --wheel --out-dir target/wheels
 # Install both wheels into the repository environment.
 uv venv --python 3.13
 uv pip install --python .venv/bin/python \
-  target/wheels/calc_flow-*.whl \
+  target/wheels/calc_flow_python-*.whl \
   target/wheels/calc_flow_studio-*.whl
 ```
 
@@ -187,7 +187,7 @@ uv build --project web-ui/backend --wheel --out-dir target\wheels
 # Install both wheels into the repository environment.
 uv venv --python 3.13
 $coreWheel = (
-    Get-ChildItem target\wheels\calc_flow-*.whl |
+    Get-ChildItem target\wheels\calc_flow_python-*.whl |
         Sort-Object LastWriteTime |
         Select-Object -Last 1
 ).FullName

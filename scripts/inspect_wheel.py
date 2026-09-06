@@ -51,14 +51,14 @@ def inspect_wheel(wheel: Path) -> int:
         raise ValueError(f"{wheel}: missing calc_flow/__init__.py")
     if not {"calc_flow/_native.abi3.so", "calc_flow/_native.pyd"}.intersection(names):
         raise ValueError(f"{wheel}: missing abi3 native module")
-    _require_wheel_license(names, "calc_flow-", wheel)
+    _require_wheel_license(names, "calc_flow_python-", wheel)
 
     for name in names:
         path = PurePosixPath(name)
         in_package = path.parts[0] == "calc_flow"
-        in_metadata = path.parts[0].startswith("calc_flow-") and path.parts[0].endswith(
-            ".dist-info"
-        )
+        in_metadata = path.parts[0].startswith("calc_flow_python-") and path.parts[
+            0
+        ].endswith(".dist-info")
         if not (in_package or in_metadata):
             raise ValueError(f"{wheel}: unexpected wheel entry: {name}")
         if _is_repository_guidance(path):

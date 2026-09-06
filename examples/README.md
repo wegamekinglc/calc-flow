@@ -9,8 +9,8 @@ this example surface.
 Install the optional array providers as needed:
 
 ```bash
-uv add "calc-flow[numpy]"
-uv add "calc-flow[jax]"
+uv add "calc-flow-python[numpy]"
+uv add "calc-flow-python[jax]"
 ```
 
 After `uv sync --extra dev && uv run maturin develop`, run:

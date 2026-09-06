@@ -1,5 +1,5 @@
 [project]
-name = "calc-flow"
+name = "calc-flow-python"
 version = "4.0.0"
 description = "Rust-native DataFusion batch and streaming calculation pipelines"
 readme = "README.md"
