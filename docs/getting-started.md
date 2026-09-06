@@ -381,6 +381,15 @@ Inspect `.calc-flow-web/api.log` for backend failures and
 `.calc-flow-web/studio.log` for npm or Vite failures. The managed launcher
 cleans up a partial start and leaves both logs in place.
 
+### Windows checkpoint examples cannot clean up their temporary directories
+
+Managed checkpoint paths include hashed lineage, operator, and segment names.
+They can exceed 260 characters beneath a checkout or user temporary directory.
+If Windows long-path support is disabled, Python cleanup can report a
+`WinError 145` even after a job completes successfully. Follow the
+[Windows temporary-path setup](../examples/README.md#prepare-and-run) to use
+an extended-length absolute `TEMP` and `TMP` for the example process.
+
 ## Continue learning
 
 - Run the complete [executable example inventory](examples.md).

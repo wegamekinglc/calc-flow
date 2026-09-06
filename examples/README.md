@@ -40,6 +40,25 @@ or network service. Example 14 also uses a temporary directory. For a
 constrained checkout, set `TMPDIR` on Linux or `TEMP` and `TMP` on Windows to
 an existing writable directory under `target/` before running.
 
+On Windows, checkpoint segment paths can exceed the traditional 260-character
+limit. Use an extended-length absolute temporary path so Python can also clean
+up those directories when system-wide long-path support is disabled:
+
+```powershell
+New-Item -ItemType Directory -Path target/tmp -Force | Out-Null
+$exampleTempPath = (Resolve-Path -LiteralPath target/tmp).Path
+$exampleSavedTemp = $env:TEMP
+$exampleSavedTmp = $env:TMP
+try {
+    $env:TEMP = '\\?\' + $exampleTempPath
+    $env:TMP = $env:TEMP
+    uv run --no-sync python scripts/run_examples.py --surface python
+} finally {
+    $env:TEMP = $exampleSavedTemp
+    $env:TMP = $exampleSavedTmp
+}
+```
+
 ## Python inventory
 
 1. [01_datafusion_pipeline.py](01_datafusion_pipeline.py) — calculate order
