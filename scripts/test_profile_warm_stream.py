@@ -18,6 +18,35 @@ from scripts.profile_warm_stream import matrix_points, paired_summary
 
 
 class WarmProfileTests(unittest.TestCase):
+    def test_benchmark_wheel_name_comes_from_each_source_revision(self) -> None:
+        for project_name in ("calc-flow", "calc-flow-python"):
+            with tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                (directory / "pyproject.toml").write_text(
+                    f'[project]\nname = "{project_name}"\n', encoding="utf-8"
+                )
+                wheel = directory / (
+                    f"{project_name.replace('-', '_')}-4.0.0-cp313-abi3-linux_x86_64.whl"
+                )
+                wheel.touch()
+                (directory / "calc_flow_studio-4.0.0-py3-none-any.whl").touch()
+                self.assertEqual(profile._core_wheel(directory, directory), wheel)
+
+    def test_benchmark_build_rejects_missing_or_ambiguous_core_wheels(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            (directory / "pyproject.toml").write_text(
+                '[project]\nname = "calc-flow-python"\n', encoding="utf-8"
+            )
+            with self.assertRaisesRegex(RuntimeError, "exactly one core wheel"):
+                profile._core_wheel(directory, directory)
+            for version in ("4.0.0", "4.0.1"):
+                (
+                    directory / f"calc_flow_python-{version}-cp313-abi3-win_amd64.whl"
+                ).touch()
+            with self.assertRaisesRegex(RuntimeError, "exactly one core wheel"):
+                profile._core_wheel(directory, directory)
+
     def test_worker_thread_override_is_explicit_validated_and_immutable(self) -> None:
         original = {"TOKIO_WORKER_THREADS": "8", "PATH": "unchanged"}
         configured = profile._configured_worker_environment(original, 1)
