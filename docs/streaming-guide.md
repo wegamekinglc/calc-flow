@@ -1,10 +1,30 @@
 # Continuous streaming guide
 
+[Documentation](README.md) / 2.3 Continuous streaming
+
 Calc Flow continuous jobs consume async sources, execute a compiled stream
 graph, publish to async sinks, and recover from managed checkpoints. Use this
 guide for application-owned connectors. For Kafka, PostgreSQL, ClickHouse,
 HTTP, WebSocket, files, and Parquet, combine it with the
 [connector and stream-project guide](connectors.md).
+
+On this page:
+
+- [Choose batch or stream](#choose-batch-or-stream)
+- [First Python continuous job](#first-python-continuous-job)
+- [Source contract](#source-contract)
+- [Watermark policies](#watermark-policies)
+- [Event-time windows](#event-time-windows)
+- [Sink contract](#sink-contract)
+- [Delivery requirements](#delivery-requirements)
+- [External provider lifecycles](#external-provider-lifecycles)
+- [Static inputs](#static-inputs)
+- [Bounded event-time Join](#bounded-event-time-join)
+- [Checkpoints and recovery](#checkpoints-and-recovery)
+- [Job lifecycle](#job-lifecycle)
+- [Runtime tuning and backpressure](#runtime-tuning-and-backpressure)
+- [Status and diagnostics](#status-and-diagnostics)
+- [Production checklist](#production-checklist)
 
 ## Choose batch or stream
 
@@ -84,7 +104,7 @@ Rust uses the same lifecycle through the `StreamSource` trait. See
 Each `SourceBinding` freezes exactly one policy:
 
 | Policy                     | Use when                                                   |
-| -------------------------- | ---------------------------------------------------------- |
+|----------------------------|------------------------------------------------------------|
 | `SourceProvidedWatermarks` | The transport emits trustworthy timezone-aware watermarks  |
 | `BoundedOutOfOrderness`    | Calc Flow should derive progress from an event-time column |
 | `DisabledWatermarks`       | The graph is stateless or windows should close only at end |
@@ -179,13 +199,9 @@ Stateful operators follow a separate path: a positive versioned
 `CheckpointedStateful` capability is sufficient, without a stateless
 lifecycle claim.
 
-An `Unproven` operator is not rejected merely because ordinary stream
-compilation ran. Instead, the existing second admission stage fails closed
-when a runner is configured with a checkpoint runtime, before any connector
-opens. Exactly-once delivery requires that checkpoint runtime, so it cannot
-admit an unproven operator. This preserves the existing separation between
-plan construction and checkpointed job admission without turning missing
-evidence into an exactly-once claim.
+An `Unproven` operator can compile for an ordinary stream plan, but
+checkpointed job admission rejects it before any connector opens.
+Exactly-once delivery requires checkpoints and therefore also rejects it.
 
 The current Python stream-provider path is the trusted NumPy/JAX
 `expression@1` registration installed by `register_numpy` or `register_jax`.
@@ -240,7 +256,7 @@ externally supplied `sources`, `sinks`, `checkpoints`, and `config`, but
 declares static inputs. `plan.static_input_ids` returns the declared names,
 and `plan.source_binding_ids` excludes them.
 
-Rust uses an additive builder on the unchanged `StreamingRunner::new`:
+Rust supplies static values through the runner builder:
 
 ```rust
 let runner = StreamingRunner::new(plan, sources, sinks, checkpoints)?
@@ -258,41 +274,27 @@ NumPy backing memory cannot change what the job observes or what a later
 restart compares. Handles are released exactly once on every exit path —
 success, cancellation, startup failure, and recovery failure.
 
-Each latched value is reduced to a lowercase-hexadecimal SHA-256 digest with
-version string `calc_flow.static_input.digest.v1`. The byte-level encoding is
-the canonical tagged-bytes grammar of
-[API note §7](../.codex/artifacts/api-notes/symbolic-computation-engine.md):
-independent of record-batch chunking, dictionary layout, strides, and batch
-metadata, with NaNs canonicalized per dtype. Declarations join the semantic
-plan fingerprint; payload digests never join the lineage key. A restart that
-supplies a different value therefore reaches the existing lineage and is
-rejected before sources open with the exact message:
+A restart with changed static values fails before sources open with a
+structured `StreamingRuntimeError` in category `checkpoint_mismatch`.
+Keep weights stable for a checkpoint lineage; use a separate lineage when the
+calculation needs different static values. Status and errors expose only the
+input name and digest information, never the payload.
 
-```text
-static_inputs.{name}.digest: checkpoint digest {stored} does not match prepared digest {prepared} for calc_flow.static_input.digest.v1
-```
-
-On the Python surface this recovery rejection arrives as a structured
-`StreamingRuntimeError` with category `checkpoint_mismatch`; engine-level it
-is the checkpoint-mismatch error class. Checkpoint manifests record one digest
-entry per static input under the root field `static_inputs`; the field is
-omitted when the set is empty, so existing manifests keep their bytes. Status,
-metrics, and errors expose at most the input name, digest version, and digest
-— never payloads or backing memory. The built-in NumPy/JAX
-`symbolic_matrix@1` provider is the static-array consumer: the runner places
-each declared weight array once per job on a blocking worker, caches only the
-successfully placed immutable provider value after a cancellation check, and
-reuses it for every data micro-batch. Its `static_placement_bytes` metadata is
-logical provider transfer, not peak memory or process RSS. The
-[API reference](api-reference.md) lists the complete exported static-input
-surface.
+Run [11_symbolic_static_matrix.py](../examples/11_symbolic_static_matrix.py)
+to check batch/stream parity and one-time weight placement. For digest
+encoding, manifest identity, copy boundaries, and provider placement, read
+[symbolic compiler design](symbolic-design.md#static-values-and-matrix-placement).
+The [API reference](api-reference.md) lists the exported static-input types.
 
 ## Bounded event-time Join
 
-Calc Flow 4.0 adds a two-input inner equi-Join for stream plans. Each retained
+Stream plans support a two-input inner equi-Join. Each retained
 row must fall inside the inclusive interval
 `[left_time - before, left_time + after]`. The two source lineages must provide
 watermark progress so the operator can evict rows that cannot match again.
+Run [12_symbolic_stream_join.py](../examples/12_symbolic_stream_join.py) for
+a complete match, then [13_symbolic_relational_dag.py](../examples/13_symbolic_relational_dag.py)
+for nested joins.
 
 Python declares exact input schemas and explicit limits; no unbounded defaults
 exist:
@@ -385,13 +387,13 @@ uv run python examples/08_streaming_recovery.py
 
 ## Job lifecycle
 
-| Operation                    | Meaning                                                         |
-| ---------------------------- | --------------------------------------------------------------- |
-| `status()`                   | Fresh synchronous, payload-safe observation                     |
-| `trigger_checkpoint_async()` | Publish and await one durable epoch                             |
-| `shutdown_async()`           | Stop admission, drain accepted work, publish terminal progress  |
-| `cancel_async()`             | Cancel work and await bounded cleanup                           |
-| `wait_async()`               | Observe natural terminal completion without changing state      |
+| Operation                    | Meaning                                                        |
+|------------------------------|----------------------------------------------------------------|
+| `status()`                   | Fresh synchronous, payload-safe observation                    |
+| `trigger_checkpoint_async()` | Publish and await one durable epoch                            |
+| `shutdown_async()`           | Stop admission, drain accepted work, publish terminal progress |
+| `cancel_async()`             | Cancel work and await bounded cleanup                          |
+| `wait_async()`               | Observe natural terminal completion without changing state     |
 
 Cancelling a task that is only awaiting `wait_async()` does not cancel the
 job. Call `cancel_async()` explicitly. A runner can start once, and a job is the

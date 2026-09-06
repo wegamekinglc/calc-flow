@@ -1,5 +1,7 @@
 # Stream message envelope
 
+[Documentation](README.md) / 4.2 Stream runtime contract
+
 The v3 Rust core moves stream traffic on one typed message: `StreamMessage`.
 Each stream edge carries a single ordered sequence of data and control
 messages from one producer to one consumer. This document is the normative
@@ -22,14 +24,8 @@ epoch),
 `crates/calc-flow/src/operator/stream.rs` (the operator traits and public
 in-memory collector), `crates/calc-flow/src/operator/window.rs` (window
 declarations and execution), and `crates/calc-flow/src/pipeline/stream.rs`
-(the compiled stream plan). The frozen semantics behind the contract are
-recorded in the [continuous streaming runtime
-specification](../.codex/artifacts/specs/continuous-streaming-runtime.md),
-cited below as S and D items. The implemented M5 checkpoint contract is
-defined by the [epoch checkpoint
-specification](../.codex/artifacts/specs/m5-epoch-checkpoint.md), its [API
-note](../.codex/artifacts/api-notes/m5-epoch-checkpoint.md), and its
-[adversarial critique](../.codex/artifacts/critiques/m5-epoch-checkpoint.md).
+(the compiled stream plan). For a component overview, read [architecture](design.md). For application
+usage, follow the [streaming guide](streaming-guide.md).
 
 The public surface splits operators and plans by lifecycle. `BatchOperator`
 and `BatchExecutionPlan` run finite one-shot graphs; `StreamOperator` and
@@ -37,29 +33,49 @@ and `BatchExecutionPlan` run finite one-shot graphs; `StreamOperator` and
 `Batch` remains the public data envelope: raw tables and arrays never cross
 a graph, plan, or runner boundary.
 
+On this page:
+
+- [`StreamMessage`: one message per edge](#streammessage-one-message-per-edge)
+- [`EventTime`](#eventtime)
+- [`Epoch`](#epoch)
+- [Job and operator context](#job-and-operator-context)
+- [The operator emission boundary](#the-operator-emission-boundary)
+- [Stream plan compilation](#stream-plan-compilation)
+- [Job preflight](#job-preflight)
+- [Source tasks and accepted positions](#source-tasks-and-accepted-positions)
+- [Operator tasks and barrier alignment](#operator-tasks-and-barrier-alignment)
+- [Sink tasks](#sink-tasks)
+- [Checkpoint coordination](#checkpoint-coordination)
+- [Manifest publication and recovery](#manifest-publication-and-recovery)
+- [Terminal recovery](#terminal-recovery)
+- [Cancellation and ownership](#cancellation-and-ownership)
+- [Status and metrics](#status-and-metrics)
+- [Execution paths](#execution-paths)
+- [Progress and replay](#progress-and-replay)
+- [Window state and storage](#window-state-and-storage)
+- [Public and private surfaces](#public-and-private-surfaces)
+
 ## `StreamMessage`: one message per edge
 
-`StreamMessage` is the single ordered message carried by one stream edge
-(S1.1). Its representation is private; the variants are:
+`StreamMessage` is the single ordered message carried by one stream edge. Its representation is private; the variants are:
 
-| Variant      | Payload     | Contract meaning                                                      |
-| ------------ | ----------- | --------------------------------------------------------------------- |
-| `Data`       | `Batch`     | One immutable data batch; the only variant public callers construct.  |
-| `Watermark`  | `EventTime` | An event-time progress estimate (S5).                                 |
-| `Barrier`    | `Epoch`     | A checkpoint barrier carrying its epoch (S7).                         |
-| `Idle`       | —           | Marks its ingress idle; excluded from watermark progress only (S1.4). |
-| `EndOfInput` | —           | Terminates its ingress permanently (S1.6).                            |
+| Variant      | Payload     | Contract meaning                                                     |
+|--------------|-------------|----------------------------------------------------------------------|
+| `Data`       | `Batch`     | One immutable data batch; the only variant public callers construct. |
+| `Watermark`  | `EventTime` | An event-time progress estimate.                                     |
+| `Barrier`    | `Epoch`     | A checkpoint barrier carrying its epoch.                             |
+| `Idle`       | —           | Marks its ingress idle; excluded from watermark progress only.       |
+| `EndOfInput` | —           | Terminates its ingress permanently.                                  |
 
 The data variant wraps one immutable `Batch`. Fan-out clones share the
-payload: cloning a message clones the handle, not the Arrow buffers (S3).
+payload: cloning a message clones the handle, not the Arrow buffers.
 
 Control messages are created only through crate-private constructors.
 `StreamMessage::data` is the only public constructor, so operators, sources,
-and other public consumers cannot forge, suppress, or reorder control
-(S1.3); the type system, not a runtime check, enforces this. Validation of
+and other public consumers cannot forge, suppress, or reorder control; the type system, not a runtime check, enforces this. Validation of
 control values — watermark monotonicity and epoch consistency — belongs to
 the runtime paths that construct and enqueue them and runs before enqueue,
-before any downstream side effect (S1.3, S5.4). The job-scoped progress driver
+before any downstream side effect. The job-scoped progress driver
 validates source-provided watermark monotonicity and owns generated
 watermark/timer ordering. A checkpoint-enabled job validates the
 single-flight epoch at its source cut, operator alignment, sink pre-commit,
@@ -69,7 +85,7 @@ started without checkpoint wiring still fails closed if it receives a barrier.
 Inspection goes through the message kind and typed accessors:
 
 | Accessor            | Returns             | Meaning                                                |
-| ------------------- | ------------------- | ------------------------------------------------------ |
+|---------------------|---------------------|--------------------------------------------------------|
 | `kind()`            | `StreamMessageKind` | The message kind, for inspection and routing.          |
 | `as_data()`         | `Option<&Batch>`    | The data payload, when this is a data message.         |
 | `as_watermark()`    | `Option<EventTime>` | The watermark value, when this is a watermark message. |
@@ -79,23 +95,23 @@ Inspection goes through the message kind and typed accessors:
 
 The `Debug` implementation shows kinds and typed business values only. Row
 payloads, batch metadata, and attributes — which may carry secrets — never
-appear in diagnostics (invariant I4).
+appear in diagnostics.
 
 ## `EventTime`
 
 `EventTime` is a newtype over a signed 64-bit integer counting microseconds
-since the Unix epoch (1970-01-01T00:00:00Z), always UTC (D1.1). Ordering is
+since the Unix epoch (1970-01-01T00:00:00Z), always UTC. Ordering is
 total across pre- and post-epoch values. Public APIs never expose a bare
 `i64` timestamp; they expose `EventTime` or its exact serialized
 microsecond value. Serialization stores the exact microsecond count, so
-durable representations round-trip losslessly (D1.2).
+durable representations round-trip losslessly.
 
 Arrow timestamp columns import through `EventTime::import_timestamp`, which
 selects the conversion by the column's time unit; `EventTime::export_timestamp`
-produces one Arrow timestamp unit back (D1.3, D1.4):
+produces one Arrow timestamp unit back:
 
 | Arrow unit      | Import to `EventTime`                    | Export from `EventTime`    |
-| --------------- | ---------------------------------------- | -------------------------- |
+|-----------------|------------------------------------------|----------------------------|
 | `timestamp(s)`  | multiply by 1,000,000, checked           | divide by 1,000,000, floor |
 | `timestamp(ms)` | multiply by 1,000, checked               | divide by 1,000, floor     |
 | `timestamp(us)` | exact identity                           | exact identity             |
@@ -106,23 +122,22 @@ errors name the offending column, and silent wrap is forbidden.
 
 Every conversion that produces a coarser representation from a finer value
 floors toward negative infinity — one uniform direction with no per-call-site
-choice (D1.5). For example, `-1,500 ns` imports to `-2 µs`, `1,999 ns`
+choice. For example, `-1,500 ns` imports to `-2 µs`, `1,999 ns`
 imports to `1 µs`, and exporting `-1 µs` to seconds yields `-1 s`, not
 `0 s`. Flooring never moves a row into a later window and keeps watermark
 progress estimates conservative.
 
 An Arrow timestamp column declared as an event-time column must be
 timezone-naive (interpreted as UTC) or carry the explicit timezone `"UTC"`;
-any other timezone is rejected with the column path in the error (D1.6).
+any other timezone is rejected with the column path in the error.
 
 ## `Epoch`
 
 `Epoch` is a newtype over `u64` identifying one checkpoint within a job
-lineage (D9). Value `0` is reserved as the "no checkpoint" sentinel and is
+lineage. Value `0` is reserved as the "no checkpoint" sentinel and is
 unconstructable: `Epoch::new` returns `None` for it, and it is never
-injected (D9.1). `Epoch::INITIAL` is `1`, the first checkpoint of a fresh
-lineage, and `Epoch::next` increments by exactly one with a checked overflow
-(D9.2). Epochs are strictly increasing within a job lineage. Serialization
+injected. `Epoch::INITIAL` is `1`, the first checkpoint of a fresh
+lineage, and `Epoch::next` increments by exactly one with a checked overflow. Epochs are strictly increasing within a job lineage. Serialization
 stores the exact value. A fresh private checkpoint lineage begins at
 `Epoch::INITIAL`; recovery selects the latest valid manifest and allocates its
 epoch's checked successor. Exhausting `u64` fails rather than wrapping.
@@ -147,7 +162,7 @@ one stream operator. It borrows the job context and exposes:
 - `job()` — the owning job's immutable context;
 - `operator_id()` — the operator's node identity;
 - `input_watermark()` — the current input watermark `WM_in`, or `None`
-  while undefined (S5.2);
+  while undefined;
 - `check_cancelled()` — the job liveness check;
 - `record_late_rows(dropped, max_lateness)` — cumulative late-data counters:
   dropped row-window assignments, the count of batches that contained at
@@ -159,7 +174,7 @@ one stream operator. It borrows the job context and exposes:
 
 The crate-private task constructor also supplies the minimum effective output
 edge budget. A window close uses that budget to split deterministic output
-rows before enqueue; the public constructor remains source-compatible and
+rows before enqueue; the public constructor
 uses the default budget plus an isolated recorder.
 
 ## The operator emission boundary
@@ -172,12 +187,11 @@ handlers are:
 
 - `process_data(ingress, batch, context, output)` — processes one batch
   from the named ingress. A failed handler never forwards a partial control
-  event (S1.3).
+  event.
 - `on_watermark(watermark, context, output)` — reacts to an input-watermark
   advance; a window operator emits newly closed windows before the runtime
-  forwards the watermark (S5.2).
-- `on_end(context, output)` — flushes once after every ingress has ended
-  (S1.6, S5.5).
+  forwards the watermark.
+- `on_end(context, output)` — flushes once after every ingress has ended.
 
 Handlers never see barriers, and watermarks arrive as typed `EventTime`
 values.
@@ -185,7 +199,7 @@ values.
 The state lifecycle is synchronous and executor-safe. `checkpoint(epoch)`
 captures dirty state as an `OperatorStateSnapshot` in O(dirty-key
 metadata) — never a bulk encode on the executor thread; durable staging is
-runtime-owned (D4.1). `restore(snapshot)` applies a captured snapshot, and
+runtime-owned. `restore(snapshot)` applies a captured snapshot, and
 `reset()` returns the operator to its freshly constructed state. The
 defaults are stateless: capture returns an empty snapshot, restore rejects a
 non-empty one, and reset succeeds.
@@ -194,8 +208,8 @@ non-empty one, and reset succeeds.
 named `segments` of allocation-shared `StateSegment` values (immutable bytes
 with a SHA-256 computed once at construction, so carried segments move
 between epochs without copying or re-hashing). Keyed row state never appears
-inline (D4.4), and no segment may carry secrets (I4); the runtime assigns
-segment paths, lengths, and checksums during staging (D4.1), reusing the
+inline, and no segment may carry secrets; the runtime assigns
+segment paths, lengths, and checksums during staging, reusing the
 already-committed handle for segment content that is unchanged since the
 current session committed it.
 
@@ -212,8 +226,7 @@ until manifest reachability collection can remove them.
 batch)` validates the port name, the `BatchKind`, and the optional exact
 Arrow schema against the compiled output ports, then enqueues the batch; a
 validation failure returns `CalcFlowError::Compile` before the batch reaches
-an edge, so an invalid batch never produces a downstream side effect (S5.4,
-S10.1). Control messages can never be emitted through this trait (S1.3):
+an edge, so an invalid batch never produces a downstream side effect. Control messages can never be emitted through this trait:
 watermark, barrier, idle, and end-of-input forwarding is runtime-owned.
 
 `EdgeCollector` is a public in-memory `StreamCollector` helper for tests,
@@ -234,20 +247,14 @@ estimated-byte accounting. For `EdgeBudget { max_rows: R, max_bytes: B }`, the
 queue admits at most `R` envelopes, independently at most `R` charged rows,
 and at most `B` charged bytes. Every data or control envelope consumes one
 slot, including a zero-row/zero-byte data batch. Direct callers choose
-`R >= max(required_row_limit, required_simultaneous_messages)`. The public
-`EdgeBudget` shape and
-`edge_channel` signature are unchanged, but zero-cost traffic can now block
-earlier than it did under row/byte-only admission.
+`R >= max(required_row_limit, required_simultaneous_messages)`. Zero-row data and control traffic are bounded by the envelope limit.
 
 Reservation is atomic with enqueue and is released exactly once on receive or
 queue teardown. A blocked send owns no reservation. An oversized data message
 fails before enqueue, a closed receiver wakes blocked senders, and each fan-out
 edge is charged independently even though immutable payload buffers are
 shared. The default `Block` path therefore propagates a slow consumer through
-sink, operator, source task, prefetch slot, and source pump. This is the
-current implementation of S10.1 and S10.5; S10.2 row/byte accounting, S10.3
-oversize and pre-open validation, S10.4 policy behavior, FIFO, close wakeup,
-no-lost-wakeup, and one-producer ownership remain unchanged.
+sink, operator, source task, prefetch slot, and source pump. FIFO order, close wakeup, and single-producer ownership apply to every edge.
 
 ## Stream plan compilation
 
@@ -299,7 +306,7 @@ output. A best-effort request is never upgraded; an at-least-once request is
 downgraded explicitly when a reachable source is lossy or unreplayable; and no
 request is silently upgraded.
 
-Two hashes describe the plan (NFR-5):
+Two hashes describe the plan:
 
 - the semantic fingerprint covers execution mode, graph structure, operator
   configurations, and the UDF catalog; it decides checkpoint compatibility;
@@ -311,7 +318,7 @@ Two hashes describe the plan (NFR-5):
   interval, a 600-second checkpoint timeout, 10,000 envelopes, 10,000 rows and
   64 MiB per edge, and two retained epochs.
 
-## Current source-driven continuous runtime
+## Job preflight
 
 The crate-root `StreamingRunner` runs a bounded
 source-to-operator-to-sink job with managed epoch checkpoints and returns an
@@ -350,7 +357,9 @@ the generic validation error `source ID is not a portable identifier`, with
 underlying message, and source chain never enter `Display`, `Debug`, or serde
 output, so an invalid identifier cannot smuggle a secret into diagnostics.
 
-A source binding owns two supervised tasks (D3):
+## Source tasks and accepted positions
+
+A source binding owns two supervised tasks:
 
 - the pump is the only caller of `StreamSource::open` and `next`, keeps at
   most one poll in flight, and feeds a one-item prefetch slot;
@@ -392,6 +401,8 @@ failures are reported in stable task-ID order, and panics become
 signal cancellation before potentially blocking teardown work, so siblings
 can converge promptly.
 
+## Operator tasks and barrier alignment
+
 One operator task owns each compiled stream operator. It selects ready
 ingresses without weakening per-ingress FIFO, validates data emissions before
 the first send, fans out over real bounded edges, and owns one lazy
@@ -416,6 +427,8 @@ version against the compiled capability; missing or mismatched versions fail
 closed before operator tasks are spawned. Stateless operators must produce and
 restore empty state.
 
+## Sink tasks
+
 One sink task owns each graph output and writes each batch to its configured
 sinks in stable order. The third sink does not see a batch when the second sink
 fails. Natural completion and graceful shutdown drain the accepted prefix;
@@ -426,6 +439,8 @@ This preserves the allowed replay-and-duplicate boundary. Transactional and
 unbounded epoch-idempotent sinks instead begin the epoch, pre-commit bounded
 canonical metadata after the barrier, and commit only after the manifest is
 durable.
+
+## Checkpoint coordination
 
 The checkpoint coordinator owns one bounded FIFO and at most one active epoch.
 Its checked phases are `Requested`, `SourcesCut`, `OperatorsSnapshotted`,
@@ -439,6 +454,8 @@ after the manifest is durable and every sink commit is acknowledged. Timeout
 never skips an epoch. Cancellation before manifest durability fails the active
 and queued requests, while cancellation after durability finishes the sink
 commit attempt or leaves the job in `RecoveryRequired`.
+
+## Manifest publication and recovery
 
 The production `ManifestTransaction` reuses the public v3
 `CheckpointManifest` as the sole durable recovery truth. It serializes segment
@@ -469,9 +486,11 @@ transactional recovery before the data gate is released. Ended sources are
 removed before connector ownership.
 
 The durable projection contains source cursor/sequence/end/watermark policy and
-operator ingress progress/state handles; it never serializes M3 trace history,
+operator ingress progress/state handles; it never serializes execution trace history,
 pending receipts, or process-local timer coordinates. Restored timers re-arm
 from a fresh origin with their complete configured delay.
+
+## Terminal recovery
 
 After the data-plane end cut, the coordinator allocates a terminal epoch out
 of band. Operators capture post-`on_end` state and sinks pre-commit final output
@@ -479,6 +498,8 @@ without any post-end barrier. A terminal manifest is recognized only when all
 source and operator ingress entries are ended. Recovery from it opens only
 sinks, completes any commit, closes resources, and returns natural completion;
 it does not reopen sources or repeat `on_end`/final-window emission.
+
+## Cancellation and ownership
 
 The public `StreamingRunner` and `StreamingJob` own three-stage launch, status,
 terminal arbitration, cancellation, graceful drain, and joining over an
@@ -505,6 +526,8 @@ timeout becomes a typed bounded secondary diagnostic without replacing the
 primary failure. Cleanup continues through later resources and converges task,
 queue, state-lease, transaction, provisional-launch, and reaper ownership.
 
+## Status and metrics
+
 Public deterministic status and metrics projections cover task/terminal state,
 source/operator/sink progress, per-edge accounting, and checkpoint request,
 completion, failure, phase/alignment/total latency, state/manifest bytes,
@@ -525,15 +548,17 @@ durations are not CPU-time measurements and are not additive across concurrent
 operators. In particular, rolling finalization happens in the watermark
 handler, not necessarily in the Data handler.
 
+## Execution paths
+
 For canonical ordered input and supported bounded typed row windows, rolling
 buffers immutable Arrow batches until finality and computes directly from
 their columns. It stages touched-entity kernel updates and newly retained
 history rows, then commits them after successful output emission. Unchanged
 retained rows are not cloned. Overlapping, unordered, or late envelopes and
-unsupported window/type shapes use the existing general path. Checkpointing
-materializes pending columnar buffers into the existing durable layout;
+unsupported window/type shapes use the general path. Checkpointing
+materializes pending columnar buffers into the durable layout;
 watermark, lateness, duplicate, null, output-budget, and recovery semantics
-remain unchanged.
+are enforced on both paths.
 
 Column-only stream projections reuse Arrow arrays without SQL planning.
 Arithmetic, filters, unsupported projections, and their errors retain the SQL
@@ -546,38 +571,61 @@ Per-request context copies, cancellation ownership, source polling order, and
 bounded runtime backpressure remain in force; the bridge does not prefetch
 source events.
 
-The short stress suite covers 100 deterministic gate schedules plus sustained
-zero-cost idle, watermark, and empty-data pressure. The universal
-non-checkpoint soak remains the ignored crate-private
-`runtime::streaming::soak::twenty_minute_two_source_slow_sink` test:
+## Progress and replay
 
-```bash
-CALC_FLOW_STREAM_SOAK=1 cargo test -p calc-flow --lib runtime::streaming::soak::twenty_minute_two_source_slow_sink -- --ignored --exact --nocapture
-```
+The runtime prepares each source policy during whole-job preflight, then
+routes raw source data/control through one job-scoped progress driver. That
+driver alone owns the logical clock, binding/local/global ordering, finite
+inbox fences, timer heap, idle epochs, aggregate progress, completion receipts,
+and the lossless admission/drain/terminal/settlement execution trace.
+Multi-ingress progress uses the minimum watermark of known active inputs; idle
+and ended inputs are excluded. Data and legal watermarks reactivate before
+processing, and all-ended emits one plain `EndOfInput` without a sentinel
+watermark.
 
-Every continuous-streaming soak uses exactly 1,200 measured seconds, a
-ten-second cadence, and 120 Linux RSS samples. The opt-in M5 checkpoint soak is
-described under the M5 boundary below. These harness contracts do not claim
-that final exact-head soak evidence has already been run. The non-checkpoint
-soak uses a 30-sample/300-second warm-up and also verifies slot pressure from
-zero-cost batches, accepted-to-both-sinks conservation, graceful drain,
-connector closure, and final task, queue, live, and reaper convergence. Both
-harnesses remain opt-in and do not expand the public API.
+The crate-private transient snapshot captures the exact prepared/config,
+upstream cursor/control, trace, gate/fence, allocator, aggregate, and timer
+coordinate only at a receipt-quiescent boundary. Restore requires paused
+upstreams at exact captured positions and field-for-field equality before any
+state or runtime side effect is installed. This remains an in-process replay
+surface, not the durable format. The checkpoint runtime separately projects
+only bounded semantic source and operator progress into manifest entries and
+reconstructs fresh process-local trace, receipt, and timer coordinates during
+recovery.
 
-## Delivery guarantees in the current runtime
+The progress driver forwards old/equal/new event-time rows unchanged. It
+neither classifies nor drops late rows and exposes no late-row runtime metric.
 
-The executing continuous runner consumes a `StreamExecutionPlan` and owns all
-source/sink bindings. Invalid stream graphs and delivery-capability mismatches
-fail before any source opens. Emission validation fails closed before enqueue,
-and control construction remains impossible outside the crate.
+## Window state and storage
 
-The runtime enforces source ordering, backpressure, cancellation, close, join,
-checkpoint, and recovery rules described above. Exactly-once proof and commit
-are scoped to each requested graph output; ordinary-sink outputs remain at
-least once and may replay duplicates after a failure. The v2 micro-batch and
-formed-batch push runners are removed.
+The public Rust surface includes a data-only `WindowSpec` for fixed UTC
+tumbling and hopping windows and the stream-only `WindowAggregateOperator`.
+The compiler validates geometry, overlap, exact event-time/group types,
+aggregate combinations, output names, state layout, and deterministic
+configuration fingerprints before source open. Supported aggregates are
+`count`, `sum`, `min`, `max`, and `avg` over the supported type
+matrix; decimal, session,
+early-trigger, allowed-lateness, update, and retract forms remain unavailable.
 
-## Ownership, visibility, and non-goals
+Execution owns incremental accumulators in deterministic
+`(window_start, window_end, G1 group key)` order. Null event times are dropped
+and counted separately. A row-window assignment is late only when
+`window_end <= WM_in`; a hopping row can therefore update open assignments
+while dropping closed ones. Watermark and end handlers emit one final value
+per non-empty window before runtime-owned control forwarding, chunk outputs to
+the effective edge budget, and preserve checked operator-owned sequences
+across snapshot/restore.
+
+The public state surface consists of immutable `StateHandle` values,
+lineage-exclusive `StateBackend` sessions, `LocalStateBackend`, and the strict
+canonical `CheckpointManifest` v3 data model. The local backend stages,
+syncs, re-reads, checksum-validates, and atomically publishes segments before
+a manifest can reference them. Manifest selection is the sole recovery truth;
+cleanup is reachability-based and fails closed on links or unexpected files.
+The continuous runtime uses this backend and manifest as its production
+checkpoint transaction and durable recovery truth.
+
+## Public and private surfaces
 
 Public: `StreamingRunner`, `StreamingJob`, `ManagedCheckpointRuntime`, source
 and sink connector/binding types, status/outcome projections, the
@@ -607,171 +655,9 @@ shutdown, cancellation, and SSE observation routes. The public v3 manifest
 model and state backend remain the runtime's durable recovery truth; Studio
 does not expose raw cursor, connector state, secret, or filesystem payloads.
 
-Non-goals:
 
-- **No public control-message injection.** Connectors yield data, watermark,
-  and idle events, but barriers and end-of-input construction remain
-  runtime-owned.
-- **No executable-object serialization.** Operator configurations carry
-  only `UdfReference` values — never source text, callables, or import
-  paths — and checkpoint state carries JSON metadata and byte segments,
-  never operator instances.
-- **No alternate continuous compatibility API.** The crate-root
-  `StreamingRunner`/`StreamingJob` facade is the sole public continuous
-  lifecycle. The v2 micro-batch and formed-batch push runners are removed,
-  with no aliases or provisional runners; project v3 and Studio `/api/v3`
-  expose only the owning lifecycle projections described above.
-- **No payload leakage in diagnostics.** Debug output and metrics show
-  kinds and typed business values only; row payloads, metadata, and
-  attributes never appear (I4).
+See [verification](verification.md#streaming-stress-and-soak-checks) for the
+stress and checkpoint-restart harnesses. These checks provide implementation
+evidence; the contract above does not claim results for any particular run.
 
-## Progress implementation boundary
-
-The runtime prepares each source policy during whole-job preflight, then
-routes raw source data/control through one job-scoped progress driver. That
-driver alone owns the logical clock, binding/local/global ordering, finite
-inbox fences, timer heap, idle epochs, aggregate progress, completion receipts,
-and the lossless admission/drain/terminal/settlement execution trace.
-Multi-ingress progress uses the minimum watermark of known active inputs; idle
-and ended inputs are excluded. Data and legal watermarks reactivate before
-processing, and all-ended emits one plain `EndOfInput` without a sentinel
-watermark.
-
-The crate-private transient snapshot captures the exact prepared/config,
-upstream cursor/control, trace, gate/fence, allocator, aggregate, and timer
-coordinate only at a receipt-quiescent boundary. Restore requires paused
-upstreams at exact captured positions and field-for-field equality before any
-state or runtime side effect is installed. This remains an in-process replay
-surface, not the durable format. The checkpoint runtime separately projects
-only bounded semantic source and operator progress into manifest entries and
-reconstructs fresh process-local trace, receipt, and timer coordinates during
-recovery.
-
-The progress driver forwards old/equal/new event-time rows unchanged. It
-neither classifies nor drops late rows and exposes no late-row runtime metric.
-
-## State and window implementation boundary
-
-The public Rust surface includes a data-only `WindowSpec` for fixed UTC
-tumbling and hopping windows and the stream-only `WindowAggregateOperator`.
-The compiler validates geometry, overlap, exact event-time/group types,
-aggregate combinations, output names, state layout, and deterministic
-configuration fingerprints before source open. Supported aggregates are
-`count`, `sum`, `min`, `max`, and `avg` over the explicit first-version type
-matrix; decimal, session,
-early-trigger, allowed-lateness, update, and retract forms remain unavailable.
-
-Execution owns incremental accumulators in deterministic
-`(window_start, window_end, G1 group key)` order. Null event times are dropped
-and counted separately. A row-window assignment is late only when
-`window_end <= WM_in`; a hopping row can therefore update open assignments
-while dropping closed ones. Watermark and end handlers emit one final value
-per non-empty window before runtime-owned control forwarding, chunk outputs to
-the effective edge budget, and preserve checked operator-owned sequences
-across snapshot/restore.
-
-The public state surface consists of immutable `StateHandle` values,
-lineage-exclusive `StateBackend` sessions, `LocalStateBackend`, and the strict
-canonical `CheckpointManifest` v3 data model. The local backend stages,
-syncs, re-reads, checksum-validates, and atomically publishes segments before
-a manifest can reference them. Manifest selection is the sole recovery truth;
-cleanup is reachability-based and fails closed on links or unexpected files.
-The continuous runtime uses this backend and manifest as its production
-checkpoint transaction and durable recovery truth.
-
-## Managed checkpoint implementation boundary
-
-The M5 checkpoint contract is documented by the
-[epoch checkpoint specification](../.codex/artifacts/specs/m5-epoch-checkpoint.md),
-its [API note](../.codex/artifacts/api-notes/m5-epoch-checkpoint.md), and its
-[adversarial critique](../.codex/artifacts/critiques/m5-epoch-checkpoint.md).
-The continuous runtime reuses the `CheckpointManifest` v3 as the single durable
-truth and implements segment/manifest publication, strict latest-completed
-selection, retention, orphan cleanup, and complete-job restore. Semantic
-identity includes the pipeline fingerprint and exact participant sets. The
-runtime-configuration hash remains canonical diagnostic metadata but does not
-invalidate compatible state. Recovery persists a bounded semantic projection
-of source/operator progress, not the M3 execution trace, pending receipts, or
-process-local timer coordinates.
-
-One single-flight coordinator creates a global source cut through the
-`LiveProgressCoordinator`, which remains the sole owner of source-output
-edges. Operators block only ingresses that have received the current epoch,
-snapshot after full alignment, and immediately forward the barrier after the
-local snapshot succeeds. Transactional sinks pre-commit before manifest
-publication and commit only after the manifest is durable; a post-manifest
-failure completes forward during recovery.
-
-Final-only output uses a coordinator-owned terminal epoch after the data-plane
-end cut. No barrier follows `EndOfInput`. Recovery from a terminal manifest
-finishes any sink commit and returns terminal success without reopening
-sources or re-emitting final windows. Exactly-once is proved per output over
-every reachable source, operator, edge policy, and sink before lifecycle work.
-The coordinator implementation remains crate-private behind
-`ManagedCheckpointRuntime`; project v3 and Studio `/api/v3` expose the same
-requested/effective delivery and lifecycle contract.
-
-The 48-case checkpoint fault/restart matrix and the three-process checkpoint
-soak both construct jobs through the crate-root public `StreamingRunner`,
-`StreamingJob`, connector bindings, and `ManagedCheckpointRuntime`. Their
-oracles read the real injected fault and cancellation trigger counts,
-checkpoint-failure metric, and live/reaper registry probe; they do not replace
-those observations with a parallel private-runner model. This section records
-the harness contract only, not a transient result from any particular run.
-
-The Linux-only M5 soak contract is an ignored parent test that launches exactly
-three sequential child OS processes using the current test executable. The
-children share only a filesystem run root and cover restart ranges `0..40`,
-`40..80`, and `80..120`. Across the complete 20-minute run they produce 120
-ten-second RSS samples, exercise two replayable sources, an aligned union and
-final window, two transactional sinks, checkpoint/retention/compaction work,
-and verify exact cursor, epoch, window, watermark, output, cleanup, executable
-hash, and source-SHA continuity. Run that contract explicitly with:
-
-```bash
-CALC_FLOW_M5_CHECKPOINT_SOAK=1 cargo test -p calc-flow --lib runtime::streaming::soak::twenty_minute_epoch_checkpoint_restart -- --ignored --exact --nocapture
-```
-
-The M5-D12-E1 performance orchestrator runs as:
-
-```bash
-uv run python scripts/m5_checkpoint_benchmark.py \
-  --baseline 972964413d328dfeabd4597088396bfe4516e5a3 \
-  --candidate <exact-final-candidate-sha> \
-  --run-id <unique-run-id>
-```
-
-Its shared-edge regression scope is only the common B1/C1/B2/C2 comparison.
-The 30-sample common benchmark is
-`m5/common/stream_channel_data_roundtrip`. The 12 optimized, ten-sample private
-checkpoint P1/P2 cases are absolute-only evidence;
-checkpoint-enabled versus disabled measurements describe candidate
-self-overhead, not main-branch regression. The immutable report identifies
-its scope as benchmark evidence rather than M5 acceptance and deliberately has
-no M5-wide `overall_pass`. Virtualized, unstable, or otherwise unsuitable
-hosts produce inconclusive performance evidence. These commands define the
-repository harness contracts; this document does not claim final candidate
-performance, soak, review, or CI evidence has run.
-
-## Current public boundary
-
-The crate-root Rust and Python surfaces expose the owning continuous lifecycle,
-and Studio projects it through persistent `/api/v3/jobs`, checkpoint,
-shutdown, cancel, status, and resume-safe SSE routes. The current public
-boundary still deliberately excludes:
-
-- control-message construction and injection;
-- task supervisors, checkpoint coordinator transactions, raw diagnostics, and
-  reaper ownership;
-- cursor, sink pre-commit, secret, state-byte, and filesystem payloads in job
-  status or Studio responses;
-- a public-hosted or authenticated Studio mode.
-
-For supported application usage, read the
-[continuous streaming guide](streaming-guide.md). The
-[design and architecture guide](design.md) maps ownership across core, Python,
-connectors, and Studio. The A6
-[specification](../.codex/artifacts/specs/a6-public-continuous-runtime.md),
-[API note](../.codex/artifacts/api-notes/a6-public-continuous-runtime.md), and
-[critique](../.codex/artifacts/critiques/a6-public-continuous-runtime.md) remain
-point-in-time engineering records rather than current user documentation.
+Next: [symbolic compiler design](symbolic-design.md).

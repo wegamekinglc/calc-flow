@@ -1,5 +1,7 @@
 # Getting started with Calc Flow
 
+[Documentation](README.md) / 1. Installation
+
 Calc Flow 4.0 is a Rust-native calculation engine with a Python binding and an
 optional local Studio. This guide covers two installation paths:
 
@@ -8,8 +10,20 @@ optional local Studio. This guide covers two installation paths:
   run the repository version of Studio.
 
 Linux commands use Bash, Windows commands use native PowerShell, and WSL
-follows the Linux instructions. See the [architecture guide](introduction.md)
-for the engine boundaries and execution model.
+follows the Linux instructions. See the [introduction](introduction.md)
+for capabilities and the execution model.
+
+On this page:
+
+- [Choose an installation path](#choose-an-installation-path)
+- [Prerequisites](#prerequisites)
+- [Install published packages](#install-published-packages)
+- [Build and install from source](#build-and-install-from-source)
+- [Start and stop Studio](#start-and-stop-studio)
+- [Verify the installation](#verify-the-installation)
+- [Smoke-test the engine](#smoke-test-the-engine)
+- [Troubleshooting](#troubleshooting)
+- [Continue learning](#continue-learning)
 
 ## Choose an installation path
 

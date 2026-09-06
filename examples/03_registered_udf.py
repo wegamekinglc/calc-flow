@@ -42,7 +42,9 @@ def main() -> None:
     )
 
     print("registered catalog:", runtime.catalog())
-    print("result:", run.outputs["output"].to_pyarrow().to_pylist())
+    output = run.outputs["output"].to_pyarrow()
+    assert output["total"].to_pylist() == [200, 500, 800]
+    print("result:", output.to_pylist())
 
 
 if __name__ == "__main__":

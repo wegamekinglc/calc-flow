@@ -113,10 +113,7 @@ class ReleaseConfigTests(unittest.TestCase):
                     (ROOT / path).read_text(encoding="utf-8"),
                 )
 
-        audit_path = (
-            Path("docs/superpowers/audits")
-            / "2026-08-19-continuous-streaming-v3-current-main.md"
-        )
+        audit_path = Path("docs/verification.md")
         audit = (ROOT / audit_path).read_text(encoding="utf-8")
         self.assertIn(advisory, audit)
         self.assertIn("lockfile-only", audit.lower())

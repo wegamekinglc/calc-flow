@@ -1,5 +1,7 @@
 # Calc Flow design and architecture
 
+[Documentation](README.md) / 4.1 Architecture
+
 Calc Flow is one Rust-native calculation engine with several entry points. The
 Rust core owns semantics. Python is a PyO3 binding and adapter layer, connectors
 are trusted implementations behind capability gates, and Studio is a separate
@@ -9,6 +11,25 @@ This document explains component ownership and end-to-end design. Use the
 [getting-started guide](getting-started.md) for installation, the
 [streaming guide](streaming-guide.md) for continuous jobs, and the
 [API reference](api-reference.md) for exact public names.
+
+On this page:
+
+- [System map](#system-map)
+- [Stable contracts](#stable-contracts)
+- [Data model](#data-model)
+- [Batch path](#batch-path)
+- [Streaming path](#streaming-path)
+- [Stateful windows](#stateful-windows)
+- [Stateful stream join](#stateful-stream-join)
+- [Rolling windows](#rolling-windows)
+- [Cross-section groups](#cross-section-groups)
+- [Checkpoint transaction](#checkpoint-transaction)
+- [Delivery model](#delivery-model)
+- [Project and registry design](#project-and-registry-design)
+- [Python boundary](#python-boundary)
+- [Studio boundary](#studio-boundary)
+- [Failure, cancellation, and diagnostics](#failure-cancellation-and-diagnostics)
+- [Extension choices](#extension-choices)
 
 ## System map
 
@@ -25,7 +46,7 @@ state/checkpoints <── managed runtime <────────────�
 ```
 
 | Component              | Owns                                                                 | Does not own                                      |
-| ---------------------- | -------------------------------------------------------------------- | ------------------------------------------------- |
+|------------------------|----------------------------------------------------------------------|---------------------------------------------------|
 | `calc-flow`            | `Batch`, graph compile, DataFusion, plans, runners, state, manifests | Transport-specific clients or browser UI          |
 | `calc-flow-python`     | PyO3 classes and async bridges                                       | Alternative execution semantics                   |
 | `python/calc_flow`     | Functional builders, adapters, NumPy/JAX registration                | Serialized executable code                        |
@@ -52,8 +73,9 @@ selects trusted registrations by exact provider, name, and version.
 A table `Batch` contains Arrow record batches. DataFusion is the only table
 expression and SQL engine. An external `Batch` contains a payload owned by an
 explicitly registered provider, such as a read-only NumPy or JAX array.
-Table-to-array conversion is never implicit; `table_matmul` is the explicit
-mixed-kind bridge.
+Table-to-array conversion is explicit: `table_matmul` provides a batch bridge,
+and supported symbolic matrix segments provide a table-attachment bridge in
+batch and stream plans. See [symbolic compiler design](symbolic-design.md).
 
 Ports declare name, batch kind, whether an input is required, and optionally an
 exact Arrow schema. Compilation rejects missing endpoints, incompatible kinds
@@ -135,40 +157,20 @@ status surface.
 
 ## Rolling windows
 
-`RollingOperator` evaluates native lag, delta, EWMA, and aggregate outputs over
-entity-partitioned, event-time-ordered rows and runs in both batch and
-stream graphs. Its `RollingSpec` declares ordered partition and sequence
-keys, a non-null UTC `timestamp[us]` event-time column, lag/delta outputs
-with positive row distances or count/sum/mean/min/max/variance/stddev and
-covariance/correlation outputs over row-count or duration frames with
-minimum-period gates, plus constant-state unadjusted EWMA outputs with a
-positive span. Existing outputs use durable layout v1; EWMA uses layout v2 to
-persist its shared valid count and exact binary64 accumulator. The declaration
-also carries allowed lateness and an envelope-scoped `error` or
-metrics-recorded `drop` late-row policy.
+`RollingOperator` evaluates entity-partitioned lag, delta, EWMA, and aggregate
+outputs with one shared native kernel for batch and stream graphs. Its
+`RollingSpec` names partition, event-time, and sequence fields, row-count or
+duration frames, minimum-period gates, allowed lateness, and a late-row policy.
+Compatible outputs share retained data and accumulators. Stream execution
+buffers rows until the input watermark passes their finality coordinate;
+batch execution orders the complete input and classifies no late rows.
 
-Aggregates count valid samples — non-null, non-NaN values, with infinities
-counting as numeric samples — and outputs over the same input column and
-frame share one reversible accumulator group per entity. Floating sums
-follow IEEE arithmetic, integer sums stay exact and checked through a wide
-transient slide, and the statistical outputs read a West accumulator with
-explicit infinity classification: a mean over one sign of infinity is that
-infinity, over both signs it is NaN, and variance and standard deviation
-over any infinity window are NaN behind the minimum-period and divisor null
-gates. `min` and `max` read a monotonic extrema queue that preserves the
-input type and orders floating samples by the IEEE total order; covariance
-and correlation read a reversible West co-moment accumulator over
-pairwise-valid positions — any infinity on either side reads NaN behind the
-minimum-period and divisor gates, and only a finite zero-variance window
-reads null for correlation.
-
-Stream execution buffers rows until the input watermark passes each row's
-event time plus the allowed lateness, then emits final rows in canonical
-order; batch evaluation classifies no late rows. The operator checkpoints
-its per-entity histories as an Arrow IPC segment with state version 1 — the
-segment stores only history and buffered rows, and restore rebuilds every
-accumulator by the same ordered fold — so a restored or reset operator
-reproduces the same ordered output.
+The current checkpoint writer uses columnar state layout `3`, including
+projected history, buffered rows, recurrence state, and numerical/kernel
+fingerprints. This is distinct from the declaration's validated layout
+fields. See [native rolling state](symbolic-design.md#native-rolling-state)
+for storage ownership and [Rust rolling API](rust-api.md#rolling-windows)
+for the exact type, numerical, null/NaN, and finality contracts.
 
 ## Cross-section groups
 
@@ -224,14 +226,15 @@ The runtime evaluates every reachable source, operator, edge policy, and sink
 before opening a connector.
 
 | Requested contract | Required route evidence                                           | Failure behavior                                    |
-| ------------------ | ----------------------------------------------------------------- | --------------------------------------------------- |
+|--------------------|-------------------------------------------------------------------|-----------------------------------------------------|
 | Best effort        | Explicit request; lossy or unreplayable sources are allowed       | Accepted data may be unavailable for replay         |
 | At least once      | Lossless replayable sources and an ordinary or stronger sink      | A sink may observe duplicates after recovery        |
 | Exactly once       | Exact replay, restorable operators, transactional/idempotent sink | Incompatible routes fail during whole-job preflight |
 
 Status exposes both requested and effective delivery for every output. A
-best-effort request is not silently upgraded, and an exactly-once request is
-not silently weakened.
+lossy or unreplayable route can report effective best effort for the default
+at-least-once request. A best-effort request is not upgraded; an incompatible
+exactly-once route is rejected before connectors open.
 
 ## Project and registry design
 

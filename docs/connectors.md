@@ -1,5 +1,13 @@
 # Connector and stream-project guide
 
+[Documentation](README.md) / 2.6 Connectors
+
+Start with [example 04](../examples/04_continuous_runtime.py) to learn the
+source/sink lifecycle, and [example 08](../examples/08_streaming_recovery.py)
+to observe recovery. Those programs use application-owned in-memory
+connectors. This guide configures registered transports using project
+fragments; each transport requires its own files or external service.
+
 Project v3 selects connectors by the exact data-only identity
 `(provider, name, version)`. A binding contains non-secret options and named
 `SecretReference` values; the trusted factory resolves those references only
@@ -16,10 +24,22 @@ This guide describes transport configuration. Read the
 [continuous streaming guide](streaming-guide.md) for source/sink lifecycle,
 watermarks, job control, checkpoint transactions, and operational practice.
 
+On this page:
+
+- [Delivery boundaries](#delivery-boundaries)
+- [File source and Parquet sink](#file-source-and-parquet-sink)
+- [Kafka](#kafka)
+- [PostgreSQL](#postgresql)
+- [ClickHouse](#clickhouse)
+- [HTTP and WebSocket](#http-and-websocket)
+- [Union and event-time windows](#union-and-event-time-windows)
+- [Static input declarations](#static-input-declarations)
+- [Recovery ownership](#recovery-ownership)
+
 ## Delivery boundaries
 
 | Connector and mode         | Replay                     | Sink completion                          | Maximum claim                          |
-| -------------------------- | -------------------------- | ---------------------------------------- | -------------------------------------- |
+|----------------------------|----------------------------|------------------------------------------|----------------------------------------|
 | File snapshot / Parquet    | Exact file and row cursor  | Atomic epoch directory publication       | Exactly once on supported local FS     |
 | Kafka                      | Exact partition offsets    | Transactional target plus compact ledger | Exactly once after ledger preflight    |
 | PostgreSQL snapshot        | Unreplayable transaction   | N/A                                      | Best effort source                     |
@@ -372,7 +392,7 @@ An array-valued input declares the provider identity instead of a schema:
 `mutability` accepts only `static`. Validation is strict and fail-closed:
 
 | Rule                                   | Failure path                                        |
-| -------------------------------------- | --------------------------------------------------- |
+|----------------------------------------|-----------------------------------------------------|
 | Unique portable SQL identifier names   | `static_inputs[i].name`                             |
 | Name must be a graph external input    | `static_inputs[i].name` (`unknown_binding`)         |
 | Name must not be a source binding      | `static_inputs[i].name` (`source_binding_conflict`) |
@@ -388,7 +408,7 @@ supplies them per job through the runner, and a restart with a different value
 is rejected against the recorded digest before sources open. See
 [static inputs](streaming-guide.md#static-inputs) for the runner semantics and
 the digest contract. An empty declaration array is omitted from canonical
-JSON, so previously valid project documents keep their exact bytes.
+JSON when no static values are declared.
 
 Studio REST cannot carry live values, so submitting a stored project that
 declares static inputs fails closed with `422` before any worker is spawned;

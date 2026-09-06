@@ -1,5 +1,7 @@
 # Python packaging and PyPI release
 
+[Documentation](README.md) / 5.5 Releases
+
 Calc Flow publishes two Python projects from the repository release workflow.
 The native `calc-flow` project and the pure-Python `calc-flow-studio` project
 share one version, but use separate PyPI Trusted Publishers so each OIDC token
@@ -11,19 +13,19 @@ The workflow produces the following Python artifact set for every manual or
 tagged release run:
 
 | Package            | Published artifacts                              | Python compatibility |
-| ------------------ | ------------------------------------------------ | -------------------- |
+|--------------------|--------------------------------------------------|----------------------|
 | `calc-flow`        | Five abi3 wheels and one source distribution     | CPython 3.13+        |
 | `calc-flow-studio` | One `py3-none-any` wheel with built React assets | Python 3.13+         |
 
 The five core wheels cover this matrix:
 
-| Operating system | Architecture | Required platform family    |
-| ---------------- | ------------ | --------------------------- |
-| Linux            | x86-64       | `manylinux_2_28_x86_64`     |
-| Linux            | AArch64      | `manylinux_2_28_aarch64`    |
-| macOS            | x86-64       | `macosx_*_x86_64`           |
-| macOS            | ARM64        | `macosx_*_arm64`            |
-| Windows          | AMD64        | `win_amd64`                 |
+| Operating system | Architecture | Required platform family |
+|------------------|--------------|--------------------------|
+| Linux            | x86-64       | `manylinux_2_28_x86_64`  |
+| Linux            | AArch64      | `manylinux_2_28_aarch64` |
+| macOS            | x86-64       | `macosx_*_x86_64`        |
+| macOS            | ARM64        | `macosx_*_arm64`         |
+| Windows          | AMD64        | `win_amd64`              |
 
 Every core filename must use `cp313-abi3`. The release verifier also checks
 the wheel's internal tags, native extension, package metadata, Apache-2.0
@@ -90,7 +92,7 @@ Create these GitHub environments and configure one Trusted Publisher on each
 existing PyPI project:
 
 | PyPI project       | GitHub owner   | Repository  | Workflow filename | GitHub environment |
-| ------------------ | -------------- | ----------- | ----------------- | ------------------ |
+|--------------------|----------------|-------------|-------------------|--------------------|
 | `calc-flow`        | `wegamekinglc` | `calc-flow` | `release.yml`     | `pypi`             |
 | `calc-flow-studio` | `wegamekinglc` | `calc-flow` | `release.yml`     | `pypi-studio`      |
 

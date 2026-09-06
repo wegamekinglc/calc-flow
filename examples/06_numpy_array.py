@@ -27,7 +27,9 @@ def main() -> None:
     )
 
     run = plan.execute({"input": values})
-    print(run.outputs["output"].array.tolist())
+    centered = run.outputs["output"].array.tolist()
+    assert centered == [-2.25, -1.25, 0.75, 2.75]
+    print(centered)
 
 
 if __name__ == "__main__":

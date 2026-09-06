@@ -1,9 +1,11 @@
 # Calc Flow 4.0 API reference
 
+[Documentation](README.md) / 3.1 API reference
+
 Calc Flow has three supported surfaces:
 
 | Surface          | Package or path           | Purpose                                     |
-| ---------------- | ------------------------- | ------------------------------------------- |
+|------------------|---------------------------|---------------------------------------------|
 | Rust core        | `calc-flow = "4.0.0"`     | Native batches, graphs, execution, recovery |
 | Python binding   | `calc-flow==4.0.0`        | PyO3 engine access and Python integrations  |
 | Local Studio API | `calc-flow-studio==4.0.0` | Loopback FastAPI service and React assets   |
@@ -11,6 +13,15 @@ Calc Flow has three supported surfaces:
 For examples and lifecycle detail, see the [executable example guide](examples.md),
 [Rust API](rust-api.md), [Python API](python-api.md), and
 [continuous streaming guide](streaming-guide.md).
+
+On this page:
+
+- [Examples](#examples)
+- [Rust modules and exports](#rust-modules-and-exports)
+- [Python package](#python-package)
+- [Local HTTP API](#local-http-api)
+- [Error categories](#error-categories)
+- [Version and compatibility](#version-and-compatibility)
 
 ## Examples
 
@@ -30,7 +41,7 @@ result = plan.execute({"input": batch})
 assert result.outputs["output"].to_pyarrow()["total"].to_pylist() == [3, 7]
 ```
 
-The runnable inventories span both surfaces and share datasets and expressions:
+The runnable inventories cover both surfaces; the SQL examples share a dataset:
 
 - Python: [`examples/README.md`](../examples/README.md) — expression pipeline,
   SQL join, registered UDF, continuous execution and recovery, async batch
@@ -47,14 +58,14 @@ The `calc_flow` crate re-exports its supported public types from
 [`lib.rs`](../crates/calc-flow/src/lib.rs).
 
 | Area                | Primary APIs                                                                                                                                           |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+|---------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
 | Data                | `Batch`, `BatchKind`, `BatchMetadata`, `TableBatch`                                                                                                    |
 | Batch graph         | `PipelineBuilder`, `Edge`, `PortEndpoint`, `BatchExecutionPlan`                                                                                        |
 | Stream plan         | `StreamExecutionPlan`, `StreamRequirements`, `DeliveryGuarantee`, `StreamRuntimeConfig`                                                                |
 | Operator traits     | `Port`, `OperatorMetadata`, `NodeOperator`, `BatchOperator`, `StreamOperator`, `StreamOperatorLifecycle`, `OperatorStateSnapshot`                      |
 | Built-in operators  | `ExpressionOperator`, `SqlOperator`, `RollingOperator`, `CrossSectionOperator`, `UnionOperator`, `WindowAggregateOperator`, `StreamJoinOperator`       |
 | Window model        | `WindowSpec`, `WindowGeometry`, `AggregateSpec`, `AggregateFunction`, `MAX_WINDOW_OVERLAP`                                                             |
-| Rolling model       | `RollingSpec`, `RollingOutputSpec`, `RollingNumericalProfile`, `LatePolicySpec`, `LateErrorScope`, `RollingValuePolicy`                              |
+| Rolling model       | `RollingSpec`, `RollingOutputSpec`, `RollingNumericalProfile`, `LatePolicySpec`, `LateErrorScope`, `RollingValuePolicy`                                |
 | Cross-section model | `CrossSectionSpec`, `CrossSectionGroupingSpec`, `CrossSectionOutputSpec`, `CrossSectionValuePolicy`, `RankTieMethod`, `SortDirection`, `NullPlacement` |
 | Stream join model   | `StreamJoinSpec`, `StreamJoinType`, `JoinTimeBounds`, `JoinStateLimits`, `StreamJoinStatus`                                                            |
 | Execution           | `ExecutionOptions`, `RunResult`, `RunMetadata`, `NodeTiming`                                                                                           |
@@ -75,8 +86,7 @@ The `calc_flow` crate re-exports its supported public types from
 `StreamExecutionPlan` is consumed by the public source-driven
 `StreamingRunner`. The runner owns source and sink bindings plus a
 `ManagedCheckpointRuntime`; `start(self)` consumes it and returns the sole
-`StreamingJob` lifecycle owner. The complete SCE-13 crate-root export delta is
-exactly `StaticArraySnapshot` and `StaticArrayValues`.
+`StreamingJob` lifecycle owner. Static array inspection uses `StaticArraySnapshot` and `StaticArrayValues`.
 `Batch::static_array_snapshot()` is an explicit owned host-neutral copy for a
 latched static array: its backend, dtype, shape, optional full null bitmap, and
 compact scalar carrier are available through read-only accessors. The snapshot
@@ -89,11 +99,9 @@ provider-transfer count — dtype width multiplied by logical element count —
 reported on first placement and zero for cached later micro-batches. It does
 not measure peak memory, process RSS, or the internal snapshot clone; the
 engine latch, snapshot carriers, Python host list, NumPy storage, and a
-provider-owned JAX result may coexist during first placement. The v2
-source/sink traits, micro-batch runner, push runner, and public
-checkpoint-document store are not exported.
+provider-owned JAX result may coexist during first placement.
 
-`EdgeBudget::new(R, B)` keeps its two-field public shape and caps queued
+`EdgeBudget::new(R, B)` caps queued
 envelopes and charged rows independently at `R`, plus charged bytes at `B`.
 Direct `edge_channel` callers must choose
 `R >= max(required_row_limit, required_simultaneous_messages)`.
@@ -111,7 +119,7 @@ Import the main surface from `calc_flow`.
 ### Batch
 
 | Member                                      | Contract                                                |
-| ------------------------------------------- | ------------------------------------------------------- |
+|---------------------------------------------|---------------------------------------------------------|
 | `Batch.from_pyarrow(table, metadata=None)`  | Own an Arrow C Stream as an immutable table batch       |
 | `Batch.from_array(array, backend=..., ...)` | Own a read-only explicitly named array-provider payload |
 | `to_pyarrow()`                              | Return the table payload or reject a non-table batch    |
@@ -261,7 +269,7 @@ table allocation and one result; JAX permits one host staging buffer, one
 device table buffer, and one device result. JAX performs no result-to-host round trip during operator execution. These are execution ceilings, not
 end-to-end zero-copy claims. `symbolic_matrix@1` is the fused
 table-to-array-to-table provider described in the
-[symbolic matrix compilation guide](python-api.md#symbolic-matrix-compilation).
+[symbolic matrix compilation guide](symbolic-api.md#symbolic-matrix-compilation).
 
 ### Projects and stores
 
@@ -311,21 +319,21 @@ relational-DAG, and matrix compilation with no separate data execution path. Eve
 feature, program, and analysis result is immutable; constructors copy
 caller-owned sequences and mappings.
 
-| Member                                                                        | Contract                                                                                                             |
-| ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `Expr` / `ColumnExpr` / `ArrayExpr` / `TableExpr` / `Parameter`               | Immutable typed declaration values with v1 digests                                                                   |
-| `table_input(name, *, schema, entity_by=(), event_time=None, sequence_by=())` | Declare one named table input                                                                                        |
-| `parameter(name, *, kind=...)`                                                | Declare one named static table or array input                                                                        |
-| `Field(name, data_type, nullable=True)`                                       | One exact table field declaration                                                                                    |
-| `rows(size)` / `duration(micros)`                                             | Row-count and exact-microsecond rolling frames                                                                       |
-| `exact_time(...)` / `event_time_bucket(...)`                                  | Cross-section group declarations                                                                                     |
-| `row` / `ts` / `cs` / `table` / `linalg` / `window`                           | Namespace functions; `ts` includes EWMA/EMA and MACD, while `table` includes ordered relational stream-join DAGs     |
-| `FeatureSet(features=())` / `.with_feature(name, value)`                      | Ordered uniquely named column expressions                                                                            |
-| `TableExpr.with_columns(features)`                                            | Append a feature set as derived columns                                                                              |
-| `Program(name, *, inputs=(), outputs=())`                                     | Declared inputs and outputs with the runtime-independent v1 fingerprint                                              |
-| `Program.analyze(runtime, *, mode)` / `.explain(runtime, *, mode)`            | Static analysis plus deterministic optimization, state, copy-boundary, and provider-cost fact rendering              |
-| `Program.compile_batch(runtime)` / `.compile_stream(runtime, *, ...)`         | Optimize and cache supported row-local, stateful, matrix, and relational-DAG strict project-v3 plans                 |
-| `AnalysisIssue` / `AnalysisResult`                                            | Immutable findings with stable output/input-rooted paths                                                             |
+| Member                                                                        | Contract                                                                                                         |
+|-------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------|
+| `Expr` / `ColumnExpr` / `ArrayExpr` / `TableExpr` / `Parameter`               | Immutable typed declaration values with v1 digests                                                               |
+| `table_input(name, *, schema, entity_by=(), event_time=None, sequence_by=())` | Declare one named table input                                                                                    |
+| `parameter(name, *, kind=...)`                                                | Declare one named static table or array input                                                                    |
+| `Field(name, data_type, nullable=True)`                                       | One exact table field declaration                                                                                |
+| `rows(size)` / `duration(micros)`                                             | Row-count and exact-microsecond rolling frames                                                                   |
+| `exact_time(...)` / `event_time_bucket(...)`                                  | Cross-section group declarations                                                                                 |
+| `row` / `ts` / `cs` / `table` / `linalg` / `window`                           | Namespace functions; `ts` includes EWMA/EMA and MACD, while `table` includes ordered relational stream-join DAGs |
+| `FeatureSet(features=())` / `.with_feature(name, value)`                      | Ordered uniquely named column expressions                                                                        |
+| `TableExpr.with_columns(features)`                                            | Append a feature set as derived columns                                                                          |
+| `Program(name, *, inputs=(), outputs=())`                                     | Declared inputs and outputs with the runtime-independent v1 fingerprint                                          |
+| `Program.analyze(runtime, *, mode)` / `.explain(runtime, *, mode)`            | Static analysis plus deterministic optimization, state, copy-boundary, and provider-cost fact rendering          |
+| `Program.compile_batch(runtime)` / `.compile_stream(runtime, *, ...)`         | Optimize and cache supported row-local, stateful, matrix, and relational-DAG strict project-v3 plans             |
+| `AnalysisIssue` / `AnalysisResult`                                            | Immutable findings with stable output/input-rooted paths                                                         |
 
 Structural identity uses `identical()`; public comparison operators build
 symbolic expressions, and converting one to `bool` fails. See the
@@ -337,7 +345,7 @@ analysis, and compilation contract.
 The separate Studio service exposes its supported API under `/api/v3`.
 
 | Method                 | Route                     | Purpose                                           |
-| ---------------------- | ------------------------- | ------------------------------------------------- |
+|------------------------|---------------------------|---------------------------------------------------|
 | `GET`                  | `/catalog`                | UDF-only top-level array                          |
 | `GET`                  | `/capabilities`           | Runtime, connector, and worker capabilities       |
 | `GET`                  | `/schema/project`         | Rust-generated v3 project JSON Schema             |
@@ -422,6 +430,5 @@ The Rust crate, Python binding, Studio package, and frontend are versioned
 `4.0.0`. Project format version `3` and checkpoint-manifest version `3` are
 separate protocol values from the package version.
 
-Calc Flow 4.0 does not load project-v2 documents or expose Studio `/api/v2`.
-See the [v2-to-v3 migration guide](migration-v2-to-v3.md) for the required
-migration boundary.
+Projects accept strict format `3`; Studio serves `/api/v3`. See
+[projects and persistence](projects-guide.md) for validation and storage.

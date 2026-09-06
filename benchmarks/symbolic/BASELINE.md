@@ -6,7 +6,7 @@ workloads the symbolic layer will compile ([GitHub #168], SCE-01 of the
 runtime does; they make no absolute performance claim and gate nothing.
 
 [GitHub #168]: https://github.com/wegamekinglc/calc-flow/issues/168
-[symbolic computation engine plan]: ../../docs/superpowers/plans/2026-08-22-symbolic-computation-engine.md
+[symbolic computation engine plan]: https://github.com/wegamekinglc/calc-flow/blob/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs/superpowers/plans/2026-08-22-symbolic-computation-engine.md
 
 ## Recorded runs
 
@@ -118,7 +118,7 @@ drain-timing artifact.
    both `origin/main` (these baselines) and the symbolic-compiler branch.
 2. Compare paired means per scenario; the initial row-local regression gate
    is five percent
-   ([design](../../docs/superpowers/specs/2026-08-22-symbolic-computation-engine-design.md)).
+   ([design](https://github.com/wegamekinglc/calc-flow/blob/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs/superpowers/specs/2026-08-22-symbolic-computation-engine-design.md)).
    Stateful and matrix gates must be set from these baselines before their
    implementations begin, not from absolute targets.
 3. For the stream scenario compare `checkpoint_duration_seconds`,

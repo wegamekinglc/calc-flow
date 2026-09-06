@@ -17,7 +17,7 @@ The files cover:
 
 - `expression_pipeline.rs` — the canonical first example. A one-node
   `ExpressionOperator` computes `total = a + b` over an Arrow `RecordBatch` and
-  awaits `ExecutionPlan::execute`.
+  awaits `BatchExecutionPlan::execute`.
 - `sql_join.rs` — a `SqlOperator` joins two named table inputs (`orders`,
   `fees`) with one read-only DataFusion `SELECT`.
 - `continuous_runtime.rs` — a replayable `StreamSource`, an ordinary
@@ -28,9 +28,9 @@ The files cover:
 - `gen_v3_schema.rs` — regenerates the canonical v3 project JSON Schema.
 
 The Python binding ships parallel examples under
-[`examples/`](../../../examples/README.md). The expression and SQL examples use
-the same datasets and expressions on both surfaces so the Rust crate and the
-Python package read as one engine.
+[`examples/`](../../../examples/README.md). The SQL examples share their dataset.
+The Rust expression example uses the introduction's addition calculation;
+Python 01 extends the same builder pattern with order totals and filtering.
 
 Use `uv run python scripts/run_examples.py --surface rust` to run every
 user-facing Rust example. Schema export and generation remain explicit tooling

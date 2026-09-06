@@ -93,6 +93,9 @@ async def main() -> None:
         print("started job:", job.id, job.status()["state"])
         outcome = await job.wait_async()
 
+        assert outcome.state == "completed"
+        assert outcome.completed_epoch is not None
+        assert sink.values == [2, 3, 4]
         print("terminal state:", outcome.state)
         print("completed epoch:", outcome.completed_epoch)
         print("results:", sink.values)
