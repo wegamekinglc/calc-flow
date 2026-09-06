@@ -7,11 +7,11 @@ quotable across all three).
 ## Source
 
 - Plan task: M0.1 of
-  [`docs/superpowers/plans/2026-08-02-continuous-streaming-v3.md`](../../../docs/superpowers/plans/2026-08-02-continuous-streaming-v3.md)
+  [`docs/superpowers/plans/2026-08-02-continuous-streaming-v3.md`](https://github.com/wegamekinglc/calc-flow/blob/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs/superpowers/plans/2026-08-02-continuous-streaming-v3.md)
   (section 6, Task M0.1), including the plan-wide invariants of section 5 and
   the process requirements of section 16.
 - Research basis:
-  [`docs/research/2026-08-02-arroyo-risingwave-streaming-research.md`](../../../docs/research/2026-08-02-arroyo-risingwave-streaming-research.md)
+  [`docs/research/2026-08-02-arroyo-risingwave-streaming-research.md`](https://github.com/wegamekinglc/calc-flow/blob/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs/research/2026-08-02-arroyo-risingwave-streaming-research.md)
 - Related docs: [`docs/introduction.md`](../../../docs/introduction.md) (v2 data
   contract and runner semantics),
   [`docs/runtime-envelope.md`](../../../docs/runtime-envelope.md) (v2 internal

@@ -142,12 +142,13 @@ no result-to-host round trip during operator execution. The example's later
 execution. See [arrays and matrices](../docs/array-guide.md) for usage and
 [symbolic compiler design](../docs/symbolic-design.md) for copy boundaries.
 
-Assertions check values and lifecycle behavior. Timings, IDs, diagnostic text,
+Checks validate values and lifecycle behavior. Timings, IDs, diagnostic text,
 and optional-provider output vary between runs. A program failure stops the
 runner and preserves its exit code.
 
 When adding an example, use the next `NN_description.py` name, keep it
-standalone with a `main()` entry point, assert its expected behavior, and avoid
+standalone with a `main()` entry point, verify its expected behavior even under
+Python optimization (`-O`), and avoid
 mutating caller-owned inputs. Clean up any job and temporary resource. Document
 its dependencies and expected result here, and link it from the relevant
 function guide. The runner discovers numbered Python files automatically;

@@ -43,7 +43,8 @@ def main() -> None:
 
     print("registered catalog:", runtime.catalog())
     output = run.outputs["output"].to_pyarrow()
-    assert output["total"].to_pylist() == [200, 500, 800]
+    if output["total"].to_pylist() != [200, 500, 800]:
+        raise RuntimeError(f"unexpected UDF totals: {output.to_pylist()}")
     print("result:", output.to_pylist())
 
 

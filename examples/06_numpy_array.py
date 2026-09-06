@@ -28,7 +28,8 @@ def main() -> None:
 
     run = plan.execute({"input": values})
     centered = run.outputs["output"].array.tolist()
-    assert centered == [-2.25, -1.25, 0.75, 2.75]
+    if centered != [-2.25, -1.25, 0.75, 2.75]:
+        raise RuntimeError(f"unexpected centered values: {centered}")
     print(centered)
 
 

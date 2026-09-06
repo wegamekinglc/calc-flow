@@ -93,9 +93,12 @@ async def main() -> None:
         print("started job:", job.id, job.status()["state"])
         outcome = await job.wait_async()
 
-        assert outcome.state == "completed"
-        assert outcome.completed_epoch is not None
-        assert sink.values == [2, 3, 4]
+        if outcome.state != "completed":
+            raise RuntimeError(f"unexpected terminal state: {outcome.state}")
+        if outcome.completed_epoch is None:
+            raise RuntimeError("unexpected missing terminal checkpoint")
+        if sink.values != [2, 3, 4]:
+            raise RuntimeError(f"unexpected stream results: {sink.values}")
         print("terminal state:", outcome.state)
         print("completed epoch:", outcome.completed_epoch)
         print("results:", sink.values)

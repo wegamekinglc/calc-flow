@@ -29,7 +29,8 @@ artifact. See [the example inventory](../examples/README.md).
 Check every relative Markdown link and heading anchor in changed documents,
 including links from the repository and example indexes. Confirm that each
 function guide links to a real program or clearly identifies a configuration
-fragment. Expected values should be checked by executable assertions; elapsed
+fragment. Expected values need runtime checks that remain active under Python
+optimization; elapsed
 time and platform-specific debug formatting are not fixed output contracts.
 
 ## Implementation surfaces

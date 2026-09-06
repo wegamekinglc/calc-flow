@@ -12,7 +12,7 @@ contradicting the specification).
   (authoritative; cited as "spec" with its D1-D9, S1-S10, I1-I10, NG1-NG13,
   FR/NFR identifiers).
 - Plan task: M0.2 of
-  [`docs/superpowers/plans/2026-08-02-continuous-streaming-v3.md`](../../../docs/superpowers/plans/2026-08-02-continuous-streaming-v3.md)
+  [`docs/superpowers/plans/2026-08-02-continuous-streaming-v3.md`](https://github.com/wegamekinglc/calc-flow/blob/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs/superpowers/plans/2026-08-02-continuous-streaming-v3.md)
   (cited as "plan"; its M0.2 checkbox list is covered end to end in Appendix A).
 - Current surfaces this replaces per plan section 1.3:
   `crates/calc-flow/src/{lib.rs,operator.rs,io.rs,checkpoint.rs}`,

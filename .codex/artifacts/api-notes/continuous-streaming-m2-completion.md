@@ -15,7 +15,7 @@
   [`../critiques/continuous-streaming-runtime.md`](../critiques/continuous-streaming-runtime.md),
   round 3, `BLOCKS REMAINING: 0`.
 - Milestone plan:
-  [`docs/superpowers/plans/2026-08-02-continuous-streaming-v3.md`](../../../docs/superpowers/plans/2026-08-02-continuous-streaming-v3.md),
+  [`docs/superpowers/plans/2026-08-02-continuous-streaming-v3.md`](https://github.com/wegamekinglc/calc-flow/blob/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs/superpowers/plans/2026-08-02-continuous-streaming-v3.md),
   tasks M2.1-M2.5.
 - M2 completion critique:
   [`../critiques/continuous-streaming-m2-completion.md`](../critiques/continuous-streaming-m2-completion.md),

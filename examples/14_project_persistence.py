@@ -24,22 +24,28 @@ async def run(directory: str) -> None:
 
     from_json = import_project_json(export_project_json(document))
     from_yaml = import_project_yaml(export_project_yaml(document))
-    assert from_json.canonical_json() == canonical
-    assert from_yaml.canonical_json() == canonical
+    if from_json.canonical_json() != canonical:
+        raise RuntimeError("unexpected JSON round-trip result")
+    if from_yaml.canonical_json() != canonical:
+        raise RuntimeError("unexpected YAML round-trip result")
 
     store = FileProjectStore(directory)
     await store.create(from_yaml)
     loaded = await store.get(document.root["id"])
-    assert loaded.canonical_json() == canonical
-    assert [item.root["id"] for item in await store.list()] == [document.root["id"]]
+    if loaded.canonical_json() != canonical:
+        raise RuntimeError("unexpected stored project content")
+    if [item.root["id"] for item in await store.list()] != [document.root["id"]]:
+        raise RuntimeError("unexpected project-store inventory")
 
     plan = Runtime().compile_batch_project(loaded.canonical_json())
     result = await plan.execute_async(
         {"input": Batch.from_pyarrow(pa.table({"a": [1, 3], "b": [2, 4]}))}
     )
     totals = result.outputs["output"].to_pyarrow()["total"].to_pylist()
-    assert totals == [3, 7]
-    assert builder.project == original
+    if totals != [3, 7]:
+        raise RuntimeError(f"unexpected reloaded totals: {totals}")
+    if builder.project != original:
+        raise RuntimeError("unexpected mutation of the original builder")
     print("reloaded totals:", totals)
     print("JSON, YAML, and file-store round trips agree")
 
