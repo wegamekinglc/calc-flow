@@ -45,7 +45,7 @@ def _artifact_identity(root: Path, artifact: dict, locked: dict) -> dict:
     }
 
 
-def _build_identity(root: Path, name: str, log: Path, locked: dict) -> list[dict]:
+def _build_messages(name: str, log: Path) -> list[dict]:
     messages = [
         json.loads(line)
         for line in log.read_text(encoding="utf-8").splitlines()
@@ -54,23 +54,29 @@ def _build_identity(root: Path, name: str, log: Path, locked: dict) -> list[dict
     finished = [row for row in messages if row.get("reason") == "build-finished"]
     if len(finished) != 1 or finished[0]["success"] is not True:
         raise ValueError(f"missing successful build completion: {name}")
+    return messages
+
+
+def _build_identity(root: Path, name: str, log: Path, locked: dict) -> list[dict]:
     artifacts = [
         _artifact_identity(root, row, locked)
-        for row in messages
+        for row in _build_messages(name, log)
         if row.get("reason") == "compiler-artifact"
     ]
     _validate_artifacts(name, artifacts)
     return [json.loads(row) for row in sorted({_encoded(row) for row in artifacts})]
 
 
-def _validate_artifacts(name: str, artifacts: list[dict]) -> None:
-    benchmarks = [
-        row
-        for row in artifacts
-        if row["target"]["kind"] == ["bench"]
+def _is_benchmark(name: str, row: dict) -> bool:
+    return (
+        row["target"]["kind"] == ["bench"]
         and row["target"]["name"] == name
         and row["package"].get("workspace_package") == "crates/calc-flow"
-    ]
+    )
+
+
+def _validate_artifacts(name: str, artifacts: list[dict]) -> None:
+    benchmarks = [row for row in artifacts if _is_benchmark(name, row)]
     dependencies = [row for row in artifacts if "source" in row["package"]]
     if len(benchmarks) != 1 or not dependencies:
         raise ValueError(f"incomplete compiled dependency inventory: {name}")

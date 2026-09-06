@@ -129,7 +129,7 @@ class CompiledDependencyTests(unittest.TestCase):
                     messages[0]["filenames"] = ["/another/cache/arrow.rlib"]
                     messages = [messages[1], messages[0], messages[2]]
                 identities.append(measure(root, log, messages))
-            self.assertEqual(*identities)
+            self.assertEqual(identities[0], identities[1])
 
     def test_incomplete_failed_or_unrecognized_builds_are_rejected(self):
         with TemporaryDirectory() as raw:
