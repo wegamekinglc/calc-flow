@@ -696,6 +696,22 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertEqual(smoke.count(evidence_path), 2)
         self.assertIn("scripts/verify_sql_datafusion_performance.py", smoke)
 
+    def test_release_budget_preserves_cold_builds_and_full_soaks(self) -> None:
+        release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        acceptance = release.split("  acceptance-gates:\n", 1)[1].split(
+            "  crate:\n", 1
+        )[0]
+
+        self.assertIn("    timeout-minutes: 180\n", acceptance)
+        for soak in (
+            "twenty_minute_two_source_slow_sink",
+            "twenty_minute_epoch_checkpoint_restart",
+        ):
+            with self.subTest(soak=soak):
+                self.assertIn(f"runtime::streaming::soak::{soak}", acceptance)
+        self.assertEqual(acceptance.count("-- --ignored --exact --nocapture"), 3)
+        self.assertNotIn("continue-on-error:", acceptance)
+
     def test_pr_and_release_isolate_stream_lifecycle_evidence(self) -> None:
         linux = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
         from scripts.benchmark_suite.catalog import shards

@@ -78,6 +78,10 @@ Manual dispatches are build-only rehearsals, including dispatches on tags.
 Only a pushed `v4.*` tag can reach the publication job. No API token or
 `skip-existing` behavior is used.
 
+The acceptance job has a 180-minute limit to accommodate cold exact-ref Rust
+and Python builds plus both mandatory 20-minute soaks. This is a job time
+budget, not a performance threshold; all benchmark and soak gates still apply.
+
 ## First-release performance baseline
 
 After the first release, the nearest reachable earlier release tag supplies
