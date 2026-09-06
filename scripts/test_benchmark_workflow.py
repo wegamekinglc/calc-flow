@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -7,6 +8,18 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class BenchmarkWorkflowTests(unittest.TestCase):
+    def test_dependency_lock_excludes_the_current_workspace_distribution(self):
+        project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
+            "project"
+        ]["name"]
+        suite = (ROOT / ".github/workflows/benchmark-suite.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(f"--no-emit-package {project} \\", suite)
+        lock = (ROOT / "benchmarks/requirements.lock").read_text(encoding="utf-8")
+        self.assertIn(f"--no-emit-package {project} ", lock)
+        self.assertFalse(any(line.startswith("-e ") for line in lock.splitlines()))
+
     def test_regular_ci_and_schedule_call_the_same_complete_suite(self):
         for name in ("ci-linux.yml", "benchmarks.yml"):
             workflow = (ROOT / ".github/workflows" / name).read_text(encoding="utf-8")
