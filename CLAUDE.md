@@ -97,8 +97,9 @@ generated `python/calc_flow/_native*.so` in source.
 There is no single top-level `pytest` invocation that covers the project; each
 surface has its own runner. The commands below describe full-suite runners, not
 a default local checklist. Follow [Verification](AGENTS.md#verification) for the
-three local-full-test exceptions, targeted TDD, and one non-blocking CI snapshot.
-Pending CI permits handoff, not a merge-ready claim or merge.
+three local-full-test exceptions, targeted test-driven development, and one
+non-blocking CI snapshot. Pending CI permits handoff, not a merge-ready claim or
+merge.
 
 - **Rust core** — unit tests live beside source under
   `crates/calc-flow/src/`; integration tests live under

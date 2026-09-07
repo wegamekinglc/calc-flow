@@ -298,9 +298,9 @@ State the specific reason and limited scope before using an exception. Local
 performance measurements require a dedicated performance task, regression
 diagnosis, or an explicit user request.
 
-Use the smallest focused tests for TDD red/green and changed refactors. Do not
-repeat an unchanged passing check; diagnose a recurring failure before rerunning
-and report a blocker when it cannot be resolved.
+Use the smallest focused tests for test-driven development red/green and changed
+refactors. Do not repeat an unchanged passing check; diagnose a recurring failure
+before rerunning and report a blocker when it cannot be resolved.
 
 After a commit/push or at review handoff, read at most one non-blocking CI status
 snapshot. Do not wait, watch, poll, or sleep/retry unless the user or acceptance
