@@ -55,6 +55,7 @@ runpy.run_path(sys.argv[1], run_name="__main__")
         ("05_async_execution.py", "a"),
         ("06_numpy_array.py", "array"),
         ("14_project_persistence.py", "a"),
+        ("15_file_source.py", "quantity"),
     ),
 )
 def test_example_rejects_incorrect_results_with_python_optimization(

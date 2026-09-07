@@ -313,7 +313,7 @@ repository commands and constraints.
 - **[Batch calculations](docs/batch-guide.md)** — expressions, SQL, UDFs, and async execution
 - **[Arrays and matrices](docs/array-guide.md)** — NumPy/JAX and static weights
 - **[Continuous streaming](docs/streaming-guide.md)** — source-to-recovery tutorial
-- **[Connectors](docs/connectors.md)** — transport configuration and guarantees
+- **[Connectors](docs/connectors/README.md)** — transport configuration and guarantees
 - **[Projects and persistence](docs/projects-guide.md)** — JSON/YAML and file stores
 - **[Studio](docs/studio-guide.md)** — local editing, inspection, and job controls
 - **[Python API](docs/python-api.md)** — Python surface and examples

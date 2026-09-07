@@ -22,5 +22,5 @@ feature set is `file`.
 | `websocket`  | JSON-lines streaming source                                               |
 
 The available identities and per-transport options are documented in
-[docs/connectors.md](../../docs/connectors.md); the running process is
+[the connector guides](../../docs/connectors/README.md); the running process is
 authoritative through its capability response.

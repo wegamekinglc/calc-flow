@@ -9,6 +9,16 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-08: Consolidate connector documentation under `docs/connectors/`
+  with an overview and one guide per transport, each linking its Python
+  example, service setup, configuration, and delivery contract. Move shared
+  stream graph and static-input fragments into the project guide.
+
+- 2026-09-08: Add standalone Python examples for all seven native source
+  connectors, including CSV, JSON Lines, and Parquet file inputs. Document
+  optional wheel features and reproducible service setup, check calculated
+  Parquet outputs, and make service examples opt-in in the example runner.
+
 - 2026-09-06: Organize documentation from overview and first run through
   function guides, API references, design, and development operations. Add
   batch, array, project-persistence, and Studio guides tied to executable

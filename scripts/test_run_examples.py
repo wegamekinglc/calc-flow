@@ -14,7 +14,7 @@ class RunExamplesTests(unittest.TestCase):
             patch.dict(run_examples.os.environ, {}, clear=True),
             patch.object(run_examples.subprocess, "run") as run,
         ):
-            exit_code = run_examples.main(["--surface", "python"])
+            exit_code = run_examples.main(["--surface", "python", "--include-services"])
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(
@@ -31,6 +31,16 @@ class RunExamplesTests(unittest.TestCase):
                 for call in run.call_args_list
             )
         )
+
+    def test_default_python_surface_skips_service_examples(self) -> None:
+        with patch.object(run_examples.subprocess, "run") as run:
+            exit_code = run_examples.main(["--surface", "python"])
+
+        self.assertEqual(exit_code, 0)
+        paths = [call.args[0][1] for call in run.call_args_list]
+        self.assertIn("examples/15_file_source.py", paths)
+        for path in run_examples.SERVICE_PYTHON_EXAMPLES:
+            self.assertNotIn(path, paths)
 
     def test_rust_surface_runs_user_examples_but_not_schema_generators(self) -> None:
         with (

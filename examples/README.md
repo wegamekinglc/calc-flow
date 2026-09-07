@@ -13,7 +13,7 @@ From a checkout with `calc-flow-python` built and installed, run one program:
 uv run --no-sync python examples/01_datafusion_pipeline.py
 ```
 
-Run the complete inventory, or choose a language:
+Run the examples that need no external service, or choose a language:
 
 ```bash
 uv run --no-sync python scripts/run_examples.py
@@ -34,9 +34,12 @@ builds wheels. An editable developer environment can instead use
 `--no-sync` runs against the environment you prepared without replacing its
 native installation.
 
-The stream examples use application-owned connectors, finite synthetic data,
-and temporary checkpoint roots. They require no Kafka, PostgreSQL, MySQL,
-ClickHouse, or network service. Example 14 also uses a temporary directory. For a
+Examples 04 and 08–12 use application-owned connectors, finite synthetic data,
+and temporary checkpoint roots. Example 15 uses the native file connector;
+these programs require no external service. Examples 16–21 require prepared
+services and opt-in native connector features; the runner skips them unless
+passed `--include-services`. See [connector setup](../docs/connectors/README.md) before running
+them directly or enabling that flag. Example 14 also uses a temporary directory. For a
 constrained checkout, set `TMPDIR` on Linux or `TEMP` and `TMP` on Windows to
 an existing writable directory under `target/` before running.
 
@@ -114,6 +117,29 @@ try {
     project through JSON, YAML, and an async file store, then compile and run
     the loaded graph. Checks totals `[3, 7]` and unchanged builder input.
     Guide: [project persistence](../docs/projects-guide.md).
+15. [15_file_source.py](15_file_source.py) — read CSV, JSON Lines, and Parquet
+    through the native file source, calculate order totals, and write them
+    with an exactly-once Parquet sink. Checks `[20.0, 60.0]` for each format;
+    creates and removes its own sample files and checkpoints.
+16. [16_kafka_source.py](16_kafka_source.py) — consume JSON orders from an
+    explicitly assigned Kafka partition, wait for sink delivery, and drain.
+17. [17_postgresql_source.py](17_postgresql_source.py) — read a PostgreSQL
+    repeatable-read snapshot in bounded pages with best-effort delivery.
+18. [18_mysql_source.py](18_mysql_source.py) — read a MySQL InnoDB snapshot
+    in primary-key order, with TLS enabled by default.
+19. [19_clickhouse_source.py](19_clickhouse_source.py) — read a bounded
+    ClickHouse snapshot using a frozen Arrow schema and composite cursor.
+20. [20_http_source.py](20_http_source.py) — poll a JSON Lines endpoint with
+    conditional requests, wait for sink delivery, and drain.
+21. [21_websocket_source.py](21_websocket_source.py) — read JSON frames with
+    blocking backpressure, wait for sink delivery, and drain.
+
+Examples 16–21 each check Parquet totals `[20.0, 60.0]` from two prepared
+orders and print the effective delivery guarantee. They have a 60-second
+deadline and clean up jobs, outputs, and checkpoints on exit. Each script
+runs independently. The [connector overview](../docs/connectors/README.md)
+links to one page per transport, each with wheel features, environment
+variables, sample SQL/messages, local service commands, and delivery limits.
 
 ## Rust counterparts
 
@@ -153,3 +179,6 @@ mutating caller-owned inputs. Clean up any job and temporary resource. Document
 its dependencies and expected result here, and link it from the relevant
 function guide. The runner discovers numbered Python files automatically;
 verify discovery with `python -m unittest scripts.test_run_examples`.
+List examples requiring external services in `SERVICE_PYTHON_EXAMPLES` in
+the runner so they require `--include-services`, and add their setup to
+[the connector instructions](../docs/connectors/README.md).

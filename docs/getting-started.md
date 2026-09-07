@@ -378,7 +378,7 @@ an extended-length absolute `TEMP` and `TMP` for the example process.
 
 - Run the complete [executable example inventory](examples.md).
 - Build a recoverable job with the [continuous streaming guide](streaming-guide.md).
-- Configure production transports with the [connector guide](connectors.md).
+- Configure production transports with the [connector guide](connectors/README.md).
 - Understand component ownership in the [design and architecture guide](design.md).
 - Look up exact names in the [Python API](python-api.md),
   [Rust API](rust-api.md), or [API reference](api-reference.md).

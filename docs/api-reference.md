@@ -49,8 +49,11 @@ The runnable inventories cover both surfaces; the SQL examples share a dataset:
 - Rust: [`crates/calc-flow/examples/README.md`](../crates/calc-flow/examples/README.md)
   — expression, SQL, continuous lifecycle, event-time window, and schema tools.
 
-Run all user examples with
-`JAX_PLATFORMS=cpu uv run python scripts/run_examples.py`.
+Run the user examples that need no external service with
+`JAX_PLATFORMS=cpu uv run --no-sync python scripts/run_examples.py`.
+To include Python connector examples 16–21, prepare the optional native features
+and services from the [connector overview](connectors/README.md), then add
+`--include-services`.
 
 ## Rust modules and exports
 

@@ -41,7 +41,7 @@ declared limits or estimates; use live metrics to observe memory and latency.
 
 Configure a stream project with the registered sources, sinks, formats,
 watermark policy, delivery requirements, and managed state settings described
-in the [connector guide](connectors.md). The Job observatory starts the job,
+in the [connector guide](connectors/README.md). The Job observatory starts the job,
 shows status, results, and bounded metrics, and resumes event observation after
 a connection interruption.
 
