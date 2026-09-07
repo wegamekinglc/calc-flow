@@ -76,10 +76,17 @@ a single run makes that diagnostic unreliable.
 
 1. Determine the baseline — the merge-base of the branch-under-test against `main`. If
    the user named a specific baseline ref, use that instead.
-2. Map the change to the scenarios it touches: DataFusion expression/session changes →
-   `test_datafusion.py` cases; runner/checkpoint changes → `test_runtime.py` cases;
-   array provider/ownership changes → the array suites. Restrict the comparison to
-   relevant groups when the change is narrow; run the full suite when it is broad.
+2. Map the change to maintained scenarios: DataFusion expression/session changes →
+   `benchmarks/test_datafusion.py`; batch graph/fan-out → `benchmarks/test_runtime.py`;
+   array provider/ownership changes → the array suites. Stream/checkpoint/recovery →
+   `benchmarks/test_symbolic_baseline.py::test_stream_window_checkpoint_and_recovery`
+   and the unified `lifecycle` shard; add corresponding Rust targets only when the
+   changed path needs them. Select relevant groups for the requested performance task.
+   Lifecycle work follows `docs/benchmark-suite.md` and
+   `scripts/verify_stream_lifecycle_evidence.py`: at least 20 measured rounds and
+   diagnostic samples, phase durations/quantiles, checkpoint bytes, RSS, recovery
+   correctness, and provenance. The unified shard uses `standard` scale. Preserve this
+   evidence contract; do not apply the standalone minima verdict below to lifecycle.
 3. Pick scales: default to `overhead` and `standard` for local iteration. Run `nightly`
    only when the user asks or the change targets large-input behavior — it is slow.
    When evaluating the 100,000- and 1,000,000-element NumPy ownership thresholds, run

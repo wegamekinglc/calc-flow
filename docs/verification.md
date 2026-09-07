@@ -3,13 +3,20 @@
 [Documentation](README.md) / 5.1 Verification
 
 Run commands from the repository root unless a working directory is shown.
-[AGENTS.md](../AGENTS.md#commands) maintains the complete required command
-groups and toolchain rules. Keep build, coverage, release, and cache outputs
+[AGENTS.md](../AGENTS.md#commands) maintains the complete CI/full-verification
+command groups and toolchain rules. Its [verification policy](../AGENTS.md#verification)
+defines the smallest local checks, three exceptions for local full testing, and
+one non-blocking CI snapshot. Full regression and routine performance gates run
+in CI; pending results permit handoff but do not permit merge. Keep build, coverage, release, and cache outputs
 under `target/` in a constrained checkout.
 
 ## Documentation and examples
 
-Prepare the environment using [getting started](getting-started.md). For an
+For an explicitly requested example run, prepare the environment using
+[getting started](getting-started.md). Documentation-only edits use proportional
+structure, link/anchor, diff, and necessary example checks; do not build native
+code merely to review prose. The full example-run references below are not a
+default documentation gate. For an
 existing installation, `--no-sync` keeps its installed native package when
 running examples:
 
@@ -49,7 +56,8 @@ The Rust test harness must inherit the same managed Python environment used
 for PyO3 compilation, including NumPy, PyArrow, and interpreter library paths.
 Connector coverage requires running Kafka, PostgreSQL, MySQL, and ClickHouse plus
 the environment variables listed in [AGENTS.md](../AGENTS.md#commands).
-Missing services are a blocked verification gate, not a passing coverage run.
+Missing services block an attempted full coverage run; skipping that run locally
+does not prove coverage or block a scoped handoff that records CI as unverified.
 
 After checks, confirm generated contracts and whitespace:
 
@@ -97,8 +105,9 @@ and [warm-stream measurements](warm-stream-performance.md) for timing work.
 Do not run benchmarks alongside builds or tests. Preserve raw failed and
 inconclusive results as well as successful ones.
 
-For release changes, additionally build the core wheel, sdist, crate, and
-Studio wheel, inspect each artifact, install wheels in clean environments,
-and perform the smoke checks in the [release guide](python-release.md).
+Release CI builds the core wheel, sdist, crate, and Studio wheel, inspects each
+artifact, installs wheels in clean environments, and performs the smoke checks
+in the [release guide](python-release.md). Select local release checks under the
+same scope and exception policy.
 
 Next: [benchmark suite](benchmark-suite.md).

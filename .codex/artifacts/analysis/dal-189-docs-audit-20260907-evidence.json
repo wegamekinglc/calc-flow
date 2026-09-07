@@ -1407,7 +1407,7 @@
     "canonical_non_instruction_fields_unchanged": true,
     "canonical_to_claude_corrections": 17
   },
-  "agent-sync": [
+  "initial-agent-sync": [
     {
       "name": "cf-orchestrator",
       "id": "a6c22a43-3dc1-4338-8581-3e1317dd9519",
@@ -1627,7 +1627,7 @@
       "delivery_protocol_preserved": true
     }
   ],
-  "final-static-checks": {
+  "initial-final-static-checks": {
     "markdown_files": 115,
     "links": 556,
     "local_links": 503,
@@ -1635,5 +1635,971 @@
     "whitespace_or_newline_issues": [],
     "changed_tables_checked": 29,
     "changed_files_checked": 19
+  },
+  "agent-sync": [
+    {
+      "name": "cf-orchestrator",
+      "id": "a6c22a43-3dc1-4338-8581-3e1317dd9519",
+      "write": true,
+      "before_instructions_sha256": "25620aa9df763eec7196f6db5190c5c3c5311cf29fa10994b1a3200887cfbff8",
+      "expected_instructions_sha256": "3c0cae304904289bec7463786a7816cb6b73f096d81cd57aa3310821676ee1a3",
+      "canonical_instructions_sha256": "f48d9ef3ba04a2521096ef494bf76dd8f0a0c9cfa3dca5adb1ca36c9f3ed9dab",
+      "preserved_overlay_sha256": "86dff6b0683848063618b0dced9349db3fdbdaf62b8a4cfc4c6d518ba9dfdfd7",
+      "canonical_base_equal_after_trim": true,
+      "adaptations": [
+        "authorized compact delivery protocol and role-specific execution supplement",
+        "existing CI responsibility supplement"
+      ],
+      "fields_sent": [
+        "instructions"
+      ],
+      "readback_matches": true,
+      "protected_field_changes": [],
+      "protected_fields_compared": [
+        "archived_at",
+        "archived_by",
+        "avatar_url",
+        "conversation_starters",
+        "created_at",
+        "custom_args",
+        "custom_env_key_count",
+        "description",
+        "disabled_runtime_skills",
+        "has_custom_env",
+        "id",
+        "invocation_targets",
+        "max_concurrent_tasks",
+        "mcp_config",
+        "mcp_config_redacted",
+        "model",
+        "name",
+        "owner_id",
+        "permission_mode",
+        "runtime_bound",
+        "runtime_config",
+        "runtime_id",
+        "runtime_mode",
+        "service_tier",
+        "skills",
+        "status",
+        "thinking_level",
+        "visibility",
+        "workspace_id"
+      ],
+      "description_unchanged": true,
+      "description_matches": true,
+      "after_instructions_sha256": "3c0cae304904289bec7463786a7816cb6b73f096d81cd57aa3310821676ee1a3",
+      "overlay_preserved_byte_for_byte": true,
+      "full_instructions_equal": false,
+      "readback_at_utc": "2026-09-07T05:52:25.333376+00:00"
+    },
+    {
+      "name": "cf-implementer",
+      "id": "227e58dc-a05a-48b6-bd20-94af140da251",
+      "write": true,
+      "before_instructions_sha256": "0ba7f1333cf5c177d3a47ddf79ef0af1b5bdd68da293474e69e7636f50ea8c0b",
+      "expected_instructions_sha256": "2f332e56815b966ae4430117ccced88ec8cba4ecc7bf0ada74c481efb76520b4",
+      "canonical_instructions_sha256": "bd004a742de70cfcd9fe15be73502470671bbcd1db440a602916157e59f67c8b",
+      "preserved_overlay_sha256": "17e1205462c727f362df01ab380f6a3bba5f7821e9bc399d4ad1033a949fd4c9",
+      "canonical_base_equal_after_trim": true,
+      "adaptations": [
+        "authorized compact delivery protocol and role-specific execution supplement"
+      ],
+      "fields_sent": [
+        "instructions"
+      ],
+      "readback_matches": true,
+      "protected_field_changes": [],
+      "protected_fields_compared": [
+        "archived_at",
+        "archived_by",
+        "avatar_url",
+        "conversation_starters",
+        "created_at",
+        "custom_args",
+        "custom_env_key_count",
+        "description",
+        "disabled_runtime_skills",
+        "has_custom_env",
+        "id",
+        "invocation_targets",
+        "max_concurrent_tasks",
+        "mcp_config",
+        "mcp_config_redacted",
+        "model",
+        "name",
+        "owner_id",
+        "permission_mode",
+        "runtime_bound",
+        "runtime_config",
+        "runtime_id",
+        "runtime_mode",
+        "service_tier",
+        "skills",
+        "status",
+        "thinking_level",
+        "visibility",
+        "workspace_id"
+      ],
+      "description_unchanged": true,
+      "description_matches": true,
+      "after_instructions_sha256": "2f332e56815b966ae4430117ccced88ec8cba4ecc7bf0ada74c481efb76520b4",
+      "overlay_preserved_byte_for_byte": true,
+      "full_instructions_equal": false,
+      "readback_at_utc": "2026-09-07T05:52:45.659840+00:00"
+    },
+    {
+      "name": "cf-tester",
+      "id": "a553f49e-ae3c-401e-88d4-919d9e078703",
+      "write": true,
+      "before_instructions_sha256": "92101fed40dac55c2473d03ef94c1cf75fa42cdc3c82f1ec9beaca087bfaa8a4",
+      "expected_instructions_sha256": "6191320fd31adac81fe2f3b6582442c39b122711f6f363e843401561ed68091b",
+      "canonical_instructions_sha256": "292f9755dd52f359fcd13b9995b76528e83679305f1bb17b87bb8c729342cdc1",
+      "preserved_overlay_sha256": "cfd962302bca26fa6ef0bf33539d4e7faea710c60059a3066f10b0a140b001b3",
+      "canonical_base_equal_after_trim": true,
+      "adaptations": [
+        "authorized compact delivery protocol and role-specific execution supplement"
+      ],
+      "fields_sent": [
+        "instructions"
+      ],
+      "readback_matches": true,
+      "protected_field_changes": [],
+      "protected_fields_compared": [
+        "archived_at",
+        "archived_by",
+        "avatar_url",
+        "conversation_starters",
+        "created_at",
+        "custom_args",
+        "custom_env_key_count",
+        "description",
+        "disabled_runtime_skills",
+        "has_custom_env",
+        "id",
+        "invocation_targets",
+        "max_concurrent_tasks",
+        "mcp_config",
+        "mcp_config_redacted",
+        "model",
+        "name",
+        "owner_id",
+        "permission_mode",
+        "runtime_bound",
+        "runtime_config",
+        "runtime_id",
+        "runtime_mode",
+        "service_tier",
+        "skills",
+        "status",
+        "thinking_level",
+        "visibility",
+        "workspace_id"
+      ],
+      "description_unchanged": true,
+      "description_matches": true,
+      "after_instructions_sha256": "6191320fd31adac81fe2f3b6582442c39b122711f6f363e843401561ed68091b",
+      "overlay_preserved_byte_for_byte": true,
+      "full_instructions_equal": false,
+      "readback_at_utc": "2026-09-07T05:53:00.844364+00:00"
+    },
+    {
+      "name": "cf-api-designer",
+      "id": "ea5b9d56-eb67-4d40-ba30-d07054d02f77",
+      "write": false,
+      "before_instructions_sha256": "2c895893165ddf6d46f41409cd3ed6c6b9df889e1d562ceaa46df352b17940c6",
+      "expected_instructions_sha256": "2c895893165ddf6d46f41409cd3ed6c6b9df889e1d562ceaa46df352b17940c6",
+      "canonical_instructions_sha256": "499bcd15a3ea0625f316bea6b5aa70de93fa1ab2a55a493c125e4ed67975ec1e",
+      "preserved_overlay_sha256": "83187dbe7fe358f0863735fdfc655ce60a1811d00ad35c89a17f50a5c2c09d73",
+      "canonical_base_equal_after_trim": true,
+      "adaptations": [
+        "authorized compact delivery protocol and role-specific execution supplement"
+      ],
+      "fields_sent": [],
+      "readback_matches": true,
+      "protected_field_changes": [],
+      "protected_fields_compared": [
+        "archived_at",
+        "archived_by",
+        "avatar_url",
+        "conversation_starters",
+        "created_at",
+        "custom_args",
+        "custom_env_key_count",
+        "description",
+        "disabled_runtime_skills",
+        "has_custom_env",
+        "id",
+        "invocation_targets",
+        "max_concurrent_tasks",
+        "mcp_config",
+        "mcp_config_redacted",
+        "model",
+        "name",
+        "owner_id",
+        "permission_mode",
+        "runtime_bound",
+        "runtime_config",
+        "runtime_id",
+        "runtime_mode",
+        "service_tier",
+        "skills",
+        "status",
+        "thinking_level",
+        "visibility",
+        "workspace_id"
+      ],
+      "description_unchanged": true,
+      "description_matches": true,
+      "after_instructions_sha256": "2c895893165ddf6d46f41409cd3ed6c6b9df889e1d562ceaa46df352b17940c6",
+      "overlay_preserved_byte_for_byte": true,
+      "full_instructions_equal": false,
+      "readback_at_utc": "2026-09-07T05:53:06.936331+00:00"
+    },
+    {
+      "name": "cf-critic",
+      "id": "d29d22b4-ec2a-4a2c-ab7b-861f7f4d0805",
+      "write": false,
+      "before_instructions_sha256": "ef7426ba5bd6037041aa53ae0740abee3f9ea5133fd574fa73fcf2afbd3ffecc",
+      "expected_instructions_sha256": "ef7426ba5bd6037041aa53ae0740abee3f9ea5133fd574fa73fcf2afbd3ffecc",
+      "canonical_instructions_sha256": "4dd9f6cb3cfc8bd6967d7bfca1c8abf6370322ad4d85a39eb9f0a3ee7459cce0",
+      "preserved_overlay_sha256": "69c7e984ad231e241817f439eb7ed6290e628b3a1c28c32cc4a57e1a1140a23f",
+      "canonical_base_equal_after_trim": true,
+      "adaptations": [
+        "authorized compact delivery protocol and role-specific execution supplement"
+      ],
+      "fields_sent": [],
+      "readback_matches": true,
+      "protected_field_changes": [],
+      "protected_fields_compared": [
+        "archived_at",
+        "archived_by",
+        "avatar_url",
+        "conversation_starters",
+        "created_at",
+        "custom_args",
+        "custom_env_key_count",
+        "description",
+        "disabled_runtime_skills",
+        "has_custom_env",
+        "id",
+        "invocation_targets",
+        "max_concurrent_tasks",
+        "mcp_config",
+        "mcp_config_redacted",
+        "model",
+        "name",
+        "owner_id",
+        "permission_mode",
+        "runtime_bound",
+        "runtime_config",
+        "runtime_id",
+        "runtime_mode",
+        "service_tier",
+        "skills",
+        "status",
+        "thinking_level",
+        "visibility",
+        "workspace_id"
+      ],
+      "description_unchanged": true,
+      "description_matches": true,
+      "after_instructions_sha256": "ef7426ba5bd6037041aa53ae0740abee3f9ea5133fd574fa73fcf2afbd3ffecc",
+      "overlay_preserved_byte_for_byte": true,
+      "full_instructions_equal": false,
+      "readback_at_utc": "2026-09-07T05:54:27.515726+00:00"
+    },
+    {
+      "name": "cf-reviewer",
+      "id": "a274f526-62bc-481f-93ef-67b4a63d9f3a",
+      "write": true,
+      "before_instructions_sha256": "56926189a26d26c2f3846813506a48d747572d3d2569b989845546be7e2e3f83",
+      "expected_instructions_sha256": "f878066abe6733042b18f85d68c13192f1e8bc9b3f84246a513a3877dac2260d",
+      "canonical_instructions_sha256": "5d5d55b83499c18dcb9cc607b112e46ef27173bfbb901bb7827bd8d2e2e5dc2d",
+      "preserved_overlay_sha256": "d4201c1c6491cced7b9308982d6aeeeb47b85e2eda56a3f75db40d6dd4819438",
+      "canonical_base_equal_after_trim": true,
+      "adaptations": [
+        "authorized compact delivery protocol and role-specific execution supplement"
+      ],
+      "fields_sent": [
+        "instructions"
+      ],
+      "readback_matches": true,
+      "protected_field_changes": [],
+      "protected_fields_compared": [
+        "archived_at",
+        "archived_by",
+        "avatar_url",
+        "conversation_starters",
+        "created_at",
+        "custom_args",
+        "custom_env_key_count",
+        "description",
+        "disabled_runtime_skills",
+        "has_custom_env",
+        "id",
+        "invocation_targets",
+        "max_concurrent_tasks",
+        "mcp_config",
+        "mcp_config_redacted",
+        "model",
+        "name",
+        "owner_id",
+        "permission_mode",
+        "runtime_bound",
+        "runtime_config",
+        "runtime_id",
+        "runtime_mode",
+        "service_tier",
+        "skills",
+        "status",
+        "thinking_level",
+        "visibility",
+        "workspace_id"
+      ],
+      "description_unchanged": true,
+      "description_matches": true,
+      "after_instructions_sha256": "f878066abe6733042b18f85d68c13192f1e8bc9b3f84246a513a3877dac2260d",
+      "overlay_preserved_byte_for_byte": true,
+      "full_instructions_equal": false,
+      "readback_at_utc": "2026-09-07T05:56:26.466080+00:00"
+    },
+    {
+      "name": "cf-doc-writer",
+      "id": "1b71d01f-a1e8-4e73-97f0-3a2576a7378c",
+      "write": false,
+      "before_instructions_sha256": "084ee1f4d85391f156efeab34fa0e256ee0a4a92454bc4519906d46f8a6cd2ef",
+      "expected_instructions_sha256": "084ee1f4d85391f156efeab34fa0e256ee0a4a92454bc4519906d46f8a6cd2ef",
+      "canonical_instructions_sha256": "74b724c789bbbc54579d5f650db67b9076c68018fa27984fef4b3f1823e08c25",
+      "preserved_overlay_sha256": "df5227dcd691a3e48362c4dc70d212167601d970847fbc3d465f79a0b84dfbb0",
+      "canonical_base_equal_after_trim": true,
+      "adaptations": [
+        "authorized compact delivery protocol and role-specific execution supplement"
+      ],
+      "fields_sent": [],
+      "readback_matches": true,
+      "protected_field_changes": [],
+      "protected_fields_compared": [
+        "archived_at",
+        "archived_by",
+        "avatar_url",
+        "conversation_starters",
+        "created_at",
+        "custom_args",
+        "custom_env_key_count",
+        "description",
+        "disabled_runtime_skills",
+        "has_custom_env",
+        "id",
+        "invocation_targets",
+        "max_concurrent_tasks",
+        "mcp_config",
+        "mcp_config_redacted",
+        "model",
+        "name",
+        "owner_id",
+        "permission_mode",
+        "runtime_bound",
+        "runtime_config",
+        "runtime_id",
+        "runtime_mode",
+        "service_tier",
+        "skills",
+        "status",
+        "thinking_level",
+        "visibility",
+        "workspace_id"
+      ],
+      "description_unchanged": true,
+      "description_matches": true,
+      "after_instructions_sha256": "084ee1f4d85391f156efeab34fa0e256ee0a4a92454bc4519906d46f8a6cd2ef",
+      "overlay_preserved_byte_for_byte": true,
+      "full_instructions_equal": false,
+      "readback_at_utc": "2026-09-07T05:56:27.714405+00:00"
+    },
+    {
+      "name": "cf-simplifier",
+      "id": "113b511d-172f-4673-becd-cc0db10b70b8",
+      "write": true,
+      "before_instructions_sha256": "60c3b772230848597b76adc669584f3f3d89ea84da39b3a60e01c89d793363ba",
+      "expected_instructions_sha256": "96a7bfc5fdd96c2b867ee23e7551d2a68b39db533a1bf4d558eb7ad67910e8ae",
+      "canonical_instructions_sha256": "b77c4ec99eef27a89cf33df389584d653fae487c6752459b6daedc7edf31abce",
+      "preserved_overlay_sha256": "fc70f3017b613514e4c2e20f5fb1caf8971066100afe21d5a08b8286228c0033",
+      "canonical_base_equal_after_trim": true,
+      "adaptations": [
+        "authorized compact delivery protocol and role-specific execution supplement"
+      ],
+      "fields_sent": [
+        "instructions"
+      ],
+      "readback_matches": true,
+      "protected_field_changes": [],
+      "protected_fields_compared": [
+        "archived_at",
+        "archived_by",
+        "avatar_url",
+        "conversation_starters",
+        "created_at",
+        "custom_args",
+        "custom_env_key_count",
+        "description",
+        "disabled_runtime_skills",
+        "has_custom_env",
+        "id",
+        "invocation_targets",
+        "max_concurrent_tasks",
+        "mcp_config",
+        "mcp_config_redacted",
+        "model",
+        "name",
+        "owner_id",
+        "permission_mode",
+        "runtime_bound",
+        "runtime_config",
+        "runtime_id",
+        "runtime_mode",
+        "service_tier",
+        "skills",
+        "status",
+        "thinking_level",
+        "visibility",
+        "workspace_id"
+      ],
+      "description_unchanged": true,
+      "description_matches": true,
+      "after_instructions_sha256": "96a7bfc5fdd96c2b867ee23e7551d2a68b39db533a1bf4d558eb7ad67910e8ae",
+      "overlay_preserved_byte_for_byte": true,
+      "full_instructions_equal": false,
+      "readback_at_utc": "2026-09-07T05:56:31.542509+00:00"
+    },
+    {
+      "name": "cf-performancer",
+      "id": "b37225a5-8640-4da1-9500-89adfab9c66b",
+      "write": true,
+      "before_instructions_sha256": "9821bef0c66f0cfa0c6b449953e7ba49034cb9295c29e9900c874fb1c6eab3be",
+      "expected_instructions_sha256": "ee05e82ed95fe2c0a66c4f035f2ee03a54dcc5ff1fd0e1c3b1e211bc276016de",
+      "canonical_instructions_sha256": "5658dc8b1457d9faaed74f44c2513dde44483aa99fbd7ca43fa41d4e6cd866fa",
+      "preserved_overlay_sha256": "6b5aad465047eef4c66f29b204aaaaae6582ef3962ff1cf63237b75d985a607d",
+      "canonical_base_equal_after_trim": true,
+      "adaptations": [
+        "authorized compact delivery protocol and role-specific execution supplement"
+      ],
+      "fields_sent": [
+        "instructions"
+      ],
+      "readback_matches": true,
+      "protected_field_changes": [],
+      "protected_fields_compared": [
+        "archived_at",
+        "archived_by",
+        "avatar_url",
+        "conversation_starters",
+        "created_at",
+        "custom_args",
+        "custom_env_key_count",
+        "description",
+        "disabled_runtime_skills",
+        "has_custom_env",
+        "id",
+        "invocation_targets",
+        "max_concurrent_tasks",
+        "mcp_config",
+        "mcp_config_redacted",
+        "model",
+        "name",
+        "owner_id",
+        "permission_mode",
+        "runtime_bound",
+        "runtime_config",
+        "runtime_id",
+        "runtime_mode",
+        "service_tier",
+        "skills",
+        "status",
+        "thinking_level",
+        "visibility",
+        "workspace_id"
+      ],
+      "description_unchanged": true,
+      "description_matches": true,
+      "after_instructions_sha256": "ee05e82ed95fe2c0a66c4f035f2ee03a54dcc5ff1fd0e1c3b1e211bc276016de",
+      "overlay_preserved_byte_for_byte": true,
+      "full_instructions_equal": false,
+      "readback_at_utc": "2026-09-07T05:56:35.657217+00:00"
+    },
+    {
+      "name": "cf-spec-writer",
+      "id": "62f89f6b-8158-4c5d-ac1d-8ed6d092473f",
+      "write": true,
+      "before_instructions_sha256": "36d9d08ae7a15c99bc6a446c5897ea76aa77a306ab79404e8705da33ff567e94",
+      "expected_instructions_sha256": "d02a081fa2fe1402f176de062651ab7833cd53b3a1df688a8a25a5f5dbc718d1",
+      "canonical_instructions_sha256": "26182a75c9f7b83ba3b5dc2667fdcfc09bde8363d76c9abae23541a87d2d2ec8",
+      "preserved_overlay_sha256": "1717c7b533cec9eb7b2860e3589e31f40625d41d8f2d9f2620be0654bb83fe49",
+      "canonical_base_equal_after_trim": true,
+      "adaptations": [
+        "authorized compact delivery protocol and role-specific execution supplement"
+      ],
+      "fields_sent": [
+        "instructions"
+      ],
+      "readback_matches": true,
+      "protected_field_changes": [],
+      "protected_fields_compared": [
+        "archived_at",
+        "archived_by",
+        "avatar_url",
+        "conversation_starters",
+        "created_at",
+        "custom_args",
+        "custom_env_key_count",
+        "description",
+        "disabled_runtime_skills",
+        "has_custom_env",
+        "id",
+        "invocation_targets",
+        "max_concurrent_tasks",
+        "mcp_config",
+        "mcp_config_redacted",
+        "model",
+        "name",
+        "owner_id",
+        "permission_mode",
+        "runtime_bound",
+        "runtime_config",
+        "runtime_id",
+        "runtime_mode",
+        "service_tier",
+        "skills",
+        "status",
+        "thinking_level",
+        "visibility",
+        "workspace_id"
+      ],
+      "description_unchanged": true,
+      "description_matches": true,
+      "after_instructions_sha256": "d02a081fa2fe1402f176de062651ab7833cd53b3a1df688a8a25a5f5dbc718d1",
+      "overlay_preserved_byte_for_byte": true,
+      "full_instructions_equal": false,
+      "readback_at_utc": "2026-09-07T05:56:39.518334+00:00"
+    }
+  ],
+  "remediation": {
+    "date": "2026-09-07",
+    "reviewed_head": "c0e3cc77ca8ac2aa05f8fe056d7b78d5e99f928a",
+    "main_baseline": "5c1cac1255e826ea4655244963c891681b14b97c",
+    "branch": "docs/DAL-189-audit-20260907",
+    "review_attachment": {
+      "id": "01a07a60-9d79-7ea2-9c15-db623579eadf",
+      "filename": "dal-189-independent-review-20260907.md",
+      "sha256": "555495571bb85d6968404dd0e4f79d50766bc23a0b4018e14da073e3e8d5b238"
+    },
+    "authority": "2026-09-07 cf-orchestrator trigger 01a07a61-bcc3-7dc1-b71f-1144102befe6; accepted independent-review classification and canonical-first corrections",
+    "acceptance": "canonical semantics agree; explicitly listed client/compact-protocol overlays may differ in bytes",
+    "findings": [
+      {
+        "id": "B1",
+        "status": "corrected; pending independent re-review",
+        "canonical": [
+          "AGENTS.md:Verification",
+          ".agents/skills/code-style/SKILL.md:Verification",
+          ".codex/agents/README.md:Shared delivery policy",
+          ".codex/agents/cf-implementer.toml:Phases 3-5",
+          ".codex/agents/cf-tester.toml:Phase 4/4B",
+          ".codex/agents/cf-reviewer.toml:Step 4",
+          ".codex/agents/cf-simplifier.toml:Apply Mode",
+          ".codex/agents/cf-spec-writer.toml:Acceptance Criteria"
+        ],
+        "semantics": [
+          "smallest targeted local checks",
+          "CI full regression and routine performance",
+          "three bounded local-full-test exceptions",
+          "90% combined Rust and 85% Studio floors preserved",
+          "no repeated unchanged passing checks",
+          "one nonblocking snapshot",
+          "pending handoff is not merge readiness",
+          "required failures block merge"
+        ],
+        "full_commands_preserved_in": "AGENTS.md and matching CLAUDE.md command blocks"
+      },
+      {
+        "id": "B2",
+        "status": "corrected; pending independent re-review",
+        "canonical": [
+          ".codex/agents/cf-orchestrator.toml:Tool Restrictions/Analyze/Plan/Delegate/Do/Do NOT/Remember",
+          ".codex/agents/README.md:Workflow and Shared delivery policy"
+        ],
+        "allowed": [
+          "authorized assigned issue/comments, repository guidance, specialist reports, GitHub issue/PR/check metadata reads",
+          "authorized platform dispatch/task tracking/handoff",
+          "required temporary comment body in workdir and cleanup"
+        ],
+        "forbidden": [
+          "implementation",
+          "build/test/benchmark",
+          "git commands",
+          "source or specialist artifact review",
+          "arbitrary repository edits",
+          "PR creation/editing",
+          "merge"
+        ],
+        "lifecycle": "run-owned results must be collected before exit; Multica uses persistent issue delegation, never background-and-exit callbacks"
+      },
+      {
+        "id": "B3",
+        "status": "corrected; pending independent re-review",
+        "canonical": [
+          ".codex/agents/cf-performancer.toml:Phase 1"
+        ],
+        "batch_fan_out": "benchmarks/test_runtime.py::test_graph_fan_out",
+        "stream_checkpoint_recovery": "benchmarks/test_symbolic_baseline.py::test_stream_window_checkpoint_and_recovery",
+        "unified_shard": "lifecycle",
+        "source_contract": [
+          "scripts/benchmark_suite/catalog.py",
+          "scripts/benchmark_suite/legacy.py",
+          "scripts/verify_stream_lifecycle_evidence.py"
+        ],
+        "evidence": [
+          "standard scale",
+          "at least 20 rounds and diagnostic samples",
+          "phase durations/quantiles",
+          "checkpoint bytes",
+          "RSS",
+          "recovery correctness",
+          "provenance",
+          "not standalone minima verdict"
+        ],
+        "performance_executed": false
+      }
+    ],
+    "mirror_sync": [
+      {
+        "name": "cf-implementer",
+        "method": "canonical section replacements; existing client adapters preserved",
+        "sections": 6
+      },
+      {
+        "name": "cf-tester",
+        "method": "canonical section replacements; existing client adapters preserved",
+        "sections": 2
+      },
+      {
+        "name": "cf-reviewer",
+        "method": "canonical section replacements; existing client adapters preserved",
+        "sections": 2
+      },
+      {
+        "name": "cf-simplifier",
+        "method": "canonical section replacements; existing client adapters preserved",
+        "sections": 1
+      },
+      {
+        "name": "cf-spec-writer",
+        "method": "canonical section replacements; existing client adapters preserved",
+        "sections": 3
+      },
+      {
+        "name": "cf-performancer",
+        "method": "canonical section replacements; existing client adapters preserved",
+        "sections": 1
+      },
+      {
+        "name": "cf-orchestrator",
+        "method": "canonical body with Claude coordination tool names; frontmatter preserved"
+      }
+    ],
+    "claude_allowed_adaptations": {
+      "cf-orchestrator": [
+        "Claude coordination/task tool names; frontmatter"
+      ],
+      "cf-implementer": [
+        "style entry point",
+        "CLAUDE guidance",
+        "EnterWorktree",
+        "line wrapping; frontmatter"
+      ],
+      "cf-tester": [
+        "style entry point",
+        "CLAUDE guidance",
+        "EnterWorktree",
+        "line wrapping; frontmatter"
+      ],
+      "cf-api-designer": [
+        "style entry point",
+        "CLAUDE guidance; frontmatter"
+      ],
+      "cf-critic": [
+        "style entry point and wording; frontmatter"
+      ],
+      "cf-reviewer": [
+        "style entry point",
+        "CLAUDE guidance",
+        "line wrapping; frontmatter"
+      ],
+      "cf-doc-writer": [
+        "style entry point",
+        "CLAUDE guidance wording",
+        "EnterWorktree",
+        "line wrapping/table formatting; frontmatter"
+      ],
+      "cf-simplifier": [
+        "style entry point and wording",
+        "CLAUDE guidance",
+        "EnterWorktree",
+        "line wrapping; frontmatter"
+      ],
+      "cf-performancer": [
+        "CLAUDE guidance",
+        "EnterWorktree",
+        "line wrapping; frontmatter"
+      ],
+      "cf-spec-writer": [
+        "style entry point and wording",
+        "CLAUDE guidance",
+        "line wrapping; frontmatter"
+      ]
+    },
+    "multica_read_interruptions": [
+      {
+        "agent": "cf-critic",
+        "operation": "readback, no write planned",
+        "exit_code": 2,
+        "resolution": "read-only retry succeeded with unchanged record"
+      },
+      {
+        "agent": "cf-reviewer",
+        "operation": "prewrite read",
+        "exit_code": 2,
+        "resolution": "read-only retry succeeded; resumed only incomplete operations"
+      }
+    ],
+    "configuration_boundary": "Only --instructions sent for seven agents. All other readable fields compared; no secret environment reads, hidden-config claims, skill rebinding, or non-text updates.",
+    "ci": "One nonblocking post-push snapshot to be reported in issue handoff; no final CI pass claimed",
+    "remaining": [
+      "Independent targeted re-review required before PR",
+      "Coveralls project URL unverified: previous GET 403; not repeated",
+      "Full CI result unverified"
+    ],
+    "new_changelog_entry": false,
+    "new_product_source_tests_examples_or_generated_changes": false,
+    "recorded_at_utc": "2026-09-07T05:57:57.462824+00:00"
+  },
+  "final-static-checks": {
+    "scope": "only files changed since c0e3cc7; referenced local targets read to resolve links",
+    "changed_files": [
+      ".agents/skills/code-style/SKILL.md",
+      ".claude/agents/README.md",
+      ".claude/agents/cf-implementer.md",
+      ".claude/agents/cf-orchestrator.md",
+      ".claude/agents/cf-performancer.md",
+      ".claude/agents/cf-reviewer.md",
+      ".claude/agents/cf-simplifier.md",
+      ".claude/agents/cf-spec-writer.md",
+      ".claude/agents/cf-tester.md",
+      ".claude/rules/code-style.md",
+      ".codex/agents/README.md",
+      ".codex/agents/cf-implementer.toml",
+      ".codex/agents/cf-orchestrator.toml",
+      ".codex/agents/cf-performancer.toml",
+      ".codex/agents/cf-reviewer.toml",
+      ".codex/agents/cf-simplifier.toml",
+      ".codex/agents/cf-spec-writer.toml",
+      ".codex/agents/cf-tester.toml",
+      ".codex/artifacts/analysis/dal-189-docs-audit-20260907-evidence.json",
+      ".codex/artifacts/analysis/dal-189-docs-audit-20260907.md",
+      "AGENTS.md",
+      "CLAUDE.md",
+      "docs/verification.md"
+    ],
+    "markdown_and_agent_sources_checked": 22,
+    "local_links_checked": 37,
+    "local_links": [
+      {
+        "source": ".agents/skills/code-style/SKILL.md",
+        "target": "../../../AGENTS.md"
+      },
+      {
+        "source": ".agents/skills/code-style/SKILL.md",
+        "target": "../../../AGENTS.md#verification"
+      },
+      {
+        "source": ".claude/agents/README.md",
+        "target": "../../AGENTS.md#verification"
+      },
+      {
+        "source": ".claude/rules/code-style.md",
+        "target": "../../AGENTS.md"
+      },
+      {
+        "source": ".claude/rules/code-style.md",
+        "target": "../../AGENTS.md#verification"
+      },
+      {
+        "source": ".codex/agents/README.md",
+        "target": "../../AGENTS.md#verification"
+      },
+      {
+        "source": ".codex/artifacts/analysis/dal-189-docs-audit-20260907.md",
+        "target": "dal-189-docs-audit-20260907-evidence.json"
+      },
+      {
+        "source": "AGENTS.md",
+        "target": "#verification"
+      },
+      {
+        "source": "CLAUDE.md",
+        "target": "README.md"
+      },
+      {
+        "source": "CLAUDE.md",
+        "target": "docs/"
+      },
+      {
+        "source": "CLAUDE.md",
+        "target": "AGENTS.md"
+      },
+      {
+        "source": "CLAUDE.md",
+        "target": "docs/introduction.md"
+      },
+      {
+        "source": "CLAUDE.md",
+        "target": "AGENTS.md#commands"
+      },
+      {
+        "source": "CLAUDE.md",
+        "target": "AGENTS.md#verification"
+      },
+      {
+        "source": "CLAUDE.md",
+        "target": "AGENTS.md#verification"
+      },
+      {
+        "source": "CLAUDE.md",
+        "target": "AGENTS.md#coding-style"
+      },
+      {
+        "source": "CLAUDE.md",
+        "target": ".claude/rules/code-style.md"
+      },
+      {
+        "source": "CLAUDE.md",
+        "target": "docs/runtime-envelope.md"
+      },
+      {
+        "source": "CLAUDE.md",
+        "target": "AGENTS.md#rust-core"
+      },
+      {
+        "source": "CLAUDE.md",
+        "target": "docs/"
+      },
+      {
+        "source": "CLAUDE.md",
+        "target": "docs/README.md"
+      },
+      {
+        "source": "CLAUDE.md",
+        "target": "docs/introduction.md"
+      },
+      {
+        "source": "CLAUDE.md",
+        "target": "docs/design.md"
+      },
+      {
+        "source": "CLAUDE.md",
+        "target": "CHANGELOG.md"
+      },
+      {
+        "source": "docs/verification.md",
+        "target": "README.md"
+      },
+      {
+        "source": "docs/verification.md",
+        "target": "../AGENTS.md#commands"
+      },
+      {
+        "source": "docs/verification.md",
+        "target": "../AGENTS.md#verification"
+      },
+      {
+        "source": "docs/verification.md",
+        "target": "getting-started.md"
+      },
+      {
+        "source": "docs/verification.md",
+        "target": "../examples/README.md"
+      },
+      {
+        "source": "docs/verification.md",
+        "target": "../AGENTS.md#commands"
+      },
+      {
+        "source": "docs/verification.md",
+        "target": "../AGENTS.md#commands"
+      },
+      {
+        "source": "docs/verification.md",
+        "target": "../deny.toml"
+      },
+      {
+        "source": "docs/verification.md",
+        "target": "benchmark-suite.md"
+      },
+      {
+        "source": "docs/verification.md",
+        "target": "sql-datafusion-performance.md"
+      },
+      {
+        "source": "docs/verification.md",
+        "target": "warm-stream-performance.md"
+      },
+      {
+        "source": "docs/verification.md",
+        "target": "python-release.md"
+      },
+      {
+        "source": "docs/verification.md",
+        "target": "benchmark-suite.md"
+      }
+    ],
+    "missing": [],
+    "whitespace": [],
+    "tables_checked": 27,
+    "table_method": "wcwidth display columns; unescaped pipes; separator dashes fill cells",
+    "canonical_non_instruction_fields_unchanged": [
+      ".codex/agents/cf-api-designer.toml",
+      ".codex/agents/cf-critic.toml",
+      ".codex/agents/cf-doc-writer.toml",
+      ".codex/agents/cf-implementer.toml",
+      ".codex/agents/cf-orchestrator.toml",
+      ".codex/agents/cf-performancer.toml",
+      ".codex/agents/cf-reviewer.toml",
+      ".codex/agents/cf-simplifier.toml",
+      ".codex/agents/cf-spec-writer.toml",
+      ".codex/agents/cf-tester.toml"
+    ],
+    "claude_frontmatter_unchanged": [
+      ".claude/agents/cf-api-designer.md",
+      ".claude/agents/cf-critic.md",
+      ".claude/agents/cf-doc-writer.md",
+      ".claude/agents/cf-implementer.md",
+      ".claude/agents/cf-orchestrator.md",
+      ".claude/agents/cf-performancer.md",
+      ".claude/agents/cf-reviewer.md",
+      ".claude/agents/cf-simplifier.md",
+      ".claude/agents/cf-spec-writer.md",
+      ".claude/agents/cf-tester.md"
+    ],
+    "descriptions_match": 10,
+    "agent_claude_commands_identical": true,
+    "root_command_blocks_unchanged": true,
+    "product_source_examples_tests_generated_unchanged": true,
+    "agent_structure_test": {
+      "command": "python3 -m unittest scripts.test_codex_agents",
+      "runs_this_round": 1,
+      "tests_passed": 10
+    },
+    "external_links": "not repeated; prior Coveralls 403 remains unverified",
+    "builds_full_suites_benchmarks_run": false
   }
 }

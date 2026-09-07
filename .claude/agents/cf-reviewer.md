@@ -134,44 +134,30 @@ need context. Check:
   `cargo audit` (with the repo's documented ignores), and `npm audit --omit=dev` are
   addressed in the PR
 
-### Step 4: Build and Run the Verification Matrix
+### Step 4: Targeted Local Verification and CI Gate
 
-Run every surface the PR touches, inside the review worktree:
+Review the implementation evidence first, then run only the smallest additional checks
+needed for the diff and directly affected behavior, inside the review worktree. Use
+focused tests and necessary module compile, format, lint, or type checks. Do not repeat
+unchanged passing checks. Full regression and routine performance gates belong to CI;
+the complete commands, combined Rust 90% line gate, and Studio 85% floor remain in
+`AGENTS.md`. Its three local-full-test exceptions are explicit user request, CI failure
+diagnosis, or clear high risk without CI coverage; state the reason and limited scope.
 
-```bash
-uv sync --extra dev
-cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-uv run python scripts/run_rust_tests.py
-# When Rust changed: configure the connector services/environment from AGENTS.md.
-uv run python scripts/run_rust_coverage.py
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
-```
-```bash
-uv sync --extra dev && uv run maturin develop
-JAX_PLATFORMS=cpu uv run pytest python/tests -q
-uv run ruff check . && uv run ruff format --check .
-```
-```bash
-cd web-ui/backend && uv run --project . --extra dev pytest --cov=calc_flow_studio
-```
-```bash
-cd web-ui && npm ci && npm run sync:api && npm run build && npm test
-npm run test:e2e    # when user-facing flows changed
-```
+Use at most one non-blocking CI status snapshot per review handoff (reuse Step 1's
+snapshot when no new push occurred). Do not wait, watch, poll, or sleep/retry unless
+the user or acceptance criteria explicitly require final results. Pending or absent
+checks permit a review handoff, not a green or merge-ready claim. Required failures,
+including performance and coverage, remain merge blockers. Record cancelled and
+inconclusive checks separately and route diagnosis without polling.
 
-Capture:
-- Build/check failures (blocking)
-- Test counts and any newly failing tests (compare against the PR's test plan)
-- Failures in areas the PR didn't touch (potential regressions)
-- Coverage floor violations
+For documentation and agent guidance, check changed structure, synchronization,
+links/anchors, diff, and necessary existing examples. Do not build native code merely
+to review prose. Report unrun product suites as not run, not passed.
 
-For a docs-only PR no matrix surface is touched — say so in the report, and execute
-any runnable snippet the diff adds (building the native module first if needed) as
-the "verify nothing is broken" step.
-
-If anything fails, investigate whether it is pre-existing or introduced by this PR.
-Pre-existing failures should be noted; new failures are blocking.
+Capture actual commands, counts/results, coverage evidence, and CI state. Investigate
+whether an observed failure is pre-existing or introduced; new failures are blocking.
+Diagnose recurring failures before rerunning and report unresolved blockers.
 
 ### Step 5: Produce the Review Report
 
@@ -256,7 +242,7 @@ merging it, confirm that intent before using a close operation.
 ## What Not to Do
 
 - Don't skip reading files in full — diff-only review misses context
-- Don't skip the verification matrix — verify nothing is broken
+- Don't replace proportional review with routine local full-matrix runs; follow Step 4
 - Don't approve a PR with failing or newly failing tests
 - Don't approve a PR with unaddressed convention violations
 - Don't merge without an explicit user request and green checks

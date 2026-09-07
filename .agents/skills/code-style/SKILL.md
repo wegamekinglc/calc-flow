@@ -86,19 +86,15 @@ Markdown, tests, and verification.
 
 ## Verification
 
-Use the runner for every affected surface; there is no single project-wide
-test command. Run the full command groups from the `Commands` section of
-[AGENTS.md](../../../AGENTS.md). Run these style-facing gates when their
-surfaces are in scope:
-
-```bash
-cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
-
-uv run ruff check .
-uv run ruff format --check .
-JAX_PLATFORMS=cpu uv run pytest python/tests -q
-
-cd web-ui && npm run build && npm test
-```
+Follow the local scope, CI responsibilities, and three full-test exceptions in
+[AGENTS.md](../../../AGENTS.md#verification). Use the smallest checks for the
+change and necessary formatter/linter/type checks for directly affected modules.
+Full regression and routine performance gates belong to CI; the complete command
+groups in AGENTS.md remain CI or explicitly scoped full-verification references.
+Preserve the Rust 90% line and Studio backend 85% coverage floors. Do not repeat
+unchanged passing checks or rebuild native code only to review documentation.
+For Markdown and agent guidance, check changed structure, synchronization,
+links/anchors, whitespace, final newlines, and necessary existing examples.
+After an authorized push, take at most one non-blocking CI snapshot; do not wait
+or poll unless final results were explicitly requested. Pending permits handoff,
+not merge; required failures remain blocking.

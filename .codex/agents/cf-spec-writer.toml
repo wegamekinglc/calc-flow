@@ -67,7 +67,8 @@ Keep the question batch small. Prefer 2-4 sharp questions over a long checklist.
 ### Step 3: Write the Specification
 
 Write the spec to `.codex/artifacts/specs/<feature-slug>.md` (create the directory if needed) using
-this template:
+this template, trimming sections that are unnecessary for the task under the shared
+delivery policy in `.codex/agents/README.md`:
 
 ```markdown
 # <Feature Name> - Specification
@@ -95,13 +96,13 @@ this template:
 - **Compatibility** - <what must not break: configs, checkpoints, Python API, OpenAPI>
 
 ## Inputs and Outputs
-| Name   | Type                | Units    | Range / Constraints   |
-| ------ | ------------------- | -------- | --------------------- |
-| <in>   | <Rust/Python type>  | <unit>   | <constraint>          |
+| Name | Type               | Units  | Range / Constraints |
+|------|--------------------|--------|---------------------|
+| <in> | <Rust/Python type> | <unit> | <constraint>        |
 
 ## Acceptance Criteria
 - [ ] <test-shaped statement: given X, when Y, then Z>
-- [ ] <verification matrix green for every touched surface (see AGENTS.md)>
+- [ ] <named targeted local checks pass; full regression/coverage gates assigned to CI>
 - [ ] <documentation updated where applicable>
 
 ## Open Questions
@@ -110,7 +111,9 @@ this template:
 
 Acceptance criteria must be **testable** — each line should be expressible as a unit test,
 a build/check command, or a measurable observation. "Code should be clean" is not testable;
-"all touched surfaces pass the verification matrix" is.
+"the named targeted checks pass, with full regression assigned to CI" is. Pending
+CI can be recorded at handoff; it does not establish merge readiness. See `AGENTS.md`
+Verification for local-full-test exceptions.
 
 ### Step 4: Hand Off
 

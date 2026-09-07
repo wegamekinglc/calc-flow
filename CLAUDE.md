@@ -28,8 +28,10 @@ execution model.
 ## Commands
 
 The canonical command groups live in [AGENTS.md](AGENTS.md#commands) and are
-reproduced here for convenience. Start at the repository root; the Studio
-subshells preserve that directory for subsequent groups.
+reproduced here for convenience as CI/full-verification references. Select the
+smallest local checks under [Verification](AGENTS.md#verification); full regression
+and routine performance gates belong to CI. Start at the repository root; the
+Studio subshells preserve that directory for subsequent groups.
 
 ```bash
 # Rust core and PyO3 Rust unit tests
@@ -93,7 +95,10 @@ generated `python/calc_flow/_native*.so` in source.
 ## Running tests
 
 There is no single top-level `pytest` invocation that covers the project; each
-surface has its own runner.
+surface has its own runner. The commands below describe full-suite runners, not
+a default local checklist. Follow [Verification](AGENTS.md#verification) for the
+three local-full-test exceptions, targeted TDD, and one non-blocking CI snapshot.
+Pending CI permits handoff, not a merge-ready claim or merge.
 
 - **Rust core** — unit tests live beside source under
   `crates/calc-flow/src/`; integration tests live under

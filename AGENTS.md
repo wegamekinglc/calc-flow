@@ -10,6 +10,8 @@ React application serving the `/api/v3` continuous job API. See `docs/introducti
 
 ## Commands
 
+These are complete command references for CI and explicitly scoped full
+verification. Select local checks under [Verification](#verification).
 Start each command group at the repository root. The Studio groups use
 subshells so their working-directory changes do not affect later commands.
 
@@ -278,8 +280,38 @@ selectors.
 
 ## Verification
 
-Before considering a change complete, run the full command groups in
-`Commands`, then:
+Local verification covers the change and its directly affected behavior: use the
+smallest focused unit/integration checks and necessary module compile, format,
+lint, or type checks. Do not run full-repository, full-workspace, or all-surface
+matrices locally by default. For documentation and agent guidance, check the
+changed structure, synchronization, links/anchors, and diff; run only necessary
+example checks that fit the requested scope, without building native code merely
+to validate prose.
+
+Full regression and routine performance gates belong to GitHub CI. The complete
+commands remain references for CI and explicitly scoped full verification. Keep
+the combined Rust 90% line floor (including connector services) and independent
+Studio backend 85% floor; a skipped local coverage run does not prove either gate.
+Expand local full testing only for an explicit user request, reproduction or
+diagnosis of a CI failure, or a clearly high-risk change without CI coverage.
+State the specific reason and limited scope before using an exception. Local
+performance measurements require a dedicated performance task, regression
+diagnosis, or an explicit user request.
+
+Use the smallest focused tests for TDD red/green and changed refactors. Do not
+repeat an unchanged passing check; diagnose a recurring failure before rerunning
+and report a blocker when it cannot be resolved.
+
+After a commit/push or at review handoff, read at most one non-blocking CI status
+snapshot. Do not wait, watch, poll, or sleep/retry unless the user or acceptance
+criteria explicitly require the final CI result. Pending or absent CI can be
+reported in a completed handoff; it is not green or merge-ready. Report failed,
+cancelled, and inconclusive checks accurately. Required test, coverage,
+cross-platform, and performance gates still block merge when failed or unresolved.
+The final specialist review remains required; merging also requires explicit
+authority and green required checks.
+
+Confirm generated contracts have no unintended drift and check whitespace:
 
 ```bash
 git diff --exit-code -- \
@@ -289,6 +321,7 @@ git diff --exit-code -- \
 git diff --check
 ```
 
-For a release change, additionally build the core wheel, source distribution,
-crate, and Studio wheel; run `scripts/inspect_wheel.py` for each; install the
-wheels in clean environments; and run the core/Studio smoke checks.
+Release CI additionally builds the core wheel, source distribution, crate, and
+Studio wheel; inspects the artifacts; installs wheels in clean environments; and
+runs the core/Studio smoke checks. Select local release verification under the
+same scope and exception rules above.
