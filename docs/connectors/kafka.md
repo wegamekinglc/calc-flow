@@ -15,6 +15,10 @@ selects the JSON codec. `run` waits for two delivered rows before draining
 the continuous job, then verifies Parquet totals `[20.0, 60.0]` and prints
 at-least-once delivery.
 
+Both the command-line entry point and imported functions default to
+`127.0.0.1:9092`. Set `CALC_FLOW_KAFKA_BOOTSTRAP` to select another broker.
+The broker and sample topic must be prepared even when using the default.
+
 Build a Python wheel with `--features connector-kafka`, retaining the
 default file connector for output. Follow the
 [shared environment preparation](README.md#prepare-the-python-environment)

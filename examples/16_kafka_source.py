@@ -110,11 +110,6 @@ def main() -> None:
             "Build a wheel with connector-kafka and connector-file; "
             "see examples/README.md."
         )
-    if not os.environ.get("CALC_FLOW_KAFKA_BOOTSTRAP"):
-        raise SystemExit(
-            "Set CALC_FLOW_KAFKA_BOOTSTRAP after preparing the sample service; "
-            "see examples/README.md."
-        )
     with TemporaryDirectory(prefix="calc-flow-kafka-source-") as directory:
         asyncio.run(run(Path(directory)))
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -59,6 +59,33 @@ def test_file_source_example_checks_native_results(
     example = load_example("15_file_source.py")
     asyncio.run(example.run(tmp_path, format_name))
     assert example.read_totals(tmp_path) == [20.0, 60.0]
+
+
+@pytest.mark.parametrize("bootstrap", (None, "broker.example:19092"))
+def test_kafka_entry_point_uses_default_or_configured_broker(
+    bootstrap: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    example = load_example("16_kafka_source.py")
+    if bootstrap is None:
+        monkeypatch.delenv("CALC_FLOW_KAFKA_BOOTSTRAP", raising=False)
+    else:
+        monkeypatch.setenv("CALC_FLOW_KAFKA_BOOTSTRAP", bootstrap)
+    runtime = Mock()
+    runtime.capabilities.return_value.connectors = [
+        SimpleNamespace(name="file"),
+        SimpleNamespace(name="kafka"),
+    ]
+    monkeypatch.setattr(example, "Runtime", Mock(return_value=runtime))
+    run = AsyncMock()
+    monkeypatch.setattr(example, "run", run)
+
+    example.main()
+
+    run.assert_awaited_once()
+    project = example.build_project(run.await_args.args[0])
+    assert project.model_dump()["sources"][0]["options"]["bootstrap_servers"] == (
+        bootstrap or "127.0.0.1:9092"
+    )
 
 
 @pytest.mark.parametrize(

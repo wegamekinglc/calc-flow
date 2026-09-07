@@ -74,7 +74,7 @@ existing capability API. The default wheel still includes only `file`.
       "name": "mysql",
       "version": "1.0.0"
     },
-    "secrets": {"url": {"resolver": "environment", "key": "MYSQL_URL"}},
+    "secrets": {"url": {"resolver": "environment", "key": "CALC_FLOW_MYSQL_URL"}},
     "options": {
       "table": "orders",
       "mode": "incremental_query",
@@ -93,7 +93,7 @@ existing capability API. The default wheel still includes only `file`.
       "name": "mysql",
       "version": "1.0.0"
     },
-    "secrets": {"url": {"resolver": "environment", "key": "MYSQL_URL"}},
+    "secrets": {"url": {"resolver": "environment", "key": "CALC_FLOW_MYSQL_URL"}},
     "options": {
       "table": "orders_out",
       "mode": "transactional",
