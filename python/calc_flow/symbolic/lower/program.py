@@ -17,7 +17,6 @@ from calc_flow.pipeline import (
     BatchExecutionPlan,
     Runtime,
     StreamExecutionPlan,
-    StreamRequirements,
     _canonical,
 )
 from calc_flow.symbolic import errors
@@ -28,6 +27,10 @@ from calc_flow.symbolic.analyzer import (
     _schema_fields,
 )
 from calc_flow.symbolic.domains import type_name
+from calc_flow.symbolic.lower.event_windows import (
+    _check_window_lateness_options,
+    _lower_event_window_program,
+)
 from calc_flow.symbolic.lower.planners import (
     _check_declared_inputs,
     _CrossSectionPlan,
@@ -679,6 +682,17 @@ def lower_program_document(
             _check_rolling_capability(program, capabilities, mode_value)
         if _program_needs_cross_section(program):
             _check_cross_section_capability(program, capabilities, mode_value)
+    _check_window_lateness_options(
+        program,
+        _program_needs_rolling(program) or _program_needs_cross_section(program),
+        allowed_lateness_micros,
+        late_policy,
+    )
+    window_project = _lower_event_window_program(
+        program, analyzer, selected, allowed_lateness_micros, late_policy
+    )
+    if window_project is not None:
+        return window_project
     join_project = _lower_stream_join_program(
         program,
         analyzer,
@@ -808,12 +822,7 @@ def compile_program_stream(
         allowed_lateness_micros,
         late_policy,
     )
-    return selected._cached_symbolic_compile(
-        key,
-        lambda: selected._compile_stream_graph_project(
-            _canonical(document), requirements=StreamRequirements()
-        ),
-    )  # type: ignore[return-value]
+    return selected._compile_symbolic_stream(key, _canonical(document))
 
 
 def _validate_lateness(allowed_lateness_micros: object, late_policy: object, /) -> None:

@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, fmt};
 
 use async_trait::async_trait;
+use datafusion::arrow::datatypes::SchemaRef;
 use serde_json::Value;
 
 use crate::{
@@ -144,6 +145,27 @@ impl ExpressionOperator {
     /// The normalized read-only query executed by this operator.
     pub(crate) fn query_text(&self) -> &str {
         &self.query
+    }
+
+    /// Plans the exact stream output schema without processing any rows.
+    ///
+    /// This internal adapter seam is for expressions without selected UDFs.
+    /// It preserves the stream column-projection path and otherwise reads the
+    /// optimized `DataFusion` physical schema using the default configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the schema cannot resolve this expression.
+    #[doc(hidden)]
+    pub async fn infer_stream_schema(&self, input: SchemaRef) -> Result<SchemaRef> {
+        if let Some(projection) = &self.column_projection
+            && let Some((_, schema)) = projection.schema(&input)
+        {
+            return Ok(schema);
+        }
+        DataFusionRuntime::new(DataFusionConfig::default())?
+            .infer_input_query_schema(&self.query, input, &self.name)
+            .await
     }
 
     /// Attaches the plan's `DataFusion` resources for the stream path.
@@ -348,6 +370,60 @@ mod tests {
             BatchMetadata::new("quotes", 7, BTreeMap::new()).unwrap(),
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn infer_stream_schema_matches_optimized_computed_projection() {
+        let input = projection_input();
+        for (select, filter) in [
+            (
+                vec![r#"CASE WHEN "Price" IS NOT NULL THEN "Price" ELSE 0 END AS guarded"#.into()],
+                None,
+            ),
+            (vec![r#"("Price" > 0) AND false AS flag"#.into()], None),
+            (vec!["sqrt(length(symbol)) AS root".into()], None),
+            (
+                vec![r#"CASE WHEN "Price" IS NULL THEN 0 ELSE "Price" END AS guarded"#.into()],
+                Some(r#""Price" IS NOT NULL"#.into()),
+            ),
+        ] {
+            let mut operator =
+                ExpressionOperator::new("inferred", "", select, filter, vec![]).unwrap();
+            let inferred = operator
+                .infer_stream_schema(Arc::clone(input.table_payload().unwrap().schema()))
+                .await
+                .unwrap();
+            assert!(!operator.stream_runtime_initialized());
+            let output = operator.process_standalone(input.clone()).await.unwrap();
+            assert_eq!(&inferred, output.table_payload().unwrap().schema());
+        }
+    }
+
+    #[tokio::test]
+    async fn infer_stream_schema_preserves_projection_metadata() {
+        let schema = Arc::new(Schema::new_with_metadata(
+            vec![Field::new("Price", DataType::Float64, false).with_metadata(
+                std::collections::HashMap::from([("unit".into(), "USD".into())]),
+            )],
+            std::collections::HashMap::from([("origin".into(), "quotes".into())]),
+        ));
+        let operator = ExpressionOperator::new(
+            "inferred",
+            "",
+            vec![r#""Price" AS "renamed""#.into()],
+            None,
+            vec![],
+        )
+        .unwrap();
+        let inferred = operator
+            .infer_stream_schema(Arc::clone(&schema))
+            .await
+            .unwrap();
+        assert_eq!(
+            inferred.field(0),
+            &schema.field(0).clone().with_name("renamed")
+        );
+        assert_eq!(inferred.metadata(), schema.metadata());
     }
 
     #[tokio::test]

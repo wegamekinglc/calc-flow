@@ -8,7 +8,7 @@ use std::{
 };
 
 use datafusion::{
-    arrow::record_batch::RecordBatch,
+    arrow::{datatypes::SchemaRef, record_batch::RecordBatch},
     datasource::MemTable,
     execution::{
         context::{SessionConfig, SessionContext},
@@ -294,6 +294,34 @@ impl DataFusionRuntime {
         let query = sql_projection(expression, "input")?;
         let tables = BTreeMap::from([("input".to_owned(), input.clone())]);
         self.sql(&query, &tables, node_id).await
+    }
+
+    pub(crate) async fn infer_input_query_schema(
+        &self,
+        query: &str,
+        schema: SchemaRef,
+        node_id: &str,
+    ) -> Result<SchemaRef> {
+        self.ensure_open()?;
+        let query = validate_select_query(query)?;
+        let _query_guard = self.query_lock.lock().await;
+        self.ensure_open()?;
+        let context = self.context_for_rows(0, None, "not_evaluated");
+        let mut registrations = TableRegistrations::new(context);
+        let input = Batch::table(
+            vec![RecordBatch::new_empty(schema)],
+            BatchMetadata::new("schema", 0, BTreeMap::new())?,
+        )?;
+        registrations.register("input", &input, Some(node_id))?;
+        let dataframe = context
+            .sql(&query)
+            .await
+            .map_err(|error| datafusion_error(Some(node_id), error))?;
+        let plan = dataframe
+            .create_physical_plan()
+            .await
+            .map_err(|error| datafusion_error(Some(node_id), error))?;
+        Ok(plan.schema())
     }
 
     /// Executes one read-only SQL query over run-scoped table aliases.

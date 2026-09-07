@@ -1283,7 +1283,7 @@ def test_row_local_scalar_functions_infer_types() -> None:
     explanation = program.explain(Runtime(), mode="batch")
     for name in ("logged", "expanded", "negated"):
         assert f"field {name} float64 nullable=true" in explanation
-    assert "field rooted float64 nullable=false" in explanation
+    assert "field rooted float64 nullable=true" in explanation
     assert "field absolute int64 nullable=true" in explanation
     assert "field inverted int64 nullable=true" in explanation
     assert "field flagged bool nullable=true" in explanation

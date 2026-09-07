@@ -13,7 +13,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 PYTHON_EXAMPLES = tuple(
     str(path.relative_to(REPOSITORY_ROOT))
     for path in sorted((REPOSITORY_ROOT / "examples").glob("[0-9][0-9]_*.py"))
-)
+) + ("examples/symbolic_event_window.py",)
 SERVICE_PYTHON_EXAMPLES = (
     "examples/16_kafka_source.py",
     "examples/17_postgresql_source.py",

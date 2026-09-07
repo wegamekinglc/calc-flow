@@ -9,7 +9,7 @@ from scripts import run_examples
 
 
 class RunExamplesTests(unittest.TestCase):
-    def test_python_surface_runs_every_numbered_example_in_order(self) -> None:
+    def test_python_surface_runs_numbered_and_named_examples_in_order(self) -> None:
         with (
             patch.dict(run_examples.os.environ, {}, clear=True),
             patch.object(run_examples.subprocess, "run") as run,
@@ -22,7 +22,8 @@ class RunExamplesTests(unittest.TestCase):
             [
                 [sys.executable, str(path)]
                 for path in sorted(Path("examples").glob("[0-9][0-9]_*.py"))
-            ],
+            ]
+            + [[sys.executable, "examples/symbolic_event_window.py"]],
         )
         self.assertTrue(all(call.kwargs["check"] for call in run.call_args_list))
         self.assertTrue(

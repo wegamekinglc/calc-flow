@@ -96,7 +96,7 @@
       "PLR0913": 10
     },
     "python/calc_flow/symbolic/ops.py": {
-      "PLR0913": 4
+      "PLR0913": 5
     },
     "python/tests/a6_cross_surface_worker.py": {
       "C901": 1

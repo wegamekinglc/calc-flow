@@ -6,6 +6,7 @@ On this page:
 
 - [Declarations and analysis](#symbolic-declarations-and-static-analysis)
 - [Compilation](#symbolic-compilation)
+- [Event-time window aggregation](#symbolic-event-time-window-aggregation)
 - [Bounded stream joins](#symbolic-bounded-stream-joins)
 - [Matrix compilation](#symbolic-matrix-compilation)
 
@@ -25,15 +26,15 @@ The declaration catalog is intentionally wider than the implemented project
 lowerers. Use this availability matrix when constructing user-facing formula
 editors or validating stored declarations:
 
-| Domain                   | Construct/analyze | Batch/stream compile  | Current lowering boundary                                             |
-|--------------------------|-------------------|-----------------------|-----------------------------------------------------------------------|
-| row-local columns        | yes               | yes                   | portable scalar types and the documented SQL allowlist                |
-| rolling `ts`             | yes               | yes                   | source/alias/row-local operands and earlier rolling results           |
-| cross-section `cs`       | yes               | yes                   | staged values; event time and partitions resolve to inputs or aliases |
-| relational stream joins  | yes               | stream only           | independent/nested native joins with proved post-join ordering        |
-| symbolic matrix          | yes               | exact supported shape | one static `weights` parameter and one allowlisted matmul             |
-| event `window`           | yes               | no                    | declaration-only; compilation fails closed                            |
-| standalone array outputs | yes               | no                    | arrays compile only through the supported table attachment            |
+| Domain                   | Construct/analyze | Batch/stream compile   | Current lowering boundary                                             |
+|--------------------------|-------------------|------------------------|-----------------------------------------------------------------------|
+| row-local columns        | yes               | yes                    | portable scalar types and the documented SQL allowlist                |
+| rolling `ts`             | yes               | yes                    | source/alias/row-local operands and earlier rolling results           |
+| cross-section `cs`       | yes               | yes                    | staged values; event time and partitions resolve to inputs or aliases |
+| relational stream joins  | yes               | stream only            | independent/nested native joins with proved post-join ordering        |
+| symbolic matrix          | yes               | exact supported shape  | one static `weights` parameter and one allowlisted matmul             |
+| event `window`           | yes               | stream with aggregates | fixed UTC tumbling/hopping; stateless table work on either side       |
+| standalone array outputs | yes               | no                     | arrays compile only through the supported table attachment            |
 
 `Program.analyze` reports `unsupported_type` for stateful operands outside
 the current materialization boundary, so a clean analysis does not advertise
@@ -101,8 +102,9 @@ the analysis proves:
 - state requirements per output, rendered by `explain` as
   `state cross_section, duration(60000000)`-style facts; and
 - stream safety: temporal and cross-section inputs need an event-time column
-  with entity and sequence keys, and a stream-mode array output with row-axis
-  lineage is reported as unbounded state.
+  with entity and sequence keys; event windows require an exact supported
+  timestamp field without that ordering metadata. A stream-mode array output
+  with row-axis lineage is reported as unbounded state.
 
 `analyze` returns an immutable `AnalysisResult` carrying `mode`,
 `program_fingerprint`, `capability_session_id`, `capability_revision`, and an
@@ -112,9 +114,9 @@ for example `outputs.signals.score`, `outputs.scores.matmul.right.shape[0]`,
 `inputs.quotes.sequence_by[0]`, and `static_inputs.weights`. Analysis is
 deterministic: it never mutates a declaration node, and repeated runs return
 equal results. For programs supported by lowering, `explain` also reports the
-physical CSE, rolling, cross-section, and array-fusion stage counts. Its cost
-section states bounded rolling rows or durations, cross-section group bounds,
-bounded stream-join row/byte/match limits, retained fixed/variable-width
+physical CSE, rolling, cross-section, event-window, and array-fusion stage
+counts. Its cost section states bounded rolling rows or durations,
+cross-section group bounds, bounded stream-join row/byte/match limits, retained fixed/variable-width
 columns, explicit table-to-dense and host-to-device copy boundaries,
 static-weight bytes when known, and provider calls per micro-batch. These are
 compile-time estimates and shape facts;
@@ -150,6 +152,12 @@ subexpressions compiles to a single fused node. Node IDs and the plan
 fingerprint are deterministic, and the lowered project carries strict JSON
 only.
 
+`log`, `exp`, and `sqrt` compute floating inputs as `float64`; `clip`
+preserves its floating input type. Lowering inserts explicit conversions for
+`float32` expressions so native results match the analyzed schema, including
+at an event-window boundary. Unsigned column negation is rejected during
+analysis; use `row.cast` to select a supported signed or floating type first.
+
 Optimization runs over the complete program after analysis. Identical,
 connected pure expression materializations are emitted once and fan out to
 each consumer. Output branches over the same input and prefilter share one
@@ -157,23 +165,174 @@ rolling operator, including its history and partition index; branches over
 the same upstream, partition keys, and exact-time or fixed-bucket finality
 share one cross-section grouping/sort stage. A different prefilter, grouping,
 bucket width, or upstream state stage is a hard materialization boundary, so
-the optimizer does not move a filter across temporal or cross-section
-finality. Table/array and backend transitions remain explicit boundaries, and
-the allowlisted array expression is fused into one provider call per accepted
-micro-batch.
+the optimizer does not move a filter across temporal, cross-section, or
+event-window finality. Table/array and backend transitions remain explicit
+boundaries, and the allowlisted array expression is fused into one provider
+call per accepted micro-batch.
 
-Each `Runtime` keeps a runtime-scoped compile cache of immutable plan values.
+Each `Runtime` keeps a bounded, runtime-scoped symbolic compile cache.
 The deterministic key contains the program fingerprint, batch/stream mode,
 stream lateness policy, exact input declaration bytes (including schemas),
 capability schema/session/revision, and selected operator, provider, and UDF
-versions. Python object identity is never a key input. Repeating a compile on
-the same runtime and key returns the cached plan; any successful provider,
-stream-lifecycle, or UDF registration invalidates that runtime's entries.
+versions. Python object identity is never a key input. Batch compilation
+returns the cached immutable plan for the same key. Stream compilation caches
+the immutable project JSON after successful native compilation and returns a
+fresh owning native plan on every call: a `StreamingRunner` consumes its plan.
+Compile again and create fresh bindings and a runner for each job or restart.
+Any successful provider, stream-lifecycle, or UDF registration invalidates
+that runtime's entries. Cache facts do not promise a measured compile speedup.
 
 Programs with one input and one output bind the plan endpoints `input` and
 `output`, matching the `PipelineBuilder` convention; multi-branch graphs name
 endpoints `<node>.input` and `<node>.output` deterministically. Batches
 supplied at execution must match the declared input schema exactly.
+
+## Symbolic event-time window aggregation
+
+`window.tumbling(value, /, *, event_time, size_micros, group_by=(),
+aggregates=None)` and `window.hopping(value, /, *, event_time, size_micros,
+slide_micros, group_by=(), aggregates=None)` declare fixed UTC event windows.
+Pass a non-empty sequence of immutable `WindowAggregate(function, column,
+output)` values to execute them with `Program.compile_stream(runtime)`.
+The helpers `window.count`, `window.sum`, `window.min`, `window.max`, and
+`window.avg` each accept a positional column name and a required keyword-only
+`output` name. All three declaration fields are non-empty strings; `function`
+is one of those five exact names. Declarations contain no expressions,
+callables, SQL, or live data. Compute a row-local value with `with_columns`
+before the window, then aggregate its named column.
+
+`count(column)` counts non-null values and always requires a column; there is
+no `count(*)` helper. Choose a non-null trade ID to count every trade.
+`avg` is the ordinary arithmetic mean. It does not weight prices by volume.
+Run the [minute aggregation example](../examples/symbolic_event_window.py)
+for grouped count, volume, low, high, and average price with explicit source
+watermarks.
+
+The aggregate and grouping sequences are copied immediately and retain their
+declaration order. Aggregate output names must be unique and must not collide
+with a grouping key, `window_start`, or `window_end`. Grouping keys must also
+be unique and cannot use those two reserved names. Multiple aggregates over
+the same input column may use distinct output names; an output may reuse an
+ordinary input column name that is absent from the result.
+
+A non-empty `aggregates` sequence constructs `window_tumbling@2` or
+`window_hopping@2`. Omitting it or passing `None` constructs the
+declaration-only `@1` form with its stable canonical bytes and digest;
+compilation rejects that form with `unknown_primitive_version`. An explicit
+empty sequence is rejected with `invalid_literal`. Mappings, sets,
+generators, strings, and sequences containing other value types are rejected.
+The following execution rules apply to the aggregate-bearing `@2` forms.
+
+### Schema and geometry
+
+The input is a table with an exact ordered schema. `event_time` names a
+`timestamp[ms]`, `timestamp[us]`, or `timestamp[us, UTC]` field. Naive
+timestamps use the native UTC coordinate, and null timestamps are allowed.
+Event windows do not require `entity_by`, `sequence_by`, or a non-null time
+declaration. The time field must pass through from an input unchanged or via a
+pure rename; time arithmetic, truncation, or casts that change its coordinate
+are rejected because they do not preserve the source watermark coordinate.
+
+Grouping keys and `min`/`max` inputs accept `bool`, signed and unsigned
+8/16/32/64-bit integers, `float32`, `float64`, `string`, `large_string`,
+`date32`, `date64`, `timestamp[us]`, and `timestamp[us, UTC]`.
+Numeric aggregates accept those integer and floating types. `count` accepts
+any currently supported portable symbolic field type representable in
+project-v3, including `timestamp[ms]` and time fields. Those additional types
+do not become valid grouping or `min`/`max` inputs.
+
+| Output                       | Arrow type                 | Nullable       |
+|------------------------------|----------------------------|----------------|
+| `window_start`, `window_end` | `timestamp[us, UTC]`       | false          |
+| Grouping key                 | Preserved input field type | Input nullable |
+| `count`                      | `uint64`                   | false          |
+| Signed integer `sum`         | `int64`                    | true           |
+| Unsigned integer `sum`       | `uint64`                   | true           |
+| Floating `sum`, every `avg`  | `float64`                  | true           |
+| `min`, `max`                 | Preserved input field type | true           |
+
+Output columns are exactly `window_start`, `window_end`, grouping keys in
+declaration order, then aggregate outputs in declaration order. Raw input
+columns, sequence keys, and internal helper columns are not appended.
+
+For stateless table transformations before or after a window, analysis first
+checks declared field names, types, and expression paths. It then confirms
+the actual lowered expression stages, including shared-expression stages,
+with the native stream schema planner. Names and types must match the frozen
+declarations; nullability comes from the native result. This includes the
+effects of DataFusion's CASE and boolean simplifications. Grouping keys
+preserve the exact window-input field nullability; the window's aggregate
+outputs retain the rules in the table above.
+
+Schema confirmation uses the native column-projection path when applicable
+and otherwise plans against an empty table with the declared Arrow schema.
+It opens no source, processes no user rows, and executes no registered UDF.
+Planning failures or incompatible names/types reject analysis before a job
+starts. Each `Runtime` separately caches up to 128 successfully planned
+immutable Arrow schemas, clearing them with its compile cache on successful
+registration changes.
+
+`size_micros` and `slide_micros` are exact positive Python integers no greater
+than `2**64 - 1`; booleans, floats, strings, and durations are not accepted.
+Hopping requires `size_micros % slide_micros == 0` and an overlap
+`size_micros // slide_micros` from 1 through 1024. Geometry is anchored at the
+Unix epoch with half-open intervals `[start, end)`. Event-time overflow that
+depends on row values is checked by the native runtime.
+
+### Final output, composition, and recovery
+
+Each unique complete declaration lowers to one native
+`WindowAggregateOperator` through the existing project-v3 `window` spec.
+Identity includes the input graph, time field, geometry, ordered grouping
+keys, and ordered aggregates with their output names. Identical declarations
+share one physical window state across branches. Different aggregate lists,
+ordering, or upstream filters create different state owners.
+
+Data arrivals accumulate native state without early output. A watermark
+closes windows whose end is less than or equal to it; end-of-input flushes the
+remaining windows. Null-time rows are dropped and counted in native metrics.
+An assignment is late when its end is less than or equal to the current input
+watermark. Hopping drops only the closed assignments, so one row can still
+contribute to other open windows. Empty windows produce no rows. Within an
+existing group, all-null aggregate inputs produce zero for `count` and null
+for the other functions. Each close sorts rows by window start, window end,
+and the native stable group-key encoding, retaining native null, NaN,
+signed-zero, overflow, metrics, and chunking semantics.
+
+Each dependency path through a window supports stateless `table.project`,
+`table.filter`, `with_columns`, and row-local expressions before and after
+one window. Window results have a distinct row origin; they cannot mix with
+raw input columns or arrays by position. The compiler rejects rolling,
+cross-section, joins, another event window, array/matrix attachment, external
+stateful providers, and cross-row reductions on that path. Independent
+windows and unrelated legal outputs may coexist in the same `Program`.
+Filters retain their declared side of the window finality boundary.
+
+`allowed_lateness_micros` and `late_policy` on `compile_stream` belong to
+rolling/cross-section operators. Event windows always apply native late
+assignment dropping. A program containing windows but no independent
+rolling/cross-section consumer rejects non-default values with
+`capability_mismatch` at `<program>.compile_stream.<option>`; the default
+`late_policy="error"` does not change window dropping into an error.
+`analyze` and `explain` take their existing runtime and mode arguments, and
+`explain` describes default compile options. Its window section reports
+geometry, aggregates, physical state sharing, layout, finality, and ordering;
+active window/group counts depend on runtime data.
+
+Batch mode fails with `unsupported_mode`. Missing or unproven native
+`window@1` capability fails with `capability_mismatch`. Invalid declarations
+fail before any source opens, with field paths such as
+`calc_flow.symbolic.window.hopping.slide_micros` or
+`outputs.minute.window_tumbling.aggregates[0].column`; unsupported field
+types append `.dtype` to the field path.
+
+The native window owns accumulators, output sequence, and checkpoint layout
+`1`. Bind sources and sinks through `StreamingRunner` and use
+`ManagedCheckpointRuntime` for the existing aligned checkpoint and recovery
+protocol. Recovering an open window restores that native state. There is no
+Python row executor or separate Python window buffer. Session windows, local
+calendar windows, offsets, early triggers, update/retraction outputs, custom
+aggregates, and extra allowed-lateness semantics are unsupported.
 
 ## Symbolic bounded stream joins
 
@@ -206,8 +365,9 @@ unrelated to a join, and rolling or cross-section state after an ordered join.
 Each unique declaration digest shares one physical join node. A joined value
 feeding another join or stateful stage without complete valid ordering fails
 with `ordering_required`. Projection removes ordering facts when it removes a
-named ordering field. Matrix attachment around a join remains unsupported,
-and symbolic event-window declarations still have no executable lowerer.
+named ordering field. Matrix attachment around a join remains unsupported.
+Event windows have the separate stateless-path boundary described above and
+cannot consume or feed a symbolic join.
 
 Lowering copies every declaration into the existing project-v3 join spec with
 no symbolic-only serialized fields. Native watermarks, inclusive time bounds,
@@ -316,8 +476,9 @@ values validated by `compile_stream` — `error` lowers to an envelope-scoped
 rejection and `drop` to a metrics-recorded drop — and the
 `stateful_numeric_v1` value policy, which preserves a null or NaN current or
 referenced value. Batch lowering writes the default lateness values, batch
-evaluation classifies no late rows, and a program without rolling
-declarations is unaffected by the lateness arguments. Non-EWMA declarations
+evaluation classifies no late rows. Cross-section stages consume the same
+options; event-window programs apply the option checks described above.
+Non-EWMA declarations
 use `state_layout_version` 1; a declaration containing EWMA uses version 2.
 The native checkpoint writer uses columnar layout 3 and persists exponential
 accumulators exactly; see [native rolling state](symbolic-design.md#native-rolling-state).
@@ -361,9 +522,9 @@ output, the `allowed_lateness_micros` and `late_policy` values validated by
 
 Analysis rejections surface as `CompileError` with the first issue's
 `{path}: {code}: {message}`. Declarations outside the implemented lowerers —
-including event `window` nodes and `linalg`/`parameter` uses that do not form
-the exact symbolic matrix compilation shape above — fail with the eighth issue
-code `unknown_primitive_version` rooted at the output or
+including declaration-only `window_tumbling@1`/`window_hopping@1` nodes and
+`linalg`/`parameter` uses that do not form the exact symbolic matrix compilation
+shape above — fail with `unknown_primitive_version` rooted at the output or
 `static_inputs.<name>`, in both batch and stream modes; a stream aggregate or
 SQL window is never silently made batch-local. Standalone array outputs fail
 with `unknown_primitive_version` in batch mode; stream mode rejects them

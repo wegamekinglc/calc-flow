@@ -19,8 +19,10 @@ a join. Every unique symbolic join still lowers to exactly one existing native
 This stage adds no Python execution path, native join implementation,
 project-v3 variant, or checkpoint layout. Native matching, watermark,
 state-limit, metric, checkpoint, and recovery behavior remains authoritative.
-Event-window declarations remain analysis-only until a separately approved
-symbolic window-aggregate lowering contract exists.
+Executable event-window aggregation follows the separate
+[symbolic event-window contract](symbolic-event-window-aggregation.md).
+Its window paths allow only stateless table transformations before and after
+one window; joins cannot consume or feed a symbolic event window.
 
 ## 2. Declaration versions and compatibility
 

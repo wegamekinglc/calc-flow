@@ -19,9 +19,10 @@ mutating caller declarations.
 `Program.analyze` consumes one explicit runtime capability snapshot. It checks
 types, row lineage, symbolic dimensions, attachment compatibility, ordering,
 state requirements, and stream safety. Issues have stable paths and codes.
-Analysis and compilation are separate: the declaration catalog includes event
-windows and standalone array forms without executable lowerers. Compilation
-checks the supported shape and reports an error before execution.
+Analysis and compilation are separate: the declaration catalog includes
+aggregate-free event windows and standalone array forms without executable
+lowerers. Compilation checks the supported shape and reports an error before
+execution.
 
 The implementation lives in
 [nodes.py](../python/calc_flow/symbolic/nodes.py),
@@ -37,6 +38,13 @@ innermost calculation outward, with deterministic row-local stages between
 stateful stages when necessary. Each unique bounded join declaration has one
 native join state owner.
 
+Aggregate-bearing event windows lower to the existing native
+`WindowAggregateOperator`. Their `@2` declaration identity includes the full
+input graph, geometry, grouping order, and aggregate order and output names.
+Equal complete declarations share one window state owner; geometry alone does
+not establish sharing. Aggregate-free `@1` declarations retain their stable
+canonical identity and remain declaration-only.
+
 The [optimizer](../python/calc_flow/symbolic/optimizer.py) shares structurally
 identical expressions, compatible rolling state, and compatible cross-section
 grouping/sort work across output branches. Prefilter identity, ordering, and
@@ -47,6 +55,50 @@ batch segmentation does not establish group completeness.
 Post-join entity, event-time, and sequence metadata proves the order needed by
 nested joins and downstream stateful calculations. It does not sort data.
 Projection discards ordering facts when it removes the named fields.
+
+## Native event-window state
+
+The [event-window lowerer](../python/calc_flow/symbolic/lower/event_windows.py)
+compiles stateless table fragments on either side of each window and connects
+them through the existing strict project-v3 `window` variant. Native
+compilation validates the exact input and derived output schemas. A window
+path contains one event window with only stateless table work before and after
+it; independent legal output branches keep their own lowering contracts.
+
+The [schema adapter](../python/calc_flow/symbolic/lower/schema.py) propagates
+Arrow schemas through each actual lowered row-local and shared-expression
+stage before a window and after its output. The analyzer first validates
+types, field references, and stable diagnostic paths, then checks that native
+field names and types agree with the frozen declarations. Native planning
+supplies nullability; Python does not reproduce DataFusion's CASE or boolean
+optimizer rules. Planning failures are analysis failures.
+
+The private `Runtime._infer_symbolic_expression_schema` adapter calls the
+private PyO3 `_infer_expression_schema` entry point. The internal Rust adapter
+preserves the native stream fast path for column projections. Other
+expressions reach DataFusion physical planning over an empty schema-bearing
+`MemTable`, and the adapter reads the physical plan's schema without opening
+sources, executing user rows, or invoking registered UDFs. This is a schema
+planning seam; project-v3, `WindowSpec`, checkpoint layouts, and REST data
+contracts retain their existing shapes.
+
+Window output has a distinct typed row origin. It does not inherit the source
+row origin, event-time key, entity keys, or sequence keys. Source column and
+array attachment cannot prove alignment with the changed row set. The time
+column used for assignment must still be an unchanged input column or a pure
+rename so that its coordinate agrees with the source watermark. The analyzer
+checks this separately from the ordering proof used for rolling and
+cross-section state; nullable time and ungrouped event windows are valid.
+
+The native window owns accumulation, late-assignment and null-time counters,
+watermark closure, output order, and checkpoint state layout `1`. Tumbling and
+hopping close at `watermark >= end` or end-of-input and append final results.
+An aligned checkpoint preserves open windows using the existing manifest and
+state protocol. Python adds no runtime accumulator or window buffer. Active
+window/group counts remain data-dependent; the 1024 hopping-overlap limit is
+an assignment bound, not a total memory bound. See the
+[event-window API](symbolic-api.md#symbolic-event-time-window-aggregation)
+for the type matrix, composition limits, and lateness-option ownership.
 
 ## Native rolling state
 
@@ -96,11 +148,21 @@ device value can coexist. Subsequent micro-batches reuse the placed weights.
 
 ## Compile cache and inspection
 
-Each [Runtime](../python/calc_flow/pipeline.py) caches immutable plans using
-program identity, execution mode, declarations, and capability/version facts.
+Each [Runtime](../python/calc_flow/pipeline.py) keys its symbolic compile cache
+by program identity, execution mode, declarations, and capability/version facts.
+Batch entries retain immutable plans. Stream entries retain successfully
+compiled immutable project JSON, and each compile creates a fresh native
+owning plan because the runner consumes it. A restart recompiles the same
+declaration and creates fresh bindings and a runner.
 Registration changes invalidate that runtime's cache. The cache is bounded
 and belongs to the runtime instance; it is not a cross-run DataFusion session
 cache.
+
+An independent runtime-local schema cache holds at most 128 immutable Arrow
+schemas. Its key contains the ordered projection, filter, and exact serialized
+input schema. Only successful native planning enters the cache. Successful
+registrations clear it alongside the compile cache. It retains planning
+metadata and does not retain user rows, running state, or DataFusion sessions.
 
 `Program.explain` reports deterministic physical sharing and state/copy facts.
 Studio inspects facts encoded in the lowered project document. Neither is a
@@ -111,7 +173,8 @@ The relevant runnable examples are
 [09](../examples/09_symbolic_financial_features.py),
 [10](../examples/10_symbolic_streaming_recovery.py),
 [11](../examples/11_symbolic_static_matrix.py),
-[12](../examples/12_symbolic_stream_join.py), and
-[13](../examples/13_symbolic_relational_dag.py).
+[12](../examples/12_symbolic_stream_join.py),
+[13](../examples/13_symbolic_relational_dag.py), and
+[event-window aggregation](../examples/symbolic_event_window.py).
 
 Next: [verification](verification.md).

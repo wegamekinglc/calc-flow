@@ -9,6 +9,21 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-08: Compile symbolic fixed UTC tumbling/hopping event-window
+  aggregation into the existing native window operator. Immutable
+  `WindowAggregate` declarations and `window.count/sum/min/max/avg` helpers
+  define ordered output columns; aggregate-bearing declarations use `@2`,
+  while aggregate-free `@1` declarations retain their canonical identities.
+  Each unique complete declaration shares one native state owner across
+  branches. Exact schema and distinct row-origin analysis constrain window
+  paths to stateless table transformations before and after aggregation.
+  Native schema planning confirms the nullability of those transformations
+  without opening sources or executing user rows; a bounded runtime cache
+  retains successful schema results separately from compiled plans.
+  Native final output, late-assignment dropping, metrics, and checkpoint
+  layout remain authoritative. Symbolic stream compilation caches immutable
+  project JSON and creates a fresh owning plan for each job or restart.
+
 - 2026-09-08: Consolidate connector documentation under `docs/connectors/`
   with an overview and one guide per transport, each linking its Python
   example, service setup, configuration, and delivery contract. Move shared

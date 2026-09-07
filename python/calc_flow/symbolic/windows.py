@@ -4,10 +4,34 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 from calc_flow.symbolic.domains import namespace_error
 from calc_flow.symbolic.expr import ColumnExpr
-from calc_flow.symbolic.types import require_positive_int
+from calc_flow.symbolic.types import require_non_empty_str, require_positive_int
+
+
+@dataclass(frozen=True, slots=True)
+class WindowAggregate:
+    """One named native event-window aggregate over an input column.
+
+    ``count`` counts non-null values; ``avg`` is the arithmetic mean.
+    Aggregate output columns retain their declaration order.
+    """
+
+    function: Literal["count", "sum", "min", "max", "avg"]
+    column: str
+    output: str
+
+    def __post_init__(self) -> None:
+        require_non_empty_str(self.function, "WindowAggregate.function")
+        if self.function not in ("count", "sum", "min", "max", "avg"):
+            raise ValueError(
+                "WindowAggregate.function: invalid_literal:"
+                " must be count, sum, min, max, or avg"
+            )
+        require_non_empty_str(self.column, "WindowAggregate.column")
+        require_non_empty_str(self.output, "WindowAggregate.output")
 
 
 @dataclass(frozen=True, slots=True)

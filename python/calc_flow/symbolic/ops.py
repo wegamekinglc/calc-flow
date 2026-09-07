@@ -46,6 +46,7 @@ from calc_flow.symbolic.windows import (
     CrossSectionGroup,
     DurationFrame,
     RowFrame,
+    WindowAggregate,
 )
 
 if TYPE_CHECKING:
@@ -1075,6 +1076,45 @@ class WindowNamespace:
 
     __slots__ = ()
 
+    @staticmethod
+    def _aggregate(
+        function: Literal["count", "sum", "min", "max", "avg"],
+        column: str,
+        output: str,
+        /,
+    ) -> WindowAggregate:
+        path = f"calc_flow.symbolic.window.{function}"
+        return WindowAggregate(
+            function,
+            require_non_empty_str(column, f"{path}.column"),
+            require_non_empty_str(output, f"{path}.output"),
+        )
+
+    def count(self, column: str, /, *, output: str) -> WindowAggregate:
+        """Count the non-null values of a named input column."""
+
+        return self._aggregate("count", column, output)
+
+    def sum(self, column: str, /, *, output: str) -> WindowAggregate:
+        """Sum the non-null values of a named numeric input column."""
+
+        return self._aggregate("sum", column, output)
+
+    def min(self, column: str, /, *, output: str) -> WindowAggregate:
+        """Find the minimum non-null value of a named input column."""
+
+        return self._aggregate("min", column, output)
+
+    def max(self, column: str, /, *, output: str) -> WindowAggregate:
+        """Find the maximum non-null value of a named input column."""
+
+        return self._aggregate("max", column, output)
+
+    def avg(self, column: str, /, *, output: str) -> WindowAggregate:
+        """Compute the arithmetic mean of a named numeric input column."""
+
+        return self._aggregate("avg", column, output)
+
     def tumbling(
         self,
         value: TableExpr,
@@ -1083,8 +1123,12 @@ class WindowNamespace:
         event_time: str,
         size_micros: int,
         group_by: Sequence[str] = (),
+        aggregates: Sequence[WindowAggregate] | None = None,
     ) -> TableExpr:
+        """Declare a fixed UTC tumbling window; aggregates opt into execution."""
+
         function = "window.tumbling"
+        groups = _str_sequence(group_by, function, "group_by")
         return TableExpr(
             build(
                 "window_tumbling",
@@ -1096,14 +1140,13 @@ class WindowNamespace:
                             f"calc_flow.symbolic.{function}.event_time",
                         )
                     ),
-                    "size_micros": CInt(
-                        require_positive_int(
-                            size_micros,
-                            f"calc_flow.symbolic.{function}.size_micros",
-                        )
+                    "size_micros": _window_micros(
+                        size_micros, function, "size_micros", aggregates is not None
                     ),
-                    "group_by": _str_sequence(group_by, function, "group_by"),
+                    "group_by": groups,
+                    **_window_aggregate_attrs(aggregates, function, groups),
                 },
+                version=1 if aggregates is None else 2,
             )
         )
 
@@ -1116,8 +1159,12 @@ class WindowNamespace:
         size_micros: int,
         slide_micros: int,
         group_by: Sequence[str] = (),
+        aggregates: Sequence[WindowAggregate] | None = None,
     ) -> TableExpr:
+        """Declare a fixed UTC hopping window; aggregates opt into execution."""
+
         function = "window.hopping"
+        groups = _str_sequence(group_by, function, "group_by")
         return TableExpr(
             build(
                 "window_hopping",
@@ -1129,21 +1176,88 @@ class WindowNamespace:
                             f"calc_flow.symbolic.{function}.event_time",
                         )
                     ),
-                    "size_micros": CInt(
-                        require_positive_int(
-                            size_micros,
-                            f"calc_flow.symbolic.{function}.size_micros",
-                        )
+                    "size_micros": _window_micros(
+                        size_micros, function, "size_micros", aggregates is not None
                     ),
-                    "slide_micros": CInt(
-                        require_positive_int(
-                            slide_micros,
-                            f"calc_flow.symbolic.{function}.slide_micros",
-                        )
+                    "slide_micros": _window_slide(
+                        size_micros, slide_micros, aggregates is not None
                     ),
-                    "group_by": _str_sequence(group_by, function, "group_by"),
+                    "group_by": groups,
+                    **_window_aggregate_attrs(aggregates, function, groups),
                 },
+                version=1 if aggregates is None else 2,
             )
+        )
+
+
+def _window_micros(value: int, function: str, field: str, executable: bool, /) -> CInt:
+    path = f"calc_flow.symbolic.{function}.{field}"
+    micros = require_positive_int(value, path)
+    if executable and micros > 2**64 - 1:
+        raise ValueError(f"{path}: invalid_literal: must not exceed 2^64 - 1")
+    return CInt(micros)
+
+
+def _window_slide(size: int, slide: int, executable: bool, /) -> CInt:
+    value = _window_micros(slide, "window.hopping", "slide_micros", executable)
+    if executable and (size % slide != 0 or not 1 <= size // slide <= 1024):
+        raise ValueError(
+            "calc_flow.symbolic.window.hopping.slide_micros: invalid_literal:"
+            " size must be an integer multiple of slide with overlap from 1 to 1024"
+        )
+    return value
+
+
+def _window_aggregate_attrs(
+    aggregates: Sequence[WindowAggregate] | None,
+    function: str,
+    groups: CSeq,
+    /,
+) -> dict[str, CValue]:
+    if aggregates is None:
+        return {}
+    if isinstance(aggregates, (str, bytes)) or not isinstance(aggregates, Sequence):
+        raise namespace_error(
+            function, "aggregates", "Sequence[WindowAggregate]", aggregates
+        )
+    declarations = tuple(aggregates)
+    path = f"calc_flow.symbolic.{function}"
+    if not declarations:
+        raise ValueError(f"{path}.aggregates: invalid_literal: must not be empty")
+    names = {"window_start", "window_end"}
+    for index, group in enumerate(groups.items):
+        assert isinstance(group, CStr)
+        _window_output_name(group.value, names, f"{path}.group_by[{index}]")
+        names.add(group.value)
+    for index, aggregate in enumerate(declarations):
+        if type(aggregate) is not WindowAggregate:
+            raise namespace_error(
+                function, f"aggregates[{index}]", "WindowAggregate", aggregate
+            )
+        _window_output_name(
+            aggregate.output, names, f"{path}.aggregates[{index}].output"
+        )
+        names.add(aggregate.output)
+    return {
+        "aggregates": CSeq(
+            tuple(
+                CMap.from_mapping(
+                    {
+                        "function": CStr(aggregate.function),
+                        "column": CStr(aggregate.column),
+                        "output": CStr(aggregate.output),
+                    }
+                )
+                for aggregate in declarations
+            )
+        )
+    }
+
+
+def _window_output_name(name: str, names: set[str], path: str, /) -> None:
+    if name in names:
+        raise ValueError(
+            f"{path}: duplicate_name: output name {name!r} is already used"
         )
 
 

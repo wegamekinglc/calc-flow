@@ -230,8 +230,8 @@ name/version pair fails construction. `ProviderArrayRules` pairs the exact
 stores both tuples sorted by identity.
 
 The `operators` tuple contains exactly `cross_section@1`, `expression@1`,
-`rolling@1`, `sql@1`, and `stream_join@1`, with truths anchored in the
-engine implementation:
+`rolling@1`, `sql@1`, `stream_join@1`, and `window@1`, with truths anchored in
+the engine implementation:
 
 | Operator          | Modes         | Finality                | Checkpoint support    | State version | State layouts |
 |-------------------|---------------|-------------------------|-----------------------|---------------|---------------|
@@ -240,6 +240,7 @@ engine implementation:
 | `rolling@1`       | batch, stream | per_row_final           | checkpointed_stateful | 1             | 1, 2          |
 | `sql@1`           | batch, stream | unproven                | stateless             | —             | —             |
 | `stream_join@1`   | stream        | unproven                | checkpointed_stateful | 1             | 1             |
+| `window@1`        | stream        | group_final_append_only | checkpointed_stateful | 1             | 1             |
 
 The Python capability catalog currently reports only layouts `1` and `2`
 for `rolling@1`, while the native operator writes columnar checkpoint layout
@@ -248,10 +249,10 @@ inventory alone to decide rolling checkpoint compatibility. See
 [native rolling state](symbolic-design.md#native-rolling-state) for the
 implemented encoding and restore rules.
 
-`cross_section@1`, `rolling@1`, and `stream_join@1` are the stateful
+`cross_section@1`, `rolling@1`, `stream_join@1`, and `window@1` are the stateful
 operators and the only ones that require a watermark; `cross_section@1`,
-`expression@1`, and `rolling@1` are micro-batch invariant. All five report
-`deterministic=True` and `replay_safe=True`. For `sql@1` those two claims
+`expression@1`, `rolling@1`, and `window@1` are micro-batch invariant. All six
+report `deterministic=True` and `replay_safe=True`. For `sql@1` those two claims
 hold from the engine viewpoint: exactly-once stream
 plans reject nodes that select volatile registered UDFs, and stream
 compilation rejects read-only queries that call volatile built-in SQL
@@ -565,8 +566,13 @@ optional JAX paths are in
 The [symbolic API reference](symbolic-api.md) covers typed declarations,
 `FeatureSet`, `Program`, static analysis, ordering, and the supported
 batch/stream compilation shapes. Use the [symbolic workflow guide](symbolic-workflows.md)
-with examples 09–13 to learn these features. Compiler ownership and physical
-sharing are described in [symbolic compiler design](symbolic-design.md).
+with examples 09–13 and the
+[event-window example](../examples/symbolic_event_window.py) to learn these
+features. Fixed UTC tumbling/hopping aggregation uses immutable
+`WindowAggregate` declarations and the existing native window operator;
+see [event-window types and composition](symbolic-api.md#symbolic-event-time-window-aggregation).
+Compiler ownership and physical sharing are described in
+[symbolic compiler design](symbolic-design.md).
 
 ## Projects and persistence
 

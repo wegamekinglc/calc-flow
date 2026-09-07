@@ -21,10 +21,11 @@ competing Python promotion table exists here.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final
 
-from calc_flow.capabilities import RuntimeCapabilities
+from calc_flow.capabilities import ProviderPort, RuntimeCapabilities
+from calc_flow.errors import CompileError, ConfigError, ExecutionError
 from calc_flow.pipeline import Runtime
 from calc_flow.symbolic.domains import type_name
 from calc_flow.symbolic.nodes import (
@@ -49,6 +50,20 @@ _SIGNED_INT_TYPES: Final = ("int8", "int16", "int32", "int64")
 _UNSIGNED_INT_TYPES: Final = ("uint8", "uint16", "uint32", "uint64")
 _NUMERIC_TYPES: Final = frozenset(
     (*_SIGNED_INT_TYPES, *_UNSIGNED_INT_TYPES, *_FLOATING_TYPES)
+)
+_WINDOW_TIME_TYPES: Final = frozenset(
+    {"timestamp[ms]", "timestamp[us]", _EVENT_TIME_TYPE}
+)
+_WINDOW_ORDERED_TYPES: Final = _NUMERIC_TYPES | frozenset(
+    {
+        "bool",
+        "string",
+        "large_string",
+        "date32",
+        "date64",
+        "timestamp[us]",
+        _EVENT_TIME_TYPE,
+    }
 )
 
 
@@ -173,11 +188,22 @@ class AnalysisResult:
 
 
 @dataclass(frozen=True, slots=True)
+class _WindowRowOrigin:
+    digest: str
+
+    def __str__(self) -> str:
+        return f"window:{self.digest}"
+
+
+type _RowOrigin = str | _WindowRowOrigin
+
+
+@dataclass(frozen=True, slots=True)
 class TableFacts:
     """The inferred schema, lineage, ordering, and state of one table value."""
 
     schema: tuple[Field, ...]
-    lineage: str | None
+    lineage: _RowOrigin | None
     state: frozenset[str]
     event_time: str | None
     entity_by: tuple[str, ...]
@@ -190,7 +216,7 @@ class ColumnFacts:
 
     data_type: str | None
     nullable: bool
-    lineage: str | None
+    lineage: _RowOrigin | None
     state: frozenset[str]
 
 
@@ -201,7 +227,7 @@ class ArrayFacts:
     backend: str | None
     dtype: str | None
     shape: tuple[int | str, ...]
-    lineage: str | None
+    lineage: _RowOrigin | None
     state: frozenset[str]
 
 
@@ -322,6 +348,23 @@ def _contains_stateful_primitive(node: Node, /) -> bool:
     return any(_contains_stateful_primitive(argument) for argument in node.args)
 
 
+def _contains_event_window(node: Node, /) -> bool:
+    pending = [node]
+    visited: set[str] = set()
+    while pending:
+        current = pending.pop()
+        if current.digest in visited:
+            continue
+        visited.add(current.digest)
+        if (
+            current.op.name in ("window_tumbling", "window_hopping")
+            and current.op.version == 2
+        ):
+            return True
+        pending.extend(current.args)
+    return False
+
+
 class _Analyzer:
     """One analysis pass over one program, mode, and capability snapshot."""
 
@@ -331,13 +374,19 @@ class _Analyzer:
         declared: frozenset[str],
         portable_types: frozenset[str],
         supports_array_kind: bool,
+        capabilities: RuntimeCapabilities | None = None,
     ) -> None:
         self._mode = mode
         self._declared = declared
         self._portable_types = portable_types
         self._supports_array_kind = supports_array_kind
+        self._capabilities = capabilities
+        self._runtime: Runtime | None = None
+        self._window_input_schemas: dict[str, tuple[Field, ...]] = {}
+        self._native_row_schemas: dict[str, tuple[Field, ...]] = {}
         self._issues: list[AnalysisIssue] = []
         self._table_cache: dict[str, TableFacts] = {}
+        self._invalid_table_nodes: set[str] = set()
         self._column_cache: dict[str, ColumnFacts] = {}
         self._array_cache: dict[str, ArrayFacts] = {}
         self._undeclared_reported: set[str] = set()
@@ -457,9 +506,74 @@ class _Analyzer:
         cached = self._table_cache.get(node.digest)
         if cached is not None:
             return cached
+        previous_issues = len(self._issues)
         facts = self._analyze_table(node, path)
+        if (
+            not self._issues
+            and self._mode == "stream"
+            and isinstance(facts.lineage, _WindowRowOrigin)
+            and node.op.name in {"project", "filter", "with_columns"}
+        ):
+            facts = replace(
+                facts, schema=self._native_row_schema(node, facts.schema, path)
+            )
+        if len(self._issues) != previous_issues or any(
+            argument.digest in self._invalid_table_nodes
+            or (
+                (column := self._column_cache.get(argument.digest)) is not None
+                and column.data_type is None
+            )
+            for argument in node.args
+        ):
+            self._invalid_table_nodes.add(node.digest)
         self._table_cache[node.digest] = facts
         return facts
+
+    def _native_row_schema(
+        self, node: Node, expected: tuple[Field, ...], path: str, /
+    ) -> tuple[Field, ...]:
+        from calc_flow.symbolic.lower.schema import infer_table_schema
+
+        if self._runtime is None or node.op.name == "table_input":
+            return expected
+        cached = self._native_row_schemas.get(node.digest)
+        if cached is not None:
+            return cached
+        boundaries = self._row_schema_boundaries(node)
+        try:
+            inferred = infer_table_schema(node, self._runtime, boundaries)
+        except (CompileError, ConfigError, ExecutionError, ValueError) as error:
+            self.issue(f"{path}.schema", "unsupported_type", str(error))
+            return expected
+        expected_types = tuple((field.name, field.data_type) for field in expected)
+        actual_types = tuple((field.name, field.data_type) for field in inferred)
+        if actual_types != expected_types:
+            self.issue(
+                f"{path}.schema",
+                "schema_mismatch",
+                "native expression field names/types differ from the declaration:"
+                f" expected {expected_types!r}, found {actual_types!r}",
+            )
+            return expected
+        self._native_row_schemas[node.digest] = inferred
+        return inferred
+
+    def _row_schema_boundaries(self, node: Node, /) -> dict[str, tuple[Field, ...]]:
+        boundaries: dict[str, tuple[Field, ...]] = {}
+        visited: set[str] = set()
+        pending = [node]
+        while pending:
+            current = pending.pop()
+            if current.digest in visited:
+                continue
+            visited.add(current.digest)
+            if current.op.name == "table_input":
+                boundaries[current.digest] = _schema_fields(current.attr("schema"))
+            elif current.op.name in {"window_tumbling", "window_hopping"}:
+                boundaries[current.digest] = self._table_cache[current.digest].schema
+            else:
+                pending.extend(current.args)
+        return boundaries
 
     def _analyze_table(self, node: Node, path: str, /) -> TableFacts:
         name = node.op.name
@@ -603,6 +717,12 @@ class _Analyzer:
 
     def _attach_columns_table(self, node: Node, path: str, /) -> TableFacts:
         child = self.table(node.args[0], f"{path}.attach_columns.value")
+        if _contains_event_window(node.args[0]):
+            self.issue(
+                f"{path}.attach_columns.array",
+                "capability_mismatch",
+                "array attachment after an event window is not supported",
+            )
         array = self.array(node.args[1], f"{path}.attach_columns.array")
         names = _cstr_seq(node.attr("names"))
         self._attach_lineage_check(array, child, path)
@@ -619,6 +739,13 @@ class _Analyzer:
 
     def _stream_join_table(self, node: Node, path: str, /) -> TableFacts:
         role = f"{path}.stream_join"
+        for side, operand in zip(("left", "right"), node.args, strict=True):
+            if _contains_event_window(operand):
+                self.issue(
+                    f"{role}.{side}",
+                    "capability_mismatch",
+                    "stream joins after an event window are not supported",
+                )
         left = self.table(node.args[0], f"{role}.left")
         right = self.table(node.args[1], f"{role}.right")
         if self._mode != "stream":
@@ -1003,6 +1130,15 @@ class _Analyzer:
         return fields
 
     def _window_table(self, node: Node, path: str, /) -> TableFacts:
+        if node.op.version == 2:
+            return self._event_window_table(node, path)
+        if node.op.version != 1:
+            self.issue(
+                f"{path}.{node.op.name}",
+                "unknown_primitive_version",
+                f"unknown event window declaration {node.op.name}@{node.op.version}",
+            )
+            return TableFacts((), None, frozenset(), None, (), ())
         child = self.table(node.args[0], f"{path}.{node.op.name}.value")
         if "stream_join" in child.state:
             self._require_post_join_ordering(
@@ -1043,6 +1179,203 @@ class _Analyzer:
             child.sequence_by,
         )
 
+    def _event_window_table(self, node: Node, path: str, /) -> TableFacts:
+        role = f"{path}.{node.op.name}"
+        self._event_window_capability(role)
+        self._window_input_path(node.args[0], f"{role}.value", set())
+        child = self.table(node.args[0], f"{role}.value")
+        if node.args[0].digest in self._invalid_table_nodes:
+            return TableFacts(
+                (),
+                _WindowRowOrigin(node.digest),
+                child.state | {"window"},
+                None,
+                (),
+                (),
+            )
+        by_name = {field.name: field for field in child.schema}
+        event_time = _cstr(node.attr("event_time"))
+        time_field = self._window_field(
+            by_name,
+            event_time,
+            f"{role}.event_time",
+            _WINDOW_TIME_TYPES,
+        )
+        if time_field is not None and not _table_field_resolves_to_input(
+            node.args[0], event_time
+        ):
+            self.issue(
+                f"{role}.event_time",
+                "capability_mismatch",
+                "event window time must be an unchanged input column or pure rename",
+            )
+        fields = [
+            Field("window_start", _EVENT_TIME_TYPE, nullable=False),
+            Field("window_end", _EVENT_TIME_TYPE, nullable=False),
+        ]
+        for index, name in enumerate(_cstr_seq(node.attr("group_by"))):
+            field = self._window_field(
+                by_name, name, f"{role}.group_by[{index}]", _WINDOW_ORDERED_TYPES
+            )
+            if field is not None:
+                fields.append(field)
+        aggregates = node.attr("aggregates")
+        if isinstance(aggregates, CSeq):
+            for index, aggregate in enumerate(aggregates.items):
+                field = self._window_aggregate_field(
+                    by_name, aggregate, f"{role}.aggregates[{index}]"
+                )
+                if field is not None:
+                    fields.append(field)
+        exact_input = child.schema
+        if self._mode == "stream" and not self._issues:
+            exact_input = self._native_row_schema(
+                node.args[0], child.schema, f"{role}.value"
+            )
+        self._window_input_schemas[node.digest] = exact_input
+        exact_by_name = {field.name: field for field in exact_input}
+        groups = frozenset(_cstr_seq(node.attr("group_by")))
+        fields = [
+            exact_by_name[field.name] if field.name in groups else field
+            for field in fields
+        ]
+        return TableFacts(
+            tuple(fields),
+            _WindowRowOrigin(node.digest),
+            child.state | frozenset({"window"}),
+            None,
+            (),
+            (),
+        )
+
+    def _window_input_path(self, node: Node, path: str, seen: set[str], /) -> None:
+        if node.digest in seen:
+            return
+        seen.add(node.digest)
+        if node.op.name not in _ROW_LOCAL_PRIMITIVES | {
+            "table_input",
+            "project",
+            "filter",
+            "with_columns",
+        }:
+            self.issue(
+                path,
+                "capability_mismatch",
+                "event window inputs support only stateless table transformations;"
+                f" found {node.op.name}@{node.op.version}",
+            )
+            return
+        names = _cstr_seq(node.attr("names"))
+        for index, argument in enumerate(node.args):
+            if node.op.name == "with_columns" and index:
+                argument_path = f"{path}.{names[index - 1]}"
+            else:
+                role = (
+                    "value"
+                    if index == 0
+                    else "predicate"
+                    if node.op.name == "filter"
+                    else f"args[{index}]"
+                )
+                argument_path = f"{path}.{node.op.name}.{role}"
+            self._window_input_path(argument, argument_path, seen)
+
+    def _event_window_capability(self, path: str, /) -> None:
+        if self._mode != "stream":
+            self.issue(
+                path, "unsupported_mode", "symbolic event windows require stream mode"
+            )
+            return
+        capabilities = self._capabilities
+        capability = (
+            next(
+                (
+                    operator
+                    for operator in capabilities.operators
+                    if operator.kind == "window" and operator.version == "1"
+                ),
+                None,
+            )
+            if capabilities is not None
+            else None
+        )
+        if capability is not None and all(
+            (
+                "stream" in capability.modes,
+                capability.finality == "group_final_append_only",
+                capability.stateful,
+                capability.checkpoint_support == "checkpointed_stateful",
+                capability.state_version == 1,
+                capability.state_layouts == (1,),
+                capability.requires_watermark,
+                capability.microbatch_invariant,
+                capability.deterministic,
+                capability.replay_safe,
+                capability.input_ports
+                == (ProviderPort("input", "table", required=True),),
+                capability.output_ports
+                == (ProviderPort("output", "table", required=True),),
+            )
+        ):
+            return
+        self.issue(
+            path,
+            "capability_mismatch",
+            "event windows require native window@1 with final append-only output,"
+            " deterministic replay, watermark support, and checkpoint layout 1",
+        )
+
+    def _window_field(
+        self,
+        fields: dict[str, Field],
+        name: str | None,
+        path: str,
+        supported: frozenset[str],
+        /,
+    ) -> Field | None:
+        field = fields.get(name)
+        if field is None:
+            self.issue(path, "unresolved_type", f"unknown window input field {name!r}")
+        elif field.data_type not in supported:
+            self.issue(
+                f"{path}.dtype",
+                "unsupported_type",
+                f"native event window does not support {field.data_type!r} here",
+            )
+            return None
+        return field
+
+    def _window_aggregate_field(
+        self, fields: dict[str, Field], aggregate: CValue, path: str, /
+    ) -> Field | None:
+        if not isinstance(aggregate, CMap):
+            return None
+        function = _cstr(aggregate.get("function"))
+        supported = (
+            self._portable_types
+            if function == "count"
+            else _NUMERIC_TYPES
+            if function in ("sum", "avg")
+            else _WINDOW_ORDERED_TYPES
+        )
+        field = self._window_field(
+            fields, _cstr(aggregate.get("column")), f"{path}.column", supported
+        )
+        if field is None:
+            return None
+        output_type = (
+            "uint64"
+            if function == "count"
+            else "float64"
+            if function == "avg"
+            else _sum_output_type(field.data_type)
+            if function == "sum"
+            else field.data_type
+        )
+        return Field(
+            _cstr(aggregate.get("output")), output_type, nullable=function != "count"
+        )
+
     # -- column analysis -----------------------------------------------------
 
     def column(self, node: Node, path: str, /) -> ColumnFacts:
@@ -1054,6 +1387,12 @@ class _Analyzer:
         return facts
 
     def _analyze_column(self, node: Node, path: str, /) -> ColumnFacts:
+        if node.op.name not in _ROW_LOCAL_PRIMITIVES and _contains_event_window(node):
+            self.issue(
+                f"{path}.{node.op.name}.value",
+                "capability_mismatch",
+                "event window outputs support only stateless table transformations",
+            )
         handler = _COLUMN_HANDLERS.get(node.op.name)
         if handler is None:
             self.issue(
@@ -1087,7 +1426,7 @@ class _Analyzer:
         nodes: tuple[Node, ...],
         paths: tuple[str, ...],
         /,
-        initial_anchor: str | None = None,
+        initial_anchor: _RowOrigin | None = None,
     ) -> tuple[ColumnFacts, ...]:
         """Analyze operands left to right against the first resolved lineage."""
 
@@ -1101,13 +1440,15 @@ class _Analyzer:
         return tuple(operands)
 
     @staticmethod
-    def _running_anchor(operands: tuple[ColumnFacts, ...], /) -> str | None:
+    def _running_anchor(operands: tuple[ColumnFacts, ...], /) -> _RowOrigin | None:
         return next(
             (facts.lineage for facts in operands if facts.lineage is not None),
             None,
         )
 
-    def _operand(self, node: Node, path: str, anchor: str | None, /) -> ColumnFacts:
+    def _operand(
+        self, node: Node, path: str, anchor: _RowOrigin | None, /
+    ) -> ColumnFacts:
         if node.op.name == "literal":
             facts = _literal_facts(node)
         else:
@@ -1207,13 +1548,13 @@ class _Analyzer:
             return ColumnFacts("bool", operand.nullable, operand.lineage, operand.state)
         if operand.data_type is not None and operand.data_type not in (
             *_SIGNED_INT_TYPES,
-            *_UNSIGNED_INT_TYPES,
             *_FLOATING_TYPES,
         ):
             self.issue(
                 f"{path}.neg.value.dtype",
                 "unsupported_type",
-                "negation requires a numeric column operand",
+                "negation requires a signed integer or floating column operand;"
+                " use row.cast for an explicit conversion",
             )
             return ColumnFacts(None, True, operand.lineage, operand.state)
         return ColumnFacts(
@@ -1296,7 +1637,7 @@ class _Analyzer:
                 " row.cast for an explicit conversion",
             )
             return ColumnFacts(None, True, operand.lineage, operand.state)
-        return ColumnFacts("float64", operand.nullable, operand.lineage, operand.state)
+        return ColumnFacts("float64", True, operand.lineage, operand.state)
 
     def _arithmetic_like_unary(self, node: Node, path: str, /) -> ColumnFacts:
         operand = self._operand(node.args[0], f"{path}.{node.op.name}.value", None)
@@ -1311,9 +1652,7 @@ class _Analyzer:
                 f"{node.op.name} requires a numeric column operand",
             )
             return ColumnFacts(None, True, operand.lineage, operand.state)
-        return ColumnFacts(
-            operand.data_type, operand.nullable, operand.lineage, operand.state
-        )
+        return ColumnFacts(operand.data_type, True, operand.lineage, operand.state)
 
     def _clip(self, node: Node, path: str, /) -> ColumnFacts:
         operand = self._operand(node.args[0], f"{path}.clip.value", None)
@@ -1609,6 +1948,13 @@ class _Analyzer:
     def _from_columns(self, node: Node, path: str, /) -> ArrayFacts:
         role = f"{path}.from_columns"
         table = self.table(node.args[0], f"{role}.value")
+        if isinstance(table.lineage, _WindowRowOrigin):
+            self.issue(
+                f"{role}.value",
+                "capability_mismatch",
+                "array conversion after an event window is not supported",
+            )
+            return ArrayFacts(None, None, (), None, table.state)
         columns = _cstr_seq(node.attr("columns"))
         data_type = self._from_columns_dtype(columns, table.schema, role)
         rows: int | str = table.lineage if table.lineage is not None else "rows"
@@ -2101,7 +2447,9 @@ def _run(
         declared,
         portable,
         "array" in capabilities.batch_kinds,
+        capabilities,
     )
+    analyzer._runtime = runtime
     for value in program.inputs:
         node = value._node
         root = _declaration_root(node)
@@ -2240,6 +2588,8 @@ def _explain_input(value: object, /) -> str:
 
 def _explain_table_output(output_name: str, facts: TableFacts, /) -> list[str]:
     lines = [f"    output {output_name} table"]
+    if isinstance(facts.lineage, _WindowRowOrigin):
+        lines.append(f"      lineage {facts.lineage}")
     lines.extend(
         f"      field {field.name} {field.data_type}"
         f" nullable={'true' if field.nullable else 'false'}"

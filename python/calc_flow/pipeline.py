@@ -151,6 +151,9 @@ class Runtime:
     _symbolic_compile_cache: dict[object, object] = field(
         default_factory=dict, repr=False, compare=False
     )
+    _symbolic_schema_cache: dict[object, Any] = field(
+        default_factory=dict, repr=False, compare=False
+    )
 
     def _cached_symbolic_compile(
         self, key: object, factory: Callable[[], object], /
@@ -170,6 +173,42 @@ class Runtime:
 
     def _invalidate_symbolic_compile_cache(self) -> None:
         self._symbolic_compile_cache.clear()
+        self._symbolic_schema_cache.clear()
+
+    def _infer_symbolic_expression_schema(
+        self, select: Sequence[str], filter_sql: str | None, schema: Any, /
+    ) -> Any:
+        """Cache native planning metadata independently of owning stream plans."""
+        key = (tuple(select), filter_sql, schema.serialize().to_pybytes())
+        with self._registration_lock:
+            cached = self._symbolic_schema_cache.get(key)
+            if cached is not None:
+                return cached
+            inferred = self._inner._infer_expression_schema(
+                list(select), filter_sql, schema
+            )
+            if len(self._symbolic_schema_cache) >= _SYMBOLIC_COMPILE_CACHE_MAX_ENTRIES:
+                del self._symbolic_schema_cache[next(iter(self._symbolic_schema_cache))]
+            self._symbolic_schema_cache[key] = inferred
+            return inferred
+
+    def _compile_symbolic_stream(
+        self, key: object, project_json: str, /
+    ) -> StreamExecutionPlan:
+        """Cache immutable graph data, then create a separately owned stream plan.
+
+        A native stream plan is consumed by the runner. Sharing that object
+        would make the next job reuse consumed state instead of a fresh plan.
+        Only successfully compiled documents enter the bounded runtime cache.
+        """
+        with self._registration_lock:
+            cached = self._symbolic_compile_cache.get(key)
+            document = cached if isinstance(cached, str) else project_json
+            plan = self._compile_stream_graph_project(
+                document, requirements=StreamRequirements()
+            )
+            self._cached_symbolic_compile(key, lambda: document)
+            return plan
 
     def register_provider(
         self,

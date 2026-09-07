@@ -233,7 +233,12 @@ def _filter_needs_stateful_tail(child: _Segment, predicate: Node, /) -> bool:
 
 def _resolve_filter(node: Node, path: str, /) -> _Segment:
     child = _resolve_table(node.args[0], f"{path}.filter.value")
-    predicate = _inline(node.args[1], dict(child.env), f"{path}.filter.predicate")
+    input_types = {
+        field.name: field for field in _schema_fields(child.input_node.attr("schema"))
+    }
+    predicate = _inline(
+        node.args[1], dict(child.env), f"{path}.filter.predicate", input_types
+    )
     if _filter_needs_stateful_tail(child, predicate):
         combined = (
             predicate
@@ -257,8 +262,13 @@ def _resolve_with_columns(node: Node, path: str, /) -> _Segment:
     child = _resolve_table(node.args[0], f"{path}.with_columns.value")
     env = dict(child.env)
     names = _cstr_seq(node.attr("names"))
+    input_types = {
+        field.name: field for field in _schema_fields(child.input_node.attr("schema"))
+    }
     for index, feature in enumerate(names):
-        env[feature] = _inline(node.args[index + 1], env, f"{path}.{feature}")
+        env[feature] = _inline(
+            node.args[index + 1], env, f"{path}.{feature}", input_types
+        )
     return _Segment(
         child.input_node,
         (*child.fields, *names),
@@ -288,7 +298,13 @@ def _segment_has_cross_section(segment: _Segment, /) -> bool:
     )
 
 
-def _inline(node: Node, env: dict[str, Node], path: str, /) -> Node:
+def _inline(
+    node: Node,
+    env: dict[str, Node],
+    path: str,
+    input_types: dict[str, Field],
+    /,
+) -> Node:
     name = node.op.name
     if name == "column_ref":
         return env[_cstr(node.attr("name"))]
@@ -302,11 +318,32 @@ def _inline(node: Node, env: dict[str, Node], path: str, /) -> Node:
         _reject_primitive(path, node)
     if name == "cast":
         _cast_target(node, path)
-    return build(
+    resolved = build(
         name,
-        tuple(_inline(argument, env, path) for argument in node.args),
+        tuple(_inline(argument, env, path, input_types) for argument in node.args),
         dict(node.attrs.entries),
         version=node.op.version,
+    )
+    return _preserve_float32_row_type(resolved, input_types)
+
+
+def _preserve_float32_row_type(node: Node, input_types: dict[str, Field], /) -> Node:
+    operation = node.op.name
+    if operation not in {
+        "clip",
+        "log",
+        "exp",
+        "sqrt",
+    } or not _rolling_argument_is_row_local(node):
+        return node
+    field = _row_local_field(node.args[0], operation, input_types)
+    if field.data_type != "float32":
+        return node
+    if operation == "clip":
+        return build("cast", (node,), {"data_type": CDType("float32")})
+    operand = build("cast", node.args, {"data_type": CDType("float64")})
+    return build(
+        operation, (operand,), dict(node.attrs.entries), version=node.op.version
     )
 
 
@@ -649,6 +686,8 @@ def _row_local_leaf_field(
     if operation != "literal":
         return None
     value = node.attr("value")
+    if isinstance(value, CNull):
+        return Field(name, "null", nullable=True)
     data_type = None if value is None else _literal_dtype(value)
     if data_type is None:
         raise RuntimeError("validated rolling literal has no data type")
@@ -665,8 +704,10 @@ def _row_local_composite_field(
     nullable = _any_nullable(children)
     if operation in {"eq", "ne", "lt", "le", "gt", "ge", "and", "or", "not"}:
         return Field(name, "bool", nullable=nullable)
-    if operation in _FUNCTION_SQL:
+    if operation in {"log", "exp", "sqrt"}:
         return Field(name, "float64", nullable=True)
+    if operation == "abs":
+        return Field(name, children[0].data_type, nullable=True)
     if operation == "cast":
         return Field(name, _cast_type_name(node), nullable=nullable)
     return _row_local_conditional_field(node, name, children, nullable)
