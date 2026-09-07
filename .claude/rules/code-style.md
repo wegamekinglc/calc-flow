@@ -1,7 +1,7 @@
 # Code Style
 
 Apply these rules to all changes in this repository. Rust core style (Rust
-2024, `unsafe_code = "forbid"`, `calc_flow::Result<T}`, async ownership,
+2024, `unsafe_code = "forbid"`, `calc_flow::Result<T>`, async ownership,
 rustdoc) is governed by the `Coding style` section of
 [AGENTS.md](../../AGENTS.md); this file covers the Python adapters, the web
 surfaces, Markdown, tests, and verification.
@@ -75,21 +75,19 @@ surfaces, Markdown, tests, and verification.
   span the full column width (including the spaces on either side of the cell
   content). This keeps tables readable in plain text and consistent with the
   format used in `CLAUDE.md`.
+* Remove trailing whitespace and end every Markdown file with a newline.
 
 ## Verification
 
-Each surface has its own runner; there is no single project-wide test command.
-Run the full command groups from the `Commands` section of
-[AGENTS.md](../../AGENTS.md). The style-facing gates are:
-
-```bash
-cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
-
-uv run ruff check .
-uv run ruff format --check .
-JAX_PLATFORMS=cpu uv run pytest python/tests -q
-
-cd web-ui && npm run build && npm test
-```
+Follow the local scope, CI responsibilities, and three full-test exceptions in
+[AGENTS.md](../../AGENTS.md#verification). Use the smallest checks for the
+change and necessary formatter/linter/type checks for directly affected modules.
+Full regression and routine performance gates belong to CI; the complete command
+groups in AGENTS.md remain CI or explicitly scoped full-verification references.
+Preserve the Rust 90% line and Studio backend 85% coverage floors. Do not repeat
+unchanged passing checks or rebuild native code only to review documentation.
+For Markdown and agent guidance, check changed structure, synchronization,
+links/anchors, whitespace, final newlines, and necessary existing examples.
+After an authorized push, take at most one non-blocking CI snapshot; do not wait
+or poll unless final results were explicitly requested. Pending permits handoff,
+not merge; required failures remain blocking.

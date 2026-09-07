@@ -65,6 +65,11 @@ measurements. Use the current guides for supported behavior.
   path. Auto remains opt-in; cross-run caches and partition-preserving DAG
   envelopes remain evidence-gated No-Go directions.
 
+- 2026-09-03: Extend Python and Studio capability contracts to schema version
+  3 with the validated operator `state_layouts` inventory. Carry the inventory
+  through the REST response, OpenAPI, and browser decoder; reject capability
+  responses with an unsupported schema version.
+
 - 2026-09-02: Add symbolic relational stream-join DAGs and explicit post-join
   ordering (SCE-18). Independent and nested bounded joins, unrelated outputs,
   and ordered post-join rolling/cross-section stages now lower to one existing

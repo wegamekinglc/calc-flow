@@ -244,13 +244,16 @@ Execution settings and deadlines are per-run values; provider-context opt-in
 belongs to the runtime registration. Neither changes project or checkpoint
 formats, fingerprints, Studio REST/OpenAPI, or capability schemas.
 
-Capability schema version 2 contains only frozen data:
+Capability schema version 3 contains only frozen data:
 `RuntimeSessionScope`, `OperatorCapability`, `UdfCapability`,
 `ProviderCapability`, `ProviderPort`, `ProviderOptionsSchema`,
-`ProviderOption`, `CapabilityRule`, and `ProviderArrayRules`. Operator and
+`ProviderOption`, `CapabilityRule`, `ProviderArrayRules`, `ConnectorCapability`,
+and `ConnectorCapabilities`. The snapshot includes compiled-in connector
+identities, formats, options, and transport capabilities. Operator and
 provider entries carry the lifecycle vocabulary — modes, finality,
 statefulness, micro-batch invariance, watermark requirement, checkpoint
-support and state version, determinism, and replay safety — validated
+support and state version, determinism, and replay safety — plus the operator
+`state_layouts` inventory, validated
 fail-closed against closed vocabularies; see the
 [Python API guide](python-api.md) for the full contract. Its session ID is
 stable for one `Runtime`; its revision advances once for each successful
@@ -292,8 +295,12 @@ documents through a public store.
 
 ### Continuous runner
 
-`StreamingRunner(stream_plan, sources, sinks, checkpoints, *, config=None,
-static_inputs=None)` owns async `StreamSource` and sink connectors.
+`StreamingRunner(plan, sources=None, sinks=None, checkpoints=None, *,
+config=None, static_inputs=None)` owns async `StreamSource` and sink connectors.
+Graph-only plans require explicit source/sink bindings and a checkpoint runtime.
+Plans returned by `compile_stream_project` own their connector bindings and
+runtime/state settings: pass only the plan and any required `static_inputs`;
+external `sources`, `sinks`, `checkpoints`, or `config` overrides are rejected.
 `start_async()` consumes the
 runner and returns a `StreamingJob`; use `trigger_checkpoint_async()`,
 `shutdown_async()`, `cancel_async()`, or `wait_async()` to drive the job.
@@ -375,9 +382,9 @@ compile-capable while worker reconstruction is unavailable. Clients should
 disable only the unsupported job action and keep project editing and
 parent-runtime validation available.
 
-The response envelope carries one schema version: `schemaVersion` is `2`, and
+The response envelope carries one schema version: `schemaVersion` is `3`, and
 the nested `runtime` object omits its own version field. The browser decoder
-rejects a response whose `schemaVersion` is not `2` or that carries any extra
+rejects a response whose `schemaVersion` is not `3` or that carries any extra
 field before React receives it. Unknown capability-rule identities, unknown
 lifecycle vocabulary, and inconsistent `stateVersion`/`stateful` combinations
 are rejected by the backend response models as well as the decoder.

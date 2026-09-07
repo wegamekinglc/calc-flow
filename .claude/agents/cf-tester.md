@@ -44,9 +44,9 @@ When no specific module is named, map the codebase to find the weakest coverage:
 1. List the modules under `crates/calc-flow/src/` and check each for a `#[cfg(test)]`
    mod or matching integration tests.
 2. Cross-reference `python/calc_flow/` modules against `python/tests/test_*.py`.
-3. Note the enforced floors: `cargo llvm-cov --workspace --all-features
-   --fail-under-lines 90` for Rust; the studio backend suite runs with coverage via
-   `--cov=calc_flow_studio`.
+3. Note the enforced floors: Rust uses the combined 90% line gate in
+   `scripts/run_rust_coverage.py`, including the connector services and environment
+   from `AGENTS.md`; Studio uses `--cov=calc_flow_studio` with its 85% floor.
 4. Rank areas by gap, prioritizing core behavior (batch, operator, pipeline, runtime,
    checkpoint) over thin adapters.
 
@@ -90,51 +90,31 @@ flows (Phase 4B).
   not corrupt state
 - Immutability: caller-owned batches, tables, and arrays are unchanged after the call
 
-### Phase 4: Build, Run, Iterate
+### Phase 4: Run the Minimum Local Verification
 
-Run the suites for every surface you touched:
+Use the diff, directly affected behavior, and existing evidence to select focused
+unit/integration tests and necessary module compile, format, lint, or type checks.
+Full regression belongs to GitHub CI; complete commands and the Rust 90%/Studio 85%
+coverage gates remain in `AGENTS.md`. Follow its Verification policy: local full testing
+requires an explicit request, CI failure diagnosis, or clear high risk without CI
+coverage. State the reason and limited scope. Do not repeat unchanged passing checks.
 
-```bash
-uv sync --extra dev
-uv run python scripts/run_rust_tests.py
-cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo llvm-cov --workspace --all-features --fail-under-lines 90
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
-```
-```bash
-uv sync --extra dev
-uv run maturin develop    # if Rust bindings changed
-JAX_PLATFORMS=cpu uv run pytest python/tests -q
-uv run ruff check .
-uv run ruff format --check .
-```
-```bash
-cd web-ui/backend && uv run --project . --extra dev pytest --cov=calc_flow_studio
-```
-```bash
-cd web-ui && npm ci && npm run sync:api && npm run build && npm test
-```
+For a failure, inspect expected versus actual and identify the cause. Fix the test
+without weakening valid assertions. If the cause is a production bug, report and route
+it to `cf-implementer`; do not patch production code. Diagnose recurring failures before
+rerunning, and report unresolved blockers.
 
-For each failure:
-1. Read the failure — expected vs actual.
-2. Identify the root cause in the test (or in the code under test).
-3. Fix the test — do not weaken the assertion unless the expectation is genuinely wrong.
-   If the root cause is a production bug, report it to the user (route to
-   `cf-implementer`) rather than patching production code yourself.
-4. Re-run.
+After an authorized push, read at most one non-blocking CI snapshot; do not wait, watch,
+poll, or sleep/retry unless final results are explicitly required. Pending permits
+handoff, not merge; required failures remain blocking.
 
-### Phase 4B: Studio e2e (when scope includes user-facing flows)
+### Phase 4B: Studio e2e
 
-If the change touches studio behavior the user can see, run the Playwright suite:
-
-```bash
-cd web-ui && npm run test:e2e
-```
-
-If the suite needs the managed local studio, use `./web-ui/scripts/start_web_ui.sh`
-beforehand and `./web-ui/scripts/stop_web_ui.sh` afterwards. Fix the root cause of any
-failure and re-run.
+Select a focused browser check only when needed for changed user-facing behavior.
+The complete Playwright suite (`npm run test:e2e` from `web-ui/`) belongs to CI unless
+a local-full-test exception above applies. For an authorized local run that needs the
+managed Studio, use `./web-ui/scripts/start_web_ui.sh` and
+`./web-ui/scripts/stop_web_ui.sh` around that run. Report actual scope and results.
 
 ### Phase 5: Style Review
 
@@ -159,17 +139,17 @@ pushing, or opening a PR.
 
 ## Key Conventions at a Glance
 
-| Element            | Convention                                                                |
-| ------------------ | ------------------------------------------------------------------------- |
-| Rust tests         | `#[cfg(test)]` mod; snake_case `#[test]`; `assert!`/`assert_eq!`          |
-| Python tests       | `python/tests/test_<module>.py`; `test_<behavior>()`; local fixtures      |
-| Backend tests      | pytest; async handlers tested async; `--cov=calc_flow_studio`             |
-| Frontend tests     | Vitest; e2e via Playwright under `web-ui/e2e/` for user flows             |
-| Coverage floor     | Rust: `cargo llvm-cov --workspace --all-features --fail-under-lines 90`   |
-| State isolation    | temp dirs for stores; no shared mutable state between tests               |
-| Array tests        | `JAX_PLATFORMS=cpu`; assert input ownership/immutability                  |
-| Branch             | `feature/<module>-tests` from `main`                                      |
-| PR                 | `test:` prefix; `## Summary` + `## Test plan`                             |
+| Element         | Convention                                                           |
+|-----------------|----------------------------------------------------------------------|
+| Rust tests      | `#[cfg(test)]` mod; snake_case `#[test]`; `assert!`/`assert_eq!`     |
+| Python tests    | `python/tests/test_<module>.py`; `test_<behavior>()`; local fixtures |
+| Backend tests   | pytest; async handlers tested async; `--cov=calc_flow_studio`        |
+| Frontend tests  | Vitest; e2e via Playwright under `web-ui/e2e/` for user flows        |
+| Coverage floor  | Rust: combined 90% line gate in `scripts/run_rust_coverage.py`       |
+| State isolation | temp dirs for stores; no shared mutable state between tests          |
+| Array tests     | `JAX_PLATFORMS=cpu`; assert input ownership/immutability             |
+| Branch          | `feature/<module>-tests` from `main`                                 |
+| PR              | `test:` prefix; `## Summary` + `## Test plan`                        |
 
 ## What Not to Do
 
@@ -183,5 +163,5 @@ pushing, or opening a PR.
 - Don't add comments describing what the test does — test names should be
   self-documenting
 - Don't create a PR that mixes test changes with unrelated work unless the user asks
-- Don't skip Playwright e2e when your changes impact studio user-facing behavior
+- Don't require the full local Playwright suite by default; apply the scoped policy in Phase 4B
 - Don't add placeholder tests that only assert scaffolding exists

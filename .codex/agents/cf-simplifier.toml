@@ -145,16 +145,15 @@ If the user has explicitly asked you to apply the fixes ("apply the duplication 
 
 1. Enter a worktree with `superpowers:using-git-worktrees` when available, or use the
    repository's `.worktrees/` fallback.
-2. Apply the agreed findings one at a time, re-running the affected surface's suite
-   after each change to prove behavior is unchanged:
-   ```bash
-   uv sync --extra dev
-   uv run python scripts/run_rust_tests.py                     # Rust
-   uv run maturin develop                                     # Python bindings current
-   JAX_PLATFORMS=cpu uv run pytest python/tests -q            # Python
-   cd web-ui/backend && uv run --project . --extra dev pytest --cov=calc_flow_studio
-   cd web-ui && npm ci && npm run build && npm test           # frontend
-   ```
+2. Apply the agreed findings in a coherent batch. Run the smallest affected tests and
+   necessary module checks, following `AGENTS.md` Verification. Full regression belongs
+   to CI. Local full testing is only for an explicit request, CI failure diagnosis, or
+   clear high risk without CI coverage; state the reason and limited scope. Do not rerun
+   unchanged passing checks or run a large suite after each small edit. Diagnose
+   recurring failures before rerunning. Report available CI evidence once without
+   waiting or polling; pending permits handoff, not merge. This does not authorize you
+   to commit, push, or expand apply mode beyond the agreed findings.
+
 3. Style-self-review the changed files against `$code-style`.
 4. Report what changed, the test result, and offer to commit/PR — do not commit or push
    yourself.
