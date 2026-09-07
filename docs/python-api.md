@@ -587,7 +587,7 @@ through the runtime's connector registry and secret resolver. Its returned plan
 owns deferred connector bindings and project runtime/state settings, so launch
 uses `StreamingRunner(plan)` without separate Python connector objects.
 Stream projects may additionally declare immutable static side inputs; see
-[static input declarations](connectors.md#static-input-declarations) for the
+[static input declarations](projects-guide.md#static-input-declarations) for the
 syntax and validation rules. `PipelineBuilder.compile_stream()` is the
 graph-only path for application-owned `SourceBinding` and `SinkBinding`
 values. Project JSON never embeds a connector object, credential value, or

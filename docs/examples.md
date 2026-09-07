@@ -32,10 +32,14 @@ multi-stage rolling calculation from a checkpoint taken during processing.
 Rust's `continuous_runtime` and `windowed_streaming` demonstrate the native
 traits and watermark-driven tumbling windows.
 
-The examples use local application-owned connectors and temporary state
-directories. For Kafka, PostgreSQL, MySQL, ClickHouse, HTTP, WebSocket,
-files, or Parquet, use the data-only fragments in the [connector guide](connectors.md)
-and supply that transport's service and credentials separately.
+Those examples use local application-owned connectors and temporary state
+directories. Continue with [example 15](../examples/15_file_source.py) for the
+native file source in CSV, JSON Lines, and Parquet formats. Examples 16–21
+cover Kafka, PostgreSQL, MySQL, ClickHouse, HTTP, and WebSocket sources, each
+with a calculation and checked Parquet output. Follow the
+[connector overview](connectors/README.md) to choose a transport; each
+connector page includes its native wheel feature, Python example, service
+preparation, and replay/delivery contract.
 
 ## Compose financial and relational calculations
 

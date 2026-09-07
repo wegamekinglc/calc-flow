@@ -25,8 +25,8 @@ pages explain how the implementation provides those behaviors.
    composition, and batch/stream execution; examples 09–13.
 5. [Projects and persistence](projects-guide.md): validate, serialize, save,
    load, and execute a project; example 14.
-6. [Connectors](connectors.md): registered transports, project configuration,
-   secrets, and delivery limits.
+6. [Connectors](connectors/README.md): overview and one guide per connector,
+   with Python examples, service setup, configuration, and delivery limits.
 7. [Studio](studio-guide.md): edit projects, inspect calculations, and operate
    local jobs.
 

@@ -54,7 +54,7 @@ and managed state settings.
 For application-owned Python sources and sinks, use `builder.compile_stream()`
 and supply bindings to the runner, as in
 [04_continuous_runtime.py](../examples/04_continuous_runtime.py).
-The [connector guide](connectors.md) provides transport-specific fragments.
+The [connector guide](connectors/README.md) provides transport-specific fragments.
 Secret references select a trusted resolver; credential values do not belong
 in project options.
 
@@ -63,4 +63,173 @@ reference. See [Python API](python-api.md#projects-and-persistence) for method
 usage and [architecture](design.md#project-and-registry-design) for storage
 and registry ownership.
 
-Next: [connectors](connectors.md).
+## Union and event-time windows
+
+Project v3 represents the built-in same-schema union directly:
+
+```json
+{
+  "id": "merge",
+  "operator": {"kind": "union"},
+  "input_ports": [
+    {"name": "left", "kind": "table", "required": true},
+    {"name": "right", "kind": "table", "required": true}
+  ]
+}
+```
+
+Window nodes require one exact table input schema. Geometry is expressed in
+exact microseconds; `slide_micros` distinguishes a hopping window from a
+tumbling window.
+
+```json
+{
+  "id": "minute_totals",
+  "operator": {
+    "kind": "window",
+    "spec": {
+      "event_time_column": "event_time",
+      "group_by": ["account"],
+      "geometry": {"kind": "tumbling", "size_micros": 60000000},
+      "aggregates": [
+        {"function": "sum", "column": "amount", "output": "total"}
+      ]
+    }
+  },
+  "input_ports": [{
+    "name": "input",
+    "kind": "table",
+    "required": true,
+    "schema": [
+      {"name": "event_time", "data_type": "timestamp[us]", "nullable": false},
+      {"name": "account", "data_type": "string", "nullable": false},
+      {"name": "amount", "data_type": "float64", "nullable": false}
+    ]
+  }]
+}
+```
+
+Stream Join nodes are the other two-input table operator. Both inputs carry an
+exact schema, the bounds and limits are required with no defaults, and the
+output schema is derived from the prefixes rather than declared:
+
+```json
+{
+  "id": "match",
+  "input_ports": [
+    {
+      "name": "left",
+      "kind": "table",
+      "required": true,
+      "schema": [
+        {"name": "account_id", "data_type": "int64", "nullable": false},
+        {"name": "authorized_at", "data_type": "timestamp[us]",
+         "nullable": false}
+      ]
+    },
+    {
+      "name": "right",
+      "kind": "table",
+      "required": true,
+      "schema": [
+        {"name": "account_id", "data_type": "int64", "nullable": false},
+        {"name": "paid_at", "data_type": "timestamp[us]", "nullable": false}
+      ]
+    }
+  ],
+  "output_ports": [],
+  "operator": {
+    "kind": "stream_join",
+    "spec": {
+      "join_type": "inner",
+      "left_keys": ["account_id"],
+      "right_keys": ["account_id"],
+      "left_event_time": "authorized_at",
+      "right_event_time": "paid_at",
+      "bounds": {"before_micros": 300000000, "after_micros": 30000000},
+      "limits": {
+        "max_state_rows_per_side": 100000,
+        "max_state_bytes_per_side": 134217728,
+        "max_matches_per_input_batch": 1000000
+      },
+      "left_prefix": "authorization",
+      "right_prefix": "payment"
+    }
+  }
+}
+```
+
+## Static input declarations
+
+A stream project declares immutable static side inputs as a data-only root
+array. Each entry names an unconnected external input port of a graph node —
+the same port a source binding would feed, minus the connector:
+
+```json
+{
+  "graph": {
+    "nodes": [
+      {
+        "id": "merge",
+        "operator": {"kind": "union"},
+        "input_ports": [
+          {"name": "left", "kind": "table", "required": true},
+          {"name": "weights", "kind": "table", "required": true}
+        ]
+      }
+    ]
+  },
+  "static_inputs": [
+    {
+      "kind": "table",
+      "name": "weights",
+      "mutability": "static",
+      "schema": [
+        {"name": "factor", "data_type": "float64", "nullable": false}
+      ]
+    }
+  ]
+}
+```
+
+An array-valued input declares the provider identity instead of a schema:
+
+```json
+{
+  "kind": "array",
+  "name": "weights",
+  "mutability": "static",
+  "backend": "numpy",
+  "dtype": "float64",
+  "shape": [3]
+}
+```
+
+`mutability` accepts only `static`. Validation is strict and fail-closed:
+
+| Rule                                     | Failure path                                          |
+|------------------------------------------|-------------------------------------------------------|
+| Unique portable SQL identifier names     | `static_inputs[i].name`                               |
+| Name must be a graph external input      | `static_inputs[i].name` (`unknown_binding`)           |
+| Name must not be a source binding        | `static_inputs[i].name` (`source_binding_conflict`)   |
+| Unique table field names                 | `static_inputs[i].schema[j].name`                     |
+| Table fields in the digest-v1 type set   | `static_inputs[i].schema[j].data_type`                |
+| Array backend of 1 to 64 bytes           | `static_inputs[i].backend`                            |
+| Array dtype in the digest-v1 set         | `static_inputs[i].dtype`                              |
+| Array rank at most 16                    | `static_inputs[i].shape`                              |
+
+The declaration joins the compiled plan's semantic fingerprint, so changing it
+selects a fresh lineage. Live values never enter the document: the caller
+supplies them per job through the runner, and a restart with a different value
+is rejected against the recorded digest before sources open. See
+[static inputs](streaming-guide.md#static-inputs) for the runner semantics and
+the digest contract. An empty declaration array is omitted from canonical
+JSON when no static values are declared.
+
+Studio REST cannot carry live values, so submitting a stored project that
+declares static inputs fails closed with `422` before any worker is spawned;
+the `detail` names the first `static_inputs.{name}` as unresolvable and no
+run, handle, or worker is created. Supply the values through the Python
+runtime instead.
+
+Next: [connectors](connectors/README.md).

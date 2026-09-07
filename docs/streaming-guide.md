@@ -6,7 +6,7 @@ Calc Flow continuous jobs consume async sources, execute a compiled stream
 graph, publish to async sinks, and recover from managed checkpoints. Use this
 guide for application-owned connectors. For Kafka, PostgreSQL, MySQL, ClickHouse,
 HTTP, WebSocket, files, and Parquet, combine it with the
-[connector and stream-project guide](connectors.md).
+[connector and stream-project guide](connectors/README.md).
 
 On this page:
 
@@ -142,8 +142,9 @@ cargo run -p calc-flow --example windowed_streaming
 
 Project v3 represents the same operator as a data-only `window` node. Use that
 form from Python or Studio; the current functional Python builder does not add
-a separate window convenience method. The [connector guide](connectors.md)
-contains the exact project fragment.
+a separate window convenience method. The
+[project guide](projects-guide.md#union-and-event-time-windows) contains the
+exact project fragment.
 
 Tumbling and hopping windows use fixed UTC microsecond geometry. Supported
 aggregates are `count`, `sum`, `min`, `max`, and `avg` over the validated type
@@ -233,8 +234,8 @@ never treated as a source.
 Declarations are data-only: a project-v3 `static_inputs` array whose entries
 name an unconnected external input port of a graph node. A table entry pins
 the exact Arrow schema; an array entry pins the backend, dtype, and shape. The
-[connector guide](connectors.md) carries the exact syntax and validation
-rules.
+[project guide](projects-guide.md#static-input-declarations) carries the exact
+syntax and validation rules.
 
 Python callers supply values through the keyword-only runner argument:
 

@@ -1,4 +1,4 @@
-"""Run every user-facing Calc Flow example with one maintained command."""
+"""Run Calc Flow examples, optionally including external-service connectors."""
 
 from __future__ import annotations
 
@@ -14,6 +14,14 @@ PYTHON_EXAMPLES = tuple(
     str(path.relative_to(REPOSITORY_ROOT))
     for path in sorted((REPOSITORY_ROOT / "examples").glob("[0-9][0-9]_*.py"))
 )
+SERVICE_PYTHON_EXAMPLES = (
+    "examples/16_kafka_source.py",
+    "examples/17_postgresql_source.py",
+    "examples/18_mysql_source.py",
+    "examples/19_clickhouse_source.py",
+    "examples/20_http_source.py",
+    "examples/21_websocket_source.py",
+)
 RUST_EXAMPLES = (
     "expression_pipeline",
     "sql_join",
@@ -22,10 +30,14 @@ RUST_EXAMPLES = (
 )
 
 
-def _commands(surface: str) -> tuple[list[str], ...]:
+def _commands(surface: str, *, include_services: bool = False) -> tuple[list[str], ...]:
     commands: list[list[str]] = []
     if surface in {"all", "python"}:
-        commands.extend([sys.executable, path] for path in PYTHON_EXAMPLES)
+        commands.extend(
+            [sys.executable, path]
+            for path in PYTHON_EXAMPLES
+            if include_services or path not in SERVICE_PYTHON_EXAMPLES
+        )
     if surface in {"all", "rust"}:
         commands.extend(
             ["cargo", "run", "-p", "calc-flow", "--example", name]
@@ -42,15 +54,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         default="all",
         help="select which examples to run (default: all)",
     )
+    parser.add_argument(
+        "--include-services",
+        action="store_true",
+        help="also run connector examples requiring prepared external services",
+    )
     arguments = parser.parse_args(argv)
     environment = os.environ.copy()
     environment.setdefault("JAX_PLATFORMS", "cpu")
 
-    for command in _commands(arguments.surface):
+    if arguments.surface in {"all", "python"} and not arguments.include_services:
+        print("Skipping external-service examples (enable with --include-services):")
+        for path in SERVICE_PYTHON_EXAMPLES:
+            print(f"  {path}")
+
+    for command in _commands(
+        arguments.surface, include_services=arguments.include_services
+    ):
         print(f"+ {' '.join(command)}", flush=True)
         # Every executable and argument comes from the fixed inventories above;
-        # argparse accepts only the three declared surface choices. Never use a
-        # shell here, so example names cannot become command syntax.
+        # argparse accepts only declared choices and a boolean flag. Never use
+        # a shell here, so example names cannot become command syntax.
         try:
             subprocess.run(  # nosec B603  # nosemgrep
                 command,

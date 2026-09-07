@@ -20,7 +20,7 @@ Rust engine. Calc Flow Studio provides a separate local browser interface.
   [streaming guide](streaming-guide.md).
 - Persist strict JSON/YAML projects and use registered file, Kafka, PostgreSQL,
   MySQL, ClickHouse, HTTP, or WebSocket connectors:
-  [projects](projects-guide.md) and [connectors](connectors.md).
+  [projects](projects-guide.md) and [connectors](connectors/README.md).
 - Edit and inspect projects and operate local jobs in [Studio](studio-guide.md).
 
 ## The basic vocabulary
