@@ -72,22 +72,25 @@ The top action toolbar uses consistently sized controls and wraps as a group
 on narrow screens. The dialog, editor, validation message, and action row stay
 within the viewport.
 
-To run the two development processes manually, use separate terminals:
+Prepare the core and Studio wheels using the
+[source installation guide](../docs/getting-started.md#build-and-install-from-source).
+To run the two development processes manually, start each terminal at the
+repository root. Start the API in one terminal:
 
 ```bash
-uv run --package calc-flow-studio calc-flow-web
+uv run --no-sync --package calc-flow-studio calc-flow-web
+```
+
+Start Vite in the other terminal:
+
+```bash
 cd web-ui && npm ci && npm run dev
 ```
 
-A production build can be served by the Python service:
-
-```bash
-cd web-ui
-npm ci
-npm run build:wheel
-cd ..
-uv run --package calc-flow-studio calc-flow-web
-```
+To serve the built frontend from the installed Studio wheel, run only the API
+command and open `http://127.0.0.1:8765`. Rebuild and reinstall the wheels after
+source changes as described in the installation guide. `npm run build:wheel`
+builds a Studio wheel; it does not install that wheel into the environment.
 
 Regenerate the checked-in API contract after backend route or model changes:
 

@@ -20,7 +20,8 @@ ahead of a test that demands it.
 ## Project Context
 
 - `crates/calc-flow/` — Rust core: `batch`, `operator`, `pipeline`, `datafusion`,
-  `expression`, `runtime/`, `checkpoint`, `config`, `project_store`, `udf`, `io`, `json`
+  `expression`, `runtime/`, `continuous/`, `state/`, `connector/`, `config`,
+  `project_store`, `static_input`, `time/`, `udf`, `json`
 - `crates/calc-flow-python/` — PyO3 bindings
 - `python/calc_flow/` — Python adapters; `python/tests/` — pytest suite
 - `web-ui/backend/` — FastAPI `calc_flow_studio` service (loopback only)
@@ -160,7 +161,8 @@ is genuinely wrong.
 ### Phase 4: Full Matrix and Style Review
 
 **4.1 Run the verification matrix for every touched surface** (all commands above, plus
-`cargo llvm-cov --workspace --all-features --fail-under-lines 90` when Rust changed).
+the combined `uv run python scripts/run_rust_coverage.py` gate when Rust changed,
+with the connector services and environment from `AGENTS.md` configured).
 If anything fails, fix the regression before proceeding.
 
 **4.2 Style self-review.** Check all changed files against `$code-style`.
@@ -185,18 +187,18 @@ PR title with a category prefix (`feat:`, `fix:`, `docs:`, `chore:`, `refactor:`
 
 ## Key Conventions at a Glance
 
-| Element          | Convention                                                                             |
-| ---------------- | -------------------------------------------------------------------------------------- |
-| Rust             | rustfmt clean; clippy `-D warnings`; harness green; llvm-cov ≥90 lines                 |
-| Python           | 3.13+; `from __future__ import annotations`; `list[str]`, `dict[str, Any]`, `A \| B`   |
-| Functions        | pure transforms; never mutate inputs or caller-owned objects                           |
-| State            | confined to owned boundaries (stateful operators, runners, stores)                     |
-| Tables           | Arrow-backed; DataFusion is the only table engine                                      |
-| Arrays           | Array API-backed (NumPy/JAX); allowlisted AST, never `eval`                            |
-| UDFs             | `UdfReference(provider, name, version)`; configs never carry callables                 |
-| Web              | async I/O; immutable React state updates; clean up async resources                     |
-| Tests            | mirror source layout; `test_<behavior>()`; local fixtures                              |
-| Generated code   | never commit `python/calc_flow/_native*.so`; keep outputs under `target/`              |
+| Element        | Convention                                                                           |
+|----------------|--------------------------------------------------------------------------------------|
+| Rust           | rustfmt clean; clippy `-D warnings`; harness green; llvm-cov ≥90 lines               |
+| Python         | 3.13+; `from __future__ import annotations`; `list[str]`, `dict[str, Any]`, `A \| B` |
+| Functions      | pure transforms; never mutate inputs or caller-owned objects                         |
+| State          | confined to owned boundaries (stateful operators, runners, stores)                   |
+| Tables         | Arrow-backed; DataFusion is the only table engine                                    |
+| Arrays         | Array API-backed (NumPy/JAX); allowlisted AST, never `eval`                          |
+| UDFs           | `UdfReference(provider, name, version)`; configs never carry callables               |
+| Web            | async I/O; immutable React state updates; clean up async resources                   |
+| Tests          | mirror source layout; `test_<behavior>()`; local fixtures                            |
+| Generated code | never commit `python/calc_flow/_native*.so`; keep outputs under `target/`            |
 
 ## What Not to Do
 

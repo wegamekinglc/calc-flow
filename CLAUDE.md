@@ -28,7 +28,8 @@ execution model.
 ## Commands
 
 The canonical command groups live in [AGENTS.md](AGENTS.md#commands) and are
-reproduced here for convenience; repeat them exactly.
+reproduced here for convenience. Start at the repository root; the Studio
+subshells preserve that directory for subsequent groups.
 
 ```bash
 # Rust core and PyO3 Rust unit tests
@@ -52,17 +53,21 @@ uv run ruff format --check .
 uv run ruff format .
 
 # Studio backend
-cd web-ui/backend
-uv run --project . --extra dev pytest --cov=calc_flow_studio
+(
+  cd web-ui/backend
+  uv run --project . --extra dev pytest --cov=calc_flow_studio
+)
 
 # Studio frontend and generated API
-cd web-ui
-npm ci
-npm run sync:api
-npm run build
-npm test
-npm run test:e2e
-npm audit --omit=dev
+(
+  cd web-ui
+  npm ci
+  npm run sync:api
+  npm run build
+  npm test
+  npm run test:e2e
+  npm audit --omit=dev
+)
 
 # Supply chain and release helpers
 cargo audit --ignore RUSTSEC-2026-0176 --ignore RUSTSEC-2026-0177 --ignore RUSTSEC-2026-0235
@@ -160,7 +165,7 @@ The native dependency edge is
 The frontend talks to the backend over the `/api/v3` REST contract only.
 
 | Path                       | Purpose                                                                                                                                  |
-| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+|----------------------------|------------------------------------------------------------------------------------------------------------------------------------------|
 | `crates/calc-flow/`        | Native core: batches, ports/operators, graph compiler, DataFusion runtime, UDF/provider registries, runners, checkpoints, project stores |
 | `crates/calc-flow-python/` | PyO3 binding exposing the core as `calc_flow._native`                                                                                    |
 | `python/calc_flow/`        | Pure-Python public API, functional `PipelineBuilder`, runner/store adapters, NumPy/JAX provider registration, exception hierarchy        |

@@ -85,8 +85,8 @@ need context. Check:
   --all-features -- -D warnings` clean
 - Errors flow through `Result`/the crate's error type; no panics on expected failure
   paths; no `unwrap` outside tests without justification
-- New behavior has `#[cfg(test)]` coverage; unsafe code (should be rare) is justified in
-  a comment
+- New behavior has `#[cfg(test)]` coverage; workspace `unsafe_code = "forbid"`
+  remains enforced without exceptions
 
 #### Python
 - `uv run ruff check .` and `uv run ruff format --check .` clean
@@ -110,7 +110,8 @@ need context. Check:
 - Array providers interpret the allowlisted AST — never Python `eval`
 - UDFs travel as `UdfReference(provider, name, version)`; configs/catalogs carry no source,
   callables, or import paths
-- Checkpoint format changes are versioned; old checkpoints still restore
+- Checkpoint recovery follows the supported manifest version, lineage, fingerprint,
+  and state-layout contracts; unsupported versions fail closed
 
 #### Tests
 - Mirrored layout per `.claude/rules/code-style.md`; `test_<behavior>()` names; fixtures
@@ -142,7 +143,8 @@ uv sync --extra dev
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 uv run python scripts/run_rust_tests.py
-cargo llvm-cov --workspace --all-features --fail-under-lines 90   # when Rust changed
+# When Rust changed: configure the connector services/environment from AGENTS.md.
+uv run python scripts/run_rust_coverage.py
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 ```
 ```bash
@@ -239,17 +241,17 @@ merging it, confirm that intent before using a close operation.
 
 ## Key Conventions at a Glance
 
-| Element          | Convention                                                                |
-| ---------------- | ------------------------------------------------------------------------- |
-| Rust             | fmt + clippy `-D warnings` clean; harness green; llvm-cov ≥90             |
-| Python           | ruff check/format clean; `pytest python/tests` green                      |
-| Backend          | `pytest --cov=calc_flow_studio` green                                     |
-| Frontend         | `npm run build` + `npm test` green; e2e when flows change                 |
-| Branches         | `feature/<desc>` / `fix/<desc>` off `main`                                |
-| Commits          | imperative <72 chars + why body; no attribution trailer                   |
-| PR               | category prefix <70 chars; `## Summary` + `## Test plan`                  |
-| Domain           | Batch immutable; DataFusion-only tables; no `eval`; data-only configs     |
-| Studio backend   | loopback-only; safe YAML only                                             |
+| Element        | Convention                                                            |
+|----------------|-----------------------------------------------------------------------|
+| Rust           | fmt + clippy `-D warnings` clean; harness green; llvm-cov ≥90         |
+| Python         | ruff check/format clean; `pytest python/tests` green                  |
+| Backend        | `pytest --cov=calc_flow_studio` green                                 |
+| Frontend       | `npm run build` + `npm test` green; e2e when flows change             |
+| Branches       | `feature/<desc>` / `fix/<desc>` off `main`                            |
+| Commits        | imperative <72 chars + why body; no attribution trailer               |
+| PR             | category prefix <70 chars; `## Summary` + `## Test plan`              |
+| Domain         | Batch immutable; DataFusion-only tables; no `eval`; data-only configs |
+| Studio backend | loopback-only; safe YAML only                                         |
 
 ## What Not to Do
 

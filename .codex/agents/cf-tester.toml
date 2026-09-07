@@ -40,9 +40,9 @@ When no specific module is named, map the codebase to find the weakest coverage:
 1. List the modules under `crates/calc-flow/src/` and check each for a `#[cfg(test)]`
    mod or matching integration tests.
 2. Cross-reference `python/calc_flow/` modules against `python/tests/test_*.py`.
-3. Note the enforced floors: `cargo llvm-cov --workspace --all-features
-   --fail-under-lines 90` for Rust; the studio backend suite runs with coverage via
-   `--cov=calc_flow_studio`.
+3. Note the enforced floors: Rust uses the combined 90% line gate in
+   `scripts/run_rust_coverage.py`, including the connector services and environment
+   from `AGENTS.md`; Studio uses `--cov=calc_flow_studio` with its 85% floor.
 4. Rank areas by gap, prioritizing core behavior (batch, operator, pipeline, runtime,
    checkpoint) over thin adapters.
 
@@ -95,7 +95,8 @@ uv sync --extra dev
 uv run python scripts/run_rust_tests.py
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo llvm-cov --workspace --all-features --fail-under-lines 90
+# Requires the connector services and environment documented in AGENTS.md.
+uv run python scripts/run_rust_coverage.py
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 ```
 ```bash
@@ -152,17 +153,17 @@ Only publish when the user explicitly requested it. Once an authorized PR is ope
 
 ## Key Conventions at a Glance
 
-| Element            | Convention                                                                |
-| ------------------ | ------------------------------------------------------------------------- |
-| Rust tests         | `#[cfg(test)]` mod; snake_case `#[test]`; `assert!`/`assert_eq!`          |
-| Python tests       | `python/tests/test_<module>.py`; `test_<behavior>()`; local fixtures      |
-| Backend tests      | pytest; async handlers tested async; `--cov=calc_flow_studio`             |
-| Frontend tests     | Vitest; e2e via Playwright under `web-ui/e2e/` for user flows             |
-| Coverage floor     | Rust: `cargo llvm-cov --workspace --all-features --fail-under-lines 90`   |
-| State isolation    | temp dirs for stores; no shared mutable state between tests               |
-| Array tests        | `JAX_PLATFORMS=cpu`; assert input ownership/immutability                  |
-| Branch             | `feature/<module>-tests` from `main`                                      |
-| PR                 | `test:` prefix; `## Summary` + `## Test plan`                             |
+| Element         | Convention                                                           |
+|-----------------|----------------------------------------------------------------------|
+| Rust tests      | `#[cfg(test)]` mod; snake_case `#[test]`; `assert!`/`assert_eq!`     |
+| Python tests    | `python/tests/test_<module>.py`; `test_<behavior>()`; local fixtures |
+| Backend tests   | pytest; async handlers tested async; `--cov=calc_flow_studio`        |
+| Frontend tests  | Vitest; e2e via Playwright under `web-ui/e2e/` for user flows        |
+| Coverage floor  | Rust: combined 90% line gate in `scripts/run_rust_coverage.py`       |
+| State isolation | temp dirs for stores; no shared mutable state between tests          |
+| Array tests     | `JAX_PLATFORMS=cpu`; assert input ownership/immutability             |
+| Branch          | `feature/<module>-tests` from `main`                                 |
+| PR              | `test:` prefix; `## Summary` + `## Test plan`                        |
 
 ## What Not to Do
 

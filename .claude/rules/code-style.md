@@ -1,7 +1,7 @@
 # Code Style
 
 Apply these rules to all changes in this repository. Rust core style (Rust
-2024, `unsafe_code = "forbid"`, `calc_flow::Result<T}`, async ownership,
+2024, `unsafe_code = "forbid"`, `calc_flow::Result<T>`, async ownership,
 rustdoc) is governed by the `Coding style` section of
 [AGENTS.md](../../AGENTS.md); this file covers the Python adapters, the web
 surfaces, Markdown, tests, and verification.
@@ -75,6 +75,7 @@ surfaces, Markdown, tests, and verification.
   span the full column width (including the spaces on either side of the cell
   content). This keeps tables readable in plain text and consistent with the
   format used in `CLAUDE.md`.
+* Remove trailing whitespace and end every Markdown file with a newline.
 
 ## Verification
 

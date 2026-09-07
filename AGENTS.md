@@ -10,6 +10,9 @@ React application serving the `/api/v3` continuous job API. See `docs/introducti
 
 ## Commands
 
+Start each command group at the repository root. The Studio groups use
+subshells so their working-directory changes do not affect later commands.
+
 ```bash
 # Rust core and PyO3 Rust unit tests
 uv sync --extra dev
@@ -32,17 +35,21 @@ uv run ruff format --check .
 uv run ruff format .
 
 # Studio backend
-cd web-ui/backend
-uv run --project . --extra dev pytest --cov=calc_flow_studio
+(
+  cd web-ui/backend
+  uv run --project . --extra dev pytest --cov=calc_flow_studio
+)
 
 # Studio frontend and generated API
-cd web-ui
-npm ci
-npm run sync:api
-npm run build
-npm test
-npm run test:e2e
-npm audit --omit=dev
+(
+  cd web-ui
+  npm ci
+  npm run sync:api
+  npm run build
+  npm test
+  npm run test:e2e
+  npm audit --omit=dev
+)
 
 # Supply chain and release helpers
 cargo audit --ignore RUSTSEC-2026-0176 --ignore RUSTSEC-2026-0177 --ignore RUSTSEC-2026-0235

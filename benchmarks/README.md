@@ -52,11 +52,11 @@ CALC_FLOW_BENCHMARK_SCALE=overhead \
 Standalone scales (`nightly` is manual-only, not a CI suite shard):
 
 | Scale      | Table rows | Array elements | Matrix dimension |
-| ---------- | ---------: | -------------: | ---------------: |
-| `overhead` |      1,000 |          1,000 |               16 |
-| `small`    |     10,000 |         10,000 |               64 |
-| `standard` |    100,000 |        100,000 |              256 |
-| `nightly`  |  1,000,000 |      1,000,000 |              512 |
+|------------|-----------:|---------------:|-----------------:|
+| `overhead` | 1,000      | 1,000          | 16               |
+| `small`    | 10,000     | 10,000         | 64               |
+| `standard` | 100,000    | 100,000        | 256              |
+| `nightly`  | 1,000,000  | 1,000,000      | 512              |
 
 Each benchmark reports the active problem scale in two places: the group
 header carries the full spec (for example
@@ -264,18 +264,18 @@ accepted milestone gates and their raw evidence are documented in
 [symbolic/SCE14.md](symbolic/SCE14.md), and
 [symbolic/SCE16.md](symbolic/SCE16.md).
 
-| Scenario                                  | Timed boundary                                             |
-| ----------------------------------------- | ---------------------------------------------------------- |
-| `symbolic_projection_20_columns`          | one DataFusion execute of a 20-column row-local SQL        |
-| `symbolic_rolling_20_60_row_features`     | one DataFusion execute of rolling window SQL               |
-| `symbolic_cross_section_rank_zscore`      | one DataFusion execute of complete-group rank/z-score      |
-| `symbolic_table_matmul_numpy`/`_jax`      | SQL features plus one counting table_matmul call           |
-| `symbolic_stream_window_checkpoint`       | full stream lifecycle (see below)                          |
-| `sce05_row_local_20_columns`              | alternating hand-built/symbolic single projections         |
-| `sce08_temporal_catalog`                  | alternating native/symbolic duration rolling runs          |
-| `sce14_cross_domain_sharing`              | separate versus shared rolling and cross-section branches  |
-| `sce16_exponential_indicators`            | alternating hand-built/symbolic EWMA and MACD runs          |
-| `symbolic_multistage_rolling_sharing`     | separate versus shared two-stage rolling output branches   |
+| Scenario                              | Timed boundary                                            |
+|---------------------------------------|-----------------------------------------------------------|
+| `symbolic_projection_20_columns`      | one DataFusion execute of a 20-column row-local SQL       |
+| `symbolic_rolling_20_60_row_features` | one DataFusion execute of rolling window SQL              |
+| `symbolic_cross_section_rank_zscore`  | one DataFusion execute of complete-group rank/z-score     |
+| `symbolic_table_matmul_numpy`/`_jax`  | SQL features plus one counting table_matmul call          |
+| `symbolic_stream_window_checkpoint`   | full stream lifecycle (see below)                         |
+| `sce05_row_local_20_columns`          | alternating hand-built/symbolic single projections        |
+| `sce08_temporal_catalog`              | alternating native/symbolic duration rolling runs         |
+| `sce14_cross_domain_sharing`          | separate versus shared rolling and cross-section branches |
+| `sce16_exponential_indicators`        | alternating hand-built/symbolic EWMA and MACD runs        |
+| `symbolic_multistage_rolling_sharing` | separate versus shared two-stage rolling output branches  |
 
 Every scenario records rows, batches, peak RSS (`VmHWM`), provider or
 DataFusion query counts, and Arrow/dense copy bytes in `extra_info`. The
@@ -292,10 +292,10 @@ across scales, which keeps paired comparisons valid. The matmul scenarios
 likewise cap rows at 400,000 so the dense 20-column feature matrix stays
 under the runtime's owned-NumPy 10,000,000-element conversion limit.
 
-Run the stream lifecycle in its own process. The PR smoke runs the same
-node selection at `overhead` scale and the scheduled workflow uses
-`standard`; either way symbolic compilation cases cannot retain allocator or
-memory-pool state before the stream measurement:
+Run the stream lifecycle in its own process. The unified suite's `lifecycle`
+shard uses `standard` for PR/main and scheduled/manual runs. Symbolic
+compilation cases cannot retain allocator or memory-pool state before this
+isolated measurement:
 
 ```bash
 CALC_FLOW_BENCHMARK_SCALE=standard \
@@ -315,12 +315,12 @@ dependency, and workload fingerprints. Release exact-ref comparison fails when
 the candidate p50 exceeds the baseline p95 plus 5%, or when checkpoint-byte
 p50 crosses the equivalent bound.
 
-Scheduled Rust evidence runs both `core` and `stream_join_perf`. The core
-harness includes two-, four-, and eight-channel fan-in, four-way fan-out, and
-saturated backpressure cases. `benchmark-provenance.json` binds the artifact to
-the exact commit, Rust toolchain, Cargo lock, runner identity, CPU identity, and
-benchmark source hashes. Release gates compare both Rust harnesses at exact
-baseline and candidate refs; scheduled timing remains informational.
+The unified suite discovers every `[[bench]]` target in the core crate for
+its Rust shard. The core harness includes two-, four-, and eight-channel
+fan-in, four-way fan-out, and saturated backpressure cases. Reports retain
+exact release, source, toolchain, dependency, and workload provenance.
+Whole-suite Rust timing deltas remain informational; allocation checks and
+the separate release comparisons of `core` and `stream_join_perf` still apply.
 
 Studio observability coverage runs separately with `standard` inputs. It
 measures checkpoint-directory scans for 1x100, 10x100, and 100x10 job/file
@@ -330,8 +330,9 @@ cases and records the exact commit, Node/npm versions, package lock, and
 benchmark source hashes in its artifact. These scheduled Studio and
 frontend results remain informational: no automated threshold consumes them,
 and their workflow-presence tests fail closed if a scenario is silently
-removed. The only timing gates are the release exact-ref comparison above and
-the isolated stream lifecycle evidence contract.
+removed. The unified engine/warm paired-median confidence gate also applies
+to its own cases, alongside the specialized release and lifecycle contracts;
+see [revision comparisons](../docs/benchmark-suite.md#revision-comparisons-and-regression-gate).
 
 Reproduce a recorded run with:
 

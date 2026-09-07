@@ -1,0 +1,1639 @@
+{
+  "baseline": "5c1cac1255e826ea4655244963c891681b14b97c",
+  "branch": "docs/DAL-189-audit-20260907",
+  "inventory": [
+    {
+      "path": ".agents/skills/code-style/SKILL.md",
+      "category": "维护/agent 指南",
+      "baseline_sha256": "eafe9d2475b9061ae8d2310f6aa7fce83c6e72cdd6ccc0eba5d6e4d327ab1103",
+      "lines": 104
+    },
+    {
+      "path": ".claude/agents/README.md",
+      "category": "维护/agent 指南",
+      "baseline_sha256": "6d84af54e3434ab17f63f17e5f7a1d1159d543b971175800e524b53fbe7eb6a9",
+      "lines": 131
+    },
+    {
+      "path": ".claude/agents/cf-api-designer.md",
+      "category": "维护/agent 指南",
+      "baseline_sha256": "ab288cb49ee43bf3f57e91fbc84b897a5d6566e88ba98784e0efb48e1bdff038",
+      "lines": 169
+    },
+    {
+      "path": ".claude/agents/cf-critic.md",
+      "category": "维护/agent 指南",
+      "baseline_sha256": "ff02a04e9c722cb38daf737af8c5a4351546a5caef0d669d619b72719ef1bf20",
+      "lines": 176
+    },
+    {
+      "path": ".claude/agents/cf-doc-writer.md",
+      "category": "维护/agent 指南",
+      "baseline_sha256": "f621f284b381e6fef016ca7d4230652dee9ac5018d4874ce0db1d54a0d3ab167",
+      "lines": 188
+    },
+    {
+      "path": ".claude/agents/cf-implementer.md",
+      "category": "维护/agent 指南",
+      "baseline_sha256": "92e346939a9f5dc9b91317419f47920bfe9cbf1ea4b2cd6a986b235b24ebbe29",
+      "lines": 222
+    },
+    {
+      "path": ".claude/agents/cf-orchestrator.md",
+      "category": "维护/agent 指南",
+      "baseline_sha256": "984ada1396b9e7dbd31fabe069ff143bb5ecd9b5e0382658b605296ebbf9a846",
+      "lines": 196
+    },
+    {
+      "path": ".claude/agents/cf-performancer.md",
+      "category": "维护/agent 指南",
+      "baseline_sha256": "3f069831af6c449a6fd62dc8819ae7e415323cf4b88c78b2e5fbb5766af9e28c",
+      "lines": 196
+    },
+    {
+      "path": ".claude/agents/cf-reviewer.md",
+      "category": "维护/agent 指南",
+      "baseline_sha256": "52d5dc5ceb7a921148f7f673fb27b58d3c04f56531492ba74cbb075fa5e28a38",
+      "lines": 263
+    },
+    {
+      "path": ".claude/agents/cf-simplifier.md",
+      "category": "维护/agent 指南",
+      "baseline_sha256": "75ee039b48ef820c4ef3a03afca8a026968aba2d7ce043e0cc3ec5fc6f6e7885",
+      "lines": 216
+    },
+    {
+      "path": ".claude/agents/cf-spec-writer.md",
+      "category": "维护/agent 指南",
+      "baseline_sha256": "10244bb314dfcedaf39bfe04c4bf9aaaea71006f913750f44277e552c3ede113",
+      "lines": 137
+    },
+    {
+      "path": ".claude/agents/cf-tester.md",
+      "category": "维护/agent 指南",
+      "baseline_sha256": "93b9c22ff9ddf311f2fd87b5d0503eb4ad50082535910253dad4a71d96012ea2",
+      "lines": 187
+    },
+    {
+      "path": ".claude/api-notes/docs-examples.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "9dffa84fa1e224d975461d9fac45cfb0cb53411d95af0949b7ae34be302c3bf7",
+      "lines": 229
+    },
+    {
+      "path": ".claude/rules/code-style.md",
+      "category": "维护/agent 指南",
+      "baseline_sha256": "cb248a66377bcd196b4086f9fff74ea6677481955786031277e1f7c30a0e9af0",
+      "lines": 95
+    },
+    {
+      "path": ".claude/specs/head-operator.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "4385cdd2eb9895adc0afb0611fcf7399a8bbb01f61c6f413c83b1f6b1b26f611",
+      "lines": 59
+    },
+    {
+      "path": ".codex/agents/README.md",
+      "category": "维护/agent 指南",
+      "baseline_sha256": "e0b93eb8530ad4cfe0f74ed126ecf0f2b282ee3cf7603b5421ea9b8de0c587af",
+      "lines": 93
+    },
+    {
+      "path": ".codex/artifacts/analysis/a6-public-continuous-runtime-implementation-evidence.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "af6191cd82795453aacdc3d34457a4033e2266bcc1edcd8d28641946c83108a0",
+      "lines": 166
+    },
+    {
+      "path": ".codex/artifacts/analysis/dal-5-5-2-acceptance-audit.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "ec9be052a4a9a2f75eca879f4bea442e2d236c576d17dda0b893e52bae4eafc0",
+      "lines": 60
+    },
+    {
+      "path": ".codex/artifacts/analysis/dal-5-weekly-capability-progress-2026-07-25.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "52fbe05aafaa658c42c4ffe8ece2924690045b1e1d0a67091910fdbf3f494145",
+      "lines": 94
+    },
+    {
+      "path": ".codex/artifacts/analysis/m3-delta-implementation-evidence.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "23e49162a8a0d98235d1cb4bc485649431545ca781ab028eb8085717e08a1817",
+      "lines": 142
+    },
+    {
+      "path": ".codex/artifacts/analysis/m4-state-window-implementation-evidence.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "9a4ce845a3c401e098891572dc754a442069fc4194e12932e8b19cdc0614940e",
+      "lines": 251
+    },
+    {
+      "path": ".codex/artifacts/analysis/sce-11-static-stream-inputs-review-record.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "69eb915d389ff036da16f745c2918664c6dc5d323d3d223694aa5c4916d26203",
+      "lines": 86
+    },
+    {
+      "path": ".codex/artifacts/api-notes/a6-public-continuous-runtime.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "faae44001e1d85a579fa85ae6c16c15c353d770d0bb0238c60e1e611c779d40e",
+      "lines": 2074
+    },
+    {
+      "path": ".codex/artifacts/api-notes/continuous-streaming-m2-completion.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "088033964aa899be3b6a3115ce9941159e783c4d57ee88dcd959ab2044ab3555",
+      "lines": 1696
+    },
+    {
+      "path": ".codex/artifacts/api-notes/continuous-streaming-runtime.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "e493456c85705b123f54541754e181ff51f32bf68f027c9fda4bc4042798b360",
+      "lines": 2166
+    },
+    {
+      "path": ".codex/artifacts/api-notes/dal-45-provider-option-error-paths-contract.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "696db3daaf43a703d0fef373b33c484e2c7d3a345fdd4372323f05f1bd7696ca",
+      "lines": 204
+    },
+    {
+      "path": ".codex/artifacts/api-notes/dal-5-5-2-main-reconciliation.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "e7181fc5ca519557f772c44fe9f8d2644316dd98dd44d9a2289e03345715793e",
+      "lines": 845
+    },
+    {
+      "path": ".codex/artifacts/api-notes/dal-5-5-2.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "a9477bd20d59b7b86205d24ca48a5e9017fd2387dbc94d1ce25cae5e714719bd",
+      "lines": 1166
+    },
+    {
+      "path": ".codex/artifacts/api-notes/dal-5-public-surface-audit.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "859ea4d05690f490e899a0d4d9f4d472fd6a3d66561a6d99f12e5fc059549e35",
+      "lines": 257
+    },
+    {
+      "path": ".codex/artifacts/api-notes/dal-5-studio-capabilities-contract.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "2537ca69a006f853aa779f637542676a72c7bd9938980c1b323098ad0f6422a9",
+      "lines": 1065
+    },
+    {
+      "path": ".codex/artifacts/api-notes/docs-examples.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "9dffa84fa1e224d975461d9fac45cfb0cb53411d95af0949b7ae34be302c3bf7",
+      "lines": 229
+    },
+    {
+      "path": ".codex/artifacts/api-notes/m3-delta-api-note.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "f8f3f8730a234b8c53f514191aaad1053c5b2bbcd2652456904724c3aad5ca16",
+      "lines": 2364
+    },
+    {
+      "path": ".codex/artifacts/api-notes/m4-state-window.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "f3bde952eedd88d5b7f544e5a89043651083db01849a6768049da6dc58577ad1",
+      "lines": 837
+    },
+    {
+      "path": ".codex/artifacts/api-notes/m5-epoch-checkpoint.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "98d1534ecae718cd117a23b4e3fe056fbefe8ef40b6de3488bf49376ee7fd3a7",
+      "lines": 598
+    },
+    {
+      "path": ".codex/artifacts/api-notes/m6-connectors-project-v3.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "3a5e427a84ae9e79ca8616e6b5ce59b44d163693f21733fccdd20f8f94743899",
+      "lines": 349
+    },
+    {
+      "path": ".codex/artifacts/api-notes/sce-11-static-stream-inputs-dictionary-addendum.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "656c5ac65d7bb6584014e470b4413f5cfbf731d003c29289b02e2b1331848e66",
+      "lines": 204
+    },
+    {
+      "path": ".codex/artifacts/api-notes/sce-11-static-stream-inputs.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "da9a9ec1687f8e1487d6b0341b838c69d1d07a54992cf3ee4b59b77b451c85d2",
+      "lines": 336
+    },
+    {
+      "path": ".codex/artifacts/api-notes/symbolic-computation-engine.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "0f5d0e95d335c4d10a7836bda32f6cc13cac1c9d5acfeabeb8dbe9c36ba14cb8",
+      "lines": 1638
+    },
+    {
+      "path": ".codex/artifacts/api-notes/symbolic-exponential-indicators.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "6604c3f4f5803a9843a915ba65880a8497c9c2177390c8e313167fd49bdc979c",
+      "lines": 40
+    },
+    {
+      "path": ".codex/artifacts/api-notes/symbolic-relational-dag.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "e42f4bc17f93fc2b31dec928d43d1b01c5b606b0a8aa3a0d667406e2a682404c",
+      "lines": 140
+    },
+    {
+      "path": ".codex/artifacts/api-notes/symbolic-stream-joins.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "25e7d048e599edd039fa5b5175bb37ee35ee424149eba0f220f55bb0bb1925b8",
+      "lines": 98
+    },
+    {
+      "path": ".codex/artifacts/api/sce-13-static-array-snapshot.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "37c7f4ec10dff27647f319446f1dc6a2f6fc004aecbf7130ddc436d052ca8876",
+      "lines": 550
+    },
+    {
+      "path": ".codex/artifacts/critiques/a6-public-continuous-runtime.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "a075cdb83222218d57cd526d6dcb610cc6667df33f961406fcc0181b78234f8f",
+      "lines": 143
+    },
+    {
+      "path": ".codex/artifacts/critiques/continuous-streaming-m2-completion.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "5ef2c9d0c208b679d364bddccca06593bb49f2b43b37677287b31083ac68e49d",
+      "lines": 1122
+    },
+    {
+      "path": ".codex/artifacts/critiques/continuous-streaming-runtime.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "c0ea09e54a9bb9628f77c87fe2d172e296d9e8d74d395f74e0c3c9ec1b2497b9",
+      "lines": 1000
+    },
+    {
+      "path": ".codex/artifacts/critiques/dal-45-provider-option-error-paths-critique.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "1e1389dc926502b3e78b936476d7b5f9ef756804be9fceea972f1c0751f08079",
+      "lines": 154
+    },
+    {
+      "path": ".codex/artifacts/critiques/dal-47-execution-options-stub-defaults.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "7050b99163e6bd702d8335afdead3c8b7dbe65f2668e0cdfbcb6789b5ff19524",
+      "lines": 148
+    },
+    {
+      "path": ".codex/artifacts/critiques/dal-5-5-2.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "f64e1e7a0405f083648a9c5c2263c92224fe0168b9b5db4a6415b20ba079308d",
+      "lines": 456
+    },
+    {
+      "path": ".codex/artifacts/critiques/dal-5-studio-capabilities-contract-critique.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "a6395ccad02ef02c0c8a3a674af8d0bc6a5c86e165dbef6737eaaf78e0458bc0",
+      "lines": 282
+    },
+    {
+      "path": ".codex/artifacts/critiques/dal-5-weekly-capability-critique-2026-07-25.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "ee204ab9f6a8d4d0370c85a62265a57f3626f523d2d2378aad23efbcb0fe3213",
+      "lines": 343
+    },
+    {
+      "path": ".codex/artifacts/critiques/github-36-claude-artifact-paths.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "16c079037ecd335e929921724f9df87d97c3f10baeee30bce84cad75e54d230b",
+      "lines": 220
+    },
+    {
+      "path": ".codex/artifacts/critiques/m3-delta-critique.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "afa42d11b6e3d522a0221d5b2b7eec40660661cc24b2a0a2fcf33d0ff50205d6",
+      "lines": 576
+    },
+    {
+      "path": ".codex/artifacts/critiques/m4-state-window.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "40b122051ffbc8eba0a3b7eeea36af2506eb4c8cf3ae3d3d59f504d702181511",
+      "lines": 346
+    },
+    {
+      "path": ".codex/artifacts/critiques/m5-epoch-checkpoint.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "bc1a458c169e00b4124cd1c1cc031e0f9723be71d047d026f451f1112d9bc02b",
+      "lines": 371
+    },
+    {
+      "path": ".codex/artifacts/critiques/m6-connectors-project-v3.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "2f85dc0b49f5ef5e607520d2c1b6d6b5b408302fac86ad79c0cd30982770180c",
+      "lines": 142
+    },
+    {
+      "path": ".codex/artifacts/critiques/sce-07-rolling-inf-mean.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "aab34c2cc0a5294b3e23a49242deeee2d32c594f4ac7a7436f63a397c9cafc1c",
+      "lines": 186
+    },
+    {
+      "path": ".codex/artifacts/critiques/sce-13-static-array-snapshot.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "32219206092da14248e26ba5aa173ff62ab353ea62c5028c153869290395414d",
+      "lines": 63
+    },
+    {
+      "path": ".codex/artifacts/critiques/symbolic-computation-engine.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "b4a7d307b31e3151ee96e9462920bea00e749860d10df9ba3e241847399b4327",
+      "lines": 132
+    },
+    {
+      "path": ".codex/artifacts/specs/a6-public-continuous-runtime.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "43a8465e5d512afad7b23156eba2566ba9faa173a17b761fad8685b7c1a45a73",
+      "lines": 947
+    },
+    {
+      "path": ".codex/artifacts/specs/continuous-streaming-m2-completion.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "917a29248dd622c54dfde16943559b05faa70dd8f2913226a7412f2ccce4fecc",
+      "lines": 1192
+    },
+    {
+      "path": ".codex/artifacts/specs/continuous-streaming-runtime.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "a635847d480d9eddd0235402cbc01ca645a3e4109ba85afb8e4685d3c0614439",
+      "lines": 1186
+    },
+    {
+      "path": ".codex/artifacts/specs/dal-45-provider-option-error-paths.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "48dfa854380d8d76b9c8bae8f67007bf0e1e7c344f3b9672314142414d1e2eaf",
+      "lines": 117
+    },
+    {
+      "path": ".codex/artifacts/specs/dal-47-execution-options-stub-defaults.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "d7f2d8c2d699a2111744e865ca013fea37e1c45e7787aee457a2b7eafdb86d1c",
+      "lines": 150
+    },
+    {
+      "path": ".codex/artifacts/specs/dal-5-5-2.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "e21da0b766bbe51391620509d07192f88ea2a5ad8a92637feb398feda27c7ab1",
+      "lines": 729
+    },
+    {
+      "path": ".codex/artifacts/specs/github-36-claude-artifact-paths.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "cc48aa29119a0e1f5e045a45a3c48d00c43314d4270ef8a414466ced68fcd9df",
+      "lines": 189
+    },
+    {
+      "path": ".codex/artifacts/specs/head-operator.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "4385cdd2eb9895adc0afb0611fcf7399a8bbb01f61c6f413c83b1f6b1b26f611",
+      "lines": 59
+    },
+    {
+      "path": ".codex/artifacts/specs/m3-delta-spec.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "ab7ff946d674b08340448d989224e89773ded865ac4a4dd32420f9638140a46b",
+      "lines": 807
+    },
+    {
+      "path": ".codex/artifacts/specs/m4-state-window.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "a417f98917c7a19580a6fbe38d4872f9f245d103867346a4409d3ff07da5f553",
+      "lines": 617
+    },
+    {
+      "path": ".codex/artifacts/specs/m5-epoch-checkpoint.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "87496fec7e57b49113a0e8c02529bbe1e6bf87363cc729fedb9ce499a8a1135f",
+      "lines": 625
+    },
+    {
+      "path": ".codex/artifacts/specs/m6-connectors-project-v3.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "af8749e686f348467fed8d5ea86252a7bfc35ecba6438d6db7b408793d684663",
+      "lines": 409
+    },
+    {
+      "path": ".codex/artifacts/specs/symbolic-computation-contract.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "e62d128b7658fc527eb92f1bcc888b1d1e9508914713877d7a738b3077eeadaa",
+      "lines": 875
+    },
+    {
+      "path": ".codex/artifacts/specs/symbolic-exponential-indicators.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "fe7bce2bebe6f452335d19fdcba71c2fd40d433c9ab7b598e1c4af7b21c0a254",
+      "lines": 88
+    },
+    {
+      "path": ".codex/artifacts/specs/symbolic-relational-dag.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "4c475d6db5ef0e54fd225ba160848267f83f1135803e341e393f973aa9411726",
+      "lines": 111
+    },
+    {
+      "path": ".codex/artifacts/specs/symbolic-stream-joins.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "86065565280ddf2b5e9dbd6cd3102a2bf416d9f166c390cec177506a97b7c7c9",
+      "lines": 96
+    },
+    {
+      "path": "AGENTS.md",
+      "category": "维护/agent 指南",
+      "baseline_sha256": "e06629dff0915d6e4bed938ed5c84b0f2fa02a21225759409e59acc45c1dd240",
+      "lines": 287
+    },
+    {
+      "path": "CHANGELOG.md",
+      "category": "变更历史",
+      "baseline_sha256": "760162a013d833380effba9a4fb993caa186797cea023125db6dcd0723e1cb31",
+      "lines": 625
+    },
+    {
+      "path": "CLAUDE.md",
+      "category": "维护/agent 指南",
+      "baseline_sha256": "6350962f5ffea2cecd450c9028ef38d1abc40cfb115a98ae0f876dfbb48807bf",
+      "lines": 250
+    },
+    {
+      "path": "README.md",
+      "category": "当前用户文档",
+      "baseline_sha256": "1111c75cd7c26e5aff84247b6ee814bd3f881ab73fd1ee583d097c33b58a8db9",
+      "lines": 335
+    },
+    {
+      "path": "benchmarks/README.md",
+      "category": "当前用户文档",
+      "baseline_sha256": "651a389286b1436f47496c13a4ed66a49e16b80da5526e1bdfbe0e3953e82d71",
+      "lines": 343
+    },
+    {
+      "path": "benchmarks/symbolic/BASELINE.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "7a3806ab09b94dec829e3af9c0b603db0ca86d5b55b43310c812a152c3a7e048",
+      "lines": 129
+    },
+    {
+      "path": "benchmarks/symbolic/SCE05.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "5aa2879e9be92ee0916896571a87020e395c22881d69a783cefdf8bea846c5ad",
+      "lines": 64
+    },
+    {
+      "path": "benchmarks/symbolic/SCE08.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "cf350bedaaf5ff211ff419ea3515afca21cad6c8eea7bdd1070b8a68eab7bc1a",
+      "lines": 68
+    },
+    {
+      "path": "benchmarks/symbolic/SCE14.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "80576f3b9c5cfae342dc42924e1a98d4cdb4df4b6f349a84bb2aeebf3dd27d4f",
+      "lines": 92
+    },
+    {
+      "path": "benchmarks/symbolic/SCE16.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "9ea696d610d7314ca418cb0a8e3bebc63b37f88f58be467b78b8b3a441572fd6",
+      "lines": 76
+    },
+    {
+      "path": "crates/calc-flow-connectors/README.md",
+      "category": "当前用户文档",
+      "baseline_sha256": "2a0851c061a6139dc8b1865cf73bc524178f58c1bfb470624544fb1ecf54ea60",
+      "lines": 26
+    },
+    {
+      "path": "crates/calc-flow/examples/README.md",
+      "category": "当前用户文档",
+      "baseline_sha256": "9a8eed114662a57817261c39d77adc5314a264202e4d985a79383a8b554b9c4e",
+      "lines": 37
+    },
+    {
+      "path": "design/tech_spec.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "ce05943a80c04e85f3bce98ea54c0228d1fceceff387d8640a140f312f956f92",
+      "lines": 105
+    },
+    {
+      "path": "design/v0.2-refactor-plan.md",
+      "category": "工程/历史记录",
+      "baseline_sha256": "b22b5b5fcabf5b10196daf98b983e9a72066f97b9e3e4a803dc6a46c8712aeb2",
+      "lines": 588
+    },
+    {
+      "path": "docs/README.md",
+      "category": "当前用户文档",
+      "baseline_sha256": "1caad359900d109a92255755ace82f375e8dbc1998469de62073fbe219e19e74",
+      "lines": 76
+    },
+    {
+      "path": "docs/api-reference.md",
+      "category": "当前用户文档",
+      "baseline_sha256": "1aeb267ce344a3e6d0737af581c65d32a4c3f041e2b13173cc48ce58870f63f6",
+      "lines": 434
+    },
+    {
+      "path": "docs/array-guide.md",
+      "category": "当前用户文档",
+      "baseline_sha256": "7134421be416279923dc39ef5240f02f85e45b5f11f059987526a541e17adff9",
+      "lines": 81
+    },
+    {
+      "path": "docs/batch-guide.md",
+      "category": "当前用户文档",
+      "baseline_sha256": "2ba53c411623362dd8151b329525b5bfd344aa158bc748b9f5b4c678e4cc61e0",
+      "lines": 103
+    },
+    {
+      "path": "docs/benchmark-suite.md",
+      "category": "当前用户文档",
+      "baseline_sha256": "c5ec11ef7fba4014431addaa9b968dfb167b6f07d6c47a431eafdc3f659fa453",
+      "lines": 206
+    },
+    {
+      "path": "docs/connectors.md",
+      "category": "当前用户文档",
+      "baseline_sha256": "1b12176f660fe118a5edbba3edfc045619ca49b2322e54749a2c4a7cecf1d897",
+      "lines": 563
+    },
+    {
+      "path": "docs/design.md",
+      "category": "当前用户文档",
+      "baseline_sha256": "f3dbe669d0174878f84561824450ab35708a49346f6ca7a214f15a06aec1e4e8",
+      "lines": 309
+    },
+    {
+      "path": "docs/examples.md",
+      "category": "当前用户文档",
+      "baseline_sha256": "08e59d30fc649c203fa069fb302edcca4de341217f8b08b56763a2ead5719995",
+      "lines": 54
+    },
+    {
+      "path": "docs/getting-started.md",
+      "category": "当前用户文档",
+      "baseline_sha256": "f70b149a03efef3fd939b757ecde60eb5370c0007ec5ee87ae0d87245c801411",
+      "lines": 384
+    },
+    {
+      "path": "docs/introduction.md",
+      "category": "当前用户文档",
+      "baseline_sha256": "d1da4ce77ecd18149e6c250ea2d12b984126920a8bab0325bc16a33a684603b1",
+      "lines": 105
+    },
+    {
+      "path": "docs/projects-guide.md",
+      "category": "当前用户文档",
+      "baseline_sha256": "6f5b76a5ce525840d1eedee9c034a6674ede0489c3048a6b00434eda0cb2dae9",
+      "lines": 66
+    },
+    {
+      "path": "docs/python-api.md",
+      "category": "当前用户文档",
+      "baseline_sha256": "b3511f87b540df174fe36eb620a94027114f9c1488f6c5519f2fa580b96604a3",
+      "lines": 697
+    },
+    {
+      "path": "docs/python-release.md",
+      "category": "当前用户文档",
+      "baseline_sha256": "29fb29b1ee56959da32268dd21f1d659b8169523bacc602fba4644a8a40e7d39",
+      "lines": 148
+    },
+    {
+      "path": "docs/runtime-envelope.md",
+      "category": "当前用户文档",
+      "baseline_sha256": "ceac40699f36474643396a3bb5c46ebe7b54bbc84ca5b102a0d996b0cec88734",
+      "lines": 663
+    },
+    {
+      "path": "docs/rust-api.md",
+      "category": "当前用户文档",
+      "baseline_sha256": "e2747ddd5e7ff25dfb591c0d2bdf5d291e518bf4d3740905d9d9b88dc13ae780",
+      "lines": 630
+    },
+    {
+      "path": "docs/sql-datafusion-performance.md",
+      "category": "当前用户文档",
+      "baseline_sha256": "ebe882ca2d91704770cea5b52ca32c726851e05760fe40c76a723dc16c12740a",
+      "lines": 137
+    },
+    {
+      "path": "docs/streaming-guide.md",
+      "category": "当前用户文档",
+      "baseline_sha256": "2282245243db20a94981a6290c8a341d28d91701d05e8cfd12bfb2400f3e493e",
+      "lines": 453
+    },
+    {
+      "path": "docs/studio-guide.md",
+      "category": "当前用户文档",
+      "baseline_sha256": "92e89c936d589abf4259a7201850921591dd6f615c183e0ee09874abe942dd12",
+      "lines": 68
+    },
+    {
+      "path": "docs/symbolic-api.md",
+      "category": "当前用户文档",
+      "baseline_sha256": "ce542fc2e1127ea13067b901538ef27e7a97053a77d594f93b18a41cfd146891",
+      "lines": 384
+    },
+    {
+      "path": "docs/symbolic-design.md",
+      "category": "当前用户文档",
+      "baseline_sha256": "eb37534dbfbd319b137ca4cc6861a35cf2d99ee4c67e59ab2af2b8423a3bd717",
+      "lines": 117
+    },
+    {
+      "path": "docs/symbolic-workflows.md",
+      "category": "当前用户文档",
+      "baseline_sha256": "f13e94a2770e229328851e34fc558f5e1a19ce68338a1512da9c1fffd1a43545",
+      "lines": 214
+    },
+    {
+      "path": "docs/verification.md",
+      "category": "当前用户文档",
+      "baseline_sha256": "654a419c9d9af0929d4062779da5fd9a0cc001c0884b9ba138f2f0a01c45a222",
+      "lines": 104
+    },
+    {
+      "path": "docs/warm-stream-performance.md",
+      "category": "当前用户文档",
+      "baseline_sha256": "0adad07352cd316b355f725924d91e2bd4749b2b3251bebd60f45a4ee3eb8ed2",
+      "lines": 189
+    },
+    {
+      "path": "examples/README.md",
+      "category": "当前用户文档",
+      "baseline_sha256": "ed9187c9b8d0a74ebdacc3c9a9b26c1d5464ee780cc9ab0ec8cc39d3a3af1623",
+      "lines": 155
+    },
+    {
+      "path": "web-ui/README.md",
+      "category": "当前用户文档",
+      "baseline_sha256": "ccda0368186d79e55d30a208fd38169a27bddd77bc33af3b5f0d399a3dd8acfc",
+      "lines": 112
+    },
+    {
+      "path": "web-ui/backend/README.md",
+      "category": "当前用户文档",
+      "baseline_sha256": "0c3adf6f94fa100e27139a563797b7e26c6409ae7def5077403d53446dff28b0",
+      "lines": 19
+    }
+  ],
+  "markdown-scan-before": {
+    "files": 114,
+    "links": 552,
+    "local_links_checked": 499,
+    "missing": [],
+    "external": {
+      "https://github.com/wegamekinglc/calc-flow/tree/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs": [
+        ".claude/agents/cf-doc-writer.md",
+        ".claude/agents/cf-doc-writer.md",
+        "CHANGELOG.md",
+        "CLAUDE.md"
+      ],
+      "https://github.com/wegamekinglc/calc-flow/pull/113": [
+        ".codex/artifacts/analysis/a6-public-continuous-runtime-implementation-evidence.md"
+      ],
+      "https://github.com/wegamekinglc/calc-flow/pull/119": [
+        ".codex/artifacts/analysis/a6-public-continuous-runtime-implementation-evidence.md"
+      ],
+      "https://github.com/wegamekinglc/calc-flow/pull/120": [
+        ".codex/artifacts/analysis/a6-public-continuous-runtime-implementation-evidence.md"
+      ],
+      "https://github.com/wegamekinglc/calc-flow/pull/121": [
+        ".codex/artifacts/analysis/a6-public-continuous-runtime-implementation-evidence.md"
+      ],
+      "https://github.com/wegamekinglc/calc-flow/pull/122": [
+        ".codex/artifacts/analysis/a6-public-continuous-runtime-implementation-evidence.md"
+      ],
+      "https://github.com/wegamekinglc/calc-flow/pull/123": [
+        ".codex/artifacts/analysis/a6-public-continuous-runtime-implementation-evidence.md"
+      ],
+      "https://github.com/wegamekinglc/calc-flow/pull/124": [
+        ".codex/artifacts/analysis/a6-public-continuous-runtime-implementation-evidence.md"
+      ],
+      "https://github.com/wegamekinglc/calc-flow/pull/125": [
+        ".codex/artifacts/analysis/a6-public-continuous-runtime-implementation-evidence.md"
+      ],
+      "https://github.com/wegamekinglc/calc-flow/pull/127": [
+        ".codex/artifacts/analysis/a6-public-continuous-runtime-implementation-evidence.md"
+      ],
+      "https://github.com/wegamekinglc/calc-flow/pull/129": [
+        ".codex/artifacts/analysis/a6-public-continuous-runtime-implementation-evidence.md"
+      ],
+      "https://github.com/wegamekinglc/calc-flow/pull/129#issuecomment-5304132298": [
+        ".codex/artifacts/analysis/a6-public-continuous-runtime-implementation-evidence.md"
+      ],
+      "https://github.com/wegamekinglc/calc-flow/pull/119#issuecomment-5305964523": [
+        ".codex/artifacts/analysis/a6-public-continuous-runtime-implementation-evidence.md"
+      ],
+      "https://github.com/wegamekinglc/calc-flow/blob/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs/superpowers/plans/2026-08-02-continuous-streaming-v3.md": [
+        ".codex/artifacts/api-notes/continuous-streaming-m2-completion.md",
+        ".codex/artifacts/api-notes/continuous-streaming-runtime.md",
+        ".codex/artifacts/specs/continuous-streaming-m2-completion.md",
+        ".codex/artifacts/specs/continuous-streaming-runtime.md"
+      ],
+      "https://github.com/wegamekinglc/calc-flow/pull/83#issuecomment-5201266650": [
+        ".codex/artifacts/api-notes/continuous-streaming-m2-completion.md",
+        ".codex/artifacts/api-notes/continuous-streaming-m2-completion.md",
+        ".codex/artifacts/critiques/continuous-streaming-m2-completion.md",
+        ".codex/artifacts/specs/continuous-streaming-m2-completion.md",
+        ".codex/artifacts/specs/continuous-streaming-m2-completion.md"
+      ],
+      "https://github.com/wegamekinglc/calc-flow/issues/36": [
+        ".codex/artifacts/critiques/github-36-claude-artifact-paths.md",
+        ".codex/artifacts/specs/github-36-claude-artifact-paths.md"
+      ],
+      "https://github.com/wegamekinglc/calc-flow/issues/94": [
+        ".codex/artifacts/specs/a6-public-continuous-runtime.md"
+      ],
+      "https://github.com/wegamekinglc/calc-flow/blob/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs/research/2026-08-02-arroyo-risingwave-streaming-research.md": [
+        ".codex/artifacts/specs/continuous-streaming-m2-completion.md",
+        ".codex/artifacts/specs/continuous-streaming-runtime.md"
+      ],
+      "https://github.com/wegamekinglc/calc-flow/issues/39": [
+        ".codex/artifacts/specs/dal-45-provider-option-error-paths.md"
+      ],
+      "https://github.com/wegamekinglc/calc-flow/blob/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs/superpowers/audits/2026-08-19-continuous-streaming-v3-current-main.md": [
+        "CHANGELOG.md"
+      ],
+      "https://github.com/wegamekinglc/calc-flow/tree/c87324ecaee30d8b883d3c30ae03704dee45f593": [
+        "CLAUDE.md"
+      ],
+      "https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-linux.yml": [
+        "README.md"
+      ],
+      "https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-linux.yml/badge.svg?branch=main": [
+        "README.md"
+      ],
+      "https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-windows.yml": [
+        "README.md"
+      ],
+      "https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-windows.yml/badge.svg?branch=main": [
+        "README.md"
+      ],
+      "https://coveralls.io/github/wegamekinglc/calc-flow?branch=main": [
+        "README.md"
+      ],
+      "https://coveralls.io/repos/github/wegamekinglc/calc-flow/badge.svg?branch=main": [
+        "README.md"
+      ],
+      "https://github.com/TA-Lib/ta-lib-python/tree/v0.7.1": [
+        "benchmarks/README.md"
+      ],
+      "https://github.com/wegamekinglc/calc-flow/issues/168": [
+        "benchmarks/symbolic/BASELINE.md"
+      ],
+      "https://github.com/wegamekinglc/calc-flow/blob/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs/superpowers/plans/2026-08-22-symbolic-computation-engine.md": [
+        "benchmarks/symbolic/BASELINE.md"
+      ],
+      "https://github.com/wegamekinglc/calc-flow/blob/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs/superpowers/specs/2026-08-22-symbolic-computation-engine-design.md": [
+        "benchmarks/symbolic/BASELINE.md"
+      ],
+      "https://github.com/wegamekinglc/calc-flow/issues/172": [
+        "benchmarks/symbolic/SCE05.md"
+      ],
+      "https://github.com/wegamekinglc/calc-flow/issues/175": [
+        "benchmarks/symbolic/SCE08.md"
+      ],
+      "https://github.com/wegamekinglc/calc-flow/issues/181": [
+        "benchmarks/symbolic/SCE14.md"
+      ],
+      "https://github.com/wegamekinglc/calc-flow/pull/221": [
+        "benchmarks/symbolic/SCE16.md"
+      ],
+      "https://github.com/wegamekinglc/calc-flow/issues/220": [
+        "benchmarks/symbolic/SCE16.md"
+      ],
+      "https://nvlpubs.nist.gov/nistpubs/TechnicalNotes/NIST.TN.2119.pdf": [
+        "docs/benchmark-suite.md"
+      ],
+      "https://doc.rust-lang.org/cargo/reference/external-tools.html#artifact-messages": [
+        "docs/benchmark-suite.md"
+      ],
+      "https://docs.astral.sh/uv/": [
+        "docs/getting-started.md"
+      ],
+      "https://github.com/alpha-miner/Finance-Python/tree/3e33d3e70c3458b4c6dcf76b88df6148229b402c/PyFin/tests/Analysis": [
+        "docs/symbolic-workflows.md"
+      ],
+      "https://github.com/wegamekinglc/calc-flow/blob/main/docs/getting-started.md": [
+        "web-ui/backend/README.md"
+      ]
+    },
+    "styles": [],
+    "fence_count": 519
+  },
+  "external-links": [
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/tree/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/tree/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/pull/113",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/pull/113"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/pull/119",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/pull/119"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/pull/120",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/pull/120"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/pull/121",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/pull/121"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/pull/122",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/pull/122"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/pull/123",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/pull/123"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/pull/124",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/pull/124"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/pull/125",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/pull/125"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/pull/127",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/pull/127"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/pull/129",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/pull/129"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/pull/129#issuecomment-5304132298",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/pull/129#issuecomment-5304132298"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/pull/119#issuecomment-5305964523",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/pull/119#issuecomment-5305964523"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs/superpowers/plans/2026-08-02-continuous-streaming-v3.md",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/blob/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs/superpowers/plans/2026-08-02-continuous-streaming-v3.md"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/pull/83#issuecomment-5201266650",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/pull/83#issuecomment-5201266650"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/issues/36",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/issues/36"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/issues/94",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/issues/94"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs/research/2026-08-02-arroyo-risingwave-streaming-research.md",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/blob/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs/research/2026-08-02-arroyo-risingwave-streaming-research.md"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/issues/39",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/issues/39"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs/superpowers/audits/2026-08-19-continuous-streaming-v3-current-main.md",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/blob/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs/superpowers/audits/2026-08-19-continuous-streaming-v3-current-main.md"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/tree/c87324ecaee30d8b883d3c30ae03704dee45f593",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/tree/c87324ecaee30d8b883d3c30ae03704dee45f593"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-linux.yml",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-linux.yml"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-linux.yml/badge.svg?branch=main",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-linux.yml/badge.svg?branch=main"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-windows.yml",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-windows.yml"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-windows.yml/badge.svg?branch=main",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-windows.yml/badge.svg?branch=main"
+    },
+    {
+      "url": "https://coveralls.io/github/wegamekinglc/calc-flow?branch=main",
+      "status": 403,
+      "final_url": "https://coveralls.io/github/wegamekinglc/calc-flow?branch=main"
+    },
+    {
+      "url": "https://coveralls.io/repos/github/wegamekinglc/calc-flow/badge.svg?branch=main",
+      "status": 200,
+      "final_url": "https://s3.amazonaws.com/assets.coveralls.io/badges/coveralls_92.svg"
+    },
+    {
+      "url": "https://github.com/TA-Lib/ta-lib-python/tree/v0.7.1",
+      "status": 200,
+      "final_url": "https://github.com/TA-Lib/ta-lib-python/tree/v0.7.1"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/issues/168",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/issues/168"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs/superpowers/plans/2026-08-22-symbolic-computation-engine.md",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/blob/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs/superpowers/plans/2026-08-22-symbolic-computation-engine.md"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs/superpowers/specs/2026-08-22-symbolic-computation-engine-design.md",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/blob/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs/superpowers/specs/2026-08-22-symbolic-computation-engine-design.md"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/issues/172",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/issues/172"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/issues/175",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/issues/175"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/issues/181",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/issues/181"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/pull/221",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/pull/221"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/issues/220",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/issues/220"
+    },
+    {
+      "url": "https://nvlpubs.nist.gov/nistpubs/TechnicalNotes/NIST.TN.2119.pdf",
+      "status": 200,
+      "final_url": "https://nvlpubs.nist.gov/nistpubs/TechnicalNotes/NIST.TN.2119.pdf"
+    },
+    {
+      "url": "https://doc.rust-lang.org/cargo/reference/external-tools.html#artifact-messages",
+      "status": 200,
+      "final_url": "https://doc.rust-lang.org/cargo/reference/external-tools.html#artifact-messages"
+    },
+    {
+      "url": "https://docs.astral.sh/uv/",
+      "status": 200,
+      "final_url": "https://docs.astral.sh/uv/"
+    },
+    {
+      "url": "https://github.com/alpha-miner/Finance-Python/tree/3e33d3e70c3458b4c6dcf76b88df6148229b402c/PyFin/tests/Analysis",
+      "status": 200,
+      "final_url": "https://github.com/alpha-miner/Finance-Python/tree/3e33d3e70c3458b4c6dcf76b88df6148229b402c/PyFin/tests/Analysis"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/blob/main/docs/getting-started.md",
+      "status": 200,
+      "final_url": "https://github.com/wegamekinglc/calc-flow/blob/main/docs/getting-started.md"
+    }
+  ],
+  "external-anchors": [
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/pull/129#issuecomment-5304132298",
+      "anchor_verified": true,
+      "readback": "https://github.com/wegamekinglc/calc-flow/pull/129#issuecomment-5304132298"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/pull/119#issuecomment-5305964523",
+      "anchor_verified": true,
+      "readback": "https://github.com/wegamekinglc/calc-flow/pull/119#issuecomment-5305964523"
+    },
+    {
+      "url": "https://github.com/wegamekinglc/calc-flow/pull/83#issuecomment-5201266650",
+      "anchor_verified": true,
+      "readback": "https://github.com/wegamekinglc/calc-flow/pull/83#issuecomment-5201266650"
+    },
+    {
+      "url": "https://doc.rust-lang.org/cargo/reference/external-tools.html#artifact-messages",
+      "anchor_verified": true
+    }
+  ],
+  "baseline-table-issues": [
+    {
+      "file": ".codex/artifacts/analysis/dal-5-5-2-acceptance-audit.md",
+      "line": 8,
+      "rows": 24
+    },
+    {
+      "file": ".codex/artifacts/analysis/dal-5-weekly-capability-progress-2026-07-25.md",
+      "line": 20,
+      "rows": 11
+    },
+    {
+      "file": ".codex/artifacts/analysis/dal-5-weekly-capability-progress-2026-07-25.md",
+      "line": 34,
+      "rows": 16
+    },
+    {
+      "file": ".codex/artifacts/api-notes/continuous-streaming-runtime.md",
+      "line": 2127,
+      "rows": 16
+    },
+    {
+      "file": ".codex/artifacts/api-notes/dal-5-5-2-main-reconciliation.md",
+      "line": 245,
+      "rows": 13
+    },
+    {
+      "file": ".codex/artifacts/api-notes/dal-5-5-2-main-reconciliation.md",
+      "line": 293,
+      "rows": 5
+    },
+    {
+      "file": ".codex/artifacts/api-notes/dal-5-5-2-main-reconciliation.md",
+      "line": 719,
+      "rows": 24
+    },
+    {
+      "file": ".codex/artifacts/api-notes/dal-5-5-2.md",
+      "line": 311,
+      "rows": 13
+    },
+    {
+      "file": ".codex/artifacts/api-notes/dal-5-5-2.md",
+      "line": 383,
+      "rows": 5
+    },
+    {
+      "file": ".codex/artifacts/api-notes/dal-5-5-2.md",
+      "line": 819,
+      "rows": 9
+    },
+    {
+      "file": ".codex/artifacts/api-notes/dal-5-5-2.md",
+      "line": 871,
+      "rows": 21
+    },
+    {
+      "file": ".codex/artifacts/api-notes/m3-delta-api-note.md",
+      "line": 3,
+      "rows": 10
+    },
+    {
+      "file": ".codex/artifacts/api-notes/m3-delta-api-note.md",
+      "line": 64,
+      "rows": 11
+    },
+    {
+      "file": ".codex/artifacts/api-notes/m3-delta-api-note.md",
+      "line": 725,
+      "rows": 6
+    },
+    {
+      "file": ".codex/artifacts/api-notes/m3-delta-api-note.md",
+      "line": 2012,
+      "rows": 14
+    },
+    {
+      "file": ".codex/artifacts/api-notes/m3-delta-api-note.md",
+      "line": 2029,
+      "rows": 18
+    },
+    {
+      "file": ".codex/artifacts/api-notes/m3-delta-api-note.md",
+      "line": 2050,
+      "rows": 20
+    },
+    {
+      "file": ".codex/artifacts/api-notes/m3-delta-api-note.md",
+      "line": 2075,
+      "rows": 11
+    },
+    {
+      "file": ".codex/artifacts/api-notes/m3-delta-api-note.md",
+      "line": 2089,
+      "rows": 81
+    },
+    {
+      "file": ".codex/artifacts/api-notes/m3-delta-api-note.md",
+      "line": 2177,
+      "rows": 87
+    },
+    {
+      "file": ".codex/artifacts/api-notes/m3-delta-api-note.md",
+      "line": 2269,
+      "rows": 11
+    },
+    {
+      "file": ".codex/artifacts/api-notes/m3-delta-api-note.md",
+      "line": 2283,
+      "rows": 17
+    },
+    {
+      "file": ".codex/artifacts/api-notes/sce-11-static-stream-inputs-dictionary-addendum.md",
+      "line": 133,
+      "rows": 7
+    },
+    {
+      "file": ".codex/artifacts/api-notes/sce-11-static-stream-inputs.md",
+      "line": 263,
+      "rows": 12
+    },
+    {
+      "file": ".codex/artifacts/critiques/dal-5-5-2.md",
+      "line": 400,
+      "rows": 11
+    },
+    {
+      "file": ".codex/artifacts/critiques/dal-5-studio-capabilities-contract-critique.md",
+      "line": 155,
+      "rows": 15
+    },
+    {
+      "file": ".codex/artifacts/critiques/dal-5-studio-capabilities-contract-critique.md",
+      "line": 204,
+      "rows": 10
+    },
+    {
+      "file": ".codex/artifacts/critiques/dal-5-weekly-capability-critique-2026-07-25.md",
+      "line": 34,
+      "rows": 9
+    },
+    {
+      "file": ".codex/artifacts/critiques/m3-delta-critique.md",
+      "line": 3,
+      "rows": 10
+    },
+    {
+      "file": ".codex/artifacts/critiques/m3-delta-critique.md",
+      "line": 30,
+      "rows": 6
+    },
+    {
+      "file": ".codex/artifacts/critiques/m3-delta-critique.md",
+      "line": 64,
+      "rows": 6
+    },
+    {
+      "file": ".codex/artifacts/critiques/m3-delta-critique.md",
+      "line": 75,
+      "rows": 11
+    },
+    {
+      "file": ".codex/artifacts/critiques/m3-delta-critique.md",
+      "line": 129,
+      "rows": 5
+    },
+    {
+      "file": ".codex/artifacts/critiques/m3-delta-critique.md",
+      "line": 201,
+      "rows": 7
+    },
+    {
+      "file": ".codex/artifacts/critiques/m3-delta-critique.md",
+      "line": 219,
+      "rows": 16
+    },
+    {
+      "file": ".codex/artifacts/critiques/m3-delta-critique.md",
+      "line": 244,
+      "rows": 4
+    },
+    {
+      "file": ".codex/artifacts/critiques/m3-delta-critique.md",
+      "line": 268,
+      "rows": 10
+    },
+    {
+      "file": ".codex/artifacts/critiques/m3-delta-critique.md",
+      "line": 285,
+      "rows": 6
+    },
+    {
+      "file": ".codex/artifacts/critiques/m3-delta-critique.md",
+      "line": 296,
+      "rows": 6
+    },
+    {
+      "file": ".codex/artifacts/critiques/m3-delta-critique.md",
+      "line": 307,
+      "rows": 6
+    },
+    {
+      "file": ".codex/artifacts/critiques/m3-delta-critique.md",
+      "line": 318,
+      "rows": 6
+    },
+    {
+      "file": ".codex/artifacts/critiques/m3-delta-critique.md",
+      "line": 329,
+      "rows": 6
+    },
+    {
+      "file": ".codex/artifacts/critiques/m3-delta-critique.md",
+      "line": 340,
+      "rows": 6
+    },
+    {
+      "file": ".codex/artifacts/critiques/m3-delta-critique.md",
+      "line": 351,
+      "rows": 6
+    },
+    {
+      "file": ".codex/artifacts/critiques/m3-delta-critique.md",
+      "line": 362,
+      "rows": 6
+    },
+    {
+      "file": ".codex/artifacts/critiques/m3-delta-critique.md",
+      "line": 373,
+      "rows": 6
+    },
+    {
+      "file": ".codex/artifacts/critiques/m3-delta-critique.md",
+      "line": 384,
+      "rows": 6
+    },
+    {
+      "file": ".codex/artifacts/critiques/m3-delta-critique.md",
+      "line": 399,
+      "rows": 87
+    },
+    {
+      "file": ".codex/artifacts/critiques/m3-delta-critique.md",
+      "line": 489,
+      "rows": 6
+    },
+    {
+      "file": ".codex/artifacts/critiques/m3-delta-critique.md",
+      "line": 534,
+      "rows": 18
+    },
+    {
+      "file": ".codex/artifacts/specs/dal-45-provider-option-error-paths.md",
+      "line": 80,
+      "rows": 6
+    },
+    {
+      "file": ".codex/artifacts/specs/dal-5-5-2.md",
+      "line": 430,
+      "rows": 13
+    },
+    {
+      "file": ".codex/artifacts/specs/dal-5-5-2.md",
+      "line": 467,
+      "rows": 7
+    },
+    {
+      "file": ".codex/artifacts/specs/dal-5-5-2.md",
+      "line": 490,
+      "rows": 14
+    },
+    {
+      "file": ".codex/artifacts/specs/dal-5-5-2.md",
+      "line": 510,
+      "rows": 24
+    },
+    {
+      "file": ".codex/artifacts/specs/m3-delta-spec.md",
+      "line": 3,
+      "rows": 7
+    },
+    {
+      "file": ".codex/artifacts/specs/m3-delta-spec.md",
+      "line": 232,
+      "rows": 6
+    },
+    {
+      "file": ".codex/artifacts/specs/m3-delta-spec.md",
+      "line": 380,
+      "rows": 10
+    },
+    {
+      "file": ".codex/artifacts/specs/m3-delta-spec.md",
+      "line": 640,
+      "rows": 87
+    },
+    {
+      "file": ".codex/artifacts/specs/m3-delta-spec.md",
+      "line": 734,
+      "rows": 6
+    },
+    {
+      "file": ".codex/artifacts/specs/m3-delta-spec.md",
+      "line": 782,
+      "rows": 20
+    },
+    {
+      "file": "benchmarks/README.md",
+      "line": 267,
+      "rows": 12
+    },
+    {
+      "file": "benchmarks/symbolic/SCE16.md",
+      "line": 40,
+      "rows": 3
+    }
+  ],
+  "targeted-checks": {
+    "bash_syntax_blocks": 28,
+    "shell_template_blocks": 11,
+    "agent_claude_commands_identical": true,
+    "studio_command_directories": "passed with uv/npm replaced by directory assertions; no builds or installs",
+    "python_examples_syntax": 14,
+    "rust_example_inventory": [
+      "expression_pipeline",
+      "sql_join",
+      "continuous_runtime",
+      "windowed_streaming"
+    ],
+    "source_and_generated_contracts_unchanged": true,
+    "api_example_blocks_unchanged": 1,
+    "canonical_claude_descriptions_matching": 10
+  },
+  "contract-checks": {
+    "capability_schema": 3,
+    "openapi_path_count": 15,
+    "openapi_operation_count": 19,
+    "versions": {
+      "workspace": "4.0.0",
+      "python": "4.0.0",
+      "studio": "4.0.0",
+      "frontend": "4.0.0",
+      "openapi": "4.0.0"
+    },
+    "canonical_non_instruction_fields_unchanged": true,
+    "canonical_to_claude_corrections": 17
+  },
+  "agent-sync": [
+    {
+      "name": "cf-orchestrator",
+      "id": "a6c22a43-3dc1-4338-8581-3e1317dd9519",
+      "canonical": ".codex/agents/cf-orchestrator.toml",
+      "mirror": ".claude/agents/cf-orchestrator.md",
+      "description_matches": true,
+      "applied": [],
+      "preserved_override": [],
+      "fields_sent": [],
+      "readback_matches": true,
+      "protected_field_changes": [],
+      "description_unchanged": true,
+      "before_instructions_sha256": "25620aa9df763eec7196f6db5190c5c3c5311cf29fa10994b1a3200887cfbff8",
+      "after_instructions_sha256": "25620aa9df763eec7196f6db5190c5c3c5311cf29fa10994b1a3200887cfbff8",
+      "canonical_instructions_sha256": "6dadb5c020594389d3f3eaf4b0177fe72113d935008a452eb118ec7547c23f12",
+      "full_instructions_equal": false,
+      "delivery_protocol_preserved": true
+    },
+    {
+      "name": "cf-implementer",
+      "id": "227e58dc-a05a-48b6-bd20-94af140da251",
+      "canonical": ".codex/agents/cf-implementer.toml",
+      "mirror": ".claude/agents/cf-implementer.md",
+      "description_matches": true,
+      "applied": [
+        "  `expression`, `runtime/`, `continuous/`, `state/`, `connector/`, `config`,\n  `project_store`, `static_input`, `time/`, `udf`, `json`"
+      ],
+      "preserved_override": [
+        "`cargo llvm-cov --workspace --all-features --fail-under-lines 90` when Rust changed)."
+      ],
+      "fields_sent": [
+        "instructions"
+      ],
+      "readback_matches": true,
+      "protected_field_changes": [],
+      "description_unchanged": true,
+      "before_instructions_sha256": "2692025d1078608d0db55b9928c435267ed020762582cbf21364d15b45c09097",
+      "after_instructions_sha256": "0ba7f1333cf5c177d3a47ddf79ef0af1b5bdd68da293474e69e7636f50ea8c0b",
+      "canonical_instructions_sha256": "07d7553715309ae9d27efb09a3b958f15bcfe4705308f6239d2df83c29e168a0",
+      "full_instructions_equal": false,
+      "delivery_protocol_preserved": true
+    },
+    {
+      "name": "cf-tester",
+      "id": "a553f49e-ae3c-401e-88d4-919d9e078703",
+      "canonical": ".codex/agents/cf-tester.toml",
+      "mirror": ".claude/agents/cf-tester.md",
+      "description_matches": true,
+      "applied": [
+        "3. Note the enforced floors: Rust uses the combined 90% line gate in\n   `scripts/run_rust_coverage.py`, including the connector services and environment\n   from `AGENTS.md`; Studio uses `--cov=calc_flow_studio` with its 85% floor.",
+        "Rust: combined 90% line gate in `scripts/run_rust_coverage.py`"
+      ],
+      "preserved_override": [
+        "cargo llvm-cov --workspace --all-features --fail-under-lines 90\n"
+      ],
+      "fields_sent": [
+        "instructions"
+      ],
+      "readback_matches": true,
+      "protected_field_changes": [],
+      "description_unchanged": true,
+      "before_instructions_sha256": "a1e719ea89f6fe2a4c7a334ecebca37e541721f397a37fba2f5965f1fc21b164",
+      "after_instructions_sha256": "92101fed40dac55c2473d03ef94c1cf75fa42cdc3c82f1ec9beaca087bfaa8a4",
+      "canonical_instructions_sha256": "910ccb0a507fbe42973a4f14da23c58d501b119f69d851ef60e58fea32282511",
+      "full_instructions_equal": false,
+      "delivery_protocol_preserved": true
+    },
+    {
+      "name": "cf-api-designer",
+      "id": "ea5b9d56-eb67-4d40-ba30-d07054d02f77",
+      "canonical": ".codex/agents/cf-api-designer.toml",
+      "mirror": ".claude/agents/cf-api-designer.md",
+      "description_matches": true,
+      "applied": [],
+      "preserved_override": [],
+      "fields_sent": [],
+      "readback_matches": true,
+      "protected_field_changes": [],
+      "description_unchanged": true,
+      "before_instructions_sha256": "2c895893165ddf6d46f41409cd3ed6c6b9df889e1d562ceaa46df352b17940c6",
+      "after_instructions_sha256": "2c895893165ddf6d46f41409cd3ed6c6b9df889e1d562ceaa46df352b17940c6",
+      "canonical_instructions_sha256": "499bcd15a3ea0625f316bea6b5aa70de93fa1ab2a55a493c125e4ed67975ec1e",
+      "full_instructions_equal": false,
+      "delivery_protocol_preserved": true
+    },
+    {
+      "name": "cf-critic",
+      "id": "d29d22b4-ec2a-4a2c-ab7b-861f7f4d0805",
+      "canonical": ".codex/agents/cf-critic.toml",
+      "mirror": ".claude/agents/cf-critic.md",
+      "description_matches": true,
+      "applied": [],
+      "preserved_override": [],
+      "fields_sent": [],
+      "readback_matches": true,
+      "protected_field_changes": [],
+      "description_unchanged": true,
+      "before_instructions_sha256": "ef7426ba5bd6037041aa53ae0740abee3f9ea5133fd574fa73fcf2afbd3ffecc",
+      "after_instructions_sha256": "ef7426ba5bd6037041aa53ae0740abee3f9ea5133fd574fa73fcf2afbd3ffecc",
+      "canonical_instructions_sha256": "4dd9f6cb3cfc8bd6967d7bfca1c8abf6370322ad4d85a39eb9f0a3ee7459cce0",
+      "full_instructions_equal": false,
+      "delivery_protocol_preserved": true
+    },
+    {
+      "name": "cf-reviewer",
+      "id": "a274f526-62bc-481f-93ef-67b4a63d9f3a",
+      "canonical": ".codex/agents/cf-reviewer.toml",
+      "mirror": ".claude/agents/cf-reviewer.md",
+      "description_matches": true,
+      "applied": [
+        "- New behavior has `#[cfg(test)]` coverage; workspace `unsafe_code = \"forbid\"`\n  remains enforced without exceptions",
+        "- Checkpoint recovery follows the supported manifest version, lineage, fingerprint,\n  and state-layout contracts; unsupported versions fail closed"
+      ],
+      "preserved_override": [
+        "cargo llvm-cov --workspace --all-features --fail-under-lines 90   # when Rust changed"
+      ],
+      "fields_sent": [
+        "instructions"
+      ],
+      "readback_matches": true,
+      "protected_field_changes": [],
+      "description_unchanged": true,
+      "before_instructions_sha256": "30cd59bd106178de2d46a3f07970cf8af1a5d4237da2ab1f61615a3cc45042a5",
+      "after_instructions_sha256": "56926189a26d26c2f3846813506a48d747572d3d2569b989845546be7e2e3f83",
+      "canonical_instructions_sha256": "9a0525bf9b26a44bd5095fa32c44a1fa71398c6edbd4939f34eecd01bbbb77f5",
+      "full_instructions_equal": false,
+      "delivery_protocol_preserved": true
+    },
+    {
+      "name": "cf-doc-writer",
+      "id": "1b71d01f-a1e8-4e73-97f0-3a2576a7378c",
+      "canonical": ".codex/agents/cf-doc-writer.toml",
+      "mirror": ".claude/agents/cf-doc-writer.md",
+      "description_matches": true,
+      "applied": [
+        "frozen release records in the linked documentation archive (leave as-is)",
+        "- [Historical release records][historical-release-records] — frozen v0.2, v1,\n  and v2 records; leave them as-is (they are history, not normative docs)",
+        "- Never branch normative docs by release or maintain per-version copies. The\n  [historical release records][historical-release-records] are not normative docs;\n  leave those frozen records untouched and do not add new ones outside release work.",
+        "[historical-release-records]: https://github.com/wegamekinglc/calc-flow/tree/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs"
+      ],
+      "preserved_override": [],
+      "fields_sent": [
+        "instructions"
+      ],
+      "readback_matches": true,
+      "protected_field_changes": [],
+      "description_unchanged": true,
+      "before_instructions_sha256": "c6c87511c2ff9872d235ccdef0f93c6d4c73c98c4f6449c6fd4d0d9c29df76e5",
+      "after_instructions_sha256": "084ee1f4d85391f156efeab34fa0e256ee0a4a92454bc4519906d46f8a6cd2ef",
+      "canonical_instructions_sha256": "74b724c789bbbc54579d5f650db67b9076c68018fa27984fef4b3f1823e08c25",
+      "full_instructions_equal": false,
+      "delivery_protocol_preserved": true
+    },
+    {
+      "name": "cf-simplifier",
+      "id": "113b511d-172f-4673-becd-cc0db10b70b8",
+      "canonical": ".codex/agents/cf-simplifier.toml",
+      "mirror": ".claude/agents/cf-simplifier.md",
+      "description_matches": true,
+      "applied": [],
+      "preserved_override": [],
+      "fields_sent": [],
+      "readback_matches": true,
+      "protected_field_changes": [],
+      "description_unchanged": true,
+      "before_instructions_sha256": "60c3b772230848597b76adc669584f3f3d89ea84da39b3a60e01c89d793363ba",
+      "after_instructions_sha256": "60c3b772230848597b76adc669584f3f3d89ea84da39b3a60e01c89d793363ba",
+      "canonical_instructions_sha256": "58574cdeea49165e48e2ed778480a056cf3c9bda9f372fabd9dd443bf52ebea1",
+      "full_instructions_equal": false,
+      "delivery_protocol_preserved": true
+    },
+    {
+      "name": "cf-performancer",
+      "id": "b37225a5-8640-4da1-9500-89adfab9c66b",
+      "canonical": ".codex/agents/cf-performancer.toml",
+      "mirror": ".claude/agents/cf-performancer.md",
+      "description_matches": true,
+      "applied": [
+        "streaming calculation engine. You select the maintained benchmark contract, compare\ncompatible baseline and candidate results, and advise on where new benchmark coverage\nbelongs.",
+        "configuration, repeated plan execution), `test_runtime.py` (graph fan-out), and the array suites",
+        "- Standalone Python scales (via `CALC_FLOW_BENCHMARK_SCALE`); `nightly` is\n  manual-only and is not a unified CI suite shard:",
+        "- `docs/benchmark-suite.md`, `scripts/benchmark_suite/`, and\n  `.github/workflows/benchmark-suite.yml` — the unified suite used by non-documentation\n  Linux PR/main CI and daily/manual benchmark runs. Engine/warm comparisons fail when\n  both rounds' paired-median confidence lower bounds exceed +5%. Whole-suite\n  pytest/Criterion/Vitest timing deltas remain informational; specialized correctness,\n  allocation, lifecycle, and release gates still apply.\n- `.github/workflows/benchmarks.yml` also owns the supplemental SQL/DataFusion\n  nightly and weekly tuning measurements.",
+        "For unified-suite work, use the catalog, release build, run, and summary commands\nin `docs/benchmark-suite.md`; preserve its paired-median confidence verdicts and\nsealed-release provenance. Its two rounds of ten alternating pairs are distinct\nfrom the standalone contract-v2 diagnostic below. Never replace a unified-suite\nverdict with a minimum-ratio verdict.\n\nThe following phases describe an explicitly requested standalone contract-v2\ncomparison. Skipping the same-ref spread measurement (Phase 3) and classifying\na single run makes that diagnostic unreliable.",
+        "unified engine/warm +5% confidence gate; whole-suite timing informational",
+        "- Don't compare single benchmark runs; standalone diagnostics use repeated paired minima",
+        "- Don't substitute standalone per-case minima for unified paired-median confidence gates"
+      ],
+      "preserved_override": [],
+      "fields_sent": [
+        "instructions"
+      ],
+      "readback_matches": true,
+      "protected_field_changes": [],
+      "description_unchanged": true,
+      "before_instructions_sha256": "3c19b7b339d205deb08d342ea2086d79e5c9db278e5326f6ae59f0becff0d798",
+      "after_instructions_sha256": "9821bef0c66f0cfa0c6b449953e7ba49034cb9295c29e9900c874fb1c6eab3be",
+      "canonical_instructions_sha256": "1351b14c646a2a14f55d33fc7b4a8ff01e1f042d6edf0dce9d3171f39b9222cf",
+      "full_instructions_equal": false,
+      "delivery_protocol_preserved": true
+    },
+    {
+      "name": "cf-spec-writer",
+      "id": "62f89f6b-8158-4c5d-ac1d-8ed6d092473f",
+      "canonical": ".codex/agents/cf-spec-writer.toml",
+      "mirror": ".claude/agents/cf-spec-writer.md",
+      "description_matches": true,
+      "applied": [],
+      "preserved_override": [],
+      "fields_sent": [],
+      "readback_matches": true,
+      "protected_field_changes": [],
+      "description_unchanged": true,
+      "before_instructions_sha256": "36d9d08ae7a15c99bc6a446c5897ea76aa77a306ab79404e8705da33ff567e94",
+      "after_instructions_sha256": "36d9d08ae7a15c99bc6a446c5897ea76aa77a306ab79404e8705da33ff567e94",
+      "canonical_instructions_sha256": "c355f376b501449e8fff0dc01a741fb0a4f63ff97a0d2627e0077977f1f47d89",
+      "full_instructions_equal": false,
+      "delivery_protocol_preserved": true
+    }
+  ],
+  "final-static-checks": {
+    "markdown_files": 115,
+    "links": 556,
+    "local_links": 503,
+    "missing_links_or_anchors": [],
+    "whitespace_or_newline_issues": [],
+    "changed_tables_checked": 29,
+    "changed_files_checked": 19
+  }
+}
