@@ -239,9 +239,13 @@ selectors.
 - `TableExpr.stream` and `Program.stream` translate logical bindings and own
   one native job through `async with` and `async for`. Results are Arrow tables
   or named `StreamOutput` events. Native state persists across batches, with
-  bounded backpressure and awaited lifecycle cleanup. Ordinary iterables have
-  no replay or watermarks; temporary managed checkpoints do not provide durable
-  restart or exactly-once application delivery.
+  bounded backpressure and awaited lifecycle cleanup. Event-time iterables default
+  to validated nondecreasing arrival times and native watermarks at
+  `max_seen - 1 microsecond`. `watermarks` selects existing policies by logical
+  input name; supplied `SourceBinding` policies cannot be overridden. Inputs
+  without event time retain stateless per-batch output. Ordinary iterables have
+  no replay; temporary checkpoints do not provide durable restart or exactly-once
+  application delivery.
 - `Program.to_project` exports data-only native graphs without Python logical
   aliases or payloads. Reloaded projects and explicit runners use physical
   binding names; durable recovery uses explicit bindings and managed state.

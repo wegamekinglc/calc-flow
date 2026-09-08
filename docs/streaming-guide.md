@@ -74,6 +74,7 @@ SCHEMA = pa.schema(
 async def batches():
     for ts, prices in [([1, 2], [10.0, 12.0]), ([3, 4], [15.0, 14.0])]:
         yield pa.table({"ts": ts, "symbol": ["a", "a"], "price": prices}, schema=SCHEMA)
+    await asyncio.Event().wait()  # Keep the input open: output must not wait for EOF.
 
 
 def features(t: cf.TableExpr) -> cf.TableExpr:
@@ -90,16 +91,15 @@ async def main() -> None:
         sequence_by=("ts",),
     )
     output = source.pipe(features).sql("SELECT delta, mean_delta FROM input")
-    async with output.stream(batches()) as results:
-        tables = [table async for table in results]
-    actual = {  # Allow floating-point round-off in the example's verification.
-        name: [None if value is None else round(value, 12) for value in values]
-        for name, values in pa.concat_tables(tables).to_pydict().items()
-    }
-    expected = {"delta": [None, 2.0, 3.0, -1.0], "mean_delta": [None, 2.0, 2.5, 1.0]}
-    if actual != expected:
+    tables = []
+    async with asyncio.timeout(5), output.stream(batches()) as results:
+        async for table in results:
+            tables.append(table)
+            if sum(batch.num_rows for batch in tables) >= 3:
+                break
+    actual = pa.concat_tables(tables).to_pydict()
+    if actual != {"delta": [None, 2.0, 3.0], "mean_delta": [None, 2.0, 2.5]}:
         raise RuntimeError(actual)
-    print(actual)
 
 
 if __name__ == "__main__":
@@ -108,16 +108,18 @@ if __name__ == "__main__":
 
 The first price in the second source batch uses the previous batch's price,
 producing delta `3.0`. The nested rolling mean also retains history. Both state
-stages live in one native stream job; no repeated batch `compute` calls or
-Python rolling buffers are involved. This finite example combines its output
-tables only to check the final values; applications can consume each table as
-it arrives.
+stages live in one native stream job. The source stays open after two batches;
+the consumer receives the first three rows before EOF and then exits. The
+checked deltas are `[None, 2.0, 3.0]`, with means `[None, 2.0, 2.5]`. Context
+exit cancels the waiting source and cleans up the job.
 
-The input schema and ordering are declared once. This ordinary async iterable
-has no watermark or replay capability, so temporal results may wait until
-end-of-input. Supply a `SourceBinding` with a suitable watermark policy when a
-long-lived temporal source needs progress before it ends. Native finality rules
-still determine emission; one input batch need not produce one output table.
+The input schema and ordering are declared once. Nondecreasing event times let
+the default watermark close timestamps below the latest observed time. Here
+time 4 remains buffered behind watermark 3. Equal timestamps may span batches;
+they remain open until progress proves them complete. Select an explicit
+[watermark policy](#watermark-policies) for unordered or source-provided progress.
+Native finality rules still determine emission; one input batch need not produce
+one output table.
 
 ## Named streaming outputs
 
@@ -171,13 +173,13 @@ stream interface.
 
 ## Stream ownership and SQL boundaries
 
-`stream(inputs, /, *, runtime=None, config=None)` constructs a one-shot
-`StreamResults` owner. A single-table declaration with no static parameters
+`stream(inputs, /, *, runtime=None, config=None, watermarks=None)` constructs a
+one-shot `StreamResults` owner. A single-table declaration with no static parameters
 accepts one async iterable or `SourceBinding` directly; multiple or static
 inputs require a logical-name mapping. `Program.stream` always takes a mapping.
-The input mapping is copied immediately, but source references and read-only
-Arrow buffers are shared. Opening sources, compiling the fresh plan, and
-starting the native job happen on context entry.
+Input and watermark-policy mappings are copied immediately, but source references
+and read-only Arrow buffers are shared. Opening sources, compiling the fresh plan,
+and starting the native job happen on context entry.
 
 Iteration requires an entered context and one consumer. Leaving `async with`,
 breaking iteration inside it, explicit `await results.aclose()`, or task
@@ -295,7 +297,33 @@ Rust uses the same lifecycle through the `StreamSource` trait. See
 
 ## Watermark policies
 
-Each `SourceBinding` freezes exactly one policy:
+`stream(..., watermarks=None)` chooses a policy for each ordinary iterable input.
+If the declaration has `event_time`, arriving timestamps must be non-null and
+nondecreasing across every row and batch of that logical source. This ordering
+applies across all entities, not separately per symbol. A decrease rejects the
+batch with its input name before admission; the adapter never sorts or drops rows.
+
+The default uses native `BoundedOutOfOrderness` with a one-microsecond delay,
+a 100 ms emission interval, and no idle timeout. Its watermark is
+`max_seen - 1 microsecond`. Rows at the latest timestamp remain open, allowing
+equal timestamps to span batches and entities. A larger timestamp closes earlier
+ones. The native timer keeps running while the next iterable read is suspended;
+backpressure and scheduling can delay delivery. Empty batches do not advance
+progress. Waiting at one timestamp alone cannot prove it complete.
+
+Without declared event time, ordinary inputs use `DisabledWatermarks`.
+Stateless expression and SQL stages still produce results as batches arrive.
+Explicitly disabling watermarks on a temporal calculation leaves finalization
+dependent on EOF or other progress provided by its graph.
+
+Pass one existing `WatermarkPolicy` to `watermarks` for a single dynamic input,
+or a mapping keyed by logical dynamic input names for several sources. Static
+parameters do not count as dynamic inputs. Omitted mapping entries select the
+default. Unknown or static names and invalid policy values fail before source
+opening. A supplied `SourceBinding` already owns its policy and cannot be
+overridden through this keyword.
+
+The available policies are:
 
 | Policy                     | Use when                                                   |
 |----------------------------|------------------------------------------------------------|
@@ -304,9 +332,28 @@ Each `SourceBinding` freezes exactly one policy:
 | `DisabledWatermarks`       | The graph is stateless or windows should close only at end |
 
 Bounded out-of-orderness names the event-time column, maximum delay, emission
-interval, and optional idle timeout. The progress driver computes the job
+interval, and optional idle timeout. Durations must be positive. An explicit
+`BoundedOutOfOrderness` permits disorder without the default monotonic-arrival
+validation and publishes the native inclusive cutoff `max_seen - delay`.
+Convenience rolling/cross-section compilation keeps zero allowed lateness and
+the error policy: rows whose native closing coordinate is at or before the
+published watermark fail rather than being silently dropped. Window and join operators retain
+their separately documented late-data rules.
+
+With `watermarks=SourceProvidedWatermarks()`, an iterable may yield existing
+timezone-aware `Watermark` objects between Arrow batches. These events use the
+source-provided native capability and do not advance data cursors. The source
+must justify completeness; native validation rejects regressing watermarks.
+Generated and disabled policies reject manually yielded watermarks. An explicit
+policy takes responsibility for progress instead of the default order check.
+
+The progress driver computes the job
 watermark from active ingresses. Idle and ended sources stop holding back the
-minimum; data or a legal watermark reactivates an idle source.
+minimum; data or a legal watermark reactivates an idle source. A quiet source
+is not automatically made idle by the default. For a node combining inputs,
+finalization follows that node's aggregate ingress progress; independent output
+branches are not synchronized. Selecting an idle timeout can permit progress
+past a quiet source, whose later rows remain subject to native late-data rules.
 
 Watermarks are monotone progress declarations, not filters. The progress
 driver forwards data unchanged. A window operator applies its own late rule:

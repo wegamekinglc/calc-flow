@@ -94,11 +94,14 @@ Use `TableExpr.stream(inputs)` or `Program.stream(inputs)` when data arrives
 over time. Enter with `async with` and consume with `async for`. Declare schemas
 and temporal ordering once; one native job retains state across batches.
 The table form yields Arrow tables; a Program yields named `StreamOutput`
-events. Inputs bind by logical declaration name. See the
+events. Inputs bind by logical declaration name. Event-time iterables default
+to nondecreasing arrival times and watermarks that finalize earlier timestamps
+before EOF. Select `watermarks` for disorder or source-provided progress; inputs
+without event time need no progress configuration for stateless work. See the
 [streaming guide](streaming-guide.md#first-python-continuous-job).
 
 Convenience streams use temporary managed state. Async iterable inputs provide
-best-effort delivery without replay or native watermarks. For durable recovery,
+best-effort delivery without replay. For durable recovery,
 transactional delivery, or explicit sink ownership, use `program.compile_stream()`
 and `StreamingRunner` with capable source/sink bindings and a stable checkpoint
 root. A `SourceBinding` can also supply watermark progress to a convenience

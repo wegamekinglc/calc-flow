@@ -153,18 +153,18 @@ Explicit input sequences are respected, including `inputs=()`; missing reference
 inputs become analysis errors. Conflicting roots with the same name fail.
 Declarations and output mappings are copied and remain immutable.
 
-| Method                                                                                                 | Result and input contract                                                      |
-|--------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------|
-| `table_expr.collect(inputs, /, *, runtime=None, options=None)`                                         | One Arrow table; one table root accepts data directly, otherwise use a mapping |
-| `program.collect(inputs, /, *, runtime=None, options=None)`                                            | `dict[str, pyarrow.Table]` in logical output order; always supply a mapping    |
-| `table_expr.collect_async(...)` / `program.collect_async(...)`                                         | Awaitable forms of the same contracts                                          |
-| `table_expr.stream(inputs, /, *, runtime=None, config=None)`                                           | Owned async iterator of Arrow tables                                           |
-| `program.stream(inputs, /, *, runtime=None, config=None)`                                              | Owned async iterator of named `StreamOutput` events; input mapping required    |
-| `program.analyze(runtime=None, /, *, mode="batch")`                                                    | Immutable analysis result                                                      |
-| `program.explain(runtime=None, /, *, mode="batch")`                                                    | Deterministic explanation text                                                 |
-| `program.compile_batch(runtime=None, /)`                                                               | Explicit batch execution plan                                                  |
-| `program.compile_stream(runtime=None, /, *, allowed_lateness_micros=0, late_policy="error")`           | Explicit stream plan for a runner                                              |
-| `program.to_project(runtime=None, /, *, mode="batch", allowed_lateness_micros=0, late_policy="error")` | Validated, data-only project-v3 document                                       |
+| Method                                                                                                   | Result and input contract                                                        |
+|----------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------|
+| `table_expr.collect(inputs, /, *, runtime=None, options=None)`                                           | One Arrow table; one table root accepts data directly, otherwise use a mapping   |
+| `program.collect(inputs, /, *, runtime=None, options=None)`                                              | `dict[str, pyarrow.Table]` in logical output order; always supply a mapping      |
+| `table_expr.collect_async(...)` / `program.collect_async(...)`                                           | Awaitable forms of the same contracts                                            |
+| `table_expr.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`                            | Owned async iterator of Arrow tables                                             |
+| `program.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`                               | Owned async iterator of named `StreamOutput` events; input mapping required      |
+| `program.analyze(runtime=None, /, *, mode="batch")`                                                      | Immutable analysis result                                                        |
+| `program.explain(runtime=None, /, *, mode="batch")`                                                      | Deterministic explanation text                                                   |
+| `program.compile_batch(runtime=None, /)`                                                                 | Explicit batch execution plan                                                    |
+| `program.compile_stream(runtime=None, /, *, allowed_lateness_micros=0, late_policy="error")`             | Explicit stream plan for a runner                                                |
+| `program.to_project(runtime=None, /, *, mode="batch", allowed_lateness_micros=0, late_policy="error")`   | Validated, data-only project-v3 document                                         |
 
 Collection mappings use declared input names, and the returned mapping uses
 logical output names. Missing, extra, or wrong-kind inputs fail with named paths.
@@ -217,31 +217,51 @@ Use native stateful declarations for cross-batch calculations.
 
 ## Streaming results
 
-`TableExpr.stream(inputs, /, *, runtime=None, config=None)` returns
+`TableExpr.stream(inputs, /, *, runtime=None, config=None, watermarks=None)` returns
 `StreamResults[pyarrow.Table]`. `Program.stream(inputs, /, *, runtime=None,
-config=None)` returns `StreamResults[StreamOutput]`. Both require `async with`
-and `async for`; there is no blocking convenience stream. Run the
+config=None, watermarks=None)` returns `StreamResults[StreamOutput]`. Both require
+`async with` and `async for`; there is no blocking convenience stream. Run the
 [stateful pipeline](../examples/20_streaming_pipeline.py) and
 [named-output example](../examples/21_streaming_outputs.py), or follow the
 [streaming guide](streaming-guide.md#first-python-continuous-job).
 
 A dynamic input accepts an `AsyncIterable` of Arrow `Table`, `RecordBatch`, or
-table `Batch` values, or a `SourceBinding`. A single-table root without static
+table `Batch` values, or a `SourceBinding`. With `SourceProvidedWatermarks`, the
+iterable may also yield `Watermark` values. A single-table root without static
 parameters accepts that source directly. Otherwise pass a mapping by logical
 declaration name; Program always requires one. Static parameter entries hold
 the declared table data or array `Batch`, and are latched once. Arrays require
 an explicitly registered provider on the selected runtime. All outputs must
 be table expressions.
 
-Construction copies the mapping and captures source/Batch references without
-consuming an iterable or starting work. Arrow buffers stay shared and read-only.
+Construction copies input and watermark mappings and captures source/Batch
+references without consuming an iterable or starting work. Arrow buffers stay
+shared and read-only.
 Context entry validates inputs, compiles one fresh native stream plan, and
 starts one native job. Native state persists across input batches; a new
 `stream` call creates a new owner and fresh state. Ordinary iterables enforce
 the declared Arrow schema and finite row/byte limits from
-`config.edge_budget`. They provide no replay or watermarks, so temporal output
-can wait for end-of-input. A supplied `SourceBinding` keeps its actual
-capabilities and watermark policy.
+`config.edge_budget`. They provide no replay. A supplied `SourceBinding` keeps
+its actual capabilities and watermark policy.
+
+With `watermarks=None`, an iterable whose input declares `event_time` must have
+non-null, nondecreasing timestamps in arrival order across rows, batches, and
+all entities in that source. The native runtime generates a watermark at
+`max_seen - 1 microsecond`, with a 100 ms emission interval. Equal timestamps
+may span batches; the latest timestamp stays open until a larger one arrives,
+explicit progress is supplied, or the source ends. This allows finalized rolling
+results to arrive before EOF. A decrease fails; the adapter does not sort or
+drop rows. Inputs without event time use disabled watermarks, and stateless
+expressions and SQL produce results as batches arrive.
+
+`watermarks` accepts an existing `WatermarkPolicy` for one dynamic input or a
+mapping by logical dynamic input name. Omitted mapping entries use the default.
+Select `BoundedOutOfOrderness` for disorder, `SourceProvidedWatermarks` for
+iterable-provided progress, or `DisabledWatermarks` for intentional EOF-driven
+finalization. Explicit policies replace the default order validation. Unknown
+or static names, invalid policies, and overrides of a `SourceBinding` fail.
+See [watermark policies](streaming-guide.md#watermark-policies) for inclusive
+cutoffs, late-data errors, and multi-source progress.
 
 `StreamResults` supports async context management, async iteration, idempotent
 `aclose()`, and a `job` property available after successful entry. A context

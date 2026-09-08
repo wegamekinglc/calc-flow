@@ -19,6 +19,12 @@ measurements. Use the current guides for supported behavior.
   execution. `TableExpr.stream` and `Program.stream` own one native job through
   async contexts and iteration, retaining state across batches and returning
   tables or named output events with bounded backpressure and awaited cleanup.
+  Event-time iterables default to nondecreasing timestamps across the source
+  and native watermarks at `max_seen - 1 microsecond`, producing finalized
+  temporal results before EOF. The `watermarks` keyword selects existing
+  policies for disorder, iterable-provided progress, or named input policies;
+  source-bound policies remain explicit. Timestamp-free stateless inputs need
+  no progress configuration.
   Iterable inputs use best-effort delivery and temporary managed checkpoints;
   durable recovery keeps explicit bindings and managed state. Stream SQL uses
   one alias and per-batch semantics, with no inherited temporal ordering.

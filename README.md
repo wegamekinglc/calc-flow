@@ -49,7 +49,11 @@ an ordinary synchronous function once while building the calculation.
 
 For streams, use `async with output.stream(batches()) as results`, then
 `async for table in results`. One native job retains state across batches and
-owns cleanup. A `Program` yields named `StreamOutput` events for multiple
+owns cleanup. Declared event-time inputs default to validated nondecreasing
+timestamps and watermarks that produce finalized results before EOF. Use
+`watermarks` for explicit disorder or source-provided progress; see
+[watermark policies](docs/streaming-guide.md#watermark-policies).
+A `Program` yields named `StreamOutput` events for multiple
 outputs. The convenience stream uses temporary checkpoints and best-effort
 iterable delivery; durable recovery uses explicit source/sink bindings and a
 managed checkpoint root.

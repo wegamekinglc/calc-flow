@@ -78,9 +78,14 @@ job across batches. Each convenience owner controls its queue and observation
 tasks, source closure, and temporary checkpoint cleanup. It does not reuse a
 cached batch plan, replay a Python pipeline per batch, or serialize callables.
 
-The ordinary iterable adapter has unsupported replay, lossy delivery capability,
-and disabled watermarks. Its counter cursor supplies ordering only, not restart
-positioning. Output observation does not acknowledge application delivery.
+The [iterable input adapter](../python/calc_flow/_stream_inputs.py) uses the
+declared event-time column to validate nondecreasing arrival times across the
+source, then selects native generated watermarks at `max_seen - 1 microsecond`.
+Inputs without event time default to disabled watermarks. Explicit `watermarks`
+policies support disorder or iterable-provided `Watermark` events; existing
+`SourceBinding` policies cannot be overridden. The iterable adapter has unsupported
+replay and lossy delivery capability. Its counter cursor supplies ordering only,
+not restart positioning. Output observation does not acknowledge application delivery.
 Durable recovery and transactional sinks therefore use the explicit runner and
 managed state interfaces. See [stream ownership](streaming-guide.md#stream-ownership-and-sql-boundaries).
 

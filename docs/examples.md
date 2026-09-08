@@ -36,14 +36,16 @@ weights in a symbolic batch or continuous program.
 Read the [first-stream tutorial](streaming-guide.md#first-python-continuous-job)
 while running [20_streaming_pipeline.py](../examples/20_streaming_pipeline.py).
 It composes a price delta, a mean of that delta, and SQL projection, using one
-native job across input batches. Continue with
+native job across input batches. Its source stays open while the first three
+rows arrive, and context exit closes the waiting source. Continue with
 [21_streaming_outputs.py](../examples/21_streaming_outputs.py) to branch a
 Program and consume named events. Both use `async with` and `async for`, require
 no external service, and clean up temporary checkpoint storage.
 
-Async iterables have no replay or watermarks; temporal output may wait for
-end-of-input. Use a capable `SourceBinding` for progress, and explicit sinks and
-a stable checkpoint root for durable recovery.
+Event-time iterables default to nondecreasing arrival times and native watermarks.
+Use an explicit [watermark policy](streaming-guide.md#watermark-policies) for
+disorder or source-provided progress. Async iterables have no replay; use explicit
+sinks and a stable checkpoint root for durable recovery.
 
 ## Operate a recoverable stream
 

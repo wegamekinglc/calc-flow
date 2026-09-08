@@ -196,8 +196,12 @@ Convenience `compute`/`collect` returns Arrow tables by logical names and create
 a fresh batch plan per call. `TableExpr.stream` and `Program.stream` own a single
 native job with `async with` and `async for`, yielding tables or named
 `StreamOutput` events. State persists across batches, with bounded backpressure
-and awaited cleanup. Ordinary iterables provide no replay or watermarks;
-temporary checkpoints do not provide durable restart or exactly-once delivery.
+and awaited cleanup. Event-time iterables default to validated nondecreasing
+arrival times and native watermarks at `max_seen - 1 microsecond`. `watermarks`
+selects existing policies by logical input name; supplied `SourceBinding`
+policies cannot be overridden. Inputs without event time retain stateless
+per-batch output. Ordinary iterables have no replay; temporary checkpoints do
+not provide durable restart or exactly-once delivery.
 
 Async preparation captures mappings and Batch references while Arrow buffers
 remain shared and read-only; caller metadata and `Batch.metadata` remain intact.

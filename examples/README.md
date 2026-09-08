@@ -162,8 +162,9 @@ external services and are included in the default example runner.
   Guide: [SQL pipelines](../docs/batch-guide.md#compose-sql-and-python-pipelines).
 - [20_streaming_pipeline.py](20_streaming_pipeline.py) — retain native delta
   and nested rolling-mean state across two input batches, followed by SQL.
-  Uses `async with` and `async for`; checks `delta=[None, 2.0, 3.0, -1.0]` and
-  `mean_delta=[None, 2.0, 2.5, 1.0]`. Temporary checkpoints are cleaned up on exit.
+  The source stays open while `async for` receives `delta=[None, 2.0, 3.0]` and
+  `mean_delta=[None, 2.0, 2.5]`. Exiting `async with` cancels the waiting source
+  and cleans up temporary checkpoints; the latest timestamp remains buffered.
   Guide: [first stream](../docs/streaming-guide.md#first-python-continuous-job).
 - [21_streaming_outputs.py](21_streaming_outputs.py) — branch a Program and
   consume independent `StreamOutput` events by name. Checks

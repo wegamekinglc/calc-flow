@@ -55,18 +55,21 @@ stream SQL accepts one alias and runs per native batch. See the
 [20_streaming_pipeline.py](../examples/20_streaming_pipeline.py) runs one
 native job through `async with output.stream(batches()) as results`. Its
 `async for` consumer observes a price delta and rolling mean that retain
-history across batches, followed by SQL projection. The checked deltas are
-`[None, 2.0, 3.0, -1.0]`; means are `[None, 2.0, 2.5, 1.0]`.
+history across batches, followed by SQL projection. The source remains open
+while the consumer checks deltas `[None, 2.0, 3.0]` and means
+`[None, 2.0, 2.5]`, then exits and cancels the waiting source. The latest
+timestamp remains buffered behind the default safe watermark.
 
 [21_streaming_outputs.py](../examples/21_streaming_outputs.py) branches with
 `Program.stream` and consumes `StreamOutput.name` and `.table`, checking
 `double=[2, 4, 6]` and `large=[2, 3]`. Output events arrive independently;
 they are not synchronized result dictionaries.
 
-Both examples use finite async iterables and temporary managed checkpoints.
-They require no external service. Ordinary iterables provide no watermarks or
-replay, so temporal finality may wait for end-of-input. A supplied `SourceBinding`
-can provide progress while the same result context owns cleanup. For durable
+Both examples use temporary managed checkpoints and require no external service.
+Event-time iterables default to validated nondecreasing timestamps across their
+whole source and native watermarks; the timestamp-free branches need no progress
+configuration. Select an explicit [watermark policy](streaming-guide.md#watermark-policies)
+for disorder or iterable-provided progress. Ordinary iterables have no replay. For durable
 restart or transactional delivery, follow the explicit recovery workflow below.
 See [stream ownership](streaming-guide.md#stream-ownership-and-sql-boundaries).
 

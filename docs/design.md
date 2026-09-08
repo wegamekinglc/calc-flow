@@ -120,9 +120,12 @@ pipeline function is called per batch, and native operators own all rolling
 state. Exiting or cancelling the context settles the native job and cleanup.
 
 Convenience streams use a temporary managed checkpoint root, removed after
-native cleanup. Async iterable adapters have no replay position or native
-watermarks and provide best-effort delivery. A supplied `SourceBinding` keeps
-its capability and watermark evidence. Durable restart and transactional sinks
+native cleanup. Async iterable adapters provide best-effort delivery without
+replay. Declared event-time inputs validate nondecreasing arrival times and use
+native generated watermarks; explicit policies support disorder or source-provided
+progress. A supplied `SourceBinding` keeps its capability and watermark evidence.
+See [watermark policies](streaming-guide.md#watermark-policies) for defaults and
+finality. Durable restart and transactional sinks
 use explicit bindings and managed state through the same native runtime:
 
 ```text

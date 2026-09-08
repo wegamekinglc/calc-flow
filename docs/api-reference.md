@@ -81,15 +81,15 @@ collection state, streaming ownership, and logical versus physical bindings.
 
 ### SQL, pipelines, and streaming results
 
-| Entry point                                                     | Contract                                                        |
-|-----------------------------------------------------------------|-----------------------------------------------------------------|
-| `sql(query, /, **tables)`                                       | Lazy `TableExpr`; explicit aliases mapped to table declarations |
-| `TableExpr.sql(query, /)`                                       | Single-table SQL with the local alias `input`                   |
-| `Expr.pipe(function, /, *args, **kwargs)`                       | Call the synchronous builder once and preserve its return type  |
-| `TableExpr.stream(inputs, /, *, runtime=None, config=None)`     | `StreamResults[pyarrow.Table]`                                  |
-| `Program.stream(inputs, /, *, runtime=None, config=None)`       | `StreamResults[StreamOutput]`; logical input mapping required   |
-| `StreamOutput.name` / `.table`                                  | Immutable named Arrow output event                              |
-| `StreamResults` async context / iteration / `aclose()` / `.job` | One native job, one consumer, bounded output and owned cleanup  |
+| Entry point                                                                  | Contract                                                          |
+|------------------------------------------------------------------------------|-------------------------------------------------------------------|
+| `sql(query, /, **tables)`                                                    | Lazy `TableExpr`; explicit aliases mapped to table declarations   |
+| `TableExpr.sql(query, /)`                                                    | Single-table SQL with the local alias `input`                     |
+| `Expr.pipe(function, /, *args, **kwargs)`                                    | Call the synchronous builder once and preserve its return type    |
+| `TableExpr.stream(inputs, /, *, runtime=None, config=None, watermarks=None)` | `StreamResults[pyarrow.Table]`                                    |
+| `Program.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`   | `StreamResults[StreamOutput]`; logical input mapping required     |
+| `StreamOutput.name` / `.table`                                               | Immutable named Arrow output event                                |
+| `StreamResults` async context / iteration / `aclose()` / `.job`              | One native job, one consumer, bounded output and owned cleanup    |
 
 SQL schema planning reads declarations, not data. Batch SQL accepts multiple
 aliases; a stream accepts one alias and executes the SQL per native batch.
@@ -98,8 +98,12 @@ and rolling before SQL are supported; SQL-to-event-window paths and standalone
 array Program outputs are unsupported.
 
 `stream` requires `async with` and `async for`. It preserves state across batches
-and binds inputs by logical declaration name. Ordinary async iterables have
-best-effort delivery without replay or watermarks; each convenience stream uses
+and binds inputs by logical declaration name. Event-time iterables default to
+validated nondecreasing arrival times and native watermark generation, so rolling
+results can arrive before EOF. `watermarks` selects existing policies for one
+dynamic input or a mapping by logical name; it cannot override `SourceBinding`.
+Inputs without event time retain stateless per-batch output. Ordinary iterables
+have best-effort delivery without replay; each convenience stream uses
 temporary checkpoint storage. Explicit bindings and managed state provide the
 separate durable-recovery path. Multi-output streams yield named events rather
 than synchronized dictionaries. See [Python contracts](python-api.md#streaming-results)
