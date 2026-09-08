@@ -15,8 +15,12 @@ outputs, await a calculation in asyncio, then build reusable financial features.
 Continue to [example 14](../examples/14_project_persistence.py) to export a
 `Program` and reload its native graph through JSON/YAML and the file store.
 
-For advanced integration, run 02 → 03 to join named inputs with explicit SQL
-and register a vectorized scalar UDF. Runtime contributors can pair Rust's
+Run [02_sql_join.py](../examples/02_sql_join.py) for named `cf.sql` aliases
+and a following column expression, then
+[19_sql_expression_pipeline.py](../examples/19_sql_expression_pipeline.py)
+for reusable `pipe` functions around SQL. The checked final values are
+`doubled=[140, 216, 72]` and `net=[18.0, 27.0]`, respectively.
+Example 03 covers explicit typed UDF registration. Runtime contributors can pair Rust's
 `expression_pipeline` with `sql_join`. The Rust expression
 program uses the small `[3, 7]` addition from the introduction; Python 01 uses
 order totals. The SQL programs share the same order/fee dataset.
@@ -26,6 +30,20 @@ order totals. The SQL programs share the same order/fee dataset.
 Read the [array guide](array-guide.md) while running 06 → 07 → 11: center a
 NumPy array, multiply Arrow columns by NumPy/JAX weights, then reuse static
 weights in a symbolic batch or continuous program.
+
+## Consume a stateful pipeline
+
+Read the [first-stream tutorial](streaming-guide.md#first-python-continuous-job)
+while running [20_streaming_pipeline.py](../examples/20_streaming_pipeline.py).
+It composes a price delta, a mean of that delta, and SQL projection, using one
+native job across input batches. Continue with
+[21_streaming_outputs.py](../examples/21_streaming_outputs.py) to branch a
+Program and consume named events. Both use `async with` and `async for`, require
+no external service, and clean up temporary checkpoint storage.
+
+Async iterables have no replay or watermarks; temporal output may wait for
+end-of-input. Use a capable `SourceBinding` for progress, and explicit sinks and
+a stable checkpoint root for durable recovery.
 
 ## Operate a recoverable stream
 
@@ -37,8 +55,9 @@ traits and watermark-driven tumbling windows.
 
 Those examples use local application-owned connectors and temporary state
 directories. Continue with [example 15](../examples/15_file_source.py) for the
-native file source in CSV, JSON Lines, and Parquet formats. Examples 16–21
-cover Kafka, PostgreSQL, MySQL, ClickHouse, HTTP, and WebSocket sources, each
+native file source in CSV, JSON Lines, and Parquet formats. Connector
+`*_source.py` examples numbered 16–21 cover Kafka, PostgreSQL, MySQL, ClickHouse,
+HTTP, and WebSocket sources, each
 with a calculation and checked Parquet output. Follow the
 [connector overview](connectors/README.md) to choose a transport; each
 connector page includes its native wheel feature, Python example, service

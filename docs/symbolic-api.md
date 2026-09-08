@@ -5,6 +5,7 @@
 On this page:
 
 - [Declarations and analysis](#symbolic-declarations-and-static-analysis)
+- [SQL composition](#sql-composition)
 - [Compilation](#symbolic-compilation)
 - [Event-time window aggregation](#symbolic-event-time-window-aggregation)
 - [Bounded stream joins](#symbolic-bounded-stream-joins)
@@ -18,14 +19,15 @@ inspection, and performance workflows, see the
 
 Use `import calc_flow as cf` for typed immutable expressions and programs.
 `cf.compute` derives a declaration from Arrow schema and returns an Arrow table;
-`TableExpr.collect` and `Program.collect` execute reusable declarations. These
-conveniences lower into the internal Rust runtime. Declarations hold no live
-data, and there is no Python row evaluator or formula parser. The supported
-`calc_flow.symbolic` imports refer to the same expression objects.
+`TableExpr.collect` and `Program.collect` execute reusable declarations.
+`sql` and `pipe` compose those declarations, and `stream` exposes their owned
+native execution as async results. Declarations hold no live data, and there
+is no Python row evaluator or formula parser. The implementation and re-exported
+expression objects live under `calc_flow.symbolic`.
 
 Start with [batch calculations](batch-guide.md); the
 [Python reference](python-api.md#compute-arrow-data) defines convenience execution,
-async ownership, schema/name restrictions, and the migration mapping.
+async ownership, SQL/streaming contracts, and schema/name restrictions.
 
 The declaration catalog is intentionally wider than the implemented project
 lowerers. Use this availability matrix when constructing user-facing formula
@@ -34,6 +36,7 @@ editors or validating stored declarations:
 | Domain                   | Construct/analyze | Batch/stream compile   | Current lowering boundary                                             |
 |--------------------------|-------------------|------------------------|-----------------------------------------------------------------------|
 | row-local columns        | yes               | yes                    | portable scalar types and the documented SQL allowlist                |
+| SQL table stages         | yes               | yes; one stream alias  | native SELECT/CTE schema; row-local expressions after SQL             |
 | rolling `ts`             | yes               | yes                    | source/alias/row-local operands and earlier rolling results           |
 | cross-section `cs`       | yes               | yes                    | staged values; event time and partitions resolve to inputs or aliases |
 | relational stream joins  | yes               | stream only            | independent/nested native joins with proved post-join ordering        |
@@ -138,6 +141,42 @@ representations, or object addresses. The frozen analysis vocabulary is
 with the same path grammar. `explain` renders the same facts as a deterministic
 multi-line report.
 
+## SQL composition
+
+`cf.sql(query, /, **tables)` declares a lazy `TableExpr` using explicit alias
+names. `TableExpr.sql(query, /)` binds that table as `input`. Both accept one
+read-only native `SELECT` or CTE. The query's field names, types, and nullability
+come from native schema planning without execution; duplicate result column
+names are rejected. Input aliases are portable identifiers, not caller-global
+lookups or data frames hidden inside the declaration.
+
+`Expr.pipe(function, /, *args, **kwargs)` passes its expression as the first
+argument and invokes the synchronous function once during construction. It
+preserves the function's return type, including a Program or column expression.
+It adds no execution-time UDF, stage framework, or serialized callable.
+
+Expressions, SQL, and downstream row-local calculations lower to one native
+DAG. Shared roots and stateful upstream declarations fan out from their native
+state owners. The compiler does not collect intermediate tables or rebuild
+Python declarations for each source batch.
+
+SQL has a distinct row lineage and clears entity, event-time, and sequence
+ordering facts. Row-local projections, filters, and arithmetic after SQL are
+supported. Rolling calculations can feed SQL; temporal expressions directly
+after SQL fail the missing-ordering check. An `ORDER BY` inside SQL does not
+establish symbolic temporal ordering. SQL-to-event-window composition and
+standalone array Program outputs are not supported. Matrix calculations must
+use the documented table-attachment shape and explicit provider registration.
+
+Batch SQL can join multiple aliases. Stream compilation rejects more than one
+alias before any source opens, even if aliases share a root. Accepted stream SQL
+runs separately for each native input batch: SQL aggregation, ordering, limits,
+and window functions are batch-local. Native rolling, event windows, and bounded
+stream joins have their separately declared cross-batch semantics. Use
+[SQL composition](../examples/19_sql_expression_pipeline.py),
+[named SQL inputs](../examples/02_sql_join.py), and the
+[rolling-to-SQL stream](../examples/20_streaming_pipeline.py) as executable examples.
+
 ## Symbolic compilation
 
 `Program.compile_batch(runtime=None, /)` and
@@ -182,6 +221,8 @@ call per accepted micro-batch.
 Explicit compilation on a supplied `Runtime` uses its bounded expression
 compile cache. Convenience `compute`/`collect` execution creates a fresh plan
 every time and neither reuses nor resets the caller's cached batch plans.
+Convenience `stream` also compiles a fresh owning plan for its one native job;
+state persists inside that job until termination.
 `Program.to_project` exports the same lowered data-only graph for persistence.
 
 Each `Runtime` keeps a bounded, runtime-scoped symbolic compile cache.
@@ -200,9 +241,10 @@ Programs with one input and one output bind the plan endpoints `input` and
 `output`, matching the `PipelineBuilder` convention; multi-branch graphs name
 endpoints `<node>.input` and `<node>.output` deterministically. Batches
 supplied at explicit plan execution must match the declared input schema
-exactly. `Program.collect` translates logical declaration names to these physical
-bindings and returns Arrow tables by logical output name. Project reload and
-stream runners retain physical bindings; Python aliases are not serialized.
+exactly. Collection and convenience stream methods translate logical declaration
+names to physical bindings. Collection returns tables by logical output name;
+Program streams yield named events. Project reload and explicit stream runners
+retain physical bindings; Python logical aliases are not serialized.
 
 ## Symbolic event-time window aggregation
 
@@ -319,7 +361,8 @@ signed-zero, overflow, metrics, and chunking semantics.
 Each dependency path through a window supports stateless `table.project`,
 `table.filter`, `with_columns`, and row-local expressions before and after
 one window. Window results have a distinct row origin; they cannot mix with
-raw input columns or arrays by position. The compiler rejects rolling,
+raw input columns or arrays by position. SQL results cannot feed a symbolic
+window. The compiler rejects rolling,
 cross-section, joins, another event window, array/matrix attachment, external
 stateful providers, and cross-row reductions on that path. Independent
 windows and unrelated legal outputs may coexist in the same `Program`.
@@ -543,8 +586,9 @@ Analysis rejections surface as `CompileError` with the first issue's
 including declaration-only `window_tumbling@1`/`window_hopping@1` nodes and
 `linalg`/`parameter` uses that do not form the exact symbolic matrix compilation
 shape above — fail with `unknown_primitive_version` rooted at the output or
-`static_inputs.<name>`, in both batch and stream modes; a stream aggregate or
-SQL window is never silently made batch-local. Standalone array outputs fail
+`static_inputs.<name>`, in both batch and stream modes. Native stateful
+operators retain their declared finality; explicit stream SQL uses the per-batch
+semantics described in [SQL composition](#sql-composition). Standalone array outputs fail
 with `unknown_primitive_version` in batch mode; stream mode rejects them
 earlier, at the analysis phase, with `unbounded_state` rooted at
 `outputs.<name>` — the stream-safety rule for an array output with row-axis

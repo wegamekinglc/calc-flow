@@ -13,15 +13,16 @@ pages explain how the implementation provides those behaviors.
 
 ## 2. Function guides
 
-1. [Batch calculations](batch-guide.md): `compute`, table expressions, named
-   collection, reusable financial functions, and async execution; examples 01,
-   05, and 09. Examples 02 and 03 cover advanced SQL and UDF integration.
+1. [Batch calculations](batch-guide.md): `compute`, expressions, SQL, `pipe`,
+   named collection, financial functions, and async execution; examples 01,
+   02, 05, 09, and `19_sql_expression_pipeline.py`. Example 03 covers typed UDFs.
 2. [Arrays and matrices](array-guide.md): NumPy/JAX registration, array
    expressions, table-to-matrix multiplication, and static weights;
    examples 06, 07, and 11.
-3. [Continuous streaming](streaming-guide.md): sources, sinks, event time,
-   windows, bounded joins, job controls, and recovery; examples 04, 08,
-   10, 12, and 13, plus the Rust window example.
+3. [Continuous streaming](streaming-guide.md): start with
+   `20_streaming_pipeline.py` and `21_streaming_outputs.py` for `stream` and
+   named events. Continue to sources, sinks, event time, windows, bounded joins,
+   and recovery in examples 04, 08, 10, 12, and 13.
 4. [Expression workflows](symbolic-workflows.md): financial features, analysis,
    composition, and batch/stream execution; examples 09–13.
 5. [Projects and persistence](projects-guide.md): validate, serialize, save,
@@ -35,8 +36,8 @@ pages explain how the implementation provides those behaviors.
 
 1. [API reference](api-reference.md): public surfaces, HTTP routes, errors,
    and package/protocol versions.
-2. [Python API](python-api.md): `compute`, named table expressions, `Program`,
-   collection, and advanced execution/provider/runner contracts.
+2. [Python API](python-api.md): `compute`, SQL, `pipe`, named table expressions,
+   `Program`, collection, streams, and advanced execution/provider/runner contracts.
 3. [Expression API](symbolic-api.md): declarations, ordering requirements,
    analysis, and compilation.
 4. [Rust runtime reference](rust-api.md): internal types, operator traits, and

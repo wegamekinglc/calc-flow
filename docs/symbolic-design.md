@@ -46,13 +46,43 @@ shared stages, or several outputs. It returns Arrow tables in logical output
 order. Project export uses `Program.to_project` and serializes only existing
 project-v3 graph/input fields; aliases and live data stay in Python.
 
-Every convenience call compiles a fresh native batch plan, including calls with
+Every convenience batch call compiles a fresh native plan, including calls with
 the same runtime. This isolates state without touching an explicitly cached plan.
 Async entry points copy mappings and capture Batch references at call time,
 then await the native cancellation-aware execution bridge. Arrow buffers remain
 shared and their storage must stay read-only through execution. Schema/field
 metadata are omitted only from internal execution schemas; caller metadata and
 `Batch.metadata` remain intact.
+
+## SQL planning and stream results
+
+`Expr.pipe` is construction-time function application. It preserves the returned
+declaration or Program and does not add a callback to the graph. SQL declarations
+capture query text and explicit alias/child pairs in the existing immutable IR.
+The [SQL lowerer](../python/calc_flow/symbolic/lower/sql.py) connects those table
+boundaries to native `sql` nodes while keeping surrounding expressions in the
+same graph. Shared declarations fan out from their native state owners.
+
+The private `Runtime._infer_symbolic_sql_schema` bridge invokes native planning
+with named schema-only tables. It reads the resulting plan schema without
+executing rows or opening sources. Query aliases, input schemas, and runtime
+registration changes determine schema-cache validity. No Python SQL parser or
+second row-execution path is involved. SQL output has its own row lineage and
+does not carry upstream entity/event-time/sequence facts.
+
+The [stream adapter](../python/calc_flow/stream.py) shares logical-to-physical
+binding metadata with collection. On context entry, it creates one fresh owning
+native plan and runner. Iterable sources are consumed once; bounded queue sinks
+produce Arrow tables or named `StreamOutput` events. State remains in the native
+job across batches. Each convenience owner controls its queue and observation
+tasks, source closure, and temporary checkpoint cleanup. It does not reuse a
+cached batch plan, replay a Python pipeline per batch, or serialize callables.
+
+The ordinary iterable adapter has unsupported replay, lossy delivery capability,
+and disabled watermarks. Its counter cursor supplies ordering only, not restart
+positioning. Output observation does not acknowledge application delivery.
+Durable recovery and transactional sinks therefore use the explicit runner and
+managed state interfaces. See [stream ownership](streaming-guide.md#stream-ownership-and-sql-boundaries).
 
 ## Lowering and physical sharing
 
@@ -180,14 +210,16 @@ compiled immutable project JSON, and each compile creates a fresh native
 owning plan because the runner consumes it. A restart recompiles the same
 declaration and creates fresh bindings and a runner.
 Convenience `compute`/`collect` calls bypass cached plan instances and do not
-reset or replace them. `Program.to_project` exports data without adding a new
+reset or replace them. Each `stream` result owner also compiles a fresh stream
+plan; the native job then retains state for that owner's lifetime. `Program.to_project` exports data without adding a new
 plan lifecycle. Registration changes invalidate that runtime's cache. The cache is bounded
 and belongs to the runtime instance; it is not a cross-run DataFusion session
 cache.
 
 An independent runtime-local schema cache holds at most 128 immutable Arrow
 schemas. Its key contains the ordered projection, filter, and exact serialized
-input schema. Only successful native planning enters the cache. Successful
+input schema for expression planning. SQL entries include query text and sorted
+alias/schema pairs. Only successful native planning enters the cache. Successful
 registrations clear it alongside the compile cache. It retains planning
 metadata and does not retain user rows, running state, or DataFusion sessions.
 

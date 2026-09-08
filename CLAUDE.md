@@ -16,7 +16,8 @@ trailers to commits unless explicitly requested.
 
 Calc Flow is a Python calculation library for Arrow tables and stateful streams.
 The application API under `python/calc_flow/` exposes immutable expressions,
-`compute`/`compute_async`, reusable `Program` collection, and integrations. The
+`compute`/`compute_async`, SQL and `pipe` composition, reusable `Program`
+collection, owned async stream results, and integrations. The
 `calc-flow` crate is the internal runtime and owns immutable `Batch` values,
 graph compilation, DataFusion execution, project validation, checkpoints, and
 runners. PyO3 and expression lowering connect the API to that single table runtime. `calc-flow-studio` is a separate local
@@ -175,7 +176,7 @@ The frontend talks to the backend over the `/api/v3` REST contract only.
 |----------------------------|------------------------------------------------------------------------------------------------------------------------------------------|
 | `crates/calc-flow/`        | Native core: batches, ports/operators, graph compiler, DataFusion runtime, UDF/provider registries, runners, checkpoints, project stores |
 | `crates/calc-flow-python/` | PyO3 binding exposing the core as `calc_flow._native`                                                                                    |
-| `python/calc_flow/`        | Python expressions, `compute`/`Program.collect`, lowering, advanced graph/runner/store adapters, provider registration                   |
+| `python/calc_flow/`        | Python expressions and SQL, `pipe`, Arrow collection, owned stream results, lowering, and runtime integrations                           |
 | `web-ui/backend/`          | `calc-flow-studio` FastAPI service under `/api/v3`, loopback-bound, spawned bounded continuous-job workers                               |
 | `web-ui/src/`              | React + TypeScript + Vite + React Flow studio; API types generated from `web-ui/openapi.json`                                            |
 | `schemas/`                 | `project-v3.schema.json`, the canonical generated project contract                                                                       |
@@ -185,16 +186,27 @@ The frontend talks to the backend over the `/api/v3` REST contract only.
 
 ### Python API boundary
 
-Root `calc_flow` expressions are the default application API;
-`calc_flow.symbolic` imports remain supported and refer to the same objects.
+Root `calc_flow` expressions, SQL, and `Program` are the application API.
+`pipe` applies a synchronous declaration function once and preserves its return
+type. SQL uses native schema planning and shares the expression DAG; execution
+stays in Rust/DataFusion. SQL output has no inherited temporal ordering, and
+stream SQL accepts one alias with per-batch semantics.
+
 Convenience `compute`/`collect` returns Arrow tables by logical names and creates
-a fresh batch plan per call. Async preparation captures mappings and Batch
-references, while Arrow buffers remain shared and read-only; caller metadata
-and `Batch.metadata` remain intact. `Program.to_project` exports native graph
-and input placeholders without Python aliases or live payloads. Reloaded projects
-and stream runners retain physical bindings. Advanced `PipelineBuilder`,
-formula/SQL strings, explicit Runtime, providers, and cached-plan state remain
-supported. Follow [the canonical Python boundary](AGENTS.md#python-application-api-and-binding).
+a fresh batch plan per call. `TableExpr.stream` and `Program.stream` own a single
+native job with `async with` and `async for`, yielding tables or named
+`StreamOutput` events. State persists across batches, with bounded backpressure
+and awaited cleanup. Ordinary iterables provide no replay or watermarks;
+temporary checkpoints do not provide durable restart or exactly-once delivery.
+
+Async preparation captures mappings and Batch references while Arrow buffers
+remain shared and read-only; caller metadata and `Batch.metadata` remain intact.
+`Program.to_project` exports graph and input placeholders without Python logical
+aliases or live payloads. Reloaded projects and explicit runners use physical
+bindings. Explicit sources, sinks, and managed state provide durable recovery;
+`PipelineBuilder`, Runtime registrations, and cached plans provide advanced
+operational controls. Follow
+[the canonical Python boundary](AGENTS.md#python-application-api-and-binding).
 
 ### Core invariants
 

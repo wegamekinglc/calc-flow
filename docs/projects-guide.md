@@ -81,7 +81,11 @@ configuration. Compile it with `compile_stream_project(project)` and start
 `StreamingRunner(plan)`. The plan supplies the registered connector factories
 and managed state settings.
 
-For application-owned Python sources and sinks, use `program.compile_stream()`
+For async results without durable restart, use `TableExpr.stream` or
+`Program.stream` directly; their input iterables and temporary checkpoint roots
+are not project configuration. See [streaming results](python-api.md#streaming-results).
+
+For application-owned Python sources and durable sinks, use `program.compile_stream()`
 and supply physical source/sink bindings plus a managed checkpoint runtime to the
 runner, as in [example 10](../examples/10_symbolic_streaming_recovery.py).
 `PipelineBuilder.compile_stream()` remains the explicit graph alternative in
@@ -90,7 +94,7 @@ runner, as in [example 10](../examples/10_symbolic_streaming_recovery.py).
 `program.to_project(mode="stream")` exports expression graphs in stream mode,
 but its generated input placeholders are not production connector bindings.
 Complete the explicit connector, watermark, delivery, and managed state settings
-before a connector-backed job launch. Collection aliases do not rename these
+before a connector-backed job launch. Python logical aliases do not rename these
 physical bindings, and export never chooses a checkpoint root for the caller.
 The [connector guide](connectors/README.md) provides transport-specific fragments.
 Secret references select a trusted resolver; credential values do not belong

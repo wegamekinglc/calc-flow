@@ -71,6 +71,78 @@ Supported field types, field nullability, and order come from Arrow; unsupported
 schemas fail with the input field path. Rename fields outside the portable
 identifier rule `[A-Za-z_][A-Za-z0-9_]*` before passing data to the expression API.
 
+## Compose SQL and Python pipelines
+
+`expression.pipe(function, /, *args, **kwargs)` passes the declaration as the
+first argument to an ordinary synchronous function. It works on tables and
+columns, preserves the function's return type, and can return a `Program` for
+branching. The function runs once during construction; it is not a per-row or
+per-batch callback and is never serialized. Async functions are rejected.
+
+`TableExpr.sql(query)` adds a read-only DataFusion SQL stage using the alias
+`input`. It returns a table declaration, so column expressions and reusable
+functions can follow it without collecting intermediate tables.
+
+Run [19_sql_expression_pipeline.py](../examples/19_sql_expression_pipeline.py):
+
+```python
+"""Reuse table and column pipelines around a native SQL stage."""
+
+from __future__ import annotations
+
+import pyarrow as pa
+
+import calc_flow as cf
+
+
+def add_gross(t: cf.TableExpr) -> cf.TableExpr:
+    return t.with_columns(gross=cf.row.cast(t["quantity"], "float64") * t["price"])
+
+
+def discounted(t: cf.TableExpr, rate: float) -> cf.TableExpr:
+    return t.select("order_id", net=t["gross"] * (1.0 - rate))
+
+
+def pipeline(t: cf.TableExpr) -> cf.TableExpr:
+    return (
+        t.pipe(add_gross)
+        .sql("SELECT order_id, gross FROM input WHERE gross >= 20 ORDER BY order_id")
+        .pipe(discounted, rate=0.1)
+    )
+
+
+def main() -> None:
+    orders = pa.table(
+        {
+            "order_id": [1, 2, 3],
+            "quantity": [2, 1, 3],
+            "price": [10.0, 5.0, 10.0],
+        }
+    )
+    result = cf.compute(orders, pipeline)
+    expected = {"order_id": [1, 3], "net": [18.0, 27.0]}
+    if result.to_pydict() != expected:
+        raise RuntimeError(result.to_pydict())
+    print(result.to_pydict())
+
+
+if __name__ == "__main__":
+    main()
+```
+
+The pipeline calculates gross amounts with Python operators, filters with SQL,
+and calculates discounted values with another Python function. The result is
+`{"order_id": [1, 3], "net": [18.0, 27.0]}`. DataFusion plans the SQL output
+schema from the declared input schemas; it does not execute data during
+construction. Collection executes the entire graph in the native runtime.
+
+SQL creates its own row lineage and does not inherit temporal ordering.
+Row-local transformations after SQL are supported. Compute rolling features
+before SQL, as in the [streaming pipeline](streaming-guide.md#first-python-continuous-job).
+A SQL result cannot currently feed a symbolic event window or become a
+standalone array Program output. See the
+[SQL composition contract](symbolic-api.md#sql-composition) for exact boundaries.
+
 ## Reusable programs and named outputs
 
 Declare a table once from an Arrow schema, then name several output tables.
@@ -180,10 +252,19 @@ Run [02_sql_join.py](../examples/02_sql_join.py):
 uv run --no-sync python examples/02_sql_join.py
 ```
 
-The SQL node declares aliases `orders` and `fees`. Supply batches under those
-same keys when calling `execute`. It joins on `order_id`, subtracts each fee
-from the amount, and uses `ORDER BY` for a defined result order. The resulting
-`net` values are `[70, 108, 36]` for order IDs `[1, 2, 3]`.
+`cf.sql(query, /, **tables)` binds SQL aliases to explicit `TableExpr`
+declarations. The example binds SQL names `o` and `f` to the logical inputs
+`orders` and `fees`, joins on `order_id`, and subtracts each fee from the amount.
+It then uses `pipe` and a column expression to double the SQL result. Collection
+binds Arrow data by the logical names `orders` and `fees`; no `Batch`, explicit
+plan, or handwritten SQL result schema is needed. The final `doubled` values
+are `[140, 216, 72]` for order IDs `[1, 2, 3]`.
+
+SQL aliases are local to the query, and Calc Flow never looks them up in caller
+globals. Multiple aliases are supported in batch mode. A streaming SQL node
+accepts exactly one alias, even when several aliases would reference the same
+input; use the [bounded stream join](streaming-guide.md#bounded-event-time-join)
+for stateful matching between streams.
 
 A SQL node accepts one read-only `SELECT` or CTE. DDL, DML, utility commands,
 and multiple statements fail validation. Table calculation uses DataFusion;
@@ -208,9 +289,8 @@ Registration installs trusted application code. The project stores only the
 function identity; loading a project requires registering the same function
 before compiling. See [projects and persistence](projects-guide.md).
 
-Formula strings, explicit graph connections, and read-only SQL remain supported
-integration APIs. They are useful for registered UDF calls and graph/provider
-operations outside the expression catalog. They execute in the same Rust
+Use explicit graph connections and formula strings for registered UDF calls
+and graph/provider operations outside the expression catalog. They execute in the same Rust
 runtime. For diagnostics and tuning, see
 [SQL performance controls](sql-datafusion-performance.md).
 

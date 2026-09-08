@@ -347,7 +347,9 @@ an extended-length absolute `TEMP` and `TMP` for the example process.
 ## Continue learning
 
 - Run the complete [executable example inventory](examples.md).
-- Build a recoverable job with the [continuous streaming guide](streaming-guide.md).
+- Compose [SQL and Python pipelines](batch-guide.md#compose-sql-and-python-pipelines).
+- Iterate a [stateful stream](streaming-guide.md#first-python-continuous-job),
+  then add explicit recovery when needed.
 - Configure production transports with the [connector guide](connectors/README.md).
 - Understand component ownership in the [design and architecture guide](design.md).
 - Look up exact names in the [Python API](python-api.md),

@@ -47,7 +47,7 @@ The runnable inventories cover both surfaces; the SQL examples share a dataset:
 
 Run the user examples that need no external service with
 `JAX_PLATFORMS=cpu uv run --no-sync python scripts/run_examples.py`.
-To include Python connector examples 16–21, prepare the optional native features
+To include connector `*_source.py` examples numbered 16–21, prepare the optional native features
 and services from the [connector overview](connectors/README.md), then add
 `--include-services`.
 
@@ -69,7 +69,7 @@ The inferred input has no ordering. Temporal calculations declare ordering on
 [temporal ordering](python-api.md#temporal-ordering).
 
 `TableExpr` provides indexing, overloaded column operators, append-only
-`with_columns`, `select`, `filter`, and `collect`/`collect_async`.
+`with_columns`, `select`, `filter`, `sql`, `pipe`, collection, and `stream`.
 `Program(name, /, *, inputs=None, outputs=())` accepts an output mapping,
 automatically discovers omitted roots, collects by logical name, and exports
 strict native projects with `to_project`. Runtime arguments are optional;
@@ -77,7 +77,33 @@ provider registrations require the explicitly selected runtime.
 
 See the [Python contracts](python-api.md#compute-arrow-data) for exact
 signatures, supported schema/name restrictions, async ownership, independent
-collection state, migration mappings, and logical versus physical bindings.
+collection state, streaming ownership, and logical versus physical bindings.
+
+### SQL, pipelines, and streaming results
+
+| Entry point                                                     | Contract                                                        |
+|-----------------------------------------------------------------|-----------------------------------------------------------------|
+| `sql(query, /, **tables)`                                       | Lazy `TableExpr`; explicit aliases mapped to table declarations |
+| `TableExpr.sql(query, /)`                                       | Single-table SQL with the local alias `input`                   |
+| `Expr.pipe(function, /, *args, **kwargs)`                       | Call the synchronous builder once and preserve its return type  |
+| `TableExpr.stream(inputs, /, *, runtime=None, config=None)`     | `StreamResults[pyarrow.Table]`                                  |
+| `Program.stream(inputs, /, *, runtime=None, config=None)`       | `StreamResults[StreamOutput]`; logical input mapping required   |
+| `StreamOutput.name` / `.table`                                  | Immutable named Arrow output event                              |
+| `StreamResults` async context / iteration / `aclose()` / `.job` | One native job, one consumer, bounded output and owned cleanup  |
+
+SQL schema planning reads declarations, not data. Batch SQL accepts multiple
+aliases; a stream accepts one alias and executes the SQL per native batch.
+SQL output does not inherit temporal ordering. Row-local expressions after SQL
+and rolling before SQL are supported; SQL-to-event-window paths and standalone
+array Program outputs are unsupported.
+
+`stream` requires `async with` and `async for`. It preserves state across batches
+and binds inputs by logical declaration name. Ordinary async iterables have
+best-effort delivery without replay or watermarks; each convenience stream uses
+temporary checkpoint storage. Explicit bindings and managed state provide the
+separate durable-recovery path. Multi-output streams yield named events rather
+than synchronized dictionaries. See [Python contracts](python-api.md#streaming-results)
+and the [streaming guide](streaming-guide.md).
 
 ### Batch
 
@@ -182,7 +208,7 @@ their existing precedence.
 ### Runtime and UDFs
 
 `Runtime` compiles strict project JSON, reports validation results, registers
-trusted providers/scalar UDFs, returns the compatibility UDF catalog, and
+trusted providers/scalar UDFs, returns the UDF catalog, and
 exposes an immutable runtime-session capability snapshot through
 `capabilities()`.
 `register_scalar_udf` requires provider/name/version, exact input type names,
@@ -198,14 +224,10 @@ engine-created `ProviderContext` exposes the authoritative run `settings` and
 normalized `deadline`; each settings read is a fresh deep copy. This run
 context is separate from the compile-time provider `options` mapping. Calc
 Flow does not inspect callback signatures or retry a call with another arity.
-The default false flag preserves all existing provider registrations, while
-the true form opts into the additive three-argument ABI.
-
-These execution changes are additive. Existing `execute(inputs)`,
-`execute_async(inputs)`, and two-argument providers retain their behavior.
+The false flag selects the two-argument ABI; true selects the three-argument ABI.
 Execution settings and deadlines are per-run values; provider-context opt-in
-belongs to the runtime registration. Neither changes project or checkpoint
-formats, fingerprints, Studio REST/OpenAPI, or capability schemas.
+belongs to the runtime registration. They are not serialized into project,
+checkpoint, or Studio API payloads.
 
 Capability schema version 3 contains only frozen data:
 `RuntimeSessionScope`, `OperatorCapability`, `UdfCapability`,
@@ -258,6 +280,10 @@ documents through a public store.
 
 ### Continuous runner
 
+Use this explicit interface for durable recovery, sink delivery protocols, and
+application-owned lifecycle controls. Ordinary iteration uses the
+[streaming result owner](#sql-pipelines-and-streaming-results).
+
 `StreamingRunner(plan, sources=None, sinks=None, checkpoints=None, *,
 config=None, static_inputs=None)` owns async `StreamSource` and sink connectors.
 Graph-only plans require explicit source/sink bindings and a checkpoint runtime.
@@ -284,9 +310,9 @@ over cancellation that arrives while the thread is being reclaimed.
 ### Symbolic declarations
 
 The root `calc_flow` exports provide immutable expressions, programs, analysis,
-and supported row-local, rolling, cross-section, relational-DAG, and matrix
-compilation. `calc_flow.symbolic` remains a supported import path for the same
-objects. Convenience execution delegates to the internal Rust runtime. Every expression,
+and supported SQL, row-local, rolling, cross-section, relational-DAG, and matrix
+compilation. The implementation and re-exported declarations live under
+`calc_flow.symbolic`. Convenience execution delegates to the internal Rust runtime. Every expression,
 feature, program, and analysis result is immutable; constructors copy
 caller-owned sequences and mappings.
 

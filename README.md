@@ -5,8 +5,8 @@
 [![Coverage Status](https://coveralls.io/repos/github/wegamekinglc/calc-flow/badge.svg?branch=main)](https://coveralls.io/github/wegamekinglc/calc-flow?branch=main)
 
 Calc Flow is a Python calculation library for Arrow tables and stateful streams.
-Compose typed expressions with Python operators, calculate a dataset, and reuse
-the same declarations in continuous jobs. Rust provides the internal runtime:
+Compose typed expressions, SQL, and reusable Python functions in one pipeline.
+Collect a dataset or iterate its results as data arrives. Rust provides the internal runtime:
 DataFusion table execution, graph compilation, state, checkpoints, and recovery.
 Calc Flow Studio is a separate local FastAPI and React application.
 
@@ -41,12 +41,27 @@ The builder receives a `TableExpr`; indexing selects columns, operators compose
 calculations, and `select`, `with_columns`, and `filter` return new declarations.
 Use `await cf.compute_async(...)` in an event loop.
 
-Continue with [batch calculations](docs/batch-guide.md) for reusable functions,
-multiple named outputs, strict types, and async options. The
-[expression workflows](docs/symbolic-workflows.md) cover financial features,
-rolling calculations, stream recovery, static matrices, and joins.
-`Program.collect` handles named Arrow inputs and outputs; explicit `Runtime`,
-plans, `Batch`, SQL, UDFs, and `PipelineBuilder` remain available for integrations.
+Add a read-only SQL stage with `t.sql(query)`, using the local alias `input`.
+Use `cf.sql(query, orders=orders, fees=fees)` for explicit named table declarations.
+SQL returns another `TableExpr`, so `pipe`, column operators, and table methods
+compose before and after it. `expression.pipe(function, *args, **kwargs)` calls
+an ordinary synchronous function once while building the calculation.
+
+For streams, use `async with output.stream(batches()) as results`, then
+`async for table in results`. One native job retains state across batches and
+owns cleanup. A `Program` yields named `StreamOutput` events for multiple
+outputs. The convenience stream uses temporary checkpoints and best-effort
+iterable delivery; durable recovery uses explicit source/sink bindings and a
+managed checkpoint root.
+
+Continue with [SQL and reusable pipelines](docs/batch-guide.md#compose-sql-and-python-pipelines)
+and the [first streaming pipeline](docs/streaming-guide.md#first-python-continuous-job).
+The runnable examples cover [SQL composition](examples/19_sql_expression_pipeline.py),
+[stateful streaming](examples/20_streaming_pipeline.py), and
+[named streaming outputs](examples/21_streaming_outputs.py).
+[Expression workflows](docs/symbolic-workflows.md) cover financial features,
+recovery, static matrices, and joins. Use explicit `Runtime`, plans, `Batch`,
+UDFs, and `PipelineBuilder` for runtime integrations and diagnostics.
 
 The [Rust runtime reference](docs/rust-api.md) and
 [native examples](crates/calc-flow/examples/README.md) cover implementation and
@@ -73,7 +88,7 @@ Python package is not a second engine.
 | `crates/calc-flow/`            | Native core: batches, ports/operators, graph compiler, DataFusion runtime, UDF/provider registries, runners, checkpoints, project stores |
 | `crates/calc-flow-connectors/` | Trusted file, Kafka, PostgreSQL, MySQL, ClickHouse, HTTP, and WebSocket connectors behind feature gates                                  |
 | `crates/calc-flow-python/`     | PyO3 binding exposing the core as `calc_flow._native`                                                                                    |
-| `python/calc_flow/`            | Python expressions, `compute`/`Program.collect`, lowering, advanced graph/runner/store adapters, provider registration                   |
+| `python/calc_flow/`            | Python expressions and SQL, `pipe`, Arrow collection, owned stream results, lowering, and runtime integrations                           |
 | `web-ui/backend/`              | `calc-flow-studio` FastAPI service under `/api/v3`, loopback-bound, spawned bounded continuous-job workers                               |
 | `web-ui/src/`                  | React + TypeScript + Vite + React Flow studio; API types generated from `web-ui/openapi.json`                                            |
 | `schemas/`                     | `project-v3.schema.json`, the canonical generated project contract                                                                       |
@@ -100,11 +115,15 @@ Python package is not a second engine.
 - Python executions accept reusable frozen `ExecutionOptions` with
   deep-copied strict-JSON settings and a cooperative, timezone-aware deadline
   normalized to UTC.
+- `TableExpr.stream` and `Program.stream` own a single native job with bounded
+  backpressure. SQL accepts one alias in a stream and runs per native batch;
+  SQL aggregation, sorting, and limits do not span batches.
 - The source-driven `StreamingRunner` consumes a `StreamExecutionPlan`, owns
   async source/sink bindings, and returns a one-owner `StreamingJob`.
 - Managed epoch checkpoints use `LocalStateBackend` segments and strict v3
   `CheckpointManifest` documents. Exactly-once compatibility is proved per
-  requested output; ordinary sinks remain at least once.
+  requested output; ordinary sinks can provide at-least-once delivery on a
+  lossless replayable route. Async iterable convenience inputs provide best effort.
 
 The capabilities and execution model are introduced in
 [docs/introduction.md](docs/introduction.md). The complete component and

@@ -19,6 +19,8 @@ between compile-time facts and runtime measurements.
 
 On this page:
 
+- [Compose SQL and Python functions](#compose-sql-and-python-functions)
+- [Consume stateful and branching streams](#consume-stateful-and-branching-streams)
 - [Compose and run financial features](#compose-and-run-financial-features)
 - [Run continuously and recover](#run-continuously-and-recover)
 - [Aggregate event-time windows](#aggregate-event-time-windows)
@@ -27,6 +29,46 @@ On this page:
 - [Read capability failures](#read-capability-failures)
 - [Interpret performance output](#interpret-performance-output)
 - [Inspect a lowered project in Studio](#inspect-a-lowered-project-in-studio)
+
+## Compose SQL and Python functions
+
+A pipeline is a composed expression declaration. Use ordinary synchronous
+Python functions and `pipe` to reuse table or column calculations; functions
+run once when constructing the graph and retain their own return type.
+
+[19_sql_expression_pipeline.py](../examples/19_sql_expression_pipeline.py)
+calculates gross order amounts, filters them with `TableExpr.sql`, and applies a
+discount through another function. It collects `net=[18.0, 27.0]` in order-ID
+order. [02_sql_join.py](../examples/02_sql_join.py) joins explicit `cf.sql`
+aliases and follows SQL with a column expression, producing
+`doubled=[140, 216, 72]`. No intermediate table is collected.
+
+SQL output uses a native planned schema and a new row lineage. It supports
+row-local expressions afterward, but carries no temporal ordering proof.
+Compute rolling features before SQL. Multi-alias SQL is for batch execution;
+stream SQL accepts one alias and runs per native batch. See the
+[batch tutorial](batch-guide.md#compose-sql-and-python-pipelines) and
+[SQL composition reference](symbolic-api.md#sql-composition).
+
+## Consume stateful and branching streams
+
+[20_streaming_pipeline.py](../examples/20_streaming_pipeline.py) runs one
+native job through `async with output.stream(batches()) as results`. Its
+`async for` consumer observes a price delta and rolling mean that retain
+history across batches, followed by SQL projection. The checked deltas are
+`[None, 2.0, 3.0, -1.0]`; means are `[None, 2.0, 2.5, 1.0]`.
+
+[21_streaming_outputs.py](../examples/21_streaming_outputs.py) branches with
+`Program.stream` and consumes `StreamOutput.name` and `.table`, checking
+`double=[2, 4, 6]` and `large=[2, 3]`. Output events arrive independently;
+they are not synchronized result dictionaries.
+
+Both examples use finite async iterables and temporary managed checkpoints.
+They require no external service. Ordinary iterables provide no watermarks or
+replay, so temporal finality may wait for end-of-input. A supplied `SourceBinding`
+can provide progress while the same result context owns cleanup. For durable
+restart or transactional delivery, follow the explicit recovery workflow below.
+See [stream ownership](streaming-guide.md#stream-ownership-and-sql-boundaries).
 
 ## Compose and run financial features
 

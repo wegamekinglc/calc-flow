@@ -3,7 +3,8 @@
 [Documentation](README.md) / 4.1 Architecture
 
 Calc Flow's application API is Python: immutable expressions, Arrow convenience
-execution, reusable programs, and explicit integrations. Rust is the internal
+execution, composable SQL and Python functions, owned async stream results,
+reusable programs, and explicit integrations. Rust is the internal
 runtime and owns table computation, plans, stream state, and recovery. PyO3 joins
 those layers; connectors are trusted implementations behind capability gates,
 and Studio is a separate loopback application. There is one table runtime.
@@ -110,6 +111,19 @@ session for its table nodes and keeps external-provider execution behind the
 same cancellation, rollback, and timing boundaries.
 
 ## Streaming path
+
+`TableExpr.stream` and `Program.stream` create a one-shot `StreamResults`
+owner. On `async with` entry, it compiles a fresh native plan, translates logical
+names, and adapts iterable inputs and bounded result sinks to one native runner.
+The table form yields Arrow tables; Program yields named events. No Python
+pipeline function is called per batch, and native operators own all rolling
+state. Exiting or cancelling the context settles the native job and cleanup.
+
+Convenience streams use a temporary managed checkpoint root, removed after
+native cleanup. Async iterable adapters have no replay position or native
+watermarks and provide best-effort delivery. A supplied `SourceBinding` keeps
+its capability and watermark evidence. Durable restart and transactional sinks
+use explicit bindings and managed state through the same native runtime:
 
 ```text
 stream plan + source/sink bindings + checkpoint root
@@ -263,11 +277,18 @@ credential values, cursor payloads, or connector state.
 
 ## Python boundary
 
-The root `calc_flow` API exposes existing expression objects plus `compute`,
-`compute_async`, table methods, and `Program.collect`/`collect_async`. A builder
-receives a table declaration once; Python lowering produces canonical project-v3
-JSON, and native `Runtime` compilation retains final validation. `PipelineBuilder`
-and string/SQL declarations remain advanced ways to produce that same graph.
+The root `calc_flow` API exposes expressions, `compute`/`compute_async`, SQL,
+`pipe`, table methods, collection, and streams. Builders and pipe functions run
+once during declaration, preserving the function's return type. Python lowering
+produces canonical project-v3 JSON; native `Runtime` compilation retains final
+validation. `PipelineBuilder` exposes explicit graph and UDF/provider selection.
+
+SQL and expressions share one DAG. A private native planning bridge derives SQL
+result schemas without reading rows or executing queries; data execution stays
+in Rust/DataFusion. SQL output has a distinct lineage without inherited temporal
+ordering. Row-local work may follow SQL, and native rolling may precede it.
+Stream SQL accepts one alias and executes per native batch; it does not create
+cross-batch SQL aggregate or window state.
 
 Convenience adapters infer supported Arrow schemas, capture input references,
 and translate logical input/output names to physical graph bindings. They remove
@@ -319,8 +340,9 @@ diagnostics and do not overwrite the primary terminal cause.
 
 ## Extension choices
 
-- Compose application calculations through Python expressions and reusable
-  functions; use explicit SQL/UDF integration for capabilities outside lowering.
+- Compose application calculations through Python expressions, SQL, and
+  reusable `pipe` functions; use explicit UDF/provider registrations for
+  trusted runtime extensions.
 - Extend the internal runtime with `ExpressionOperator`, `SqlOperator`, or a
   trusted native scalar UDF; see the [Rust runtime reference](rust-api.md).
 - Add non-table bounded computation through a registered batch or stream

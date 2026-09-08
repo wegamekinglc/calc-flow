@@ -2,9 +2,14 @@
 
 [Documentation](README.md) / 2.3 Continuous streaming
 
-Calc Flow continuous jobs consume async sources, execute a compiled stream
-graph, publish to async sinks, and recover from managed checkpoints. Use this
-guide for application-owned connectors. For Kafka, PostgreSQL, MySQL, ClickHouse,
+Use `TableExpr.stream` to consume an async source as Arrow results, or
+`Program.stream` for named output events. One native job executes the expression
+and SQL graph and retains state across batches. Enter the result owner with
+`async with`, and consume it with `async for`.
+
+For durable restart and delivery controls, compile the declaration and bind
+explicit sources, sinks, and managed checkpoints. This guide covers both
+convenience streams and application-owned connectors. For Kafka, PostgreSQL, MySQL, ClickHouse,
 HTTP, WebSocket, files, and Parquet, combine it with the
 [connector and stream-project guide](connectors/README.md).
 
@@ -12,6 +17,9 @@ On this page:
 
 - [Choose batch or stream](#choose-batch-or-stream)
 - [First Python continuous job](#first-python-continuous-job)
+- [Named streaming outputs](#named-streaming-outputs)
+- [Stream ownership and SQL boundaries](#stream-ownership-and-sql-boundaries)
+- [Explicit connectors and recovery](#explicit-connectors-and-recovery)
 - [Source contract](#source-contract)
 - [Watermark policies](#watermark-policies)
 - [Event-time windows](#event-time-windows)
@@ -30,15 +38,182 @@ On this page:
 
 Use `cf.compute` or `Program.collect` when all inputs are available and you want
 Arrow tables. Compile an explicit batch plan when you need `RunResult` diagnostics
-or owned plan state. Use `Program.compile_stream()` when sources
-arrive over time, state must survive restarts, event-time progress matters, or
-the application needs a long-lived owning job.
+or owned plan state. Use `TableExpr.stream` or `Program.stream` when sources
+arrive over time and the calculation must retain state between batches.
+Use `Program.compile_stream()` with explicit bindings and a stable
+`ManagedCheckpointRuntime` when state must survive process restarts or the
+application owns transactional delivery.
 
 Batch and stream plans are intentionally different types. A batch plan cannot
 be passed to `StreamingRunner`, and a stream plan cannot be executed with
 `execute()`.
 
 ## First Python continuous job
+
+[20_streaming_pipeline.py](../examples/20_streaming_pipeline.py) composes a
+price delta, a rolling mean of that delta, and SQL projection in one pipeline:
+
+```python
+from __future__ import annotations
+
+import asyncio
+
+import pyarrow as pa
+
+import calc_flow as cf
+
+SCHEMA = pa.schema(
+    [
+        pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
+        pa.field("symbol", pa.string(), nullable=False),
+        pa.field("price", pa.float64(), nullable=False),
+    ]
+)
+
+
+async def batches():
+    for ts, prices in [([1, 2], [10.0, 12.0]), ([3, 4], [15.0, 14.0])]:
+        yield pa.table({"ts": ts, "symbol": ["a", "a"], "price": prices}, schema=SCHEMA)
+
+
+def features(t: cf.TableExpr) -> cf.TableExpr:
+    delta = cf.ts.delta(t["price"])
+    return t.select(delta=delta, mean_delta=cf.ts.mean(delta, window=cf.rows(2)))
+
+
+async def main() -> None:
+    source = cf.table_input(
+        "quotes",
+        schema=SCHEMA,
+        entity_by=("symbol",),
+        event_time="ts",
+        sequence_by=("ts",),
+    )
+    output = source.pipe(features).sql("SELECT delta, mean_delta FROM input")
+    async with output.stream(batches()) as results:
+        tables = [table async for table in results]
+    actual = {  # Allow floating-point round-off in the example's verification.
+        name: [None if value is None else round(value, 12) for value in values]
+        for name, values in pa.concat_tables(tables).to_pydict().items()
+    }
+    expected = {"delta": [None, 2.0, 3.0, -1.0], "mean_delta": [None, 2.0, 2.5, 1.0]}
+    if actual != expected:
+        raise RuntimeError(actual)
+    print(actual)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+The first price in the second source batch uses the previous batch's price,
+producing delta `3.0`. The nested rolling mean also retains history. Both state
+stages live in one native stream job; no repeated batch `compute` calls or
+Python rolling buffers are involved. This finite example combines its output
+tables only to check the final values; applications can consume each table as
+it arrives.
+
+The input schema and ordering are declared once. This ordinary async iterable
+has no watermark or replay capability, so temporal results may wait until
+end-of-input. Supply a `SourceBinding` with a suitable watermark policy when a
+long-lived temporal source needs progress before it ends. Native finality rules
+still determine emission; one input batch need not produce one output table.
+
+## Named streaming outputs
+
+[21_streaming_outputs.py](../examples/21_streaming_outputs.py) branches one
+logical source into independent calculations:
+
+```python
+from __future__ import annotations
+
+import asyncio
+
+import pyarrow as pa
+
+import calc_flow as cf
+
+
+async def batches():
+    yield pa.table({"value": [1, 2]})
+    yield pa.table({"value": [3]})
+
+
+async def main() -> None:
+    source = cf.table_input("events", schema=pa.schema([("value", pa.int64())]))
+    program = cf.Program(
+        "branches",
+        outputs={
+            "double": source.select(value2=source["value"] * 2),
+            "large": source.filter(source["value"] >= 2).select("value"),
+        },
+    )
+    values = {"double": [], "large": []}
+    async with program.stream({"events": batches()}) as results:
+        async for output in results:
+            values[output.name].extend(output.table.column(0).to_pylist())
+    if values != {"double": [2, 4, 6], "large": [2, 3]}:
+        raise RuntimeError(values)
+    print(values)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+`Program.stream` takes a mapping keyed by declared input names and yields
+immutable `StreamOutput` events. Each event contains `name` and `table`;
+the example routes them by name and checks `double=[2, 4, 6]` and `large=[2, 3]`.
+The stream preserves each output's order without promising a total order
+between independent outputs or synchronized dictionaries across branches.
+The example accumulates values for verification; that is not required by the
+stream interface.
+
+## Stream ownership and SQL boundaries
+
+`stream(inputs, /, *, runtime=None, config=None)` constructs a one-shot
+`StreamResults` owner. A single-table declaration with no static parameters
+accepts one async iterable or `SourceBinding` directly; multiple or static
+inputs require a logical-name mapping. `Program.stream` always takes a mapping.
+The input mapping is copied immediately, but source references and read-only
+Arrow buffers are shared. Opening sources, compiling the fresh plan, and
+starting the native job happen on context entry.
+
+Iteration requires an entered context and one consumer. Leaving `async with`,
+breaking iteration inside it, explicit `await results.aclose()`, or task
+cancellation settles the owned job and source cleanup. `aclose` is idempotent.
+Native failure raises `StreamingRuntimeError`; it is not reported as successful
+empty output. After entry, `results.job` provides status and job controls while
+the context retains ownership.
+
+Native row/byte edge limits and a bounded result queue apply backpressure to
+slow consumers. `StreamRuntimeConfig.edge_budget` also bounds each iterable
+input batch; schema mismatches and oversized batches fail with the input name.
+This does not bound tables that application code accumulates after reading them.
+
+A streaming SQL stage supports exactly one alias and evaluates its query
+separately for each native input batch. SQL aggregates, `ORDER BY`, `LIMIT`, and
+SQL window functions do not retain cross-batch SQL state. Multi-alias SQL is a
+batch operation. Use native `ts` operations for rolling state and the documented
+window/join declarations for event-time aggregation and matching.
+
+SQL results have a new row lineage and no inherited temporal ordering. The
+supported pipeline above calculates rolling values before SQL, then may apply
+row-local expressions after it. A SQL result cannot currently feed a symbolic
+event window or execute as a standalone array Program output; see
+[SQL composition](symbolic-api.md#sql-composition).
+
+Convenience streams use a temporary managed checkpoint root and ordinary
+output sinks. Async iterable inputs provide best-effort delivery and no replay;
+a generated counter is not a recoverable source cursor. Even a supplied
+replayable `SourceBinding` does not make the temporary output iterator durable
+or provide exactly-once application delivery. Use explicit sinks and a stable
+checkpoint root for those guarantees. Temporary state is removed only after
+native cleanup finishes. Arrow results omit the `Batch` envelope; use an
+explicit sink when application processing needs its metadata or delivery
+acknowledgement.
+
+## Explicit connectors and recovery
 
 Build expressions with `cf.table_input`, Python operators, and `cf.Program`.
 Declare the input schema before sources start. For rolling and cross-section
@@ -53,8 +228,8 @@ expression-based rolling job: it builds a program, binds `"input"` and
 restored. See [expression workflows](symbolic-workflows.md#run-continuously-and-recover).
 
 Bind the plan's `source_binding_ids`, `static_input_ids`, and `sink_binding_ids`.
-These are physical graph names; the logical names used by `Program.collect` do
-not become stream aliases. Each stream compile creates a fresh owning native
+These are physical graph names. Direct `StreamingRunner` bindings use them;
+`TableExpr.stream` and `Program.stream` translate logical input/output names. Each stream compile creates a fresh owning native
 plan, and each runner starts once. Convenience batch collection never starts a
 job or chooses checkpoint storage.
 
@@ -207,6 +382,8 @@ that protocol.
 
 ## Delivery requirements
 
+These controls apply to explicit stream plans and sinks. The convenience
+iterator uses temporary state and does not provide durable application delivery.
 Declare requirements during stream compilation:
 
 ```python
@@ -427,6 +604,10 @@ uv run python examples/08_streaming_recovery.py
 ```
 
 ## Job lifecycle
+
+The operations below control an explicit `StreamingJob`. A `StreamResults`
+context also owns its job: cancelling iteration or exiting the context cancels
+and settles its live work.
 
 | Operation                    | Meaning                                                        |
 |------------------------------|----------------------------------------------------------------|

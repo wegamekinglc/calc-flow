@@ -12,15 +12,17 @@ local browser interface.
 
 - Calculate columns with Python operators, select and filter rows, and collect
   Arrow results: [batch guide](batch-guide.md).
-- Use explicit graph construction and read-only DataFusion SQL for advanced
-  integrations: [SQL joins](batch-guide.md#named-inputs-and-sql-joins).
+- Mix read-only DataFusion SQL with column expressions and reusable Python
+  functions in one pipeline: [SQL pipelines](batch-guide.md#compose-sql-and-python-pipelines)
+  and [named SQL joins](batch-guide.md#named-inputs-and-sql-joins).
 - Register typed scalar UDFs and explicitly selected NumPy/JAX array providers:
   [batch guide](batch-guide.md#registered-scalar-functions) and
   [array guide](array-guide.md).
 - Compute rolling features, cross-section statistics, and bounded event-time
   joins: [expression workflows](symbolic-workflows.md).
-- Consume async sources, write to sinks, checkpoint state, and resume jobs:
-  [streaming guide](streaming-guide.md).
+- Iterate Arrow results from async sources with native state across batches:
+  [streaming guide](streaming-guide.md#first-python-continuous-job). Use explicit
+  sources, sinks, and managed checkpoints for durable recovery.
 - Persist strict JSON/YAML projects and use registered file, Kafka, PostgreSQL,
   MySQL, ClickHouse, HTTP, or WebSocket connectors:
   [projects](projects-guide.md) and [connectors](connectors/README.md).
@@ -31,8 +33,11 @@ local browser interface.
 A `TableExpr` declares a table calculation; `t["price"]` selects a `ColumnExpr`.
 Python arithmetic, comparisons, and `&`, `|`, `~` compose expressions.
 `with_columns`, `select`, and `filter` return new declarations without changing
-inputs. `compute(data, build)` supplies the input schema and returns an Arrow
-table. A `Program` gives reusable calculations named inputs and outputs.
+inputs. `sql` adds a read-only query to that same graph. `pipe` applies a
+reusable synchronous function to a declaration during construction.
+`compute(data, build)` supplies the input schema and returns an Arrow table.
+A `Program` gives reusable calculations named inputs and outputs; `stream`
+exposes an owned async iterator over a running calculation.
 
 For runtime integration, `Batch` is the immutable data envelope:
 
@@ -85,21 +90,33 @@ Temporal calculations declare entity, event-time, and sequence keys on
 logical output name. Async forms use the same calculation and cancellation
 contract. See [batch calculations](batch-guide.md).
 
-Use `program.compile_stream()` and `StreamingRunner` when inputs arrive over
-time and need event-time progress or recoverable state. Schemas, ordering,
-sources, sinks, and managed checkpoints are explicit. Follow
-[expression workflows](symbolic-workflows.md) and the
-[streaming guide](streaming-guide.md).
+Use `TableExpr.stream(inputs)` or `Program.stream(inputs)` when data arrives
+over time. Enter with `async with` and consume with `async for`. Declare schemas
+and temporal ordering once; one native job retains state across batches.
+The table form yields Arrow tables; a Program yields named `StreamOutput`
+events. Inputs bind by logical declaration name. See the
+[streaming guide](streaming-guide.md#first-python-continuous-job).
+
+Convenience streams use temporary managed state. Async iterable inputs provide
+best-effort delivery without replay or native watermarks. For durable recovery,
+transactional delivery, or explicit sink ownership, use `program.compile_stream()`
+and `StreamingRunner` with capable source/sink bindings and a stable checkpoint
+root. A `SourceBinding` can also supply watermark progress to a convenience
+stream; it does not make that temporary stream restartable.
 
 For integrations needing diagnostics or owned plan state, compile and execute a
-plan directly. `Runtime`, `Batch`, `PipelineBuilder`, formula strings, and SQL
-remain supported advanced APIs. Rust crate APIs are documented as
+plan directly. `Runtime`, `Batch`, `PipelineBuilder`, and formula strings expose
+advanced graph, UDF, provider, and lifecycle controls. Rust crate APIs are documented as
 [runtime implementation and extension reference](rust-api.md).
 
 ## Supported boundaries
 
 DataFusion 54 executes table expressions and SQL. SQL nodes accept one
-read-only `SELECT` or CTE. Array providers are registered explicitly and use
+read-only `SELECT` or CTE. Batch SQL supports multiple aliases; streaming SQL
+accepts one alias and evaluates it separately for each native batch. SQL output
+has a new row lineage and does not inherit temporal ordering. Row-local
+expressions may follow SQL; compute rolling features before a SQL stage.
+Array providers are registered explicitly and use
 a bounded expression language. Graphs exchange `Batch` values rather than
 raw tables or arrays, and configuration contains data and registration
 references rather than executable objects.

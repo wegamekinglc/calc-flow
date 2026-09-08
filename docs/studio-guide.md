@@ -37,8 +37,9 @@ copy boundaries.
 
 This inspection reads the document exported by `program.to_project()`. It does
 not run the Python builder or reconstruct expression objects or logical aliases.
-Reloaded graphs retain physical binding names; `Program.collect` resolves logical
-names only for Python collection. Exporting with `mode="stream"` still requires
+Reloaded graphs retain physical binding names; Python collection and convenience
+stream methods resolve logical names for their own execution. Exporting with
+`mode="stream"` still requires
 explicit operational connector and state settings before a job can launch. Reported sizes are
 declared limits or estimates; use live metrics to observe memory and latency.
 

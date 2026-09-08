@@ -9,17 +9,22 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
-- 2026-09-08: Make Python expressions the default application API and Rust the
-  internal runtime. Root expression imports, operator composition, named table
-  methods, Arrow schema acceptance, and inferred Program inputs simplify
-  authoring. `compute`/`compute_async` and `collect`/`collect_async` return Arrow
-  tables by logical name with independent batch state. `compute` entry points
-  take `data`, `build`, and optional `runtime`/`options`; temporal ordering belongs
-  to `table_input` declarations executed through collection. `Program.to_project`
-  exports the native graph. Existing symbolic imports, FeatureSet/tuple forms,
-  explicit Runtime, formula/SQL builders, and Rust extensions remain supported.
-  Equivalent declaration identities, project-v3, stream/checkpoint, provider,
-  and Studio REST contracts remain unchanged; documentation uses this Python path.
+- 2026-09-09: Make Python expressions, SQL, and composable functions the
+  application API, with Rust as the internal runtime. Root imports, overloaded
+  operators, named table methods, inferred Arrow schemas, and automatic Program
+  inputs simplify authoring. `compute`/`compute_async` and collection return
+  Arrow tables with independent batch state. `cf.sql` and `TableExpr.sql`
+  compose native SQL with expressions; `Expr.pipe` applies reusable synchronous
+  functions at declaration time. SQL schemas are planned natively without row
+  execution. `TableExpr.stream` and `Program.stream` own one native job through
+  async contexts and iteration, retaining state across batches and returning
+  tables or named output events with bounded backpressure and awaited cleanup.
+  Iterable inputs use best-effort delivery and temporary managed checkpoints;
+  durable recovery keeps explicit bindings and managed state. Stream SQL uses
+  one alias and per-batch semantics, with no inherited temporal ordering.
+  `Program.to_project` exports data-only native graphs. Project-v3, managed
+  checkpoint, provider, and Studio REST contracts retain their formats.
+  Documentation and executable SQL/streaming examples use this Python path.
 
 - 2026-09-08: Compile symbolic fixed UTC tumbling/hopping event-window
   aggregation into the existing native window operator. Immutable
