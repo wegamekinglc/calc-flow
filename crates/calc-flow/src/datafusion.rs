@@ -313,15 +313,7 @@ impl DataFusionRuntime {
             BatchMetadata::new("schema", 0, BTreeMap::new())?,
         )?;
         registrations.register("input", &input, Some(node_id))?;
-        let dataframe = context
-            .sql(&query)
-            .await
-            .map_err(|error| datafusion_error(Some(node_id), error))?;
-        let plan = dataframe
-            .create_physical_plan()
-            .await
-            .map_err(|error| datafusion_error(Some(node_id), error))?;
-        Ok(plan.schema())
+        physical_query_schema(context, &query, node_id).await
     }
 
     /// Executes one read-only SQL query over run-scoped table aliases.
@@ -916,6 +908,22 @@ impl Drop for TableRegistrations<'_> {
             let _ = self.context.deregister_table(alias.as_str());
         }
     }
+}
+
+async fn physical_query_schema(
+    context: &SessionContext,
+    query: &str,
+    node_id: &str,
+) -> Result<SchemaRef> {
+    let dataframe = context
+        .sql(query)
+        .await
+        .map_err(|error| datafusion_error(Some(node_id), error))?;
+    let plan = dataframe
+        .create_physical_plan()
+        .await
+        .map_err(|error| datafusion_error(Some(node_id), error))?;
+    Ok(plan.schema())
 }
 
 fn datafusion_error(node_id: Option<&str>, error: impl std::fmt::Display) -> CalcFlowError {

@@ -282,6 +282,7 @@ def test_capabilities_route_exposes_the_typed_runtime_session_snapshot(
         "rolling",
         "sql",
         "stream_join",
+        "window",
     ]
     assert document["runtime"]["operators"][0]["modes"] == ["batch", "stream"]
     assert document["runtime"]["operators"][0]["finality"] == "group_final_append_only"

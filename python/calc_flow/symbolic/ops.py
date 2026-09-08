@@ -1224,11 +1224,7 @@ def _window_aggregate_attrs(
     path = f"calc_flow.symbolic.{function}"
     if not declarations:
         raise ValueError(f"{path}.aggregates: invalid_literal: must not be empty")
-    names = {"window_start", "window_end"}
-    for index, group in enumerate(groups.items):
-        assert isinstance(group, CStr)
-        _window_output_name(group.value, names, f"{path}.group_by[{index}]")
-        names.add(group.value)
+    names = _window_group_names(groups, function)
     for index, aggregate in enumerate(declarations):
         if type(aggregate) is not WindowAggregate:
             raise namespace_error(
@@ -1252,6 +1248,18 @@ def _window_aggregate_attrs(
             )
         )
     }
+
+
+def _window_group_names(groups: CSeq, function: str, /) -> set[str]:
+    names = {"window_start", "window_end"}
+    for index, group in enumerate(groups.items):
+        parameter = f"group_by[{index}]"
+        if not isinstance(group, CStr):
+            raise namespace_error(function, parameter, "str", group)
+        path = f"calc_flow.symbolic.{function}.{parameter}"
+        _window_output_name(group.value, names, path)
+        names.add(group.value)
+    return names
 
 
 def _window_output_name(name: str, names: set[str], path: str, /) -> None:

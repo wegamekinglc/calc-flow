@@ -69,14 +69,17 @@ def _fragment_schema(
         dependencies = parents[name]
         if len(dependencies) > 1:
             raise RuntimeError("row schema planning requires one input per stage")
-        operator = nodes[name]["operator"]
-        if operator["kind"] != "expression" or operator["udfs"]:
-            raise RuntimeError("row schema planning requires native expressions")
         schema = schemas[dependencies[0]] if dependencies else source_schema
-        schemas[name] = runtime._infer_symbolic_expression_schema(
-            operator["select"], operator["filter"], schema
-        )
+        schemas[name] = _expression_schema(nodes[name]["operator"], runtime, schema)
     return schemas["cf_schema_result"]
+
+
+def _expression_schema(operator, runtime: Runtime, schema: pa.Schema, /) -> pa.Schema:
+    if operator["kind"] != "expression" or operator["udfs"]:
+        raise RuntimeError("row schema planning requires native expressions")
+    return runtime._infer_symbolic_expression_schema(
+        operator["select"], operator["filter"], schema
+    )
 
 
 def infer_table_schema(

@@ -665,8 +665,8 @@ impl PyRuntime {
         Ok(PyStreamExecutionPlan::new(plan, owner))
     }
 
-    #[pyo3(signature = (select, filter, input_schema))]
-    fn _infer_expression_schema<'py>(
+    #[pyo3(name = "_infer_expression_schema", signature = (select, filter, input_schema))]
+    fn infer_expression_schema<'py>(
         &self,
         py: Python<'py>,
         select: Vec<String>,
@@ -811,7 +811,7 @@ mod tests {
                 )))
             };
             let output = runtime
-                ._infer_expression_schema(
+                .infer_expression_schema(
                     py,
                     vec!["(x > 0) AND false AS flag".into()],
                     None,
@@ -824,16 +824,16 @@ mod tests {
             assert_eq!(output.field(0).name(), "flag");
             assert!(!output.field(0).is_nullable());
             let error = runtime
-                ._infer_expression_schema(py, vec!["missing".into()], None, input())
+                .infer_expression_schema(py, vec!["missing".into()], None, input())
                 .unwrap_err();
             assert!(error.is_instance_of::<crate::error::ExecutionError>(py));
             let error = runtime
-                ._infer_expression_schema(py, vec![], None, input())
+                .infer_expression_schema(py, vec![], None, input())
                 .unwrap_err();
             assert!(error.is_instance_of::<crate::error::ConfigError>(py));
             runtime.__clear__();
             let error = runtime
-                ._infer_expression_schema(py, vec!["x".into()], None, input())
+                .infer_expression_schema(py, vec!["x".into()], None, input())
                 .unwrap_err();
             assert!(error.is_instance_of::<PyRuntimeError>(py));
         });

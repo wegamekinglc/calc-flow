@@ -4,7 +4,7 @@
 CHANGELOG 为准。本文保留实施任务及验收合同。
 
 工作项 slug：`symbolic-event-window-aggregation`。
-核对日期：2026-09-08。
+核对日期：2026-09-08（Asia/Shanghai，UTC+08:00；本文日期均使用该时区）。
 源码基线：`464a480a7d87d7e5933b54afa1d7a30af9d18971`。
 范围：Python symbolic 到既有 Rust 原生事件窗口的编译、执行与恢复接入。
 

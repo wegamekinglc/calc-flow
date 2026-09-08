@@ -165,6 +165,19 @@ def expected_minutes() -> pa.Table:
     )
 
 
+def check_results(minute: pa.Table, summary: pa.Table) -> None:
+    expected = expected_minutes()
+    if minute.schema != expected.schema or not minute.equals(expected):
+        raise RuntimeError(f"unexpected minute result: {minute}")
+    expected_summary = expected.append_column(
+        "price_range", pa.array([2.0, None, 20.0], type=pa.float64())
+    )
+    if summary.schema != expected_summary.schema or not summary.equals(
+        expected_summary
+    ):
+        raise RuntimeError(f"unexpected summary result: {summary}")
+
+
 async def main() -> None:
     runtime = Runtime()
     program = minute_program()
@@ -199,16 +212,7 @@ async def main() -> None:
 
     minute = pa.concat_tables(minute_sink.tables)
     summary = pa.concat_tables(summary_sink.tables)
-    expected = expected_minutes()
-    if minute.schema != expected.schema or not minute.equals(expected):
-        raise RuntimeError(f"unexpected minute result: {minute}")
-    expected_summary = expected.append_column(
-        "price_range", pa.array([2.0, None, 20.0], type=pa.float64())
-    )
-    if summary.schema != expected_summary.schema or not summary.equals(
-        expected_summary
-    ):
-        raise RuntimeError(f"unexpected summary result: {summary}")
+    check_results(minute, summary)
     print("minute rows:", minute.num_rows)
     print("volumes:", minute["volume"].to_pylist())
     print("average prices:", minute["avg_price"].to_pylist())

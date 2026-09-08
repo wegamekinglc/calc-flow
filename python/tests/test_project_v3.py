@@ -183,5 +183,6 @@ class TestProjectV3Surface:
             "rolling",
             "sql",
             "stream_join",
+            "window",
         )
         assert tuple(connector.name for connector in caps.connectors) == ("file",)

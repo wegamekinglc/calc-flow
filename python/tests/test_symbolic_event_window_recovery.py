@@ -387,6 +387,18 @@ def _assert_tables_equal(actual: pa.Table, expected: pa.Table) -> None:
             assert actual[field.name].equals(expected[field.name])
 
 
+def _table_snapshot(value: pa.Table) -> tuple[pa.Schema, list[list[object]]]:
+    """Preserve schema and epoch values without consulting host timezone data."""
+    return value.schema, [
+        (
+            column.cast(pa.int64()).to_pylist()
+            if pa.types.is_timestamp(column.type)
+            else column.to_pylist()
+        )
+        for column in value.columns
+    ]
+
+
 def _split_events(segmentation: str) -> list[tuple[str, object]]:
     value = _trades()
     if segmentation == "single":
@@ -418,7 +430,7 @@ def test_batch_splits_with_fixed_watermarks_match_native(
 ) -> None:
     events = _split_events(segmentation)
     originals = [value for kind, value in events if kind == "data"]
-    snapshots = [value.to_pylist() for value in originals]
+    snapshots = [_table_snapshot(value) for value in originals]
 
     async def exercise() -> None:
         expected, native_metrics = await _complete(
@@ -461,7 +473,7 @@ def test_batch_splits_with_fixed_watermarks_match_native(
             )
 
     asyncio.run(exercise())
-    assert [value.to_pylist() for value in originals] == snapshots
+    assert [_table_snapshot(value) for value in originals] == snapshots
 
 
 def test_native_fixture_uses_handwritten_window_spec(tmp_path: Path) -> None:
@@ -472,34 +484,7 @@ def test_native_fixture_uses_handwritten_window_spec(tmp_path: Path) -> None:
     assert metrics["null_event_time_rows"] == 1
 
 
-def test_filters_and_derived_columns_preserve_shared_window_boundary(
-    tmp_path: Path,
-) -> None:
-    trades = _program().inputs[0]
-    positive = table.filter(trades, trades["quantity"] > 0)
-    prepared = positive.with_columns(
-        FeatureSet([("event_ts", positive["ts"]), ("amount", positive["quantity"] * 2)])
-    )
-    prepared = table.project(prepared, ["event_ts", "symbol", "trade_id", "amount"])
-    minute = window.tumbling(
-        prepared,
-        event_time="event_ts",
-        size_micros=MINUTE,
-        group_by=["symbol"],
-        aggregates=[
-            window.sum("amount", output="volume"),
-            window.count("trade_id", output="trade_count"),
-        ],
-    )
-    selected = table.filter(minute, minute["volume"] > 25)
-    selected = selected.with_columns(FeatureSet([("excess", selected["volume"] - 25)]))
-    selected = table.project(selected, ["symbol", "window_end", "volume", "excess"])
-    symbolic_plan = Program(
-        "window-filter-boundary",
-        inputs=[trades],
-        outputs=[("all", minute), ("selected", selected)],
-    ).compile_stream(Runtime())
-
+def _filtered_window_native_plan() -> StreamExecutionPlan:
     document = _native_document()
     native_window = document["graph"]["nodes"][0]
     original_schema = native_window["input_ports"][0]["schema"]
@@ -618,6 +603,38 @@ def test_filters_and_derived_columns_preserve_shared_window_boundary(
     native_plan = PipelineBuilder._from_json(json.dumps(document)).compile_stream(
         runtime=Runtime()
     )
+    return native_plan
+
+
+def test_filters_and_derived_columns_preserve_shared_window_boundary(
+    tmp_path: Path,
+) -> None:
+    trades = _program().inputs[0]
+    positive = table.filter(trades, trades["quantity"] > 0)
+    prepared = positive.with_columns(
+        FeatureSet([("event_ts", positive["ts"]), ("amount", positive["quantity"] * 2)])
+    )
+    prepared = table.project(prepared, ["event_ts", "symbol", "trade_id", "amount"])
+    minute = window.tumbling(
+        prepared,
+        event_time="event_ts",
+        size_micros=MINUTE,
+        group_by=["symbol"],
+        aggregates=[
+            window.sum("amount", output="volume"),
+            window.count("trade_id", output="trade_count"),
+        ],
+    )
+    selected = table.filter(minute, minute["volume"] > 25)
+    selected = selected.with_columns(FeatureSet([("excess", selected["volume"] - 25)]))
+    selected = table.project(selected, ["symbol", "window_end", "volume", "excess"])
+    symbolic_plan = Program(
+        "window-filter-boundary",
+        inputs=[trades],
+        outputs=[("all", minute), ("selected", selected)],
+    ).compile_stream(Runtime())
+
+    native_plan = _filtered_window_native_plan()
     values = pa.table(
         {
             "ts": [
@@ -631,7 +648,7 @@ def test_filters_and_derived_columns_preserve_shared_window_boundary(
         },
         schema=_schema(),
     )
-    original = values.to_pylist()
+    original = _table_snapshot(values)
     events = [
         ("data", values.slice(0, 6)),
         ("data", values.slice(6)),
@@ -703,7 +720,7 @@ def test_filters_and_derived_columns_preserve_shared_window_boundary(
             _assert_tables_equal(symbolic_outputs[name], expected)
 
     asyncio.run(exercise())
-    assert values.to_pylist() == original
+    assert _table_snapshot(values) == original
 
 
 def test_watermark_end_closes_exactly_and_eoi_flushes_without_early_output(
@@ -728,9 +745,11 @@ def test_watermark_end_closes_exactly_and_eoi_flushes_without_early_output(
             assert await job.trigger_checkpoint_async() == 2
             first_window = pa.concat_tables(sink.tables)
             assert first_window["symbol"].to_pylist() == ["A", "B"]
-            assert (
-                first_window["window_end"].to_pylist()
-                == [BASE + timedelta(seconds=60)] * 2
+            assert first_window["window_end"].equals(
+                pa.chunked_array(
+                    [[BASE + timedelta(seconds=60)] * 2],
+                    type=pa.timestamp("us", tz="UTC"),
+                )
             )
             source.release(2)
             assert await asyncio.wait_for(source.paused.get(), timeout=30) == 3
@@ -749,7 +768,9 @@ def test_watermark_end_closes_exactly_and_eoi_flushes_without_early_output(
         actual, symbolic_metrics = await run("symbolic")
         _assert_tables_equal(actual, expected)
         assert actual.num_rows == 3
-        assert actual["window_end"].to_pylist()[-1] == BASE + timedelta(seconds=120)
+        assert actual["window_end"][-1].equals(
+            pa.scalar(BASE + timedelta(seconds=120), type=pa.timestamp("us", tz="UTC"))
+        )
         assert symbolic_metrics == native_metrics
 
     asyncio.run(exercise())
@@ -779,9 +800,12 @@ def test_hopping_late_row_contributes_only_to_still_open_assignment(
             _compile("symbolic", hopping=True), events, tmp_path / "symbolic"
         )
         _assert_tables_equal(actual, expected)
-        assert actual["window_start"].to_pylist() == [
-            BASE + timedelta(seconds=seconds) for seconds in [-60, 0, 60]
-        ]
+        assert actual["window_start"].equals(
+            pa.chunked_array(
+                [[BASE + timedelta(seconds=seconds) for seconds in [-60, 0, 60]]],
+                type=pa.timestamp("us", tz="UTC"),
+            )
+        )
         assert actual["trade_count"].to_pylist() == [1, 3, 1]
         assert actual["volume"].to_pylist() == [10, 30, 13]
         assert symbolic_metrics == native_metrics
@@ -1099,6 +1123,15 @@ def test_cached_plan_starts_independent_window_state_in_two_jobs(
     asyncio.run(exercise())
 
 
+def _portable_aggregate_functions(arrow_type: pa.DataType, ordered: bool) -> list[str]:
+    functions = ["count"]
+    if ordered:
+        functions.extend(["min", "max"])
+    if pa.types.is_integer(arrow_type) or pa.types.is_floating(arrow_type):
+        functions.extend(["sum", "avg"])
+    return functions
+
+
 @pytest.mark.parametrize(
     ("event_type", "arrow_event_type"),
     [
@@ -1156,12 +1189,7 @@ def test_full_portable_type_matrix_and_null_groups_match_native(
             group_by.append(group_name)
             fields.append(Field(group_name, dtype))
             arrays[group_name] = pa.array([values[0]] * 3 + [None], type=arrow_type)
-        functions = ["count"]
-        if ordered:
-            functions.extend(["min", "max"])
-        if pa.types.is_integer(arrow_type) or pa.types.is_floating(arrow_type):
-            functions.extend(["sum", "avg"])
-        for function in functions:
+        for function in _portable_aggregate_functions(arrow_type, ordered):
             output = f"{name}_{function}"
             aggregates.append(getattr(window, function)(name, output=output))
             native_aggregates.append(
@@ -1280,8 +1308,8 @@ def test_nan_signed_zero_group_order_and_epoch_boundaries_match_native(
             symbolic_plan, [("data", value)], tmp_path / "symbolic"
         )
         _assert_tables_equal(actual, expected)
-        assert min(actual["window_start"].to_pylist()) == epoch - timedelta(seconds=120)
-        assert max(actual["window_end"].to_pylist()) == epoch + timedelta(seconds=180)
+        assert min(actual["window_start"].cast(pa.int64()).to_pylist()) == -2 * MINUTE
+        assert max(actual["window_end"].cast(pa.int64()).to_pylist()) == 3 * MINUTE
         assert sum(actual["count"].to_pylist()) == 8
 
     asyncio.run(exercise())

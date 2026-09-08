@@ -7,6 +7,7 @@ can see through that boundary and no Python object owns runtime window state.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from hashlib import sha256
 from typing import TYPE_CHECKING
@@ -152,15 +153,7 @@ class _WindowGraph:
         self._sources: dict[str, str] = {}
 
     def allocate(self, preferred: str) -> str:
-        if (
-            len(preferred) > 48
-            or not preferred[0].isascii()
-            or not preferred[0].isalpha()
-            or any(
-                not char.isascii() or not (char.isalnum() or char in "_-")
-                for char in preferred
-            )
-        ):
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,47}", preferred) is None:
             preferred = f"cf_{sha256(preferred.encode()).hexdigest()[:40]}"
         name = preferred
         ordinal = 0
@@ -212,29 +205,39 @@ class _WindowGraph:
             }
             for edge in raw_edges
         )
-        for node_id, port in _downstream_input_endpoints(raw_nodes, raw_edges):
+        self._connect_fragment_inputs(raw_nodes, raw_edges, aliases, bindings)
+        for declaration in document.get("static_inputs", []):
+            if declaration not in self.static_inputs:
+                self.static_inputs.append(declaration)
+
+    def _connect_fragment_inputs(
+        self,
+        nodes: list[dict[str, object]],
+        edges: list[dict[str, object]],
+        aliases: dict[str, str],
+        bindings: dict[str, str],
+    ) -> None:
+        by_id = {node["id"]: node for node in nodes}
+        for node_id, port in _downstream_input_endpoints(nodes, edges):
             ports = by_id[node_id].get("input_ports", [])
             if any(item["name"] == port and item["kind"] == "array" for item in ports):
                 continue
-            if len(bindings) == 1:
-                upstream = next(iter(bindings.values()))
-            elif node_id in bindings:
-                upstream = bindings[node_id]
-            else:
-                raise RuntimeError(
-                    f"unresolved event-window fragment source {node_id!r}"
-                )
             self.edges.append(
                 {
-                    "source_node": upstream,
+                    "source_node": _fragment_upstream(node_id, bindings),
                     "source_port": "output",
                     "target_node": aliases[node_id],
                     "target_port": port,
                 }
             )
-        for declaration in document.get("static_inputs", []):
-            if declaration not in self.static_inputs:
-                self.static_inputs.append(declaration)
+
+
+def _fragment_upstream(node_id: str, bindings: dict[str, str], /) -> str:
+    if len(bindings) == 1:
+        return next(iter(bindings.values()))
+    if node_id not in bindings:
+        raise RuntimeError(f"unresolved event-window fragment source {node_id!r}")
+    return bindings[node_id]
 
 
 def _temporary_input(graph: _WindowGraph, value: TableExpr, /) -> TableExpr:
@@ -251,40 +254,46 @@ def _temporary_input(graph: _WindowGraph, value: TableExpr, /) -> TableExpr:
     )
 
 
+def _window_input_source(
+    graph: _WindowGraph, plan: _WindowPlan, runtime: Runtime, /
+) -> str:
+    from calc_flow.symbolic.lower.program import lower_program_document
+    from calc_flow.symbolic.program import Program
+
+    source_digests = _reachable_inputs(plan.node.args[0])
+    inputs = tuple(
+        value for value in graph.program.inputs if value.digest in source_digests
+    )
+    if len(inputs) != 1 or inputs[0]._node.op.name != "table_input":
+        raise RuntimeError("analyzed event window must have one table source")
+    source_id = graph.source(inputs[0]._node)
+    if plan.node.args[0].op.name == "table_input":
+        return source_id
+    upstream = graph.allocate(f"{plan.node_id}__input")
+    fragment = Program(
+        graph.program.name,
+        inputs=inputs,
+        outputs=[(upstream, TableExpr(plan.node.args[0]))],
+    )
+    document = lower_program_document(fragment, runtime, "stream")
+    # Pin the complete pre-window schema, including derived columns.
+    for node in document["graph"]["nodes"]:
+        if node["id"] == upstream:
+            node["output_ports"] = [_table_port(plan.input_schema, "output")]
+    graph.append_fragment(
+        document, {"input": source_id}, {upstream: upstream}, upstream
+    )
+    return upstream
+
+
 def _append_window_inputs(
     graph: _WindowGraph,
     plans: tuple[_WindowPlan, ...],
     runtime: Runtime,
     /,
 ) -> None:
-    from calc_flow.symbolic.lower.program import lower_program_document
-    from calc_flow.symbolic.program import Program
-
     for plan in plans:
-        source_digests = _reachable_inputs(plan.node.args[0])
-        inputs = tuple(
-            value for value in graph.program.inputs if value.digest in source_digests
-        )
-        if len(inputs) != 1 or inputs[0]._node.op.name != "table_input":
-            raise RuntimeError("analyzed event window must have one table source")
-        source_id = graph.source(inputs[0]._node)
-        if plan.node.args[0].op.name == "table_input":
-            upstream = source_id
-        else:
-            upstream = graph.allocate(f"{plan.node_id}__input")
-            fragment = Program(
-                graph.program.name,
-                inputs=inputs,
-                outputs=[(upstream, TableExpr(plan.node.args[0]))],
-            )
-            document = lower_program_document(fragment, runtime, "stream")
-            # Pin the complete pre-window schema, including derived columns.
-            for node in document["graph"]["nodes"]:
-                if node["id"] == upstream:
-                    node["output_ports"] = [_table_port(plan.input_schema, "output")]
-            graph.append_fragment(
-                document, {"input": source_id}, {upstream: upstream}, upstream
-            )
+        upstream = _window_input_source(graph, plan, runtime)
         graph.nodes.append(_window_node(plan))
         graph.edges.append(
             {
@@ -296,17 +305,9 @@ def _append_window_inputs(
         )
 
 
-def _append_window_outputs(
-    graph: _WindowGraph,
-    plans: tuple[_WindowPlan, ...],
-    runtime: Runtime,
-    allowed_lateness_micros: int,
-    late_policy: str,
-    /,
-) -> None:
-    from calc_flow.symbolic.lower.program import lower_program_document
-    from calc_flow.symbolic.program import Program
-
+def _window_bindings(
+    graph: _WindowGraph, plans: tuple[_WindowPlan, ...], /
+) -> tuple[dict[str, Node], list[object], dict[str, str]]:
     replacements: dict[str, Node] = {}
     inputs: list[object] = []
     bindings: dict[str, str] = {}
@@ -320,22 +321,37 @@ def _append_window_outputs(
         replacements[plan.node.digest] = virtual._node
         inputs.append(virtual)
         bindings[_cstr(virtual._node.attr("name"))] = plan.node_id
+    return replacements, inputs, bindings
+
+
+def _unwindowed_bindings(
+    graph: _WindowGraph, replacements: dict[str, Node], /
+) -> tuple[dict[str, Node], list[object], dict[str, str]]:
     outside_windows = frozenset().union(
         *(
             _reachable_inputs(_rewrite_nodes(value._node, replacements))
             for _, value in graph.program.outputs
         )
     )
+    rewritten: dict[str, Node] = {}
+    inputs: list[object] = []
+    bindings: dict[str, str] = {}
     for value in graph.program.inputs:
         if value.digest not in outside_windows:
             continue
         if isinstance(value, TableExpr):
             replacement = _temporary_input(graph, value)
-            replacements[value.digest] = replacement._node
+            rewritten[value.digest] = replacement._node
             inputs.append(replacement)
             bindings[_cstr(replacement._node.attr("name"))] = graph.source(value._node)
         else:
             inputs.append(value)
+    return rewritten, inputs, bindings
+
+
+def _window_output_groups(
+    graph: _WindowGraph, replacements: dict[str, Node], /
+) -> list[tuple[tuple[str, object], ...]]:
     outputs = tuple(
         (name, type(value)(_rewrite_nodes(value._node, replacements)))
         for name, value in graph.program.outputs
@@ -348,17 +364,49 @@ def _append_window_outputs(
     groups = ([regular] if regular else []) + [
         (item,) for item in outputs if item[1]._node.op.name == "attach_columns"
     ]
+    return groups
+
+
+def _output_fragment(
+    name: str,
+    group: tuple[tuple[str, object], ...],
+    inputs: list[object],
+    bindings: dict[str, str],
+) -> tuple[Program, dict[str, str]]:
+    from calc_flow.symbolic.program import Program
+
+    reachable = frozenset().union(
+        *(_reachable_inputs(value._node) for _, value in group)
+    )
+    selected_inputs = tuple(value for value in inputs if value.digest in reachable)
+    selected_bindings = {
+        _cstr(value._node.attr("name")): bindings[_cstr(value._node.attr("name"))]
+        for value in selected_inputs
+        if isinstance(value, TableExpr)
+    }
+    fragment = Program(name, inputs=selected_inputs, outputs=group)
+    return fragment, selected_bindings
+
+
+def _append_window_outputs(
+    graph: _WindowGraph,
+    plans: tuple[_WindowPlan, ...],
+    runtime: Runtime,
+    allowed_lateness_micros: int,
+    late_policy: str,
+    /,
+) -> None:
+    from calc_flow.symbolic.lower.program import lower_program_document
+
+    replacements, window_inputs, window_bindings = _window_bindings(graph, plans)
+    outside, other_inputs, other_bindings = _unwindowed_bindings(graph, replacements)
+    groups = _window_output_groups(graph, {**replacements, **outside})
+    inputs = [*window_inputs, *other_inputs]
+    bindings = {**window_bindings, **other_bindings}
     for ordinal, group in enumerate(groups):
-        reachable = frozenset().union(
-            *(_reachable_inputs(value._node) for _, value in group)
+        fragment, selected_bindings = _output_fragment(
+            graph.program.name, group, inputs, bindings
         )
-        selected_inputs = tuple(value for value in inputs if value.digest in reachable)
-        selected_bindings = {
-            _cstr(value._node.attr("name")): bindings[_cstr(value._node.attr("name"))]
-            for value in selected_inputs
-            if isinstance(value, TableExpr)
-        }
-        fragment = Program(graph.program.name, inputs=selected_inputs, outputs=group)
         document = lower_program_document(
             fragment,
             runtime,

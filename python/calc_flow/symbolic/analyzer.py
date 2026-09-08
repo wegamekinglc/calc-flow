@@ -508,26 +508,34 @@ class _Analyzer:
             return cached
         previous_issues = len(self._issues)
         facts = self._analyze_table(node, path)
-        if (
+        if self._requires_native_row_schema(node, facts):
+            facts = replace(
+                facts, schema=self._native_row_schema(node, facts.schema, path)
+            )
+        if len(self._issues) != previous_issues or self._has_invalid_table_argument(
+            node
+        ):
+            self._invalid_table_nodes.add(node.digest)
+        self._table_cache[node.digest] = facts
+        return facts
+
+    def _requires_native_row_schema(self, node: Node, facts: TableFacts, /) -> bool:
+        return (
             not self._issues
             and self._mode == "stream"
             and isinstance(facts.lineage, _WindowRowOrigin)
             and node.op.name in {"project", "filter", "with_columns"}
-        ):
-            facts = replace(
-                facts, schema=self._native_row_schema(node, facts.schema, path)
-            )
-        if len(self._issues) != previous_issues or any(
+        )
+
+    def _has_invalid_table_argument(self, node: Node, /) -> bool:
+        return any(
             argument.digest in self._invalid_table_nodes
             or (
                 (column := self._column_cache.get(argument.digest)) is not None
                 and column.data_type is None
             )
             for argument in node.args
-        ):
-            self._invalid_table_nodes.add(node.digest)
-        self._table_cache[node.digest] = facts
-        return facts
+        )
 
     def _native_row_schema(
         self, node: Node, expected: tuple[Field, ...], path: str, /
@@ -1139,6 +1147,9 @@ class _Analyzer:
                 f"unknown event window declaration {node.op.name}@{node.op.version}",
             )
             return TableFacts((), None, frozenset(), None, (), ())
+        return self._legacy_window_table(node, path)
+
+    def _legacy_window_table(self, node: Node, path: str, /) -> TableFacts:
         child = self.table(node.args[0], f"{path}.{node.op.name}.value")
         if "stream_join" in child.state:
             self._require_post_join_ordering(
@@ -1194,6 +1205,21 @@ class _Analyzer:
                 (),
             )
         by_name = {field.name: field for field in child.schema}
+        self._window_event_time_field(node, by_name, role)
+        fields = self._window_declared_fields(node, by_name, role)
+        fields = self._window_exact_fields(node, child, fields, role)
+        return TableFacts(
+            fields,
+            _WindowRowOrigin(node.digest),
+            child.state | frozenset({"window"}),
+            None,
+            (),
+            (),
+        )
+
+    def _window_event_time_field(
+        self, node: Node, by_name: dict[str, Field], role: str, /
+    ) -> None:
         event_time = _cstr(node.attr("event_time"))
         time_field = self._window_field(
             by_name,
@@ -1209,6 +1235,10 @@ class _Analyzer:
                 "capability_mismatch",
                 "event window time must be an unchanged input column or pure rename",
             )
+
+    def _window_declared_fields(
+        self, node: Node, by_name: dict[str, Field], role: str, /
+    ) -> list[Field]:
         fields = [
             Field("window_start", _EVENT_TIME_TYPE, nullable=False),
             Field("window_end", _EVENT_TIME_TYPE, nullable=False),
@@ -1227,6 +1257,11 @@ class _Analyzer:
                 )
                 if field is not None:
                     fields.append(field)
+        return fields
+
+    def _window_exact_fields(
+        self, node: Node, child: TableFacts, fields: list[Field], role: str, /
+    ) -> tuple[Field, ...]:
         exact_input = child.schema
         if self._mode == "stream" and not self._issues:
             exact_input = self._native_row_schema(
@@ -1235,17 +1270,9 @@ class _Analyzer:
         self._window_input_schemas[node.digest] = exact_input
         exact_by_name = {field.name: field for field in exact_input}
         groups = frozenset(_cstr_seq(node.attr("group_by")))
-        fields = [
+        return tuple(
             exact_by_name[field.name] if field.name in groups else field
             for field in fields
-        ]
-        return TableFacts(
-            tuple(fields),
-            _WindowRowOrigin(node.digest),
-            child.state | frozenset({"window"}),
-            None,
-            (),
-            (),
         )
 
     def _window_input_path(self, node: Node, path: str, seen: set[str], /) -> None:
