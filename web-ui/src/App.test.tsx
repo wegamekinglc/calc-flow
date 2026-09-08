@@ -352,10 +352,10 @@ describe('Calc Flow Studio', () => {
     render(<App />);
 
     const right = await screen.findByLabelText('Input alias 2');
-    await act(async () => {
+    await act(() => {
       fireEvent.change(right, { target: { value: 'rhs' } });
     });
-    await act(async () => {
+    await act(() => {
       fireEvent.keyDown(right, { key: 'Enter' });
     });
     expect(screen.getByLabelText('Input alias 2')).toHaveValue('rhs');
