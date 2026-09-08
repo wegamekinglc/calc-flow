@@ -140,16 +140,29 @@ Run the complete source-watermark-window-sink example with:
 cargo run -p calc-flow --example windowed_streaming
 ```
 
-Project v3 represents the same operator as a data-only `window` node. Use that
-form from Python or Studio; the current functional Python builder does not add
-a separate window convenience method. The
+Python symbolic programs declare the same native operator with
+`window.tumbling` or `window.hopping` and an ordered sequence of
+`window.count`, `window.sum`, `window.min`, `window.max`, or `window.avg`
+aggregates. Run
+[`symbolic_event_window.py`](../examples/symbolic_event_window.py) for a
+grouped minute summary with explicit source watermarks. The
+[symbolic window reference](symbolic-api.md#symbolic-event-time-window-aggregation)
+defines exact types, row origins, and the supported stateless transformations
+before and after the window.
+
+Project v3 represents the operator as a data-only `window` node. Python and
+Studio can use that form directly; the functional Python builder has no
+separate window convenience method. The
 [project guide](projects-guide.md#union-and-event-time-windows) contains the
 exact project fragment.
 
 Tumbling and hopping windows use fixed UTC microsecond geometry. Supported
 aggregates are `count`, `sum`, `min`, `max`, and `avg` over the validated type
 matrix. Output is deterministic by window bounds and group key. Empty windows
-are not materialized.
+are not materialized. Null-time rows are dropped. Watermark equality with the
+window end closes the window, and end-of-input flushes remaining state.
+Hopping drops only already-closed assignments from a late row. No early,
+update, or retraction output is emitted.
 
 ## Sink contract
 

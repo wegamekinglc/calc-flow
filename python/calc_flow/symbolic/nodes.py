@@ -465,6 +465,13 @@ _PRIMITIVES: dict[str, PrimitiveSpec] = {
 }
 
 
+_WINDOW_AGGREGATES: Final[dict[str, PrimitiveSpec]] = {
+    name: PrimitiveSpec(spec.allowed | {"aggregates"}, spec.defaults)
+    for name, spec in _PRIMITIVES.items()
+    if name in ("window_tumbling", "window_hopping")
+}
+
+
 def build(
     name: str,
     args: Sequence[Node],
@@ -475,7 +482,18 @@ def build(
 ) -> Node:
     """Build one normalized node with materialized defaults and its digest."""
 
-    spec = _PRIMITIVES.get(name)
+    if name in _WINDOW_AGGREGATES:
+        if type(version) is not int or version not in (1, 2):
+            raise ValueError(
+                f"unknown_primitive_version: symbolic primitive {name!r}@{version}"
+            )
+        if version == 2 and "aggregates" not in attrs:
+            raise ValueError(f"primitive {name!r}@2 requires aggregates")
+    spec = (
+        _WINDOW_AGGREGATES[name]
+        if version == 2 and name in _WINDOW_AGGREGATES
+        else _PRIMITIVES.get(name)
+    )
     if spec is None:
         raise ValueError(f"unknown symbolic primitive {name!r}")
     unknown = frozenset(attrs) - spec.allowed

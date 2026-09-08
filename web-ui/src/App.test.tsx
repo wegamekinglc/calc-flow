@@ -353,7 +353,11 @@ describe('Calc Flow Studio', () => {
 
     const right = await screen.findByLabelText('Input alias 2');
     fireEvent.change(right, { target: { value: 'rhs' } });
-    fireEvent.keyDown(right, { key: 'Enter' });
+    await waitFor(() => {
+      expect(screen.getByLabelText('Input alias 2')).toHaveValue('rhs');
+    });
+    fireEvent.keyDown(screen.getByLabelText('Input alias 2'), { key: 'Enter' });
+    expect(await screen.findByText('in · rhs')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     await waitFor(() => expect(

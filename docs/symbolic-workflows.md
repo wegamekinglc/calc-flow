@@ -20,6 +20,7 @@ On this page:
 
 - [Compose and run financial features](#compose-and-run-financial-features)
 - [Run continuously and recover](#run-continuously-and-recover)
+- [Aggregate event-time windows](#aggregate-event-time-windows)
 - [Join two symbolic streams](#join-two-symbolic-streams)
 - [Use static matrices with NumPy or JAX](#use-static-matrices-with-numpy-or-jax)
 - [Read capability failures](#read-capability-failures)
@@ -88,13 +89,60 @@ lowered rolling or cross-section node remains the only implementation of its
 state and watermark rules; the streaming runner checkpoints that native state
 using the ordinary project-v3 recovery contract.
 
+## Aggregate event-time windows
+
+[`symbolic_event_window.py`](../examples/symbolic_event_window.py) declares
+two UTC one-minute windows grouped by symbol. It computes non-null trade
+count, volume, low, high, and arithmetic average price, then derives
+`price_range` from the window's high and low columns. The named `minute` and
+`summary` outputs share one native window state owner.
+
+```bash
+uv run python examples/symbolic_event_window.py
+```
+
+The source sends two public `Watermark` events through
+`SourceProvidedWatermarks`, each equal to a window end. Each closes its window
+and appends final rows in native window/key order. Null-time rows are dropped,
+and all-null aggregate
+inputs retain the native count/null result rules. The source and sinks use
+finite synthetic data with no external service.
+
+The three result rows have volumes `[40, None, 20]`, average prices
+`[101.0, None, 100.0]`, and price ranges `[2.0, None, 20.0]`. The example
+checks exact Arrow schemas and row order as well as values.
+
+Use `window.tumbling` or `window.hopping` with a non-empty `aggregates`
+sequence. The helpers `window.count`, `window.sum`, `window.min`,
+`window.max`, and `window.avg` reference named columns. Derive an ordinary
+aggregate input before the window with `with_columns`; use `table.project`,
+`table.filter`, or `with_columns` to transform final window rows afterward.
+The timestamp used for assignment must pass through from the source unchanged
+or by a pure rename. Event windows accept nullable time and do not require
+rolling's entity and sequence declarations.
+
+Window results have their own row origin. Mixing them with original input
+columns or arrays by position is invalid. Each window path permits one window
+and stateless table work on either side; joins, rolling/cross-section stages,
+another window, and matrix attachment cannot enter that path. Independent
+windows and other legal output branches may coexist. The
+[symbolic window reference](symbolic-api.md#symbolic-event-time-window-aggregation)
+defines types, geometry, stable diagnostics, and lateness-option rules.
+
+For recovery, compile the same declaration again on the same `Runtime`,
+create fresh bindings and a runner, and reuse the managed checkpoint root.
+Each stream compile returns an independent owning native plan. Open window
+state restores through the ordinary native checkpoint protocol; window
+declarations add no Python state or checkpoint format.
+
 ## Join two symbolic streams
 
 [`12_symbolic_stream_join.py`](../examples/12_symbolic_stream_join.py)
 declares authorization and payment inputs, joins equal account keys inside
 inclusive event-time bounds, and derives a row-local amount check from the
 prefixed output fields. It analyzes and compiles in stream mode, then runs the
-same immutable plan with two independently segmented sources:
+same declaration with two independently segmented sources and a fresh plan for
+each job:
 
 ```bash
 uv run python examples/12_symbolic_stream_join.py
@@ -118,8 +166,8 @@ facts fail with `ordering_required`; metadata never sorts data or runs Python.
 uses that proof to feed an authorization/payment match into a settlement join.
 Independent joins and unrelated output branches may coexist, while each unique
 join digest retains one native state owner and checkpoint entry. Matrix
-attachment around a join and symbolic event-window execution remain outside
-this contract.
+attachment around a join remains unsupported. Event-window paths use the
+separate stateless composition rules above and cannot include a join.
 
 ## Use static matrices with NumPy or JAX
 
@@ -170,7 +218,7 @@ backend: provider identity is part of the compiled plan and its fingerprint.
 
 `Program.explain(runtime, mode=...)` reports deterministic compile-time facts:
 
-- shared expression, rolling, cross-section, and array stages;
+- shared expression, rolling, cross-section, event-window, and array stages;
 - bounded row or duration retention and watermark finality;
 - selected provider identity and calls per micro-batch;
 - table-to-dense, host-to-device, and result-attachment copy boundaries; and

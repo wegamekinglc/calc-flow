@@ -60,6 +60,7 @@ from calc_flow import symbolic
     "Program",
     "RowFrame",
     "TableExpr",
+    "WindowAggregate",
     "cs",
     "duration",
     "event_time_bucket",
@@ -483,9 +484,22 @@ table.filter(value: TableExpr, predicate: ColumnExpr, /) -> TableExpr
 table.attach_columns(value: TableExpr, array: ArrayExpr, /, *, names: Sequence[str]) -> TableExpr
 linalg.from_columns(value: TableExpr, /, *, columns: Sequence[str], backend: str) -> ArrayExpr
 linalg.matmul(left: ArrayExpr, right: ArrayExpr | Parameter[ArrayExpr], /) -> ArrayExpr
-window.tumbling(value: TableExpr, /, *, event_time: str, size_micros: int, group_by: Sequence[str] = ()) -> TableExpr
-window.hopping(value: TableExpr, /, *, event_time: str, size_micros: int, slide_micros: int, group_by: Sequence[str] = ()) -> TableExpr
+window.tumbling(value: TableExpr, /, *, event_time: str, size_micros: int, group_by: Sequence[str] = (), aggregates: Sequence[WindowAggregate] | None = None) -> TableExpr
+window.hopping(value: TableExpr, /, *, event_time: str, size_micros: int, slide_micros: int, group_by: Sequence[str] = (), aggregates: Sequence[WindowAggregate] | None = None) -> TableExpr
+window.count(column: str, /, *, output: str) -> WindowAggregate
+window.sum(column: str, /, *, output: str) -> WindowAggregate
+window.min(column: str, /, *, output: str) -> WindowAggregate
+window.max(column: str, /, *, output: str) -> WindowAggregate
+window.avg(column: str, /, *, output: str) -> WindowAggregate
 ```
+
+The [symbolic event-window contract](../specs/symbolic-event-window-aggregation.md)
+owns the aggregate-bearing window declarations. `WindowAggregate` is frozen
+and slotted with `function`, `column`, and `output` string fields. A non-empty
+aggregate sequence constructs an executable stream-only `@2` window;
+`aggregates=None` retains the declaration-only `@1` bytes and digest. The
+native project-v3 `window` spec and state layout remain unchanged. Window
+paths permit only stateless table work before and after one window.
 
 All default values above are semantic defaults from D1–D13. Lowering writes
 them explicitly into stateful project variants; omission is never used to

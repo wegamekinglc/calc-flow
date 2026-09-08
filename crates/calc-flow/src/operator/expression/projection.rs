@@ -3,7 +3,10 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use datafusion::{
-    arrow::{datatypes::Schema, record_batch::RecordBatch},
+    arrow::{
+        datatypes::{Schema, SchemaRef},
+        record_batch::RecordBatch,
+    },
     sql::sqlparser::{
         ast::{Expr, Ident, SelectItem, SetExpr, Statement},
         dialect::GenericDialect,
@@ -36,35 +39,40 @@ impl ColumnProjection {
         Some(Self { columns })
     }
 
-    pub(super) fn apply(&self, batch: &Batch, node_id: &str) -> Result<Option<Batch>> {
-        let table = batch.table_payload()?;
+    pub(super) fn schema(&self, input: &SchemaRef) -> Option<(Vec<usize>, SchemaRef)> {
         let mut indices = Vec::with_capacity(self.columns.len());
         let mut fields = Vec::with_capacity(self.columns.len());
         for (source, target) in &self.columns {
-            let mut matches = table
-                .schema()
+            let mut matches = input
                 .fields()
                 .iter()
                 .enumerate()
                 .filter(|(_, field)| field.name() == source);
-            let Some((index, field)) = matches.next() else {
-                return Ok(None);
-            };
+            let (index, field) = matches.next()?;
             if matches.next().is_some() {
-                return Ok(None);
+                return None;
             }
             indices.push(index);
             fields.push(field.as_ref().clone().with_name(target));
         }
-        if indices.iter().copied().eq(0..table.schema().fields().len())
+        let schema = if indices.iter().copied().eq(0..input.fields().len())
             && self.columns.iter().all(|(source, target)| source == target)
         {
+            Arc::clone(input)
+        } else {
+            Arc::new(Schema::new_with_metadata(fields, input.metadata().clone()))
+        };
+        Some((indices, schema))
+    }
+
+    pub(super) fn apply(&self, batch: &Batch, node_id: &str) -> Result<Option<Batch>> {
+        let table = batch.table_payload()?;
+        let Some((indices, schema)) = self.schema(table.schema()) else {
+            return Ok(None);
+        };
+        if Arc::ptr_eq(&schema, table.schema()) {
             return Ok(Some(batch.clone()));
         }
-        let schema = Arc::new(Schema::new_with_metadata(
-            fields,
-            table.schema().metadata().clone(),
-        ));
         let records = table
             .batches()
             .iter()

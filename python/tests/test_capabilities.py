@@ -137,6 +137,23 @@ def test_empty_runtime_capabilities_are_frozen_and_session_scoped() -> None:
             deterministic=True,
             replay_safe=True,
         ),
+        OperatorCapability(
+            kind="window",
+            version="1",
+            input_ports=(ProviderPort("input", "table", required=True),),
+            output_ports=(ProviderPort("output", "table", required=True),),
+            modes=("stream",),
+            finality="group_final_append_only",
+            requires_datafusion=False,
+            stateful=True,
+            microbatch_invariant=True,
+            requires_watermark=True,
+            checkpoint_support="checkpointed_stateful",
+            state_version=1,
+            state_layouts=(1,),
+            deterministic=True,
+            replay_safe=True,
+        ),
     )
     assert snapshot.udfs == ()
     assert snapshot.providers == ()
@@ -951,6 +968,7 @@ def test_capability_catalog_reports_every_durable_state_layout() -> None:
     assert operators["rolling"].state_layouts == (1, 2)
     assert operators["cross_section"].state_layouts == (1,)
     assert operators["stream_join"].state_layouts == (1,)
+    assert operators["window"].state_layouts == (1,)
     assert operators["expression"].state_layouts == ()
     assert operators["sql"].state_layouts == ()
 

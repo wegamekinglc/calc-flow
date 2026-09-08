@@ -2,7 +2,7 @@
 
 Start with the [documentation overview](../docs/introduction.md) and
 [installation guide](../docs/getting-started.md). These programs use the public
-Rust-native engine and check observable results. Each numbered Python program
+Rust-native engine and check observable results. Each Python program
 is standalone; the [learning paths](../docs/examples.md) group them by task.
 
 ## Prepare and run
@@ -141,6 +141,12 @@ runs independently. The [connector overview](../docs/connectors/README.md)
 links to one page per transport, each with wheel features, environment
 variables, sample SQL/messages, local service commands, and delivery limits.
 
+The explicitly registered [symbolic_event_window.py](symbolic_event_window.py)
+example computes grouped one-minute trade count, volume, low, high, and
+arithmetic average price. It checks native final output with explicit source
+watermarks and a `price_range` branch sharing the same window declaration.
+Guide: [symbolic event windows](../docs/symbolic-workflows.md#aggregate-event-time-windows).
+
 ## Rust counterparts
 
 Run a Rust example with `cargo run -p calc-flow --example NAME`:
@@ -178,7 +184,8 @@ Python optimization (`-O`), and avoid
 mutating caller-owned inputs. Clean up any job and temporary resource. Document
 its dependencies and expected result here, and link it from the relevant
 function guide. The runner discovers numbered Python files automatically;
-verify discovery with `python -m unittest scripts.test_run_examples`.
+`symbolic_event_window.py` is also explicitly registered. Verify discovery
+with `python -m unittest scripts.test_run_examples`.
 List examples requiring external services in `SERVICE_PYTHON_EXAMPLES` in
 the runner so they require `--include-services`, and add their setup to
 [the connector instructions](../docs/connectors/README.md).

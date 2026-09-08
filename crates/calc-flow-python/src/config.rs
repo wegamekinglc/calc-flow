@@ -665,6 +665,28 @@ impl PyRuntime {
         Ok(PyStreamExecutionPlan::new(plan, owner))
     }
 
+    #[pyo3(name = "_infer_expression_schema", signature = (select, filter, input_schema))]
+    fn infer_expression_schema<'py>(
+        &self,
+        py: Python<'py>,
+        select: Vec<String>,
+        filter: Option<String>,
+        input_schema: pyo3_arrow::PySchema,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let runtime = self.snapshot()?;
+        let expression = calc_flow::ExpressionOperator::new("schema", "", select, filter, vec![])
+            .map_err(crate::error::to_py_err)?;
+        let schema = input_schema.into_inner();
+        let schema = py
+            .detach(|| {
+                runtime
+                    .tokio
+                    .block_on(expression.infer_stream_schema(schema))
+            })
+            .map_err(crate::error::to_py_err)?;
+        pyo3_arrow::PySchema::new(schema).into_pyarrow(py)
+    }
+
     #[allow(
         clippy::needless_pass_by_value,
         reason = "PyO3's garbage-collector protocol requires PyVisit by value"
@@ -773,6 +795,49 @@ mod tests {
             "id": "source_1", "input": "input", "format": "inline_json", "data": []
         }]
     }"#;
+
+    #[test]
+    fn runtime_infers_expression_schema_and_preserves_error_categories() {
+        Python::initialize();
+        Python::attach(|py| {
+            let runtime = PyRuntime::new().unwrap();
+            let input = || {
+                pyo3_arrow::PySchema::new(Arc::new(datafusion::arrow::datatypes::Schema::new(
+                    vec![datafusion::arrow::datatypes::Field::new(
+                        "x",
+                        datafusion::arrow::datatypes::DataType::Float64,
+                        true,
+                    )],
+                )))
+            };
+            let output = runtime
+                .infer_expression_schema(
+                    py,
+                    vec!["(x > 0) AND false AS flag".into()],
+                    None,
+                    input(),
+                )
+                .unwrap()
+                .extract::<pyo3_arrow::PySchema>()
+                .unwrap()
+                .into_inner();
+            assert_eq!(output.field(0).name(), "flag");
+            assert!(!output.field(0).is_nullable());
+            let error = runtime
+                .infer_expression_schema(py, vec!["missing".into()], None, input())
+                .unwrap_err();
+            assert!(error.is_instance_of::<crate::error::ExecutionError>(py));
+            let error = runtime
+                .infer_expression_schema(py, vec![], None, input())
+                .unwrap_err();
+            assert!(error.is_instance_of::<crate::error::ConfigError>(py));
+            runtime.__clear__();
+            let error = runtime
+                .infer_expression_schema(py, vec!["x".into()], None, input())
+                .unwrap_err();
+            assert!(error.is_instance_of::<PyRuntimeError>(py));
+        });
+    }
 
     #[test]
     fn runtime_compiles_strict_projects_and_helpers_are_canonical() {

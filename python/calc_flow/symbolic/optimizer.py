@@ -294,6 +294,11 @@ def _state_cost(node: dict[str, object], /) -> str | None:
     operator = node.get("operator")
     spec = operator.get("spec") if isinstance(operator, dict) else None
     kind = operator.get("kind") if isinstance(operator, dict) else None
+    if kind == "window" and isinstance(spec, dict):
+        return (
+            f"    state {node['id']} active_windows=runtime active_groups=runtime"
+            " rows=unknown bytes=unknown state_layout=1"
+        )
     if kind == "stream_join" and isinstance(spec, dict):
         limits = spec.get("limits")
         if not isinstance(limits, dict):
@@ -562,6 +567,60 @@ def _cost_lines(
     return tuple(lines)
 
 
+def _window_explain_lines(
+    document: dict[str, object], nodes: list[dict[str, object]], /
+) -> tuple[str, ...]:
+    windows = _nodes_of_kind(nodes, "window")
+    if not windows:
+        return ()
+    graph = document["graph"]
+    outgoing: dict[str, set[str]] = {}
+    for edge in graph["edges"]:
+        outgoing.setdefault(edge["source_node"], set()).add(edge["target_node"])
+
+    def output_count(start: str) -> int:
+        pending = [start]
+        visited: set[str] = set()
+        leaves: set[str] = set()
+        while pending:
+            current = pending.pop()
+            if current in visited:
+                continue
+            visited.add(current)
+            children = outgoing.get(current, set())
+            if children:
+                pending.extend(children)
+            else:
+                leaves.add(current)
+        return len(leaves)
+
+    shared = sum(output_count(node["id"]) for node in windows)
+    lines = [
+        f"    window state_stages {len(windows)} shared_outputs {shared}",
+        "    window group_final_append_only late_assignments=drop null_event_time=drop",
+        "    window closes_at=watermark>=end_or_end_of_input"
+        " ordering=start,end,stable_group_key",
+        "    Program.explain uses default compile options;"
+        " lateness options belong to rolling/cross_section",
+    ]
+    for node in windows:
+        spec = node["operator"]["spec"]
+        geometry = spec["geometry"]
+        size = geometry["size_micros"]
+        slide = geometry.get("slide_micros", size)
+        aggregates = ",".join(
+            f"{item['function']}({item['column']})->{item['output']}"
+            for item in spec["aggregates"]
+        )
+        lines.append(
+            f"    window {node['id']} declaration_version=2 native_version=1"
+            f" geometry={geometry['kind']} size_micros={size} slide_micros={slide}"
+            f" overlap={size // slide} group_by={','.join(spec['group_by']) or 'none'}"
+            f" aggregates={aggregates} state_layout=1"
+        )
+    return tuple(lines)
+
+
 def explain_optimization(document: dict[str, object], /) -> tuple[str, ...]:
     """Render deterministic physical sharing and bounded cost facts."""
 
@@ -592,6 +651,7 @@ def explain_optimization(document: dict[str, object], /) -> tuple[str, ...]:
     providers = _cost_lines(nodes, _provider_cost)
     return (
         *lines,
+        *_window_explain_lines(document, nodes),
         *(kernels or ("    rolling kernels none",)),
         "  costs",
         *(state or ("    state none",)),
