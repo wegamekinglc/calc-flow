@@ -18,6 +18,7 @@ SCHEMA = pa.schema(
 async def batches():
     for ts, prices in [([1, 2], [10.0, 12.0]), ([3, 4], [15.0, 14.0])]:
         yield pa.table({"ts": ts, "symbol": ["a", "a"], "price": prices}, schema=SCHEMA)
+    await asyncio.Event().wait()  # Keep the input open: output must not wait for EOF.
 
 
 def features(t: cf.TableExpr) -> cf.TableExpr:
@@ -34,16 +35,15 @@ async def main() -> None:
         sequence_by=("ts",),
     )
     output = source.pipe(features).sql("SELECT delta, mean_delta FROM input")
-    async with output.stream(batches()) as results:
-        tables = [table async for table in results]
-    actual = {  # Allow floating-point round-off in the example's verification.
-        name: [None if value is None else round(value, 12) for value in values]
-        for name, values in pa.concat_tables(tables).to_pydict().items()
-    }
-    expected = {"delta": [None, 2.0, 3.0, -1.0], "mean_delta": [None, 2.0, 2.5, 1.0]}
-    if actual != expected:
+    tables = []
+    async with asyncio.timeout(5), output.stream(batches()) as results:
+        async for table in results:
+            tables.append(table)
+            if sum(batch.num_rows for batch in tables) >= 3:
+                break
+    actual = pa.concat_tables(tables).to_pydict()
+    if actual != {"delta": [None, 2.0, 3.0], "mean_delta": [None, 2.0, 2.5]}:
         raise RuntimeError(actual)
-    print(actual)
 
 
 if __name__ == "__main__":

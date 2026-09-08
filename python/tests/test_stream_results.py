@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pyarrow as pa
@@ -14,7 +14,7 @@ import calc_flow.stream as stream_module
 
 
 class _Feed:
-    def __init__(self, batches: list[pa.Table | cf.Batch]) -> None:
+    def __init__(self, batches: list[pa.Table | cf.Batch | cf.Watermark]) -> None:
         self.batches = batches
         self.opened = 0
         self.closed = 0
@@ -24,7 +24,7 @@ class _Feed:
         self.opened += 1
         return self
 
-    async def __anext__(self) -> pa.Table | cf.Batch:
+    async def __anext__(self) -> pa.Table | cf.Batch | cf.Watermark:
         if self.read == len(self.batches):
             raise StopAsyncIteration
         value = self.batches[self.read]
@@ -738,5 +738,533 @@ def test_stream_close_at_native_start_completion_cancels_before_entry_returns(
         finally:
             await results.aclose()
             await asyncio.gather(*closing, return_exceptions=True)
+
+    asyncio.run(run())
+
+
+class _OpenEndedFeed(_Feed):
+    def __init__(self, batches: list[pa.Table | cf.Watermark]) -> None:
+        super().__init__(batches)
+        self.waiting = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def __anext__(self) -> pa.Table | cf.Batch | cf.Watermark:
+        if self.read == len(self.batches):
+            self.waiting.set()
+            await self.release.wait()
+        return await super().__anext__()
+
+
+async def _first_rows(results, count: int) -> pa.Table:
+    tables: list[pa.Table] = []
+    rows = 0
+    async for table in results:
+        tables.append(table)
+        rows += table.num_rows
+        if rows >= count:
+            return pa.concat_tables(tables).slice(0, count)
+    raise AssertionError("stream ended before the requested rows arrived")
+
+
+def test_stream_composite_rolling_emits_while_source_remains_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(stream_module.tempfile, "tempdir", str(tmp_path))
+    quotes = _quotes()
+    source = cf.table_input(
+        "quotes",
+        schema=quotes.schema,
+        entity_by=("symbol",),
+        event_time="ts",
+        sequence_by=("ts",),
+    )
+    delta = cf.ts.delta(source["price"])
+    output = source.select(delta=delta, mean_delta=cf.ts.mean(delta, window=cf.rows(2)))
+    output = output.sql("SELECT delta, mean_delta FROM input")
+
+    async def run() -> None:
+        before = asyncio.all_tasks()
+        feed = _OpenEndedFeed([quotes.slice(0, 2), quotes.slice(2)])
+        results = output.stream(feed)
+        try:
+            async with results:
+                await asyncio.wait_for(feed.waiting.wait(), 5)
+                table = await asyncio.wait_for(_first_rows(results, 3), 5)
+                assert table.to_pydict() == {
+                    "delta": [None, 2.0, 3.0],
+                    "mean_delta": [None, 2.0, 2.5],
+                }
+                assert not feed.release.is_set()
+                assert feed.closed == 0
+                assert results.job.status()["state"] == "running"
+        finally:
+            await results.aclose()
+            assert (feed.opened, feed.closed, feed.read) == (1, 1, 2)
+            assert not feed.release.is_set()
+            assert results.job.status()["task_count"] == 0
+            assert list(tmp_path.iterdir()) == []
+            assert asyncio.all_tasks() == before
+
+    asyncio.run(run())
+
+
+def _temporal_source(name: str = "quotes") -> cf.TableExpr:
+    return cf.table_input(
+        name,
+        schema=_quotes().schema,
+        entity_by=("symbol",),
+        event_time="ts",
+        sequence_by=("ts",),
+    )
+
+
+def _temporal_rows(times, symbols=None) -> pa.Table:
+    return pa.table(
+        {
+            "ts": times,
+            "symbol": ["a"] * len(times) if symbols is None else symbols,
+            "price": [float(index) for index in range(len(times))],
+        },
+        schema=_quotes().schema,
+    )
+
+
+@pytest.mark.parametrize(
+    "batches",
+    [
+        [_temporal_rows([2, 1])],
+        [_temporal_rows([2]), _temporal_rows([1])],
+        [_temporal_rows([2], ["a"]), _temporal_rows([1], ["b"])],
+    ],
+    ids=["within-batch", "across-batches", "across-entities"],
+)
+def test_stream_default_rejects_globally_descending_event_time(batches) -> None:
+    source = _temporal_source()
+    feed = _Feed(batches)
+    results = source.select(delta=cf.ts.delta(source["price"])).stream(feed)
+
+    async def run() -> None:
+        before = asyncio.all_tasks()
+        with pytest.raises(
+            cf.StreamingRuntimeError,
+            match=r"stream.inputs.quotes.event_time: expected nondecreasing.*explicit",
+        ):
+            async with asyncio.timeout(5), results:
+                assert [table async for table in results] == []
+        assert feed.closed == feed.opened == 1
+        assert results.job.status()["task_count"] == 0
+        assert asyncio.all_tasks() == before
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "policy, message",
+    [
+        ({"unknown": cf.DisabledWatermarks()}, "unknown"),
+        ({"quotes": None}, "supported watermark policy"),
+        ("invalid", "supported watermark policy"),
+    ],
+)
+def test_stream_rejects_invalid_watermark_selection_before_source_open(
+    policy, message
+) -> None:
+    feed = _Feed([_quotes()])
+    results = _temporal_source().stream(feed, watermarks=policy)
+
+    async def run() -> None:
+        with pytest.raises((TypeError, ValueError), match=message):
+            await results.__aenter__()
+
+    asyncio.run(run())
+    assert feed.closed == feed.opened == 0
+
+
+def test_stream_equal_times_and_empty_batches_preserve_open_frontier() -> None:
+    source = _temporal_source()
+    output = source.select("ts", "symbol", previous=cf.ts.lag(source["price"]))
+
+    async def run() -> None:
+        before = asyncio.all_tasks()
+        feed = _OpenEndedFeed(
+            [
+                _temporal_rows([]),
+                _temporal_rows([1], ["a"]),
+                _temporal_rows([]),
+                _temporal_rows([1], ["b"]),
+                _temporal_rows([]),
+                _temporal_rows([2], ["a"]),
+            ]
+        )
+        results = output.stream(feed)
+        async with asyncio.timeout(5), results:
+            await feed.waiting.wait()
+            table = await _first_rows(results, 2)
+            assert table["ts"].cast(pa.int64()).to_pylist() == [1, 1]
+            assert sorted(table["symbol"].to_pylist()) == ["a", "b"]
+            assert table["previous"].to_pylist() == [None, None]
+            assert feed.read == 6
+            assert feed.closed == 0
+        assert feed.closed == 1
+        assert results.job.status()["task_count"] == 0
+        assert asyncio.all_tasks() == before
+
+    asyncio.run(run())
+
+
+class _PushFeed(_Feed):
+    def __init__(self, batches) -> None:
+        super().__init__(batches)
+        self.waiting = asyncio.Event()
+        self.pending: asyncio.Queue[pa.Table | cf.Watermark] = asyncio.Queue()
+
+    async def __anext__(self) -> pa.Table | cf.Batch | cf.Watermark:
+        if self.read < len(self.batches):
+            return await super().__anext__()
+        self.waiting.set()
+        data = await self.pending.get()
+        self.read += 1
+        return data
+
+
+def test_stream_explicit_disorder_emits_and_rejects_observed_inclusive_cutoff() -> None:
+    source = _temporal_source()
+    output = source.select("ts", previous=cf.ts.lag(source["price"]))
+    policy = cf.BoundedOutOfOrderness(
+        "ts", timedelta(microseconds=2), timedelta(milliseconds=100)
+    )
+
+    async def run() -> None:
+        before = asyncio.all_tasks()
+        feed = _PushFeed([_temporal_rows([2, 1, 4])])
+        results = output.stream(feed, watermarks=policy)
+        with pytest.raises(cf.StreamingRuntimeError) as caught:
+            async with asyncio.timeout(5), results:
+                await feed.waiting.wait()
+                table = await _first_rows(results, 2)
+                assert table["ts"].cast(pa.int64()).to_pylist() == [1, 2]
+                assert table["previous"].to_pylist() == [None, 1.0]
+                # Observed output establishes that max(4) - delay(2) was published.
+                feed.pending.put_nowait(_temporal_rows([2], ["b"]))
+                await anext(results)
+        assert caught.value.component_kind == "operator"
+        assert caught.value.component_id.endswith("rolling")
+        assert feed.closed == 1
+        assert results.job.status()["task_count"] == 0
+        assert asyncio.all_tasks() == before
+
+    asyncio.run(run())
+
+
+def _watermark(microseconds: int) -> cf.Watermark:
+    return cf.Watermark(
+        datetime(1970, 1, 1, tzinfo=UTC) + timedelta(microseconds=microseconds)
+    )
+
+
+def test_stream_manual_watermarks_preserve_cursors_and_close_paused_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _temporal_source()
+    output = source.select(previous=cf.ts.lag(source["price"]))
+    cursors = []
+    original = cf.SourceBinding._native_next
+
+    async def next_event(binding):
+        event = await original(binding)
+        if event is not None and event[0] == "data":
+            cursors.append(int.from_bytes(event[3], "big"))
+        return event
+
+    monkeypatch.setattr(cf.SourceBinding, "_native_next", next_event)
+
+    async def run() -> None:
+        feed = _OpenEndedFeed(
+            [_temporal_rows([1]), _watermark(1), _temporal_rows([2]), _watermark(2)]
+        )
+        results = output.stream(feed, watermarks=cf.SourceProvidedWatermarks())
+        async with asyncio.timeout(5), results:
+            await feed.waiting.wait()
+            table = await _first_rows(results, 2)
+            assert table["previous"].to_pylist() == [None, 0.0]
+            assert cursors == [1, 2]
+            assert not feed.release.is_set()
+        assert feed.closed == 1
+        assert results.job.status()["task_count"] == 0
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        None,
+        cf.DisabledWatermarks(),
+        cf.BoundedOutOfOrderness(
+            "ts", timedelta(microseconds=1), timedelta(milliseconds=100)
+        ),
+    ],
+    ids=["default", "disabled", "generated"],
+)
+def test_stream_rejects_manual_watermark_with_non_native_policy(policy) -> None:
+    feed = _Feed([_watermark(2)])
+    results = _temporal_source().stream(feed, watermarks=policy)
+
+    async def run() -> None:
+        with pytest.raises(
+            cf.StreamingRuntimeError, match="Watermark requires SourceProvided"
+        ):
+            async with asyncio.timeout(5), results:
+                await anext(results)
+        assert feed.closed == 1
+        assert results.job.status()["task_count"] == 0
+
+    asyncio.run(run())
+
+
+def test_stream_default_rejects_null_event_time() -> None:
+    feed = _Feed([_temporal_rows([None])])
+    results = _temporal_source().stream(feed)
+
+    async def run() -> None:
+        with pytest.raises(
+            cf.StreamingRuntimeError, match="expected non-null event time"
+        ):
+            async with asyncio.timeout(5), results:
+                await anext(results)
+        assert feed.closed == 1
+        assert results.job.status()["task_count"] == 0
+
+    asyncio.run(run())
+
+
+def test_stream_rejects_source_binding_policy_override_before_open() -> None:
+    source = _NativeSource(_quotes())
+    binding = cf.SourceBinding(source)
+    results = _temporal_source().stream(binding, watermarks=cf.DisabledWatermarks())
+
+    async def run() -> None:
+        with pytest.raises(ValueError, match="cannot override SourceBinding"):
+            await results.__aenter__()
+
+    asyncio.run(run())
+    assert source.opened == source.closed == source.capability_calls == 0
+
+
+def test_stream_multiple_sources_require_logical_watermark_mapping() -> None:
+    left, right = _temporal_source("left"), _temporal_source("right")
+    program = cf.Program("two", outputs={"left": left, "right": right})
+    feeds = {"left": _Feed([_quotes()]), "right": _Feed([_quotes()])}
+    results = program.stream(feeds, watermarks=cf.DisabledWatermarks())
+
+    async def run() -> None:
+        with pytest.raises(ValueError, match="multiple inputs require a name mapping"):
+            await results.__aenter__()
+
+    asyncio.run(run())
+    assert all(feed.opened == feed.closed == 0 for feed in feeds.values())
+
+
+async def _named_rows(results, counts) -> dict[str, list[float | None]]:
+    values = {name: [] for name in counts}
+    async for output in results:
+        values[output.name].extend(output.table["previous"].to_pylist())
+        if all(len(values[name]) >= count for name, count in counts.items()):
+            return values
+    raise AssertionError("stream ended before the requested named rows arrived")
+
+
+def test_stream_captures_policy_mapping_and_defaults_omitted_logical_source() -> None:
+    left, right = _temporal_source("left_input"), _temporal_source("right_input")
+    program = cf.Program(
+        "two",
+        outputs={
+            "left": left.select(previous=cf.ts.lag(left["price"])),
+            "right": right.select(previous=cf.ts.lag(right["price"])),
+        },
+    )
+
+    async def run() -> None:
+        feeds = {
+            "left_input": _OpenEndedFeed([_quotes().slice(0, 2), _watermark(3)]),
+            "right_input": _OpenEndedFeed([_quotes()]),
+        }
+        policies = {"left_input": cf.SourceProvidedWatermarks()}
+        results = program.stream(feeds, watermarks=policies)
+        policies["left_input"] = cf.DisabledWatermarks()
+        async with asyncio.timeout(5), results:
+            for feed in feeds.values():
+                await feed.waiting.wait()
+            assert await _named_rows(results, {"left": 2, "right": 3}) == {
+                "left": [None, 10.0],
+                "right": [None, 10.0, 12.0],
+            }
+        assert all(feed.opened == feed.closed == 1 for feed in feeds.values())
+        assert results.job.status()["task_count"] == 0
+
+    asyncio.run(run())
+
+
+async def _observe_marker(results, timestamp: int) -> None:
+    async for output in results:
+        if output.name == "marker" and output.table["ts"].cast(
+            pa.int64()
+        ).to_pylist() == [timestamp]:
+            return
+    raise AssertionError("stream ended before source progress was observed")
+
+
+async def _next_named_output(results, name: str) -> pa.Table:
+    async for output in results:
+        if output.name == name:
+            return output.table
+    raise AssertionError("stream ended before requested output arrived")
+
+
+def test_stream_quiet_active_source_holds_shared_watermark_until_it_advances() -> None:
+    left, right = _temporal_source("left_input"), _temporal_source("right_input")
+    program = cf.Program(
+        "two",
+        outputs={
+            "left": left.select(previous=cf.ts.lag(left["price"])),
+            "right": right.select(previous=cf.ts.lag(right["price"])),
+            "marker": right,
+        },
+    )
+
+    async def run() -> None:
+        before = asyncio.all_tasks()
+        feeds = {
+            "left_input": _PushFeed([_temporal_rows([1])]),
+            "right_input": _PushFeed(
+                [_temporal_rows([1]), _watermark(10), _temporal_rows([11])]
+            ),
+        }
+        policies = {name: cf.SourceProvidedWatermarks() for name in feeds}
+        results = program.stream(feeds, watermarks=policies)
+        async with asyncio.timeout(5), results:
+            for feed in feeds.values():
+                await feed.waiting.wait()
+            # The right source's post-watermark row proves its frontier was read.
+            await _observe_marker(results, 11)
+            assert results.job.status()["watermark_micros"] is None
+            feeds["left_input"].pending.put_nowait(_watermark(10))
+            table = await _next_named_output(results, "left")
+            assert table["previous"].to_pylist() == [None]
+            assert results.job.status()["watermark_micros"] == 10
+        assert all(feed.opened == feed.closed == 1 for feed in feeds.values())
+        assert results.job.status()["task_count"] == 0
+        assert asyncio.all_tasks() == before
+
+    asyncio.run(run())
+
+
+def test_stream_default_watermark_underflow_fails_without_forward_progress() -> None:
+    source = _temporal_source()
+    output = source.select(previous=cf.ts.lag(source["price"]))
+
+    async def run() -> None:
+        before = asyncio.all_tasks()
+        feed = _OpenEndedFeed([_temporal_rows([-(1 << 63)])])
+        results = output.stream(feed)
+        with pytest.raises(cf.StreamingRuntimeError):
+            async with asyncio.timeout(5), results:
+                await feed.waiting.wait()
+                assert [table async for table in results] == []
+        assert results.job.status()["watermark_micros"] is None
+        assert results.job.status()["task_count"] == 0
+        assert feed.closed == 1
+        assert asyncio.all_tasks() == before
+
+    asyncio.run(run())
+
+
+def test_stream_policies_apply_only_to_dynamic_inputs_with_static_parameters() -> None:
+    import numpy as np
+
+    source = _temporal_source()
+    weights = cf.parameter(
+        "weights", kind="array", backend="numpy", dtype="float64", shape=(1, 1)
+    )
+    values = cf.linalg.from_columns(source, columns=("price",), backend="numpy")
+    output = cf.table.attach_columns(
+        source, cf.linalg.matmul(values, weights), names=("score",)
+    )
+    runtime = cf.Runtime()
+    cf.register_numpy(runtime)
+
+    async def run() -> None:
+        feed = _Feed([_quotes()])
+        inputs = {
+            "quotes": feed,
+            "weights": cf.Batch.from_array(np.array([[2.0]]), backend="numpy"),
+        }
+        invalid = output.stream(
+            inputs, runtime=runtime, watermarks={"weights": cf.DisabledWatermarks()}
+        )
+        with pytest.raises(ValueError, match="watermarks.weights.*dynamic input"):
+            await invalid.__aenter__()
+        assert feed.opened == 0
+        results = output.stream(
+            inputs, runtime=runtime, watermarks=cf.DisabledWatermarks()
+        )
+        async with asyncio.timeout(5), results:
+            tables = [table async for table in results]
+        assert pa.concat_tables(tables)["score"].to_pylist() == [20.0, 24.0, 30.0, 28.0]
+        assert feed.closed == 1
+        assert results.job.status()["task_count"] == 0
+
+    asyncio.run(run())
+
+
+def test_stream_generated_timer_with_full_output_queue_cleans_owned_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(stream_module.tempfile, "tempdir", str(tmp_path))
+    source = _temporal_source()
+    previous = source.select(previous=cf.ts.lag(source["price"]))
+    program = cf.Program("fanout", outputs={"first": previous, "second": previous})
+
+    async def run() -> None:
+        before = asyncio.all_tasks()
+        blocked = asyncio.Event()
+        original = stream_module._QueueSink.write
+
+        async def write(sink, batch) -> None:
+            if sink._queue.full():
+                blocked.set()
+            await original(sink, batch)
+
+        monkeypatch.setattr(stream_module._QueueSink, "write", write)
+        feed = _OpenEndedFeed([_quotes()])
+        config = cf.StreamRuntimeConfig(edge_budget=cf.EdgeBudget(4, 256))
+        results = program.stream({"quotes": feed}, config=config)
+        async with asyncio.timeout(5), results:
+            await feed.waiting.wait()
+            await blocked.wait()
+            assert feed.closed == 0
+            assert not feed.release.is_set()
+        assert results.job.status()["task_count"] == 0
+        assert feed.closed == 1
+        assert asyncio.all_tasks() == before
+        assert list(tmp_path.iterdir()) == []
+
+    asyncio.run(run())
+
+
+def test_stream_rejects_invalid_iterable_value_by_logical_input() -> None:
+    feed = _Feed([object()])
+    results = _source().stream(feed)
+
+    async def run() -> None:
+        with pytest.raises(
+            cf.StreamingRuntimeError, match="stream.inputs.events: expected Arrow"
+        ):
+            async with asyncio.timeout(5), results:
+                await anext(results)
+        assert feed.closed == 1
+        assert results.job.status()["task_count"] == 0
 
     asyncio.run(run())

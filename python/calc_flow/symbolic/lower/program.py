@@ -62,6 +62,7 @@ from calc_flow.symbolic.lower.strategies import (
     _lower_matrix_program,
     _lower_stream_join_program,
     _project_document,
+    _relational_source_name,
     _required_segment_state_plan,
     _stream_join_nodes,
 )
@@ -189,7 +190,9 @@ def _lower_program(
             input_node = value._node
             if input_node.digest not in consumed:
                 continue
-            input_name = _cstr(input_node.attr("name"))
+            input_name = _relational_source_name(
+                input_node, frozenset(name for name, _ in program.outputs)
+            )
             schema = _schema_fields(input_node.attr("schema"))
             pinned = (
                 input_node.digest in rolling_digests
@@ -416,7 +419,12 @@ def _lower_program(
                             "target_port": "input",
                         }
                     )
-                    input_schema = None
+                    input_schema = (
+                        _schema_fields(segment.input_node.attr("schema"))
+                        if segment.input_node.digest
+                        in rolling_digests | direct_cross_section_digests
+                        else None
+                    )
                 else:
                     input_schema = _schema_fields(segment.input_node.attr("schema"))
             else:

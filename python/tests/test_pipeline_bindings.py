@@ -57,6 +57,61 @@ def _binding(feed: _NativeFeed) -> cf.SourceBinding:
     return cf.SourceBinding(feed, watermark_policy=cf.SourceProvidedWatermarks())
 
 
+def _ordered_source(name: str, data: pa.Table) -> cf.TableExpr:
+    return cf.table_input(
+        name,
+        schema=data.schema,
+        entity_by=("symbol",),
+        event_time="ts",
+        sequence_by=("ts",),
+    )
+
+
+def _collect_named_stream(program, data):
+    feeds = {name: _NativeFeed(table) for name, table in data.items()}
+
+    async def run():
+        collected = {}
+        inputs = {name: _binding(feed) for name, feed in feeds.items()}
+        async with program.stream(inputs) as results:
+            async for item in results:
+                collected.setdefault(item.name, []).append(item.table)
+        assert results.job.status()["task_count"] == 0
+        return {name: pa.concat_tables(tables) for name, tables in collected.items()}
+
+    result = asyncio.run(run())
+    assert [(feed.opened, feed.closed) for feed in feeds.values()] == [(1, 1), (1, 1)]
+    return result
+
+
+@pytest.mark.parametrize("streaming", [False, True], ids=["batch", "stream"])
+@pytest.mark.parametrize("project_marker", [False, True], ids=["names", "projection"])
+def test_stateful_fanout_keeps_logical_names_and_projection_schemas(
+    streaming, project_marker
+):
+    left_data, right_data = _data(10.0), _data(3.0)
+    left_name, right_name = (
+        ("left_input", "right_input") if project_marker else ("left", "right")
+    )
+    left = _ordered_source(left_name, left_data)
+    right = _ordered_source(right_name, right_data)
+    outputs = {
+        "left": left.select(mean=cf.ts.mean(left["value"], window=cf.rows(1))),
+        "right": right.select(mean=cf.ts.mean(right["value"], window=cf.rows(1))),
+    }
+    if project_marker:
+        outputs["marker"] = right.select("ts")
+    program = cf.Program("stateful-fanout", outputs=outputs)
+    inputs = {right_name: right_data, left_name: left_data}
+    result = (
+        _collect_named_stream(program, inputs) if streaming else program.collect(inputs)
+    )
+    assert result["left"].to_pydict() == {"mean": [10.0]}
+    assert result["right"].to_pydict() == {"mean": [3.0]}
+    if project_marker:
+        assert result["marker"].equals(right_data.select(["ts"]))
+
+
 @pytest.mark.parametrize("with_sql", [False, True])
 def test_stream_window_preserves_source_watermarks_and_logical_outputs(with_sql):
     data = _data(7.0)

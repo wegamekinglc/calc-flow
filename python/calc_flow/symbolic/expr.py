@@ -52,7 +52,7 @@ if TYPE_CHECKING:
     from calc_flow._native import ExecutionOptions
     from calc_flow.compute import TableData
     from calc_flow.pipeline import Runtime
-    from calc_flow.runtime import StreamRuntimeConfig
+    from calc_flow.runtime import StreamRuntimeConfig, WatermarkPolicy
     from calc_flow.stream import StreamInput, StreamResults
     from calc_flow.symbolic.program import FeatureSet
 
@@ -468,11 +468,18 @@ class TableExpr(Expr[object]):
         *,
         runtime: Runtime | None = None,
         config: StreamRuntimeConfig | None = None,
+        watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None = None,
     ) -> StreamResults[pa.Table]:
-        """Own a native stateful stream with ``async with`` and ``async for``."""
+        """Own a native stream with ``async with`` and ``async for``.
+
+        Declared event-time inputs advance safe watermarks by default and require
+        nondecreasing arrival times. Select an explicit policy for unordered data
+        or iterable-provided watermarks. Supplied SourceBinding policies stay owned
+        by their bindings.
+        """
         from calc_flow.stream import _stream_table
 
-        return _stream_table(self, inputs, runtime, config)
+        return _stream_table(self, inputs, runtime, config, watermarks)
 
     def collect(
         self,

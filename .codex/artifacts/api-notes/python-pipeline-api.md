@@ -56,6 +56,7 @@ class TableExpr:
         self, inputs: StreamInput | Mapping[str, StreamInput | TableData], /,
         *, runtime: Runtime | None = None,
         config: StreamRuntimeConfig | None = None,
+        watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None = None,
     ) -> StreamResults[pa.Table]: ...
 
 class Program:
@@ -63,6 +64,7 @@ class Program:
         self, inputs: Mapping[str, StreamInput | TableData], /,
         *, runtime: Runtime | None = None,
         config: StreamRuntimeConfig | None = None,
+        watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None = None,
     ) -> StreamResults[StreamOutput]: ...
 
 # Add once on the expression base, retaining the concrete self type in typing.
@@ -73,7 +75,7 @@ class Expr[T]:
     ) -> R: ...
 
 type TableData = pa.Table | pa.RecordBatch | Batch
-type StreamInput = AsyncIterable[TableData] | SourceBinding
+type StreamInput = AsyncIterable[TableData | Watermark] | SourceBinding
 
 @dataclass(frozen=True, slots=True)
 class StreamOutput:
@@ -186,18 +188,109 @@ Stream input handling:
   Its iterator is acquired once on entry. Normalize Arrow batches with the current
   metadata-safe wrapper, validate exact declared schema, and assign monotonically
   increasing counter cursors. Declare `ReplayPositioning.UNSUPPORTED`,
-  `SourceDeliveryCapability.LOSSY`, `NativeWatermarkCapability.NEVER_EMITS`, and
-  `DisabledWatermarks`. A generated counter is not a replay position.
+  `SourceDeliveryCapability.LOSSY`, and the native watermark capability required
+  by the selected policy below. A generated counter is not a replay position.
 - Derive finite maximum source batch rows/bytes from `config.edge_budget`, using
   current defaults, and reject oversized inputs by source name before admission.
   No unbounded eager collection or background producer buffer is allowed.
 - A supplied `SourceBinding` keeps its real capabilities and watermark policy.
   This supports event windows and existing custom connectors through the same
-  concise output iterator without pretending an async iterable emits watermarks.
+  concise output iterator. Explicit source-provided iterator watermarks also use
+  the existing `Watermark` envelope and policy, as specified below.
 - Source closure follows the native owner. For an iterable adapter, await `aclose`
   on the acquired iterator if it provides one, on normal exhaustion, failure or
   cancellation; perform it at most once. Do not mutate or clear the caller's
   container or close an unstarted iterable during Python argument validation.
+
+### Progress correction: online temporal results
+
+This bounded correction, 2026-09-09, supersedes the original blanket disabled-
+watermark default. Reviewing implementation `945ab5c` exposed a real acceptance
+gap: `RollingOperator.process_data` buffers rows and `on_watermark`/`on_end`
+finalizes them. Cross-section and event-window operators likewise need progress.
+An infinite plain iterable with disabled watermarks therefore never yielded these
+results. Finite-feed EOF tests did not prove online streaming.
+
+Add the single `watermarks` keyword shown above; each method has exactly five
+parameters including `self`. Reuse existing `WatermarkPolicy` variants, without a
+new public config wrapper or any change to `StreamRuntimeConfig`/native schemas.
+Copy a supplied policy mapping at `stream()` call time alongside input bindings.
+The policy applies to dynamic logical input names, not physical ports or outputs.
+
+Policy selection is deterministic:
+
+- `None`, or an omitted entry in a policy mapping, selects the default per source.
+  A scalar policy is accepted when exactly one dynamic table input exists, even
+  with additional static parameters. Multiple dynamic sources require a mapping.
+  Reject unknown names, static parameter names, non-policy values and attempts to
+  override a supplied `SourceBinding`; validate before opening sources. An existing
+  binding already owns its policy and needs no extra keyword.
+- For a plain iterable whose declaration has `event_time`, default to native
+  `BoundedOutOfOrderness(event_time, timedelta(microseconds=1),
+  timedelta(milliseconds=100))`, with no idle timeout. The adapter enforces that
+  every arriving row has a non-null timestamp and event time is nondecreasing
+  in arrival order, within and across batches, across the entire logical source.
+  It validates the complete batch before admitting any row. A decrease fails with
+  `stream.inputs.<name>.event_time: expected nondecreasing event time; select an
+  explicit watermark policy for out-of-order input`. It neither sorts nor drops
+  caller data. Do not infer this guarantee from `sequence_by` or only per entity.
+- The generated watermark is `max_seen - 1 microsecond`, computed by the existing
+  native progress driver. Native rolling closes rows at or before the watermark.
+  Therefore timestamps equal to the current maximum remain open: equal timestamps
+  may span batches or different entities without prematurely closing a group.
+  A larger observed timestamp closes the previous timestamp. This one-microsecond
+  offset is a safe completion boundary under the enforced monotonic contract,
+  not a promise to buffer one microsecond of arbitrary disorder.
+- Native timers publish progress even while the next iterable read is suspended.
+  The 100 ms interval is a scheduling target, not an output latency guarantee under
+  load or backpressure. No Python timer task is needed. Timestamp conversion,
+  known-schema validation and representable-range errors remain native; never
+  wrap/saturate the `i64` minimum-minus-delay edge to a false forward watermark.
+- A plain input without declared event time defaults to `DisabledWatermarks`.
+  Stateless expressions and SQL keep producing on each batch without any timestamp
+  requirement. `DisabledWatermarks()` can also be selected explicitly to retain
+  finite/EOF-driven temporal finalization; docs must identify that behavior.
+
+For disorder, users pass an existing `BoundedOutOfOrderness("ts", delay, interval)`
+directly to `watermarks`, or by logical source name. Its durations retain native
+positive-duration validation. This explicit mode does not impose the default
+monotonic-arrival validation. Native generation uses the existing inclusive cutoff
+`max_seen - delay`; future temporal rows must be strictly after a published cutoff.
+The convenience compiler keeps `allowed_lateness_micros=0` and `late_policy="error"`:
+late envelopes fail, never silently disappear. It does not redefine the supplied
+policy by adding a hidden offset, set late-drop, or pretend a watermark corrects
+bad source ordering. Stateless operators still pass data through unchanged.
+
+For explicit progress, `watermarks=SourceProvidedWatermarks()` permits the iterable
+to yield existing timezone-aware `cf.Watermark(...)` objects between Arrow data.
+The adapter reports `EMITS_NATIVE` and forwards these through `SourceBinding`;
+watermark events do not increment data cursors. Native validation enforces monotone
+watermarks and downstream operators enforce lateness. Generated/default/disabled
+modes report `NEVER_EMITS` and reject manually yielded Watermark objects instead of
+mixing two sources of progress. No new public envelope, replay cursor or source
+class is required in application code. A watermark must be justified by the source:
+the library cannot infer future completeness for arbitrary unordered inputs.
+
+The default's monotonic order is global per source, not independently per symbol.
+For example, entity A at time 20 followed by entity B at time 10 is rejected even
+if each entity is individually ordered. Equal times across symbols are accepted;
+existing entity/sequence row-identity validation still applies. Multiple sources
+keep separate frontiers; the existing native aggregate uses the minimum of active
+sources. Do not automatically mark a quiet source idle: stalled progress may be
+needed for correctness. Explicit policies may opt into their existing idle-timeout
+semantics, including native late-row errors if an old source later resumes.
+
+Empty batches are valid, do not advance the adapter's last timestamp or native
+maximum, and are not end-of-input. A source that pauses at one timestamp cannot
+prove that timestamp complete by waiting; it needs a later timestamp, an explicit
+source watermark, or EOF. Event windows still wait for their window-end frontier;
+stream joins retain their existing matching and watermark-driven eviction rules.
+
+Support was checked in `runtime.py` (`SourceBinding._native_policy` and Watermark
+projection), `progress/generated.rs` (`observe_batch`, `on_timer`),
+`progress/prepare.rs` (positive durations and schema), and `operator/rolling.rs`
+(`process_data`, `on_watermark`, `is_late`, `closing_keys`). The correction is an
+adapter/policy-selection change, not a new engine or a checkpoint-format change.
 
 All stream convenience calls use a run-owned temporary managed checkpoint root
 and ordinary output sinks. This provides true in-process stateful streaming and
@@ -357,6 +450,7 @@ SCHEMA = pa.schema(
 async def batches():
     for ts, prices in [([1, 2], [10.0, 12.0]), ([3, 4], [15.0, 14.0])]:
         yield pa.table({"ts": ts, "symbol": ["a", "a"], "price": prices}, schema=SCHEMA)
+    await asyncio.Event().wait()  # The source stays open; no EOF is delivered.
 
 
 def features(t: cf.TableExpr) -> cf.TableExpr:
@@ -373,13 +467,17 @@ async def main() -> None:
         sequence_by=("ts",),
     )
     output = source.pipe(features).sql("SELECT delta, mean_delta FROM input")
-    async with output.stream(batches()) as results:
-        tables = [table async for table in results]
+    tables = []
+    async with asyncio.timeout(5), output.stream(batches()) as results:
+        async for table in results:
+            tables.append(table)
+            if sum(part.num_rows for part in tables) >= 3:
+                break
     actual = {  # Allow floating-point round-off in the example's verification.
         name: [None if value is None else round(value, 12) for value in values]
         for name, values in pa.concat_tables(tables).to_pydict().items()
     }
-    expected = {"delta": [None, 2.0, 3.0, -1.0], "mean_delta": [None, 2.0, 2.5, 1.0]}
+    expected = {"delta": [None, 2.0, 3.0], "mean_delta": [None, 2.0, 2.5]}
     if actual != expected:
         raise RuntimeError(actual)
     print(actual)
@@ -389,12 +487,15 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-The first value of the second batch must use the first batch's previous price.
-The nested rolling mean must also retain its state. The native rolling null/min-
-periods contract is authoritative. The example declares one symbol/entity key
-and checks floating-point values after rounding to 12 decimal places. The batch
-pipeline explicitly casts integer quantities before multiplying float prices;
-Calc Flow retains its existing strict expression types.
+The first value of the second batch uses the first batch's previous price; the
+nested rolling mean also retains state. The paused source never emits EOF, yet
+the first three rows become observable. The latest timestamp, 4, remains open
+behind watermark 3. Breaking the result loop cancels and closes the source. Keep
+the corresponding finite-feed test, which still returns all four rows after EOF.
+The native null/min-periods contract remains authoritative; float verification
+rounds to 12 places. The shipped example should stay focused at about 20-50 lines
+of executable Python rather than adding a source/sink class. Example 21 needs no
+call-site change: it deliberately demonstrates timestamp-free stateless results.
 
 ### Named branches: `examples/21_streaming_outputs.py`
 
@@ -490,6 +591,27 @@ Implementation starts with the smallest failing behavior tests, then targeted gr
    A second run has fresh state. SQL stream stages produce correct per-batch
    results; multi-input SQL fails before source open. Named outputs/fan-out open
    and close each logical source once, including distinct same-schema inputs.
+   The online correction additionally requires a source paused on its third
+   `next` after admitting times `[1, 2]` and `[3, 4]`, without EOF: observe all
+   three finalized rows `[None, 2, 3]` / `[None, 2, 2.5]` within a bounded wait
+   while the job is still running and the source remains open. Count rows across
+   arbitrary output-batch boundaries; time 4 remains buffered. The existing RED
+   for this exact case failed with TimeoutError on `945ab5c`; source/job/tasks/temp
+   cleanup passed. This is the required GREEN, not another finite-feed substitute.
+   Add focused cases for within-batch and cross-batch descending timestamps,
+   globally descending times across different entities, equal-time rows split
+   across batches with valid distinct row identities, and empty batches that do
+   not advance progress. Explicit bounded-disorder input must succeed inside its
+   declared frontier and fail for a temporal row at/before an already observed
+   watermark, with late_policy=error. Exercise an iterable-provided Watermark
+   causing output while the source stays open, and reject that envelope under
+   generated/disabled modes. Cover per-source policy mapping capture, bad names,
+   SourceBinding override rejection, default no-time row-local output, and one
+   multi-source case proving a quiet active input prevents premature finalization.
+   Reuse existing cancellation/backpressure cleanup assertions with the new native
+   progress timers. Use events/output observation to establish order, not sleeps
+   alone. The focused RED and these directly affected cases are sufficient locally;
+   no repeat whole-stream suite or native engine rewrite is required by this note.
 4. One focused lifecycle test each for natural EOF, early break, producer error,
    schema mismatch/oversize input, idle source cancellation, output queue full on
    cancellation and start failure. Verify source closure, terminal job outcome,

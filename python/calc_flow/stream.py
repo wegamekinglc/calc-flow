@@ -5,42 +5,41 @@ from __future__ import annotations
 import asyncio
 import shutil
 import tempfile
-from collections.abc import AsyncIterable, AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, fields, replace
 from types import TracebackType
-from typing import NoReturn, cast
+from typing import cast
 
 import pyarrow as pa
 
 from calc_flow._native import Batch, StreamingRuntimeError
-from calc_flow.compute import TableData, _input_batch, _table_batch
+from calc_flow._stream_inputs import (
+    StreamInput as StreamInput,
+)
+from calc_flow._stream_inputs import (
+    _capture_watermarks,
+    _IterableSource,
+    _selected_policies,
+    _source_binding,
+)
+from calc_flow.compute import TableData, _input_batch
 from calc_flow.pipeline import Runtime, StreamExecutionPlan, _canonical
 from calc_flow.runtime import (
-    Cursor,
-    Data,
-    DisabledWatermarks,
     EdgeBudget,
     JobOutcome,
     ManagedCheckpointRuntime,
-    NativeWatermarkCapability,
-    ReplayPositioning,
     SinkBinding,
     SourceBinding,
-    SourceCapabilities,
-    SourceDeliveryCapability,
     StreamingJob,
     StreamingRunner,
     StreamRuntimeConfig,
+    WatermarkPolicy,
     _finish_cleanup,
     _runner_config,
 )
-from calc_flow.symbolic.analyzer import _schema_fields
 from calc_flow.symbolic.expr import Parameter, TableExpr
 from calc_flow.symbolic.lower.bindings import _BatchBindings
-from calc_flow.symbolic.lower.schema import _arrow_schema
 from calc_flow.symbolic.program import Program, _node_name, _selected_runtime
-
-type StreamInput = AsyncIterable[TableData] | SourceBinding
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,70 +56,7 @@ class _StreamRequest:
     inputs: dict[str, StreamInput | TableData]
     runtime: Runtime | None
     config: StreamRuntimeConfig | None
-
-
-class _IterableSource:
-    def __init__(
-        self,
-        source: AsyncIterable[TableData],
-        name: str,
-        schema: pa.Schema,
-        budget: EdgeBudget,
-    ) -> None:
-        self._source = source
-        self._path = f"stream.inputs.{name}"
-        self._schema = schema
-        self._budget = budget
-        self._iterator: AsyncIterator[TableData] | None = None
-        self._closed = False
-        self._position = 0
-        self.failure: str | None = None
-
-    def capabilities(self) -> SourceCapabilities:
-        return SourceCapabilities(
-            ReplayPositioning.UNSUPPORTED,
-            SourceDeliveryCapability.LOSSY,
-            max_batch_rows=self._budget.max_rows,
-            max_batch_bytes=self._budget.max_bytes,
-            schema=self._schema,
-            native_watermarks=NativeWatermarkCapability.NEVER_EMITS,
-        )
-
-    async def open(self, cursor: Cursor | None) -> None:
-        self._iterator = aiter(self._source)
-
-    async def next(self) -> Data | None:
-        if self._iterator is None:
-            raise RuntimeError(f"{self._path}: source is not open")
-        try:
-            data = await anext(self._iterator)
-        except StopAsyncIteration:
-            return None
-        batch = _table_batch(data, self._path)
-        self._validate_batch(batch)
-        self._position += 1
-        return Data(batch, Cursor(self._position.to_bytes(16, "big"), {}))
-
-    def _validate_batch(self, batch: Batch) -> None:
-        table = batch.to_pyarrow()
-        if not table.schema.equals(self._schema):
-            self._reject(".schema: expected declared Arrow schema")
-        if table.num_rows > self._budget.max_rows:
-            self._reject(": batch exceeds edge_budget.max_rows")
-        if table.nbytes > self._budget.max_bytes:
-            self._reject(": batch exceeds edge_budget.max_bytes")
-
-    def _reject(self, message: str) -> NoReturn:
-        self.failure = self._path + message
-        raise ValueError(self.failure)
-
-    async def close(self) -> None:
-        if self._closed or self._iterator is None:
-            return
-        self._closed = True
-        close = getattr(self._iterator, "aclose", None)
-        if close is not None:
-            await close()
+    watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None
 
 
 class _QueueSink:
@@ -179,23 +115,6 @@ def _compile_stream(
         reserved.add(sink_id)
         sinks[logical] = (physical, sink_id)
     return selected._compile_stream_graph_project(_canonical(document)), names, sinks
-
-
-def _source_binding(
-    data: StreamInput,
-    name: str,
-    value: TableExpr,
-    budget: EdgeBudget,
-) -> tuple[SourceBinding, _IterableSource | None]:
-    if isinstance(data, SourceBinding):
-        return data, None
-    if not isinstance(data, AsyncIterable):
-        raise TypeError(
-            f"stream.inputs.{name}: expected async iterable or SourceBinding"
-        )
-    schema = _arrow_schema(_schema_fields(value._node.attr("schema")))
-    source = _IterableSource(data, name, schema, budget)
-    return SourceBinding(source, watermark_policy=DisabledWatermarks()), source
 
 
 def _outcome_error(
@@ -259,10 +178,13 @@ class StreamResults[T]:
 
     async def _start(self) -> None:
         expected = _validate_request(self._request)
+        policies = _selected_policies(
+            self._request.inputs, expected, self._request.watermarks
+        )
         config = _runner_config(self._request.config)
         config._native()
         plan, names, outputs = _compile_stream(self._request)
-        sources, static = self._bindings(expected, names, config.edge_budget)
+        sources, static = self._bindings(expected, names, config.edge_budget, policies)
         sinks = {
             outputs[name][0]: [
                 SinkBinding.ordinary(
@@ -285,6 +207,7 @@ class StreamResults[T]:
         expected: dict[str, TableExpr | Parameter],
         names: dict[str, tuple[str, ...]],
         budget: EdgeBudget,
+        policies: Mapping[str, WatermarkPolicy],
     ) -> tuple[dict[str, SourceBinding], dict[str, Batch]]:
         sources: dict[str, SourceBinding] = {}
         static: dict[str, Batch] = {}
@@ -293,7 +216,9 @@ class StreamResults[T]:
             if isinstance(value, Parameter):
                 static[name] = _input_batch(data, value, f"stream.inputs.{name}")
             else:
-                binding, adapter = _source_binding(data, name, value, budget)
+                binding, adapter = _source_binding(
+                    data, name, value, budget, policies.get(name)
+                )
                 ports = names.get(name, ())
                 if len(ports) != 1:
                     raise ValueError(
@@ -423,11 +348,15 @@ def _stream_program(
     inputs: Mapping[str, StreamInput | TableData],
     runtime: Runtime | None,
     config: StreamRuntimeConfig | None,
+    watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None,
 ) -> StreamResults[StreamOutput]:
     if not isinstance(inputs, Mapping):
         raise TypeError("stream.inputs: expected a mapping by declared input name")
     return StreamResults(
-        _StreamRequest(program, dict(inputs), runtime, config), table_output=False
+        _StreamRequest(
+            program, dict(inputs), runtime, config, _capture_watermarks(watermarks)
+        ),
+        table_output=False,
     )
 
 
@@ -436,6 +365,7 @@ def _stream_table(
     inputs: StreamInput | Mapping[str, StreamInput | TableData],
     runtime: Runtime | None,
     config: StreamRuntimeConfig | None,
+    watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None,
 ) -> StreamResults[pa.Table]:
     program = Program("stream", outputs={"result": table})
     if not isinstance(inputs, Mapping):
@@ -443,5 +373,8 @@ def _stream_table(
             raise ValueError("stream: multiple or static inputs require a name mapping")
         inputs = {_node_name(program.inputs[0]._node): inputs}
     return StreamResults(
-        _StreamRequest(program, dict(inputs), runtime, config), table_output=True
+        _StreamRequest(
+            program, dict(inputs), runtime, config, _capture_watermarks(watermarks)
+        ),
+        table_output=True,
     )

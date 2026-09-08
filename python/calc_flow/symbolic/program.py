@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from calc_flow.compute import TableData
     from calc_flow.config import ProjectDocument
     from calc_flow.pipeline import BatchExecutionPlan, Runtime, StreamExecutionPlan
-    from calc_flow.runtime import StreamRuntimeConfig
+    from calc_flow.runtime import StreamRuntimeConfig, WatermarkPolicy
     from calc_flow.stream import StreamInput, StreamOutput, StreamResults
     from calc_flow.symbolic.analyzer import AnalysisResult
     from calc_flow.symbolic.types import LatePolicy
@@ -360,11 +360,17 @@ class Program:
         *,
         runtime: Runtime | None = None,
         config: StreamRuntimeConfig | None = None,
+        watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None = None,
     ) -> StreamResults[StreamOutput]:
-        """Yield named output events from one owned native streaming job."""
+        """Yield named output events from one owned native streaming job.
+
+        Watermark policies use logical input names. Ordered event-time iterables
+        advance safe watermarks by default; explicit policies support disorder or
+        iterable-provided watermarks without changing SourceBinding policies.
+        """
         from calc_flow.stream import _stream_program
 
-        return _stream_program(self, inputs, runtime, config)
+        return _stream_program(self, inputs, runtime, config, watermarks)
 
     def output(self, name: str, value: TableExpr | ArrayExpr, /) -> Program:
         """Return a new program with one declared output appended."""
