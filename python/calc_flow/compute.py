@@ -28,18 +28,21 @@ def _require_blocking(entry: str) -> None:
     )
 
 
-def _table_batch(data: TableData, path: str) -> Batch:
+def _arrow_table(data: TableData, path: str) -> pa.Table | pa.RecordBatch:
     if isinstance(data, Batch):
         if data.kind != "table":
             raise TypeError(f"{path}: expected table input, got {data.kind} Batch")
-        table = data.to_pyarrow()
-    elif isinstance(data, (pa.Table, pa.RecordBatch)):
-        table = data
-    else:
-        raise TypeError(
-            f"{path}: expected Arrow Table, RecordBatch or table Batch; "
-            f"got {type(data).__name__}"
-        )
+        return data.to_pyarrow()
+    if isinstance(data, (pa.Table, pa.RecordBatch)):
+        return data
+    raise TypeError(
+        f"{path}: expected Arrow Table, RecordBatch or table Batch; "
+        f"got {type(data).__name__}"
+    )
+
+
+def _table_batch(data: TableData, path: str) -> Batch:
+    table = _arrow_table(data, path)
     if table.schema.metadata is not None or any(
         field.metadata is not None for field in table.schema
     ):
@@ -52,15 +55,13 @@ def _table_batch(data: TableData, path: str) -> Batch:
     return data if isinstance(data, Batch) else Batch.from_pyarrow(table)
 
 
-def _prepare_collect(
-    program: Program, inputs: Mapping[str, TableData], runtime: Runtime | None
-) -> tuple[BatchExecutionPlan, dict[str, Batch], dict[str, str]]:
-    from calc_flow.symbolic.lower.program import lower_program_document
-
+def _validated_inputs(
+    inputs: Mapping[str, TableData],
+    expected: Mapping[str, TableExpr | Parameter[object]],
+) -> dict[str, TableData]:
     if not isinstance(inputs, Mapping):
         raise TypeError("collect.inputs: expected a mapping by declared input name")
     copied = dict(inputs)
-    expected = {_node_name(value._node): value for value in program.inputs}
     for name, value in expected.items():
         if name not in copied:
             kind = "static parameter" if isinstance(value, Parameter) else "table input"
@@ -68,23 +69,44 @@ def _prepare_collect(
     for name in copied:
         if name not in expected:
             raise ValueError(f"inputs.{name}: unexpected input name")
-    batches: dict[str, Batch] = {}
-    for name, value in expected.items():
-        data = copied[name]
-        if isinstance(value, Parameter) and value.kind == "array":
-            if not isinstance(data, Batch) or data.kind != "array":
-                raise TypeError(
-                    f"inputs.{name}: expected array Batch; use Batch.from_array "
-                    "and register its provider"
-                )
-            batches[name] = data
-        else:
-            batches[name] = _table_batch(data, f"inputs.{name}")
+    return copied
+
+
+def _input_batch(
+    data: TableData, value: TableExpr | Parameter[object], path: str
+) -> Batch:
+    if isinstance(value, Parameter) and value.kind == "array":
+        if not isinstance(data, Batch) or data.kind != "array":
+            raise TypeError(
+                f"{path}: expected array Batch; use Batch.from_array "
+                "and register its provider"
+            )
+        return data
+    return _table_batch(data, path)
+
+
+def _collect_batches(
+    program: Program, inputs: Mapping[str, TableData]
+) -> dict[str, Batch]:
+    expected = {_node_name(value._node): value for value in program.inputs}
+    copied = _validated_inputs(inputs, expected)
+    return {
+        name: _input_batch(copied[name], value, f"inputs.{name}")
+        for name, value in expected.items()
+    }
+
+
+def _prepare_collect(
+    program: Program, inputs: Mapping[str, TableData], runtime: Runtime | None
+) -> tuple[BatchExecutionPlan, dict[str, Batch], dict[str, str]]:
+    from calc_flow.symbolic.lower.program import lower_program_document
+
+    batches = _collect_batches(program, inputs)
     selected = _selected_runtime(runtime)
     bindings = _BatchBindings()
     document = lower_program_document(program, selected, "batch", _bindings=bindings)
     input_names, output_names = bindings.names()
-    for name in expected:
+    for name in batches:
         if name not in input_names:
             errors.raise_compile(
                 f"inputs.{name}",

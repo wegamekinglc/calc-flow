@@ -15,11 +15,7 @@ def _buffer_addresses(table: pa.Table) -> list[list[int | None]]:
     ]
 
 
-@pytest.mark.parametrize("metadata_kind", ["schema", "field"])
-@pytest.mark.parametrize("input_kind", ["table", "record_batch", "batch"])
-def test_convenience_normalizes_arrow_metadata_without_copying_buffers(
-    metadata_kind, input_kind, monkeypatch
-):
+def _metadata_table(metadata_kind):
     field = pa.field(
         "x",
         pa.int64(),
@@ -28,17 +24,28 @@ def test_convenience_normalizes_arrow_metadata_without_copying_buffers(
     schema = pa.schema(
         [field], metadata={b"source": b"quotes"} if metadata_kind == "schema" else None
     )
-    data = pa.table({"x": pa.chunked_array([[1, None], [3]])}, schema=schema)
-    envelope = {"source": "quotes", "sequence": 7, "nested": {"enabled": True}}
+    return pa.table({"x": pa.chunked_array([[1, None], [3]])}, schema=schema)
+
+
+def _supplied_table(data, input_kind, envelope):
     if input_kind == "record_batch":
         supplied = data.to_batches()[0]
-        original = pa.Table.from_batches([supplied])
-    elif input_kind == "batch":
+        return supplied, pa.Table.from_batches([supplied])
+    if input_kind == "batch":
         supplied = cf.Batch.from_pyarrow(data, metadata=envelope)
-        original = supplied.to_pyarrow()
-    else:
-        supplied = data
-        original = data
+        return supplied, supplied.to_pyarrow()
+    return data, data
+
+
+@pytest.mark.parametrize("metadata_kind", ["schema", "field"])
+@pytest.mark.parametrize("input_kind", ["table", "record_batch", "batch"])
+def test_convenience_normalizes_arrow_metadata_without_copying_buffers(
+    metadata_kind, input_kind, monkeypatch
+):
+    data = _metadata_table(metadata_kind)
+    schema = data.schema
+    envelope = {"source": "quotes", "sequence": 7, "nested": {"enabled": True}}
+    supplied, original = _supplied_table(data, input_kind, envelope)
     before = original.to_pydict()
     buffers = _buffer_addresses(original)
     captured = []
