@@ -27,6 +27,7 @@ from calc_flow.symbolic.analyzer import (
     _schema_fields,
 )
 from calc_flow.symbolic.domains import type_name
+from calc_flow.symbolic.lower.bindings import _BatchBindings
 from calc_flow.symbolic.lower.event_windows import (
     _check_window_lateness_options,
     _lower_event_window_program,
@@ -80,6 +81,8 @@ def _lower_program(
     allowed_lateness_micros: int,
     late_policy: str,
     /,
+    *,
+    bindings: _BatchBindings | None = None,
 ) -> dict[str, object]:
     # #lizard forgives
     matrix_project = _lower_matrix_program(
@@ -87,6 +90,7 @@ def _lower_program(
         mode,
         allowed_lateness_micros,
         late_policy,
+        bindings=bindings,
     )
     if matrix_project is not None:
         return matrix_project
@@ -432,7 +436,13 @@ def _lower_program(
         edges,
         frozenset(output_name for output_name, _ in program.outputs),
     )
-    return _project_document(program.name, mode, nodes, edges)
+    document = _project_document(program.name, mode, nodes, edges)
+    if bindings is not None:
+        for output_name, segment in segments:
+            bindings.add_table(
+                _cstr(segment.input_node.attr("name")), output_name, document
+            )
+    return document
 
 
 def _require_runtime(runtime: object, entry: str, /) -> Runtime:
@@ -663,6 +673,7 @@ def lower_program_document(
     *,
     allowed_lateness_micros: int = 0,
     late_policy: str = "error",
+    _bindings: _BatchBindings | None = None,
 ) -> dict[str, object]:
     """Analyze and lower one program to its strict project-v3 document.
 
@@ -702,7 +713,9 @@ def lower_program_document(
     )
     if join_project is not None:
         return join_project
-    return _lower_program(program, mode_value, allowed_lateness_micros, late_policy)
+    return _lower_program(
+        program, mode_value, allowed_lateness_micros, late_policy, bindings=_bindings
+    )
 
 
 def _cache_graph_nodes(document: dict[str, object], /) -> list[dict[str, object]]:

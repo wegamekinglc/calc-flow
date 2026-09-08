@@ -18,6 +18,7 @@ from calc_flow.capabilities import (
     UdfCapability,
     connector_capabilities,
 )
+from calc_flow.compute import compute, compute_async
 from calc_flow.config import ProjectDocument
 from calc_flow.errors import (
     CalcFlowError,
@@ -81,6 +82,36 @@ from calc_flow.runtime import (
     WatermarkPolicy,
 )
 from calc_flow.store import FileProjectStore
+from calc_flow.symbolic import (
+    AnalysisIssue,
+    AnalysisResult,
+    ArrayExpr,
+    ColumnExpr,
+    CrossSectionGroup,
+    DurationFrame,
+    EventTimeBucket,
+    Expr,
+    FeatureSet,
+    Field,
+    Parameter,
+    Program,
+    RowFrame,
+    TableExpr,
+    WindowAggregate,
+    cs,
+    duration,
+    event_time_bucket,
+    exact_time,
+    linalg,
+    lit,
+    parameter,
+    row,
+    rows,
+    table,
+    table_input,
+    ts,
+    window,
+)
 
 __version__ = "4.0.0"
 Batch = _native.Batch
@@ -88,6 +119,36 @@ ExecutionOptions = _native.ExecutionOptions
 ProviderContext = _native.ProviderContext
 RunResult = _native.RunResult
 __all__ = [
+    "compute",
+    "compute_async",
+    "Expr",
+    "ColumnExpr",
+    "TableExpr",
+    "ArrayExpr",
+    "Parameter",
+    "Field",
+    "FeatureSet",
+    "Program",
+    "table_input",
+    "parameter",
+    "lit",
+    "row",
+    "ts",
+    "cs",
+    "table",
+    "linalg",
+    "window",
+    "rows",
+    "duration",
+    "exact_time",
+    "event_time_bucket",
+    "RowFrame",
+    "DurationFrame",
+    "CrossSectionGroup",
+    "EventTimeBucket",
+    "WindowAggregate",
+    "AnalysisIssue",
+    "AnalysisResult",
     "Batch",
     "ArrowFieldSpec",
     "BatchExecutionPlan",

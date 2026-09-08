@@ -1,16 +1,13 @@
-"""Immutable feature sets and programs over symbolic declarations.
+"""Immutable feature sets and reusable programs over expression declarations.
 
-``FeatureSet`` and ``Program`` are the program-level declaration values of the
-frozen public surface. A program owns its declared inputs and outputs, the
-``calc_flow.symbolic.declaration.v1`` program fingerprint, and the declaration
-processing entry points ``analyze``/``explain``. Compilation to execution plans
-is a later lowering stage and is deliberately absent here.
+Programs own declarations and canonical fingerprints. Analysis, compilation,
+project export and collection share the native runtime and existing lowering.
 """
 
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Sequence
+from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -26,6 +23,11 @@ from calc_flow.symbolic.nodes import (
 from calc_flow.symbolic.types import CompileMode
 
 if TYPE_CHECKING:
+    import pyarrow as pa
+
+    from calc_flow._native import ExecutionOptions
+    from calc_flow.compute import TableData
+    from calc_flow.config import ProjectDocument
     from calc_flow.pipeline import BatchExecutionPlan, Runtime, StreamExecutionPlan
     from calc_flow.symbolic.analyzer import AnalysisResult
     from calc_flow.symbolic.types import LatePolicy
@@ -210,6 +212,28 @@ def _validated_inputs(
     return tuple(copied)
 
 
+def _discovered_inputs(
+    outputs: tuple[tuple[str, TableExpr | ArrayExpr], ...], /
+) -> tuple[TableExpr | Parameter[object], ...]:
+    visited: set[bytes] = set()
+    roots: list[TableExpr | Parameter[object]] = []
+
+    def visit(node: Node) -> None:
+        if node.node_bytes in visited:
+            return
+        visited.add(node.node_bytes)
+        if node.op.name == "table_input":
+            roots.append(TableExpr(node))
+        elif node.op.name == "parameter":
+            roots.append(Parameter(node))
+        for child in node.args:
+            visit(child)
+
+    for _, value in outputs:
+        visit(value._node)
+    return _validated_inputs(roots)
+
+
 def _validated_output(index: int, item: object, /) -> tuple[str, TableExpr | ArrayExpr]:
     if not isinstance(item, tuple) or len(item) != 2:
         raise TypeError(
@@ -236,11 +260,14 @@ def _validated_output(index: int, item: object, /) -> tuple[str, TableExpr | Arr
 
 
 def _validated_outputs(
-    outputs: Sequence[tuple[str, TableExpr | ArrayExpr]], /
+    outputs: Mapping[str, TableExpr | ArrayExpr]
+    | Sequence[tuple[str, TableExpr | ArrayExpr]],
+    /,
 ) -> tuple[tuple[str, TableExpr | ArrayExpr], ...]:
     copied: list[tuple[str, TableExpr | ArrayExpr]] = []
     names: set[str] = set()
-    for index, item in enumerate(outputs):
+    entries = outputs.items() if isinstance(outputs, Mapping) else outputs
+    for index, item in enumerate(entries):
         output_name, value = _validated_output(index, item)
         if output_name in names:
             raise ValueError(
@@ -266,8 +293,9 @@ class Program:
         name: str,
         /,
         *,
-        inputs: Sequence[TableExpr | Parameter[object]] = (),
-        outputs: Sequence[tuple[str, TableExpr | ArrayExpr]] = (),
+        inputs: Sequence[TableExpr | Parameter[object]] | None = None,
+        outputs: Mapping[str, TableExpr | ArrayExpr]
+        | Sequence[tuple[str, TableExpr | ArrayExpr]] = (),
     ) -> None:
         if type(name) is not str:
             raise TypeError(f"Program.name must be a string; got {type_name(name)}")
@@ -275,8 +303,12 @@ class Program:
             raise ValueError(
                 "Program.name: invalid_literal: must be a non-empty string"
             )
-        copied_inputs = _validated_inputs(inputs)
         copied_outputs = _validated_outputs(outputs)
+        copied_inputs = (
+            _discovered_inputs(copied_outputs)
+            if inputs is None
+            else _validated_inputs(inputs)
+        )
         object.__setattr__(self, "_name", name)
         object.__setattr__(self, "_inputs", copied_inputs)
         object.__setattr__(self, "_outputs", copied_outputs)
@@ -328,21 +360,25 @@ class Program:
             outputs=(*self._outputs, (name, value)),
         )
 
-    def analyze(self, runtime: Runtime, /, *, mode: CompileMode) -> AnalysisResult:
+    def analyze(
+        self, runtime: Runtime | None = None, /, *, mode: CompileMode = "batch"
+    ) -> AnalysisResult:
         """Analyze this program against one immutable capability snapshot."""
 
         from calc_flow.symbolic.analyzer import analyze_program
 
-        return analyze_program(self, runtime, mode)
+        return analyze_program(self, _selected_runtime(runtime), mode)
 
-    def explain(self, runtime: Runtime, /, *, mode: CompileMode) -> str:
+    def explain(
+        self, runtime: Runtime | None = None, /, *, mode: CompileMode = "batch"
+    ) -> str:
         """Render deterministic analysis facts for this program."""
 
         from calc_flow.symbolic.analyzer import explain_program
 
-        return explain_program(self, runtime, mode)
+        return explain_program(self, _selected_runtime(runtime), mode)
 
-    def compile_batch(self, runtime: Runtime, /) -> BatchExecutionPlan:
+    def compile_batch(self, runtime: Runtime | None = None, /) -> BatchExecutionPlan:
         """Lower this program to a strict project-v3 batch execution plan.
 
         Compilation is declaration processing only: it captures one immutable
@@ -353,11 +389,11 @@ class Program:
 
         from calc_flow.symbolic.lower import compile_program_batch
 
-        return compile_program_batch(self, runtime)
+        return compile_program_batch(self, _selected_runtime(runtime))
 
     def compile_stream(
         self,
-        runtime: Runtime,
+        runtime: Runtime | None = None,
         /,
         *,
         allowed_lateness_micros: int = 0,
@@ -373,5 +409,60 @@ class Program:
         from calc_flow.symbolic.lower import compile_program_stream
 
         return compile_program_stream(
-            self, runtime, allowed_lateness_micros, late_policy
+            self, _selected_runtime(runtime), allowed_lateness_micros, late_policy
         )
+
+    def collect(
+        self,
+        inputs: Mapping[str, TableData],
+        /,
+        *,
+        runtime: Runtime | None = None,
+        options: ExecutionOptions | None = None,
+    ) -> dict[str, pa.Table]:
+        """Execute a fresh plan and return Arrow tables by declaration name."""
+        from calc_flow.compute import _collect
+
+        return _collect(self, inputs, runtime, options)
+
+    def collect_async(
+        self,
+        inputs: Mapping[str, TableData],
+        /,
+        *,
+        runtime: Runtime | None = None,
+        options: ExecutionOptions | None = None,
+    ) -> Awaitable[dict[str, pa.Table]]:
+        """Snapshot named inputs now and await independent native execution."""
+        from calc_flow.compute import _collect_async
+
+        return _collect_async(self, inputs, runtime, options)
+
+    def to_project(
+        self,
+        runtime: Runtime | None = None,
+        /,
+        *,
+        mode: CompileMode = "batch",
+        allowed_lateness_micros: int = 0,
+        late_policy: LatePolicy = "error",
+    ) -> ProjectDocument:
+        """Export a strict native project; logical aliases stay in Python."""
+        from calc_flow.config import ProjectDocument
+        from calc_flow.symbolic.lower import lower_program_document
+
+        return ProjectDocument.model_validate(
+            lower_program_document(
+                self,
+                _selected_runtime(runtime),
+                mode,
+                allowed_lateness_micros=allowed_lateness_micros,
+                late_policy=late_policy,
+            )
+        )
+
+
+def _selected_runtime(runtime: Runtime | None, /) -> Runtime:
+    from calc_flow.pipeline import Runtime
+
+    return Runtime() if runtime is None else runtime

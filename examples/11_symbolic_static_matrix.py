@@ -14,8 +14,10 @@ from calc_flow import (
     Cursor,
     Data,
     DisabledWatermarks,
+    Field,
     ManagedCheckpointRuntime,
     NativeWatermarkCapability,
+    Program,
     ReplayPositioning,
     Runtime,
     SinkBinding,
@@ -23,9 +25,12 @@ from calc_flow import (
     SourceCapabilities,
     SourceDeliveryCapability,
     StreamingRunner,
+    linalg,
+    parameter,
     register_numpy,
+    table,
+    table_input,
 )
-from calc_flow.symbolic import Field, Program, linalg, parameter, table, table_input
 
 
 class SegmentedSource:
@@ -96,8 +101,7 @@ def symbolic_matrix_program() -> Program:
     )
     return Program(
         "symbolic-static-matrix",
-        inputs=(source, weights),
-        outputs=(("signals", output),),
+        outputs={"signals": output},
     )
 
 
@@ -161,10 +165,10 @@ async def main() -> None:
         np.array([[100.0], [-10.0]], dtype=np.float64),
         backend="numpy",
     )
-    batch_result = await program.compile_batch(runtime).execute_async(
-        {"input": Batch.from_pyarrow(input_table), "weights": weights}
+    batch_result = await program.collect_async(
+        {"prices": input_table, "weights": weights}, runtime=runtime
     )
-    batch_scores = batch_result.outputs["output"].to_pyarrow()["risk_score"].to_pylist()
+    batch_scores = batch_result["signals"]["risk_score"].to_pylist()
     streamed_scores, placements = await stream_scores(
         program,
         runtime,

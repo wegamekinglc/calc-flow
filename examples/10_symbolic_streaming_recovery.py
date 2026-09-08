@@ -14,9 +14,12 @@ from calc_flow import (
     Cursor,
     Data,
     DisabledWatermarks,
+    FeatureSet,
+    Field,
     Idle,
     ManagedCheckpointRuntime,
     NativeWatermarkCapability,
+    Program,
     ReplayPositioning,
     Runtime,
     SinkBinding,
@@ -24,8 +27,11 @@ from calc_flow import (
     SourceCapabilities,
     SourceDeliveryCapability,
     StreamingRunner,
+    row,
+    rows,
+    table_input,
+    ts,
 )
-from calc_flow.symbolic import FeatureSet, Field, Program, row, rows, table_input, ts
 
 
 class ReplaySource:

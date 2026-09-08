@@ -2319,7 +2319,7 @@ class _Analyzer:
         )
 
 
-def _literal_column(node: Node, _path: str, /) -> ColumnFacts:
+def _literal_column(_analyzer: _Analyzer, node: Node, _path: str, /) -> ColumnFacts:
     return _literal_facts(node)
 
 

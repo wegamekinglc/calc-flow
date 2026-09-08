@@ -98,6 +98,7 @@ def test_public_surface_is_the_frozen_export_list() -> None:
         "event_time_bucket",
         "exact_time",
         "linalg",
+        "lit",
         "parameter",
         "row",
         "rows",

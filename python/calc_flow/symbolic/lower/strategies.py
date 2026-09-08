@@ -23,6 +23,7 @@ from calc_flow.symbolic.analyzer import (
     _Analyzer,
     _schema_fields,
 )
+from calc_flow.symbolic.lower.bindings import _BatchBindings
 from calc_flow.symbolic.lower.planners import (
     _CrossSectionPlan,
     _LoweringProgram,
@@ -370,6 +371,8 @@ def _matrix_upstream_project(
     allowed_lateness_micros: int,
     late_policy: str,
     /,
+    *,
+    bindings: _BatchBindings | None = None,
 ) -> dict[str, object]:
     upstream = _LoweringProgram(
         program.name,
@@ -387,6 +390,7 @@ def _matrix_upstream_project(
         mode,
         allowed_lateness_micros,
         late_policy,
+        bindings=bindings,
     )
 
 
@@ -454,6 +458,8 @@ def _lower_matrix_program(
     allowed_lateness_micros: int,
     late_policy: str,
     /,
+    *,
+    bindings: _BatchBindings | None = None,
 ) -> dict[str, object] | None:
     output = _matrix_program_output(program)
     if output is None:
@@ -472,8 +478,15 @@ def _lower_matrix_program(
         mode,
         allowed_lateness_micros,
         late_policy,
+        bindings=bindings,
     )
     _wire_matrix_node(project, external, upstream_id, output_name)
+    if bindings is not None:
+        bindings.inputs.setdefault(_cstr(parameter.attr("name")), set()).add(
+            (output_name, "weights")
+        )
+        bindings.outputs.pop(upstream_id)
+        bindings.outputs[output_name] = (output_name, "output")
     if mode == "stream":
         project["static_inputs"] = [_static_array_declaration(parameter)]
     else:
