@@ -12,10 +12,13 @@ from calc_flow import (
     Batch,
     Cursor,
     Data,
+    FeatureSet,
+    Field,
     JoinStateLimits,
     JoinTimeBounds,
     ManagedCheckpointRuntime,
     NativeWatermarkCapability,
+    Program,
     ReplayPositioning,
     Runtime,
     SinkBinding,
@@ -25,8 +28,9 @@ from calc_flow import (
     SourceProvidedWatermarks,
     StreamingRunner,
     Watermark,
+    table,
+    table_input,
 )
-from calc_flow.symbolic import FeatureSet, Field, Program, table, table_input
 
 
 def symbolic_program() -> Program:

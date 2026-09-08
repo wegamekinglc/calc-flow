@@ -1,13 +1,11 @@
-"""Compose batch financial indicators with the symbolic declaration layer."""
+"""Compose batch financial indicators with reusable Python expressions."""
 
 from __future__ import annotations
 
 import pyarrow as pa
 
-from calc_flow import Batch, Runtime
-from calc_flow.symbolic import (
-    FeatureSet,
-    Field,
+from calc_flow import (
+    ColumnExpr,
     Program,
     TableExpr,
     cs,
@@ -19,7 +17,7 @@ from calc_flow.symbolic import (
 )
 
 
-def financial_features(quotes: TableExpr) -> FeatureSet:
+def financial_features(quotes: TableExpr) -> dict[str, ColumnExpr]:
     """Build reusable declarations without reading or mutating any row data."""
     previous = ts.lag(quotes["price"])
     previous_log_price = ts.lag(row.log(quotes["price"]))
@@ -49,25 +47,20 @@ def financial_features(quotes: TableExpr) -> FeatureSet:
         group=exact_time(quotes["ts"]),
         min_samples=2,
     )
-    return FeatureSet(
-        (
-            ("momentum_1", momentum_1),
-            ("previous_log_price", previous_log_price),
-            ("log_return_1", log_return_1),
-            ("price_mean_3", price_mean_3),
-            ("price_ema_3", price_ema_3),
-            ("price_macd_2_4", price_macd_2_4),
-            ("price_stddev_3", price_stddev_3),
-            ("bollinger_upper_3", price_mean_3 + 2.0 * price_stddev_3),
-            ("bollinger_lower_3", price_mean_3 - 2.0 * price_stddev_3),
-            ("rsi_3", rsi_3),
-            ("volume_z", volume_z),
-            (
-                "liquidity_adjusted_momentum",
-                momentum_1 - volume_z * 0.01,
-            ),
-        )
-    )
+    return {
+        "momentum_1": momentum_1,
+        "previous_log_price": previous_log_price,
+        "log_return_1": log_return_1,
+        "price_mean_3": price_mean_3,
+        "price_ema_3": price_ema_3,
+        "price_macd_2_4": price_macd_2_4,
+        "price_stddev_3": price_stddev_3,
+        "bollinger_upper_3": price_mean_3 + 2.0 * price_stddev_3,
+        "bollinger_lower_3": price_mean_3 - 2.0 * price_stddev_3,
+        "rsi_3": rsi_3,
+        "volume_z": volume_z,
+        "liquidity_adjusted_momentum": momentum_1 - volume_z * 0.01,
+    }
 
 
 def require(condition: bool, message: str) -> None:
@@ -77,29 +70,6 @@ def require(condition: bool, message: str) -> None:
 
 
 def main() -> None:
-    quotes = table_input(
-        "quotes",
-        schema=(
-            Field("ts", "timestamp[us, UTC]", nullable=False),
-            Field("symbol", "string", nullable=False),
-            Field("price", "float64", nullable=False),
-            Field("volume", "float64", nullable=False),
-        ),
-        entity_by=("symbol",),
-        event_time="ts",
-        sequence_by=("ts",),
-    )
-    program = Program(
-        "symbolic-financial-features",
-        inputs=(quotes,),
-        outputs=(("signals", quotes.with_columns(financial_features(quotes))),),
-    )
-    runtime = Runtime()
-
-    analysis = program.analyze(runtime, mode="batch")
-    require(analysis.issues == (), f"unexpected analysis issues: {analysis.issues}")
-    print(program.explain(runtime, mode="batch"))
-
     schema = pa.schema(
         (
             pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
@@ -117,12 +87,21 @@ def main() -> None:
         },
         schema=schema,
     )
-    output = (
-        program.compile_batch(runtime)
-        .execute({"input": Batch.from_pyarrow(input_table)})
-        .outputs["output"]
-        .to_pyarrow()
+    quotes = table_input(
+        "quotes",
+        schema=schema,
+        entity_by=("symbol",),
+        event_time="ts",
+        sequence_by=("ts",),
     )
+    program = Program(
+        "financial-features",
+        outputs={"signals": quotes.with_columns(financial_features(quotes))},
+    )
+    analysis = program.analyze()
+    require(analysis.issues == (), f"unexpected analysis issues: {analysis.issues}")
+    print(program.explain())
+    output = program.collect({"quotes": input_table})["signals"]
 
     require(output.num_rows == 4, f"unexpected output rows: {output.num_rows}")
     require(

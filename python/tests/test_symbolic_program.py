@@ -124,7 +124,7 @@ def test_with_columns_rejects_non_feature_set_operand() -> None:
     with pytest.raises(
         TypeError,
         match=r"^calc_flow.symbolic.TableExpr.with_columns.features:"
-        " expected FeatureSet; got",
+        r" expected FeatureSet \| Mapping \| None; got",
     ):
         _quotes().with_columns([("score", _quotes()["x"])])  # type: ignore[arg-type]
 

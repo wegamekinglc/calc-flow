@@ -9,6 +9,29 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-09: Make Python expressions, SQL, and composable functions the
+  application API, with Rust as the internal runtime. Root imports, overloaded
+  operators, named table methods, inferred Arrow schemas, and automatic Program
+  inputs simplify authoring. `compute`/`compute_async` and collection return
+  Arrow tables with independent batch state. `cf.sql` and `TableExpr.sql`
+  compose native SQL with expressions; `Expr.pipe` applies reusable synchronous
+  functions at declaration time. SQL schemas are planned natively without row
+  execution. `TableExpr.stream` and `Program.stream` own one native job through
+  async contexts and iteration, retaining state across batches and returning
+  tables or named output events with bounded backpressure and awaited cleanup.
+  Event-time iterables default to nondecreasing timestamps across the source
+  and native watermarks at `max_seen - 1 microsecond`, producing finalized
+  temporal results before EOF. The `watermarks` keyword selects existing
+  policies for disorder, iterable-provided progress, or named input policies;
+  source-bound policies remain explicit. Timestamp-free stateless inputs need
+  no progress configuration.
+  Iterable inputs use best-effort delivery and temporary managed checkpoints;
+  durable recovery keeps explicit bindings and managed state. Stream SQL uses
+  one alias and per-batch semantics, with no inherited temporal ordering.
+  `Program.to_project` exports data-only native graphs. Project-v3, managed
+  checkpoint, provider, and Studio REST contracts retain their formats.
+  Documentation and executable SQL/streaming examples use this Python path.
+
 - 2026-09-08: Compile symbolic fixed UTC tumbling/hopping event-window
   aggregation into the existing native window operator. Immutable
   `WindowAggregate` declarations and `window.count/sum/min/max/avg` helpers

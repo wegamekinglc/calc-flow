@@ -1,17 +1,18 @@
-"""Immutable symbolic expressions for tables, columns, arrays, parameters.
+"""Immutable expressions with native execution through explicit collection.
 
-Expression objects are declaration-only values: they compose into a node
-graph, expose a canonical digest and a deterministic explanation, and offer
-no data-execution path. Operator dunders build new expressions; ``==`` and
-friends never produce Python booleans, and structural identity is available
-only through ``identical()``.
+Operators build declarations with canonical digests; collection lowers a fresh
+native plan without capturing data in the expression. Use ``identical()`` for
+structural comparison instead of symbolic equality or truth testing.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import inspect
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, overload
+from typing import TYPE_CHECKING, Concatenate, Literal, overload
+
+import pyarrow as pa
 
 from calc_flow.symbolic.domains import (
     array_operator_error,
@@ -37,6 +38,7 @@ from calc_flow.symbolic.nodes import (
     literal_value,
 )
 from calc_flow.symbolic.types import (
+    TABLE_FIELD_TYPES,
     BatchKind,
     Field,
     ScalarLiteral,
@@ -47,6 +49,11 @@ from calc_flow.symbolic.types import (
 )
 
 if TYPE_CHECKING:
+    from calc_flow._native import ExecutionOptions
+    from calc_flow.compute import TableData
+    from calc_flow.pipeline import Runtime
+    from calc_flow.runtime import StreamRuntimeConfig, WatermarkPolicy
+    from calc_flow.stream import StreamInput, StreamResults
     from calc_flow.symbolic.program import FeatureSet
 
 type ColumnOperand = ColumnExpr | ScalarLiteral
@@ -80,6 +87,23 @@ class Expr[T]:
 
         return explain_node(self._node)
 
+    def pipe[SelfExpr: Expr, **P, R](
+        self: SelfExpr,
+        function: Callable[Concatenate[SelfExpr, P], R],
+        /,
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> R:
+        """Apply a synchronous declaration builder once, preserving its return type."""
+        if not callable(function):
+            raise TypeError("pipe.function: expected a synchronous callable")
+        result = function(self, *args, **kwargs)
+        if inspect.isawaitable(result):
+            if inspect.iscoroutine(result):
+                result.close()
+            raise TypeError("pipe.result: use a synchronous declaration builder")
+        return result
+
     def __bool__(self) -> bool:
         raise bool_error()
 
@@ -91,6 +115,11 @@ class Expr[T]:
 
 def _literal_node(value: ScalarLiteral, /) -> Node:
     return build("literal", (), {"value": literal_value(value)})
+
+
+def lit(value: ScalarLiteral, /) -> ColumnExpr:
+    """Declare a strict scalar literal for a column expression."""
+    return ColumnExpr(_literal_node(value))
 
 
 def _column_operand(operand: object, operator: str, /) -> Node:
@@ -374,20 +403,121 @@ class TableExpr(Expr[object]):
             )
         return ColumnExpr(build("column_ref", (self._node,), {"name": CStr(field)}))
 
-    def with_columns(self, features: FeatureSet, /) -> TableExpr:
+    def with_columns(
+        self,
+        features: FeatureSet | Mapping[str, ColumnExpr] | None = None,
+        /,
+        **named: ColumnExpr,
+    ) -> TableExpr:
+        """Append named expressions; existing columns cannot be replaced."""
         from calc_flow.symbolic.program import FeatureSet
 
-        if not isinstance(features, FeatureSet):
+        if features is None:
+            entries = ()
+        elif isinstance(features, FeatureSet):
+            entries = features.features
+        elif isinstance(features, Mapping):
+            entries = tuple(features.items())
+        else:
             raise namespace_error(
-                "TableExpr.with_columns", "features", "FeatureSet", features
+                "TableExpr.with_columns",
+                "features",
+                "FeatureSet | Mapping | None",
+                features,
             )
-        names = CSeq(tuple(CStr(name) for name, _ in features.features))
+        combined = FeatureSet((*entries, *named.items()))
+        names = CSeq(tuple(CStr(name) for name, _ in combined.features))
         return TableExpr(
             build(
                 "with_columns",
-                (self._node, *(value._node for _, value in features.features)),
+                (self._node, *(value._node for _, value in combined.features)),
                 {"names": names},
             )
+        )
+
+    def select(self, *columns: str, **named: ColumnExpr) -> TableExpr:
+        """Project literal column names followed by named derived expressions."""
+        from calc_flow.symbolic.ops import table
+
+        names = _validate_name_sequence(columns, "TableExpr.select.columns") + tuple(
+            named
+        )
+        if not names:
+            raise ValueError("TableExpr.select: select at least one column")
+        if len(set(names)) != len(names):
+            raise ValueError("TableExpr.select: duplicate output column name")
+        source = self.with_columns(named) if named else self
+        return table.project(source, names)
+
+    def filter(self, predicate: ColumnExpr, /) -> TableExpr:
+        """Keep rows matching a boolean expression over this table."""
+        from calc_flow.symbolic.ops import table
+
+        return table.filter(self, predicate)
+
+    def sql(self, query: str, /) -> TableExpr:
+        """Declare a read-only SQL stage using this table as the ``input`` alias."""
+        from calc_flow.symbolic.sql import sql
+
+        return sql(query, input=self)
+
+    def stream(
+        self,
+        inputs: StreamInput | Mapping[str, StreamInput | TableData],
+        /,
+        *,
+        runtime: Runtime | None = None,
+        config: StreamRuntimeConfig | None = None,
+        watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None = None,
+    ) -> StreamResults[pa.Table]:
+        """Own a native stream with ``async with`` and ``async for``.
+
+        Declared event-time inputs advance safe watermarks by default and require
+        nondecreasing arrival times. Select an explicit policy for unordered data
+        or iterable-provided watermarks. Supplied SourceBinding policies stay owned
+        by their bindings.
+        """
+        from calc_flow.stream import _stream_table
+
+        return _stream_table(self, inputs, runtime, config, watermarks)
+
+    def collect(
+        self,
+        inputs: TableData | Mapping[str, TableData],
+        /,
+        *,
+        runtime: Runtime | None = None,
+        options: ExecutionOptions | None = None,
+    ) -> pa.Table:
+        """Execute with named inputs, or a single table when there is one table root."""
+        from calc_flow.compute import _require_blocking, _table_inputs
+        from calc_flow.symbolic.program import Program
+
+        _require_blocking("collect")
+        program = Program("collect", outputs={"output": self})
+        return program.collect(
+            _table_inputs(program, inputs), runtime=runtime, options=options
+        )["output"]
+
+    def collect_async(
+        self,
+        inputs: TableData | Mapping[str, TableData],
+        /,
+        *,
+        runtime: Runtime | None = None,
+        options: ExecutionOptions | None = None,
+    ) -> Awaitable[pa.Table]:
+        """Copy input mappings, capture Batch references and await execution.
+
+        Arrow buffers are shared; keep their underlying storage read-only until
+        execution completes.
+        """
+        from calc_flow.compute import _collect_table_async, _table_inputs
+        from calc_flow.symbolic.program import Program
+
+        program = Program("collect", outputs={"output": self})
+        return _collect_table_async(
+            program, _table_inputs(program, inputs), runtime, options
         )
 
 
@@ -414,7 +544,35 @@ class Parameter[T](Expr[T]):
         raise TypeError("parameter node is missing its kind attribute")
 
 
-def _validate_schema(schema: Sequence[Field], path: str, /) -> tuple[Field, ...]:
+def _arrow_fields(schema: pa.Schema, path: str, /) -> tuple[Field, ...]:
+    special = {
+        "time32[s]": pa.time32("s"),
+        "time64[us]": pa.time64("us"),
+        "timestamp[ms]": pa.timestamp("ms"),
+        "timestamp[us]": pa.timestamp("us"),
+        "timestamp[us, UTC]": pa.timestamp("us", tz="UTC"),
+    }
+    types = {
+        special[name] if name in special else pa.type_for_alias(name): name
+        for name in TABLE_FIELD_TYPES
+    }
+    fields = []
+    for field in schema:
+        data_type = types.get(field.type)
+        if data_type is None:
+            raise ValueError(
+                f"{path}.{field.name}: unsupported_type: "
+                f"unsupported Arrow type {field.type}"
+            )
+        fields.append(Field(field.name, data_type, nullable=field.nullable))
+    return tuple(fields)
+
+
+def _validate_schema(
+    schema: pa.Schema | Sequence[Field], path: str, /
+) -> tuple[Field, ...]:
+    if isinstance(schema, pa.Schema):
+        schema = _arrow_fields(schema, path)
     fields: list[Field] = []
     seen: set[str] = set()
     for index, field in enumerate(schema):
@@ -464,7 +622,7 @@ def table_input(
     name: str,
     /,
     *,
-    schema: Sequence[Field],
+    schema: pa.Schema | Sequence[Field],
     entity_by: Sequence[str] = (),
     event_time: str | None = None,
     sequence_by: Sequence[str] = (),

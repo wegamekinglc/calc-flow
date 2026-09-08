@@ -59,6 +59,10 @@ recreate it.
 
 ## Project configuration
 
+These bindings also apply to graphs exported from Python expressions; follow
+[expression-to-connector integration](README.md#connect-python-expressions-to-transports)
+to supply physical graph bindings and explicit runtime/state settings.
+
 Enable the Rust connector crate's `mysql` feature, or build the Python binding
 with `--features connector-mysql`. Register Rust factories with
 `register_mysql_connectors`; the Python binding registers them automatically
@@ -134,18 +138,18 @@ are outside this mode's contract. The connector validates the index and types;
 the application owns the immutability, retention, and commit-order assumptions.
 This mode advertises exact positioning only under those assumptions.
 
-| MySQL type                 | Arrow representation                          |
-|----------------------------|-----------------------------------------------|
-| Signed/unsigned integers   | Corresponding signed/unsigned integer width   |
-| `MEDIUMINT`                | `int32` / `uint32`                            |
-| `YEAR`                     | `uint16`                                      |
-| `FLOAT`, `DOUBLE`          | `float32`, `float64`                          |
-| Text, enum, set, JSON      | UTF-8 string                                  |
-| `DECIMAL`                  | Exact decimal string                          |
-| Binary, blob, bit          | Binary bytes                                  |
-| `DATE`                     | `date32`                                      |
-| `DATETIME`, `TIMESTAMP`    | `timestamp[us]`, UTC session                  |
-| `TIME`                     | Signed `HH:MM:SS.ffffff` string               |
+| MySQL type               | Arrow representation                        |
+|--------------------------|---------------------------------------------|
+| Signed/unsigned integers | Corresponding signed/unsigned integer width |
+| `MEDIUMINT`              | `int32` / `uint32`                          |
+| `YEAR`                   | `uint16`                                    |
+| `FLOAT`, `DOUBLE`        | `float32`, `float64`                        |
+| Text, enum, set, JSON    | UTF-8 string                                |
+| `DECIMAL`                | Exact decimal string                        |
+| Binary, blob, bit        | Binary bytes                                |
+| `DATE`                   | `date32`                                    |
+| `DATETIME`, `TIMESTAMP`  | `timestamp[us]`, UTC session                |
+| `TIME`                   | Signed `HH:MM:SS.ffffff` string             |
 
 `TINYINT(1)` remains an integer on reads. Sinks additionally accept Arrow
 booleans and `decimal128`, using bound parameters without float conversion.

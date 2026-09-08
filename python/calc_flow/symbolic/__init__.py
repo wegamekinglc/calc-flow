@@ -1,12 +1,7 @@
-"""The public symbolic declaration surface of ``calc_flow``.
+"""Compatibility imports for the expression API also exported by ``calc_flow``.
 
-``calc_flow.symbolic`` is the only public declaration module. It builds
-immutable expression IR with canonical v1 digests, programs with canonical v1
-fingerprints, and static analysis over the declaration graph. There is no data
-execution path: no ``eval``, ``push``, ``value``, ``transform``, preview
-evaluator, or formula parser exists. Semantics are frozen by
-``.codex/artifacts/specs/symbolic-computation-contract.md`` and the exact
-signatures by ``.codex/artifacts/api-notes/symbolic-computation-engine.md``.
+Expressions and programs retain canonical declaration identities. Execution
+uses the Rust runtime; Python builders never become serialized project data.
 """
 
 from __future__ import annotations
@@ -18,11 +13,13 @@ from calc_flow.symbolic.expr import (
     Expr,
     Parameter,
     TableExpr,
+    lit,
     parameter,
     table_input,
 )
 from calc_flow.symbolic.ops import cs, linalg, row, table, ts, window
 from calc_flow.symbolic.program import FeatureSet, Program
+from calc_flow.symbolic.sql import sql
 from calc_flow.symbolic.types import Field
 from calc_flow.symbolic.windows import (
     CrossSectionGroup,
@@ -57,9 +54,11 @@ __all__ = [
     "event_time_bucket",
     "exact_time",
     "linalg",
+    "lit",
     "parameter",
     "row",
     "rows",
+    "sql",
     "table",
     "table_input",
     "ts",

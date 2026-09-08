@@ -27,6 +27,7 @@ from calc_flow.symbolic.analyzer import (
     _schema_fields,
 )
 from calc_flow.symbolic.domains import type_name
+from calc_flow.symbolic.lower.bindings import _BatchBindings
 from calc_flow.symbolic.lower.event_windows import (
     _check_window_lateness_options,
     _lower_event_window_program,
@@ -61,6 +62,7 @@ from calc_flow.symbolic.lower.strategies import (
     _lower_matrix_program,
     _lower_stream_join_program,
     _project_document,
+    _relational_source_name,
     _required_segment_state_plan,
     _stream_join_nodes,
 )
@@ -80,6 +82,8 @@ def _lower_program(
     allowed_lateness_micros: int,
     late_policy: str,
     /,
+    *,
+    bindings: _BatchBindings | None = None,
 ) -> dict[str, object]:
     # #lizard forgives
     matrix_project = _lower_matrix_program(
@@ -87,6 +91,7 @@ def _lower_program(
         mode,
         allowed_lateness_micros,
         late_policy,
+        bindings=bindings,
     )
     if matrix_project is not None:
         return matrix_project
@@ -185,7 +190,9 @@ def _lower_program(
             input_node = value._node
             if input_node.digest not in consumed:
                 continue
-            input_name = _cstr(input_node.attr("name"))
+            input_name = _relational_source_name(
+                input_node, frozenset(name for name, _ in program.outputs)
+            )
             schema = _schema_fields(input_node.attr("schema"))
             pinned = (
                 input_node.digest in rolling_digests
@@ -412,7 +419,12 @@ def _lower_program(
                             "target_port": "input",
                         }
                     )
-                    input_schema = None
+                    input_schema = (
+                        _schema_fields(segment.input_node.attr("schema"))
+                        if segment.input_node.digest
+                        in rolling_digests | direct_cross_section_digests
+                        else None
+                    )
                 else:
                     input_schema = _schema_fields(segment.input_node.attr("schema"))
             else:
@@ -432,7 +444,13 @@ def _lower_program(
         edges,
         frozenset(output_name for output_name, _ in program.outputs),
     )
-    return _project_document(program.name, mode, nodes, edges)
+    document = _project_document(program.name, mode, nodes, edges)
+    if bindings is not None:
+        for output_name, segment in segments:
+            bindings.add_table(
+                _cstr(segment.input_node.attr("name")), output_name, document
+            )
+    return document
 
 
 def _require_runtime(runtime: object, entry: str, /) -> Runtime:
@@ -655,25 +673,13 @@ def _check_rolling_capability(
     )
 
 
-def lower_program_document(
+def _check_stateful_lowering(
     program: Program,
-    runtime: Runtime,
-    mode: str,
-    /,
-    *,
-    allowed_lateness_micros: int = 0,
-    late_policy: str = "error",
-) -> dict[str, object]:
-    """Analyze and lower one program to its strict project-v3 document.
-
-    The lateness arguments are validated whenever the program contains
-    rolling or cross-section primitives; row-local programs do not consume
-    them.
-    """
-
-    selected = _require_runtime(runtime, "lower_program_document")
-    mode_value = _require_mode(mode)
-    analyzer, capabilities = _check_expression_capability(program, selected, mode_value)
+    capabilities: RuntimeCapabilities,
+    mode_value: str,
+    allowed_lateness_micros: int,
+    late_policy: str,
+) -> None:
     if _program_needs_stream_join(program):
         _check_stream_join_capability(program, capabilities, mode_value)
     if _program_needs_rolling(program) or _program_needs_cross_section(program):
@@ -688,6 +694,39 @@ def lower_program_document(
         allowed_lateness_micros,
         late_policy,
     )
+
+
+def lower_program_document(
+    program: Program,
+    runtime: Runtime,
+    mode: str,
+    /,
+    *,
+    allowed_lateness_micros: int = 0,
+    late_policy: str = "error",
+    _bindings: _BatchBindings | None = None,
+) -> dict[str, object]:
+    """Analyze and lower one program to its strict project-v3 document.
+
+    The lateness arguments are validated whenever the program contains
+    rolling or cross-section primitives; row-local programs do not consume
+    them.
+    """
+
+    selected = _require_runtime(runtime, "lower_program_document")
+    mode_value = _require_mode(mode)
+    analyzer, capabilities = _check_expression_capability(program, selected, mode_value)
+    analyzer._bindings = _bindings
+    _check_stateful_lowering(
+        program, capabilities, mode_value, allowed_lateness_micros, late_policy
+    )
+    from calc_flow.symbolic.lower.sql import lower_sql_program
+
+    sql_project = lower_sql_program(
+        program, analyzer, allowed_lateness_micros, late_policy
+    )
+    if sql_project is not None:
+        return sql_project
     window_project = _lower_event_window_program(
         program, analyzer, selected, allowed_lateness_micros, late_policy
     )
@@ -702,7 +741,9 @@ def lower_program_document(
     )
     if join_project is not None:
         return join_project
-    return _lower_program(program, mode_value, allowed_lateness_micros, late_policy)
+    return _lower_program(
+        program, mode_value, allowed_lateness_micros, late_policy, bindings=_bindings
+    )
 
 
 def _cache_graph_nodes(document: dict[str, object], /) -> list[dict[str, object]]:

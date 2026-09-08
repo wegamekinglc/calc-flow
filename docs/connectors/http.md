@@ -44,6 +44,10 @@ Stop the demo server with Ctrl-C after the consumer completes.
 
 ## Project configuration
 
+These bindings also apply to graphs exported from Python expressions; follow
+[expression-to-connector integration](README.md#connect-python-expressions-to-transports)
+to supply physical graph bindings and explicit runtime/state settings.
+
 HTTP requires the `url` secret slot and optionally accepts an `authorization`
 secret. The Python example uses this source binding:
 

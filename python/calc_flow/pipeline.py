@@ -192,6 +192,26 @@ class Runtime:
             self._symbolic_schema_cache[key] = inferred
             return inferred
 
+    def _infer_symbolic_sql_schema(
+        self, query: str, schemas: Mapping[str, Any], /
+    ) -> Any:
+        """Cache schema-only SQL planning within the current registration revision."""
+        ordered = tuple(sorted(schemas.items()))
+        key = (
+            "sql",
+            query,
+            tuple((name, schema.serialize().to_pybytes()) for name, schema in ordered),
+        )
+        with self._registration_lock:
+            cached = self._symbolic_schema_cache.get(key)
+            if cached is not None:
+                return cached
+            inferred = self._inner._infer_sql_schema(query, dict(ordered))
+            if len(self._symbolic_schema_cache) >= _SYMBOLIC_COMPILE_CACHE_MAX_ENTRIES:
+                del self._symbolic_schema_cache[next(iter(self._symbolic_schema_cache))]
+            self._symbolic_schema_cache[key] = inferred
+            return inferred
+
     def _compile_symbolic_stream(
         self, key: object, project_json: str, /
     ) -> StreamExecutionPlan:

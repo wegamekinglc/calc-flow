@@ -2,10 +2,12 @@
 
 [Documentation](README.md) / 4.1 Architecture
 
-Calc Flow is one Rust-native calculation engine with several entry points. The
-Rust core owns semantics. Python is a PyO3 binding and adapter layer, connectors
-are trusted implementations behind capability gates, and Studio is a separate
-loopback application. None of those surfaces implements a second graph engine.
+Calc Flow's application API is Python: immutable expressions, Arrow convenience
+execution, composable SQL and Python functions, owned async stream results,
+reusable programs, and explicit integrations. Rust is the internal
+runtime and owns table computation, plans, stream state, and recovery. PyO3 joins
+those layers; connectors are trusted implementations behind capability gates,
+and Studio is a separate loopback application. There is one table runtime.
 
 This document explains component ownership and end-to-end design. Use the
 [getting-started guide](getting-started.md) for installation, the
@@ -34,22 +36,24 @@ On this page:
 ## System map
 
 ```text
-Rust application ───────────────┐
-                               │
-Python application ── PyO3 ────┼──> project/graph compiler ──> immutable plan
-                               │                               │
-Studio /api/v3 ── worker ──────┘                               ├──> batch executor
-                                                               └──> streaming runner
-                                                                        │
-connectors <── trusted factories <───────────────────────────────────────┤
-state/checkpoints <── managed runtime <──────────────────────────────────┘
+Python application -> expressions / Program -> lowering -> PyO3 ─┐
+                                                                │
+Rust runtime extensions ─────────────────────────────────────────┤
+                                                                v
+Studio /api/v3 -> worker ───────────────────────────> native graph compiler
+                                                                │
+                                                batch plan / stream plan
+                                                                │
+                                                DataFusion / stream runner
+                                                                │
+                                         connectors + state + checkpoints
 ```
 
 | Component              | Owns                                                                        | Does not own                                      |
 |------------------------|-----------------------------------------------------------------------------|---------------------------------------------------|
 | `calc-flow`            | `Batch`, graph compile, DataFusion, plans, runners, state, manifests        | Transport-specific clients or browser UI          |
 | `calc-flow-python`     | PyO3 classes and async bridges                                              | Alternative execution semantics                   |
-| `python/calc_flow`     | Functional builders, adapters, NumPy/JAX registration                       | Serialized executable code                        |
+| `python/calc_flow`     | Expression API, convenience execution, lowering, integrations               | Serialized executable code                        |
 | `calc-flow-connectors` | File, Kafka, PostgreSQL, MySQL, ClickHouse, HTTP, WebSocket implementations | Graph compilation or job supervision              |
 | `calc-flow-studio`     | Local process workers, resource limits, `/api/v3`, static assets            | Public-hosted multi-user service                  |
 | React Studio           | Project editing, job controls, SSE observation                              | Direct access to connector secrets or checkpoints |
@@ -89,11 +93,15 @@ immutable snapshots of registries and engine configuration.
 ## Batch path
 
 ```text
-builder/project
-    -> validation and deterministic graph compile
+compute / collect -> supported Arrow schema + expression declaration
+    -> strict project-v3 lowering and deterministic native graph compile
+    -> fresh batch plan for convenience execution
     -> one run-scoped DataFusion session when table nodes exist
-    -> topological node execution
-    -> named output batches + timings + DataFusion metrics
+    -> native node execution
+    -> Arrow tables with logical output names
+
+explicit builder/project/compile -> owned plan
+    -> Batch inputs -> RunResult batches + timings + DataFusion metrics
 ```
 
 Each batch execution receives a fresh run context. It can carry copied JSON
@@ -103,6 +111,22 @@ session for its table nodes and keeps external-provider execution behind the
 same cancellation, rollback, and timing boundaries.
 
 ## Streaming path
+
+`TableExpr.stream` and `Program.stream` create a one-shot `StreamResults`
+owner. On `async with` entry, it compiles a fresh native plan, translates logical
+names, and adapts iterable inputs and bounded result sinks to one native runner.
+The table form yields Arrow tables; Program yields named events. No Python
+pipeline function is called per batch, and native operators own all rolling
+state. Exiting or cancelling the context settles the native job and cleanup.
+
+Convenience streams use a temporary managed checkpoint root, removed after
+native cleanup. Async iterable adapters provide best-effort delivery without
+replay. Declared event-time inputs validate nondecreasing arrival times and use
+native generated watermarks; explicit policies support disorder or source-provided
+progress. A supplied `SourceBinding` keeps its capability and watermark evidence.
+See [watermark policies](streaming-guide.md#watermark-policies) for defaults and
+finality. Durable restart and transactional sinks
+use explicit bindings and managed state through the same native runtime:
 
 ```text
 stream plan + source/sink bindings + checkpoint root
@@ -256,10 +280,34 @@ credential values, cursor payloads, or connector state.
 
 ## Python boundary
 
-Python `PipelineBuilder` produces canonical project-v3 graph JSON and compiles
-through the native `Runtime`. Blocking batch methods reject a running event
-loop. Async methods let native work proceed without blocking Python and wait
-for native cleanup before surfacing task cancellation.
+The root `calc_flow` API exposes expressions, `compute`/`compute_async`, SQL,
+`pipe`, table methods, collection, and streams. Builders and pipe functions run
+once during declaration, preserving the function's return type. Python lowering
+produces canonical project-v3 JSON; native `Runtime` compilation retains final
+validation. `PipelineBuilder` exposes explicit graph and UDF/provider selection.
+
+SQL and expressions share one DAG. A private native planning bridge derives SQL
+result schemas without reading rows or executing queries; data execution stays
+in Rust/DataFusion. SQL output has a distinct lineage without inherited temporal
+ordering. Row-local work may follow SQL, and native rolling may precede it.
+Stream SQL accepts one alias and executes per native batch; it does not create
+cross-batch SQL aggregate or window state.
+
+Convenience adapters infer supported Arrow schemas, capture input references,
+and translate logical input/output names to physical graph bindings. They remove
+Arrow schema/field metadata only from internal execution schemas, preserve caller
+objects and `Batch.metadata`, and share Arrow buffers. Callers keep underlying
+storage read-only during execution. Async preparation copies mappings and captures
+Batch references at call time; it does not snapshot table contents.
+
+Convenience batch calls create independent plans even on a shared runtime;
+explicit cached plan state and snapshot/restore/reset behavior remain unchanged.
+`Program.to_project` exports graph and input placeholders as data, without Python
+aliases, builders, or payloads. Reloaded projects use physical binding names.
+
+Blocking batch methods reject an active event loop. Async methods use the native
+cancellation-aware bridge and await cleanup before surfacing task cancellation.
+Python declarations never become a second row executor or checkpoint owner.
 
 Python scalar UDFs are trusted vectorized callbacks with exact Arrow types,
 version, provider, and volatility. NumPy/JAX providers use a bounded allowlist
@@ -295,8 +343,11 @@ diagnostics and do not overwrite the primary terminal cause.
 
 ## Extension choices
 
-- Add table logic with `ExpressionOperator`, `SqlOperator`, or a trusted native
-  scalar UDF.
+- Compose application calculations through Python expressions, SQL, and
+  reusable `pipe` functions; use explicit UDF/provider registrations for
+  trusted runtime extensions.
+- Extend the internal runtime with `ExpressionOperator`, `SqlOperator`, or a
+  trusted native scalar UDF; see the [Rust runtime reference](rust-api.md).
 - Add non-table bounded computation through a registered batch or stream
   operator factory.
 - Add a transport through `calc-flow-connectors` and a capability descriptor;

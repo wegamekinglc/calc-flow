@@ -23,6 +23,7 @@ from calc_flow.symbolic.analyzer import (
     _Analyzer,
     _schema_fields,
 )
+from calc_flow.symbolic.lower.bindings import _BatchBindings
 from calc_flow.symbolic.lower.planners import (
     _CrossSectionPlan,
     _LoweringProgram,
@@ -370,6 +371,8 @@ def _matrix_upstream_project(
     allowed_lateness_micros: int,
     late_policy: str,
     /,
+    *,
+    bindings: _BatchBindings | None = None,
 ) -> dict[str, object]:
     upstream = _LoweringProgram(
         program.name,
@@ -387,6 +390,7 @@ def _matrix_upstream_project(
         mode,
         allowed_lateness_micros,
         late_policy,
+        bindings=bindings,
     )
 
 
@@ -454,6 +458,8 @@ def _lower_matrix_program(
     allowed_lateness_micros: int,
     late_policy: str,
     /,
+    *,
+    bindings: _BatchBindings | None = None,
 ) -> dict[str, object] | None:
     output = _matrix_program_output(program)
     if output is None:
@@ -472,8 +478,15 @@ def _lower_matrix_program(
         mode,
         allowed_lateness_micros,
         late_policy,
+        bindings=bindings,
     )
     _wire_matrix_node(project, external, upstream_id, output_name)
+    if bindings is not None:
+        bindings.inputs.setdefault(_cstr(parameter.attr("name")), set()).add(
+            (output_name, "weights")
+        )
+        bindings.outputs.pop(upstream_id)
+        bindings.outputs[output_name] = (output_name, "output")
     if mode == "stream":
         project["static_inputs"] = [_static_array_declaration(parameter)]
     else:
@@ -844,7 +857,9 @@ def _lower_stream_join_program(
     joins = _stream_join_nodes(program)
     if not joins:
         return None
-    if _requires_relational_dag_lowering(program, joins):
+    if getattr(
+        analyzer, "_bindings", None
+    ) is not None or _requires_relational_dag_lowering(program, joins):
         return _lower_relational_dag_program(
             program,
             analyzer,
@@ -1228,14 +1243,21 @@ def _append_relational_joins(
 ) -> None:
     for join in join_nodes:
         plan = plans[join.digest]
-        nodes.append(
-            _stream_join_node(
-                plan.node,
-                plan.node_id,
-                plan.sides[0].schema,
-                plan.sides[1].schema,
-            )
+        native = _stream_join_node(
+            plan.node,
+            plan.node_id,
+            plan.sides[0].schema,
+            plan.sides[1].schema,
         )
+        native["output_ports"] = [
+            {
+                "kind": "table",
+                "name": "output",
+                "required": True,
+                "schema": [_field_json(field) for field in plan.output_schema],
+            }
+        ]
+        nodes.append(native)
         for side in plan.sides:
             _wire_relational_join_side(
                 program,
@@ -1323,6 +1345,15 @@ def _lower_relational_dag_program(
     typed_nodes = [_graph_node(node) for node in nodes]
     typed_edges = [_graph_node(edge) for edge in edges]
     typed_nodes, typed_edges = _deduplicate_node_ids(typed_nodes, typed_edges)
+    bindings = getattr(analyzer, "_bindings", None)
+    if bindings is not None:
+        for value in program.inputs:
+            source = sources.get(value.digest)
+            if source is not None:
+                bindings.inputs.setdefault(_cstr(value._node.attr("name")), set()).add(
+                    (source, "input")
+                )
+        bindings.outputs.update({name: (name, "output") for name, _ in program.outputs})
     return _project_document(program.name, mode, typed_nodes, typed_edges)
 
 

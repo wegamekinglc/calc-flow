@@ -28,8 +28,9 @@ uv run --no-sync ruff format --check examples
 git diff --check
 ```
 
-The runner discovers numbered Python programs in order, skips external-service
-examples 16–21 by default, runs the maintained Rust user-example list, and stops
+The runner discovers numbered Python programs in order, including the SQL and
+streaming pipeline examples. It skips connector `*_source.py` examples numbered
+16–21 by default, runs the maintained Rust user-example list, and stops
 with the first failing program's exit code. Add `--include-services` only after
 the [connector feature and service setup](connectors/README.md) is complete.
 Schema exporters are separate tools because generation updates a tracked

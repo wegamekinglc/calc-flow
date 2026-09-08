@@ -810,6 +810,10 @@ impl OneShotContinuousRunner {
         }
     }
 
+    pub(crate) fn cleanup_observer(&self) -> RunnerShutdownObserver {
+        RunnerShutdownObserver::new(Arc::clone(&self.runner.core))
+    }
+
     pub(crate) fn start(self, spec: ContinuousJobSpec) -> OneShotStartObserver {
         let runner = self.runner;
         let start = runner.start(spec);
@@ -5373,6 +5377,37 @@ mod tests {
                 if matches!(failure.origin, super::FailureOrigin::RunnerLifecycle)
                     && matches!(failure.error, CalcFlowError::Internal { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn one_shot_cleanup_observer_does_not_own_or_cancel_job() {
+        let source = LifecycleProbe::default();
+        source.block_close.store(true, Ordering::SeqCst);
+        let runner = OneShotContinuousRunner::new();
+        let mut cleanup = Box::pin(runner.cleanup_observer());
+        let job = runner
+            .start(spec(
+                false,
+                Arc::new(AtomicUsize::new(0)),
+                source.clone(),
+                LifecycleProbe::default(),
+            ))
+            .await
+            .unwrap();
+        let lifecycle = job.runner_probe_for_test();
+
+        assert!(futures::poll!(cleanup.as_mut()).is_pending());
+        assert_eq!(job.state(), ContinuousJobState::Running);
+        let close_started = source.close_started.notified();
+        drop(job);
+        close_started.await;
+        assert!(futures::poll!(cleanup.as_mut()).is_pending());
+        assert!(!lifecycle.is_finished());
+
+        source.close_release.notify_waiters();
+        cleanup.await.unwrap();
+        assert_eq!(lifecycle.registry_counts(), (0, 0));
+        assert!(lifecycle.is_finished());
     }
 
     #[tokio::test]

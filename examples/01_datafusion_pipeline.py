@@ -1,46 +1,46 @@
-"""Build and execute a DataFusion expression pipeline with the v3 builder."""
+"""Compose and compute order expressions through the Python API."""
 
 from __future__ import annotations
 
 import pyarrow as pa
 
-from calc_flow import Batch, PipelineBuilder
+import calc_flow as cf
+
+
+def large_orders(t: cf.TableExpr) -> cf.TableExpr:
+    gross = t["quantity"] * t["unit_price"]
+    enriched = t.with_columns(gross=gross, fee=cf.row.cast(gross, "float64") / 10.0)
+    return enriched.filter(enriched["gross"] >= 20).select("order_id", "gross")
 
 
 def main() -> None:
-    orders = Batch.from_pyarrow(
-        pa.table(
-            {
-                "order_id": ["A-100", "A-101", "A-102"],
-                "quantity": [3, 1, 4],
-                "unit_price": [10, 12, 10],
-            }
-        )
+    orders = pa.table(
+        {
+            "order_id": ["A-100", "A-101", "A-102"],
+            "quantity": [3, 1, 4],
+            "unit_price": [10, 12, 10],
+        }
     )
-
-    plan = (
-        PipelineBuilder("datafusion-quickstart")
-        .expression("calculate_gross", "gross = quantity * unit_price")
-        .expression(
-            "large_orders",
-            "",
-            select=("order_id", "gross"),
-            filter="gross >= 20",
-        )
-        .connect("calculate_gross", "large_orders")
-        .compile_batch()
-    )
-
-    run = plan.execute({"input": orders})
-
-    rows = run.outputs["output"].to_pyarrow().to_pylist()
+    rows = cf.compute(orders, large_orders).to_pylist()
     if rows != [
         {"order_id": "A-100", "gross": 30},
         {"order_id": "A-102", "gross": 40},
     ]:
         raise RuntimeError(f"unexpected filtered orders: {rows}")
     print(rows)
-    print("node timings:", run.node_timings)
+
+    t = cf.table_input("orders", schema=orders.schema)
+    program = cf.Program(
+        "order-outputs",
+        outputs={
+            "totals": t.select("order_id", gross=t["quantity"] * t["unit_price"]),
+            "quantities": t.select("order_id", "quantity"),
+        },
+    )
+    tables = program.collect({"orders": orders})
+    if tables["totals"]["gross"].to_pylist() != [30, 12, 40]:
+        raise RuntimeError("unexpected reusable program totals")
+    print("named outputs:", list(tables))
 
 
 if __name__ == "__main__":

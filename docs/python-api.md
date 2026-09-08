@@ -3,15 +3,22 @@
 [Documentation](README.md) / 3.2 Python API
 
 For a guided first calculation, read [batch calculations](batch-guide.md).
-This page describes methods and their contracts; the larger symbolic surface
-has its own [reference](symbolic-api.md).
+This page describes the Python application API and its contracts; the full
+expression catalog has its own [reference](symbolic-api.md).
 
-The `calc-flow-python==4.0.0` Python package is a PyO3 binding to the Rust engine plus
-small functional adapters. Python 3.13 or newer is required.
+The `calc-flow-python==4.0.0` package exposes Python expressions and Arrow
+execution over the internal Rust runtime through PyO3. Python 3.13 or newer
+is required.
 
 On this page:
 
 - [Install and develop](#install-and-develop)
+- [Compute Arrow data](#compute-arrow-data)
+- [Table expressions and names](#table-expressions-and-names)
+- [Reusable programs and collection](#reusable-programs-and-collection)
+- [SQL and pipeline composition](#sql-and-pipeline-composition)
+- [Streaming results](#streaming-results)
+- [Choosing an integration API](#choosing-an-integration-api)
 - [Table batches and builder](#table-batches-and-builder)
 - [Multi-input SQL](#multi-input-sql)
 - [Trusted Python scalar UDFs](#trusted-python-scalar-udfs)
@@ -38,10 +45,264 @@ From a source checkout:
 ```bash
 uv sync --extra dev
 uv run maturin develop
-JAX_PLATFORMS=cpu uv run pytest python/tests -q
 ```
 
+## Compute Arrow data
+
+```python
+import pyarrow as pa
+import calc_flow as cf
+
+data = pa.table({"a": [1, 3], "b": [2, 4]})
+result = cf.compute(data, lambda t: t.select(total=t["a"] + t["b"]))
+assert result.to_pydict() == {"total": [3, 7]}
+```
+
+`cf.compute(data, build, /, *, runtime=None, options=None) -> pyarrow.Table`
+accepts an Arrow `Table`, `RecordBatch`, or table `Batch`. It derives the
+supported field types, nullability, and column order from that input, calls the
+synchronous builder exactly once with a `TableExpr`, and executes its returned
+table declaration.
+The builder must return `TableExpr`; asynchronous builders and other return
+values fail before native execution. Builder exceptions keep their traceback.
+
+`cf.compute_async(data, build, /, *, runtime=None, options=None)` returns an
+awaitable Arrow table. Its builder and declaration preparation run when called;
+awaiting it drives cancellation-aware native execution. `compute` rejects a running event loop
+before invoking the builder. Both forms accept keyword-only `runtime` and
+`options`.
+
+Arrow schema and field metadata are omitted only from the internal execution
+schema. The caller's objects and their metadata remain unchanged, and a table
+`Batch` retains its `Batch.metadata`. Column buffers remain shared. Keep their
+underlying storage read-only until execution completes; this is not a deep
+copy of table contents. Async collection copies input mappings and captures
+`Batch` references at call time, before awaiting execution.
+
+### Temporal ordering
+
+`compute` and `compute_async` infer an input with no ordering declaration.
+For temporal calculations, set `entity_by`, `event_time`, and `sequence_by` on
+`cf.table_input`, apply the same synchronous builder to that declaration, and
+collect the returned table expression.
+
+The [financial example](batch-guide.md#financial-expressions) declares `source`
+for its `quotes` data and `signals` builder. Use
+`signals(source).collect(quotes, runtime=runtime, options=options)` or
+`await signals(source).collect_async(quotes, runtime=runtime, options=options)`;
+both execution arguments remain optional. Named-output programs use
+`Program.collect` or `Program.collect_async` with the same declared inputs.
+
+Rolling and cross-section calculations require explicit `entity_by`,
+`event_time`, and `sequence_by` declarations. Rolling event time must be a
+non-null `timestamp[us, UTC]` field. Ordinary Arrow inference makes timestamp
+fields nullable, even when no value is null; supply an explicit non-null schema
+as in [example 09](../examples/09_symbolic_financial_features.py). Event windows
+have their own [timestamp contract](symbolic-api.md#schema-and-geometry).
+
+## Table expressions and names
+
+Use `import calc_flow as cf`. `cf.table_input(name, /, *, schema, entity_by=(),
+event_time=None, sequence_by=())` accepts a `pyarrow.Schema` or ordered
+`Sequence[cf.Field]`. Declarations contain schema and expression structure;
+they do not retain live data. `cf.lit(value)` constructs a scalar expression from
+`None`, `bool`, `int`, finite `float`, or `str`. Cast an untyped null explicitly when its type cannot
+be inferred.
+
+| Operation                                    | Meaning                                                           |
+|----------------------------------------------|-------------------------------------------------------------------|
+| `t["price"]`                                 | Select one named column expression                                |
+| `+`, `-`, `*`, `/`, unary `-`                | Compose arithmetic, including reflected scalar arithmetic         |
+| `==`, `!=`, `<`, `<=`, `>`, `>=`             | Build comparison expressions                                      |
+| `&`, `\|`, `~`                               | Compose boolean expressions; parenthesize comparisons             |
+| `t.with_columns(mapping, **named)`           | Append named expressions; `mapping` is optional                   |
+| `t.select(*columns, **named)`                | Keep literal column names, then append named expressions in order |
+| `t.filter(predicate)`                        | Keep rows matching a boolean `ColumnExpr` over that table         |
+| `expression.pipe(function, *args, **kwargs)` | Apply a synchronous declaration function once                     |
+| `t.sql(query)`                               | Add SQL using this table as the local alias `input`               |
+| `expression.identical(other)`                | Compare structural identity as a Python boolean                   |
+
+Use `&`, `|`, and `~` instead of `and`, `or`, and `not`; converting an expression
+to `bool` fails. Chained comparisons, `**`, `//`, and `%` are unsupported.
+`select` requires at least one column and takes literal column-name strings,
+not formula source. Use named arguments for calculations. `with_columns` also accepts a `FeatureSet`
+and copies mappings in insertion order before appending keyword entries.
+
+Named columns are append-only: they cannot replace an existing input column.
+`select` follows this rule for its named expressions even if the original column
+is not selected. Duplicate names across mappings/keywords or projected/derived
+columns fail; use a new output name. Expressions in one `with_columns` call refer
+to its input table, so build another table stage before referencing a derived
+column. Cross-input or incompatible row-lineage arithmetic fails analysis.
+
+Types are strict. Ordinary integer Arrow columns and integer literals do not
+silently promote for arithmetic. For floating division of integer `gross`, use
+`cf.row.cast(gross, "float64") / 10.0`, as in
+[example 01](../examples/01_datafusion_pipeline.py). Unsupported Arrow types or
+field names fail with an input/field path. Fields and derived column names must
+satisfy the portable identifier rule `[A-Za-z_][A-Za-z0-9_]*`; rename columns in
+Arrow before declaring them if necessary. String literals are values, never
+parsed as formulas.
+
+## Reusable programs and collection
+
+`cf.Program(name, /, *, inputs=None, outputs=())` accepts outputs as a mapping
+in insertion order or a sequence of `(name, TableExpr | ArrayExpr)` pairs. Omitting
+`inputs` discovers reachable table inputs and parameters in deterministic order.
+Explicit input sequences are respected, including `inputs=()`; missing referenced
+inputs become analysis errors. Conflicting roots with the same name fail.
+Declarations and output mappings are copied and remain immutable.
+
+| Method                                                                                                   | Result and input contract                                                        |
+|----------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------|
+| `table_expr.collect(inputs, /, *, runtime=None, options=None)`                                           | One Arrow table; one table root accepts data directly, otherwise use a mapping   |
+| `program.collect(inputs, /, *, runtime=None, options=None)`                                              | `dict[str, pyarrow.Table]` in logical output order; always supply a mapping      |
+| `table_expr.collect_async(...)` / `program.collect_async(...)`                                           | Awaitable forms of the same contracts                                            |
+| `table_expr.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`                            | Owned async iterator of Arrow tables                                             |
+| `program.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`                               | Owned async iterator of named `StreamOutput` events; input mapping required      |
+| `program.analyze(runtime=None, /, *, mode="batch")`                                                      | Immutable analysis result                                                        |
+| `program.explain(runtime=None, /, *, mode="batch")`                                                      | Deterministic explanation text                                                   |
+| `program.compile_batch(runtime=None, /)`                                                                 | Explicit batch execution plan                                                    |
+| `program.compile_stream(runtime=None, /, *, allowed_lateness_micros=0, late_policy="error")`             | Explicit stream plan for a runner                                                |
+| `program.to_project(runtime=None, /, *, mode="batch", allowed_lateness_micros=0, late_policy="error")`   | Validated, data-only project-v3 document                                         |
+
+Collection mappings use declared input names, and the returned mapping uses
+logical output names. Missing, extra, or wrong-kind inputs fail with named paths.
+Supported static array parameters require `Batch.from_array` and explicit provider
+registration on the selected runtime. Collection returns table outputs;
+standalone array-output declarations are not executable. See the
+[capability matrix](symbolic-api.md#symbolic-declarations-and-static-analysis).
+
+Omitting `runtime` selects a fresh default `Runtime`; pass one explicitly for
+registered providers/UDFs. Every convenience `compute` or `collect` call creates
+a fresh batch plan, including repeated/concurrent calls using the same runtime.
+Rolling state does not carry between those calls, and explicitly compiled cached
+plans are neither reused nor reset. Use explicit plans for snapshot/restore/reset,
+state reuse, timings, and DataFusion metrics.
+
+Project export saves the native graph and data-only input placeholders. It does
+not save data, builder functions, Python expression objects, logical aliases, or
+a running job. Reloaded projects and explicit runners use the physical binding
+names in their plans/documents. Collection and convenience stream methods
+translate those names for Python callers. See [project export and reload](projects-guide.md).
+
+## SQL and pipeline composition
+
+`cf.sql(query: str, /, **tables: TableExpr) -> TableExpr` declares lazy,
+read-only DataFusion SQL. Aliases are explicit portable identifiers bound to
+table declarations; at least one is required. Raw Arrow data are supplied only
+at execution. `t.sql(query, /)` is the single-table form with local alias
+`input`. Query results have a natively planned schema, so `select`,
+`with_columns`, `filter`, and column arithmetic can follow SQL without a manual
+result schema or an intermediate collection. Duplicate SQL output names fail.
+
+`expression.pipe(function, /, *args, **kwargs) -> R` invokes
+`function(expression, *args, **kwargs)` once during declaration. It works for
+table and column expressions, retains the function's return type, and may
+return a Program for multiple outputs. It rejects awaitable results; a builder
+exception retains its original traceback. These functions are never runtime
+UDFs or serialized callbacks.
+
+See the complete [SQL and Python pipeline](batch-guide.md#compose-sql-and-python-pipelines)
+and [multi-input SQL example](#multi-input-sql). SQL output has a distinct row
+lineage and does not inherit entity/event-time/sequence ordering. Row-local
+work after SQL and rolling before SQL are supported. SQL-to-event-window paths
+and standalone array Program outputs are unsupported; the
+[composition reference](symbolic-api.md#sql-composition) gives the full boundary.
+
+Batch SQL accepts multiple aliases. Stream SQL accepts exactly one and applies
+SQL independently to each native input batch. SQL aggregation, sorting, limits,
+and window functions have batch-local semantics, including inside a stream.
+Use native stateful declarations for cross-batch calculations.
+
+## Streaming results
+
+`TableExpr.stream(inputs, /, *, runtime=None, config=None, watermarks=None)` returns
+`StreamResults[pyarrow.Table]`. `Program.stream(inputs, /, *, runtime=None,
+config=None, watermarks=None)` returns `StreamResults[StreamOutput]`. Both require
+`async with` and `async for`; there is no blocking convenience stream. Run the
+[stateful pipeline](../examples/20_streaming_pipeline.py) and
+[named-output example](../examples/21_streaming_outputs.py), or follow the
+[streaming guide](streaming-guide.md#first-python-continuous-job).
+
+A dynamic input accepts an `AsyncIterable` of Arrow `Table`, `RecordBatch`, or
+table `Batch` values, or a `SourceBinding`. With `SourceProvidedWatermarks`, the
+iterable may also yield `Watermark` values. A single-table root without static
+parameters accepts that source directly. Otherwise pass a mapping by logical
+declaration name; Program always requires one. Static parameter entries hold
+the declared table data or array `Batch`, and are latched once. Arrays require
+an explicitly registered provider on the selected runtime. All outputs must
+be table expressions.
+
+Construction copies input and watermark mappings and captures source/Batch
+references without consuming an iterable or starting work. Arrow buffers stay
+shared and read-only.
+Context entry validates inputs, compiles one fresh native stream plan, and
+starts one native job. Native state persists across input batches; a new
+`stream` call creates a new owner and fresh state. Ordinary iterables enforce
+the declared Arrow schema and finite row/byte limits from
+`config.edge_budget`. They provide no replay. A supplied `SourceBinding` keeps
+its actual capabilities and watermark policy.
+
+With `watermarks=None`, an iterable whose input declares `event_time` must have
+non-null, nondecreasing timestamps in arrival order across rows, batches, and
+all entities in that source. The native runtime generates a watermark at
+`max_seen - 1 microsecond`, with a 100 ms emission interval. Equal timestamps
+may span batches; the latest timestamp stays open until a larger one arrives,
+explicit progress is supplied, or the source ends. This allows finalized rolling
+results to arrive before EOF. A decrease fails; the adapter does not sort or
+drop rows. Inputs without event time use disabled watermarks, and stateless
+expressions and SQL produce results as batches arrive.
+
+`watermarks` accepts an existing `WatermarkPolicy` for one dynamic input or a
+mapping by logical dynamic input name. Omitted mapping entries use the default.
+Select `BoundedOutOfOrderness` for disorder, `SourceProvidedWatermarks` for
+iterable-provided progress, or `DisabledWatermarks` for intentional EOF-driven
+finalization. Explicit policies replace the default order validation. Unknown
+or static names, invalid policies, and overrides of a `SourceBinding` fail.
+See [watermark policies](streaming-guide.md#watermark-policies) for inclusive
+cutoffs, late-data errors, and multi-source progress.
+
+`StreamResults` supports async context management, async iteration, idempotent
+`aclose()`, and a `job` property available after successful entry. A context
+can be entered once, and only one consumer can call `__anext__` at a time.
+The native job and bounded output queue apply backpressure. Completion drains
+queued output and settles cleanup. Early exit, exceptions, and cancellation
+cancel live work and await source/job/task cleanup. Native failure raises
+`StreamingRuntimeError` with safe structured details.
+
+`StreamOutput` is an immutable `name: str` / `table: pyarrow.Table` event.
+Outputs are ordered within each name; independent outputs have no promised
+combined order or synchronized dictionary. Do not assume one result table per
+source batch. Results omit native `Batch` metadata and do not acknowledge
+application delivery.
+
+Every convenience stream owns temporary managed checkpoint storage removed
+after native cleanup. Ordinary iterables have best-effort delivery, and neither
+the iterator nor its temporary checkpoints provide durable restart or
+exactly-once processing. For those contracts, use explicit source/sink bindings,
+`Program.compile_stream`, `StreamingRunner`, and `ManagedCheckpointRuntime`.
+See [explicit connectors and recovery](streaming-guide.md#explicit-connectors-and-recovery).
+
+## Choosing an integration API
+
+Use root `calc_flow` expressions, SQL, `pipe`, collection, and streams for
+application calculations. Use the explicit controls below for operational needs:
+
+| Need                                     | Interface                                                      |
+|------------------------------------------|----------------------------------------------------------------|
+| Plan state and execution diagnostics     | `Program.compile_batch`, `BatchExecutionPlan`, and `RunResult` |
+| Typed runtime UDF or provider selection  | `Runtime` registrations and explicitly selected builder nodes  |
+| Durable recovery or transactional sinks  | `Program.compile_stream`, explicit bindings, and managed state |
+| Native graph construction and inspection | `PipelineBuilder`, ports, and validated `ProjectDocument`      |
+
+These expose the same native graph and runtime. They do not introduce a table
+backend selector or serialize arbitrary Python execution.
+
 ## Table batches and builder
+
+This advanced interface exposes graph nodes, ports, and execution diagnostics.
+Use the expression and collection methods above for ordinary calculations.
 
 ```python
 import pyarrow as pa
@@ -68,34 +329,44 @@ An expression node accepts exactly one calculation expression or a non-empty
 
 ## Multi-input SQL
 
+This complete [02_sql_join.py](../examples/02_sql_join.py) example composes a
+named SQL join and a Python column transform:
+
 ```python
-plan = (
-    PipelineBuilder("orders-and-fees")
-    .sql(
-        "join",
-        "SELECT orders.order_id, orders.amount - fees.fee AS net "
-        "FROM orders JOIN fees ON orders.order_id = fees.order_id "
-        "ORDER BY orders.order_id",
-        aliases=("orders", "fees"),
+"""Compose named SQL inputs and ordinary Python expression transforms."""
+
+from __future__ import annotations
+
+import pyarrow as pa
+
+import calc_flow as cf
+
+
+def main() -> None:
+    orders = pa.table({"order_id": [1, 2, 3], "amount": [75, 120, 40]})
+    fees = pa.table({"order_id": [1, 2, 3], "fee": [5, 12, 4]})
+    joined = cf.sql(
+        "SELECT o.order_id, o.amount - f.fee AS net "
+        "FROM o JOIN f ON o.order_id = f.order_id ORDER BY o.order_id",
+        o=cf.table_input("orders", schema=orders.schema),
+        f=cf.table_input("fees", schema=fees.schema),
     )
-    .compile_batch()
-)
-result = plan.execute(
-    {
-        "orders": Batch.from_pyarrow(
-            pa.table({"order_id": [1, 2, 3], "amount": [75, 120, 40]})
-        ),
-        "fees": Batch.from_pyarrow(
-            pa.table({"order_id": [1, 2, 3], "fee": [5, 12, 4]})
-        ),
-    }
-)
-assert result.outputs["output"].to_pyarrow()["net"].to_pylist() == [70, 108, 36]
+    output = joined.pipe(lambda t: t.select("order_id", doubled=t["net"] * 2))
+    result = output.collect({"orders": orders, "fees": fees})
+    expected = {"order_id": [1, 2, 3], "doubled": [140, 216, 72]}
+    if result.to_pydict() != expected:
+        raise RuntimeError(f"unexpected SQL join result: {result.to_pydict()}")
+    print(result.to_pydict())
+
+
+if __name__ == "__main__":
+    main()
 ```
 
-Only one read-only DataFusion `SELECT` or CTE is accepted. The full version is
-[`examples/02_sql_join.py`](../examples/02_sql_join.py), which mirrors the Rust
-`sql_join.rs` example.
+The SQL aliases `o` and `f` name the declarations inside the query; collection
+binds data by logical input names `orders` and `fees`. The final doubled values
+are `[140, 216, 72]`. Only one read-only DataFusion `SELECT` or CTE is accepted;
+DDL, DML, utility commands, and multiple statements fail validation.
 
 Use the immutable builder method to select parallelism and diagnostic controls:
 
@@ -259,8 +530,7 @@ compilation rejects read-only queries that call volatile built-in SQL
 functions such as `random()` or wall-clock built-ins such as `now()`,
 `current_date()`, and `current_time()` (aliases included).
 
-Providers registered through `register_provider` keep their existing
-signature and source compatibility. The registration API accepts no lifecycle
+The `register_provider` API accepts no lifecycle
 metadata, so a registered provider's entry is always batch-only with
 conservative values: `modes=("batch",)`, `finality="unproven"`,
 `stateful=False`, `microbatch_invariant=False`, `requires_watermark=False`,
@@ -370,8 +640,7 @@ when `accepts_context=False`, the default, or
 `(batch, provider_options, context)` when it is true. A mapping provider
 registered with `_register_mapping_provider` receives its named input mapping
 instead: `(inputs, provider_options)` when false or
-`(inputs, provider_options, context)` when true. Existing two-argument
-providers therefore remain source-compatible.
+`(inputs, provider_options, context)` when true.
 
 Each callback is invoked exactly once under the selected ABI. The frozen,
 engine-created `ProviderContext` exposes the authoritative run
@@ -382,10 +651,8 @@ flag must be an exact `bool`; Calc Flow does not infer arity or retry a
 callback after `TypeError`. Native cancellation tokens are intentionally not
 part of the public Python API.
 
-The feature is additive: existing `execute(inputs)`, `execute_async(inputs)`,
-and two-argument providers retain their behavior. Run settings, deadlines,
-and provider-context opt-in are not serialized into projects, checkpoints, or
-Studio API payloads and do not change those formats.
+Run settings, deadlines, and provider-context opt-in are not serialized into
+projects, checkpoints, or Studio API payloads.
 
 `ExecutionOptions.deadline` is an absolute cooperative engine deadline.
 Studio's `RunOptions.timeout_seconds` is instead a process-level preview limit; it
@@ -394,29 +661,37 @@ does not populate execution settings or a deadline in the worker.
 ## Async execution
 
 ```python
+import asyncio
 from datetime import UTC, datetime, timedelta
 
-from calc_flow import ExecutionOptions
+import pyarrow as pa
+
+import calc_flow as cf
 
 
-async def calculate() -> list[int]:
-    plan = (
-        PipelineBuilder("async-example")
-        .expression("calc", "total = a + b")
-        .compile_batch()
-    )
-    options = ExecutionOptions(
+async def run() -> None:
+    options = cf.ExecutionOptions(
         settings={"request": {"source": "async-example"}},
         deadline=datetime.now(UTC) + timedelta(seconds=30),
     )
-    result = await plan.execute_async(
-        {"input": Batch.from_pyarrow(pa.table({"a": [1, 3], "b": [2, 4]}))},
-        options=options,
+    heartbeat = asyncio.create_task(asyncio.sleep(0, result="event loop remained live"))
+    execution = asyncio.create_task(
+        cf.compute_async(
+            pa.table({"a": [1, 3], "b": [2, 4]}),
+            lambda t: t.select(total=t["a"] + t["b"]),
+            options=options,
+        )
     )
-    return result.outputs["output"].to_pyarrow()["total"].to_pylist()
+    print(await heartbeat)
+    output = await execution
+    if output["total"].to_pylist() != [3, 7]:
+        raise RuntimeError(f"unexpected async totals: {output.to_pylist()}")
+    print(output.to_pylist())
+
 ```
 
-Blocking `execute`, store, and runner methods reject a running event loop. Use
+Blocking `compute`, `collect`, `execute`, store, and runner methods reject a
+running event loop. Use
 their async forms in servers and asyncio applications. `plan.execute()` checks
 for a running event loop before it validates inputs or options, so that usage
 error has precedence. An already-expired or crossed execution deadline raises
@@ -563,9 +838,9 @@ optional JAX paths are in
 
 ## Symbolic declarations and static analysis
 
-The [symbolic API reference](symbolic-api.md) covers typed declarations,
+The [expression API reference](symbolic-api.md) covers typed declarations,
 `FeatureSet`, `Program`, static analysis, ordering, and the supported
-batch/stream compilation shapes. Use the [symbolic workflow guide](symbolic-workflows.md)
+batch/stream compilation shapes. Use the [expression workflow guide](symbolic-workflows.md)
 with examples 09–13 and the
 [event-window example](../examples/symbolic_event_window.py) to learn these
 features. Fixed UTC tumbling/hopping aggregation uses immutable
@@ -575,6 +850,12 @@ Compiler ownership and physical sharing are described in
 [symbolic compiler design](symbolic-design.md).
 
 ## Projects and persistence
+
+`program.to_project()` exports a validated native graph as `ProjectDocument`.
+Use `mode="stream"` for stream export; operational connector, state, and delivery
+settings are still explicit. Python logical aliases and live data are not saved.
+[Example 14](../examples/14_project_persistence.py) shows export and reloading
+through the physical `input`/`output` bindings.
 
 `ProjectDocument` validates a strict `format_version: 3` mapping with the Rust
 schema. `project_json_schema()` returns the generated schema;
@@ -607,11 +888,21 @@ store.
 
 ## Streaming runner
 
-`PipelineBuilder.compile_stream()` returns a distinct `StreamExecutionPlan`.
+Use this explicit interface for durable recovery, transactional sinks, native
+Batch metadata, and operational controls. For ordinary async iteration, use
+[streaming results](#streaming-results).
+
+`Program.compile_stream()` returns a distinct `StreamExecutionPlan` from
+expression declarations. `PipelineBuilder.compile_stream()` is the explicit
+graph alternative. Bind the physical `source_binding_ids`, `static_input_ids`,
+and `sink_binding_ids`; these explicit runner bindings are physical names.
+The convenience `stream` methods translate logical declaration names.
 The plan records immutable source/sink binding IDs and optional per-output
 `StreamRequirements`; it cannot execute as a batch plan. A
 `StreamingRunner` owns that plan, all connector bindings, one
 `ManagedCheckpointRuntime`, and optional `StreamRuntimeConfig`:
+
+The explicit graph form is:
 
 ```python
 plan = PipelineBuilder("orders").expression("total", "total = a + b").compile_stream()
@@ -699,8 +990,9 @@ See [`examples/`](../examples/README.md) and the
 [cross-language inventory](examples.md) for executable programs. Run the
 examples that need no external service against a prepared installation with
 `JAX_PLATFORMS=cpu uv run --no-sync python scripts/run_examples.py`.
-Examples 16–21 require optional native connector features and prepared services;
+The connector `*_source.py` examples numbered 16–21 require optional native
+connector features and prepared services;
 follow the [connector setup](connectors/README.md) before adding
 `--include-services` to the runner command.
-The [symbolic workflow guide](symbolic-workflows.md) maps the symbolic examples
+The [expression workflow guide](symbolic-workflows.md) maps the symbolic examples
 to analysis, lowering, checkpoint recovery, static inputs, and Studio.

@@ -771,15 +771,20 @@ class ReleaseConfigTests(unittest.TestCase):
 
     def test_normative_docs_use_final_package_and_project_versions(self) -> None:
         documentation = {
-            "README.md": ("Calc Flow 4.0", 'calc-flow = "4.0.0"'),
+            "README.md": ("Calc Flow 4.0", "uv add calc-flow-python"),
             "docs/api-reference.md": (
                 "Calc Flow 4.0 API reference",
                 "`calc-flow-python==4.0.0`",
+                '`calc-flow = "4.0.0"`',
+                "`calc-flow-studio==4.0.0`",
                 "Project format version `3`",
             ),
-            "docs/getting-started.md": ("cargo add calc-flow@4.0.0",),
+            "docs/getting-started.md": (
+                "uv add calc-flow-python",
+                "version `4.0.0`",
+            ),
             "docs/python-api.md": ("`calc-flow-python==4.0.0`",),
-            "docs/rust-api.md": ("Calc Flow 4.0", "cargo add calc-flow@4.0.0"),
+            "docs/rust-api.md": ("cargo add calc-flow@4.0.0",),
         }
         stale_package_claims = (
             "Calc Flow 2.0",

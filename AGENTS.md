@@ -1,10 +1,12 @@
 # Repository Guidance
 
-Calc Flow 4.0 is a Rust-native micro-batch and streaming calculation engine.
-The `calc-flow` crate owns immutable `Batch` values, graph compilation,
-DataFusion execution, projects, stores, checkpoints, and runners. The Python
-package under `python/calc_flow/` is a PyO3 binding plus functional adapters;
-it is not a second engine. `calc-flow-connectors` delivers connector implementations behind
+Calc Flow is a Python calculation library for Arrow tables and stateful streams.
+The application API under `python/calc_flow/` exposes immutable expressions,
+`compute`/`compute_async`, SQL and `pipe` composition, reusable `Program`
+collection, owned async stream results, and integrations. The
+`calc-flow` crate is the internal runtime and owns immutable `Batch` values,
+graph compilation, DataFusion execution, projects, stores, checkpoints, and
+runners. PyO3 and Python lowering connect the API to that single table runtime. `calc-flow-connectors` delivers connector implementations behind
 feature gates. `calc-flow-studio` is a separate local FastAPI and
 React application serving the `/api/v3` continuous job API. See `docs/introduction.md`.
 
@@ -217,14 +219,40 @@ expression/projection/filter node or one read-only `SELECT`/CTE SQL node.
 Reject DDL, DML, utility statements, multiple statements, and table backend
 selectors.
 
-### Python binding
+### Python application API and binding
 
 - Public Python source lives under `python/calc_flow/`; native bindings live in
   `crates/calc-flow-python/`.
 - `Batch.from_pyarrow` and `Batch.from_array` construct Python-facing native
   envelopes.
-- Functional `PipelineBuilder` emits strict project format v3 and compiles
-  through Rust `Runtime`.
+- Root `calc_flow` expressions, SQL, and `Program` are the application API.
+  `pipe` applies a synchronous declaration function once; it does not serialize
+  callbacks or run a Python pipeline per batch. Arrow schemas, named outputs,
+  and SQL stages lower through one immutable expression graph to project-v3.
+- SQL result schemas come from private native planning without reading rows.
+  SQL output has a new row lineage and no inherited temporal ordering.
+  Batch SQL supports multiple aliases; stream SQL accepts one and runs per batch.
+- `compute` and `collect` return Arrow tables using logical declaration names.
+  Each convenience call owns a fresh batch plan. Async calls capture mappings
+  and Batch references at entry; Arrow buffers remain shared and read-only.
+  Internal schema normalization preserves caller metadata and `Batch.metadata`.
+- `TableExpr.stream` and `Program.stream` translate logical bindings and own
+  one native job through `async with` and `async for`. Results are Arrow tables
+  or named `StreamOutput` events. Native state persists across batches, with
+  bounded backpressure and awaited lifecycle cleanup. Event-time iterables default
+  to validated nondecreasing arrival times and native watermarks at
+  `max_seen - 1 microsecond`. `watermarks` selects existing policies by logical
+  input name; supplied `SourceBinding` policies cannot be overridden. Inputs
+  without event time retain stateless per-batch output. Ordinary iterables have
+  no replay; temporary checkpoints do not provide durable restart or exactly-once
+  application delivery.
+- `Program.to_project` exports data-only native graphs without Python logical
+  aliases or payloads. Reloaded projects and explicit runners use physical
+  binding names; durable recovery uses explicit bindings and managed state.
+- Advanced functional `PipelineBuilder` and formula/SQL strings emit the same
+  strict project-v3 graph and compile through Rust `Runtime`. Explicit runtime,
+  cached-plan state, provider registration, and stream/checkpoint contracts remain
+  available.
 - Python scalar UDFs are trusted vectorized callbacks registered with exact
   Arrow types/provider/name/version/volatility and selected explicitly by
   nodes.

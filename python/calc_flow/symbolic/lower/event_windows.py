@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 from calc_flow.symbolic import errors
 from calc_flow.symbolic.analyzer import _Analyzer, _schema_fields
 from calc_flow.symbolic.expr import TableExpr, table_input
+from calc_flow.symbolic.lower.bindings import _BatchBindings
 from calc_flow.symbolic.lower.segments import (
     _cint,
     _cstr,
@@ -151,6 +152,7 @@ class _WindowGraph:
         self.static_inputs: list[object] = []
         self._reserved = {name for name, _ in program.outputs}
         self._sources: dict[str, str] = {}
+        self.bindings = _BatchBindings()
 
     def allocate(self, preferred: str) -> str:
         if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,47}", preferred) is None:
@@ -177,6 +179,9 @@ class _WindowGraph:
                 )
             )
             self._sources[node.digest] = name
+            self.bindings.inputs.setdefault(_cstr(node.attr("name")), set()).add(
+                (name, "input")
+            )
         return self._sources[node.digest]
 
     def append_fragment(
@@ -445,6 +450,10 @@ def _lower_event_window_program(
     )
     _append_window_inputs(graph, plans, runtime)
     _append_window_outputs(graph, plans, runtime, allowed_lateness_micros, late_policy)
+    bindings = getattr(analyzer, "_bindings", None)
+    if bindings is not None:
+        bindings.inputs.update(graph.bindings.inputs)
+        bindings.outputs.update({name: (name, "output") for name, _ in program.outputs})
     document = _project_document(program.name, "stream", graph.nodes, graph.edges)
     if graph.static_inputs:
         document["static_inputs"] = graph.static_inputs

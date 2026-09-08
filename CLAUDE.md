@@ -14,11 +14,13 @@ trailers to commits unless explicitly requested.
 
 ## What this is
 
-Calc Flow 4.0 is a Rust-native micro-batch and streaming calculation engine.
-The `calc-flow` crate owns immutable `Batch` values, graph compilation,
-DataFusion execution, project validation, checkpointing, and runner semantics.
-The Python package under `python/calc_flow/` is a PyO3 binding plus functional
-adapters; it is not a second engine. `calc-flow-studio` is a separate local
+Calc Flow is a Python calculation library for Arrow tables and stateful streams.
+The application API under `python/calc_flow/` exposes immutable expressions,
+`compute`/`compute_async`, SQL and `pipe` composition, reusable `Program`
+collection, owned async stream results, and integrations. The
+`calc-flow` crate is the internal runtime and owns immutable `Batch` values,
+graph compilation, DataFusion execution, project validation, checkpoints, and
+runners. PyO3 and expression lowering connect the API to that single table runtime. `calc-flow-studio` is a separate local
 FastAPI and React application. There is no `src/calc_flow/` pure-Python
 implementation; the frozen v1 implementation is preserved in
 [commit `c87324e`](https://github.com/wegamekinglc/calc-flow/tree/c87324ecaee30d8b883d3c30ae03704dee45f593).
@@ -161,7 +163,7 @@ The full conventions are in [AGENTS.md](AGENTS.md#coding-style) and
 ```text
 crates/calc-flow  (Rust core: Batch, graph compiler, DataFusion, runners, stores)
   └─ crates/calc-flow-python  (PyO3 _native binding)
-       └─ python/calc_flow  (pure-Python public API + functional adapters)
+       └─ python/calc_flow  (Python expressions, Arrow execution + integrations)
             └─ web-ui/backend  (calc-flow-studio FastAPI, /api/v3, loopback only)
                   └─ web-ui/src  (React + TypeScript + Vite + React Flow studio, via REST)
 ```
@@ -174,13 +176,41 @@ The frontend talks to the backend over the `/api/v3` REST contract only.
 |----------------------------|------------------------------------------------------------------------------------------------------------------------------------------|
 | `crates/calc-flow/`        | Native core: batches, ports/operators, graph compiler, DataFusion runtime, UDF/provider registries, runners, checkpoints, project stores |
 | `crates/calc-flow-python/` | PyO3 binding exposing the core as `calc_flow._native`                                                                                    |
-| `python/calc_flow/`        | Pure-Python public API, functional `PipelineBuilder`, runner/store adapters, NumPy/JAX provider registration, exception hierarchy        |
+| `python/calc_flow/`        | Python expressions and SQL, `pipe`, Arrow collection, owned stream results, lowering, and runtime integrations                           |
 | `web-ui/backend/`          | `calc-flow-studio` FastAPI service under `/api/v3`, loopback-bound, spawned bounded continuous-job workers                               |
 | `web-ui/src/`              | React + TypeScript + Vite + React Flow studio; API types generated from `web-ui/openapi.json`                                            |
 | `schemas/`                 | `project-v3.schema.json`, the canonical generated project contract                                                                       |
-| `examples/`                | Executable v3 Python examples                                                                                                            |
+| `examples/`                | Executable Python expression and integration examples                                                                                    |
 | `benchmarks/`              | pytest-benchmark harness (informational)                                                                                                 |
 | `docs/`                    | Published documentation                                                                                                                  |
+
+### Python API boundary
+
+Root `calc_flow` expressions, SQL, and `Program` are the application API.
+`pipe` applies a synchronous declaration function once and preserves its return
+type. SQL uses native schema planning and shares the expression graph; execution
+stays in Rust/DataFusion. SQL output has no inherited temporal ordering, and
+stream SQL accepts one alias with per-batch semantics.
+
+Convenience `compute`/`collect` returns Arrow tables by logical names and creates
+a fresh batch plan per call. `TableExpr.stream` and `Program.stream` own a single
+native job with `async with` and `async for`, yielding tables or named
+`StreamOutput` events. State persists across batches, with bounded backpressure
+and awaited cleanup. Event-time iterables default to validated nondecreasing
+arrival times and native watermarks at `max_seen - 1 microsecond`. `watermarks`
+selects existing policies by logical input name; supplied `SourceBinding`
+policies cannot be overridden. Inputs without event time retain stateless
+per-batch output. Ordinary iterables have no replay; temporary checkpoints do
+not provide durable restart or exactly-once delivery.
+
+Async preparation captures mappings and Batch references while Arrow buffers
+remain shared and read-only; caller metadata and `Batch.metadata` remain intact.
+`Program.to_project` exports graph and input placeholders without Python logical
+aliases or live payloads. Reloaded projects and explicit runners use physical
+bindings. Explicit sources, sinks, and managed state provide durable recovery;
+`PipelineBuilder`, Runtime registrations, and cached plans provide advanced
+operational controls. Follow
+[the canonical Python boundary](AGENTS.md#python-application-api-and-binding).
 
 ### Core invariants
 
