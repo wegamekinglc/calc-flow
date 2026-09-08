@@ -13,7 +13,9 @@ measurements. Use the current guides for supported behavior.
   internal runtime. Root expression imports, operator composition, named table
   methods, Arrow schema acceptance, and inferred Program inputs simplify
   authoring. `compute`/`compute_async` and `collect`/`collect_async` return Arrow
-  tables by logical name with independent batch state; `Program.to_project`
+  tables by logical name with independent batch state. `compute` entry points
+  take `data`, `build`, and optional `runtime`/`options`; temporal ordering belongs
+  to `table_input` declarations executed through collection. `Program.to_project`
   exports the native graph. Existing symbolic imports, FeatureSet/tuple forms,
   explicit Runtime, formula/SQL builders, and Rust extensions remain supported.
   Equivalent declaration identities, project-v3, stream/checkpoint, provider,

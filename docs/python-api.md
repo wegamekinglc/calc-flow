@@ -56,18 +56,19 @@ result = cf.compute(data, lambda t: t.select(total=t["a"] + t["b"]))
 assert result.to_pydict() == {"total": [3, 7]}
 ```
 
-`cf.compute(data, build, /, *, entity_by=(), event_time=None, sequence_by=(),
-runtime=None, options=None) -> pyarrow.Table` accepts an Arrow `Table`,
-`RecordBatch`, or table `Batch`. It derives the supported field types,
-nullability, and column order from that input, calls the synchronous builder
-exactly once with a `TableExpr`, and executes its returned table declaration.
+`cf.compute(data, build, /, *, runtime=None, options=None) -> pyarrow.Table`
+accepts an Arrow `Table`, `RecordBatch`, or table `Batch`. It derives the
+supported field types, nullability, and column order from that input, calls the
+synchronous builder exactly once with a `TableExpr`, and executes its returned
+table declaration.
 The builder must return `TableExpr`; asynchronous builders and other return
 values fail before native execution. Builder exceptions keep their traceback.
 
-`cf.compute_async` has the same arguments and returns an awaitable Arrow table.
-Its builder and declaration preparation run when called; awaiting it drives
-cancellation-aware native execution. `compute` rejects a running event loop
-before invoking the builder. Both forms accept keyword-only `ExecutionOptions`.
+`cf.compute_async(data, build, /, *, runtime=None, options=None)` returns an
+awaitable Arrow table. Its builder and declaration preparation run when called;
+awaiting it drives cancellation-aware native execution. `compute` rejects a running event loop
+before invoking the builder. Both forms accept keyword-only `runtime` and
+`options`.
 
 Arrow schema and field metadata are omitted only from the internal execution
 schema. The caller's objects and their metadata remain unchanged, and a table
@@ -75,6 +76,27 @@ schema. The caller's objects and their metadata remain unchanged, and a table
 underlying storage read-only until execution completes; this is not a deep
 copy of table contents. Async collection copies input mappings and captures
 `Batch` references at call time, before awaiting execution.
+
+### Temporal ordering
+
+`compute` and `compute_async` infer an input with no ordering declaration.
+For temporal calculations, set `entity_by`, `event_time`, and `sequence_by` on
+`cf.table_input`, apply the same synchronous builder to that declaration, and
+collect the returned table expression.
+
+The [financial example](batch-guide.md#financial-expressions) declares `source`
+for its `quotes` data and `signals` builder. Use
+`signals(source).collect(quotes, runtime=runtime, options=options)` or
+`await signals(source).collect_async(quotes, runtime=runtime, options=options)`;
+both execution arguments remain optional. Named-output programs use
+`Program.collect` or `Program.collect_async` with the same declared inputs.
+
+Rolling and cross-section calculations require explicit `entity_by`,
+`event_time`, and `sequence_by` declarations. Rolling event time must be a
+non-null `timestamp[us, UTC]` field. Ordinary Arrow inference makes timestamp
+fields nullable, even when no value is null; supply an explicit non-null schema
+as in [example 09](../examples/09_symbolic_financial_features.py). Event windows
+have their own [timestamp contract](symbolic-api.md#schema-and-geometry).
 
 ## Table expressions and names
 
@@ -117,13 +139,6 @@ field names fail with an input/field path. Fields and derived column names must
 satisfy the portable identifier rule `[A-Za-z_][A-Za-z0-9_]*`; rename columns in
 Arrow before declaring them if necessary. String literals are values, never
 parsed as formulas.
-
-Rolling and cross-section calculations require explicit `entity_by`,
-`event_time`, and `sequence_by` declarations. Rolling event time must be a
-non-null `timestamp[us, UTC]` field. Ordinary Arrow inference makes timestamp
-fields nullable, even when no value is null; supply an explicit non-null schema
-as in [example 09](../examples/09_symbolic_financial_features.py). Event windows
-have their own [timestamp contract](symbolic-api.md#schema-and-geometry).
 
 ## Reusable programs and collection
 

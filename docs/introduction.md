@@ -72,12 +72,15 @@ outputs, projection, and filtering.
 
 ## Choose how to declare and execute a calculation
 
-Start with `cf.compute(data, build)` or `await cf.compute_async(data, build)`.
-No explicit schema, input name, `Batch`, runtime, or plan is needed for supported
-Arrow data. Types remain strict; convenience execution does not coerce columns.
+Start with `cf.compute(data, build)` or `await cf.compute_async(data, build)`
+for calculations that need no ordering declaration. No explicit schema, input
+name, `Batch`, runtime, or plan is needed for supported Arrow data. Types remain
+strict; convenience execution does not coerce columns.
 
 Use `cf.table_input(name, schema=...)` and `cf.Program(name, outputs={...})`
 for reusable declarations, named outputs, analysis, or project export.
+Temporal calculations declare entity, event-time, and sequence keys on
+`table_input`; see [temporal ordering](python-api.md#temporal-ordering).
 `TableExpr.collect` returns one Arrow table; `Program.collect` returns tables by
 logical output name. Async forms use the same calculation and cancellation
 contract. See [batch calculations](batch-guide.md).

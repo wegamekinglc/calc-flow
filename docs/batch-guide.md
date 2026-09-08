@@ -2,7 +2,8 @@
 
 [Documentation](README.md) / 2.1 Batch calculations
 
-Use `cf.compute(data, build)` when a complete Arrow input is available.
+Use `cf.compute(data, build)` when a complete Arrow input is available and the
+calculation needs no ordering declaration.
 The builder composes immutable table expressions and the result is a
 `pyarrow.Table`. Supported Arrow schema, default names, and the internal
 runtime are selected automatically. See [installation](getting-started.md).
@@ -102,8 +103,8 @@ the explicit execution APIs in the [Python reference](python-api.md).
 
 ## Financial expressions
 
-Reusable Python functions can compose rolling formulas and named results. This
-example declares its event-time field explicitly:
+Reusable Python functions can compose rolling formulas and named results.
+Declare ordering on `cf.table_input`, then collect from the returned expression:
 
 ```python
 quote_schema = pa.schema([
@@ -123,13 +124,14 @@ def signals(q: cf.TableExpr) -> cf.TableExpr:
     mean = cf.ts.mean(price, window=cf.rows(3))
     return q.select("symbol", "ts", momentum=momentum, mean_price=mean)
 
-result = cf.compute(
-    quotes,
-    signals,
+source = cf.table_input(
+    "quotes",
+    schema=quotes.schema,
     entity_by=("symbol",),
     event_time="ts",
     sequence_by=("ts",),
 )
+result = signals(source).collect(quotes)
 ```
 
 Rolling needs non-empty entity and sequence keys plus non-null
@@ -137,6 +139,10 @@ Rolling needs non-empty entity and sequence keys plus non-null
 nullable even when all values are present; declare `nullable=False` in the schema.
 The `price` field and its divisors here are floating-point. Null/warm-up and
 ordering rules remain those of the native rolling operators.
+
+Collection accepts optional `runtime` and `options` arguments, and
+`collect_async` provides the awaited form. See the
+[temporal execution contract](python-api.md#temporal-ordering).
 
 [Example 09](../examples/09_symbolic_financial_features.py) extends this pattern
 with reusable mappings for returns, Bollinger bands, RSI, EMA/MACD, and

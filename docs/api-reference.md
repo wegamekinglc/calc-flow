@@ -57,11 +57,16 @@ Import the main surface from `calc_flow`.
 
 ### Expressions and Arrow execution
 
-Prefer `import calc_flow as cf`. `compute(data, build, /, *, entity_by=(),
-event_time=None, sequence_by=(), runtime=None, options=None)` returns an Arrow
-table; `compute_async` returns its awaitable. Inputs are Arrow tables, record
-batches, or table `Batch` values. The synchronous builder receives a typed
-`TableExpr` once, with the supported Arrow schema inferred from data.
+Prefer `import calc_flow as cf`.
+`compute(data, build, /, *, runtime=None, options=None)` returns an Arrow table;
+`compute_async(data, build, /, *, runtime=None, options=None)` returns its
+awaitable. Inputs are Arrow tables, record batches, or table `Batch` values.
+The synchronous builder receives a typed `TableExpr` once, with the supported
+Arrow schema inferred from data.
+
+The inferred input has no ordering. Temporal calculations declare ordering on
+`table_input` and execute through `collect` or `collect_async`; see
+[temporal ordering](python-api.md#temporal-ordering).
 
 `TableExpr` provides indexing, overloaded column operators, append-only
 `with_columns`, `select`, `filter`, and `collect`/`collect_async`.
