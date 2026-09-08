@@ -188,7 +188,7 @@ The frontend talks to the backend over the `/api/v3` REST contract only.
 
 Root `calc_flow` expressions, SQL, and `Program` are the application API.
 `pipe` applies a synchronous declaration function once and preserves its return
-type. SQL uses native schema planning and shares the expression DAG; execution
+type. SQL uses native schema planning and shares the expression graph; execution
 stays in Rust/DataFusion. SQL output has no inherited temporal ordering, and
 stream SQL accepts one alias with per-batch semantics.
 

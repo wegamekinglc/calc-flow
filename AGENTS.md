@@ -228,7 +228,7 @@ selectors.
 - Root `calc_flow` expressions, SQL, and `Program` are the application API.
   `pipe` applies a synchronous declaration function once; it does not serialize
   callbacks or run a Python pipeline per batch. Arrow schemas, named outputs,
-  and SQL stages lower through one immutable DAG to project-v3.
+  and SQL stages lower through one immutable expression graph to project-v3.
 - SQL result schemas come from private native planning without reading rows.
   SQL output has a new row lineage and no inherited temporal ordering.
   Batch SQL supports multiple aliases; stream SQL accepts one and runs per batch.

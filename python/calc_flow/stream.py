@@ -280,7 +280,8 @@ class StreamResults[T]:
             self._next_busy = False
 
     async def _next_output(self) -> StreamOutput:
-        assert self._waiter is not None
+        if self._waiter is None:
+            raise RuntimeError("stream: enter with async with before iteration")
         while self._queue.empty():
             if self._waiter.done():
                 await self.aclose()
