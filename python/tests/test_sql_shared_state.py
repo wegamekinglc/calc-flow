@@ -104,3 +104,52 @@ def test_sql_branches_keep_distinct_filter_admission_for_shared_columns():
     actual = _run(program)
     assert actual["high"] == pytest.approx([None, 3.0, -1.0])
     assert actual["other"] == pytest.approx([None, 2.0, 2.0])
+
+
+@pytest.mark.parametrize("mode", ["batch", "stream"])
+def test_sql_row_branches_preserve_typed_fanout_edges(mode):
+    data = pa.table({"x": [1, 2]})
+    source = cf.table_input("values", schema=data.schema)
+    program = cf.Program(
+        "branches",
+        outputs={
+            "a": source.select(a=source["x"] + 1).sql("SELECT a FROM input"),
+            "b": source.select(b=source["x"] * 2).sql("SELECT b FROM input"),
+        },
+    )
+    if mode == "batch":
+        result = program.collect({"values": data})
+        actual = {name: table.column(0).to_pylist() for name, table in result.items()}
+    else:
+
+        async def feed():
+            yield data.slice(0, 1)
+            yield data.slice(1)
+
+        async def run():
+            values = {"a": [], "b": []}
+            async with program.stream({"values": feed()}) as results:
+                async for output in results:
+                    values[output.name].extend(output.table.column(0).to_pylist())
+            return values
+
+        actual = asyncio.run(run())
+    assert actual == {"a": [2, 3], "b": [2, 4]}
+
+
+def test_sql_join_and_direct_branch_keep_distinct_same_schema_inputs():
+    left_data = pa.table({"x": [1, 2]})
+    right_data = pa.table({"x": [10, 20]})
+    left = cf.table_input("left", schema=left_data.schema)
+    right = cf.table_input("right", schema=right_data.schema)
+    first = left.select(v=left["x"] + 1)
+    second = right.select(v2=right["x"] * 2)
+    joined = cf.sql(
+        "SELECT a.v + b.v2 AS total FROM a CROSS JOIN b ORDER BY total",
+        a=first,
+        b=second,
+    )
+    program = cf.Program("multi-frontier", outputs={"sql": joined, "left": first})
+    result = program.collect({"right": right_data, "left": left_data})
+    assert result["sql"].to_pydict() == {"total": [22, 23, 42, 43]}
+    assert result["left"].to_pydict() == {"v": [2, 3]}

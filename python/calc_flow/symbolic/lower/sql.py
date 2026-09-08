@@ -103,6 +103,40 @@ def _pin_fragment_schemas(
     for node in raw["nodes"]:
         if node["operator"]["kind"] == "expression" and node["id"] not in untyped:
             node["output_ports"] = [_table_port(_fields(schemas[node["id"]]), "output")]
+    _pin_fragment_inputs(raw)
+
+
+def _pin_fragment_inputs(graph: Mapping[str, Any]) -> None:
+    by_id = {node["id"]: node for node in graph["nodes"]}
+    for edge in graph["edges"]:
+        _pin_connected_input(by_id, edge)
+
+
+def _pin_connected_input(nodes: Mapping[str, Any], edge: Mapping[str, str]) -> None:
+    target = nodes[edge["target_node"]]
+    if target["operator"]["kind"] != "expression":
+        return
+    source = nodes[edge["source_node"]]
+    schema = next(
+        (
+            port.get("schema")
+            for port in source.get("output_ports", [])
+            if port["name"] == edge["source_port"]
+        ),
+        None,
+    )
+    if schema is not None:
+        _pin_input_port(target, edge["target_port"], schema)
+
+
+def _pin_input_port(
+    node: dict[str, Any], name: str, schema: list[dict[str, Any]]
+) -> None:
+    ports = {port["name"]: dict(port) for port in node.get("input_ports", [])}
+    port = ports.setdefault(name, {"name": name, "kind": "table", "required": True})
+    if port.get("schema") is None:
+        port["schema"] = [dict(field) for field in schema]
+    node["input_ports"] = list(ports.values())
 
 
 class _SQLGraph:
