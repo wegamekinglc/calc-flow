@@ -62,6 +62,34 @@ def _shared_tables(program: Program, analyzer: _Analyzer) -> frozenset[str]:
     )
 
 
+_TABLE_BOUNDARIES = frozenset(
+    {
+        "sql",
+        "attach_columns",
+        "stream_join",
+        "window_tumbling",
+        "window_hopping",
+    }
+)
+
+
+def _expression_frontiers(program: Program) -> tuple[Node, ...]:
+    candidates: dict[str, Node] = {}
+    for _, value in program.outputs:
+        candidates[value.digest] = value._node
+        for node in _walk_nodes(value._node):
+            if node.op.name in _TABLE_BOUNDARIES:
+                for child in node.args:
+                    candidates[child.digest] = child
+    return tuple(node for node in candidates.values() if _is_row_fragment(node))
+
+
+def _is_row_fragment(node: Node) -> bool:
+    if node.op.name not in {"project", "filter", "with_columns"}:
+        return False
+    return not any(child.op.name in _TABLE_BOUNDARIES for child in _walk_nodes(node))
+
+
 def _pin_fragment_schemas(
     document: dict[str, Any], schemas: Mapping[str, pa.Schema]
 ) -> None:
@@ -102,11 +130,14 @@ class _SQLGraph:
         if node.op.name == "table_input":
             self.schemas[node.digest] = self.analyzer.table(node, "sql.input").schema
             return self.graph.source(node)
+        if node.op.name != "sql":
+            return self._append_expression(node)
         output_id = self.graph.allocate(f"cf_sql_{node.digest[:24]}")
-        if node.op.name == "sql":
-            self._append_sql(node, output_id)
-        else:
-            output_id = self._append_expression(node, output_id)
+        self._append_sql(node, output_id)
+        self._remember(node, output_id)
+        return output_id
+
+    def _remember(self, node: Node, output_id: str) -> None:
         facts = self.analyzer.table(node, f"{self.graph.program.name}.sql")
         virtual = table_input(
             self.graph.allocate(f"cf_sql_input_{node.digest[:24]}"),
@@ -118,7 +149,6 @@ class _SQLGraph:
         self.replacements[node.digest] = virtual._node
         self.virtual_sources[virtual.digest] = output_id
         self.materialized[node.digest] = output_id
-        return output_id
 
     def _append_sql(self, node: Node, output_id: str) -> None:
         aliases = _cstr_seq(node.attr("aliases"))
@@ -152,8 +182,7 @@ class _SQLGraph:
             for alias, parent in zip(aliases, parents, strict=True)
         )
 
-    def _append_expression(self, node: Node, output_id: str) -> str:
-        from calc_flow.symbolic.lower.program import lower_program_document
+    def _append_expression(self, node: Node) -> str:
 
         for boundary in reversed(_walk_nodes(node)):
             if boundary.digest == node.digest:
@@ -163,9 +192,21 @@ class _SQLGraph:
                 or boundary.digest in self.shared
             ):
                 self.table(boundary)
-        rewritten = _rewrite_nodes(node, self.replacements)
+        self._append_expressions((node,))
+        return self.materialized[node.digest]
+
+    def _append_expressions(self, nodes: tuple[Node, ...]) -> None:
+        from calc_flow.symbolic.lower.program import lower_program_document
+
+        outputs = {
+            self.graph.allocate(f"cf_sql_{node.digest[:24]}"): node for node in nodes
+        }
         fragment = Program(
-            self.graph.program.name, outputs={output_id: TableExpr(rewritten)}
+            self.graph.program.name,
+            outputs={
+                name: TableExpr(_rewrite_nodes(node, self.replacements))
+                for name, node in outputs.items()
+            },
         )
         bindings = _BatchBindings()
         document = lower_program_document(
@@ -177,20 +218,35 @@ class _SQLGraph:
             _bindings=bindings,
         )
         declared = {
-            output_id: _arrow_schema(self.analyzer.table(node, "sql.input").schema)
+            name: _arrow_schema(self.analyzer.table(node, "sql.input").schema)
+            for name, node in outputs.items()
         }
         schemas = infer_document_schemas(document, self.analyzer._runtime, declared)
-        self.schemas[node.digest] = _fields(schemas[output_id])
         _pin_fragment_schemas(document, schemas)
         upstreams = {
             _cstr(value._node.attr("name")): self._source(value._node)
             for value in fragment.inputs
             if isinstance(value, TableExpr)
         }
-        self._append_fragment(document, bindings, upstreams, output_id)
-        if node.op.name == "attach_columns":
-            return self._provider_schema_boundary(output_id, self.schemas[node.digest])
-        return output_id
+        self._append_fragment(
+            document, bindings, upstreams, {name: name for name in outputs}
+        )
+        self._remember_outputs(outputs, schemas)
+
+    def _remember_outputs(
+        self,
+        outputs: Mapping[str, Node],
+        schemas: Mapping[str, pa.Schema],
+    ) -> None:
+        for name, node in outputs.items():
+            fields = _fields(schemas[name])
+            self.schemas[node.digest] = fields
+            parent = (
+                self._provider_schema_boundary(name, fields)
+                if node.op.name == "attach_columns"
+                else name
+            )
+            self._remember(node, parent)
 
     def _provider_schema_boundary(self, parent: str, fields: tuple[Field, ...]) -> str:
         output = self.graph.allocate(f"{parent}__typed")
@@ -222,13 +278,14 @@ class _SQLGraph:
         document: dict[str, Any],
         bindings: _BatchBindings,
         upstreams: Mapping[str, str],
-        output_id: str,
+        output_ids: Mapping[str, str],
     ) -> None:
         raw = document["graph"]
+        scope = next(iter(output_ids))
         aliases = {
-            node["id"]: output_id
-            if node["id"] == output_id
-            else self.graph.allocate(f"{output_id}__{node['id']}")
+            node["id"]: output_ids[node["id"]]
+            if node["id"] in output_ids
+            else self.graph.allocate(f"{scope}__{node['id']}")
             for node in raw["nodes"]
         }
         self.graph.nodes.extend(
@@ -270,6 +327,10 @@ class _SQLGraph:
             )
 
     def outputs(self) -> None:
+        frontiers = _expression_frontiers(self.graph.program)
+        if len(frontiers) > 1:
+            # Preserve the existing planner's CSE and filter admission across SQL cuts.
+            self._append_expressions(frontiers)
         for name, value in self.graph.program.outputs:
             upstream = self.table(value._node)
             fields = self.schemas[value.digest]

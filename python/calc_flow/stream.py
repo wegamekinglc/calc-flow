@@ -228,6 +228,7 @@ class StreamResults[T]:
         self._closed = False
         self._next_busy = False
         self._job: StreamingJob | None = None
+        self._starting: asyncio.Task[None] | None = None
         self._waiter: asyncio.Task[JobOutcome] | None = None
         self._closing: asyncio.Task[None] | None = None
         self._queue: asyncio.Queue[StreamOutput] = asyncio.Queue(maxsize=1)
@@ -246,8 +247,11 @@ class StreamResults[T]:
         if self._entered or self._closed:
             raise RuntimeError("stream: a result context may be entered only once")
         self._entered = True
+        self._starting = asyncio.create_task(self._start())
         try:
-            await self._start()
+            await asyncio.shield(self._starting)
+            if self._closed:
+                raise asyncio.CancelledError("stream: closed during context entry")
         except BaseException:
             await _finish_cleanup(self.aclose())
             raise
@@ -379,20 +383,39 @@ class StreamResults[T]:
             raise
 
     async def _close(self) -> None:
-        outcome = None
         try:
-            if self._job is not None and self._waiter is not None:
-                if not self._waiter.done():
-                    await self._job.cancel_async()
-                outcome = await self._waiter
+            await self._stop_start()
         finally:
             try:
-                for adapter in self._adapters:
-                    await adapter.close()
+                outcome = await self._stop_job()
             finally:
-                if self._root is not None:
-                    await asyncio.to_thread(shutil.rmtree, self._root)
+                await self._close_sources()
         self._raise_failure(outcome)
+
+    async def _stop_start(self) -> None:
+        if self._starting is None:
+            return
+        if not self._starting.done():
+            self._starting.cancel()
+        # Context entry reports startup errors; close waits for its owned work.
+        await asyncio.gather(self._starting, return_exceptions=True)
+
+    async def _stop_job(self) -> JobOutcome | None:
+        if self._job is None:
+            return None
+        if self._waiter is None:
+            return await self._job.cancel_async()
+        if not self._waiter.done():
+            await self._job.cancel_async()
+        return await self._waiter
+
+    async def _close_sources(self) -> None:
+        try:
+            for adapter in self._adapters:
+                await adapter.close()
+        finally:
+            if self._root is not None:
+                await asyncio.to_thread(shutil.rmtree, self._root)
 
 
 def _stream_program(

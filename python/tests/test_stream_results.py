@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
@@ -619,3 +620,123 @@ def test_stream_cancellation_at_native_start_result_releases_job(
 
     asyncio.run(run())
     assert list(tmp_path.iterdir()) == []
+
+
+class _TempRootGate:
+    def __init__(self, directory: Path) -> None:
+        self._directory = directory
+        self._create = stream_module.tempfile.mkdtemp
+        self._loop = asyncio.get_running_loop()
+        self.created = asyncio.Event()
+        self.release = threading.Event()
+        self.roots: list[str] = []
+
+    def __call__(self, *, prefix: str) -> str:
+        root = self._create(prefix=prefix, dir=self._directory)
+        self.roots.append(root)
+        self._loop.call_soon_threadsafe(self.created.set)
+        if not self.release.wait(5):
+            raise RuntimeError("test did not release temp creation")
+        return root
+
+    async def cleanup(self, results, tasks) -> None:
+        self.release.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if results._job is not None:
+            await results.job.cancel_async()
+            await results._waiter
+        for root in self.roots:
+            if Path(root).exists():
+                await asyncio.to_thread(shutil.rmtree, root)
+
+
+@pytest.mark.parametrize("close_count", [1, 2])
+def test_stream_close_waits_for_pending_start_and_prevents_late_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    close_count: int,
+) -> None:
+    original_close = stream_module.StreamResults._close
+
+    async def run() -> None:
+        before = asyncio.all_tasks()
+        gate = _TempRootGate(tmp_path)
+        close_started, close_finished = asyncio.Event(), asyncio.Event()
+
+        async def close(results) -> None:
+            close_started.set()
+            await original_close(results)
+            close_finished.set()
+
+        monkeypatch.setattr(stream_module.tempfile, "mkdtemp", gate)
+        monkeypatch.setattr(stream_module.StreamResults, "_close", close)
+        feed = _IdleFeed()
+        results = _source().stream(feed)
+        entry = asyncio.create_task(results.__aenter__())
+        await asyncio.wait_for(gate.created.wait(), 5)
+        closing = [asyncio.create_task(results.aclose()) for _ in range(close_count)]
+        try:
+            await asyncio.wait_for(close_started.wait(), 5)
+            assert not close_finished.is_set()
+            gate.release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(entry, 5)
+            await asyncio.wait_for(asyncio.gather(*closing), 5)
+            assert list(tmp_path.iterdir()) == []
+            assert feed.opened == feed.closed == 0
+            assert asyncio.all_tasks() == before
+        finally:
+            await gate.cleanup(results, [entry, *closing])
+
+    asyncio.run(run())
+
+
+def test_stream_close_before_entry_never_acquires_sources() -> None:
+    feed = _Feed([pa.table({"value": [1]})])
+    results = _source().stream(feed)
+
+    async def run() -> None:
+        before = asyncio.all_tasks()
+        await asyncio.gather(results.aclose(), results.aclose())
+        with pytest.raises(RuntimeError, match="once"):
+            await results.__aenter__()
+        assert asyncio.all_tasks() == before
+
+    asyncio.run(run())
+    assert feed.opened == feed.closed == 0
+
+
+def test_stream_close_at_native_start_completion_cancels_before_entry_returns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(stream_module.tempfile, "tempdir", str(tmp_path))
+    original_start = stream_module.StreamResults._start
+
+    async def run() -> None:
+        before = asyncio.all_tasks()
+        closing = []
+
+        async def start(results) -> None:
+            await original_start(results)
+            asyncio.get_running_loop().call_soon(
+                lambda: closing.append(asyncio.create_task(results.aclose()))
+            )
+
+        monkeypatch.setattr(stream_module.StreamResults, "_start", start)
+        feed = _IdleFeed()
+        results = _source().stream(feed)
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(results.__aenter__(), 5)
+            await asyncio.wait_for(asyncio.gather(*closing), 5)
+            assert results.job.status()["state"] == "cancelled"
+            assert results.job.status()["task_count"] == 0
+            assert feed.opened == feed.closed == 1
+            assert asyncio.all_tasks() == before
+            assert list(tmp_path.iterdir()) == []
+        finally:
+            await results.aclose()
+            await asyncio.gather(*closing, return_exceptions=True)
+
+    asyncio.run(run())
