@@ -355,7 +355,7 @@ def main() -> None:
     result = output.collect({"orders": orders, "fees": fees})
     expected = {"order_id": [1, 2, 3], "doubled": [140, 216, 72]}
     if result.to_pydict() != expected:
-        raise RuntimeError(result.to_pydict())
+        raise RuntimeError(f"unexpected SQL join result: {result.to_pydict()}")
     print(result.to_pydict())
 
 
