@@ -5,7 +5,7 @@ use pyo3::{
     Borrowed, PyTraverseError, PyVisit,
     exceptions::{PyRuntimeError, PyTypeError},
     prelude::*,
-    types::{PyAny, PyBool},
+    types::{PyAny, PyBool, PyMapping},
 };
 
 use crate::pipeline::{PyExecutionPlan, PyStreamExecutionPlan};
@@ -683,6 +683,28 @@ impl PyRuntime {
                     .tokio
                     .block_on(expression.infer_stream_schema(schema))
             })
+            .map_err(crate::error::to_py_err)?;
+        pyo3_arrow::PySchema::new(schema).into_pyarrow(py)
+    }
+
+    fn _infer_sql_schema<'py>(
+        &self,
+        py: Python<'py>,
+        query: &str,
+        schemas: &Bound<'py, PyMapping>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let runtime = self.snapshot()?;
+        let schemas = schemas
+            .items()?
+            .extract::<Vec<(String, pyo3_arrow::PySchema)>>()?
+            .into_iter()
+            .map(|(alias, schema)| (alias, schema.into_inner()))
+            .collect::<BTreeMap<_, _>>();
+        let operator =
+            calc_flow::SqlOperator::new("schema", query, schemas.keys().cloned().collect(), vec![])
+                .map_err(crate::error::to_py_err)?;
+        let schema = py
+            .detach(|| runtime.tokio.block_on(operator.infer_schema(&schemas)))
             .map_err(crate::error::to_py_err)?;
         pyo3_arrow::PySchema::new(schema).into_pyarrow(py)
     }

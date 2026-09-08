@@ -665,6 +665,29 @@ def _check_rolling_capability(
     )
 
 
+def _check_stateful_lowering(
+    program: Program,
+    capabilities: RuntimeCapabilities,
+    mode_value: str,
+    allowed_lateness_micros: int,
+    late_policy: str,
+) -> None:
+    if _program_needs_stream_join(program):
+        _check_stream_join_capability(program, capabilities, mode_value)
+    if _program_needs_rolling(program) or _program_needs_cross_section(program):
+        _validate_lateness(allowed_lateness_micros, late_policy)
+        if _program_needs_rolling(program):
+            _check_rolling_capability(program, capabilities, mode_value)
+        if _program_needs_cross_section(program):
+            _check_cross_section_capability(program, capabilities, mode_value)
+    _check_window_lateness_options(
+        program,
+        _program_needs_rolling(program) or _program_needs_cross_section(program),
+        allowed_lateness_micros,
+        late_policy,
+    )
+
+
 def lower_program_document(
     program: Program,
     runtime: Runtime,
@@ -685,20 +708,17 @@ def lower_program_document(
     selected = _require_runtime(runtime, "lower_program_document")
     mode_value = _require_mode(mode)
     analyzer, capabilities = _check_expression_capability(program, selected, mode_value)
-    if _program_needs_stream_join(program):
-        _check_stream_join_capability(program, capabilities, mode_value)
-    if _program_needs_rolling(program) or _program_needs_cross_section(program):
-        _validate_lateness(allowed_lateness_micros, late_policy)
-        if _program_needs_rolling(program):
-            _check_rolling_capability(program, capabilities, mode_value)
-        if _program_needs_cross_section(program):
-            _check_cross_section_capability(program, capabilities, mode_value)
-    _check_window_lateness_options(
-        program,
-        _program_needs_rolling(program) or _program_needs_cross_section(program),
-        allowed_lateness_micros,
-        late_policy,
+    analyzer._bindings = _bindings
+    _check_stateful_lowering(
+        program, capabilities, mode_value, allowed_lateness_micros, late_policy
     )
+    from calc_flow.symbolic.lower.sql import lower_sql_program
+
+    sql_project = lower_sql_program(
+        program, analyzer, allowed_lateness_micros, late_policy
+    )
+    if sql_project is not None:
+        return sql_project
     window_project = _lower_event_window_program(
         program, analyzer, selected, allowed_lateness_micros, late_policy
     )

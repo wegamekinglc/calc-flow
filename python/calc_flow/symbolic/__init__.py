@@ -19,6 +19,7 @@ from calc_flow.symbolic.expr import (
 )
 from calc_flow.symbolic.ops import cs, linalg, row, table, ts, window
 from calc_flow.symbolic.program import FeatureSet, Program
+from calc_flow.symbolic.sql import sql
 from calc_flow.symbolic.types import Field
 from calc_flow.symbolic.windows import (
     CrossSectionGroup,
@@ -57,6 +58,7 @@ __all__ = [
     "parameter",
     "row",
     "rows",
+    "sql",
     "table",
     "table_input",
     "ts",

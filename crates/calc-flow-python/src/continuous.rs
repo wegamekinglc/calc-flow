@@ -1345,9 +1345,10 @@ fn resolved_observer_await<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     let resolver = OBSERVER_RESULT_RESOLVER.get_or_try_init(py, || {
         let namespace = PyDict::new(py);
+        // Cancellation tracebacks must release an undelivered job's completed future.
         py.run(
             pyo3::ffi::c_str!(
-                "async def resolve_observer_result(observer):\n    succeeded, value = await observer\n    if succeeded:\n        return value\n    try:\n        raise value\n    except BaseException as error:\n        BaseException.__context__.__set__(error, None)\n        raise"
+                "async def resolve_observer_result(observer):\n    try:\n        succeeded, value = await observer\n    finally:\n        observer = None\n    if succeeded:\n        return value\n    try:\n        raise value\n    except BaseException as error:\n        BaseException.__context__.__set__(error, None)\n        raise"
             ),
             Some(&namespace),
             Some(&namespace),

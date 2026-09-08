@@ -195,7 +195,12 @@ class _WindowRowOrigin:
         return f"window:{self.digest}"
 
 
-type _RowOrigin = str | _WindowRowOrigin
+@dataclass(frozen=True, slots=True)
+class _SQLRowOrigin:
+    digest: str
+
+
+type _RowOrigin = str | _WindowRowOrigin | _SQLRowOrigin
 
 
 @dataclass(frozen=True, slots=True)
@@ -542,14 +547,20 @@ class _Analyzer:
     ) -> tuple[Field, ...]:
         from calc_flow.symbolic.lower.schema import infer_table_schema
 
-        if self._runtime is None or node.op.name == "table_input":
+        if self._runtime is None or node.op.name in {
+            "table_input",
+            "sql",
+            "attach_columns",
+        }:
             return expected
         cached = self._native_row_schemas.get(node.digest)
         if cached is not None:
             return cached
         boundaries = self._row_schema_boundaries(node)
         try:
-            inferred = infer_table_schema(node, self._runtime, boundaries)
+            inferred = infer_table_schema(
+                node, self._runtime, boundaries, mode=self._mode
+            )
         except (CompileError, ConfigError, ExecutionError, ValueError) as error:
             self.issue(f"{path}.schema", "unsupported_type", str(error))
             return expected
@@ -577,7 +588,13 @@ class _Analyzer:
             visited.add(current.digest)
             if current.op.name == "table_input":
                 boundaries[current.digest] = _schema_fields(current.attr("schema"))
-            elif current.op.name in {"window_tumbling", "window_hopping"}:
+            elif current.op.name in {
+                "window_tumbling",
+                "window_hopping",
+                "sql",
+                "attach_columns",
+                "stream_join",
+            }:
                 boundaries[current.digest] = self._table_cache[current.digest].schema
             else:
                 pending.extend(current.args)
@@ -585,26 +602,71 @@ class _Analyzer:
 
     def _analyze_table(self, node: Node, path: str, /) -> TableFacts:
         name = node.op.name
-        if name in ("table_input", "parameter"):
-            return self._table_declaration(node, path)
-        if name == "project":
-            return self._project_table(node, path)
-        if name == "filter":
-            return self._filter_table(node, path)
-        if name == "with_columns":
-            return self._with_columns_table(node, path)
-        if name == "attach_columns":
-            return self._attach_columns_table(node, path)
-        if name == "stream_join":
-            return self._stream_join_table(node, path)
-        if name in ("window_tumbling", "window_hopping"):
-            return self._window_table(node, path)
+        handler = {
+            "table_input": self._table_declaration,
+            "parameter": self._table_declaration,
+            "project": self._project_table,
+            "filter": self._filter_table,
+            "with_columns": self._with_columns_table,
+            "attach_columns": self._attach_columns_table,
+            "stream_join": self._stream_join_table,
+            "window_tumbling": self._window_table,
+            "window_hopping": self._window_table,
+            "sql": self._sql_table,
+        }.get(name)
+        if handler is not None:
+            return handler(node, path)
         self.issue(
             path,
             "unknown_primitive_version",
             f"primitive {name!r} does not produce a table value",
         )
         return TableFacts((), None, frozenset(), None, (), ())
+
+    def _sql_table(self, node: Node, path: str, /) -> TableFacts:
+        aliases = _cstr_seq(node.attr("aliases"))
+        inputs = {
+            alias: self.table(child, f"{path}.sql.tables.{alias}")
+            for alias, child in zip(aliases, node.args, strict=True)
+        }
+        state = frozenset().union(*(facts.state for facts in inputs.values()))
+        empty = TableFacts((), _SQLRowOrigin(node.digest), state, None, (), ())
+        if self._mode == "stream" and len(aliases) != 1:
+            self.issue(
+                path,
+                "unsupported_mode",
+                "multi-input SQL has no incremental stream semantics",
+            )
+            return empty
+        if self._issues or self._runtime is None:
+            return empty
+        try:
+            schema = self._sql_schema(node, inputs, path)
+            return replace(empty, schema=schema)
+        except (CompileError, ConfigError, ExecutionError, ValueError) as error:
+            self.issue(f"{path}.sql.schema", "unsupported_type", str(error))
+            return empty
+
+    def _sql_schema(
+        self, node: Node, inputs: dict[str, TableFacts], path: str
+    ) -> tuple[Field, ...]:
+        from calc_flow.symbolic.lower.schema import _arrow_schema, _fields
+
+        schemas = {
+            alias: _arrow_schema(
+                self._native_row_schema(
+                    child,
+                    inputs[alias].schema,
+                    f"{path}.sql.tables.{alias}",
+                )
+            )
+            for alias, child in zip(
+                _cstr_seq(node.attr("aliases")), node.args, strict=True
+            )
+        }
+        return _fields(
+            self._runtime._infer_symbolic_sql_schema(_cstr(node.attr("query")), schemas)
+        )
 
     def _table_declaration(self, node: Node, path: str, /) -> TableFacts:
         name = _cstr(node.attr("name"))
@@ -1886,6 +1948,14 @@ class _Analyzer:
         message: str,
         /,
     ) -> None:
+        facts = self._column_cache.get(node.digest)
+        if facts is not None and isinstance(facts.lineage, _SQLRowOrigin):
+            self.issue(
+                path,
+                "ordering_required",
+                "SQL output has no temporal ordering; declare rolling work before SQL",
+            )
+            return
         if not _stateful_operand_is_stageable(node):
             self.issue(path, "unsupported_type", message)
 

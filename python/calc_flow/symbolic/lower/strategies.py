@@ -857,7 +857,9 @@ def _lower_stream_join_program(
     joins = _stream_join_nodes(program)
     if not joins:
         return None
-    if _requires_relational_dag_lowering(program, joins):
+    if getattr(
+        analyzer, "_bindings", None
+    ) is not None or _requires_relational_dag_lowering(program, joins):
         return _lower_relational_dag_program(
             program,
             analyzer,
@@ -1241,14 +1243,21 @@ def _append_relational_joins(
 ) -> None:
     for join in join_nodes:
         plan = plans[join.digest]
-        nodes.append(
-            _stream_join_node(
-                plan.node,
-                plan.node_id,
-                plan.sides[0].schema,
-                plan.sides[1].schema,
-            )
+        native = _stream_join_node(
+            plan.node,
+            plan.node_id,
+            plan.sides[0].schema,
+            plan.sides[1].schema,
         )
+        native["output_ports"] = [
+            {
+                "kind": "table",
+                "name": "output",
+                "required": True,
+                "schema": [_field_json(field) for field in plan.output_schema],
+            }
+        ]
+        nodes.append(native)
         for side in plan.sides:
             _wire_relational_join_side(
                 program,
@@ -1336,6 +1345,15 @@ def _lower_relational_dag_program(
     typed_nodes = [_graph_node(node) for node in nodes]
     typed_edges = [_graph_node(edge) for edge in edges]
     typed_nodes, typed_edges = _deduplicate_node_ids(typed_nodes, typed_edges)
+    bindings = getattr(analyzer, "_bindings", None)
+    if bindings is not None:
+        for value in program.inputs:
+            source = sources.get(value.digest)
+            if source is not None:
+                bindings.inputs.setdefault(_cstr(value._node.attr("name")), set()).add(
+                    (source, "input")
+                )
+        bindings.outputs.update({name: (name, "output") for name, _ in program.outputs})
     return _project_document(program.name, mode, typed_nodes, typed_edges)
 
 

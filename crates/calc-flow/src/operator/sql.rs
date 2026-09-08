@@ -4,6 +4,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use datafusion::arrow::datatypes::SchemaRef;
 use serde_json::Value;
 
 use crate::{
@@ -135,6 +136,46 @@ impl SqlOperator {
     /// The normalized read-only query executed by this operator.
     pub(crate) fn query_text(&self) -> &str {
         &self.query
+    }
+
+    /// Plans the exact SQL output schema without processing rows.
+    ///
+    /// This internal adapter seam uses built-in SQL functions and named Arrow
+    /// schemas. It does not execute batches or select registered UDFs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for selected UDFs, mismatched aliases, unresolved SQL,
+    /// or duplicate output field names.
+    #[doc(hidden)]
+    pub async fn infer_schema(&self, schemas: &BTreeMap<String, SchemaRef>) -> Result<SchemaRef> {
+        if !self.udfs.is_empty()
+            || !schemas
+                .keys()
+                .eq(self.aliases.iter().collect::<BTreeSet<_>>())
+        {
+            return Err(CalcFlowError::InvalidArgument {
+                field: "sql.tables".into(),
+                message: "schema planning requires the declared aliases and built-in SQL functions"
+                    .into(),
+            });
+        }
+        let schema = DataFusionRuntime::new(DataFusionConfig::default())?
+            .infer_query_schema(&self.query, schemas, &self.name)
+            .await?;
+        let mut names = BTreeSet::new();
+        for field in schema.fields() {
+            if !names.insert(field.name()) {
+                return Err(CalcFlowError::InvalidArgument {
+                    field: "sql.output.schema".into(),
+                    message: format!(
+                        "duplicate output field {:?}; use unique aliases",
+                        field.name()
+                    ),
+                });
+            }
+        }
+        Ok(schema)
     }
 
     /// Attaches the plan's `DataFusion` resources for the stream path.

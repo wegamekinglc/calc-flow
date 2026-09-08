@@ -82,6 +82,7 @@ from calc_flow.runtime import (
     WatermarkPolicy,
 )
 from calc_flow.store import FileProjectStore
+from calc_flow.stream import StreamInput, StreamOutput, StreamResults
 from calc_flow.symbolic import (
     AnalysisIssue,
     AnalysisResult,
@@ -107,6 +108,7 @@ from calc_flow.symbolic import (
     parameter,
     row,
     rows,
+    sql,
     table,
     table_input,
     ts,
@@ -121,6 +123,10 @@ RunResult = _native.RunResult
 __all__ = [
     "compute",
     "compute_async",
+    "sql",
+    "StreamInput",
+    "StreamOutput",
+    "StreamResults",
     "Expr",
     "ColumnExpr",
     "TableExpr",

@@ -7,9 +7,10 @@ structural comparison instead of symbolic equality or truth testing.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Mapping, Sequence
+import inspect
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, overload
+from typing import TYPE_CHECKING, Concatenate, Literal, overload
 
 import pyarrow as pa
 
@@ -51,6 +52,8 @@ if TYPE_CHECKING:
     from calc_flow._native import ExecutionOptions
     from calc_flow.compute import TableData
     from calc_flow.pipeline import Runtime
+    from calc_flow.runtime import StreamRuntimeConfig
+    from calc_flow.stream import StreamInput, StreamResults
     from calc_flow.symbolic.program import FeatureSet
 
 type ColumnOperand = ColumnExpr | ScalarLiteral
@@ -83,6 +86,23 @@ class Expr[T]:
         """Render the declaration tree deterministically."""
 
         return explain_node(self._node)
+
+    def pipe[SelfExpr: Expr, **P, R](
+        self: SelfExpr,
+        function: Callable[Concatenate[SelfExpr, P], R],
+        /,
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> R:
+        """Apply a synchronous declaration builder once, preserving its return type."""
+        if not callable(function):
+            raise TypeError("pipe.function: expected a synchronous callable")
+        result = function(self, *args, **kwargs)
+        if inspect.isawaitable(result):
+            if inspect.iscoroutine(result):
+                result.close()
+            raise TypeError("pipe.result: use a synchronous declaration builder")
+        return result
 
     def __bool__(self) -> bool:
         raise bool_error()
@@ -434,6 +454,25 @@ class TableExpr(Expr[object]):
         from calc_flow.symbolic.ops import table
 
         return table.filter(self, predicate)
+
+    def sql(self, query: str, /) -> TableExpr:
+        """Declare a read-only SQL stage using this table as the ``input`` alias."""
+        from calc_flow.symbolic.sql import sql
+
+        return sql(query, input=self)
+
+    def stream(
+        self,
+        inputs: StreamInput | Mapping[str, StreamInput | TableData],
+        /,
+        *,
+        runtime: Runtime | None = None,
+        config: StreamRuntimeConfig | None = None,
+    ) -> StreamResults[pa.Table]:
+        """Own a native stateful stream with ``async with`` and ``async for``."""
+        from calc_flow.stream import _stream_table
+
+        return _stream_table(self, inputs, runtime, config)
 
     def collect(
         self,

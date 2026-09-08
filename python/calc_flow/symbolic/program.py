@@ -29,6 +29,8 @@ if TYPE_CHECKING:
     from calc_flow.compute import TableData
     from calc_flow.config import ProjectDocument
     from calc_flow.pipeline import BatchExecutionPlan, Runtime, StreamExecutionPlan
+    from calc_flow.runtime import StreamRuntimeConfig
+    from calc_flow.stream import StreamInput, StreamOutput, StreamResults
     from calc_flow.symbolic.analyzer import AnalysisResult
     from calc_flow.symbolic.types import LatePolicy
 
@@ -350,6 +352,19 @@ class Program:
             inputs=(*self._inputs, value),
             outputs=self._outputs,
         )
+
+    def stream(
+        self,
+        inputs: Mapping[str, StreamInput | TableData],
+        /,
+        *,
+        runtime: Runtime | None = None,
+        config: StreamRuntimeConfig | None = None,
+    ) -> StreamResults[StreamOutput]:
+        """Yield named output events from one owned native streaming job."""
+        from calc_flow.stream import _stream_program
+
+        return _stream_program(self, inputs, runtime, config)
 
     def output(self, name: str, value: TableExpr | ArrayExpr, /) -> Program:
         """Return a new program with one declared output appended."""

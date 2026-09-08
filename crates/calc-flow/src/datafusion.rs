@@ -302,17 +302,29 @@ impl DataFusionRuntime {
         schema: SchemaRef,
         node_id: &str,
     ) -> Result<SchemaRef> {
+        self.infer_query_schema(query, &BTreeMap::from([("input".into(), schema)]), node_id)
+            .await
+    }
+
+    pub(crate) async fn infer_query_schema(
+        &self,
+        query: &str,
+        schemas: &BTreeMap<String, SchemaRef>,
+        node_id: &str,
+    ) -> Result<SchemaRef> {
         self.ensure_open()?;
         let query = validate_select_query(query)?;
         let _query_guard = self.query_lock.lock().await;
         self.ensure_open()?;
         let context = self.context_for_rows(0, None, "not_evaluated");
         let mut registrations = TableRegistrations::new(context);
-        let input = Batch::table(
-            vec![RecordBatch::new_empty(schema)],
-            BatchMetadata::new("schema", 0, BTreeMap::new())?,
-        )?;
-        registrations.register("input", &input, Some(node_id))?;
+        for (alias, schema) in schemas {
+            let input = Batch::table(
+                vec![RecordBatch::new_empty(Arc::clone(schema))],
+                BatchMetadata::new("schema", 0, BTreeMap::new())?,
+            )?;
+            registrations.register(alias, &input, Some(node_id))?;
+        }
         physical_query_schema(context, &query, node_id).await
     }
 
@@ -987,6 +999,48 @@ mod tests {
             Volatility::Immutable,
             Arc::new(move |_| Ok(ColumnarValue::Scalar(ScalarValue::Int64(Some(value))))),
         ))
+    }
+
+    #[tokio::test]
+    async fn named_schema_planning_does_not_execute_or_invoke_selected_udfs() {
+        use datafusion::arrow::datatypes::{Field, Schema};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        let reference =
+            UdfReference::new("rust", "observed", "1", UdfKind::DataFusionScalar).unwrap();
+        let udf = Arc::new(create_udf(
+            "observed",
+            vec![DataType::Int64],
+            DataType::Int64,
+            Volatility::Volatile,
+            Arc::new(move |_| {
+                observed.fetch_add(1, Ordering::Relaxed);
+                Ok(ColumnarValue::Scalar(ScalarValue::Int64(Some(1))))
+            }),
+        ));
+        let mut registry = UdfRegistry::new();
+        registry
+            .register_datafusion(reference.clone(), udf, 1)
+            .unwrap();
+        let mut runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+        runtime
+            .register_udfs(&registry.snapshot(), &[reference])
+            .unwrap();
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)]));
+        let result = runtime
+            .infer_query_schema(
+                "SELECT observed(x) AS value FROM declared",
+                &BTreeMap::from([("declared".into(), schema)]),
+                "schema",
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.field(0).name(), "value");
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert!(runtime.metrics().is_empty());
+        assert_eq!(runtime.next_query.load(Ordering::Relaxed), 1);
+        assert!(!runtime.context().table_exist("declared").unwrap());
     }
 
     #[test]
