@@ -32,13 +32,24 @@ def _table_batch(data: TableData, path: str) -> Batch:
     if isinstance(data, Batch):
         if data.kind != "table":
             raise TypeError(f"{path}: expected table input, got {data.kind} Batch")
-        return data
-    if isinstance(data, (pa.Table, pa.RecordBatch)):
-        return Batch.from_pyarrow(data)
-    raise TypeError(
-        f"{path}: expected Arrow Table, RecordBatch or table Batch; "
-        f"got {type(data).__name__}"
-    )
+        table = data.to_pyarrow()
+    elif isinstance(data, (pa.Table, pa.RecordBatch)):
+        table = data
+    else:
+        raise TypeError(
+            f"{path}: expected Arrow Table, RecordBatch or table Batch; "
+            f"got {type(data).__name__}"
+        )
+    if table.schema.metadata is not None or any(
+        field.metadata is not None for field in table.schema
+    ):
+        # Symbolic schemas omit Arrow metadata; rewrap the same column buffers.
+        schema = pa.schema([field.remove_metadata() for field in table.schema])
+        normalized = pa.Table.from_arrays(table.columns, schema=schema)
+        return Batch.from_pyarrow(
+            normalized, metadata=data.metadata if isinstance(data, Batch) else None
+        )
+    return data if isinstance(data, Batch) else Batch.from_pyarrow(table)
 
 
 def _prepare_collect(
@@ -127,7 +138,7 @@ def compute(
     runtime: Runtime | None = None,
     options: ExecutionOptions | None = None,
 ) -> pa.Table:
-    """Build from the exact Arrow schema and independently compute the result."""
+    """Build from Arrow fields and independently compute the result."""
     _require_blocking("compute")
     program, batch = _build_program(data, build, entity_by, event_time, sequence_by)
     return _collect(program, {"input": batch}, runtime, options)["output"]
@@ -212,6 +223,10 @@ def compute_async(
     runtime: Runtime | None = None,
     options: ExecutionOptions | None = None,
 ) -> Awaitable[pa.Table]:
-    """Snapshot inputs now and await cancellation-aware native execution."""
+    """Capture the input Batch and await cancellation-aware native execution.
+
+    Arrow buffers are shared. Keep their underlying storage read-only until
+    execution completes; this does not copy the table contents.
+    """
     program, batch = _build_program(data, build, entity_by, event_time, sequence_by)
     return _collect_table_async(program, {"input": batch}, runtime, options)

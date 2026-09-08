@@ -166,9 +166,12 @@ is rejected with a clear builder-result error.
 
 Data does not become part of an expression node, digest, compile cache key or
 project. A supplied `Batch` must be table-kind and keeps its metadata; Arrow input
-uses the existing immutable `Batch.from_pyarrow` boundary. Accept only these
-explicit input types; implicit pandas, Polars, dict and array conversions would add
-unclear data-copy and backend behavior. A caller can explicitly convert those to
+uses the existing `Batch.from_pyarrow` boundary, which shares Arrow buffers.
+Convenience execution removes schema/field Arrow metadata only from its internal
+schema wrapper so it agrees with the metadata-free declaration. It preserves the
+caller table, its buffers and Arrow metadata, and the supplied `Batch.metadata`.
+Accept only these explicit input types; implicit pandas, Polars, dict and array
+conversions would add unclear data-copy and backend behavior. A caller can explicitly convert those to
 Arrow. Unsupported Arrow field types produce an input-field error, not a lossy cast.
 
 Ordering arguments are forwarded to the inferred `table_input`. No entity, timestamp,
@@ -349,8 +352,10 @@ Arrow data or arrays. Output conversion returns new Python dicts.
 Blocking `compute`/`collect` reject an active event loop before invoking a builder
 or starting work and name the async alternative. Async forms use the existing
 cancellation-aware native bridge; they must not call blocking execute, `asyncio.run`
-or swallow cancellation. Copy caller-owned mappings and snapshot inputs at the
-adapter boundary before asynchronous execution. Forward the exact provided
+or swallow cancellation. Copy caller-owned mappings and capture Batch references
+at the adapter boundary before asynchronous execution. Arrow buffers remain shared;
+no table-content snapshot is taken. Callers must keep the underlying storage
+read-only until execution completes. Forward the exact provided
 `ExecutionOptions` settings/deadline through the existing validated boundary.
 
 ## Before and after

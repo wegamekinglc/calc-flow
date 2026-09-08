@@ -461,7 +461,11 @@ class TableExpr(Expr[object]):
         runtime: Runtime | None = None,
         options: ExecutionOptions | None = None,
     ) -> Awaitable[pa.Table]:
-        """Snapshot input data and await this table's independent execution."""
+        """Copy input mappings, capture Batch references and await execution.
+
+        Arrow buffers are shared; keep their underlying storage read-only until
+        execution completes.
+        """
         from calc_flow.compute import _collect_table_async, _table_inputs
         from calc_flow.symbolic.program import Program
 

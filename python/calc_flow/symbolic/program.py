@@ -433,7 +433,11 @@ class Program:
         runtime: Runtime | None = None,
         options: ExecutionOptions | None = None,
     ) -> Awaitable[dict[str, pa.Table]]:
-        """Snapshot named inputs now and await independent native execution."""
+        """Copy input mappings, capture Batch references and await execution.
+
+        Arrow buffers are shared; keep their underlying storage read-only until
+        execution completes.
+        """
         from calc_flow.compute import _collect_async
 
         return _collect_async(self, inputs, runtime, options)
