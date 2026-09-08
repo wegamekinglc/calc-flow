@@ -1,9 +1,12 @@
-# Rust API
+# Rust runtime and extension reference
 
-[Documentation](README.md) / 3.4 Rust API
+[Documentation](README.md) / 3.4 Rust runtime reference
 
-The `calc-flow` crate is the implementation of Calc Flow 4.0. Its public
-surface is re-exported from `calc_flow`; no Python process is required.
+The `calc-flow` crate implements Calc Flow's internal runtime. This reference
+is for runtime contributors and extension authors working with native batches,
+operators, graph plans, runners, stores, and checkpoints. The application API is
+[Python expressions](python-api.md); Rust exports, traits, and package names remain
+available for native integration. Native execution needs no Python process.
 
 On this page:
 
@@ -29,9 +32,9 @@ RUSTDOCFLAGS="-D warnings" cargo doc -p calc-flow --no-deps
 
 ## Expression pipeline
 
-This is the canonical first example, exercised by
+This native implementation example is exercised by
 [`crates/calc-flow/examples/expression_pipeline.rs`](../crates/calc-flow/examples/expression_pipeline.rs)
-and a true twin of the Python quickstart:
+and computes the same `[3, 7]` result as the Python expression quickstart:
 
 ```rust
 use std::{collections::BTreeMap, sync::Arc};

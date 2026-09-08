@@ -57,6 +57,10 @@ recreate it.
 
 ## Project configuration
 
+These bindings also apply to graphs exported from Python expressions; follow
+[expression-to-connector integration](README.md#connect-python-expressions-to-transports)
+to supply physical graph bindings and explicit runtime/state settings.
+
 Every source requires a frozen Arrow schema and an explicitly unique composite
 cursor. Snapshot mode fixes an upper bound at startup; incremental mode polls
 beyond the last accepted `(cursor, tie_breaker)` pair.

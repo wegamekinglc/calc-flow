@@ -28,8 +28,9 @@ On this page:
 
 ## Choose batch or stream
 
-Use `compile_batch()` when all named inputs are already available and one
-execution should return one `RunResult`. Use `compile_stream()` when sources
+Use `cf.compute` or `Program.collect` when all inputs are available and you want
+Arrow tables. Compile an explicit batch plan when you need `RunResult` diagnostics
+or owned plan state. Use `Program.compile_stream()` when sources
 arrive over time, state must survive restarts, event-time progress matters, or
 the application needs a long-lived owning job.
 
@@ -39,8 +40,26 @@ be passed to `StreamingRunner`, and a stream plan cannot be executed with
 
 ## First Python continuous job
 
-The complete runnable version is
-[`04_continuous_runtime.py`](../examples/04_continuous_runtime.py). Its core is:
+Build expressions with `cf.table_input`, Python operators, and `cf.Program`.
+Declare the input schema before sources start. For rolling and cross-section
+work, declare entity/event-time/sequence keys and a non-null
+`timestamp[us, UTC]` event-time field. Call `program.compile_stream(runtime)`
+(or omit runtime when no custom registration is needed), then pass that plan,
+sources, sinks, and `ManagedCheckpointRuntime` to `StreamingRunner`.
+
+[Example 10](../examples/10_symbolic_streaming_recovery.py) is a complete
+expression-based rolling job: it builds a program, binds `"input"` and
+`"output"`, checkpoints during processing, and resumes with both state stages
+restored. See [expression workflows](symbolic-workflows.md#run-continuously-and-recover).
+
+Bind the plan's `source_binding_ids`, `static_input_ids`, and `sink_binding_ids`.
+These are physical graph names; the logical names used by `Program.collect` do
+not become stream aliases. Each stream compile creates a fresh owning native
+plan, and each runner starts once. Convenience batch collection never starts a
+job or chooses checkpoint storage.
+
+The explicit graph alternative is demonstrated by
+[`04_continuous_runtime.py`](../examples/04_continuous_runtime.py):
 
 ```python
 plan = (
@@ -59,8 +78,8 @@ print(job.status())
 outcome = await job.wait_async()
 ```
 
-`PipelineBuilder.compile_stream()` is the graph-only path for connectors owned
-by the application. A connector-backed project uses
+Both expression and builder stream compilation produce graph-only plans for
+connectors owned by the application. A connector-backed project uses
 `compile_stream_project(project)` and then `StreamingRunner(plan)`; the
 compiled project already owns its registered source/sink factories, state root,
 and runtime settings.
@@ -121,7 +140,19 @@ input watermark.
 
 ## Event-time windows
 
-Rust applications create a `WindowSpec` and add a
+Python expressions imported from `calc_flow` declare the same native operator with
+`window.tumbling` or `window.hopping` and an ordered sequence of
+`window.count`, `window.sum`, `window.min`, `window.max`, or `window.avg`
+aggregates. Run
+[`symbolic_event_window.py`](../examples/symbolic_event_window.py) for a
+grouped minute summary with explicit source watermarks. The
+[symbolic window reference](symbolic-api.md#symbolic-event-time-window-aggregation)
+defines exact types, row origins, and the supported stateless transformations
+before and after the window.
+
+The [Rust runtime reference](rust-api.md) covers native window extension work.
+
+Runtime extension authors can create a `WindowSpec` and add a
 `WindowAggregateOperator` to the graph:
 
 ```rust
@@ -139,16 +170,6 @@ Run the complete source-watermark-window-sink example with:
 ```bash
 cargo run -p calc-flow --example windowed_streaming
 ```
-
-Python symbolic programs declare the same native operator with
-`window.tumbling` or `window.hopping` and an ordered sequence of
-`window.count`, `window.sum`, `window.min`, `window.max`, or `window.avg`
-aggregates. Run
-[`symbolic_event_window.py`](../examples/symbolic_event_window.py) for a
-grouped minute summary with explicit source watermarks. The
-[symbolic window reference](symbolic-api.md#symbolic-event-time-window-aggregation)
-defines exact types, row origins, and the supported stateless transformations
-before and after the window.
 
 Project v3 represents the operator as a data-only `window` node. Python and
 Studio can use that form directly; the functional Python builder has no
@@ -310,8 +331,14 @@ Run [12_symbolic_stream_join.py](../examples/12_symbolic_stream_join.py) for
 a complete match, then [13_symbolic_relational_dag.py](../examples/13_symbolic_relational_dag.py)
 for nested joins.
 
-Python declares exact input schemas and explicit limits; no unbounded defaults
-exist:
+Prefer `cf.table.stream_join` for expression composition. The examples above
+use root `calc_flow` imports with exact input schemas, ordering declarations,
+`JoinTimeBounds`, and `JoinStateLimits`. The
+[expression join reference](symbolic-api.md#symbolic-bounded-stream-joins)
+defines post-join ordering and nested composition.
+
+The advanced `PipelineBuilder.stream_join` form also requires exact input
+schemas and explicit limits; no unbounded defaults exist:
 
 ```python
 from datetime import timedelta

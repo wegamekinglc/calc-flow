@@ -18,15 +18,45 @@ uv run --no-sync python examples/14_project_persistence.py
 The example starts with the addition graph from the introduction and performs
 these operations:
 
-1. Validate `builder.project` as a `ProjectDocument`.
+1. Build a Python expression `Program` and export it with `program.to_project()`.
 2. Round-trip its data through canonical JSON and safe YAML.
 3. Create the document in a temporary `FileProjectStore` and read it back.
 4. Compile the loaded document through `Runtime` and execute Arrow input.
-5. Assert that totals remain `[3, 7]` and the original builder is unchanged.
+5. Assert that totals remain `[3, 7]` and the original program is unchanged.
 
 It prints the totals and a round-trip confirmation. Its temporary store is
 cleaned up on exit. For persistent application storage, provide a stable
 directory to `FileProjectStore` instead.
+
+## Export expressions and retain the right names
+
+The first part of example 14 uses the public export method:
+
+```python
+import pyarrow as pa
+
+import calc_flow as cf
+
+data = pa.table({"a": [1, 3], "b": [2, 4]})
+t = cf.table_input("numbers", schema=data.schema)
+program = cf.Program(
+    "saved-totals", outputs={"totals": t.select(total=t["a"] + t["b"])}
+)
+document = program.to_project()
+```
+
+`program.collect({"numbers": data})` returns the logical output `"totals"`.
+After export and reload, this graph's native batch plan instead executes with
+`"input"` and exposes `"output"`. Multi-branch graphs can have qualified physical
+names. Use the document's bindings when reloading; Python logical aliases are
+not serialized or reconstructed from project-v3.
+
+`to_project(runtime=None, /, *, mode="batch", allowed_lateness_micros=0,
+late_policy="error")` uses the same lowering and strict validation as compilation.
+Pass a registered runtime for provider-dependent graphs. The document stores
+the native graph and data-only input placeholders, without table/array contents,
+Python builders, expression objects, or running state. It can be passed directly
+to the store and serialization helpers below.
 
 ## Document and store APIs
 
@@ -51,9 +81,17 @@ configuration. Compile it with `compile_stream_project(project)` and start
 `StreamingRunner(plan)`. The plan supplies the registered connector factories
 and managed state settings.
 
-For application-owned Python sources and sinks, use `builder.compile_stream()`
-and supply bindings to the runner, as in
-[04_continuous_runtime.py](../examples/04_continuous_runtime.py).
+For application-owned Python sources and sinks, use `program.compile_stream()`
+and supply physical source/sink bindings plus a managed checkpoint runtime to the
+runner, as in [example 10](../examples/10_symbolic_streaming_recovery.py).
+`PipelineBuilder.compile_stream()` remains the explicit graph alternative in
+[example 04](../examples/04_continuous_runtime.py).
+
+`program.to_project(mode="stream")` exports expression graphs in stream mode,
+but its generated input placeholders are not production connector bindings.
+Complete the explicit connector, watermark, delivery, and managed state settings
+before a connector-backed job launch. Collection aliases do not rename these
+physical bindings, and export never chooses a checkpoint root for the caller.
 The [connector guide](connectors/README.md) provides transport-specific fragments.
 Secret references select a trusted resolver; credential values do not belong
 in project options.
@@ -207,16 +245,16 @@ An array-valued input declares the provider identity instead of a schema:
 
 `mutability` accepts only `static`. Validation is strict and fail-closed:
 
-| Rule                                     | Failure path                                          |
-|------------------------------------------|-------------------------------------------------------|
-| Unique portable SQL identifier names     | `static_inputs[i].name`                               |
-| Name must be a graph external input      | `static_inputs[i].name` (`unknown_binding`)           |
-| Name must not be a source binding        | `static_inputs[i].name` (`source_binding_conflict`)   |
-| Unique table field names                 | `static_inputs[i].schema[j].name`                     |
-| Table fields in the digest-v1 type set   | `static_inputs[i].schema[j].data_type`                |
-| Array backend of 1 to 64 bytes           | `static_inputs[i].backend`                            |
-| Array dtype in the digest-v1 set         | `static_inputs[i].dtype`                              |
-| Array rank at most 16                    | `static_inputs[i].shape`                              |
+| Rule                                   | Failure path                                        |
+|----------------------------------------|-----------------------------------------------------|
+| Unique portable SQL identifier names   | `static_inputs[i].name`                             |
+| Name must be a graph external input    | `static_inputs[i].name` (`unknown_binding`)         |
+| Name must not be a source binding      | `static_inputs[i].name` (`source_binding_conflict`) |
+| Unique table field names               | `static_inputs[i].schema[j].name`                   |
+| Table fields in the digest-v1 type set | `static_inputs[i].schema[j].data_type`              |
+| Array backend of 1 to 64 bytes         | `static_inputs[i].backend`                          |
+| Array dtype in the digest-v1 set       | `static_inputs[i].dtype`                            |
+| Array rank at most 16                  | `static_inputs[i].shape`                            |
 
 The declaration joins the compiled plan's semantic fingerprint, so changing it
 selects a fresh lineage. Live values never enter the document: the caller

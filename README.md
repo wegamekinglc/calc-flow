@@ -4,12 +4,11 @@
 [![Windows CI](https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-windows.yml/badge.svg?branch=main)](https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-windows.yml)
 [![Coverage Status](https://coveralls.io/repos/github/wegamekinglc/calc-flow/badge.svg?branch=main)](https://coveralls.io/github/wegamekinglc/calc-flow?branch=main)
 
-Calc Flow 4.0 is a Rust-native calculation engine for immutable Arrow
-micro-batches and stateful streams. The core crate compiles typed calculation
-graphs, runs every table expression and query with Apache DataFusion, and owns
-checkpoint/recovery semantics. The Python package is a PyO3 binding to that
-engine; it is not a second implementation. Calc Flow Studio remains a separate
-local FastAPI and React application.
+Calc Flow is a Python calculation library for Arrow tables and stateful streams.
+Compose typed expressions with Python operators, calculate a dataset, and reuse
+the same declarations in continuous jobs. Rust provides the internal runtime:
+DataFusion table execution, graph compilation, state, checkpoints, and recovery.
+Calc Flow Studio is a separate local FastAPI and React application.
 
 ## Install
 
@@ -26,125 +25,32 @@ uv add "calc-flow-python[numpy]"
 uv add "calc-flow-python[jax]"
 ```
 
-Rust:
-
-```toml
-[dependencies]
-calc-flow = "4.0.0"
-```
-
 ## Python quickstart
 
 ```python
-from datetime import UTC, datetime, timedelta
-
 import pyarrow as pa
+import calc_flow as cf
 
-from calc_flow import Batch, ExecutionOptions, PipelineBuilder
-
-batch = Batch.from_pyarrow(pa.table({"a": [1, 3], "b": [2, 4]}))
-plan = (
-    PipelineBuilder("totals").expression("calculate", "total = a + b").compile_batch()
-)
-result = plan.execute(
-    {"input": batch},
-    options=ExecutionOptions(
-        settings={"request": {"source": "readme"}},
-        deadline=datetime.now(UTC) + timedelta(seconds=30),
-    ),
-)
-
-assert result.outputs["output"].to_pyarrow()["total"].to_pylist() == [3, 7]
+data = pa.table({"a": [1, 3], "b": [2, 4]})
+result = cf.compute(data, lambda t: t.select(total=t["a"] + t["b"]))
+assert result.to_pydict() == {"total": [3, 7]}
 ```
 
-`PipelineBuilder` is functional: every method returns a new builder and leaves
-its input unchanged. Unconnected input ports become graph inputs; unconnected
-output ports become graph outputs. Use `execute_async()` inside an event loop.
-Both execution forms accept keyword-only, frozen `ExecutionOptions` carrying
-deep-copied strict-JSON settings and an optional timezone-aware deadline that
-is normalized to UTC. Settings may be nested mappings/lists; `settings=None`
-means empty settings.
+`cf.compute` infers the supported Arrow schema and returns a `pyarrow.Table`.
+The builder receives a `TableExpr`; indexing selects columns, operators compose
+calculations, and `select`, `with_columns`, and `filter` return new declarations.
+Use `await cf.compute_async(...)` in an event loop.
 
-See [the Python API guide](docs/python-api.md) and the executable
-[examples](examples/README.md) for SQL, Python scalar UDFs, continuous
-execution and recovery, asyncio, and NumPy/JAX.
-The [symbolic workflow guide](docs/symbolic-workflows.md) covers composed
-financial features, checkpoint recovery, static matrices, bounded stream
-joins, capability errors, Studio inspection, and performance output.
+Continue with [batch calculations](docs/batch-guide.md) for reusable functions,
+multiple named outputs, strict types, and async options. The
+[expression workflows](docs/symbolic-workflows.md) cover financial features,
+rolling calculations, stream recovery, static matrices, and joins.
+`Program.collect` handles named Arrow inputs and outputs; explicit `Runtime`,
+plans, `Batch`, SQL, UDFs, and `PipelineBuilder` remain available for integrations.
 
-## Rust quickstart
-
-The Rust crate exposes the native data, operator, graph, runtime, project, and
-checkpoint types directly. A table `Batch` contains one or more Arrow
-`RecordBatch` values plus immutable metadata. Build a graph with
-`PipelineBuilder`, compile it against a `UdfRegistrySnapshot`, then await
-`BatchExecutionPlan::execute`. The canonical first example is
-[`crates/calc-flow/examples/expression_pipeline.rs`](crates/calc-flow/examples/expression_pipeline.rs),
-a true twin of the Python quickstart:
-
-```rust
-use std::{collections::BTreeMap, sync::Arc};
-
-use calc_flow::{
-    Batch, BatchMetadata, ExecutionOptions, ExpressionOperator, PipelineBuilder, UdfRegistry,
-};
-use datafusion::arrow::{array::Int64Array, record_batch::RecordBatch};
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let plan = PipelineBuilder::new("totals")?
-        .add_node(
-            "calculate",
-            Box::new(ExpressionOperator::new(
-                "calculate",
-                "total = a + b",
-                Vec::new(),
-                None,
-                Vec::new(),
-            )?),
-        )?
-        .compile_batch(&UdfRegistry::new().snapshot())?;
-    let input = RecordBatch::try_from_iter(vec![
-        (
-            "a",
-            Arc::new(Int64Array::from(vec![1, 3])) as Arc<dyn datafusion::arrow::array::Array>,
-        ),
-        ("b", Arc::new(Int64Array::from(vec![2, 4])) as _),
-    ])?;
-    let result = plan
-        .execute(
-            BTreeMap::from([(
-                "input".into(),
-                Batch::table(vec![input], BatchMetadata::default())?,
-            )]),
-            ExecutionOptions::default(),
-        )
-        .await?;
-    let output = result.outputs["output"].table_payload()?;
-    let totals = output.batches()[0]
-        .column_by_name("total")
-        .expect("expression output contains total")
-        .as_any()
-        .downcast_ref::<Int64Array>()
-        .expect("total is an Int64 column");
-
-    assert_eq!(totals.values(), &[3, 7]);
-    println!("calculated totals: {totals:?}");
-    Ok(())
-}
-```
-
-Run the checked examples:
-
-```bash
-cargo run -p calc-flow --example expression_pipeline
-cargo run -p calc-flow --example sql_join
-cargo run -p calc-flow --example continuous_runtime
-cargo run -p calc-flow --example windowed_streaming
-```
-
-See [the Rust API guide](docs/rust-api.md) for paired source examples and links
-to the public types, or the [Rust examples index](crates/calc-flow/examples/README.md).
+The [Rust runtime reference](docs/rust-api.md) and
+[native examples](crates/calc-flow/examples/README.md) cover implementation and
+extension work. The `calc-flow` crate's exports remain available to those users.
 
 ## Architecture
 
@@ -152,7 +58,7 @@ to the public types, or the [Rust examples index](crates/calc-flow/examples/READ
 crates/calc-flow  (Rust core: Batch, graph compiler, DataFusion, runners, stores)
   ├─ crates/calc-flow-connectors  (trusted transport implementations)
   └─ crates/calc-flow-python  (PyO3 _native binding + registered connectors)
-       └─ python/calc_flow  (pure-Python public API + functional adapters)
+       └─ python/calc_flow  (Python expressions, Arrow execution + integrations)
             └─ web-ui/backend  (calc-flow-studio FastAPI, /api/v3, loopback only)
                   └─ web-ui/src  (React + TypeScript + Vite + React Flow studio, via REST)
 ```
@@ -167,16 +73,17 @@ Python package is not a second engine.
 | `crates/calc-flow/`            | Native core: batches, ports/operators, graph compiler, DataFusion runtime, UDF/provider registries, runners, checkpoints, project stores |
 | `crates/calc-flow-connectors/` | Trusted file, Kafka, PostgreSQL, MySQL, ClickHouse, HTTP, and WebSocket connectors behind feature gates                                  |
 | `crates/calc-flow-python/`     | PyO3 binding exposing the core as `calc_flow._native`                                                                                    |
-| `python/calc_flow/`            | Pure-Python public API, functional `PipelineBuilder`, runner/store adapters, NumPy/JAX provider registration, exception hierarchy        |
+| `python/calc_flow/`            | Python expressions, `compute`/`Program.collect`, lowering, advanced graph/runner/store adapters, provider registration                   |
 | `web-ui/backend/`              | `calc-flow-studio` FastAPI service under `/api/v3`, loopback-bound, spawned bounded continuous-job workers                               |
 | `web-ui/src/`                  | React + TypeScript + Vite + React Flow studio; API types generated from `web-ui/openapi.json`                                            |
 | `schemas/`                     | `project-v3.schema.json`, the canonical generated project contract                                                                       |
-| `examples/`                    | Executable v3 Python examples                                                                                                            |
+| `examples/`                    | Executable Python expression and integration examples                                                                                    |
 | `benchmarks/`                  | pytest-benchmark harness (informational)                                                                                                 |
 
 ## Data and execution model
 
-- Table data is Arrow-backed and calculated only by DataFusion.
+- Table data is Arrow-backed. The Rust runtime executes row expressions and SQL
+  with DataFusion and owns native rolling, window, and cross-section operators.
 - NumPy and JAX are optional Python array providers. They are registered
   explicitly and evaluate a bounded, allowlisted expression language.
 - Raw tables or arrays never cross a graph or runner boundary; they are wrapped
@@ -188,8 +95,8 @@ Python package is not a second engine.
 - Table and mixed graph runs own one run-scoped DataFusion session. External-only
   NumPy/JAX runs own no DataFusion configuration, UDF state, or runtime and
   return an empty DataFusion metrics list.
-- Every graph run returns named outputs, per-node row counts/timings, and run
-  metadata; table work additionally reports DataFusion plans and timings.
+- Convenience batch calls return Arrow tables. Explicit plan execution returns
+  named `Batch` outputs, per-node timings, metadata, and DataFusion diagnostics.
 - Python executions accept reusable frozen `ExecutionOptions` with
   deep-copied strict-JSON settings and a cooperative, timezone-aware deadline
   normalized to UTC.
@@ -212,7 +119,7 @@ input types, return type, and volatility. Graph nodes select registrations
 explicitly with `(provider, name, version)` references. Serialized projects
 contain references only.
 
-Rust applications use `UdfRegistry` for native DataFusion UDFs and
+Runtime extension authors use `UdfRegistry` for native DataFusion UDFs and
 `ProviderRegistry` for explicitly registered external operators.
 
 ## Studio
@@ -266,7 +173,10 @@ recorded in [CHANGELOG.md](CHANGELOG.md).
 ## Development
 
 Large Cargo and Maturin outputs should use the repository `target/` tree.
-A typical local verification sequence is:
+The complete CI/full-verification command reference is below. Local changes use
+the smallest affected checks under [AGENTS.md Verification](AGENTS.md#verification);
+full regression, Rust 90% coverage, Studio backend 85% coverage, and routine
+performance gates belong to CI:
 
 ```bash
 uv sync --extra dev
@@ -317,11 +227,11 @@ repository commands and constraints.
 - **[Projects and persistence](docs/projects-guide.md)** — JSON/YAML and file stores
 - **[Studio](docs/studio-guide.md)** — local editing, inspection, and job controls
 - **[Python API](docs/python-api.md)** — Python surface and examples
-- **[Symbolic workflows](docs/symbolic-workflows.md)** — declaration-to-Studio
+- **[Expression workflows](docs/symbolic-workflows.md)** — declaration-to-Studio
   batch, stream, recovery, static matrix, and performance workflows
-- **[Rust API](docs/rust-api.md)** — native surface and examples
+- **[Rust runtime reference](docs/rust-api.md)** — native surface and examples
 - **[API reference](docs/api-reference.md)** — supported surfaces at a glance
-- **[Symbolic API](docs/symbolic-api.md)** — declarations, analysis, and compile requirements
+- **[Expression API](docs/symbolic-api.md)** — declarations, analysis, and compile requirements
 - **[Design and architecture](docs/design.md)** — component ownership and execution design
 - **[Verification](docs/verification.md)** — documentation, examples, and implementation checks
 - **[Python release guide](docs/python-release.md)** — packaging, verification,

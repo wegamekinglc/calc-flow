@@ -1,6 +1,6 @@
-# Symbolic API
+# Expression API
 
-[Documentation](README.md) / 3.3 Symbolic API
+[Documentation](README.md) / 3.3 Expression API
 
 On this page:
 
@@ -14,13 +14,18 @@ On this page:
 
 For end-to-end batch, continuous, recovery, static NumPy/JAX matrix, Studio
 inspection, and performance workflows, see the
-[symbolic workflow guide](symbolic-workflows.md).
+[expression workflow guide](symbolic-workflows.md).
 
-`calc_flow.symbolic` is the pure declaration surface: typed immutable
-expressions, feature sets, and programs with canonical identities plus static
-analysis over the declaration graph. It has no data execution path — there is
-no `eval`, `push`, `value`, `transform`, preview evaluator, or formula parser —
-and execution stays owned by the existing execution plans and runners.
+Use `import calc_flow as cf` for typed immutable expressions and programs.
+`cf.compute` derives a declaration from Arrow schema and returns an Arrow table;
+`TableExpr.collect` and `Program.collect` execute reusable declarations. These
+conveniences lower into the internal Rust runtime. Declarations hold no live
+data, and there is no Python row evaluator or formula parser. The supported
+`calc_flow.symbolic` imports refer to the same expression objects.
+
+Start with [batch calculations](batch-guide.md); the
+[Python reference](python-api.md#compute-arrow-data) defines convenience execution,
+async ownership, schema/name restrictions, and the migration mapping.
 
 The declaration catalog is intentionally wider than the implemented project
 lowerers. Use this availability matrix when constructing user-facing formula
@@ -40,43 +45,45 @@ editors or validating stored declarations:
 the current materialization boundary, so a clean analysis does not advertise
 an expression that the lowerer will reject for that reason.
 
+With the orders `data` from the [batch guide](batch-guide.md), declare reusable
+logical outputs:
+
 ```python
-from calc_flow import Runtime
-from calc_flow.symbolic import FeatureSet, Field, Program, table_input
-
-quotes = table_input(
-    "quotes",
-    schema=[
-        Field("ts", "timestamp[us, UTC]", nullable=False),
-        Field("x", "float64"),
-        Field("y", "float64"),
-    ],
-)
-signals = quotes.with_columns(FeatureSet([("score", quotes["x"] + quotes["y"])]))
-program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
-
-result = program.analyze(Runtime(), mode="batch")
-assert result.issues == ()
+t = cf.table_input("orders", schema=data.schema)
+gross = t["quantity"] * t["unit_price"]
+program = cf.Program("orders", outputs={
+    "totals": t.select("order_id", gross=gross),
+    "quantities": t.select("order_id", "quantity"),
+})
+tables = program.collect({"orders": data})
+assert list(tables) == ["totals", "quantities"]
+assert tables["totals"]["gross"].to_pylist() == [30, 12, 40]
 ```
 
 `table_input` declares one named table input with an exact ordered schema — a
-sequence of `Field` values, never a mapping; `event_time`, `entity_by`, and
-`sequence_by` declare the ordering facts of a temporal input. Selecting
+`pyarrow.Schema` or a sequence of `Field` values, never a schema mapping.
+The Arrow form preserves supported types, field nullability, and order;
+`event_time`, `entity_by`, and `sequence_by` declare the ordering facts of a temporal input. Selecting
 `quotes["x"]` builds a `ColumnExpr`; arithmetic, comparison, and boolean
 composition build immutable expression nodes whose canonical v1 digests are
 stable across processes. Public comparisons build symbolic expressions:
 converting an expression to `bool` fails, and `identical()` is the structural
 identity check.
 
-A `FeatureSet` is an ordered immutable set of uniquely named column
-expressions; `with_feature` appends one. `TableExpr.with_columns(features)`
-returns a new table with the declared features appended as derived columns.
+`TableExpr.with_columns(features=None, /, **named)` appends an ordered mapping,
+keyword expressions, or a `FeatureSet`. Existing columns cannot be replaced;
+names must be unique. `select(*columns, **named)` projects literal names then
+named expressions, following the same append-only rule. `filter(predicate)`
+composes a row selection. A `FeatureSet` remains an ordered immutable set of
+uniquely named expressions, with `with_feature` to append one.
 The `row`, `ts`, `cs`, `table`, `linalg`, and `window` namespaces expose
 row-local functions, rolling frames (`rows`/`duration`), cross-section groups
 (`exact_time`/`event_time_bucket`), table bridges, and matrix work.
 
 A `Program` declares uniquely named inputs (`table_input` or `parameter`
-values) and outputs (tables or arrays) in declaration order. Its `fingerprint`
+values) and outputs (tables or arrays) in declaration order. Outputs accept a
+mapping or tuple-pair sequence. Omitting `inputs` discovers reachable roots;
+explicit inputs, including an empty sequence, are honored. Its `fingerprint`
 is the runtime-independent `calc_flow.symbolic.declaration.v1` program
 fingerprint over every unique node reachable from a declared input or output;
 it does not depend on construction history and is stable across conforming
@@ -85,8 +92,9 @@ paths such as `inputs.quotes: duplicate_name`. An input referenced by an
 output but missing from `inputs` is reported during analysis as an issue
 rooted at `inputs.<name>`.
 
-`Program.analyze(runtime, mode=...)` and `Program.explain(runtime, mode=...)`
-require an explicit `Runtime` and a `batch` or `stream` mode; both consume one
+`Program.analyze(runtime=None, /, *, mode="batch")` and
+`Program.explain(runtime=None, /, *, mode="batch")` select a default `Runtime`
+when omitted. Pass the registered runtime for providers. Both consume one
 immutable capability snapshot and record its session and revision. From the
 declaration graph alone — no data object, source, sink, or runner is accepted —
 the analysis proves:
@@ -132,8 +140,9 @@ multi-line report.
 
 ## Symbolic compilation
 
-`Program.compile_batch(runtime)` and `Program.compile_stream(runtime, *,
-allowed_lateness_micros=0, late_policy="error")` lower a program to the
+`Program.compile_batch(runtime=None, /)` and
+`Program.compile_stream(runtime=None, /, *, allowed_lateness_micros=0,
+late_policy="error")` lower a program to the
 existing execution plans. Compilation is declaration processing only: it
 captures one immutable capability snapshot, lowers one strict project-v3
 document, and invokes the Rust graph compiler for final port, kind, schema,
@@ -170,6 +179,11 @@ event-window finality. Table/array and backend transitions remain explicit
 boundaries, and the allowlisted array expression is fused into one provider
 call per accepted micro-batch.
 
+Explicit compilation on a supplied `Runtime` uses its bounded expression
+compile cache. Convenience `compute`/`collect` execution creates a fresh plan
+every time and neither reuses nor resets the caller's cached batch plans.
+`Program.to_project` exports the same lowered data-only graph for persistence.
+
 Each `Runtime` keeps a bounded, runtime-scoped symbolic compile cache.
 The deterministic key contains the program fingerprint, batch/stream mode,
 stream lateness policy, exact input declaration bytes (including schemas),
@@ -185,7 +199,10 @@ that runtime's entries. Cache facts do not promise a measured compile speedup.
 Programs with one input and one output bind the plan endpoints `input` and
 `output`, matching the `PipelineBuilder` convention; multi-branch graphs name
 endpoints `<node>.input` and `<node>.output` deterministically. Batches
-supplied at execution must match the declared input schema exactly.
+supplied at explicit plan execution must match the declared input schema
+exactly. `Program.collect` translates logical declaration names to these physical
+bindings and returns Arrow tables by logical output name. Project reload and
+stream runners retain physical bindings; Python aliases are not serialized.
 
 ## Symbolic event-time window aggregation
 
@@ -422,7 +439,8 @@ rolling aggregates `ts.count`, `ts.sum`, `ts.mean`, `ts.min`, `ts.max`,
 `ts.variance`, `ts.stddev`, `ts.covariance`, and `ts.correlation` lower to one
 or more native `rolling` stages per program output, placed ahead of the fused
 row-local stages. Rolling requires the input table to declare its `entity_by`,
-`event_time`, and `sequence_by` ordering keys; a program missing them fails with
+`event_time`, and `sequence_by` ordering keys, with non-null
+`timestamp[us, UTC]` event time; a program missing them fails with
 `ordering_required`. A rolling argument may resolve to a plain input column,
 a direct or derived row-local alias, a pure row-local expression such as
 `ts.lag(row.log(quotes["x"]))`, or an earlier rolling result. The lowerer
@@ -447,7 +465,7 @@ state nodes. A lag, delta, `min`, or `max` column keeps the input column's type;
 remaining aggregate columns take the frozen output type — `uint64` for
 `count`, `int64` or `uint64` for an integer `sum`, `float64` otherwise —
 and the engine evaluates the frozen window semantics described in the
-[Rust API guide](rust-api.md).
+[Rust runtime reference](rust-api.md).
 The direct difference of two `mean`, `variance`, `stddev`, or EWMA expressions
 at the same finality boundary lowers as one native `difference` output. Its two
 leaf states still participate in ordinary group sharing, but neither leaf is
@@ -514,7 +532,7 @@ and a filter below every cross-section feature becomes the shared
 `<output>__cf_prefilter` node. Rank, percentile, demean, and z-score are
 nullable float64; winsorize and mean-fill preserve float32/float64; top/bottom
 are nullable boolean. The engine evaluates the frozen complete-group semantics
-described in the [Rust API guide](rust-api.md). The lowered node's frozen
+described in the [Rust runtime reference](rust-api.md). The lowered node's frozen
 spec carries `configuration_version` and `state_layout_version` 1, the
 declared ordering and partition keys, the shared grouping, one entry per
 output, the `allowed_lateness_micros` and `late_policy` values validated by
@@ -542,4 +560,4 @@ registry, matching the resolved canonical name, and fails volatile and
 wall-clock calls before any source opens, so the deterministic,
 replay-safe lifecycle claims of those operators remain truthful.
 
-Next: [Rust API](rust-api.md).
+Next: [Rust runtime reference](rust-api.md).

@@ -1,8 +1,10 @@
 # Calc Flow examples
 
 Start with the [documentation overview](../docs/introduction.md) and
-[installation guide](../docs/getting-started.md). These programs use the public
-Rust-native engine and check observable results. Each Python program
+[installation guide](../docs/getting-started.md). Start with Python expression
+examples 01, 05, and 09, then 14 for project export. These programs use the
+internal Rust runtime and check observable results; explicit graph/SQL, provider,
+and native-extension examples cover advanced integrations. Each Python program
 is standalone; the [learning paths](../docs/examples.md) group them by task.
 
 ## Prepare and run
@@ -65,8 +67,9 @@ try {
 ## Python inventory
 
 1. [01_datafusion_pipeline.py](01_datafusion_pipeline.py) — calculate order
-   gross amounts, project columns, and filter small orders. Checks orders
-   `A-100` / `A-102` with gross values `30` / `40`; prints node timings.
+   gross amounts with `cf.compute`, project columns, and filter small orders.
+   Checks orders `A-100` / `A-102` with gross values `30` / `40`, then collects
+   reusable `totals` and `quantities` logical outputs.
    Guide: [batch calculations](../docs/batch-guide.md).
 2. [02_sql_join.py](02_sql_join.py) — join named Arrow inputs `orders` and
    `fees` with read-only SQL. Checks net values `[70, 108, 36]` in order-ID
@@ -79,7 +82,7 @@ try {
    and sink with replay cursors, managed checkpoints, status, and terminal
    wait. Checks lifecycle completion.
    Guide: [continuous streaming](../docs/streaming-guide.md).
-5. [05_async_execution.py](05_async_execution.py) — run a batch plan alongside
+5. [05_async_execution.py](05_async_execution.py) — await `cf.compute_async` alongside
    an asyncio heartbeat with settings and a deadline. Checks totals `[3, 7]`.
    Guide: [async execution](../docs/batch-guide.md#async-execution-and-deadlines).
 6. [06_numpy_array.py](06_numpy_array.py) — register NumPy and center an array
@@ -95,7 +98,8 @@ try {
    Guide: [recovery](../docs/streaming-guide.md#checkpoints-and-recovery).
 9. [09_symbolic_financial_features.py](09_symbolic_financial_features.py) —
    analyze and run momentum, Bollinger, RSI, EMA/MACD, and cross-section
-   features. Prints analysis, explanation, and checked feature output.
+   features composed by a reusable Python mapping function. Analyzes with a
+   default runtime, prints explanation, and collects checked Arrow output.
    Guide: [financial features](../docs/symbolic-workflows.md#compose-and-run-financial-features).
 10. [10_symbolic_streaming_recovery.py](10_symbolic_streaming_recovery.py) —
     checkpoint a two-stage rolling program mid-stream, cancel, and resume.
@@ -114,8 +118,9 @@ try {
     join results.
     Guide: [symbolic joins](../docs/symbolic-workflows.md#join-two-symbolic-streams).
 14. [14_project_persistence.py](14_project_persistence.py) — round-trip a
-    project through JSON, YAML, and an async file store, then compile and run
-    the loaded graph. Checks totals `[3, 7]` and unchanged builder input.
+    `Program.to_project()` document through JSON, YAML, and an async file store,
+    then execute its physical `input`/`output` bindings after reload. Checks
+    totals `[3, 7]` and unchanged program declarations.
     Guide: [project persistence](../docs/projects-guide.md).
 15. [15_file_source.py](15_file_source.py) — read CSV, JSON Lines, and Parquet
     through the native file source, calculate order totals, and write them
@@ -148,6 +153,9 @@ watermarks and a `price_range` branch sharing the same window declaration.
 Guide: [symbolic event windows](../docs/symbolic-workflows.md#aggregate-event-time-windows).
 
 ## Rust counterparts
+
+These programs are runtime implementation and extension references. Python is
+the application API; the native examples retain explicit graph and trait usage.
 
 Run a Rust example with `cargo run -p calc-flow --example NAME`:
 

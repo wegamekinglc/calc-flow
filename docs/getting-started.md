@@ -2,8 +2,8 @@
 
 [Documentation](README.md) / 1. Installation
 
-Calc Flow 4.0 is a Rust-native calculation engine with a Python binding and an
-optional local Studio. This guide covers two installation paths:
+Calc Flow is a Python calculation library backed by an internal Rust runtime,
+with an optional local Studio. This guide covers two installation paths:
 
 - install published packages when you want to use Calc Flow in an application;
 - build release artifacts from source when you want to develop Calc Flow or
@@ -27,7 +27,7 @@ On this page:
 
 ## Choose an installation path
 
-Use published packages if you only need the Python API or Rust crate. This
+Use published packages for Python application development. This
 path does not require a repository checkout, a Rust compiler for Python wheels,
 or Node.js.
 
@@ -41,8 +41,7 @@ environment. Use it for unreleased code or Calc Flow development as well.
 
 Package users need:
 
-- Python 3.13 or newer and [uv](https://docs.astral.sh/uv/) for Python;
-- Rust 1.88 or newer and Cargo for Rust applications.
+- Python 3.13 or newer and [uv](https://docs.astral.sh/uv/).
 
 Source developers additionally need:
 
@@ -105,14 +104,9 @@ uv add "calc-flow-python[numpy]"
 uv add "calc-flow-python[jax]"
 ```
 
-Rust applications add the published crate from their Cargo project:
-
-```bash
-cargo add calc-flow@4.0.0
-```
-
-Continue with the [Python API guide](python-api.md) or
-[Rust API guide](rust-api.md) after installation.
+Continue with the [batch guide](batch-guide.md) after installation. Native
+runtime and extension authors can find crate installation and examples in the
+[Rust runtime reference](rust-api.md).
 
 ## Build and install from source
 
@@ -284,15 +278,12 @@ and the native extension loads correctly.
 
 ```python
 import pyarrow as pa
+import calc_flow as cf
 
-from calc_flow import Batch, PipelineBuilder
-
-batch = Batch.from_pyarrow(pa.table({"a": [1, 3], "b": [2, 4]}))
-plan = (
-    PipelineBuilder("totals").expression("calculate", "total = a + b").compile_batch()
-)
-result = plan.execute({"input": batch})
-print(result.outputs["output"].to_pyarrow()["total"].to_pylist())
+data = pa.table({"a": [1, 3], "b": [2, 4]})
+result = cf.compute(data, lambda t: t.select(total=t["a"] + t["b"]))
+assert result.to_pydict() == {"total": [3, 7]}
+print(result["total"].to_pylist())
 ```
 
 Save the script as `verify.py` and run it with the prepared environment's
@@ -313,29 +304,8 @@ you are verifying):
 
 You should see the computed totals: `[3, 7]`.
 
-### Rust
-
-Rust users get an equivalent example in the [Rust API guide](rust-api.md): the
-`expression_pipeline` example builds the same expression pipeline over Arrow
-`RecordBatch` values and awaits `BatchExecutionPlan::execute`. With a source
-checkout you can run it directly:
-
-```bash
-cargo run -p calc-flow --example expression_pipeline
-```
-
-The command prints Arrow's debug representation:
-
-```text
-calculated totals: PrimitiveArray<Int64>
-[
-  3,
-  7,
-]
-```
-
-The [`expression_pipeline.rs`](../crates/calc-flow/examples/expression_pipeline.rs)
-source and [Rust API guide](rust-api.md) walk through the example.
+The [Rust runtime reference](rust-api.md) provides the equivalent native
+calculation for contributors developing the runtime or extensions.
 
 ## Troubleshooting
 
@@ -381,4 +351,4 @@ an extended-length absolute `TEMP` and `TMP` for the example process.
 - Configure production transports with the [connector guide](connectors/README.md).
 - Understand component ownership in the [design and architecture guide](design.md).
 - Look up exact names in the [Python API](python-api.md),
-  [Rust API](rust-api.md), or [API reference](api-reference.md).
+  [Rust runtime reference](rust-api.md), or [API reference](api-reference.md).

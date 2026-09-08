@@ -2,12 +2,13 @@
 
 [Documentation](README.md) / 4.3 Symbolic compiler design
 
-The symbolic layer turns immutable Python declarations into the same native
-project graphs used by direct builders. It owns declaration identity, static
-analysis, and lowering. Native operators and runners own data execution,
+The expression compiler implements the declarations exported from the Python
+application API. Its implementation remains under `calc_flow.symbolic` and turns
+immutable expressions into the native project graphs also used by direct builders.
+It owns declaration identity, static analysis, and lowering. Native operators and runners own data execution,
 event-time progress, and recovery. For usage, read
-[symbolic workflows](symbolic-workflows.md); for accepted declarations, use the
-[symbolic API](symbolic-api.md).
+[expression workflows](symbolic-workflows.md); for accepted declarations, use the
+[expression API](symbolic-api.md).
 
 ## Declaration and analysis
 
@@ -16,7 +17,8 @@ features, and outputs contribute to a runtime-independent program fingerprint.
 Structural identity allows shared expressions without evaluating data or
 mutating caller declarations.
 
-`Program.analyze` consumes one explicit runtime capability snapshot. It checks
+`Program.analyze` selects a default runtime when omitted and consumes one
+immutable capability snapshot from the selected runtime. It checks
 types, row lineage, symbolic dimensions, attachment compatibility, ordering,
 state requirements, and stream safety. Issues have stable paths and codes.
 Analysis and compilation are separate: the declaration catalog includes
@@ -28,6 +30,29 @@ The implementation lives in
 [nodes.py](../python/calc_flow/symbolic/nodes.py),
 [program.py](../python/calc_flow/symbolic/program.py), and
 [analyzer.py](../python/calc_flow/symbolic/analyzer.py).
+
+## Convenience execution and export
+
+The [compute adapter](../python/calc_flow/compute.py) turns Arrow schema into
+existing ordered `Field` declarations without reading values to infer types or
+nullability. Named table mappings and keyword expressions normalize to existing
+nodes. Omitted Program inputs are discovered deterministically from outputs;
+explicit input lists remain authoritative. The canonical IR and fingerprints
+are unchanged for equivalent declarations.
+
+The adapter tracks logical declarations through lowering to physical graph
+endpoints, allowing collection by declared names even with multiple inputs,
+shared stages, or several outputs. It returns Arrow tables in logical output
+order. Project export uses `Program.to_project` and serializes only existing
+project-v3 graph/input fields; aliases and live data stay in Python.
+
+Every convenience call compiles a fresh native batch plan, including calls with
+the same runtime. This isolates state without touching an explicitly cached plan.
+Async entry points copy mappings and capture Batch references at call time,
+then await the native cancellation-aware execution bridge. Arrow buffers remain
+shared and their storage must stay read-only through execution. Schema/field
+metadata are omitted only from internal execution schemas; caller metadata and
+`Batch.metadata` remain intact.
 
 ## Lowering and physical sharing
 
@@ -118,7 +143,7 @@ owns this encoding.
 The default numerical profile is `stable_v1`. Explicit `stable_v2` enables
 shifted compensated sums with periodic rebasing. Profile identity contributes
 to configuration and kernel fingerprints and is checked on recovery.
-The [Rust API](rust-api.md#rolling-windows) specifies types, null/NaN handling,
+The [Rust runtime reference](rust-api.md#rolling-windows) specifies types, null/NaN handling,
 infinity classification, numerical limits, and late-row behavior.
 
 ## Static values and matrix placement
@@ -154,7 +179,9 @@ Batch entries retain immutable plans. Stream entries retain successfully
 compiled immutable project JSON, and each compile creates a fresh native
 owning plan because the runner consumes it. A restart recompiles the same
 declaration and creates fresh bindings and a runner.
-Registration changes invalidate that runtime's cache. The cache is bounded
+Convenience `compute`/`collect` calls bypass cached plan instances and do not
+reset or replace them. `Program.to_project` exports data without adding a new
+plan lifecycle. Registration changes invalidate that runtime's cache. The cache is bounded
 and belongs to the runtime instance; it is not a cross-run DataFusion session
 cache.
 

@@ -1,8 +1,9 @@
-# Symbolic computation workflows
+# Expression computation workflows
 
-[Documentation](README.md) / 2.4 Symbolic workflows
+[Documentation](README.md) / 2.4 Expression workflows
 
-Calc Flow's symbolic API declares immutable calculations and lowers them into
+Calc Flow's Python expression API, imported from `calc_flow`, declares immutable
+calculations and lowers them into
 the same strict project-v3 graph that the native engine and Studio use. No
 Python callback or expression object captured by a symbolic declaration runs
 while a lowered native operator executes. Explicitly registered runtime
@@ -12,7 +13,7 @@ symbolic compiler. This guide connects the public declarations to batch,
 continuous, recovery, array-provider, inspection, and performance workflows
 implemented in Calc Flow 4.0.
 
-The complete declaration reference is in the [symbolic API](symbolic-api.md).
+The complete declaration reference is in the [expression API](symbolic-api.md).
 Use this guide to choose an executable example and understand the boundary
 between compile-time facts and runtime measurements.
 
@@ -30,19 +31,21 @@ On this page:
 ## Compose and run financial features
 
 [`09_symbolic_financial_features.py`](../examples/09_symbolic_financial_features.py)
-builds one reusable `FeatureSet` containing one-period simple and log returns,
+builds a reusable Python function returning a named expression mapping containing one-period simple and log returns,
 a three-row price mean, EMA, and standard deviation, a fast/slow MACD,
 Bollinger bands, a composed three-row RSI, an exact-time cross-section volume
 z-score, and a liquidity-adjusted momentum. The example:
 
 1. declares the input schema and its entity, event-time, and sequence keys;
-2. calls `Program.analyze(runtime, mode="batch")` before compilation;
-3. prints `Program.explain(...)`, including physical sharing and bounded-state
-   estimates; and
-4. lowers and executes the program with `compile_batch`.
+2. passes the function's mapping to `with_columns` and declares a named output;
+3. calls `program.analyze()` and prints `program.explain()`, using a default
+   runtime to report physical sharing and bounded-state estimates; and
+4. collects Arrow output with `program.collect({"quotes": input_table})["signals"]`.
 
 Declarations only capture names, types, shapes, and expression structure.
-They never read the Arrow rows used later by `BatchExecutionPlan.execute`.
+They never read the Arrow rows supplied later to `collect` or explicit plan
+execution. Use `cf.compute` for the shortest single-input calculation and a
+`Program` for reusable logical names. See the [batch guide](batch-guide.md).
 Structurally identical expressions can therefore be shared by the complete
 program without changing the result or mutating the declaration graph.
 
@@ -84,7 +87,12 @@ uv run python examples/10_symbolic_streaming_recovery.py
 ```
 
 Temporal rolling and cross-section declarations add event-time finality. Their
-input must declare the required event-time, entity, and sequence keys. The
+input must declare the required event-time, entity, and sequence keys, with
+non-null `timestamp[us, UTC]` event time. Arrow inference alone does not make a
+timestamp field non-null. Build the exact schema before declaring the input.
+`program.compile_stream(runtime)` returns a plan whose `source_binding_ids`,
+`static_input_ids`, and `sink_binding_ids` are physical graph names, independent
+of the logical names used by `Program.collect`. The
 lowered rolling or cross-section node remains the only implementation of its
 state and watermark rules; the streaming runner checkpoints that native state
 using the ordinary project-v3 recovery contract.
@@ -230,6 +238,12 @@ measured latency, resident memory, and copy volume. A plan estimate can explain
 where work must occur; it cannot promise a device transfer time or peak RSS.
 
 ## Inspect a lowered project in Studio
+
+Export expressions with `program.to_project(runtime, mode="stream")` or the
+default batch mode. [Example 14](../examples/14_project_persistence.py) shows the
+public export and JSON/YAML/store round trip. Export contains native graph and
+input placeholders, without live data, builders, or Python logical aliases.
+Stream launch still requires explicit operational bindings and state settings.
 
 Studio accepts and saves only a strict `ProjectDocument` v3. Selecting a node
 shows a **Lowered project inspection** section derived from that document:

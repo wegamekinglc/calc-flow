@@ -42,6 +42,10 @@ Stop the demo server with Ctrl-C after the consumer completes.
 
 ## Project configuration
 
+These bindings also apply to graphs exported from Python expressions; follow
+[expression-to-connector integration](README.md#connect-python-expressions-to-transports)
+to supply physical graph bindings and explicit runtime/state settings.
+
 WebSocket requires the `url` secret slot and decodes bounded JSON frames.
 The Python example uses this source binding:
 

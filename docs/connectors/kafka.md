@@ -58,6 +58,10 @@ recreate it.
 
 ## Project configuration
 
+These bindings also apply to graphs exported from Python expressions; follow
+[expression-to-connector integration](README.md#connect-python-expressions-to-transports)
+to supply physical graph bindings and explicit runtime/state settings.
+
 ```json
 {
   "sources": [{

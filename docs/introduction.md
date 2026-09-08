@@ -2,20 +2,23 @@
 
 [Documentation](README.md) / 1. Overview
 
-Calc Flow 4.0 calculates over immutable Arrow batches and stateful streams.
-Use it to build a graph of calculations, execute a finite dataset, or keep a
-calculation running as data arrives. Python and Rust applications use the same
-Rust engine. Calc Flow Studio provides a separate local browser interface.
+Calc Flow is a Python calculation library for Arrow tables and stateful streams.
+Write calculations as immutable Python expressions, compute a finite dataset,
+or keep the same calculation running as data arrives. The internal Rust runtime
+owns table execution, state, and recovery. Calc Flow Studio provides a separate
+local browser interface.
 
 ## What you can do
 
-- Calculate columns, select and filter rows, and join tables with read-only
-  DataFusion SQL: [batch guide](batch-guide.md).
+- Calculate columns with Python operators, select and filter rows, and collect
+  Arrow results: [batch guide](batch-guide.md).
+- Use explicit graph construction and read-only DataFusion SQL for advanced
+  integrations: [SQL joins](batch-guide.md#named-inputs-and-sql-joins).
 - Register typed scalar UDFs and explicitly selected NumPy/JAX array providers:
   [batch guide](batch-guide.md#registered-scalar-functions) and
   [array guide](array-guide.md).
 - Compute rolling features, cross-section statistics, and bounded event-time
-  joins: [symbolic workflows](symbolic-workflows.md).
+  joins: [expression workflows](symbolic-workflows.md).
 - Consume async sources, write to sinks, checkpoint state, and resume jobs:
   [streaming guide](streaming-guide.md).
 - Persist strict JSON/YAML projects and use registered file, Kafka, PostgreSQL,
@@ -25,7 +28,13 @@ Rust engine. Calc Flow Studio provides a separate local browser interface.
 
 ## The basic vocabulary
 
-`Batch` is the immutable data envelope passed into and out of a calculation:
+A `TableExpr` declares a table calculation; `t["price"]` selects a `ColumnExpr`.
+Python arithmetic, comparisons, and `&`, `|`, `~` compose expressions.
+`with_columns`, `select`, and `filter` return new declarations without changing
+inputs. `compute(data, build)` supplies the input schema and returns an Arrow
+table. A `Program` gives reusable calculations named inputs and outputs.
+
+For runtime integration, `Batch` is the immutable data envelope:
 
 - table batches hold Arrow record batches;
 - array batches hold a payload for an explicitly selected external provider;
@@ -48,42 +57,41 @@ This small batch calculation adds two Arrow columns:
 
 ```python
 import pyarrow as pa
+import calc_flow as cf
 
-from calc_flow import Batch, PipelineBuilder
-
-batch = Batch.from_pyarrow(pa.table({"a": [1, 3], "b": [2, 4]}))
-plan = (
-    PipelineBuilder("totals").expression("calculate", "total = a + b").compile_batch()
-)
-result = plan.execute({"input": batch})
-assert result.outputs["output"].to_pyarrow()["total"].to_pylist() == [3, 7]
+data = pa.table({"a": [1, 3], "b": [2, 4]})
+result = cf.compute(data, lambda t: t.select(total=t["a"] + t["b"]))
+assert result.to_pydict() == {"total": [3, 7]}
 ```
 
-Builder methods return new builders. Compilation exposes unconnected inputs
-and outputs by name, so the `input` and `output` keys above are graph ports.
-Execution returns named batches and timings without mutating the input.
-
-Run [example 01](../examples/01_datafusion_pipeline.py) to extend this pattern
-to order totals, projection, and filtering. Rust users can run the equivalent
-addition in [expression_pipeline.rs](../crates/calc-flow/examples/expression_pipeline.rs).
+`compute` calls the synchronous builder once, compiles its returned table
+expression, and executes in the Rust runtime. The result contains only `total`;
+the caller's Arrow table remains unchanged. Run
+[example 01](../examples/01_datafusion_pipeline.py) for order totals, named
+outputs, projection, and filtering.
 
 ## Choose how to declare and execute a calculation
 
-Use `PipelineBuilder` to name operators and connect their ports directly.
-Use Python's `calc_flow.symbolic` to compose typed expressions and features,
-analyze them before supplying data, and compile them into a native graph.
-Both forms produce native execution plans.
+Start with `cf.compute(data, build)` or `await cf.compute_async(data, build)`.
+No explicit schema, input name, `Batch`, runtime, or plan is needed for supported
+Arrow data. Types remain strict; convenience execution does not coerce columns.
 
-Use `compile_batch()` when all inputs are available and you want a `RunResult`.
-In Python, `execute()` is the blocking entry point and `execute_async()` is
-for an active event loop. See examples [01](../examples/01_datafusion_pipeline.py)
-and [05](../examples/05_async_execution.py).
+Use `cf.table_input(name, schema=...)` and `cf.Program(name, outputs={...})`
+for reusable declarations, named outputs, analysis, or project export.
+`TableExpr.collect` returns one Arrow table; `Program.collect` returns tables by
+logical output name. Async forms use the same calculation and cancellation
+contract. See [batch calculations](batch-guide.md).
 
-Use `compile_stream()` when inputs arrive over time or the graph needs
-event-time progress and recoverable state. A `StreamingRunner` starts the
-plan and returns an owning `StreamingJob`. See examples
-[04](../examples/04_continuous_runtime.py) and
-[08](../examples/08_streaming_recovery.py).
+Use `program.compile_stream()` and `StreamingRunner` when inputs arrive over
+time and need event-time progress or recoverable state. Schemas, ordering,
+sources, sinks, and managed checkpoints are explicit. Follow
+[expression workflows](symbolic-workflows.md) and the
+[streaming guide](streaming-guide.md).
+
+For integrations needing diagnostics or owned plan state, compile and execute a
+plan directly. `Runtime`, `Batch`, `PipelineBuilder`, formula strings, and SQL
+remain supported advanced APIs. Rust crate APIs are documented as
+[runtime implementation and extension reference](rust-api.md).
 
 ## Supported boundaries
 

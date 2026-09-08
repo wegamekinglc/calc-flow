@@ -2,6 +2,11 @@
 
 [Documentation](README.md) / 4.2 Stream runtime contract
 
+This internal-runtime and extension reference describes the Rust contract beneath
+Calc Flow's Python application API. Expression `Program.compile_stream` and
+explicit graph/project compilation reach this same runtime; Python convenience
+batch collection does not create a stream or alter its recovery protocol.
+
 The v3 Rust core moves stream traffic on one typed message: `StreamMessage`.
 Each stream edge carries a single ordered sequence of data and control
 messages from one producer to one consumer. This document is the normative

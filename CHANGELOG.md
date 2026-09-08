@@ -9,6 +9,16 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-08: Make Python expressions the default application API and Rust the
+  internal runtime. Root expression imports, operator composition, named table
+  methods, Arrow schema acceptance, and inferred Program inputs simplify
+  authoring. `compute`/`compute_async` and `collect`/`collect_async` return Arrow
+  tables by logical name with independent batch state; `Program.to_project`
+  exports the native graph. Existing symbolic imports, FeatureSet/tuple forms,
+  explicit Runtime, formula/SQL builders, and Rust extensions remain supported.
+  Equivalent declaration identities, project-v3, stream/checkpoint, provider,
+  and Studio REST contracts remain unchanged; documentation uses this Python path.
+
 - 2026-09-08: Compile symbolic fixed UTC tumbling/hopping event-window
   aggregation into the existing native window operator. Immutable
   `WindowAggregate` declarations and `window.count/sum/min/max/avg` helpers

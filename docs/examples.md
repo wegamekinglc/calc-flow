@@ -9,12 +9,15 @@ the learning order does not require importing or running an earlier example.
 
 ## Calculate a finite dataset
 
-Read the [batch guide](batch-guide.md) while running 01 → 02 → 03 → 05:
-calculate and filter order totals, join orders to fees, register a scalar
-function, then execute a plan in an asyncio application. Continue to
-[example 14](../examples/14_project_persistence.py) to save and reload the graph.
+Read the [batch guide](batch-guide.md) while running 01 → 05 → 09:
+compose and filter order expressions with `cf.compute`, collect several named
+outputs, await a calculation in asyncio, then build reusable financial features.
+Continue to [example 14](../examples/14_project_persistence.py) to export a
+`Program` and reload its native graph through JSON/YAML and the file store.
 
-Rust users can pair `expression_pipeline` with `sql_join`. The Rust expression
+For advanced integration, run 02 → 03 to join named inputs with explicit SQL
+and register a vectorized scalar UDF. Runtime contributors can pair Rust's
+`expression_pipeline` with `sql_join`. The Rust expression
 program uses the small `[3, 7]` addition from the introduction; Python 01 uses
 order totals. The SQL programs share the same order/fee dataset.
 
@@ -29,7 +32,7 @@ weights in a symbolic batch or continuous program.
 Read the [streaming guide](streaming-guide.md) while running 04 → 08 → 10:
 own a source/sink lifecycle, recover a completed stream, then restore a
 multi-stage rolling calculation from a checkpoint taken during processing.
-Rust's `continuous_runtime` and `windowed_streaming` demonstrate the native
+For runtime contributors, Rust's `continuous_runtime` and `windowed_streaming` demonstrate the native
 traits and watermark-driven tumbling windows.
 
 Those examples use local application-owned connectors and temporary state
@@ -43,10 +46,10 @@ preparation, and replay/delivery contract.
 
 ## Compose financial and relational calculations
 
-Read [symbolic workflows](symbolic-workflows.md) while running 09 → 10 → 11
+Read [expression workflows](symbolic-workflows.md) while running 09 → 10 → 11
 for financial features, recovery, and matrices. Run 12 → 13 for a bounded
 two-stream match followed by an ordered nested join. Consult the
-[symbolic API](symbolic-api.md) for declaration and ordering requirements.
+[expression API](symbolic-api.md) for declaration and ordering requirements.
 
 ## Use the local browser application
 

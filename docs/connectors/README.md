@@ -32,11 +32,26 @@ watermarks, and job control.
 
 Shared topics on this page:
 
+- [Connect Python expressions to transports](#connect-python-expressions-to-transports)
 - [Prepare the Python environment](#prepare-the-python-environment)
 - [Run the Python examples](#run-the-python-examples)
 - [Project bindings and secrets](#project-bindings-and-secrets)
 - [Delivery boundaries](#delivery-boundaries)
 - [Recovery ownership](#recovery-ownership)
+
+## Connect Python expressions to transports
+
+Declare calculations with the root `calc_flow` expression API and exact source
+schemas. `program.to_project(mode="stream")` exports the native graph and input
+placeholders; complete its source/sink connector bindings, formats, watermarks,
+delivery requirements, and managed state settings before launch. Use the
+physical binding names in the graph document, not `Program.collect` aliases.
+See [project export](../projects-guide.md#export-expressions-and-retain-the-right-names).
+
+Connector configuration and secret references stay data-only. Export does not
+supply live static values, credentials, or a checkpoint root. The examples below
+are advanced project/transport integrations and retain explicit serialized
+expression strings. They use the same runtime as Python expression programs.
 
 ## Prepare the Python environment
 
@@ -143,18 +158,18 @@ in the project guide.
 
 ## Delivery boundaries
 
-| Connector and mode           | Replay                       | Sink completion                            | Maximum claim                            |
-|------------------------------|------------------------------|--------------------------------------------|------------------------------------------|
-| File snapshot / Parquet      | Exact file and row cursor    | Atomic epoch directory publication         | Exactly once on supported local FS       |
-| Kafka                        | Exact partition offsets      | Transactional target plus compact ledger   | Exactly once after ledger preflight      |
-| PostgreSQL snapshot          | Unreplayable transaction     | N/A                                        | Best effort source                       |
-| PostgreSQL incremental/CDC   | Exact composite cursor/LSN   | Same-transaction epoch ledger              | Exactly once with transactional sink     |
-| MySQL snapshot               | Unreplayable transaction     | N/A                                        | Best effort source                       |
-| MySQL incremental            | Exact monotonic cursor       | Same-transaction epoch ledger              | Exactly once under cursor assumptions    |
-| ClickHouse polling           | Exact bounded cursor         | Stable insert deduplication token          | At least once; retry deduplicated only   |
-| HTTP polling                 | Unreplayable                 | N/A                                        | Best effort                              |
-| WebSocket `block`            | Unreplayable                 | N/A                                        | Best effort                              |
-| WebSocket `drop_oldest`      | Lossy and observable         | N/A                                        | Best effort                              |
+| Connector and mode         | Replay                     | Sink completion                          | Maximum claim                          |
+|----------------------------|----------------------------|------------------------------------------|----------------------------------------|
+| File snapshot / Parquet    | Exact file and row cursor  | Atomic epoch directory publication       | Exactly once on supported local FS     |
+| Kafka                      | Exact partition offsets    | Transactional target plus compact ledger | Exactly once after ledger preflight    |
+| PostgreSQL snapshot        | Unreplayable transaction   | N/A                                      | Best effort source                     |
+| PostgreSQL incremental/CDC | Exact composite cursor/LSN | Same-transaction epoch ledger            | Exactly once with transactional sink   |
+| MySQL snapshot             | Unreplayable transaction   | N/A                                      | Best effort source                     |
+| MySQL incremental          | Exact monotonic cursor     | Same-transaction epoch ledger            | Exactly once under cursor assumptions  |
+| ClickHouse polling         | Exact bounded cursor       | Stable insert deduplication token        | At least once; retry deduplicated only |
+| HTTP polling               | Unreplayable               | N/A                                      | Best effort                            |
+| WebSocket `block`          | Unreplayable               | N/A                                      | Best effort                            |
+| WebSocket `drop_oldest`    | Lossy and observable       | N/A                                      | Best effort                            |
 
 HTTP ETag and Last-Modified validators can suppress an unchanged response,
 but cannot seek historical endpoint representations. They therefore never

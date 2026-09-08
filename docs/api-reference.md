@@ -2,23 +2,24 @@
 
 [Documentation](README.md) / 3.1 API reference
 
-Calc Flow has three supported surfaces:
+Python is the application API. Rust implements the internal runtime and exposes
+extension interfaces; Studio provides local project and job controls:
 
-| Surface          | Package or path           | Purpose                                     |
-|------------------|---------------------------|---------------------------------------------|
-| Rust core        | `calc-flow = "4.0.0"`     | Native batches, graphs, execution, recovery |
-| Python binding   | `calc-flow-python==4.0.0` | PyO3 engine access and Python integrations  |
-| Local Studio API | `calc-flow-studio==4.0.0` | Loopback FastAPI service and React assets   |
+| Surface          | Package or path           | Purpose                                    |
+|------------------|---------------------------|--------------------------------------------|
+| Python API       | `calc-flow-python==4.0.0` | Expressions, Arrow execution, integrations |
+| Rust core        | `calc-flow = "4.0.0"`     | Internal runtime and extension contracts   |
+| Local Studio API | `calc-flow-studio==4.0.0` | Loopback FastAPI service and React assets  |
 
 For examples and lifecycle detail, see the [executable example guide](examples.md),
-[Rust API](rust-api.md), [Python API](python-api.md), and
+[Rust runtime reference](rust-api.md), [Python API](python-api.md), and
 [continuous streaming guide](streaming-guide.md).
 
 On this page:
 
 - [Examples](#examples)
-- [Rust modules and exports](#rust-modules-and-exports)
 - [Python package](#python-package)
+- [Rust modules and exports](#rust-modules-and-exports)
 - [Local HTTP API](#local-http-api)
 - [Error categories](#error-categories)
 - [Version and compatibility](#version-and-compatibility)
@@ -29,16 +30,11 @@ Minimal end-to-end calculation (Python):
 
 ```python
 import pyarrow as pa
+import calc_flow as cf
 
-from calc_flow import Batch, PipelineBuilder
-
-batch = Batch.from_pyarrow(pa.table({"a": [1, 3], "b": [2, 4]}))
-plan = (
-    PipelineBuilder("totals").expression("calculate", "total = a + b").compile_batch()
-)
-result = plan.execute({"input": batch})
-
-assert result.outputs["output"].to_pyarrow()["total"].to_pylist() == [3, 7]
+data = pa.table({"a": [1, 3], "b": [2, 4]})
+result = cf.compute(data, lambda t: t.select(total=t["a"] + t["b"]))
+assert result.to_pydict() == {"total": [3, 7]}
 ```
 
 The runnable inventories cover both surfaces; the SQL examples share a dataset:
@@ -55,69 +51,28 @@ To include Python connector examples 16–21, prepare the optional native featur
 and services from the [connector overview](connectors/README.md), then add
 `--include-services`.
 
-## Rust modules and exports
-
-The `calc_flow` crate re-exports its supported public types from
-[`lib.rs`](../crates/calc-flow/src/lib.rs).
-
-| Area                | Primary APIs                                                                                                                                           |
-|---------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Data                | `Batch`, `BatchKind`, `BatchMetadata`, `TableBatch`                                                                                                    |
-| Batch graph         | `PipelineBuilder`, `Edge`, `PortEndpoint`, `BatchExecutionPlan`                                                                                        |
-| Stream plan         | `StreamExecutionPlan`, `StreamRequirements`, `DeliveryGuarantee`, `StreamRuntimeConfig`                                                                |
-| Operator traits     | `Port`, `OperatorMetadata`, `NodeOperator`, `BatchOperator`, `StreamOperator`, `StreamOperatorLifecycle`, `OperatorStateSnapshot`                      |
-| Built-in operators  | `ExpressionOperator`, `SqlOperator`, `RollingOperator`, `CrossSectionOperator`, `UnionOperator`, `WindowAggregateOperator`, `StreamJoinOperator`       |
-| Window model        | `WindowSpec`, `WindowGeometry`, `AggregateSpec`, `AggregateFunction`, `MAX_WINDOW_OVERLAP`                                                             |
-| Rolling model       | `RollingSpec`, `RollingOutputSpec`, `RollingNumericalProfile`, `LatePolicySpec`, `LateErrorScope`, `RollingValuePolicy`                                |
-| Cross-section model | `CrossSectionSpec`, `CrossSectionGroupingSpec`, `CrossSectionOutputSpec`, `CrossSectionValuePolicy`, `RankTieMethod`, `SortDirection`, `NullPlacement` |
-| Stream join model   | `StreamJoinSpec`, `StreamJoinType`, `JoinTimeBounds`, `JoinStateLimits`, `StreamJoinStatus`                                                            |
-| Execution           | `ExecutionOptions`, `RunResult`, `RunMetadata`, `NodeTiming`                                                                                           |
-| Stream model        | `StreamMessage`, `StreamMessageKind`, `StreamJobContext`, `EventTime`, `Epoch`                                                                         |
-| Stream channel      | `EdgeBudget`, `EnvelopeCost`, `ChannelMetrics`, `EdgeSender`, `EdgeReceiver`, `edge_channel`                                                           |
-| State backend       | `StateBackend`, `StateLineageBackend`, `StateLineageKey`, `StateHandle`, `LocalStateBackend`                                                           |
-| State manifest      | `CheckpointManifest`, `CheckpointManifestFields`, `ManifestExpectation`, `OperatorManifestEntry`, `RecoveryStatus`                                     |
-| UDF/providers       | `UdfRegistry`, `UdfReference`, `ProviderRegistry`, `BatchOperatorFactory`, `StreamOperatorFactory`                                                     |
-| Sources and sinks   | `StreamSource`, `StreamSink`, `TransactionalStreamSink`, `SourceBinding`, `SinkBinding`                                                                |
-| Continuous runtime  | `StreamingRunner`, `StreamingJob`, `ManagedCheckpointRuntime`, `Cursor`, `SourceEvent`, `JobStatus`, `JobOutcome`                                      |
-| Static inputs       | `StaticInputSpec`, `StaticInputDigest`, `StaticMutability`, `STATIC_INPUT_DIGEST_VERSION`, `StaticArraySnapshot`, `StaticArrayValues`                  |
-| Projects            | `ProjectSpec`, `compile_project`, `validate_project`                                                                                                   |
-| Persistence         | `FileProjectStore`, `LocalStateBackend`, `CheckpointManifest`                                                                                          |
-| Errors              | `CalcFlowError`, `Result<T>`                                                                                                                           |
-
-`compile_project` produces a `BatchExecutionPlan`. `compile_batch` and
-`compile_stream` are the Rust graph-compilation entry points. A
-`StreamExecutionPlan` is consumed by the public source-driven
-`StreamingRunner`. The runner owns source and sink bindings plus a
-`ManagedCheckpointRuntime`; `start(self)` consumes it and returns the sole
-`StreamingJob` lifecycle owner. Static array inspection uses `StaticArraySnapshot` and `StaticArrayValues`.
-`Batch::static_array_snapshot()` is an explicit owned host-neutral copy for a
-latched static array: its backend, dtype, shape, optional full null bitmap, and
-compact scalar carrier are available through read-only accessors. The snapshot
-and value enum are non-exhaustive and intentionally provide no `Clone`,
-payload-bearing `Debug`, serde, or mutation surface.
-
-Python static placement creates one transient `O(n)` snapshot clone per placed
-static input inside a blocking worker. `static_placement_bytes` is the logical
-provider-transfer count — dtype width multiplied by logical element count —
-reported on first placement and zero for cached later micro-batches. It does
-not measure peak memory, process RSS, or the internal snapshot clone; the
-engine latch, snapshot carriers, Python host list, NumPy storage, and a
-provider-owned JAX result may coexist during first placement.
-
-`EdgeBudget::new(R, B)` caps queued
-envelopes and charged rows independently at `R`, plus charged bytes at `B`.
-Direct `edge_channel` callers must choose
-`R >= max(required_row_limit, required_simultaneous_messages)`.
-
-Generate local rustdoc with:
-
-```bash
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
-```
-
 ## Python package
 
 Import the main surface from `calc_flow`.
+
+### Expressions and Arrow execution
+
+Prefer `import calc_flow as cf`. `compute(data, build, /, *, entity_by=(),
+event_time=None, sequence_by=(), runtime=None, options=None)` returns an Arrow
+table; `compute_async` returns its awaitable. Inputs are Arrow tables, record
+batches, or table `Batch` values. The synchronous builder receives a typed
+`TableExpr` once, with the supported Arrow schema inferred from data.
+
+`TableExpr` provides indexing, overloaded column operators, append-only
+`with_columns`, `select`, `filter`, and `collect`/`collect_async`.
+`Program(name, /, *, inputs=None, outputs=())` accepts an output mapping,
+automatically discovers omitted roots, collects by logical name, and exports
+strict native projects with `to_project`. Runtime arguments are optional;
+provider registrations require the explicitly selected runtime.
+
+See the [Python contracts](python-api.md#compute-arrow-data) for exact
+signatures, supported schema/name restrictions, async ownership, independent
+collection state, migration mappings, and logical versus physical bindings.
 
 ### Batch
 
@@ -323,32 +278,93 @@ over cancellation that arrives while the thread is being reclaimed.
 
 ### Symbolic declarations
 
-`calc_flow.symbolic` is the pure declaration surface: immutable expressions,
-programs, static analysis, and supported row-local, rolling, cross-section,
-relational-DAG, and matrix compilation with no separate data execution path. Every expression,
+The root `calc_flow` exports provide immutable expressions, programs, analysis,
+and supported row-local, rolling, cross-section, relational-DAG, and matrix
+compilation. `calc_flow.symbolic` remains a supported import path for the same
+objects. Convenience execution delegates to the internal Rust runtime. Every expression,
 feature, program, and analysis result is immutable; constructors copy
 caller-owned sequences and mappings.
 
-| Member                                                                        | Contract                                                                                                         |
-|-------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------|
-| `Expr` / `ColumnExpr` / `ArrayExpr` / `TableExpr` / `Parameter`               | Immutable typed declaration values with v1 digests                                                               |
-| `table_input(name, *, schema, entity_by=(), event_time=None, sequence_by=())` | Declare one named table input                                                                                    |
-| `parameter(name, *, kind=...)`                                                | Declare one named static table or array input                                                                    |
-| `Field(name, data_type, nullable=True)`                                       | One exact table field declaration                                                                                |
-| `rows(size)` / `duration(micros)`                                             | Row-count and exact-microsecond rolling frames                                                                   |
-| `exact_time(...)` / `event_time_bucket(...)`                                  | Cross-section group declarations                                                                                 |
-| `row` / `ts` / `cs` / `table` / `linalg` / `window`                           | Namespace functions; `ts` includes EWMA/EMA and MACD, while `table` includes ordered relational stream-join DAGs |
-| `FeatureSet(features=())` / `.with_feature(name, value)`                      | Ordered uniquely named column expressions                                                                        |
-| `TableExpr.with_columns(features)`                                            | Append a feature set as derived columns                                                                          |
-| `Program(name, *, inputs=(), outputs=())`                                     | Declared inputs and outputs with the runtime-independent v1 fingerprint                                          |
-| `Program.analyze(runtime, *, mode)` / `.explain(runtime, *, mode)`            | Static analysis plus deterministic optimization, state, copy-boundary, and provider-cost fact rendering          |
-| `Program.compile_batch(runtime)` / `.compile_stream(runtime, *, ...)`         | Optimize and cache supported row-local, stateful, matrix, and relational-DAG strict project-v3 plans             |
-| `AnalysisIssue` / `AnalysisResult`                                            | Immutable findings with stable output/input-rooted paths                                                         |
+| Member                                                                                | Contract                                                                                                         |
+|---------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------|
+| `Expr` / `ColumnExpr` / `ArrayExpr` / `TableExpr` / `Parameter`                       | Immutable typed declaration values with v1 digests                                                               |
+| `table_input(name, *, schema, entity_by=(), event_time=None, sequence_by=())`         | Declare one named table input                                                                                    |
+| `parameter(name, *, kind=...)`                                                        | Declare one named static table or array input                                                                    |
+| `Field(name, data_type, nullable=True)`                                               | One exact table field declaration                                                                                |
+| `rows(size)` / `duration(micros)`                                                     | Row-count and exact-microsecond rolling frames                                                                   |
+| `exact_time(...)` / `event_time_bucket(...)`                                          | Cross-section group declarations                                                                                 |
+| `row` / `ts` / `cs` / `table` / `linalg` / `window`                                   | Namespace functions; `ts` includes EWMA/EMA and MACD, while `table` includes ordered relational stream-join DAGs |
+| `FeatureSet(features=())` / `.with_feature(name, value)`                              | Ordered uniquely named column expressions                                                                        |
+| `TableExpr.with_columns(features=None, /, **named)`                                   | Append a mapping, named expressions, or a feature set                                                            |
+| `Program(name, /, *, inputs=None, outputs=())`                                        | Declared inputs and outputs with the runtime-independent v1 fingerprint                                          |
+| `Program.analyze(runtime=None, /, *, mode="batch")` / `.explain(...)`                 | Static analysis plus deterministic optimization, state, copy-boundary, and provider-cost fact rendering          |
+| `Program.compile_batch(runtime=None, /)` / `.compile_stream(runtime=None, /, *, ...)` | Optimize and cache supported row-local, stateful, matrix, and relational-DAG strict project-v3 plans             |
+| `AnalysisIssue` / `AnalysisResult`                                                    | Immutable findings with stable output/input-rooted paths                                                         |
 
 Structural identity uses `identical()`; public comparison operators build
 symbolic expressions, and converting one to `bool` fails. See the
 [Python API guide](python-api.md) for the declaration, fingerprint,
 analysis, and compilation contract.
+
+## Rust modules and exports
+
+The `calc_flow` crate re-exports its supported public types from
+[`lib.rs`](../crates/calc-flow/src/lib.rs).
+
+| Area                | Primary APIs                                                                                                                                           |
+|---------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Data                | `Batch`, `BatchKind`, `BatchMetadata`, `TableBatch`                                                                                                    |
+| Batch graph         | `PipelineBuilder`, `Edge`, `PortEndpoint`, `BatchExecutionPlan`                                                                                        |
+| Stream plan         | `StreamExecutionPlan`, `StreamRequirements`, `DeliveryGuarantee`, `StreamRuntimeConfig`                                                                |
+| Operator traits     | `Port`, `OperatorMetadata`, `NodeOperator`, `BatchOperator`, `StreamOperator`, `StreamOperatorLifecycle`, `OperatorStateSnapshot`                      |
+| Built-in operators  | `ExpressionOperator`, `SqlOperator`, `RollingOperator`, `CrossSectionOperator`, `UnionOperator`, `WindowAggregateOperator`, `StreamJoinOperator`       |
+| Window model        | `WindowSpec`, `WindowGeometry`, `AggregateSpec`, `AggregateFunction`, `MAX_WINDOW_OVERLAP`                                                             |
+| Rolling model       | `RollingSpec`, `RollingOutputSpec`, `RollingNumericalProfile`, `LatePolicySpec`, `LateErrorScope`, `RollingValuePolicy`                                |
+| Cross-section model | `CrossSectionSpec`, `CrossSectionGroupingSpec`, `CrossSectionOutputSpec`, `CrossSectionValuePolicy`, `RankTieMethod`, `SortDirection`, `NullPlacement` |
+| Stream join model   | `StreamJoinSpec`, `StreamJoinType`, `JoinTimeBounds`, `JoinStateLimits`, `StreamJoinStatus`                                                            |
+| Execution           | `ExecutionOptions`, `RunResult`, `RunMetadata`, `NodeTiming`                                                                                           |
+| Stream model        | `StreamMessage`, `StreamMessageKind`, `StreamJobContext`, `EventTime`, `Epoch`                                                                         |
+| Stream channel      | `EdgeBudget`, `EnvelopeCost`, `ChannelMetrics`, `EdgeSender`, `EdgeReceiver`, `edge_channel`                                                           |
+| State backend       | `StateBackend`, `StateLineageBackend`, `StateLineageKey`, `StateHandle`, `LocalStateBackend`                                                           |
+| State manifest      | `CheckpointManifest`, `CheckpointManifestFields`, `ManifestExpectation`, `OperatorManifestEntry`, `RecoveryStatus`                                     |
+| UDF/providers       | `UdfRegistry`, `UdfReference`, `ProviderRegistry`, `BatchOperatorFactory`, `StreamOperatorFactory`                                                     |
+| Sources and sinks   | `StreamSource`, `StreamSink`, `TransactionalStreamSink`, `SourceBinding`, `SinkBinding`                                                                |
+| Continuous runtime  | `StreamingRunner`, `StreamingJob`, `ManagedCheckpointRuntime`, `Cursor`, `SourceEvent`, `JobStatus`, `JobOutcome`                                      |
+| Static inputs       | `StaticInputSpec`, `StaticInputDigest`, `StaticMutability`, `STATIC_INPUT_DIGEST_VERSION`, `StaticArraySnapshot`, `StaticArrayValues`                  |
+| Projects            | `ProjectSpec`, `compile_project`, `validate_project`                                                                                                   |
+| Persistence         | `FileProjectStore`, `LocalStateBackend`, `CheckpointManifest`                                                                                          |
+| Errors              | `CalcFlowError`, `Result<T>`                                                                                                                           |
+
+`compile_project` produces a `BatchExecutionPlan`. `compile_batch` and
+`compile_stream` are the Rust graph-compilation entry points. A
+`StreamExecutionPlan` is consumed by the public source-driven
+`StreamingRunner`. The runner owns source and sink bindings plus a
+`ManagedCheckpointRuntime`; `start(self)` consumes it and returns the sole
+`StreamingJob` lifecycle owner. Static array inspection uses `StaticArraySnapshot` and `StaticArrayValues`.
+`Batch::static_array_snapshot()` is an explicit owned host-neutral copy for a
+latched static array: its backend, dtype, shape, optional full null bitmap, and
+compact scalar carrier are available through read-only accessors. The snapshot
+and value enum are non-exhaustive and intentionally provide no `Clone`,
+payload-bearing `Debug`, serde, or mutation surface.
+
+Python static placement creates one transient `O(n)` snapshot clone per placed
+static input inside a blocking worker. `static_placement_bytes` is the logical
+provider-transfer count — dtype width multiplied by logical element count —
+reported on first placement and zero for cached later micro-batches. It does
+not measure peak memory, process RSS, or the internal snapshot clone; the
+engine latch, snapshot carriers, Python host list, NumPy storage, and a
+provider-owned JAX result may coexist during first placement.
+
+`EdgeBudget::new(R, B)` caps queued
+envelopes and charged rows independently at `R`, plus charged bytes at `B`.
+Direct `edge_channel` callers must choose
+`R >= max(required_row_limit, required_simultaneous_messages)`.
+
+Generate local rustdoc with:
+
+```bash
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
+```
 
 ## Local HTTP API
 

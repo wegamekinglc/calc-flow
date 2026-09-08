@@ -11,9 +11,11 @@ development frontend opens at `http://127.0.0.1:5173`.
 
 Use the order-total calculation in
 [01_datafusion_pipeline.py](../examples/01_datafusion_pipeline.py) as a small
-graph to understand: an expression calculates `gross`, and a connected
-projection/filter keeps the large orders. Studio edits the same node, port,
-and expression fields found in the project document. Validate the graph after
+calculation to understand: Python expressions calculate `gross`, then filter
+and select the large orders. Export a reusable `Program` with `to_project()`
+to obtain the native graph. The compiler can fuse those operations into fewer
+nodes. Studio edits the lowered node, port, and expression fields in that
+document. Validate the graph after
 changing nodes or connections, then save the project.
 
 For batch input cards, **Edit data** opens a draft editor. **Confirm** applies
@@ -33,8 +35,11 @@ declarations into native project nodes. Selecting a node in Studio shows the
 provider identity, state and watermark requirements, and recognized matrix
 copy boundaries.
 
-This inspection reads the project document. It does not run a symbolic Python
-compiler or reconstruct the original expression objects. Reported sizes are
+This inspection reads the document exported by `program.to_project()`. It does
+not run the Python builder or reconstruct expression objects or logical aliases.
+Reloaded graphs retain physical binding names; `Program.collect` resolves logical
+names only for Python collection. Exporting with `mode="stream"` still requires
+explicit operational connector and state settings before a job can launch. Reported sizes are
 declared limits or estimates; use live metrics to observe memory and latency.
 
 ## Start and observe a continuous job

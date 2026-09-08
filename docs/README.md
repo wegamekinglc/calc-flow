@@ -13,15 +13,16 @@ pages explain how the implementation provides those behaviors.
 
 ## 2. Function guides
 
-1. [Batch calculations](batch-guide.md): expressions, filters, SQL joins,
-   registered UDFs, and async execution; examples 01, 02, 03, and 05.
+1. [Batch calculations](batch-guide.md): `compute`, table expressions, named
+   collection, reusable financial functions, and async execution; examples 01,
+   05, and 09. Examples 02 and 03 cover advanced SQL and UDF integration.
 2. [Arrays and matrices](array-guide.md): NumPy/JAX registration, array
    expressions, table-to-matrix multiplication, and static weights;
    examples 06, 07, and 11.
 3. [Continuous streaming](streaming-guide.md): sources, sinks, event time,
    windows, bounded joins, job controls, and recovery; examples 04, 08,
    10, 12, and 13, plus the Rust window example.
-4. [Symbolic workflows](symbolic-workflows.md): financial features, analysis,
+4. [Expression workflows](symbolic-workflows.md): financial features, analysis,
    composition, and batch/stream execution; examples 09–13.
 5. [Projects and persistence](projects-guide.md): validate, serialize, save,
    load, and execute a project; example 14.
@@ -34,11 +35,12 @@ pages explain how the implementation provides those behaviors.
 
 1. [API reference](api-reference.md): public surfaces, HTTP routes, errors,
    and package/protocol versions.
-2. [Python API](python-api.md): builders, execution options, providers,
-   persistence, and runner methods.
-3. [Symbolic API](symbolic-api.md): declarations, ordering requirements,
+2. [Python API](python-api.md): `compute`, named table expressions, `Program`,
+   collection, and advanced execution/provider/runner contracts.
+3. [Expression API](symbolic-api.md): declarations, ordering requirements,
    analysis, and compilation.
-4. [Rust API](rust-api.md): native types, operators, traits, and examples.
+4. [Rust runtime reference](rust-api.md): internal types, operator traits, and
+   examples for runtime contributors and extension authors.
 
 The [project schema](../schemas/project-v3.schema.json) and
 [OpenAPI document](../web-ui/openapi.json) define the serialized contracts.
