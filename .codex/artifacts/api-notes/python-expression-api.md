@@ -134,9 +134,6 @@ def compute(
     build: Callable[[TableExpr], TableExpr],
     /,
     *,
-    entity_by: Sequence[str] = (),
-    event_time: str | None = None,
-    sequence_by: Sequence[str] = (),
     runtime: Runtime | None = None,
     options: ExecutionOptions | None = None,
 ) -> pa.Table: ...
@@ -146,9 +143,6 @@ def compute_async(
     build: Callable[[TableExpr], TableExpr],
     /,
     *,
-    entity_by: Sequence[str] = (),
-    event_time: str | None = None,
-    sequence_by: Sequence[str] = (),
     runtime: Runtime | None = None,
     options: ExecutionOptions | None = None,
 ) -> Awaitable[pa.Table]: ...
@@ -174,10 +168,13 @@ Accept only these explicit input types; implicit pandas, Polars, dict and array
 conversions would add unclear data-copy and backend behavior. A caller can explicitly convert those to
 Arrow. Unsupported Arrow field types produce an input-field error, not a lossy cast.
 
-Ordering arguments are forwarded to the inferred `table_input`. No entity, timestamp,
-sorting or sequence semantics are invented from row position. Stateful expressions
-without required ordering continue to fail analysis. Rolling `event_time` must be
-declared as a non-null UTC microsecond timestamp. Schema inference preserves the
+The inferred input has no ordering declaration. Calculations requiring ordering
+declare `entity_by`, `event_time`, and `sequence_by` on `table_input`, apply the same
+builder, and call `TableExpr.collect`/`collect_async` or `Program.collect`/
+`collect_async`. No entity, timestamp, sorting or sequence semantics are invented
+from row position. Stateful expressions without required ordering continue to fail
+analysis. Rolling `event_time` must be declared as a non-null UTC microsecond
+timestamp. Schema inference preserves the
 input Arrow field's nullability; an observed absence of null values does not make
 a nullable field non-nullable. Callers provide an appropriately declared Arrow
 schema when constructing temporal input data.
@@ -435,19 +432,20 @@ def signals(q: cf.TableExpr) -> cf.TableExpr:
     mean = cf.ts.mean(price, window=cf.rows(3))
     return q.select("symbol", "ts", momentum=momentum, mean_price=mean)
 
-result = cf.compute(
-    quotes,
-    signals,
+source = cf.table_input(
+    "quotes",
+    schema=quotes.schema,
     entity_by=("symbol",),
     event_time="ts",
     sequence_by=("ts",),
 )
+result = signals(source).collect(quotes)
 ```
 
 The financial example explicitly declares floating `price` and non-null
 `timestamp[us, UTC]` event time. A timestamp field inferred by ordinary `pa.table`
 construction is nullable by default and would not satisfy the rolling contract,
-even if every timestamp value is present. `compute` preserves the supplied schema;
+even if every timestamp value is present. `table_input` preserves the supplied schema;
 existing type, null/warm-up and ordering semantics apply unchanged.
 
 ## Projects, streaming, providers and Rust
@@ -578,11 +576,84 @@ one final coordinated alignment after review. Preserve historical artifacts and
   reconciliation where affected; measured historical results and valid commands stay
   intact. No whole-repository prose rewrite is required for unaffected content.
 
-Migration is additive at the callable/import level: existing formula builder,
+Relative to the base revision, migration is additive at the callable/import level:
+existing formula builder,
 `FeatureSet` tuple pairs, explicit Program inputs/output pairs and positional Runtime
 calls continue working. Examples teach new authors the expression route. Explicit
 string SQL and project expressions remain advanced supported surfaces, not deprecated
 runtime features. There is no version bump or v1 compatibility restoration in scope.
+
+## PR 259 correction: declaration ordering belongs to table inputs
+
+This correction locks the four-parameter `compute` and `compute_async` signatures
+above. Relative to PR head `0e9bbbb332906f2a76adb68e6e6871a23f9fdabd`, remove the
+three keyword-only arguments `entity_by`, `event_time`, and `sequence_by` from both
+functions. Keep positional-only `data`/`build` and keyword-only `runtime`/`options`,
+with their existing annotations and defaults. These entry points are introduced
+by this unreleased PR; this correction changes no callable from the base revision.
+Python's normal unexpected-keyword `TypeError` is sufficient for removed arguments;
+do not add deprecated aliases, `**kwargs`, a new options type, or lint suppressions.
+
+Ordering describes a reusable input declaration and already has one explicit home
+in `table_input`. Execution settings and provider selection belong at execution,
+so `ExecutionOptions` and `Runtime` remain discoverable direct arguments. Existing
+`ExecutionOptions` represents deadlines/settings, not declaration ordering; do not
+extend it with schema semantics. Named inputs/outputs remain with `table_input`
+and `Program`, and stateful plan ownership remains with explicit compilation.
+
+The migration for a temporal builder is the financial example above:
+`signals(source).collect(quotes, runtime=runtime, options=options)`. Its async form
+is `await signals(source).collect_async(quotes, runtime=runtime, options=options)`.
+For named outputs, use `Program("signals", outputs={"output": signals(source)})`
+and `collect({"quotes": quotes}, ...)` or `collect_async`. The cost is an explicit
+source declaration for temporal calculations; the declaration is reusable and
+already required for streaming. Plain `cf.compute(data, lambda t: ...)` stays
+unchanged. Both paths continue through the same lowering and native runtime.
+
+Implementation scope and acceptance:
+
+- In `python/calc_flow/compute.py`, remove the three parameters from both public
+  signatures and from `_build_program` and its two calls; construct the inferred
+  `table_input` using its existing ordering defaults. Remove the unused `Sequence`
+  import. No change to `_table_batch`, collection, fresh-plan creation, or async
+  preparation/cancellation is needed.
+- Keep all existing cases in `python/tests/test_compute.py` and
+  `python/tests/test_compute_metadata.py`. Start with a focused failing contract
+  case that removed ordering keywords are rejected by both entry points before
+  invoking their builder. Exercise the documented temporal migration through
+  `TableExpr.collect` and `collect_async` with the same explicit runtime/options
+  and assert actual lag results, using the existing `_rolling_program` data.
+  The existing Program repeated/concurrent collection and cached-plan snapshot
+  case must still pass; do not replace it with a signature-only test.
+- Verify both convenience entry points still forward the caller's selected
+  Runtime and ExecutionOptions, preserve metadata/shared buffers, invoke builders
+  once, reject a blocking call in an event loop, and drain native cancellation.
+  Existing focused tests supply most evidence; add only missing direct coverage.
+- Update exact signatures in `docs/python-api.md` and `docs/api-reference.md`;
+  replace the ordering-keyword `compute` call in `docs/batch-guide.md` with the
+  migrated financial example. Explain declaration ordering and sync/async migration
+  once in the Python reference, link it from the API index, and clarify the existing
+  calculation-choice paragraph in `docs/introduction.md`. Reconcile the current
+  Python-first entry of `CHANGELOG.md` with the reduced entry point. Source
+  docstrings should point temporal callers to `table_input` and collection.
+- Existing calls in `examples/01_datafusion_pipeline.py`,
+  `examples/05_async_execution.py`, `README.md`, and getting-started need no edits.
+  `examples/09_symbolic_financial_features.py` already uses explicit ordering and
+  Program collection. Existing expression tests also use supported arguments.
+  Run the updated financial documentation block as the relevant example check.
+- Local verification is targeted Ruff (including explicit `PLR0913`) on compute
+  and changed tests, the compute/metadata test modules, the migrated example, and
+  one run of `scripts/verify_complexity_gates.py` to reproduce the failed CI gate.
+  The signatures must have four explicit parameters and the module zero PLR0913
+  findings. Retain existing complexity thresholds/baselines and the already fixed
+  cyclomatic complexity bound. Full regression/coverage remains in CI.
+
+No extra critic stage is needed: this narrows an unreleased convenience API and
+reuses already-tested declaration and execution contracts. Direct handoff goes
+to `cf-implementer`, then focused `cf-reviewer`. The remaining risk is stale
+documentation or external experimentation against the earlier PR signature;
+the migration is explicit. This correction does not authorize runtime, native
+binding, IR identity, checkpoint, REST, or existing advanced API changes.
 
 ## Testable acceptance and bounded verification
 
@@ -639,8 +710,9 @@ focused independent evidence based on the actual diff.
 Full cross-platform regression, combined Rust 90% line coverage, Python coverage,
 Studio backend 85%, release artifacts and routine performance gates remain CI's
 responsibility. This design stage ran no builds/tests/performance and triggers no CI.
-After a later authorized push take one non-blocking checks snapshot; pending is
-reportable but not merge-ready. No push, PR creation or merge is authorized here.
+The parent delivery task now has separate user authority to push PR 259 and track
+its results; pending is reportable but not merge-ready. This API-design correction
+performs no push, PR mutation, or merge itself.
 
 ## Handoff
 

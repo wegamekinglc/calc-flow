@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping
 
 import pyarrow as pa
 
@@ -154,33 +154,25 @@ def compute(
     build: Callable[[TableExpr], TableExpr],
     /,
     *,
-    entity_by: Sequence[str] = (),
-    event_time: str | None = None,
-    sequence_by: Sequence[str] = (),
     runtime: Runtime | None = None,
     options: ExecutionOptions | None = None,
 ) -> pa.Table:
-    """Build from Arrow fields and independently compute the result."""
+    """Build from Arrow fields and independently compute the result.
+
+    The inferred input has no ordering. For temporal expressions, declare
+    ordering with ``table_input`` and execute through ``TableExpr.collect``.
+    """
     _require_blocking("compute")
-    program, batch = _build_program(data, build, entity_by, event_time, sequence_by)
+    program, batch = _build_program(data, build)
     return _collect(program, {"input": batch}, runtime, options)["output"]
 
 
 def _build_program(
     data: TableData,
     build: Callable[[TableExpr], TableExpr],
-    entity_by: Sequence[str],
-    event_time: str | None,
-    sequence_by: Sequence[str],
 ) -> tuple[Program, Batch]:
     batch = _table_batch(data, "compute.data")
-    source = table_input(
-        "input",
-        schema=batch.to_pyarrow().schema,
-        entity_by=entity_by,
-        event_time=event_time,
-        sequence_by=sequence_by,
-    )
+    source = table_input("input", schema=batch.to_pyarrow().schema)
     if not callable(build):
         raise TypeError("compute.build: expected a callable returning TableExpr")
     output = build(source)
@@ -239,9 +231,6 @@ def compute_async(
     build: Callable[[TableExpr], TableExpr],
     /,
     *,
-    entity_by: Sequence[str] = (),
-    event_time: str | None = None,
-    sequence_by: Sequence[str] = (),
     runtime: Runtime | None = None,
     options: ExecutionOptions | None = None,
 ) -> Awaitable[pa.Table]:
@@ -249,6 +238,9 @@ def compute_async(
 
     Arrow buffers are shared. Keep their underlying storage read-only until
     execution completes; this does not copy the table contents.
+
+    The inferred input has no ordering. For temporal expressions, declare
+    ordering with ``table_input`` and await ``TableExpr.collect_async``.
     """
-    program, batch = _build_program(data, build, entity_by, event_time, sequence_by)
+    program, batch = _build_program(data, build)
     return _collect_table_async(program, {"input": batch}, runtime, options)

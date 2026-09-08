@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pyarrow as pa
+import pytest
 
 import calc_flow as cf
 
@@ -9,6 +10,21 @@ def test_compute_quickstart():
     data = pa.table({"a": [1, 3], "b": [2, 4]})
     result = cf.compute(data, lambda t: t.select(total=t["a"] + t["b"]))
     assert result.to_pydict() == {"total": [3, 7]}
+
+
+@pytest.mark.parametrize("entry", [cf.compute, cf.compute_async])
+@pytest.mark.parametrize(
+    "ordering",
+    [{"entity_by": ("symbol",)}, {"event_time": "ts"}, {"sequence_by": ("ts",)}],
+)
+def test_compute_rejects_declaration_ordering_before_building(entry, ordering):
+    data, _ = _rolling_program()
+
+    def build(t):
+        pytest.fail("unexpected ordering keyword reached the expression builder")
+
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        entry(data, build, **ordering)
 
 
 def test_collection_binds_logical_names_across_distinct_inputs_and_shared_outputs():
@@ -189,6 +205,53 @@ def _rolling_program():
     )
     output = t.select("price", previous=cf.ts.lag(t["price"]))
     return data, cf.Program("rolling", outputs={"signals": output})
+
+
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("temporal", [False, True], ids=["compute", "ordered-collect"])
+def test_convenience_forwards_runtime_and_options(asynchronous, temporal, monkeypatch):
+    import asyncio
+    from datetime import UTC, datetime, timedelta
+
+    data, program = _rolling_program()
+    expression = program.outputs[0][1]
+    runtime = cf.Runtime()
+    options = cf.ExecutionOptions(deadline=datetime.now(UTC) + timedelta(minutes=1))
+    runtimes = []
+    executions = []
+    compile_project = cf.Runtime.compile_batch_project
+    execute_name = "execute_async" if asynchronous else "execute"
+    execute = getattr(cf.BatchExecutionPlan, execute_name)
+
+    def record_compile(self, document):
+        runtimes.append(self)
+        return compile_project(self, document)
+
+    def record_execute(self, inputs, *, options=None):
+        executions.append(options)
+        return execute(self, inputs, options=options)
+
+    monkeypatch.setattr(cf.Runtime, "compile_batch_project", record_compile)
+    monkeypatch.setattr(cf.BatchExecutionPlan, execute_name, record_execute)
+
+    def collect():
+        if temporal:
+            entry = expression.collect_async if asynchronous else expression.collect
+            return entry(data, runtime=runtime, options=options)
+        entry = cf.compute_async if asynchronous else cf.compute
+        return entry(
+            data, lambda t: t.select("price"), runtime=runtime, options=options
+        )
+
+    async def run():
+        return await collect()
+
+    result = asyncio.run(run()) if asynchronous else collect()
+    assert result["price"].to_pylist() == [2.0, 4.0, 8.0]
+    if temporal:
+        assert result["previous"].to_pylist() == [None, 2.0, 4.0]
+    assert len(runtimes) == 1 and runtimes[0] is runtime
+    assert len(executions) == 1 and executions[0] is options
 
 
 def test_collect_owns_fresh_state_and_does_not_reset_cached_plan():
