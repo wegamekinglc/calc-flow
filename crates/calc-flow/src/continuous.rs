@@ -960,6 +960,34 @@ impl StreamingRunner {
     ///
     /// Returns a safe streaming error after all provisional runtime resources are settled.
     pub async fn start(self) -> Result<StreamingJob> {
+        self.start_with_cleanup().0.await
+    }
+
+    /// Starts a job with an independent observer of its runner's complete teardown.
+    ///
+    /// This internal binding seam must be called within a Tokio runtime. The
+    /// cleanup future observes completion without requesting cancellation or
+    /// retaining an owning job handle. It includes managed storage handle release.
+    ///
+    /// # Errors
+    ///
+    /// The start future reports startup failures; the cleanup future reports
+    /// a runner lifecycle join failure.
+    #[doc(hidden)]
+    pub fn start_with_cleanup(
+        self,
+    ) -> (
+        impl Future<Output = Result<StreamingJob>> + Send,
+        impl Future<Output = Result<()>> + Send,
+    ) {
+        let runner = OneShotContinuousRunner::new();
+        let cleanup = runner.cleanup_observer();
+        (self.start_on(runner), async move {
+            cleanup.await.map_err(safe_error)
+        })
+    }
+
+    async fn start_on(self, runner: OneShotContinuousRunner) -> Result<StreamingJob> {
         let Self {
             plan,
             sources,
@@ -1010,31 +1038,22 @@ impl StreamingRunner {
         #[cfg(test)]
         let (start, fault_probe) = match checkpoints.fault {
             Some((point, mode)) => {
-                let (start, probe) = OneShotContinuousRunner::new()
-                    .start_checkpointed_with_config_and_fault_probe(
-                        spec,
-                        checkpoints.inner,
-                        config,
-                        point,
-                        mode,
-                    );
-                (start, Some(probe))
-            }
-            None => (
-                OneShotContinuousRunner::new().start_checkpointed_with_config(
+                let (start, probe) = runner.start_checkpointed_with_config_and_fault_probe(
                     spec,
                     checkpoints.inner,
                     config,
-                ),
+                    point,
+                    mode,
+                );
+                (start, Some(probe))
+            }
+            None => (
+                runner.start_checkpointed_with_config(spec, checkpoints.inner, config),
                 None,
             ),
         };
         #[cfg(not(test))]
-        let start = OneShotContinuousRunner::new().start_checkpointed_with_config(
-            spec,
-            checkpoints.inner,
-            config,
-        );
+        let start = runner.start_checkpointed_with_config(spec, checkpoints.inner, config);
         start
             .await
             .map(|inner| StreamingJob {

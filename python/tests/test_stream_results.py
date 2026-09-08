@@ -591,12 +591,37 @@ class _StartProxy:
         return getattr(self._native, name)
 
 
+def _open_managed_descriptors(root: str) -> list[Path]:
+    descriptors = Path("/proc/self/fd")
+    if not descriptors.is_dir():
+        return []
+    managed = Path(root).resolve()
+    retained = []
+    for descriptor in descriptors.iterdir():
+        try:
+            target = descriptor.readlink()
+        except FileNotFoundError:
+            continue
+        if target.is_relative_to(managed):
+            retained.append(target)
+    return retained
+
+
 def test_stream_cancellation_at_native_start_result_releases_job(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(stream_module.tempfile, "tempdir", str(tmp_path))
     original = cf.StreamingRunner.start_async
+    remove = stream_module.shutil.rmtree
+
+    def remove_released_root(root: str) -> None:
+        # Linux permits unlinking open directories; inspect handles before removal.
+        # Windows retains its real deny-delete/rmdir check below.
+        assert _open_managed_descriptors(root) == []
+        remove(root)
+
+    monkeypatch.setattr(stream_module.shutil, "rmtree", remove_released_root)
 
     async def start(runner):
         native = runner._inner

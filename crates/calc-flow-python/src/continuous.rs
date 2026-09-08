@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     future::Future,
+    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -120,6 +121,37 @@ struct RunnerStartState {
     awaits: Arc<PythonAwaitRegistry>,
     context: Arc<Mutex<Option<Arc<PythonAsyncContext>>>>,
     ownership: Arc<ConnectorOwnership>,
+    cleanup: tokio::sync::Mutex<Option<StartCleanup>>,
+}
+
+type StartCleanup = Pin<Box<dyn Future<Output = calc_flow::Result<()>> + Send>>;
+
+fn retain_start_ownership<F: Future>(
+    ownership: &Arc<ConnectorOwnership>,
+    start: F,
+) -> impl Future<Output = F::Output> + use<F> {
+    // Acquire synchronously: native project connectors have no Python leases.
+    let lease = ownership.retain();
+    async move {
+        let result = start.await;
+        drop(lease);
+        result
+    }
+}
+
+async fn wait_start_cleanup(
+    ownership: &ConnectorOwnership,
+    cleanup: &tokio::sync::Mutex<Option<StartCleanup>>,
+) -> calc_flow::Result<()> {
+    ownership.wait_idle().await;
+    // Connector drops can precede the driver's managed directory handle release.
+    let mut cleanup = cleanup.lock().await;
+    let result = match cleanup.as_mut() {
+        Some(completion) => completion.await,
+        None => Ok(()),
+    };
+    *cleanup = None;
+    result
 }
 
 #[pyclass(frozen, module = "calc_flow._native")]
@@ -699,6 +731,7 @@ impl PyContinuousStreamingRunner {
                 awaits: Arc::new(PythonAwaitRegistry::new()),
                 context: Arc::new(Mutex::new(None)),
                 ownership: Arc::new(ConnectorOwnership::new()),
+                cleanup: tokio::sync::Mutex::new(None),
             }),
         }
     }
@@ -1100,6 +1133,7 @@ impl PyContinuousStreamingRunner {
                 awaits,
                 context,
                 ownership,
+                cleanup: tokio::sync::Mutex::new(None),
             }),
         })
     }
@@ -1148,10 +1182,11 @@ impl PyContinuousStreamingRunner {
     }
 
     fn _wait_start_cleanup_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let ownership = Arc::clone(&self.inner.ownership);
+        let state = Arc::clone(&self.inner);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            ownership.wait_idle().await;
-            Ok(())
+            wait_start_cleanup(&state.ownership, &state.cleanup)
+                .await
+                .map_err(streaming_py_err)
         })
     }
 }
@@ -1168,18 +1203,23 @@ impl PyStreamingStartAwaitable {
             PyRuntimeError::new_err("streaming runner has already been consumed by start()")
         })?;
         let state = Arc::clone(&self.inner);
-        let observer = observer_result_future(py, async move {
-            let job = runner.start().await.map_err(streaming_py_err)?;
-            let roots = state.roots.lock().clone();
-            let awaits = Arc::clone(&state.awaits);
-            let context = Arc::clone(&state.context);
-            Python::attach(|py| {
-                Py::new(
-                    py,
-                    PyStreamingJob::from_inner_with_roots(job, roots, awaits, context),
-                )
-            })
-        })?;
+        let observer = observer_result_future(
+            py,
+            retain_start_ownership(&self.inner.ownership, async move {
+                let (start, cleanup) = runner.start_with_cleanup();
+                *state.cleanup.lock().await = Some(Box::pin(cleanup));
+                let job = start.await.map_err(streaming_py_err)?;
+                let roots = state.roots.lock().clone();
+                let awaits = Arc::clone(&state.awaits);
+                let context = Arc::clone(&state.context);
+                Python::attach(|py| {
+                    Py::new(
+                        py,
+                        PyStreamingJob::from_inner_with_roots(job, roots, awaits, context),
+                    )
+                })
+            }),
+        )?;
         resolved_observer_await(py, observer)
     }
 }
@@ -2061,6 +2101,97 @@ mod tests {
 
     struct PendingSource {
         closed: Arc<AtomicBool>,
+    }
+
+    #[tokio::test]
+    async fn start_cleanup_waits_for_runner_after_connectors_are_idle() {
+        use std::{
+            future::{Future, poll_fn},
+            pin::pin,
+            task::Poll,
+        };
+
+        let ownership = super::ConnectorOwnership::new();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let storage_closed = Arc::new(AtomicBool::new(false));
+        let closed = Arc::clone(&storage_closed);
+        let completion: super::StartCleanup = Box::pin(async move {
+            released.await.unwrap();
+            closed.store(true, Ordering::Release);
+            Ok(())
+        });
+        let cleanup = tokio::sync::Mutex::new(Some(completion));
+        let mut wait = pin!(super::wait_start_cleanup(&ownership, &cleanup));
+        poll_fn(|context| {
+            assert!(wait.as_mut().poll(context).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert!(!storage_closed.load(Ordering::Acquire));
+        release.send(()).unwrap();
+        wait.await.unwrap();
+        assert!(storage_closed.load(Ordering::Acquire));
+        super::wait_start_cleanup(&ownership, &cleanup)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn start_cleanup_waits_for_native_registration_before_first_poll() {
+        use std::{
+            future::{Future, pending, poll_fn},
+            task::Poll,
+        };
+
+        let ownership = Arc::new(super::ConnectorOwnership::new());
+        let cleanup = tokio::sync::Mutex::new(None);
+        let (release, released) = tokio::sync::oneshot::channel();
+        let mut start = Box::pin(super::retain_start_ownership(&ownership, async {
+            let completion: super::StartCleanup = Box::pin(async move {
+                released.await.unwrap();
+                Ok(())
+            });
+            *cleanup.lock().await = Some(completion);
+            pending::<()>().await;
+        }));
+        let mut wait = Box::pin(super::wait_start_cleanup(&ownership, &cleanup));
+
+        poll_fn(|context| {
+            assert!(wait.as_mut().poll(context).is_pending());
+            assert!(start.as_mut().poll(context).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(start);
+        poll_fn(|context| {
+            assert!(wait.as_mut().poll(context).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        release.send(()).unwrap();
+        wait.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unpolled_native_start_drop_releases_registration_ownership() {
+        use std::{
+            future::{Future, poll_fn},
+            task::Poll,
+        };
+
+        let ownership = Arc::new(super::ConnectorOwnership::new());
+        let cleanup = tokio::sync::Mutex::new(None);
+        let start = super::retain_start_ownership(&ownership, async {
+            panic!("the cancelled start must remain unpolled");
+        });
+        let mut wait = Box::pin(super::wait_start_cleanup(&ownership, &cleanup));
+        poll_fn(|context| {
+            assert!(wait.as_mut().poll(context).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(start);
+        wait.await.unwrap();
     }
 
     #[test]
