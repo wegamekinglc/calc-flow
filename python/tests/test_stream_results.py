@@ -14,7 +14,9 @@ import calc_flow.stream as stream_module
 
 
 class _Feed:
-    def __init__(self, batches: list[pa.Table | cf.Batch | cf.Watermark]) -> None:
+    def __init__(
+        self, batches: list[pa.Table | pa.RecordBatch | cf.Batch | cf.Watermark]
+    ) -> None:
         self.batches = batches
         self.opened = 0
         self.closed = 0
@@ -24,7 +26,7 @@ class _Feed:
         self.opened += 1
         return self
 
-    async def __anext__(self) -> pa.Table | cf.Batch | cf.Watermark:
+    async def __anext__(self) -> pa.Table | pa.RecordBatch | cf.Batch | cf.Watermark:
         if self.read == len(self.batches):
             raise StopAsyncIteration
         value = self.batches[self.read]
@@ -464,6 +466,56 @@ def test_stream_metadata_normalization_preserves_caller_batch_and_buffers() -> N
         batch.to_pyarrow().column(0).chunk(0).buffers()
         == table.column(0).chunk(0).buffers()
     )
+
+
+@pytest.mark.parametrize("metadata", [None, {}, {b"origin": b"test"}])
+@pytest.mark.parametrize("input_kind", ["table", "record_batch", "batch"])
+def test_stream_preserves_zero_column_metadata_rows(metadata, input_kind) -> None:
+    records = [
+        pa.record_batch([pa.array(range(count), type=pa.int64())], names=["x"])
+        .replace_schema_metadata(metadata)
+        .select([])
+        for count in (0, 1, 3)
+    ]
+    tables = [pa.Table.from_batches([record]) for record in records]
+    supplied = tables
+    if input_kind == "record_batch":
+        supplied = records
+    elif input_kind == "batch":
+        supplied = [
+            cf.Batch.from_pyarrow(table, metadata={"sequence": index})
+            for index, table in enumerate(tables)
+        ]
+    schemas = [
+        (batch.to_pyarrow() if input_kind == "batch" else batch).schema
+        for batch in supplied
+    ]
+    feed = _Feed(supplied)
+    output = cf.table_input("events", schema=records[0].schema).select(value=cf.lit(1))
+    results = output.stream(feed)
+
+    async def run() -> list[int]:
+        async with asyncio.timeout(5), results:
+            output_tables = [table async for table in results]
+        assert results.job.status()["state"] == "completed"
+        assert results.job.status()["task_count"] == 0
+        return [
+            value for table in output_tables for value in table["value"].to_pylist()
+        ]
+
+    values = asyncio.run(run())
+    assert (feed.opened, feed.closed, feed.read) == (1, 1, 3)
+    assert values == [1, 1, 1, 1]
+    assert [batch.num_rows for batch in supplied] == [0, 1, 3]
+    for index, batch in enumerate(supplied):
+        original = batch.to_pyarrow() if input_kind == "batch" else batch
+        assert original.schema.equals(schemas[index], check_metadata=True)
+        assert original.schema.metadata == schemas[index].metadata
+        assert (
+            tables[index].schema.metadata == records[index].schema.metadata == metadata
+        )
+        if input_kind == "batch":
+            assert batch.metadata == {"sequence": index}
 
 
 def test_stream_cancellation_during_temp_creation_reclaims_created_directory(

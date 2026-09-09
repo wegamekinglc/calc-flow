@@ -48,7 +48,15 @@ def _table_batch(data: TableData, path: str) -> Batch:
     ):
         # Symbolic schemas omit Arrow metadata; rewrap the same column buffers.
         schema = pa.schema([field.remove_metadata() for field in table.schema])
-        normalized = pa.Table.from_arrays(table.columns, schema=schema)
+        if table.num_columns:
+            normalized = pa.Table.from_arrays(table.columns, schema=schema)
+        else:
+            # RecordBatch metadata replacement preserves zero-column row counts.
+            batches = table.to_batches() if isinstance(table, pa.Table) else [table]
+            normalized = pa.Table.from_batches(
+                [batch.replace_schema_metadata(None) for batch in batches],
+                schema=schema,
+            )
         return Batch.from_pyarrow(
             normalized, metadata=data.metadata if isinstance(data, Batch) else None
         )
