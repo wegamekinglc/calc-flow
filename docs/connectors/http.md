@@ -40,6 +40,17 @@ return newline-delimited JSON objects, with stable ETag or Last-Modified
 validators to suppress unchanged responses; a JSON array is a different
 format. Validators do not make historical representations replayable.
 
+The calculation uses `cf.table_input`, `pipe(order_totals)`, overloaded
+arithmetic/comparison, and `with_columns` → `filter` → `select`, then exports
+with `Program.to_project(mode="stream")`. The JSON decoder infers fields in
+name order: `id`, `price`, `quantity`. Its declared schema follows that order;
+there is no transport option to override the inferred JSON schema. Quantity
+is `int64` and is explicitly cast to `float64` before multiplication.
+
+The native connector has no sink direction; this example writes its result
+through the file connector. Output files and temporary checkpoints are
+removed on exit, and a new invocation starts a new lineage.
+
 Stop the demo server with Ctrl-C after the consumer completes.
 
 ## Project configuration

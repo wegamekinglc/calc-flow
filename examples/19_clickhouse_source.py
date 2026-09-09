@@ -13,16 +13,33 @@ from tempfile import TemporaryDirectory
 import pyarrow as pa
 import pyarrow.parquet as parquet
 
-from calc_flow import PipelineBuilder, ProjectDocument, Runtime, StreamingRunner
+import calc_flow as cf
+from calc_flow import ProjectDocument, Runtime, StreamingRunner
+
+
+def order_totals(orders: cf.TableExpr) -> cf.TableExpr:
+    totals = orders.with_columns(
+        total=cf.row.cast(orders["quantity"], "float64") * orders["price"]
+    )
+    return totals.filter(totals["quantity"] > 0).select("id", "total")
 
 
 def build_project(directory: Path) -> ProjectDocument:
-    graph = PipelineBuilder("clickhouse-source").expression(
-        "calculate", "total = quantity * price"
+    orders = cf.table_input(
+        "orders",
+        schema=[
+            cf.Field("sequence", "int64", nullable=False),
+            cf.Field("id", "int64", nullable=False),
+            cf.Field("quantity", "int64", nullable=False),
+            cf.Field("price", "float64", nullable=False),
+        ],
+    )
+    graph = cf.Program(
+        "clickhouse-source", outputs={"totals": orders.pipe(order_totals)}
     )
     return ProjectDocument.model_validate(
         {
-            **graph.project,
+            **graph.to_project(mode="stream").model_dump(),
             "data_sources": [],
             "runtime": {"mode": "stream", "options": {}},
             "sources": [

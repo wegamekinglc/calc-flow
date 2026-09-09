@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import asdict
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -11,7 +12,8 @@ import pyarrow as pa
 import pyarrow.csv as csv
 import pyarrow.parquet as parquet
 
-from calc_flow import PipelineBuilder, ProjectDocument, Runtime, StreamingRunner
+import calc_flow as cf
+from calc_flow import ProjectDocument, Runtime, StreamingRunner
 
 
 def write_input(directory: Path, format_name: str) -> Path:
@@ -30,18 +32,29 @@ def write_input(directory: Path, format_name: str) -> Path:
     return path
 
 
+def order_totals(orders: cf.TableExpr) -> cf.TableExpr:
+    totals = orders.with_columns(
+        total=cf.row.cast(orders["quantity"], "float64") * orders["price"]
+    )
+    return totals.filter(totals["quantity"] > 0).select("id", "total")
+
+
 def build_project(directory: Path, format_name: str) -> ProjectDocument:
     connector = {
         "provider": "calc-flow-connectors",
         "name": "file",
         "version": "2.0.0",
     }
-    graph = PipelineBuilder(f"file-{format_name}").expression(
-        "calculate", "total = quantity * price"
-    )
+    schema = [
+        cf.Field("id", "int64"),
+        cf.Field("quantity", "int64"),
+        cf.Field("price", "float64"),
+    ]
+    orders = cf.table_input("orders", schema=schema)
+    graph = cf.Program("file-source", outputs={"totals": orders.pipe(order_totals)})
     return ProjectDocument.model_validate(
         {
-            **graph.project,
+            **graph.to_project(mode="stream").model_dump(),
             "data_sources": [],
             "runtime": {"mode": "stream", "options": {}},
             "sources": [
@@ -50,6 +63,7 @@ def build_project(directory: Path, format_name: str) -> ProjectDocument:
                     "connector": connector,
                     "format": {"name": format_name, "version": "1"},
                     "options": {
+                        "schema": [asdict(field) for field in schema],
                         "path": str(directory / f"orders.{format_name}"),
                         "format": format_name,
                         "header": True,

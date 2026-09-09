@@ -29,10 +29,11 @@ git diff --check
 ```
 
 The runner discovers numbered Python programs in order, including the SQL and
-streaming pipeline examples. It skips connector `*_source.py` examples numbered
-16–21 by default, runs the maintained Rust user-example list, and stops
-with the first failing program's exit code. Add `--include-services` only after
-the [connector feature and service setup](connectors/README.md) is complete.
+streaming pipeline examples. It skips the ten service-backed connector
+read/write examples by default, runs the maintained Rust user-example list,
+and stops with the first failing program's exit code. Add `--include-services`
+only after the [connector setup](connectors/README.md) has prepared native
+features, services, source data, and empty sink destinations.
 Schema exporters are separate tools because generation updates a tracked
 artifact. See [the example inventory](../examples/README.md).
 

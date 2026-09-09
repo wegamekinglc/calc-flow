@@ -6,11 +6,19 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import pyarrow as pa
 import pytest
 
+import calc_flow as cf
 from calc_flow import ConfigError, Runtime
 
 ROOT = Path(__file__).resolve().parents[2]
+SINK_EXAMPLES = (
+    ("22_kafka_sink.py", "kafka"),
+    ("23_postgresql_sink.py", "postgresql"),
+    ("24_mysql_sink.py", "mysql"),
+    ("25_clickhouse_sink.py", "clickhouse"),
+)
 EXAMPLES = (
     ("15_file_source.py", "file"),
     ("16_kafka_source.py", "kafka"),
@@ -32,8 +40,8 @@ def load_example(filename: str) -> ModuleType:
     return module
 
 
-@pytest.mark.parametrize(("filename", "connector"), EXAMPLES)
-def test_source_example_project_compiles_without_opening_service(
+@pytest.mark.parametrize(("filename", "connector"), EXAMPLES + SINK_EXAMPLES)
+def test_connector_example_project_compiles_without_opening_service(
     filename: str, connector: str, tmp_path: Path
 ) -> None:
     example = load_example(filename)
@@ -109,3 +117,73 @@ def test_live_source_example_cancels_an_idle_job_on_timeout(
 
     job.cancel_async.assert_awaited_once()
     job.shutdown_async.assert_not_awaited()
+
+
+@pytest.mark.parametrize(("filename", "connector"), EXAMPLES + SINK_EXAMPLES)
+def test_connector_calculation_composes_totals_and_filters(
+    filename: str, connector: str
+) -> None:
+    example = load_example(filename)
+    data = pa.table(
+        {"id": [1, 2, 3], "quantity": [2, 3, 0], "price": [10.0, 20.0, 99.0]}
+    )
+    result = cf.compute(data, example.order_totals)
+    assert result.to_pydict() == {"id": [1, 2], "total": [20.0, 60.0]}
+
+
+def test_http_source_example_checks_native_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if "http" not in {item.name for item in Runtime().capabilities().connectors}:
+        pytest.skip("requires connector-http")
+    example = load_example("20_http_source.py")
+    payload = (ROOT / "examples/data/orders.jsonl").read_bytes()
+
+    async def run() -> None:
+        async def respond(
+            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        ) -> None:
+            try:
+                await reader.readuntil(b"\r\n\r\n")
+                writer.write(
+                    b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: "
+                    + str(len(payload)).encode()
+                    + b"\r\n\r\n"
+                    + payload
+                )
+                await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        async with await asyncio.start_server(respond, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            monkeypatch.setenv("CALC_FLOW_HTTP_URL", f"http://127.0.0.1:{port}/orders")
+            await example.run(tmp_path, timeout=10)
+
+    asyncio.run(run())
+    assert example.read_totals(tmp_path) == [20.0, 60.0]
+
+
+def test_websocket_source_example_checks_native_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if "websocket" not in {item.name for item in Runtime().capabilities().connectors}:
+        pytest.skip("requires connector-websocket")
+    websocket = pytest.importorskip("websockets.asyncio.server")
+    example = load_example("21_websocket_source.py")
+    payload = (ROOT / "examples/data/orders.jsonl").read_text(encoding="utf-8")
+
+    async def send(connection) -> None:
+        for line in payload.splitlines():
+            await connection.send(line)
+        await connection.wait_closed()
+
+    async def run() -> None:
+        async with websocket.serve(send, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            monkeypatch.setenv("CALC_FLOW_WS_URL", f"ws://127.0.0.1:{port}")
+            await example.run(tmp_path, timeout=10)
+
+    asyncio.run(run())
+    assert example.read_totals(tmp_path) == [20.0, 60.0]

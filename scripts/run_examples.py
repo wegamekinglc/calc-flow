@@ -21,6 +21,10 @@ SERVICE_PYTHON_EXAMPLES = (
     "examples/19_clickhouse_source.py",
     "examples/20_http_source.py",
     "examples/21_websocket_source.py",
+    "examples/22_kafka_sink.py",
+    "examples/23_postgresql_sink.py",
+    "examples/24_mysql_sink.py",
+    "examples/25_clickhouse_sink.py",
 )
 RUST_EXAMPLES = (
     "expression_pipeline",

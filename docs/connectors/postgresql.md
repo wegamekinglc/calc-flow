@@ -7,7 +7,12 @@ logical CDC. Sinks support append, upsert, and transactional epoch writes.
 
 Identity: `calc-flow-connectors/postgresql/2.0.0`.
 
-## Python example
+The read example uses a snapshot; the write example appends calculated totals.
+Use [the source example](#python-source-example) to read into Parquet, or
+[the sink example](#python-sink-example) to write from Parquet. Both use
+`pipe(order_totals)` with overloaded Python expressions.
+
+## Python source example
 
 Run [17_postgresql_source.py](../../examples/17_postgresql_source.py).
 `build_project` selects `snapshot` on `calc_flow_example_orders` and resolves
@@ -15,7 +20,7 @@ its URL through `CALC_FLOW_PG_URL`. `run` reads one-row pages until the source
 ends, verifies Parquet totals `[20.0, 60.0]`, and prints best-effort delivery.
 
 Build a Python wheel with `--features connector-postgresql`, retaining the
-default file connector for output. Follow the
+default file connector for local input/output. Follow the
 [shared environment preparation](README.md#prepare-the-python-environment)
 before the service commands below.
 
@@ -45,7 +50,38 @@ transaction. `sslmode=disable` here is specific to the local demo service.
 For incremental polling and logical CDC configuration, including publication
 and slot ownership, see [PostgreSQL](#project-configuration).
 
-After the example completes, stop the disposable demo service:
+## Python sink example
+
+Run [23_postgresql_sink.py](../../examples/23_postgresql_sink.py) after
+starting the PostgreSQL service above. It creates its own finite Parquet
+input, so it does not depend on the source example or its orders table.
+Prepare an empty, dedicated output table, run the script, then read it back:
+
+```bash
+docker exec -i calc-flow-example-pg psql -U postgres -v ON_ERROR_STOP=1 <<'SQL'
+CREATE TABLE calc_flow_example_totals (
+    id BIGINT PRIMARY KEY,
+    total DOUBLE PRECISION NOT NULL
+);
+SQL
+export CALC_FLOW_PG_URL='postgresql://postgres:calcflow-example@127.0.0.1:5432/postgres?sslmode=disable'
+uv run --no-sync python examples/23_postgresql_sink.py
+docker exec calc-flow-example-pg psql -U postgres -c 'SELECT id, total FROM calc_flow_example_totals ORDER BY id;'
+```
+
+The result has exactly two rows: `(1, 20.0)` and `(2, 60.0)`. The script
+casts quantity to `float64`, multiplies by price, filters the third order's
+zero quantity, and selects `id` and `total`. Its `append` sink reports
+`at_least_once`; the script checks delivered row count and effective delivery.
+It removes only local inputs/checkpoints and leaves remote rows intact.
+Rerunning with the same populated target fails on duplicate primary keys.
+Recreate the disposable service and tables to repeat from an empty destination.
+Each invocation has a new temporary checkpoint lineage; use the durable
+[recovery workflow](README.md#recovery-ownership) for restarts.
+
+## Clean up
+
+After the examples complete, stop the disposable demo service:
 
 ```bash
 docker stop calc-flow-example-pg

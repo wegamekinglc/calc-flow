@@ -9,7 +9,10 @@ Identity: `calc-flow-connectors/file/2.0.0`.
 
 ## Python example
 
-Run [15_file_source.py](../../examples/15_file_source.py).
+Run [15_file_source.py](../../examples/15_file_source.py) for both source
+and sink directions. It composes `order_totals` with `pipe`, overloaded
+multiplication/comparison, `with_columns`, `filter`, and `select`, then exports
+a stream project with `Program.to_project(mode="stream")`.
 `write_input` creates the two orders; `build_project(directory, format_name)`
 selects the file codec; `run` waits for natural source completion, reads the
 Parquet output, and checks both totals and the exactly-once delivery status.
@@ -26,6 +29,12 @@ The script creates and removes its own input, output, and checkpoint
 directories. It repeats the same calculation for CSV, JSON Lines, and Parquet;
 each format must produce totals equivalent to `[20.0, 60.0]` with
 `exactly_once` delivery. No external service or environment variable is needed.
+
+The graph and source codec share an explicit `id`, `quantity`, `price` schema;
+quantity is cast from `int64` to `float64` before multiplication. Each run
+uses new temporary state and deletes it on exit. Exactly-once status describes
+that job's delivery; persistent restart recovery requires a stable checkpoint
+root and sink identity, as described in [recovery ownership](README.md#recovery-ownership).
 
 CSV and Parquet inputs must fit the configured file and batch bounds; JSON
 Lines can advance in bounded row chunks.

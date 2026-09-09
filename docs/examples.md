@@ -56,14 +56,37 @@ For runtime contributors, Rust's `continuous_runtime` and `windowed_streaming` d
 traits and watermark-driven tumbling windows.
 
 Those examples use local application-owned connectors and temporary state
-directories. Continue with [example 15](../examples/15_file_source.py) for the
-native file source in CSV, JSON Lines, and Parquet formats. Connector
-`*_source.py` examples numbered 16–21 cover Kafka, PostgreSQL, MySQL, ClickHouse,
-HTTP, and WebSocket sources, each
-with a calculation and checked Parquet output. Follow the
-[connector overview](connectors/README.md) to choose a transport; each
-connector page includes its native wheel feature, Python example, service
-preparation, and replay/delivery contract.
+directories. To connect a native transport, follow the path below.
+
+## Read and write through connectors
+
+Start with [15_file_source.py](../examples/15_file_source.py): read CSV, JSON
+Lines, and Parquet, compose order totals with `pipe` and Python operators,
+filter rows, then write and verify Parquet results. No external service is
+needed; the default wheel includes the file connector.
+
+Choose a transport from the
+[complete read/write inventory](connectors/README.md). Kafka, PostgreSQL,
+MySQL, ClickHouse, HTTP, and WebSocket each have a source example; every
+transport supporting writes also has a sink example. HTTP and WebSocket are
+source-only. The connector guides include optional native build features,
+service/data preparation, environment variables, and commands for each script.
+
+Source examples verify Parquet totals `[20.0, 60.0]`. Run
+[22_kafka_sink.py](../examples/22_kafka_sink.py),
+[23_postgresql_sink.py](../examples/23_postgresql_sink.py),
+[24_mysql_sink.py](../examples/24_mysql_sink.py), or
+[25_clickhouse_sink.py](../examples/25_clickhouse_sink.py) to write filtered
+order totals `(1, 20.0), (2, 60.0)` from temporary Parquet input to an empty
+remote destination. The guide for each transport includes a readback command.
+
+These standalone examples declare the calculation with `cf.table_input`,
+`cf.Program`, and reusable Python functions, export a stream project, and
+supply explicit transport/lifecycle settings. They use temporary checkpoints,
+so rerunning starts a new lineage and remote writes remain. Follow the
+connector guide's delivery and repeat-run limits. Use complete filenames:
+`19_clickhouse_source.py`, `20_http_source.py`, and `21_websocket_source.py`
+share numeric prefixes with the SQL and streaming pipeline examples.
 
 ## Compose financial and relational calculations
 

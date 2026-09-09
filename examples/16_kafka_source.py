@@ -7,22 +7,35 @@ from __future__ import annotations
 
 import asyncio
 import os
+from dataclasses import asdict
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import pyarrow as pa
 import pyarrow.parquet as parquet
 
-from calc_flow import PipelineBuilder, ProjectDocument, Runtime, StreamingRunner
+import calc_flow as cf
+from calc_flow import ProjectDocument, Runtime, StreamingRunner
+
+
+def order_totals(orders: cf.TableExpr) -> cf.TableExpr:
+    totals = orders.with_columns(
+        total=cf.row.cast(orders["quantity"], "float64") * orders["price"]
+    )
+    return totals.filter(totals["quantity"] > 0).select("id", "total")
 
 
 def build_project(directory: Path) -> ProjectDocument:
-    graph = PipelineBuilder("kafka-source").expression(
-        "calculate", "total = quantity * price"
-    )
+    schema = [
+        cf.Field("id", "int64"),
+        cf.Field("quantity", "int64"),
+        cf.Field("price", "float64"),
+    ]
+    orders = cf.table_input("orders", schema=schema)
+    graph = cf.Program("kafka-source", outputs={"totals": orders.pipe(order_totals)})
     return ProjectDocument.model_validate(
         {
-            **graph.project,
+            **graph.to_project(mode="stream").model_dump(),
             "data_sources": [],
             "runtime": {"mode": "stream", "options": {}},
             "sources": [
@@ -35,6 +48,7 @@ def build_project(directory: Path) -> ProjectDocument:
                     },
                     "format": {"name": "json", "version": "1"},
                     "options": {
+                        "schema": [asdict(field) for field in schema],
                         "bootstrap_servers": os.environ.get(
                             "CALC_FLOW_KAFKA_BOOTSTRAP", "127.0.0.1:9092"
                         ),
