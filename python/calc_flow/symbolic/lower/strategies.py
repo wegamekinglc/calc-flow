@@ -529,6 +529,10 @@ def _stream_join_node(
     right_schema: tuple[Field, ...],
     /,
 ) -> dict[str, object]:
+    if node.op.name == "stream_asof_join":
+        from calc_flow.symbolic.lower.asof import native_asof_node
+
+        return native_asof_node(node, node_id, left_schema, right_schema)
     return {
         "id": node_id,
         "input_ports": [
@@ -696,7 +700,7 @@ def _stream_join_plan(
     left_facts = analyzer.table(join.args[0], f"{program.name}.stream_join.left")
     right_facts = analyzer.table(join.args[1], f"{program.name}.stream_join.right")
     join_facts = analyzer.table(join, f"{program.name}.stream_join")
-    join_id = f"cf_stream_join_{join.digest[:16]}"
+    join_id = f"cf_{join.op.name}_{join.digest[:16]}"
     return _StreamJoinPlan(
         join,
         join_id,
@@ -854,12 +858,19 @@ def _lower_stream_join_program(
     late_policy: str,
     /,
 ) -> dict[str, object] | None:
-    joins = _stream_join_nodes(program)
+    from calc_flow.symbolic.lower.asof import asof_nodes
+
+    asofs = asof_nodes(program)
+    joins = tuple(
+        sorted((*_stream_join_nodes(program), *asofs), key=lambda node: node.digest)
+    )
     if not joins:
         return None
-    if getattr(
-        analyzer, "_bindings", None
-    ) is not None or _requires_relational_dag_lowering(program, joins):
+    if (
+        asofs
+        or getattr(analyzer, "_bindings", None) is not None
+        or _requires_relational_dag_lowering(program, joins)
+    ):
         return _lower_relational_dag_program(
             program,
             analyzer,
@@ -918,7 +929,7 @@ def _relational_boundary(node: Node, path: str, /) -> Node:
     current = node
     while current.op.name in ("project", "filter", "with_columns"):
         current = current.args[0]
-    if current.op.name in ("table_input", "stream_join"):
+    if current.op.name in ("table_input", "stream_join", "stream_asof_join"):
         return current
     if _contains_primitive(current, "attach_columns"):
         errors.raise_compile(
@@ -1018,7 +1029,7 @@ def _relational_fragment(
     late_policy: str,
     /,
 ) -> dict[str, object]:
-    if boundary.op.name == "stream_join":
+    if boundary.op.name in ("stream_join", "stream_asof_join"):
         facts = analyzer.table(boundary, f"{path}.boundary")
         declared = _virtual_relational_input(
             f"cf_join_output_{boundary.digest[:16]}", facts

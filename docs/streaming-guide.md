@@ -28,6 +28,7 @@ On this page:
 - [External provider lifecycles](#external-provider-lifecycles)
 - [Static inputs](#static-inputs)
 - [Bounded event-time Join](#bounded-event-time-join)
+- [Bounded backward ASOF Join](#bounded-backward-asof-join)
 - [Checkpoints and recovery](#checkpoints-and-recovery)
 - [Job lifecycle](#job-lifecycle)
 - [Runtime tuning and backpressure](#runtime-tuning-and-backpressure)
@@ -314,7 +315,9 @@ progress. Waiting at one timestamp alone cannot prove it complete.
 Without declared event time, ordinary inputs use `DisabledWatermarks`.
 Stateless expression and SQL stages still produce results as batches arrive.
 Explicitly disabling watermarks on a temporal calculation leaves finalization
-dependent on EOF or other progress provided by its graph.
+dependent on EOF or other progress provided by its graph when that operator
+permits disabled watermarks. ASOF requires watermark progress from every
+reachable source and rejects a disabled policy during preflight.
 
 Pass one existing `WatermarkPolicy` to `watermarks` for a single dynamic input,
 or a mapping keyed by logical dynamic input names for several sources. Static
@@ -354,6 +357,9 @@ is not automatically made idle by the default. For a node combining inputs,
 finalization follows that node's aggregate ingress progress; independent output
 branches are not synchronized. Selecting an idle timeout can permit progress
 past a quiet source, whose later rows remain subject to native late-data rules.
+ASOF has its own stricter frontier: idle inputs retain their watermark and keep
+holding back finality, and the ASOF output never becomes idle before both inputs
+end. See [ASOF progress](asof-join-guide.md#watermarks-idle-and-late-input).
 
 Watermarks are monotone progress declarations, not filters. The progress
 driver forwards data unchanged. A window operator applies its own late rule:
@@ -618,6 +624,27 @@ per-side retained rows and bytes, evicted, late, and null drop counters,
 `emitted_match_rows`, `state_limit_failures`, and `match_limit_failures`. Jobs
 without a Join node report an empty mapping. Studio progress events carry the
 same per-node rows as a `stream_joins` list on the run event.
+
+## Bounded backward ASOF Join
+
+`cf.table.stream_asof_join` and `TableExpr.stream_asof_join` attach at most one
+historical right row to each accepted left row. The inclusive tolerance bounds
+quote age, and typed sequence values resolve equal-time ties. Both inputs must
+strictly pass the left event time before final output; idle does not close an
+input. Unmatched left rows remain, with all right fields nullable.
+
+[22_stream_asof_join.py](../examples/22_stream_asof_join.py) shows the complete
+trade/quote stream using logical input bindings and explicit source watermarks.
+It checks no output at equal watermarks and final `quote__price=[10.2, None]`
+after progress. Read the [ASOF guide](asof-join-guide.md) for the exact non-null
+schema/identity contract, late error/drop policies, whole-operator state and
+workspace budgets, composition, and recovery guarantees.
+
+ASOF owns an independent `stream_asof_join@1` state layout. Its
+`job.status()["stream_asof_joins"]` mapping is separate from `stream_joins`.
+Studio carries ASOF counters and watermark microseconds as decimal strings;
+Python keeps integers. Ordinary sink replay and temporary iterable checkpoints
+retain the delivery boundaries described in this guide.
 
 ## Checkpoints and recovery
 

@@ -49,6 +49,14 @@ pub enum StreamingFailureReason {
     JoinMatchLimitExceeded,
     JoinCounterOverflow,
     JoinTimeConversionFailed,
+    AsofInvalidInput,
+    AsofDuplicateIdentity,
+    AsofLateRow,
+    AsofStateLimitExceeded,
+    AsofWorkspaceLimitExceeded,
+    AsofOutputLimitExceeded,
+    AsofCounterOverflow,
+    AsofProtocolError,
 }
 
 /// Public component kind associated with a streaming failure.

@@ -173,7 +173,7 @@ Temporary checkpoint lineages do not demonstrate durable restart recovery.
 ### SQL and streaming pipelines
 
 These scripts are distinct from the connector files with the same numeric
-prefix. Use the full filename when choosing a program; all three run without
+prefix. Use the full filename when choosing a program; these scripts run without
 external services and are included in the default example runner.
 
 - [19_sql_expression_pipeline.py](19_sql_expression_pipeline.py) — compose
@@ -190,6 +190,13 @@ external services and are included in the default example runner.
   consume independent `StreamOutput` events by name. Checks
   `double=[2, 4, 6]` and `large=[2, 3]` without assuming cross-output order.
   Guide: [named outputs](../docs/streaming-guide.md#named-streaming-outputs).
+
+- [22_stream_asof_join.py](22_stream_asof_join.py) — attach the latest quote
+  within ten microseconds to each trade. Checks no output while both
+  watermarks equal 105, then `quote__price=[10.2, None]` after they advance to
+  122. Uses explicit source watermarks and temporary state; no external service
+  or durable iterable replay is required.
+  Guide: [bounded backward ASOF Join](../docs/asof-join-guide.md).
 
 The explicitly registered [symbolic_event_window.py](symbolic_event_window.py)
 example computes grouped one-minute trade count, volume, low, high, and

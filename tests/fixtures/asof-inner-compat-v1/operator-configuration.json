@@ -1,0 +1,1 @@
+{"bounds":{"after_micros":15,"before_micros":10},"join_type":"inner","left_event_time":"ts","left_keys":["key"],"left_prefix":"left","limits":{"max_matches_per_input_batch":1000,"max_state_bytes_per_side":1048576,"max_state_rows_per_side":100},"right_event_time":"ts","right_keys":["key"],"right_prefix":"right"}

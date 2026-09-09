@@ -1,0 +1,113 @@
+{
+  "data_sources": [],
+  "description": "",
+  "format_version": 3,
+  "graph": {
+    "datafusion": {
+      "batch_size": 8192,
+      "collect_diagnostics": true,
+      "enable_rolling_rewrite": true,
+      "max_partitions": 32,
+      "min_rows_per_partition": 65536,
+      "parallelism_mode": "fixed",
+      "small_rows_threshold": 10001,
+      "target_partitions": 1
+    },
+    "edges": [],
+    "name": "legacy-inner",
+    "nodes": [
+      {
+        "id": "match",
+        "input_ports": [
+          {
+            "kind": "table",
+            "name": "left",
+            "required": true,
+            "schema": [
+              {
+                "data_type": "string",
+                "name": "key",
+                "nullable": false
+              },
+              {
+                "data_type": "timestamp[us]",
+                "name": "ts",
+                "nullable": false
+              },
+              {
+                "data_type": "int64",
+                "name": "value",
+                "nullable": true
+              }
+            ]
+          },
+          {
+            "kind": "table",
+            "name": "right",
+            "required": true,
+            "schema": [
+              {
+                "data_type": "string",
+                "name": "key",
+                "nullable": false
+              },
+              {
+                "data_type": "timestamp[us]",
+                "name": "ts",
+                "nullable": false
+              },
+              {
+                "data_type": "int64",
+                "name": "value",
+                "nullable": false
+              }
+            ]
+          }
+        ],
+        "operator": {
+          "kind": "stream_join",
+          "spec": {
+            "bounds": {
+              "after_micros": 15,
+              "before_micros": 10
+            },
+            "join_type": "inner",
+            "left_event_time": "ts",
+            "left_keys": [
+              "key"
+            ],
+            "left_prefix": "left",
+            "limits": {
+              "max_matches_per_input_batch": 1000,
+              "max_state_bytes_per_side": 1048576,
+              "max_state_rows_per_side": 100
+            },
+            "right_event_time": "ts",
+            "right_keys": [
+              "key"
+            ],
+            "right_prefix": "right"
+          }
+        },
+        "output_ports": [],
+        "position": null
+      }
+    ]
+  },
+  "id": "legacy-inner",
+  "name": "Legacy inner compatibility",
+  "runtime": {
+    "mode": "stream",
+    "options": {
+      "checkpoint_interval_ms": 30000,
+      "max_batch_bytes": 67108864,
+      "max_batch_rows": 10000
+    }
+  },
+  "sinks": [],
+  "sources": [],
+  "state": {
+    "retention": 3,
+    "root": ".calc-flow-state"
+  }
+}

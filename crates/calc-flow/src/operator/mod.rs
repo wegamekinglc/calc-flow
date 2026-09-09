@@ -1,5 +1,6 @@
 //! Operator metadata, the batch/stream trait split, and provider factories.
 
+mod asof;
 mod batch;
 mod checkpoint;
 mod cross_section;
@@ -11,6 +12,11 @@ mod stream;
 mod union;
 mod window;
 
+pub(crate) use asof::schema_issues as asof_schema_issues;
+pub use asof::{
+    AsofJoinSide, AsofLatePolicy, AsofStateLimits, StreamAsofJoinOperator,
+    StreamAsofJoinSideStatus, StreamAsofJoinSpec, StreamAsofJoinStatus,
+};
 pub use batch::{BatchOperator, BatchOperatorContext};
 pub use cross_section::{
     CROSS_SECTION_CONFIGURATION_VERSION, CROSS_SECTION_STATE_LAYOUT_VERSION,
@@ -256,6 +262,7 @@ pub enum NodeOperator {
     Rolling(RollingOperator),
     CrossSection(CrossSectionOperator),
     StreamJoin(Box<StreamJoinOperator>),
+    StreamAsofJoin(Box<StreamAsofJoinOperator>),
     Batch(Box<dyn BatchOperator>),
     Stream(Box<dyn StreamOperator>),
 }
@@ -270,6 +277,7 @@ impl NodeOperator {
             Self::Rolling(operator) => operator,
             Self::CrossSection(operator) => operator,
             Self::StreamJoin(operator) => operator.as_ref(),
+            Self::StreamAsofJoin(operator) => operator.as_ref(),
             Self::Batch(operator) => operator.as_ref(),
             Self::Stream(operator) => operator.as_ref(),
         }
@@ -294,7 +302,7 @@ impl NodeOperator {
     pub(crate) const fn requires_datafusion(&self) -> bool {
         matches!(
             self,
-            Self::Expression(_) | Self::Sql(_) | Self::StreamJoin(_)
+            Self::Expression(_) | Self::Sql(_) | Self::StreamJoin(_) | Self::StreamAsofJoin(_)
         )
     }
 }
@@ -639,4 +647,15 @@ pub(crate) fn udf_configuration(reference: &UdfReference) -> Value {
         "version": reference.version(),
         "kind": reference.kind(),
     })
+}
+
+impl From<StreamAsofJoinOperator> for NodeOperator {
+    fn from(value: StreamAsofJoinOperator) -> Self {
+        Self::StreamAsofJoin(Box::new(value))
+    }
+}
+impl From<Box<StreamAsofJoinOperator>> for NodeOperator {
+    fn from(value: Box<StreamAsofJoinOperator>) -> Self {
+        Self::StreamAsofJoin(value)
+    }
 }

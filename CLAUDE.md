@@ -238,7 +238,8 @@ operational controls. Follow
   continuous operators implement `BatchOperator` and `StreamOperator`
   respectively. `ExpressionOperator`, `SqlOperator`, `RollingOperator`, and
   `CrossSectionOperator` implement both; `UnionOperator`,
-  `WindowAggregateOperator`, and `StreamJoinOperator` are stream-only.
+  `WindowAggregateOperator`, `StreamJoinOperator`, and
+  `StreamAsofJoinOperator` are stream-only.
   External operators resolve through lifecycle-specific factories in
   `ProviderRegistry`.
 - `PipelineBuilder` consumes immutable graph-building steps. `compile_batch()`

@@ -1,3 +1,5 @@
 schemas/project-v3.schema.json text eol=lf
 web-ui/openapi.json text eol=lf
 web-ui/src/api/schema.d.ts text eol=lf
+tests/fixtures/asof-inner-compat-v1/*.json text eol=lf
+tests/fixtures/asof-inner-compat-v1/*.bin -text

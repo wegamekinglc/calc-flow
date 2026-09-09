@@ -1,3 +1,5 @@
+mod asof;
+
 use std::{
     fs::File,
     io::{Read, Write},
@@ -497,8 +499,13 @@ fn collect_raw_stream_join_issues(document: &Value) -> Result<Vec<ValidationIssu
         let Some(operator) = node.get("operator") else {
             continue;
         };
-        if operator.get("kind").and_then(Value::as_str) != Some("stream_join") {
-            continue;
+        match operator.get("kind").and_then(Value::as_str) {
+            Some("stream_asof_join") => {
+                issues.extend(asof::collect_node_issues(operator, index));
+                continue;
+            }
+            Some("stream_join") => {}
+            _ => continue,
         }
         let Some(spec) = operator.get("spec") else {
             continue;

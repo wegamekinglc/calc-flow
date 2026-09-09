@@ -155,6 +155,7 @@ pub(crate) enum CompiledStreamOperator {
     Rolling(crate::RollingOperator),
     CrossSection(crate::CrossSectionOperator),
     StreamJoin(Box<StreamJoinOperator>),
+    StreamAsofJoin(Box<crate::StreamAsofJoinOperator>),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -342,13 +343,20 @@ pub(crate) struct StreamRuntimePlanParts {
 
 impl CompiledStreamOperator {
     pub(crate) const fn requires_output_frontier_state(&self) -> bool {
-        matches!(self, Self::StreamJoin(_))
+        matches!(self, Self::StreamJoin(_) | Self::StreamAsofJoin(_))
     }
 
     /// Returns the Join node's payload-free status, when this is a Join.
     pub(crate) fn stream_join_status(&self) -> Option<crate::StreamJoinStatus> {
         match self {
             Self::StreamJoin(operator) => Some(operator.status()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn stream_asof_join_status(&self) -> Option<crate::StreamAsofJoinStatus> {
+        match self {
+            Self::StreamAsofJoin(operator) => Some(operator.status()),
             _ => None,
         }
     }
@@ -360,6 +368,7 @@ impl CompiledStreamOperator {
     ) -> Result<Option<crate::EventTime>> {
         match self {
             Self::StreamJoin(operator) => operator.output_frontier_candidate(ingress_progress),
+            Self::StreamAsofJoin(operator) => operator.output_frontier_candidate(ingress_progress),
             Self::External(_)
             | Self::Expression(_)
             | Self::Sql(_)
@@ -370,10 +379,15 @@ impl CompiledStreamOperator {
         }
     }
 
+    pub(crate) const fn suppresses_output_idle(&self) -> bool {
+        matches!(self, Self::StreamAsofJoin(_))
+    }
+
     pub(crate) async fn on_ingress_progress(
         &mut self,
         ingress: &str,
         context: &crate::StreamOperatorContext<'_>,
+        output: &mut dyn crate::StreamCollector,
     ) -> Result<()> {
         match self {
             Self::External(operator) => operator.on_ingress_progress(ingress, context).await,
@@ -384,6 +398,11 @@ impl CompiledStreamOperator {
             Self::Rolling(operator) => operator.on_ingress_progress(ingress, context).await,
             Self::CrossSection(operator) => operator.on_ingress_progress(ingress, context).await,
             Self::StreamJoin(operator) => operator.on_ingress_progress(ingress, context).await,
+            Self::StreamAsofJoin(operator) => {
+                operator
+                    .on_ingress_progress_with_output(ingress, context, output)
+                    .await
+            }
         }
     }
 
@@ -419,6 +438,12 @@ impl CompiledStreamOperator {
                 }
                 Ok(Self::StreamJoin(operator))
             }
+            NodeOperator::StreamAsofJoin(mut operator) => {
+                if let Some(table) = table {
+                    operator.set_stream_resources(table.config, table.udfs.clone());
+                }
+                Ok(Self::StreamAsofJoin(operator))
+            }
             NodeOperator::Stream(operator) => Ok(Self::External(operator)),
             NodeOperator::Batch(_) => Err(CalcFlowError::Compile {
                 message: format!(
@@ -439,6 +464,7 @@ impl CompiledStreamOperator {
             Self::Rolling(operator) => operator.reset(),
             Self::CrossSection(operator) => operator.reset(),
             Self::StreamJoin(operator) => operator.reset(),
+            Self::StreamAsofJoin(operator) => operator.reset(),
         }
     }
 
@@ -459,6 +485,7 @@ impl CompiledStreamOperator {
             Self::Rolling(operator) => operator.checkpoint(epoch),
             Self::CrossSection(operator) => operator.checkpoint(epoch),
             Self::StreamJoin(operator) => operator.checkpoint(epoch),
+            Self::StreamAsofJoin(operator) => operator.checkpoint(epoch),
         }
     }
 
@@ -476,6 +503,21 @@ impl CompiledStreamOperator {
             Self::Rolling(operator) => operator.restore(snapshot),
             Self::CrossSection(operator) => operator.restore(snapshot),
             Self::StreamJoin(operator) => operator.restore(snapshot),
+            Self::StreamAsofJoin(operator) => operator.restore(snapshot),
+        }
+    }
+
+    pub(crate) fn restore_with_progress(
+        &mut self,
+        snapshot: &crate::OperatorStateSnapshot,
+        progress: &crate::IngressProgressSnapshot,
+        output_frontier: Option<crate::EventTime>,
+    ) -> Result<()> {
+        match self {
+            Self::StreamAsofJoin(operator) => {
+                operator.restore_with_progress(snapshot, progress, output_frontier)
+            }
+            _ => self.restore(snapshot),
         }
     }
 
@@ -503,6 +545,9 @@ impl CompiledStreamOperator {
             Self::StreamJoin(operator) => {
                 operator.process_data(ingress, batch, context, output).await
             }
+            Self::StreamAsofJoin(operator) => {
+                operator.process_data(ingress, batch, context, output).await
+            }
         }
     }
 
@@ -521,6 +566,8 @@ impl CompiledStreamOperator {
             Self::Rolling(operator) => operator.on_watermark(watermark, context, output).await,
             Self::CrossSection(operator) => operator.on_watermark(watermark, context, output).await,
             Self::StreamJoin(operator) => operator.on_watermark(watermark, context, output).await,
+            // ASOF already processed this exact ingress snapshot with a collector.
+            Self::StreamAsofJoin(_) => Ok(()),
         }
     }
 
@@ -538,6 +585,7 @@ impl CompiledStreamOperator {
             Self::Rolling(operator) => operator.on_end(context, output).await,
             Self::CrossSection(operator) => operator.on_end(context, output).await,
             Self::StreamJoin(operator) => operator.on_end(context, output).await,
+            Self::StreamAsofJoin(operator) => operator.on_end(context, output).await,
         }
     }
 
@@ -546,6 +594,7 @@ impl CompiledStreamOperator {
             Self::Expression(operator) => operator.stream_runtime_initialized(),
             Self::Sql(operator) => operator.stream_runtime_initialized(),
             Self::StreamJoin(operator) => operator.stream_runtime_initialized(),
+            Self::StreamAsofJoin(operator) => operator.stream_runtime_initialized(),
             Self::External(_)
             | Self::Union(_)
             | Self::Window(_)
@@ -736,6 +785,7 @@ fn validate_stream_node(node_id: &str, operator: &NodeOperator) -> Result<()> {
         | NodeOperator::Rolling(_)
         | NodeOperator::CrossSection(_)
         | NodeOperator::StreamJoin(_)
+        | NodeOperator::StreamAsofJoin(_)
         | NodeOperator::Stream(_) => Ok(()),
         NodeOperator::Sql(operator) if operator.input_ports().len() == 1 => Ok(()),
         NodeOperator::Sql(_) => Err(CalcFlowError::Compile {

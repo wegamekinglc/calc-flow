@@ -1109,6 +1109,12 @@ impl StreamingJob {
         self.inner.stream_join_status()
     }
 
+    /// Returns payload-free bounded ASOF diagnostics, keyed by operator node ID.
+    #[must_use]
+    pub fn stream_asof_join_status(&self) -> BTreeMap<String, crate::StreamAsofJoinStatus> {
+        self.inner.stream_asof_join_status()
+    }
+
     /// Requests a manual checkpoint and waits for durable completion.
     ///
     /// # Errors

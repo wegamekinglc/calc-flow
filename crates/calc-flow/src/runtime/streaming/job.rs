@@ -1,3 +1,5 @@
+mod asof;
+
 use std::{
     collections::{BTreeMap, BTreeSet, btree_map::Entry},
     fmt,
@@ -343,6 +345,10 @@ impl OwningContinuousJob {
         self.job.stream_join_status()
     }
 
+    pub(crate) fn stream_asof_join_status(&self) -> BTreeMap<String, crate::StreamAsofJoinStatus> {
+        self.job.stream_asof_join_status()
+    }
+
     pub(crate) async fn trigger_checkpoint(&self) -> Result<Epoch> {
         match self.job.trigger_checkpoint().await {
             Ok(epoch) => Ok(epoch),
@@ -462,6 +468,7 @@ pub(crate) fn preflight_job(spec: ContinuousJobSpec) -> Result<ValidatedContinuo
     validate_context_fingerprint(&context, &plan)?;
     validate_runtime_topology(&plan)?;
     let (validated_sources, progress) = validate_sources(&plan, sources)?;
+    asof::validate_progress(&plan, &progress)?;
     let validated_sinks = validate_sinks(&plan, sinks)?;
     validate_state_owner_ids(&plan, &validated_sinks)?;
     let delivery_proofs =

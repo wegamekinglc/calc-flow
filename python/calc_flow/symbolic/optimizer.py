@@ -624,6 +624,8 @@ def _window_explain_lines(
 def explain_optimization(document: dict[str, object], /) -> tuple[str, ...]:
     """Render deterministic physical sharing and bounded cost facts."""
 
+    from calc_flow.symbolic.lower.asof import explain_asof
+
     nodes = _document_nodes(document)
     cse_count = sum("__cf_cse_" in str(node.get("id")) for node in nodes)
     rolling = _nodes_of_kind(nodes, "rolling")
@@ -652,6 +654,7 @@ def explain_optimization(document: dict[str, object], /) -> tuple[str, ...]:
     return (
         *lines,
         *_window_explain_lines(document, nodes),
+        *explain_asof(nodes),
         *(kernels or ("    rolling kernels none",)),
         "  costs",
         *(state or ("    state none",)),

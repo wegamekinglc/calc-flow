@@ -349,6 +349,7 @@ _PRIMITIVES: dict[str, PrimitiveSpec] = {
         ),
         CMap(()),
     ),
+    "stream_asof_join": PrimitiveSpec(frozenset({"spec"}), CMap(())),
     "stream_join": PrimitiveSpec(
         frozenset(
             {
@@ -483,6 +484,10 @@ def build(
 ) -> Node:
     """Build one normalized node with materialized defaults and its digest."""
 
+    if name == "stream_asof_join" and (type(version) is not int or version != 1):
+        raise ValueError(
+            f"unknown_primitive_version: symbolic primitive {name!r}@{version}"
+        )
     if name in _WINDOW_AGGREGATES:
         if type(version) is not int or version not in (1, 2):
             raise ValueError(

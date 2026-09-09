@@ -911,6 +911,77 @@
             ],
             "type": "object"
           },
+          "AsofJoinSide": {
+            "additionalProperties": false,
+            "description": "Exact identity and output naming declaration for one ASOF input.",
+            "properties": {
+              "event_time": {
+                "type": "string"
+              },
+              "keys": {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              },
+              "prefix": {
+                "type": "string"
+              },
+              "sequence_by": {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "keys",
+              "event_time",
+              "sequence_by",
+              "prefix"
+            ],
+            "type": "object"
+          },
+          "AsofLatePolicy": {
+            "description": "Policy for rows strictly below their own ingress watermark.",
+            "oneOf": [
+              {
+                "const": "error",
+                "description": "Fail the complete admission attempt.",
+                "type": "string"
+              },
+              {
+                "const": "drop",
+                "description": "Discard late rows and count them.",
+                "type": "string"
+              }
+            ]
+          },
+          "AsofStateLimits": {
+            "additionalProperties": false,
+            "description": "Total logical state limits, shared by both ASOF inputs.",
+            "properties": {
+              "max_state_bytes": {
+                "format": "uint64",
+                "maximum": 9007199254740991.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              "max_state_rows": {
+                "format": "uint64",
+                "maximum": 9007199254740991.0,
+                "minimum": 1.0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "max_state_rows",
+              "max_state_bytes"
+            ],
+            "type": "object"
+          },
           "BatchKind": {
             "enum": [
               "table",
@@ -1917,6 +1988,24 @@
                   },
                   "spec": {
                     "$ref": "#/components/schemas/ProjectCreateRequest/$defs/StreamJoinSpec"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "spec"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Bounded backward ASOF with left-preserving final append-only output.",
+                "properties": {
+                  "kind": {
+                    "const": "stream_asof_join",
+                    "type": "string"
+                  },
+                  "spec": {
+                    "$ref": "#/components/schemas/ProjectCreateRequest/$defs/StreamAsofJoinSpec"
                   }
                 },
                 "required": [
@@ -3391,6 +3480,38 @@
               }
             ]
           },
+          "StreamAsofJoinSpec": {
+            "additionalProperties": false,
+            "description": "Version-one backward, left-preserving, final ASOF configuration.",
+            "properties": {
+              "late_policy": {
+                "$ref": "#/components/schemas/ProjectCreateRequest/$defs/AsofLatePolicy"
+              },
+              "left": {
+                "$ref": "#/components/schemas/ProjectCreateRequest/$defs/AsofJoinSide"
+              },
+              "limits": {
+                "$ref": "#/components/schemas/ProjectCreateRequest/$defs/AsofStateLimits"
+              },
+              "right": {
+                "$ref": "#/components/schemas/ProjectCreateRequest/$defs/AsofJoinSide"
+              },
+              "tolerance_micros": {
+                "format": "uint64",
+                "maximum": 9007199254740991.0,
+                "minimum": 0.0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "left",
+              "right",
+              "tolerance_micros",
+              "limits",
+              "late_policy"
+            ],
+            "type": "object"
+          },
           "StreamJoinSpec": {
             "additionalProperties": false,
             "description": "Immutable declaration for a two-input bounded inner stream Join.",
@@ -3740,6 +3861,77 @@
             "required": [
               "name",
               "data_type"
+            ],
+            "type": "object"
+          },
+          "AsofJoinSide": {
+            "additionalProperties": false,
+            "description": "Exact identity and output naming declaration for one ASOF input.",
+            "properties": {
+              "event_time": {
+                "type": "string"
+              },
+              "keys": {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              },
+              "prefix": {
+                "type": "string"
+              },
+              "sequence_by": {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "keys",
+              "event_time",
+              "sequence_by",
+              "prefix"
+            ],
+            "type": "object"
+          },
+          "AsofLatePolicy": {
+            "description": "Policy for rows strictly below their own ingress watermark.",
+            "oneOf": [
+              {
+                "const": "error",
+                "description": "Fail the complete admission attempt.",
+                "type": "string"
+              },
+              {
+                "const": "drop",
+                "description": "Discard late rows and count them.",
+                "type": "string"
+              }
+            ]
+          },
+          "AsofStateLimits": {
+            "additionalProperties": false,
+            "description": "Total logical state limits, shared by both ASOF inputs.",
+            "properties": {
+              "max_state_bytes": {
+                "format": "uint64",
+                "maximum": 9007199254740991.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              "max_state_rows": {
+                "format": "uint64",
+                "maximum": 9007199254740991.0,
+                "minimum": 1.0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "max_state_rows",
+              "max_state_bytes"
             ],
             "type": "object"
           },
@@ -4749,6 +4941,24 @@
                   },
                   "spec": {
                     "$ref": "#/components/schemas/ProjectDocument/$defs/StreamJoinSpec"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "spec"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Bounded backward ASOF with left-preserving final append-only output.",
+                "properties": {
+                  "kind": {
+                    "const": "stream_asof_join",
+                    "type": "string"
+                  },
+                  "spec": {
+                    "$ref": "#/components/schemas/ProjectDocument/$defs/StreamAsofJoinSpec"
                   }
                 },
                 "required": [
@@ -6223,6 +6433,38 @@
               }
             ]
           },
+          "StreamAsofJoinSpec": {
+            "additionalProperties": false,
+            "description": "Version-one backward, left-preserving, final ASOF configuration.",
+            "properties": {
+              "late_policy": {
+                "$ref": "#/components/schemas/ProjectDocument/$defs/AsofLatePolicy"
+              },
+              "left": {
+                "$ref": "#/components/schemas/ProjectDocument/$defs/AsofJoinSide"
+              },
+              "limits": {
+                "$ref": "#/components/schemas/ProjectDocument/$defs/AsofStateLimits"
+              },
+              "right": {
+                "$ref": "#/components/schemas/ProjectDocument/$defs/AsofJoinSide"
+              },
+              "tolerance_micros": {
+                "format": "uint64",
+                "maximum": 9007199254740991.0,
+                "minimum": 0.0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "left",
+              "right",
+              "tolerance_micros",
+              "limits",
+              "late_policy"
+            ],
+            "type": "object"
+          },
           "StreamJoinSpec": {
             "additionalProperties": false,
             "description": "Immutable declaration for a two-input bounded inner stream Join.",
@@ -6875,6 +7117,171 @@
         "title": "ResourceLimits",
         "type": "object"
       },
+      "RunEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "backpressure_events": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Backpressure Events"
+          },
+          "epoch": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Epoch"
+          },
+          "late_rows": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Late Rows"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "queue_bytes": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queue Bytes"
+          },
+          "queue_envelopes": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queue Envelopes"
+          },
+          "queue_rows": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queue Rows"
+          },
+          "sequence": {
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "state": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "State"
+          },
+          "stream_asof_joins": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/StreamAsofJoinMetrics"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stream Asof Joins"
+          },
+          "stream_joins": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/StreamJoinMetrics"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stream Joins"
+          },
+          "throughput_rows": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Throughput Rows"
+          },
+          "timestamp": {
+            "format": "date-time",
+            "title": "Timestamp",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          },
+          "watermark": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Watermark"
+          }
+        },
+        "required": [
+          "sequence",
+          "timestamp",
+          "type",
+          "message"
+        ],
+        "title": "RunEvent",
+        "type": "object"
+      },
       "RunningJobResponse": {
         "additionalProperties": false,
         "properties": {
@@ -7071,12 +7478,253 @@
         "title": "SerializedWorkerRegistration",
         "type": "object"
       },
+      "SignedDecimal": {
+        "maxLength": 20,
+        "pattern": "^(0|-?[1-9][0-9]*)$",
+        "type": "string"
+      },
+      "StreamAsofJoinMetrics": {
+        "additionalProperties": false,
+        "properties": {
+          "emitted_left_rows": {
+            "$ref": "#/components/schemas/UnsignedDecimal"
+          },
+          "evicted_right_rows": {
+            "$ref": "#/components/schemas/UnsignedDecimal"
+          },
+          "identity_only_rows": {
+            "$ref": "#/components/schemas/UnsignedDecimal"
+          },
+          "left": {
+            "$ref": "#/components/schemas/StreamAsofJoinSideMetrics"
+          },
+          "matched_rows": {
+            "$ref": "#/components/schemas/UnsignedDecimal"
+          },
+          "node_id": {
+            "minLength": 1,
+            "title": "Node Id",
+            "type": "string"
+          },
+          "output_limit_failures": {
+            "$ref": "#/components/schemas/UnsignedDecimal"
+          },
+          "output_watermark_micros": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SignedDecimal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "pending_left_rows": {
+            "$ref": "#/components/schemas/UnsignedDecimal"
+          },
+          "retained_right_rows": {
+            "$ref": "#/components/schemas/UnsignedDecimal"
+          },
+          "right": {
+            "$ref": "#/components/schemas/StreamAsofJoinSideMetrics"
+          },
+          "state_bytes": {
+            "$ref": "#/components/schemas/UnsignedDecimal"
+          },
+          "state_limit_failures": {
+            "$ref": "#/components/schemas/UnsignedDecimal"
+          },
+          "state_rows": {
+            "$ref": "#/components/schemas/UnsignedDecimal"
+          },
+          "unmatched_rows": {
+            "$ref": "#/components/schemas/UnsignedDecimal"
+          },
+          "workspace_limit_failures": {
+            "$ref": "#/components/schemas/UnsignedDecimal"
+          }
+        },
+        "required": [
+          "node_id",
+          "left",
+          "right",
+          "pending_left_rows",
+          "retained_right_rows",
+          "identity_only_rows",
+          "state_rows",
+          "state_bytes",
+          "emitted_left_rows",
+          "matched_rows",
+          "unmatched_rows",
+          "evicted_right_rows",
+          "state_limit_failures",
+          "workspace_limit_failures",
+          "output_limit_failures",
+          "output_watermark_micros"
+        ],
+        "title": "StreamAsofJoinMetrics",
+        "type": "object"
+      },
+      "StreamAsofJoinSideMetrics": {
+        "additionalProperties": false,
+        "properties": {
+          "accepted_rows": {
+            "$ref": "#/components/schemas/UnsignedDecimal"
+          },
+          "duplicate_rows": {
+            "$ref": "#/components/schemas/UnsignedDecimal"
+          },
+          "ended": {
+            "title": "Ended",
+            "type": "boolean"
+          },
+          "idle": {
+            "title": "Idle",
+            "type": "boolean"
+          },
+          "late_rows": {
+            "$ref": "#/components/schemas/UnsignedDecimal"
+          },
+          "watermark_micros": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SignedDecimal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "accepted_rows",
+          "late_rows",
+          "duplicate_rows",
+          "watermark_micros",
+          "idle",
+          "ended"
+        ],
+        "title": "StreamAsofJoinSideMetrics",
+        "type": "object"
+      },
+      "StreamJoinMetrics": {
+        "additionalProperties": false,
+        "properties": {
+          "emitted_match_rows": {
+            "minimum": 0.0,
+            "title": "Emitted Match Rows",
+            "type": "integer"
+          },
+          "left": {
+            "$ref": "#/components/schemas/StreamJoinSideMetrics"
+          },
+          "match_limit_failures": {
+            "minimum": 0.0,
+            "title": "Match Limit Failures",
+            "type": "integer"
+          },
+          "node_id": {
+            "minLength": 1,
+            "title": "Node Id",
+            "type": "string"
+          },
+          "right": {
+            "$ref": "#/components/schemas/StreamJoinSideMetrics"
+          },
+          "state_limit_failures": {
+            "minimum": 0.0,
+            "title": "State Limit Failures",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "node_id",
+          "left",
+          "right",
+          "emitted_match_rows",
+          "state_limit_failures",
+          "match_limit_failures"
+        ],
+        "title": "StreamJoinMetrics",
+        "type": "object"
+      },
+      "StreamJoinSideMetrics": {
+        "additionalProperties": false,
+        "properties": {
+          "evicted_rows": {
+            "minimum": 0.0,
+            "title": "Evicted Rows",
+            "type": "integer"
+          },
+          "late_affected_batches": {
+            "minimum": 0.0,
+            "title": "Late Affected Batches",
+            "type": "integer"
+          },
+          "late_rows": {
+            "minimum": 0.0,
+            "title": "Late Rows",
+            "type": "integer"
+          },
+          "max_lateness_micros": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Lateness Micros"
+          },
+          "null_event_time_rows": {
+            "minimum": 0.0,
+            "title": "Null Event Time Rows",
+            "type": "integer"
+          },
+          "null_key_rows": {
+            "minimum": 0.0,
+            "title": "Null Key Rows",
+            "type": "integer"
+          },
+          "retained_bytes": {
+            "minimum": 0.0,
+            "title": "Retained Bytes",
+            "type": "integer"
+          },
+          "retained_rows": {
+            "minimum": 0.0,
+            "title": "Retained Rows",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "retained_rows",
+          "retained_bytes",
+          "evicted_rows",
+          "late_rows",
+          "late_affected_batches",
+          "null_event_time_rows",
+          "null_key_rows"
+        ],
+        "title": "StreamJoinSideMetrics",
+        "type": "object"
+      },
       "StreamingFailureReasonCode": {
         "enum": [
           "join_state_limit_exceeded",
           "join_match_limit_exceeded",
           "join_counter_overflow",
-          "join_time_conversion_failed"
+          "join_time_conversion_failed",
+          "asof_invalid_input",
+          "asof_duplicate_identity",
+          "asof_late_row",
+          "asof_state_limit_exceeded",
+          "asof_workspace_limit_exceeded",
+          "asof_output_limit_exceeded",
+          "asof_counter_overflow",
+          "asof_protocol_error"
         ],
         "type": "string"
       },
@@ -7172,6 +7820,11 @@
         ],
         "title": "UnavailableWorkerRegistration",
         "type": "object"
+      },
+      "UnsignedDecimal": {
+        "maxLength": 20,
+        "pattern": "^(0|[1-9][0-9]*)$",
+        "type": "string"
       },
       "ValidValidationReport": {
         "additionalProperties": false,
@@ -7568,11 +8221,14 @@
         "responses": {
           "200": {
             "content": {
-              "application/json": {
-                "schema": {}
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunEvent",
+                  "type": "string"
+                }
               }
             },
-            "description": "Successful Response"
+            "description": "SSE stream; each data field contains one RunEvent."
           },
           "422": {
             "content": {

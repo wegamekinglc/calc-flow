@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, Unpack
 
 from calc_flow.symbolic.domains import (
     is_strict_scalar_type,
@@ -50,7 +50,11 @@ from calc_flow.symbolic.windows import (
 )
 
 if TYPE_CHECKING:
+    from datetime import timedelta
+
+    from calc_flow.asof_join_spec import AsofStateLimits
     from calc_flow.pipeline import JoinStateLimits, JoinTimeBounds
+    from calc_flow.symbolic.asof import _AsofJoinOptions
 
 
 def _column(value: object, function: str, parameter: str, /) -> ColumnExpr:
@@ -915,6 +919,28 @@ class TableNamespace:
                 {"names": _str_sequence(names, function, "names")},
             )
         )
+
+    def stream_asof_join(
+        self,
+        left: TableExpr,
+        right: TableExpr,
+        /,
+        *,
+        tolerance: timedelta,
+        limits: AsofStateLimits,
+        **options: Unpack[_AsofJoinOptions],
+    ) -> TableExpr:
+        """Attach each left event's latest valid historical right row.
+
+        ``keys`` optionally overrides the inputs' entity keys; time and sequence
+        come from their current temporal metadata. ``late_policy`` is ``"error"``
+        by default, or ``"drop"``. ``prefixes`` defaults to ``("left", "right")``.
+        Both input watermarks must strictly pass a left event before it is
+        emitted, including when no candidate exists and right fields are null.
+        """
+        from calc_flow.symbolic.asof import _AsofOptions, declare_asof
+
+        return declare_asof(left, right, tolerance, limits, _AsofOptions(**options))
 
     def stream_join(
         self,

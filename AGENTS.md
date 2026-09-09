@@ -193,9 +193,9 @@ dashes span the full column width, including cell spaces.
   `StreamOperator` split finite processing from continuous processing and
   checkpoint lifecycle. `ExpressionOperator`, `SqlOperator`,
   `RollingOperator`, and `CrossSectionOperator` implement both lifecycles;
-  `UnionOperator`, `WindowAggregateOperator`, and `StreamJoinOperator` are
-  stream-only. External operators resolve through lifecycle-specific
-  factories in `ProviderRegistry`.
+  `UnionOperator`, `WindowAggregateOperator`, `StreamJoinOperator`, and
+  `StreamAsofJoinOperator` are stream-only. External operators resolve through
+  lifecycle-specific factories in `ProviderRegistry`.
 - `PipelineBuilder` consumes immutable graph-building steps.
   `compile_batch()` and `compile_stream()` validate endpoints, kinds, schemas,
   one-writer inputs, UDFs, cycles, deterministic topology, inputs/outputs, and

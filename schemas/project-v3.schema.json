@@ -74,6 +74,77 @@
       ],
       "type": "object"
     },
+    "AsofJoinSide": {
+      "additionalProperties": false,
+      "description": "Exact identity and output naming declaration for one ASOF input.",
+      "properties": {
+        "event_time": {
+          "type": "string"
+        },
+        "keys": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "prefix": {
+          "type": "string"
+        },
+        "sequence_by": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "keys",
+        "event_time",
+        "sequence_by",
+        "prefix"
+      ],
+      "type": "object"
+    },
+    "AsofLatePolicy": {
+      "description": "Policy for rows strictly below their own ingress watermark.",
+      "oneOf": [
+        {
+          "const": "error",
+          "description": "Fail the complete admission attempt.",
+          "type": "string"
+        },
+        {
+          "const": "drop",
+          "description": "Discard late rows and count them.",
+          "type": "string"
+        }
+      ]
+    },
+    "AsofStateLimits": {
+      "additionalProperties": false,
+      "description": "Total logical state limits, shared by both ASOF inputs.",
+      "properties": {
+        "max_state_bytes": {
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "max_state_rows": {
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "max_state_rows",
+        "max_state_bytes"
+      ],
+      "type": "object"
+    },
     "BatchKind": {
       "enum": [
         "table",
@@ -1082,6 +1153,24 @@
             },
             "spec": {
               "$ref": "#/$defs/StreamJoinSpec"
+            }
+          },
+          "required": [
+            "kind",
+            "spec"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Bounded backward ASOF with left-preserving final append-only output.",
+          "properties": {
+            "kind": {
+              "const": "stream_asof_join",
+              "type": "string"
+            },
+            "spec": {
+              "$ref": "#/$defs/StreamAsofJoinSpec"
             }
           },
           "required": [
@@ -2559,6 +2648,38 @@
           "type": "string"
         }
       ]
+    },
+    "StreamAsofJoinSpec": {
+      "additionalProperties": false,
+      "description": "Version-one backward, left-preserving, final ASOF configuration.",
+      "properties": {
+        "late_policy": {
+          "$ref": "#/$defs/AsofLatePolicy"
+        },
+        "left": {
+          "$ref": "#/$defs/AsofJoinSide"
+        },
+        "limits": {
+          "$ref": "#/$defs/AsofStateLimits"
+        },
+        "right": {
+          "$ref": "#/$defs/AsofJoinSide"
+        },
+        "tolerance_micros": {
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "left",
+        "right",
+        "tolerance_micros",
+        "limits",
+        "late_policy"
+      ],
+      "type": "object"
     },
     "StreamJoinSpec": {
       "additionalProperties": false,

@@ -1,0 +1,61 @@
+{
+  "inline_metadata": {
+    "ended": false,
+    "epoch": 2,
+    "layout_version": 1,
+    "metrics": {
+      "emitted_match_rows": 1,
+      "left": {
+        "evicted_rows": 0,
+        "late_affected_batches": 0,
+        "late_rows": 0,
+        "max_lateness_micros": null,
+        "null_event_time_rows": 0,
+        "null_key_rows": 0,
+        "retained_bytes": 228,
+        "retained_rows": 2
+      },
+      "match_limit_failures": 0,
+      "right": {
+        "evicted_rows": 0,
+        "late_affected_batches": 0,
+        "late_rows": 0,
+        "max_lateness_micros": null,
+        "null_event_time_rows": 0,
+        "null_key_rows": 0,
+        "retained_bytes": 114,
+        "retained_rows": 1
+      },
+      "state_limit_failures": 0
+    },
+    "next_left_row_id": 2,
+    "next_output_sequence": 1,
+    "next_right_row_id": 1,
+    "spec": {
+      "bounds": {
+        "after_micros": 15,
+        "before_micros": 10
+      },
+      "join_type": "inner",
+      "left_event_time": "ts",
+      "left_keys": [
+        "key"
+      ],
+      "left_prefix": "left",
+      "limits": {
+        "max_matches_per_input_batch": 1000,
+        "max_state_bytes_per_side": 1048576,
+        "max_state_rows_per_side": 100
+      },
+      "right_event_time": "ts",
+      "right_keys": [
+        "key"
+      ],
+      "right_prefix": "right"
+    }
+  },
+  "segments": {
+    "left-delta-1": "left-delta-1.bin",
+    "right-delta-2": "right-delta-2.bin"
+  }
+}

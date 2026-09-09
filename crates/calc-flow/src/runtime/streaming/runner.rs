@@ -1,3 +1,5 @@
+mod asof;
+
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     future::Future,
@@ -342,6 +344,7 @@ pub(crate) struct OperatorStatus {
     pub(crate) null_event_time_rows: u64,
     pub(crate) null_event_time_batches: u64,
     pub(crate) stream_join: Option<crate::StreamJoinStatus>,
+    pub(crate) stream_asof_join: Option<crate::StreamAsofJoinStatus>,
 }
 
 impl From<OperatorProgressSnapshot> for OperatorStatus {
@@ -358,6 +361,7 @@ impl From<OperatorProgressSnapshot> for OperatorStatus {
             null_event_time_rows: progress.null_event_time_rows,
             null_event_time_batches: progress.null_event_time_batches,
             stream_join: progress.stream_join,
+            stream_asof_join: progress.stream_asof_join,
         }
     }
 }
@@ -420,6 +424,22 @@ impl ContinuousJob {
                 progress
                     .snapshot()
                     .stream_join
+                    .map(|status| (id.clone(), status))
+            })
+            .collect()
+    }
+
+    /// Collects independent ASOF diagnostics without changing inner Join status.
+    pub(crate) fn stream_asof_join_status(&self) -> BTreeMap<String, crate::StreamAsofJoinStatus> {
+        self.core
+            .runtime_status
+            .lock()
+            .nodes
+            .iter()
+            .filter_map(|(id, progress)| {
+                progress
+                    .snapshot()
+                    .stream_asof_join
                     .map(|status| (id.clone(), status))
             })
             .collect()
@@ -1669,7 +1689,7 @@ async fn run_job_driver(
 ) -> DriverReport {
     let ValidatedContinuousJob {
         context,
-        plan,
+        mut plan,
         mut sources,
         sinks,
         progress: prepared_progress,
@@ -1717,6 +1737,22 @@ async fn run_job_driver(
         }
         match manifest_is_terminal(&selected.manifest, &plan) {
             Ok(true) => {
+                let restored = asof::restore_terminal(
+                    &mut plan,
+                    checkpoint,
+                    &prepared_progress,
+                    &cancellation,
+                )
+                .await;
+                match restored {
+                    Ok(nodes) => core.runtime_status.lock().nodes.extend(nodes),
+                    Err(error) => {
+                        return checkpoint_start_failure(
+                            launch_id,
+                            sanitize_managed_recovery_error(error, checkpoint.managed),
+                        );
+                    }
+                }
                 drop(sources);
                 return recover_terminal_manifest(
                     launch_id,
@@ -4686,6 +4722,8 @@ fn cancelled_driver_report_with_task_cleanup(
 
 #[cfg(test)]
 mod tests {
+    mod asof_tests;
+
     use std::{
         collections::{BTreeMap, BTreeSet, VecDeque},
         future::Future as _,

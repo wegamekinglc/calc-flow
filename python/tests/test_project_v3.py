@@ -182,6 +182,7 @@ class TestProjectV3Surface:
             "expression",
             "rolling",
             "sql",
+            "stream_asof_join",
             "stream_join",
             "window",
         )

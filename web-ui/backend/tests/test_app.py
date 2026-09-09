@@ -281,6 +281,7 @@ def test_capabilities_route_exposes_the_typed_runtime_session_snapshot(
         "expression",
         "rolling",
         "sql",
+        "stream_asof_join",
         "stream_join",
         "window",
     ]

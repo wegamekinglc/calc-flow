@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 
 import { validateInputAlias } from './inputAliasEditorModel';
 
@@ -27,11 +27,6 @@ function InputAliasRow({
   const [draft, setDraft] = useState(alias);
   const [error, setError] = useState<string | null>(null);
   const errorId = `input-alias-${index + 1}-error`;
-
-  useEffect(() => {
-    setDraft(alias);
-    setError(null);
-  }, [alias]);
 
   const commit = () => {
     const nextError = validateInputAlias(draft, alias, aliases);

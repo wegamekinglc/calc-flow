@@ -50,6 +50,19 @@ from calc_flow_studio.web_errors import (
 API_PREFIX = "/api/v3"
 
 
+class _JobEventStreamResponse(StreamingResponse):
+    media_type = "text/event-stream"
+
+
+def _job_event_json(event: RunEvent) -> str:
+    payload = event.model_dump(mode="json", exclude_none=True)
+    if event.stream_asof_joins is not None:
+        payload["stream_asof_joins"] = [
+            metrics.model_dump(mode="json") for metrics in event.stream_asof_joins
+        ]
+    return json.dumps(payload, separators=(",", ":"))
+
+
 class ProjectStoreProtocol(Protocol):
     async def create(self, project: ProjectDocument) -> None: ...
 
@@ -421,6 +434,13 @@ def register_job_routes(
 
     @app.get(
         f"{API_PREFIX}/jobs/{{job_id}}/events",
+        response_class=_JobEventStreamResponse,
+        responses={
+            200: {
+                "model": RunEvent,
+                "description": "SSE stream; each data field contains one RunEvent.",
+            }
+        },
     )
     async def get_job_events(
         job_id: str,
@@ -452,10 +472,7 @@ def register_job_routes(
                     yield ": keep-alive\n\n"
                     continue
                 for event in events:
-                    payload = json.dumps(
-                        event.model_dump(mode="json", exclude_none=True),
-                        separators=(",", ":"),
-                    )
+                    payload = _job_event_json(event)
                     yield (
                         f"id: {event.sequence}\nevent: {event.type}\n"
                         f"data: {payload}\n\n"
@@ -464,8 +481,7 @@ def register_job_routes(
                 if job_status in terminal:
                     return
 
-        return StreamingResponse(
+        return _JobEventStreamResponse(
             stream(),
-            media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )

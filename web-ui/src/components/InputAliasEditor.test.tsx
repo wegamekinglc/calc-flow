@@ -1,9 +1,51 @@
+import { fireEvent as fireDOMEvent, queryByLabelText, waitFor } from '@testing-library/dom';
 import { fireEvent, render, screen } from '@testing-library/react';
+import { createRoot } from 'react-dom/client';
 import { describe, expect, it, vi } from 'vitest';
 
 import { InputAliasEditor } from './InputAliasEditor';
 
 describe('InputAliasEditor', () => {
+  it('keeps an edit made as soon as the alias input appears', async () => {
+    const environment = globalThis as typeof globalThis & {
+      IS_REACT_ACT_ENVIRONMENT: boolean | undefined;
+    };
+    const previousActEnvironment = environment.IS_REACT_ACT_ENVIRONMENT;
+    // Preserve browser timing: RTL render flushes effects before the first edit.
+    environment.IS_REACT_ACT_ENVIRONMENT = false;
+    const container = document.createElement('div');
+    document.body.append(container);
+    const root = createRoot(container);
+    let observer: MutationObserver | undefined;
+    try {
+      const edited = new Promise<void>((resolve) => {
+        observer = new MutationObserver(() => {
+          const input = queryByLabelText<HTMLInputElement>(container, 'Input alias 2');
+          if (input === null) return;
+          observer?.disconnect();
+          fireDOMEvent.change(input, { target: { value: 'rhs' } });
+          resolve();
+        });
+        observer.observe(container, { childList: true, subtree: true });
+      });
+      root.render(
+        <InputAliasEditor
+          aliases={['left', 'right']}
+          onAdd={vi.fn()}
+          onRename={vi.fn()}
+          onRemove={vi.fn()}
+        />,
+      );
+      await edited;
+      await waitFor(() => expect(screen.getByLabelText('Input alias 2')).toHaveValue('rhs'));
+    } finally {
+      observer?.disconnect();
+      root.unmount();
+      container.remove();
+      environment.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
+    }
+  });
+
   it('adds and commits a second alias as an independent row', () => {
     const onAdd = vi.fn();
     const onRename = vi.fn();

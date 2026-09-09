@@ -118,6 +118,26 @@ def test_empty_runtime_capabilities_are_frozen_and_session_scoped() -> None:
             replay_safe=True,
         ),
         OperatorCapability(
+            kind="stream_asof_join",
+            version="1",
+            input_ports=(
+                ProviderPort("left", "table", required=True),
+                ProviderPort("right", "table", required=True),
+            ),
+            output_ports=(ProviderPort("output", "table", required=True),),
+            modes=("stream",),
+            finality="group_final_append_only",
+            requires_datafusion=True,
+            stateful=True,
+            microbatch_invariant=True,
+            requires_watermark=True,
+            checkpoint_support="checkpointed_stateful",
+            state_version=1,
+            state_layouts=(1,),
+            deterministic=True,
+            replay_safe=True,
+        ),
+        OperatorCapability(
             kind="stream_join",
             version="1",
             input_ports=(
