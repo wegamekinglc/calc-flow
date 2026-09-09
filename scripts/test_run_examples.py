@@ -40,7 +40,13 @@ class RunExamplesTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         paths = [call.args[0][1] for call in run.call_args_list]
         self.assertIn("examples/15_file_source.py", paths)
-        for path in run_examples.SERVICE_PYTHON_EXAMPLES:
+        for path in (
+            *run_examples.SERVICE_PYTHON_EXAMPLES,
+            "examples/22_kafka_sink.py",
+            "examples/23_postgresql_sink.py",
+            "examples/24_mysql_sink.py",
+            "examples/25_clickhouse_sink.py",
+        ):
             self.assertNotIn(path, paths)
 
     def test_rust_surface_runs_user_examples_but_not_schema_generators(self) -> None:
