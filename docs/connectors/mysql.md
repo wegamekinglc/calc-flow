@@ -7,7 +7,12 @@ Sinks support append, upsert, and recoverable epoch transactions.
 
 Identity: `calc-flow-connectors/mysql/1.0.0`.
 
-## Python example
+The read example uses an InnoDB snapshot; the write example appends totals.
+Use [the source example](#python-source-example) to read into Parquet, or
+[the sink example](#python-sink-example) to write from Parquet. Both use
+`pipe(order_totals)` with overloaded Python expressions.
+
+## Python source example
 
 Run [18_mysql_source.py](../../examples/18_mysql_source.py).
 `build_project` selects an InnoDB `snapshot`, resolves `CALC_FLOW_MYSQL_URL`,
@@ -16,7 +21,7 @@ reads primary-key-ordered pages and verifies Parquet totals `[20.0, 60.0]`
 with best-effort delivery.
 
 Build a Python wheel with `--features connector-mysql`, retaining the
-default file connector for output. Follow the
+default file connector for local input/output. Follow the
 [shared environment preparation](README.md#prepare-the-python-environment)
 before the service commands below.
 
@@ -48,7 +53,41 @@ connector identity is `mysql/1.0.0`. Incremental mode requires explicit
 monotonic cursor assumptions and does not provide binlog CDC; see
 [MySQL](#project-configuration).
 
-After the example completes, stop the disposable demo service:
+## Python sink example
+
+Run [24_mysql_sink.py](../../examples/24_mysql_sink.py) after starting
+the MySQL service above. It generates its own finite Parquet input; the
+source example and its orders table are not prerequisites. Prepare an empty
+InnoDB destination, run the writer, then query it:
+
+```bash
+docker exec -i -e MYSQL_PWD=calcflow-example calc-flow-example-mysql mysql -u root calcflow <<'SQL'
+CREATE TABLE calc_flow_example_totals (
+    id BIGINT PRIMARY KEY,
+    total DOUBLE NOT NULL
+) ENGINE=InnoDB;
+SQL
+export CALC_FLOW_MYSQL_URL='mysql://root:calcflow-example@127.0.0.1:3306/calcflow'
+export CALC_FLOW_MYSQL_PLAINTEXT=1
+uv run --no-sync python examples/24_mysql_sink.py
+docker exec -e MYSQL_PWD=calcflow-example calc-flow-example-mysql mysql -u root calcflow -e 'SELECT id, total FROM calc_flow_example_totals ORDER BY id;'
+```
+
+The two output rows are `(1, 20.0)` and `(2, 60.0)`. A reusable Python
+expression function calculates totals and removes the zero-quantity third
+order. The sink uses `append` and checks two delivered rows with
+`at_least_once` status. Plaintext is enabled only for this loopback demo;
+otherwise leave `CALC_FLOW_MYSQL_PLAINTEXT` unset for verified TLS.
+
+The script removes local inputs/checkpoints, retains remote rows, and starts
+a new lineage each time. Rerunning against the populated target fails on
+duplicate primary keys. Recreate the disposable service and tables for a
+fresh run; use stable state and sink identities for
+[durable recovery](README.md#recovery-ownership).
+
+## Clean up
+
+After the examples complete, stop the disposable demo service:
 
 ```bash
 docker stop calc-flow-example-mysql
@@ -138,18 +177,18 @@ are outside this mode's contract. The connector validates the index and types;
 the application owns the immutability, retention, and commit-order assumptions.
 This mode advertises exact positioning only under those assumptions.
 
-| MySQL type               | Arrow representation                        |
-|--------------------------|---------------------------------------------|
-| Signed/unsigned integers | Corresponding signed/unsigned integer width |
-| `MEDIUMINT`              | `int32` / `uint32`                          |
-| `YEAR`                   | `uint16`                                    |
-| `FLOAT`, `DOUBLE`        | `float32`, `float64`                        |
-| Text, enum, set, JSON    | UTF-8 string                                |
-| `DECIMAL`                | Exact decimal string                        |
-| Binary, blob, bit        | Binary bytes                                |
-| `DATE`                   | `date32`                                    |
-| `DATETIME`, `TIMESTAMP`  | `timestamp[us]`, UTC session                |
-| `TIME`                   | Signed `HH:MM:SS.ffffff` string             |
+| MySQL type                 | Arrow representation                          |
+|----------------------------|-----------------------------------------------|
+| Signed/unsigned integers   | Corresponding signed/unsigned integer width   |
+| `MEDIUMINT`                | `int32` / `uint32`                            |
+| `YEAR`                     | `uint16`                                      |
+| `FLOAT`, `DOUBLE`          | `float32`, `float64`                          |
+| Text, enum, set, JSON      | UTF-8 string                                  |
+| `DECIMAL`                  | Exact decimal string                          |
+| Binary, blob, bit          | Binary bytes                                  |
+| `DATE`                     | `date32`                                      |
+| `DATETIME`, `TIMESTAMP`    | `timestamp[us]`, UTC session                  |
+| `TIME`                     | Signed `HH:MM:SS.ffffff` string               |
 
 `TINYINT(1)` remains an integer on reads. Sinks additionally accept Arrow
 booleans and `decimal128`, using bound parameters without float conversion.

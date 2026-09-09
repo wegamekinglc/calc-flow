@@ -28,7 +28,8 @@ pages explain how the implementation provides those behaviors.
 5. [Projects and persistence](projects-guide.md): validate, serialize, save,
    load, and execute a project; example 14.
 6. [Connectors](connectors/README.md): overview and one guide per connector,
-   with Python examples, service setup, configuration, and delivery limits.
+   with Python examples for every supported read/write direction, service setup,
+   configuration, and delivery limits.
 7. [Studio](studio-guide.md): edit projects, inspect calculations, and operate
    local jobs.
 

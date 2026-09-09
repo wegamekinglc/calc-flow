@@ -41,11 +41,14 @@ native installation.
 Examples 04 and 08–12 use application-owned connectors, finite synthetic data,
 and temporary checkpoint roots. Example 15 uses the native file connector;
 these programs require no external service. The SQL/streaming pipeline examples
-listed below also need no service. Connector `*_source.py` files numbered 16–21
-require prepared services and opt-in native connector features; the runner skips them unless
-passed `--include-services`. See [connector setup](../docs/connectors/README.md) before running
-them directly or enabling that flag. Example 14 also uses a temporary directory. For a
-constrained checkout, set `TMPDIR` on Linux or `TEMP` and `TMP` on Windows to
+listed below also need no service. The ten connector read/write examples in
+[the connector inventory](#connector-readwrite-examples) require prepared
+services and opt-in native connector features; the runner skips them unless
+passed `--include-services`. The default wheel includes only the file connector.
+Follow [connector setup](../docs/connectors/README.md) to build the other native
+features and prepare both source data and empty sink destinations before
+running them directly or enabling that flag. Example 14 also uses a temporary
+directory. For a constrained checkout, set `TMPDIR` on Linux or `TEMP` and `TMP` on Windows to
 an existing writable directory under `target/` before running.
 
 On Windows, checkpoint segment paths can exceed the traditional 260-character
@@ -125,30 +128,47 @@ try {
     then execute its physical `input`/`output` bindings after reload. Checks
     totals `[3, 7]` and unchanged program declarations.
     Guide: [project persistence](../docs/projects-guide.md).
-15. [15_file_source.py](15_file_source.py) — read CSV, JSON Lines, and Parquet
-    through the native file source, calculate order totals, and write them
-    with an exactly-once Parquet sink. Checks `[20.0, 60.0]` for each format;
-    creates and removes its own sample files and checkpoints.
-16. [16_kafka_source.py](16_kafka_source.py) — consume JSON orders from an
-    explicitly assigned Kafka partition, wait for sink delivery, and drain.
-17. [17_postgresql_source.py](17_postgresql_source.py) — read a PostgreSQL
-    repeatable-read snapshot in bounded pages with best-effort delivery.
-18. [18_mysql_source.py](18_mysql_source.py) — read a MySQL InnoDB snapshot
-    in primary-key order, with TLS enabled by default.
-19. [19_clickhouse_source.py](19_clickhouse_source.py) — read a bounded
-    ClickHouse snapshot using a frozen Arrow schema and composite cursor.
-20. [20_http_source.py](20_http_source.py) — poll a JSON Lines endpoint with
-    conditional requests, wait for sink delivery, and drain.
-21. [21_websocket_source.py](21_websocket_source.py) — read JSON frames with
-    blocking backpressure, wait for sink delivery, and drain.
+### Connector read/write examples
 
-The connector `*_source.py` examples numbered 16–21 each check Parquet totals
-`[20.0, 60.0]` from two prepared
-orders and print the effective delivery guarantee. They have a 60-second
-deadline and clean up jobs, outputs, and checkpoints on exit. Each script
-runs independently. The [connector overview](../docs/connectors/README.md)
-links to one page per transport, each with wheel features, environment
-variables, sample SQL/messages, local service commands, and delivery limits.
+All eleven scripts use `cf.table_input`, a reusable `order_totals` function
+with `pipe`, overloaded arithmetic/comparisons, and
+`with_columns` → `filter` → `select`. They export with
+`Program.to_project(mode="stream")`, then supply the native connector and
+managed-job settings. Each connector page below has feature flags, service
+preparation, environment variables, complete run commands, and delivery limits.
+
+| Connector and setup                            | Read example                                       | Write example                                  |
+|------------------------------------------------|----------------------------------------------------|------------------------------------------------|
+| [File](../docs/connectors/file.md)             | [15_file_source.py](15_file_source.py)             | Same script: Parquet sink                      |
+| [Kafka](../docs/connectors/kafka.md)           | [16_kafka_source.py](16_kafka_source.py)           | [22_kafka_sink.py](22_kafka_sink.py)           |
+| [PostgreSQL](../docs/connectors/postgresql.md) | [17_postgresql_source.py](17_postgresql_source.py) | [23_postgresql_sink.py](23_postgresql_sink.py) |
+| [MySQL](../docs/connectors/mysql.md)           | [18_mysql_source.py](18_mysql_source.py)           | [24_mysql_sink.py](24_mysql_sink.py)           |
+| [ClickHouse](../docs/connectors/clickhouse.md) | [19_clickhouse_source.py](19_clickhouse_source.py) | [25_clickhouse_sink.py](25_clickhouse_sink.py) |
+| [HTTP](../docs/connectors/http.md)             | [20_http_source.py](20_http_source.py)             | Source-only connector                          |
+| [WebSocket](../docs/connectors/websocket.md)   | [21_websocket_source.py](21_websocket_source.py)   | Source-only connector                          |
+
+`15_file_source.py` creates CSV, JSON Lines, and Parquet inputs and checks
+Parquet totals `[20.0, 60.0]` with exactly-once delivery for each format. It
+requires no external service and removes its sample files and checkpoints.
+
+The six other `*_source.py` scripts read two prepared orders and check the
+same Parquet totals, sorted by ID. Kafka consumes an assigned partition;
+PostgreSQL and MySQL read bounded transaction snapshots; ClickHouse uses a
+frozen schema and composite cursor; HTTP polls with conditional requests;
+WebSocket uses blocking backpressure. Each prints its effective delivery status.
+
+The four `*_sink.py` scripts generate three temporary Parquet input rows,
+filter a zero-quantity order, and deliver `(id, total) = (1, 20.0), (2, 60.0)`.
+Each checks two delivered rows and its effective guarantee: exactly once for
+Kafka, at least once for PostgreSQL/MySQL append and ClickHouse. Use the
+connector page's readback command to verify the remote values.
+
+Every connector script runs independently with a 60-second deadline and cleans
+up jobs and local files/checkpoints on exit. Remote writes remain in their
+target tables or topics. Use empty, dedicated demo destinations: rerunning
+PostgreSQL/MySQL append hits duplicate primary keys; Kafka/ClickHouse append
+more data. The setup pages explain how to recreate disposable services.
+Temporary checkpoint lineages do not demonstrate durable restart recovery.
 
 ### SQL and streaming pipelines
 
