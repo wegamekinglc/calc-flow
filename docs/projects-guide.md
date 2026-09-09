@@ -151,7 +151,7 @@ tumbling window.
 }
 ```
 
-Stream Join nodes are the other two-input table operator. Both inputs carry an
+Bounded inner Join nodes are another two-input table operator. Both inputs carry an
 exact schema, the bounds and limits are required with no defaults, and the
 output schema is derived from the prefixes rather than declared:
 
@@ -200,6 +200,29 @@ output schema is derived from the prefixes rather than declared:
   }
 }
 ```
+
+## Bounded backward ASOF Join
+
+ASOF has the independent operator kind `stream_asof_join`. Its nested `spec`
+contains required `left` and `right` declarations, `tolerance_micros`, and
+`limits`; `late_policy` defaults to `"error"`. Each side records ordered `keys`,
+`event_time`, ordered `sequence_by`, and `prefix`. Limits are the whole-operator
+`max_state_rows` and `max_state_bytes`; all numeric settings use the JSON-safe
+integer domain. Unknown fields are rejected at every object level.
+
+The two required table ports are `left` and `right`, each with an exact schema.
+Key/time/sequence fields are non-null, and event time is `timestamp[us, UTC]`.
+The derived `output` preserves left fields and makes all prefixed right fields
+nullable. The [generated schema](../schemas/project-v3.schema.json) defines the
+complete serialized shape. Use the [immutable Python spec and builder](python-api.md#bounded-backward-asof-join)
+or export an expression Program in stream mode to construct this graph.
+
+The [ASOF guide](asof-join-guide.md) defines selection, watermark/idle waiting,
+late policies, resource bounds, and recovery. A connector-backed project must
+provide watermark progress on all source paths reaching ASOF. Studio's generic
+import, inspection, and save preserve this kind and its nested configuration;
+there is no dedicated ASOF editor. Project format and managed manifests remain
+v3, and inner `stream_join` has its own independent spec and checkpoint identity.
 
 ## Static input declarations
 

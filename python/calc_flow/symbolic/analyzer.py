@@ -301,7 +301,7 @@ def _resolves_to_input_column(node: Node, /) -> bool:
 
 def _table_field_resolves_to_input(table: Node, field_name: str, /) -> bool:
     operation = table.op.name
-    if operation in ("table_input", "stream_join"):
+    if operation in ("table_input", "stream_join", "stream_asof_join"):
         return True
     if operation in ("project", "filter"):
         return _table_field_resolves_to_input(table.args[0], field_name)
@@ -334,7 +334,7 @@ def _stateful_operand_is_stageable(node: Node, /) -> bool:
 
 def _table_field_is_stageable(table: Node, field_name: str, /) -> bool:
     operation = table.op.name
-    if operation in ("table_input", "stream_join"):
+    if operation in ("table_input", "stream_join", "stream_asof_join"):
         return True
     if operation in ("project", "filter"):
         return _table_field_is_stageable(table.args[0], field_name)
@@ -594,6 +594,7 @@ class _Analyzer:
                 "sql",
                 "attach_columns",
                 "stream_join",
+                "stream_asof_join",
             }:
                 boundaries[current.digest] = self._table_cache[current.digest].schema
             else:
@@ -610,6 +611,7 @@ class _Analyzer:
             "with_columns": self._with_columns_table,
             "attach_columns": self._attach_columns_table,
             "stream_join": self._stream_join_table,
+            "stream_asof_join": self._stream_asof_join_table,
             "window_tumbling": self._window_table,
             "window_hopping": self._window_table,
             "sql": self._sql_table,
@@ -721,7 +723,10 @@ class _Analyzer:
     def _filter_table(self, node: Node, path: str, /) -> TableFacts:
         child = self.table(node.args[0], f"{path}.filter.value")
         predicate = self.column(node.args[1], f"{path}.filter.predicate")
-        if "stream_join" in child.state and _contains_stateful_primitive(node.args[1]):
+        if child.state & {
+            "stream_join",
+            "stream_asof_join",
+        } and _contains_stateful_primitive(node.args[1]):
             self._require_post_join_ordering(
                 child,
                 f"{path}.filter.value",
@@ -768,7 +773,7 @@ class _Analyzer:
             elif facts.data_type is not None:
                 fields.append(Field(name, facts.data_type, facts.nullable))
                 existing.add(name)
-        if "stream_join" in child.state and any(
+        if child.state & {"stream_join", "stream_asof_join"} and any(
             _contains_stateful_primitive(expression) for expression in node.args[1:]
         ):
             self._require_post_join_ordering(
@@ -806,6 +811,11 @@ class _Analyzer:
             child.entity_by,
             child.sequence_by,
         )
+
+    def _stream_asof_join_table(self, node: Node, path: str, /) -> TableFacts:
+        from calc_flow.symbolic.asof import analyze_asof
+
+        return analyze_asof(self, node, path)
 
     def _stream_join_table(self, node: Node, path: str, /) -> TableFacts:
         role = f"{path}.stream_join"
@@ -888,7 +898,7 @@ class _Analyzer:
         selected_event_time: str | None,
         /,
     ) -> None:
-        if "stream_join" in facts.state:
+        if facts.state & {"stream_join", "stream_asof_join"}:
             self._require_post_join_ordering(
                 facts,
                 f"{role}.{side_name}",
@@ -1213,6 +1223,12 @@ class _Analyzer:
 
     def _legacy_window_table(self, node: Node, path: str, /) -> TableFacts:
         child = self.table(node.args[0], f"{path}.{node.op.name}.value")
+        if "stream_asof_join" in child.state:
+            self.issue(
+                path,
+                "capability_mismatch",
+                "event windows after ASOF are not supported",
+            )
         if "stream_join" in child.state:
             self._require_post_join_ordering(
                 child,

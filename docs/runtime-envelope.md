@@ -284,7 +284,8 @@ compile time, before any source opens:
 Stream graphs compose unary expression nodes, single-input SQL nodes,
 explicit stream providers, `RollingOperator`, `CrossSectionOperator`,
 `UnionOperator`, `WindowAggregateOperator`, and the two-input bounded
-event-time `StreamJoinOperator`. A union's two or more input ports share one
+event-time `StreamJoinOperator` and `StreamAsofJoinOperator`. A union's two or
+more input ports share one
 kind, one required flag, and one exact schema, or are all schema-less.
 
 The compiled plan records the deterministic topology, stable edge IDs, the
@@ -431,6 +432,26 @@ inline metadata. Recovery removes that envelope only after checking the stored
 version against the compiled capability; missing or mismatched versions fail
 closed before operator tasks are spawned. Stateless operators must produce and
 restore empty state.
+
+ASOF additionally receives every ingress progress change through a private
+compiled-operator hook with a bounded collector, including changes that create
+no new aggregate watermark emission. It finalizes left rows only after both
+sides strictly pass their time or end. Idle ingresses keep their watermark in
+that decision, and output idle is suppressed before dual EOF. After emitting
+all rows below the unfinished-input minimum `C`, ASOF forwards at most `C - 1`
+microsecond; no watermark is emitted for an underflowing predecessor. This
+preserves downstream acceptance of later legal rows at `C`. The public
+`StreamOperator` trait gains no new control-injection or callback requirement.
+
+ASOF prepares one complete compacted segment during bounded asynchronous
+handlers; its synchronous `checkpoint` capture shares that allocation rather
+than encoding all retained rows. Each full-state preparation is
+`O(retained state)` and repeats for each accepted output chunk; total handler
+work includes those repeated preparations. Restore cross-validates native
+rows/counters/terminal state
+with the wrapper's ingress progress and output frontier before readiness is
+acknowledged. All sources reaching ASOF must have a non-disabled valid watermark
+policy at preflight. See [ASOF state and recovery](asof-join-guide.md#recovery-status-and-delivery).
 
 ## Sink tasks
 
@@ -586,7 +607,9 @@ and the lossless admission/drain/terminal/settlement execution trace.
 Multi-ingress progress uses the minimum watermark of known active inputs; idle
 and ended inputs are excluded. Data and legal watermarks reactivate before
 processing, and all-ended emits one plain `EndOfInput` without a sentinel
-watermark.
+watermark. Stateful operators may maintain a more conservative output
+frontier; ASOF retains idle input progress and applies the strict closure
+contract described under [operator tasks](#operator-tasks-and-barrier-alignment).
 
 The crate-private transient snapshot captures the exact prepared/config,
 upstream cursor/control, trace, gate/fence, allocator, aggregate, and timer

@@ -93,6 +93,7 @@ pub(crate) struct OperatorProgressSnapshot {
     pub(crate) null_event_time_rows: u64,
     pub(crate) null_event_time_batches: u64,
     pub(crate) stream_join: Option<crate::StreamJoinStatus>,
+    pub(crate) stream_asof_join: Option<crate::StreamAsofJoinStatus>,
 }
 
 #[derive(Clone, Default)]
@@ -148,6 +149,10 @@ impl OperatorProgress {
 
     fn observe_stream_join(&self, status: crate::StreamJoinStatus) {
         self.0.lock().stream_join = Some(status);
+    }
+
+    fn observe_stream_asof_join(&self, status: crate::StreamAsofJoinStatus) {
+        self.0.lock().stream_asof_join = Some(status);
     }
 }
 
@@ -243,6 +248,9 @@ fn reset_and_acknowledge(
         Ok(input_progress) => (Ok(()), Some(input_progress)),
         Err(error) => (Err(error), None),
     };
+    if let Some(progress) = &input_progress {
+        observe_asof_status(inputs, progress.output_frontier);
+    }
     restore_ingress_completion(inputs, input_progress.is_some());
     let dropped_message = dropped_ack_message(inputs, input_progress.is_some());
     inputs
@@ -258,11 +266,10 @@ fn reset_and_acknowledge(
 }
 
 fn reset_operator(inputs: &mut OperatorTaskInputs, task_id: TaskId) -> Result<()> {
-    let restore_snapshot = inputs.restore.as_ref().map(|restore| &restore.snapshot);
     match catch_unwind(AssertUnwindSafe(|| {
         inputs.operator.reset()?;
-        if let Some(snapshot) = restore_snapshot {
-            inputs.operator.restore(snapshot)?;
+        if let Some(restore) = &inputs.restore {
+            restore_operator_state(&mut inputs.operator, &inputs.ingresses, restore)?;
         }
         Ok(())
     })) {
@@ -272,6 +279,51 @@ fn reset_operator(inputs: &mut OperatorTaskInputs, task_id: TaskId) -> Result<()
             message: panic_message(payload.as_ref()),
         }),
     }
+}
+
+fn restore_operator_state(
+    operator: &mut CompiledStreamOperator,
+    ingresses: &BTreeMap<String, OperatorIngress>,
+    restore: &OperatorRestoreState,
+) -> Result<()> {
+    if !matches!(operator, CompiledStreamOperator::StreamAsofJoin(_)) {
+        return operator.restore(&restore.snapshot);
+    }
+    let progress = OperatorInputProgress::restore(
+        ingresses.keys(),
+        &restore.progress,
+        restore.output_frontier,
+    )?;
+    operator.restore_with_progress(
+        &restore.snapshot,
+        &progress.snapshot()?,
+        restore.output_frontier,
+    )
+}
+
+/// Validates terminal ASOF state through the same ingress contract as task entry.
+pub(super) fn restore_terminal_asof<'a>(
+    operator: &mut CompiledStreamOperator,
+    ingresses: impl IntoIterator<Item = &'a String>,
+    restore: &OperatorRestoreState,
+) -> Result<OperatorProgress> {
+    let inputs =
+        OperatorInputProgress::restore(ingresses, &restore.progress, restore.output_frontier)?;
+    operator.restore_with_progress(
+        &restore.snapshot,
+        &inputs.snapshot()?,
+        restore.output_frontier,
+    )?;
+    let mut status = operator
+        .stream_asof_join_status()
+        .ok_or_else(|| CalcFlowError::Internal {
+            message: "terminal ASOF recovery requires an ASOF operator".into(),
+        })?;
+    status.output_watermark_micros = restore.output_frontier;
+    let progress = OperatorProgress::default();
+    progress.observe_stream_asof_join(status);
+    progress.mark_ended();
+    Ok(progress)
 }
 
 fn restore_ingress_completion(inputs: &mut OperatorTaskInputs, succeeded: bool) {
@@ -498,7 +550,15 @@ async fn dispatch_message(
     if let Some(status) = inputs.operator.stream_join_status() {
         inputs.progress.observe_stream_join(status);
     }
+    observe_asof_status(inputs, input_progress.output_frontier);
     result
+}
+
+fn observe_asof_status(inputs: &OperatorTaskInputs, output_frontier: Option<EventTime>) {
+    if let Some(mut status) = inputs.operator.stream_asof_join_status() {
+        status.output_watermark_micros = output_frontier;
+        inputs.progress.observe_stream_asof_join(status);
+    }
 }
 
 /// Evaluates one watermark/idle input and forwards the resulting transitions.
@@ -962,10 +1022,23 @@ async fn dispatch_progress_transition(
         output_budget,
         late_metrics,
     );
-    inputs
+    let mut collector = ChannelStreamCollector::new(
+        &inputs.node_id,
+        inputs.context.job().job_id(),
+        &inputs.output_ports,
+        &mut inputs.outputs,
+        inputs.context.job().cancellation(),
+        &inputs.progress,
+        &inputs.metrics,
+    );
+    let progress_result = inputs
         .operator
-        .on_ingress_progress(ingress_name, &context)
-        .await?;
+        .on_ingress_progress(ingress_name, &context, &mut collector)
+        .await;
+    inputs
+        .progress
+        .observe_datafusion_runtime(inputs.operator.datafusion_runtime_initialized());
+    progress_result?;
     let emit_idle = apply_progress_emissions(
         inputs,
         ingress_name,
@@ -981,7 +1054,7 @@ async fn dispatch_progress_transition(
         output_frontier,
     )
     .await?;
-    if emit_idle {
+    if emit_idle && !inputs.operator.suppresses_output_idle() {
         dispatch_idle(inputs, ingress_name, StreamMessage::idle()).await?;
     }
     Ok(())
@@ -1370,6 +1443,8 @@ fn runtime_routes_error(node_id: &str, port: &str) -> CalcFlowError {
 
 #[cfg(test)]
 pub(super) mod tests {
+    mod asof_tests;
+
     use std::{
         any::Any,
         collections::BTreeMap,

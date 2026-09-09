@@ -20,6 +20,8 @@ local browser interface.
   [array guide](array-guide.md).
 - Compute rolling features, cross-section statistics, and bounded event-time
   joins: [expression workflows](symbolic-workflows.md).
+- Attach the latest historical value to each event with a bounded
+  [backward ASOF Join](asof-join-guide.md), preserving unmatched left rows.
 - Iterate Arrow results from async sources with native state across batches:
   [streaming guide](streaming-guide.md#first-python-continuous-job). Use explicit
   sources, sinks, and managed checkpoints for durable recovery.

@@ -1270,6 +1270,10 @@ impl PyStreamingJob {
         let joins = job.stream_join_status();
         let join_values = stream_join_status_to_py(py, &joins)?;
         status.set_item("stream_joins", join_values)?;
+        status.set_item(
+            "stream_asof_joins",
+            stream_asof_status_to_py(py, &job.stream_asof_join_status())?,
+        )?;
         Ok(status)
     }
 
@@ -1747,6 +1751,58 @@ fn stream_join_status_value_to_py<'py>(
     Ok(value)
 }
 
+fn stream_asof_status_to_py<'py>(
+    py: Python<'py>,
+    statuses: &BTreeMap<String, calc_flow::StreamAsofJoinStatus>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let values = PyDict::new(py);
+    for (node_id, status) in statuses {
+        values.set_item(node_id, stream_asof_status_value_to_py(py, status)?)?;
+    }
+    Ok(values)
+}
+
+fn stream_asof_status_value_to_py<'py>(
+    py: Python<'py>,
+    status: &calc_flow::StreamAsofJoinStatus,
+) -> PyResult<Bound<'py, PyDict>> {
+    let value = PyDict::new(py);
+    set_py_items!(value, {
+        "left" => stream_asof_side_to_py(py, &status.left)?,
+        "right" => stream_asof_side_to_py(py, &status.right)?,
+        "pending_left_rows" => status.pending_left_rows,
+        "retained_right_rows" => status.retained_right_rows,
+        "identity_only_rows" => status.identity_only_rows,
+        "state_rows" => status.state_rows,
+        "state_bytes" => status.state_bytes,
+        "emitted_left_rows" => status.emitted_left_rows,
+        "matched_rows" => status.matched_rows,
+        "unmatched_rows" => status.unmatched_rows,
+        "evicted_right_rows" => status.evicted_right_rows,
+        "state_limit_failures" => status.state_limit_failures,
+        "workspace_limit_failures" => status.workspace_limit_failures,
+        "output_limit_failures" => status.output_limit_failures,
+        "output_watermark_micros" => status.output_watermark_micros.map(calc_flow::EventTime::as_micros),
+    });
+    Ok(value)
+}
+
+fn stream_asof_side_to_py<'py>(
+    py: Python<'py>,
+    side: &calc_flow::StreamAsofJoinSideStatus,
+) -> PyResult<Bound<'py, PyDict>> {
+    let value = PyDict::new(py);
+    set_py_items!(value, {
+        "accepted_rows" => side.accepted_rows,
+        "late_rows" => side.late_rows,
+        "duplicate_rows" => side.duplicate_rows,
+        "watermark_micros" => side.watermark_micros.map(calc_flow::EventTime::as_micros),
+        "idle" => side.idle,
+        "ended" => side.ended,
+    });
+    Ok(value)
+}
+
 fn stream_join_side_to_py<'py>(
     py: Python<'py>,
     side: &calc_flow::StreamJoinSideStatus,
@@ -1998,6 +2054,20 @@ const fn streaming_failure_reason_name(
         calc_flow::StreamingFailureReason::JoinTimeConversionFailed => {
             Some("join_time_conversion_failed")
         }
+        calc_flow::StreamingFailureReason::AsofInvalidInput => Some("asof_invalid_input"),
+        calc_flow::StreamingFailureReason::AsofDuplicateIdentity => Some("asof_duplicate_identity"),
+        calc_flow::StreamingFailureReason::AsofLateRow => Some("asof_late_row"),
+        calc_flow::StreamingFailureReason::AsofStateLimitExceeded => {
+            Some("asof_state_limit_exceeded")
+        }
+        calc_flow::StreamingFailureReason::AsofWorkspaceLimitExceeded => {
+            Some("asof_workspace_limit_exceeded")
+        }
+        calc_flow::StreamingFailureReason::AsofOutputLimitExceeded => {
+            Some("asof_output_limit_exceeded")
+        }
+        calc_flow::StreamingFailureReason::AsofCounterOverflow => Some("asof_counter_overflow"),
+        calc_flow::StreamingFailureReason::AsofProtocolError => Some("asof_protocol_error"),
         _ => None,
     }
 }
@@ -2098,6 +2168,51 @@ mod tests {
         PyContinuousStreamingRunner, PyManagedCheckpointRuntime, checked_static_array_shape,
     };
     use crate::{batch::PyBatch, pipeline::PyStreamExecutionPlan};
+
+    #[test]
+    fn asof_status_preserves_native_integer_ranges() {
+        Python::initialize();
+        Python::attach(|py| {
+            let mut status = calc_flow::StreamAsofJoinStatus::default();
+            status.left.accepted_rows = u64::MAX;
+            status.left.watermark_micros = Some(EventTime::from_micros(i64::MIN));
+            status.right.watermark_micros = Some(EventTime::from_micros(i64::MAX));
+            status.right.ended = true;
+            let value = super::stream_asof_status_value_to_py(py, &status).unwrap();
+            let left = value.get_item("left").unwrap().unwrap();
+            let right = value.get_item("right").unwrap().unwrap();
+            assert_eq!(
+                left.get_item("accepted_rows")
+                    .unwrap()
+                    .extract::<u64>()
+                    .unwrap(),
+                u64::MAX
+            );
+            assert_eq!(
+                left.get_item("watermark_micros")
+                    .unwrap()
+                    .extract::<i64>()
+                    .unwrap(),
+                i64::MIN
+            );
+            assert_eq!(
+                right
+                    .get_item("watermark_micros")
+                    .unwrap()
+                    .extract::<i64>()
+                    .unwrap(),
+                i64::MAX
+            );
+            assert!(right.get_item("ended").unwrap().extract::<bool>().unwrap());
+            assert!(
+                value
+                    .get_item("output_watermark_micros")
+                    .unwrap()
+                    .unwrap()
+                    .is_none()
+            );
+        });
+    }
 
     struct PendingSource {
         closed: Arc<AtomicBool>,
@@ -2932,7 +3047,7 @@ mod tests {
                 .unwrap();
             py.run(
                 &CString::new(
-                    "import asyncio\nasync def exercise():\n    assert 'consumed=false' in repr(runner)\n    job = await runner.start_async()\n    assert job.id > 0\n    while 'transactional.write:1' not in events:\n        await asyncio.sleep(0)\n    epoch = await job.trigger_checkpoint_async()\n    assert epoch >= 1\n    source.release.set()\n    status = job.status()\n    assert status['job_id'] == job.id\n    assert set(status) == {'job_id', 'state', 'terminal_cause', 'delivery', 'task_count', 'task_errors', 'metrics_overflowed', 'watermark_micros', 'edges', 'sources', 'operators', 'sinks', 'checkpoint', 'stream_joins'}\n    assert status['stream_joins'] == {}
+                    "import asyncio\nasync def exercise():\n    assert 'consumed=false' in repr(runner)\n    job = await runner.start_async()\n    assert job.id > 0\n    while 'transactional.write:1' not in events:\n        await asyncio.sleep(0)\n    epoch = await job.trigger_checkpoint_async()\n    assert epoch >= 1\n    source.release.set()\n    status = job.status()\n    assert status['job_id'] == job.id\n    assert set(status) == {'job_id', 'state', 'terminal_cause', 'delivery', 'task_count', 'task_errors', 'metrics_overflowed', 'watermark_micros', 'edges', 'sources', 'operators', 'sinks', 'checkpoint', 'stream_joins', 'stream_asof_joins'}\n    assert status['stream_joins'] == {}
     outcome = await job.wait_async()\n    assert outcome['state'] == 'completed', outcome\n    assert outcome['cause'] == 'natural_end'\n    assert outcome['errors'] == ()\n    assert 'state=completed' in repr(job)\nasyncio.run(exercise())\nassert 'source.open' in events\nassert 'sink.open' in events\nassert 'sink.write:1' in events\nassert 'source.close' in events\nassert 'sink.close' in events\nassert any(value.startswith('transactional.begin:') for value in events)\nassert any(value.startswith('transactional.pre_commit:') for value in events)\nassert any(value.startswith('transactional.commit:') for value in events)\nassert 'transactional.close' in events",
                 )
                 .unwrap(),

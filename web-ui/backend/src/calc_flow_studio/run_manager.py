@@ -36,6 +36,7 @@ from calc_flow import (
 )
 from pydantic import ValidationError
 
+from calc_flow_studio.asof_metrics import stream_asof_progress
 from calc_flow_studio.models import (
     CapabilitiesResponse,
     JobResponse,
@@ -68,6 +69,14 @@ _STREAM_JOIN_FAILURE_REASONS = frozenset(
         "join_match_limit_exceeded",
         "join_counter_overflow",
         "join_time_conversion_failed",
+        "asof_invalid_input",
+        "asof_duplicate_identity",
+        "asof_late_row",
+        "asof_state_limit_exceeded",
+        "asof_workspace_limit_exceeded",
+        "asof_output_limit_exceeded",
+        "asof_counter_overflow",
+        "asof_protocol_error",
     }
 )
 
@@ -1127,6 +1136,7 @@ def _continuous_progress(status: dict[str, object]) -> dict[str, object]:
         "backpressure_events": backpressure,
         "late_rows": late_rows,
         "stream_joins": _stream_join_progress(status.get("stream_joins")),
+        "stream_asof_joins": stream_asof_progress(status.get("stream_asof_joins")),
     }
 
 
@@ -1940,6 +1950,9 @@ class RunManager:
                         backpressure_events=int(message.get("backpressure_events", 0)),
                         late_rows=int(message.get("late_rows", 0)),
                         stream_joins=_stream_join_progress(message.get("stream_joins")),
+                        stream_asof_joins=stream_asof_progress(
+                            message.get("stream_asof_joins")
+                        ),
                     )
                 elif kind == "checkpoint":
                     self._job_event(

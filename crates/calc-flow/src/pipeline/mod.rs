@@ -187,7 +187,7 @@ impl PipelineBuilder {
             NodeOperator::CrossSection(_) => OperatorCheckpointCapability::CheckpointedStateful {
                 state_version: crate::operator::CROSS_SECTION_STATE_LAYOUT_VERSION,
             },
-            NodeOperator::StreamJoin(_) => {
+            NodeOperator::StreamJoin(_) | NodeOperator::StreamAsofJoin(_) => {
                 OperatorCheckpointCapability::CheckpointedStateful { state_version: 1 }
             }
             NodeOperator::Stream(operator) if operator.lifecycle().is_proven_stateless() => {

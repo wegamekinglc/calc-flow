@@ -143,6 +143,9 @@ const CHECKPOINT_SOAK_SMOKE_CHECKPOINT_WAIT: Duration =
     Duration::from_millis(CHECKPOINT_SOAK_SMOKE_WAIT_MILLIS);
 const CHECKPOINT_SOAK_SMOKE_GENERATION_TIMEOUT: Duration = Duration::from_secs(300);
 const CHECKPOINT_SOAK_SETTLE_TIMEOUT: Duration = Duration::from_secs(60);
+// Fault cases assert terminal phase and cleanup separately. Their test watchdog
+// must allow settlement after the five-second checkpoint deadline under I/O load.
+const CHECKPOINT_FAULT_SETTLE_TIMEOUT: Duration = Duration::from_secs(30);
 const CHECKPOINT_SOAK_CHECKPOINT_TIMEOUT_MILLIS: u64 = 10_000;
 const CHECKPOINT_SOAK_SMOKE_TARGET_CHECKPOINTS: u64 = 12;
 // Process-level smoke runs compete for the same host CPU and filesystem budget,
@@ -4075,11 +4078,17 @@ async fn run_checkpoint_restart_fault_case(
         panic!("fault case {point:?}/{mode:?} failed to start: {failure:?}")
     });
     wait_for_checkpoint_matrix_sources(&first_job, &output_probe).await;
-    let (manual, first_outcome) = tokio::time::timeout(Duration::from_secs(5), async {
+    let (manual, first_outcome) = tokio::time::timeout(CHECKPOINT_FAULT_SETTLE_TIMEOUT, async {
         tokio::join!(first_job.trigger_checkpoint(), first_job.wait())
     })
     .await
-    .unwrap_or_else(|error| panic!("fault case {point:?}/{mode:?} hung: {error}"));
+    .unwrap_or_else(|error| {
+        let probe = first_job.test_probe();
+        panic!(
+            "fault case {point:?}/{mode:?} hung: {error}; status={:?}, fault_triggers={}, cancellation_triggers={}",
+            first_job.status(), probe.checkpoint_fault_triggers, probe.cancellation_triggers
+        )
+    });
     let manual_observation = checkpoint_manual_observation(manual);
     let first_status = first_job.status();
     let first_probe = first_job.test_probe();
@@ -4330,9 +4339,14 @@ async fn run_checkpoint_restart_fault_case(
     let restart_job = restart_runner.start().await.unwrap_or_else(|failure| {
         panic!("restart case {point:?}/{mode:?} failed to start: {failure:?}")
     });
-    let restart_outcome = tokio::time::timeout(Duration::from_secs(5), restart_job.wait())
+    let restart_outcome = tokio::time::timeout(CHECKPOINT_FAULT_SETTLE_TIMEOUT, restart_job.wait())
         .await
-        .unwrap_or_else(|error| panic!("restart case {point:?}/{mode:?} hung: {error}"));
+        .unwrap_or_else(|error| {
+            panic!(
+                "restart case {point:?}/{mode:?} hung: {error}; status={:?}",
+                restart_job.status()
+            )
+        });
     assert_eq!(
         restart_outcome.state,
         PublicJobState::Completed,

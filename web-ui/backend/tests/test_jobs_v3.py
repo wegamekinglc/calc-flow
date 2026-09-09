@@ -393,9 +393,24 @@ def test_worker_death_without_terminal_event_is_a_typed_failure(
     assert failed["error"] == "worker exited without a terminal event"
 
 
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "join_state_limit_exceeded",
+        "asof_invalid_input",
+        "asof_duplicate_identity",
+        "asof_late_row",
+        "asof_state_limit_exceeded",
+        "asof_workspace_limit_exceeded",
+        "asof_output_limit_exceeded",
+        "asof_counter_overflow",
+        "asof_protocol_error",
+    ],
+)
 def test_worker_join_failure_reason_survives_terminal_response(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    reason: str,
 ) -> None:
     def failed_worker(_project_json: str, _commands: object, output: object) -> None:
         output.put(
@@ -404,7 +419,7 @@ def test_worker_join_failure_reason_survives_terminal_response(
                 "state": "failed",
                 "cause": "failure",
                 "error": "operator failed",
-                "reason_code": "join_state_limit_exceeded",
+                "reason_code": reason,
             }
         )
 
@@ -421,7 +436,7 @@ def test_worker_join_failure_reason_survives_terminal_response(
     failed = manager.get_job(started.id).model_dump(mode="json")
 
     assert failed["error_code"] == "worker_failed"
-    assert failed["reason_code"] == "join_state_limit_exceeded"
+    assert failed["reason_code"] == reason
     assert failed["error"] == "operator failed"
 
 

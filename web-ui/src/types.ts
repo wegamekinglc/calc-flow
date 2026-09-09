@@ -43,6 +43,8 @@ export interface StreamJoinMetrics {
   match_limit_failures: number;
 }
 
+export type StreamAsofJoinMetrics = components['schemas']['StreamAsofJoinMetrics'];
+
 export interface JobEvent {
   sequence: number;
   timestamp: string;
@@ -58,6 +60,7 @@ export interface JobEvent {
   backpressure_events?: number;
   late_rows?: number;
   stream_joins?: StreamJoinMetrics[] | null;
+  stream_asof_joins?: StreamAsofJoinMetrics[] | null;
 }
 
 export interface UdfCatalogEntry {

@@ -3,7 +3,7 @@ import type { Dispatch } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ApiContractError } from '../api/client';
-import type { JobResponse } from '../types';
+import type { JobResponse, StreamAsofJoinMetrics } from '../types';
 import { useJobEvents } from './useJobEvents';
 import { at } from '../types';
 
@@ -61,7 +61,7 @@ afterEach(() => {
 });
 
 describe('useJobEvents', () => {
-  it('forwards progress payloads and refreshes authoritative job state', async () => {
+  it('preserves full ASOF integer strings and refreshes authoritative job state', async () => {
     const onUpdate = vi.fn();
     const onEvent = vi.fn();
     const onError = vi.fn();
@@ -74,6 +74,23 @@ describe('useJobEvents', () => {
       useJobEvents('job-1', onUpdate, onEvent, onError);
     });
     const source = at(FakeEventSource.instances);
+    const asof: StreamAsofJoinMetrics = {
+      node_id: 'asof',
+      left: {
+        accepted_rows: '18446744073709551615', late_rows: '0', duplicate_rows: '0',
+        watermark_micros: '-9223372036854775808', idle: false, ended: false,
+      },
+      right: {
+        accepted_rows: '1', late_rows: '0', duplicate_rows: '0',
+        watermark_micros: '9223372036854775807', idle: true, ended: false,
+      },
+      pending_left_rows: '0', retained_right_rows: '1', identity_only_rows: '0',
+      state_rows: '1', state_bytes: '9007199254740991',
+      emitted_left_rows: '18446744073709551615', matched_rows: '18446744073709551615',
+      unmatched_rows: '0', evicted_right_rows: '0', state_limit_failures: '0',
+      workspace_limit_failures: '0', output_limit_failures: '0',
+      output_watermark_micros: null,
+    };
     const progress = {
       sequence: 2,
       timestamp: '2026-01-01T00:00:02Z',
@@ -81,6 +98,7 @@ describe('useJobEvents', () => {
       message: 'running',
       epoch: 7,
       throughput_rows: 42,
+      stream_asof_joins: [asof],
     };
     act(() => {
       source.emit('progress', JSON.stringify(progress));

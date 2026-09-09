@@ -95,6 +95,11 @@ for financial features, recovery, and matrices. Run 12 → 13 for a bounded
 two-stream match followed by an ordered nested join. Consult the
 [expression API](symbolic-api.md) for declaration and ordering requirements.
 
+Run [22_stream_asof_join.py](../examples/22_stream_asof_join.py) for each
+trade's latest eligible historical quote. It checks that equal watermarks do
+not emit, then produces one matched price and one null after progress. Read the
+[ASOF guide](asof-join-guide.md) for strict types, tie ordering, and delivery limits.
+
 ## Use the local browser application
 
 Read the [Studio guide](studio-guide.md) to edit and inspect the same project

@@ -9,6 +9,16 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-09: Add the independent `stream_asof_join@1` native operator for
+  bounded backward stream matching. Typed sequence identities make equal-time
+  selection deterministic; strict dual-watermark finality preserves each
+  accepted left row with nullable unmatched right fields. Immutable Python
+  expression/builder declarations, project-v3 contracts, checkpoint recovery,
+  bounded state/workspace, late policies, and payload-free status share the
+  native implementation. Studio carries new ASOF metrics as exact decimal
+  strings and preserves the new project kind on import/save. Existing inner
+  Join configuration and checkpoint contracts remain independent.
+
 - 2026-09-09: Make Python expressions, SQL, and composable functions the
   application API, with Rust as the internal runtime. Root imports, overloaded
   operators, named table methods, inferred Arrow schemas, and automatic Program
