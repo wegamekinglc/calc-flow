@@ -80,6 +80,12 @@ underlying storage read-only until execution completes; this is not a deep
 copy of table contents. Async collection copies input mappings and captures
 `Batch` references at call time, before awaiting execution.
 
+Zero-column Arrow inputs can still contain rows. Metadata normalization
+preserves those row counts for `compute`/`compute_async`, `TableExpr` and
+`Program` collection (including async forms), and async iterable stream
+inputs. Projecting a literal over a three-row, zero-column input therefore
+produces three result rows.
+
 ### Temporal ordering
 
 `compute` and `compute_async` infer an input with no ordering declaration.
@@ -716,7 +722,6 @@ async def run() -> None:
     if output["total"].to_pylist() != [3, 7]:
         raise RuntimeError(f"unexpected async totals: {output.to_pylist()}")
     print(output.to_pylist())
-
 ```
 
 Blocking `compute`, `collect`, `execute`, store, and runner methods reject a

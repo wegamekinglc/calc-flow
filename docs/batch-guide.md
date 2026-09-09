@@ -23,16 +23,20 @@ filters derived values, and selects the final columns:
 import calc_flow as cf
 import pyarrow as pa
 
-data = pa.table({
-    "order_id": ["A-100", "A-101", "A-102"],
-    "quantity": [3, 1, 4],
-    "unit_price": [10, 12, 10],
-})
+data = pa.table(
+    {
+        "order_id": ["A-100", "A-101", "A-102"],
+        "quantity": [3, 1, 4],
+        "unit_price": [10, 12, 10],
+    }
+)
+
 
 def large_orders(t: cf.TableExpr) -> cf.TableExpr:
     gross = t["quantity"] * t["unit_price"]
     enriched = t.with_columns(gross=gross, fee=cf.row.cast(gross, "float64") / 10.0)
     return enriched.filter(enriched["gross"] >= 20).select("order_id", "gross")
+
 
 rows = cf.compute(data, large_orders)
 assert rows.to_pylist() == [
@@ -151,10 +155,13 @@ Continue with the `data` orders table above:
 ```python
 t = cf.table_input("orders", schema=data.schema)
 gross = t["quantity"] * t["unit_price"]
-program = cf.Program("orders", outputs={
-    "totals": t.select("order_id", gross=gross),
-    "quantities": t.select("order_id", "quantity"),
-})
+program = cf.Program(
+    "orders",
+    outputs={
+        "totals": t.select("order_id", gross=gross),
+        "quantities": t.select("order_id", "quantity"),
+    },
+)
 tables = program.collect({"orders": data})
 assert list(tables) == ["totals", "quantities"]
 assert tables["totals"]["gross"].to_pylist() == [30, 12, 40]
@@ -179,22 +186,29 @@ Reusable Python functions can compose rolling formulas and named results.
 Declare ordering on `cf.table_input`, then collect from the returned expression:
 
 ```python
-quote_schema = pa.schema([
-    pa.field("symbol", pa.string(), nullable=False),
-    pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
-    pa.field("price", pa.float64(), nullable=False),
-])
-quotes = pa.table({
-    "symbol": ["AAA", "AAA", "AAA"],
-    "ts": [1_000_000, 2_000_000, 3_000_000],
-    "price": [100.0, 102.0, 101.0],
-}, schema=quote_schema)
+quote_schema = pa.schema(
+    [
+        pa.field("symbol", pa.string(), nullable=False),
+        pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
+        pa.field("price", pa.float64(), nullable=False),
+    ]
+)
+quotes = pa.table(
+    {
+        "symbol": ["AAA", "AAA", "AAA"],
+        "ts": [1_000_000, 2_000_000, 3_000_000],
+        "price": [100.0, 102.0, 101.0],
+    },
+    schema=quote_schema,
+)
+
 
 def signals(q: cf.TableExpr) -> cf.TableExpr:
     price = q["price"]
     momentum = price / cf.ts.lag(price) - 1.0
     mean = cf.ts.mean(price, window=cf.rows(3))
     return q.select("symbol", "ts", momentum=momentum, mean_price=mean)
+
 
 source = cf.table_input(
     "quotes",
@@ -239,6 +253,8 @@ Arrow buffers remain shared; keep the underlying storage read-only until the
 awaited execution completes. No table-content deep copy is promised. Arrow
 schema/field metadata are omitted from the internal execution schema only;
 caller objects and metadata, including `Batch.metadata`, remain intact.
+This normalization also preserves row counts when an Arrow input has zero
+columns; see [input metadata and row counts](python-api.md#compute-arrow-data).
 
 Options copy caller settings and normalize aware deadlines to UTC. Deadlines
 are cooperative; cancellation waits for native work and cleanup to settle.

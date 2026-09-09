@@ -56,10 +56,13 @@ logical outputs:
 ```python
 t = cf.table_input("orders", schema=data.schema)
 gross = t["quantity"] * t["unit_price"]
-program = cf.Program("orders", outputs={
-    "totals": t.select("order_id", gross=gross),
-    "quantities": t.select("order_id", "quantity"),
-})
+program = cf.Program(
+    "orders",
+    outputs={
+        "totals": t.select("order_id", gross=gross),
+        "quantities": t.select("order_id", "quantity"),
+    },
+)
 tables = program.collect({"orders": data})
 assert list(tables) == ["totals", "quantities"]
 assert tables["totals"]["gross"].to_pylist() == [30, 12, 40]
