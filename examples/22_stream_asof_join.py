@@ -61,6 +61,17 @@ async def events(batch: pa.Table, advance: asyncio.Event):
     yield watermark(122)
 
 
+async def wait_for_watermarks(job: cf.StreamingJob, micros: int) -> None:
+    while True:
+        statuses = job.status()["stream_asof_joins"]
+        status = next(iter(statuses.values()), None)
+        if status is not None and all(
+            status[side]["watermark_micros"] == micros for side in ("left", "right")
+        ):
+            return
+        await asyncio.sleep(0.001)
+
+
 async def main() -> None:
     matched = source("trades").stream_asof_join(
         source("quotes"),
@@ -80,14 +91,7 @@ async def main() -> None:
         matched.stream(inputs, watermarks=policies) as result,
     ):
         pending = asyncio.create_task(anext(result))
-        while True:
-            statuses = result.job.status()["stream_asof_joins"]
-            status = next(iter(statuses.values()), None)
-            if status is not None and all(
-                status[side]["watermark_micros"] == 105 for side in ("left", "right")
-            ):
-                break
-            await asyncio.sleep(0.001)
+        await wait_for_watermarks(result.job, 105)
         if pending.done():
             raise RuntimeError("Equal watermarks cannot finalize the trade at 105")
         print("Both watermarks equal 105: no final output yet.")
