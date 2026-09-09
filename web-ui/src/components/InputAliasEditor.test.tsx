@@ -18,13 +18,13 @@ describe('InputAliasEditor', () => {
     const root = createRoot(container);
     let observer: MutationObserver | undefined;
     try {
-      const edited = new Promise<HTMLInputElement>((resolve) => {
+      const edited = new Promise<void>((resolve) => {
         observer = new MutationObserver(() => {
           const input = queryByLabelText<HTMLInputElement>(container, 'Input alias 2');
           if (input === null) return;
           observer?.disconnect();
           fireDOMEvent.change(input, { target: { value: 'rhs' } });
-          resolve(input);
+          resolve();
         });
         observer.observe(container, { childList: true, subtree: true });
       });
@@ -36,8 +36,8 @@ describe('InputAliasEditor', () => {
           onRemove={vi.fn()}
         />,
       );
-      const input = await edited;
-      await waitFor(() => expect(input).toHaveValue('rhs'));
+      await edited;
+      await waitFor(() => expect(screen.getByLabelText('Input alias 2')).toHaveValue('rhs'));
     } finally {
       observer?.disconnect();
       root.unmount();
