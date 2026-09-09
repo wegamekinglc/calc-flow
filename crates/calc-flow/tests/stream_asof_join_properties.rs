@@ -53,7 +53,6 @@ async fn backward_asof_is_inclusive_left_preserving_and_final() {
 
 #[tokio::test]
 async fn typed_ties_and_legal_batch_interleavings_match_independent_oracle() {
-    use datafusion::arrow::array::StringArray;
     let right: Vec<_> = (0_i64..24)
         .map(|index| {
             (
@@ -102,47 +101,53 @@ async fn typed_ties_and_legal_batch_interleavings_match_independent_oracle() {
             }
         }
         op.on_end(&cx, &mut out).await.unwrap();
-        let mut actual = Vec::new();
-        for message in out.drain("output") {
-            for record in message
-                .as_data()
-                .unwrap()
-                .table_payload()
-                .unwrap()
-                .batches()
-            {
-                let keys = record
-                    .column(0)
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .unwrap();
-                let times = record
-                    .column(1)
-                    .as_any()
-                    .downcast_ref::<datafusion::arrow::array::TimestampMicrosecondArray>()
-                    .unwrap();
-                let sequences = record
-                    .column(2)
-                    .as_any()
-                    .downcast_ref::<Int64Array>()
-                    .unwrap();
-                let values = record
-                    .column(7)
-                    .as_any()
-                    .downcast_ref::<Int64Array>()
-                    .unwrap();
-                for row in 0..record.num_rows() {
-                    actual.push((
-                        times.value(row),
-                        keys.value(row).to_owned(),
-                        sequences.value(row),
-                        (!values.is_null(row)).then(|| values.value(row)),
-                    ));
-                }
+        assert_eq!(output_rows(&mut out), expected, "seed {seed}");
+    }
+}
+
+fn output_rows(output: &mut EdgeCollector) -> Vec<OutputRow> {
+    use datafusion::arrow::array::StringArray;
+
+    let mut actual = Vec::new();
+    for message in output.drain("output") {
+        for record in message
+            .as_data()
+            .unwrap()
+            .table_payload()
+            .unwrap()
+            .batches()
+        {
+            let keys = record
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let times = record
+                .column(1)
+                .as_any()
+                .downcast_ref::<datafusion::arrow::array::TimestampMicrosecondArray>()
+                .unwrap();
+            let sequences = record
+                .column(2)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            let values = record
+                .column(7)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            for row in 0..record.num_rows() {
+                actual.push((
+                    times.value(row),
+                    keys.value(row).to_owned(),
+                    sequences.value(row),
+                    (!values.is_null(row)).then(|| values.value(row)),
+                ));
             }
         }
-        assert_eq!(actual, expected, "seed {seed}");
     }
+    actual
 }
 
 type InputRow<'a> = (&'a str, i64, i64, i64);

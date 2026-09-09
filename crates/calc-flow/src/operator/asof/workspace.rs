@@ -1,7 +1,7 @@
 use super::{StreamAsofJoinOperator, checked, reason, state::State};
 use crate::{Batch, Result, StreamingFailureReason};
 use datafusion::{
-    arrow::record_batch::RecordBatch,
+    arrow::{array::ArrayRef, datatypes::Schema, record_batch::RecordBatch},
     execution::memory_pool::{MemoryConsumer, MemoryReservation},
 };
 
@@ -30,25 +30,9 @@ impl StreamAsofJoinOperator {
         batch: &Batch,
         input: super::admission::ValidatedInput,
     ) -> Result<MemoryReservation> {
-        let mut bytes = 0;
-        let side = if input.index == 0 {
-            self.spec.left()
-        } else {
-            self.spec.right()
-        };
-        for record in batch.table_payload()?.batches() {
-            for row in 0..record.num_rows() {
-                if input
-                    .watermark
-                    .is_some_and(|wm| super::admission::times(record, side).value(row) < wm)
-                {
-                    continue;
-                }
-                let row_charge = row_workspace(record, row, &self.name)?;
-                bytes = checked(&self.name, bytes, row_charge)?;
-            }
-        }
-        self.reserve_workspace(bytes)
+        self.reserve_input_rows(batch, input, |record, row| {
+            row_workspace(record, row, &self.name)
+        })
     }
 
     pub(super) fn identity_workspace(
@@ -56,42 +40,25 @@ impl StreamAsofJoinOperator {
         batch: &Batch,
         input: super::admission::ValidatedInput,
     ) -> Result<MemoryReservation> {
-        let side = if input.index == 0 {
-            self.spec.left()
-        } else {
-            self.spec.right()
-        };
+        self.reserve_input_rows(batch, input, |record, row| {
+            identity_row_workspace(record, row, input.side(&self.spec), &self.name)
+        })
+    }
+
+    fn reserve_input_rows(
+        &self,
+        batch: &Batch,
+        input: super::admission::ValidatedInput,
+        charge: impl Fn(&RecordBatch, usize) -> Result<u64>,
+    ) -> Result<MemoryReservation> {
+        let side = input.side(&self.spec);
         let mut bytes = 0;
         for record in batch.table_payload()?.batches() {
             for row in 0..record.num_rows() {
-                if input
-                    .watermark
-                    .is_some_and(|wm| super::admission::times(record, side).value(row) < wm)
-                {
+                if input.is_late(super::admission::times(record, side).value(row)) {
                     continue;
                 }
-                bytes = checked(&self.name, bytes, 2048)?;
-                for name in side.keys().iter().chain(side.sequence_by()) {
-                    let column =
-                        record.column(record.schema().index_of(name).expect("validated schema"));
-                    let logical = column
-                        .to_data()
-                        .slice(row, 1)
-                        .get_slice_memory_size()
-                        .map_err(|error| super::arrow_error(&error))?
-                        as u64;
-                    bytes = checked(
-                        &self.name,
-                        bytes,
-                        logical.checked_mul(4).ok_or_else(|| {
-                            reason(
-                                &self.name,
-                                StreamingFailureReason::AsofCounterOverflow,
-                                "ASOF identity workspace arithmetic overflowed",
-                            )
-                        })?,
-                    )?;
-                }
+                bytes = checked(&self.name, bytes, charge(record, row)?)?;
             }
         }
         self.reserve_workspace(bytes)
@@ -113,23 +80,32 @@ impl StreamAsofJoinOperator {
     }
 }
 
+fn identity_row_workspace(
+    record: &RecordBatch,
+    row: usize,
+    side: &super::AsofJoinSide,
+    name: &str,
+) -> Result<u64> {
+    let mut bytes = 2048;
+    for field in side.keys().iter().chain(side.sequence_by()) {
+        let column = record.column(record.schema().index_of(field).expect("validated schema"));
+        let logical = column_workspace(column, row)?;
+        let charge = logical.checked_mul(4).ok_or_else(|| {
+            reason(
+                name,
+                StreamingFailureReason::AsofCounterOverflow,
+                "ASOF identity workspace arithmetic overflowed",
+            )
+        })?;
+        bytes = checked(name, bytes, charge)?;
+    }
+    Ok(bytes)
+}
+
 fn row_workspace(batch: &RecordBatch, row: usize, name: &str) -> Result<u64> {
-    let schema = batch.schema();
-    let mut bytes = 4096;
-    for (key, value) in schema.metadata() {
-        bytes = checked(name, bytes, key.len() as u64)?;
-        bytes = checked(name, bytes, value.len() as u64 + 256)?;
-    }
-    for field in schema.fields() {
-        bytes = checked(name, bytes, field.size() as u64 + 256)?;
-    }
+    let mut bytes = schema_workspace(&batch.schema(), name)?;
     for column in batch.columns() {
-        let data = column.to_data();
-        let logical = data
-            .slice(row, 1)
-            .get_slice_memory_size()
-            .map_err(|error| super::arrow_error(&error))?;
-        bytes = checked(name, bytes, logical as u64)?;
+        bytes = checked(name, bytes, column_workspace(column, row)?)?;
         bytes = checked(name, bytes, 256)?;
     }
     bytes.checked_mul(8).ok_or_else(|| {
@@ -139,4 +115,25 @@ fn row_workspace(batch: &RecordBatch, row: usize, name: &str) -> Result<u64> {
             "ASOF workspace arithmetic overflowed",
         )
     })
+}
+
+fn schema_workspace(schema: &Schema, name: &str) -> Result<u64> {
+    let mut bytes = 4096;
+    for (key, value) in schema.metadata() {
+        bytes = checked(name, bytes, key.len() as u64)?;
+        bytes = checked(name, bytes, value.len() as u64 + 256)?;
+    }
+    for field in schema.fields() {
+        bytes = checked(name, bytes, field.size() as u64 + 256)?;
+    }
+    Ok(bytes)
+}
+
+fn column_workspace(column: &ArrayRef, row: usize) -> Result<u64> {
+    column
+        .to_data()
+        .slice(row, 1)
+        .get_slice_memory_size()
+        .map(|bytes| bytes as u64)
+        .map_err(|error| super::arrow_error(&error))
 }

@@ -11,7 +11,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from calc_flow import _native
-from calc_flow.asof_join_spec import AsofJoinSpec
+from calc_flow.asof_join_spec import AsofJoinSide, AsofJoinSpec
 from calc_flow.capabilities import (
     ProviderArrayRules,
     ProviderOptionsSchema,
@@ -742,6 +742,24 @@ def _arrow_fields(
     ]
 
 
+def _asof_output_schema(
+    sides: Sequence[tuple[str, list[dict[str, object]], AsofJoinSide]],
+) -> list[dict[str, object]]:
+    output = [
+        {
+            **field,
+            "name": f"{side.prefix}__{field['name']}",
+            "nullable": field["nullable"] if port == "left" else True,
+        }
+        for port, fields, side in sides
+        for field in fields
+    ]
+    names = [field["name"] for field in output]
+    if len(set(names)) != len(names):
+        raise ValueError("ASOF prefixes produce an output field collision")
+    return output
+
+
 def _join_keys(values: Sequence[str], field_name: str) -> list[str]:
     if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
         raise TypeError(f"{field_name} must be a sequence of column names")
@@ -1047,19 +1065,7 @@ class PipelineBuilder:
             {"kind": "table", "name": port, "required": True, "schema": fields}
             for port, fields, _ in sides
         ]
-        output = [
-            {
-                **field,
-                "name": f"{side.prefix}__{field['name']}",
-                "nullable": field["nullable"] if port == "left" else True,
-            }
-            for port, fields, side in sides
-            for field in fields
-        ]
-
-        names = [field["name"] for field in output]
-        if len(set(names)) != len(names):
-            raise ValueError("ASOF prefixes produce an output field collision")
+        output = _asof_output_schema(sides)
 
         def add(project: dict[str, Any]) -> None:
             project["graph"]["nodes"].append(

@@ -57,10 +57,7 @@ impl StreamAsofJoinOperator {
         spec: StreamAsofJoinSpec,
     ) -> Result<Self> {
         let result_schema = schema::output_schema(&spec, &left_schema, &right_schema)?;
-        let inputs = vec![
-            Port::with_schema_ref("left", BatchKind::Table, true, Some(left_schema.clone()))?,
-            Port::with_schema_ref("right", BatchKind::Table, true, Some(right_schema.clone()))?,
-        ];
+        let inputs = input_ports(&left_schema, &right_schema)?;
         let outputs = vec![Port::with_schema_ref(
             "output",
             BatchKind::Table,
@@ -362,4 +359,13 @@ pub(super) fn checked(name: &str, current: u64, delta: u64) -> Result<u64> {
             "ASOF counter or resource arithmetic overflowed",
         )
     })
+}
+
+fn input_ports(left: &SchemaRef, right: &SchemaRef) -> Result<Vec<Port>> {
+    [("left", left), ("right", right)]
+        .into_iter()
+        .map(|(name, schema)| {
+            Port::with_schema_ref(name, BatchKind::Table, true, Some(schema.clone()))
+        })
+        .collect()
 }

@@ -1,5 +1,6 @@
 use super::{
-    AsofJoinSide, AsofLatePolicy, StreamAsofJoinOperator, reason,
+    AsofJoinSide, AsofLatePolicy, StreamAsofJoinOperator, StreamAsofJoinSideStatus,
+    StreamAsofJoinSpec, StreamAsofJoinStatus, reason,
     state::{self, LeftOrder},
 };
 use crate::{Batch, Result, StateSegment, StreamOperatorContext, StreamingFailureReason};
@@ -31,17 +32,7 @@ impl StreamAsofJoinOperator {
         ingress: &str,
         batch: &Batch,
     ) -> Result<ValidatedInput> {
-        let index = match ingress {
-            "left" => 0,
-            "right" => 1,
-            _ => {
-                return Err(reason(
-                    &self.name,
-                    StreamingFailureReason::AsofInvalidInput,
-                    "unknown ingress",
-                ));
-            }
-        };
+        let index = ingress_index(ingress, &self.name)?;
         self.inputs[index].validate(batch, ingress).map_err(|_| {
             reason(
                 &self.name,
@@ -49,39 +40,37 @@ impl StreamAsofJoinOperator {
                 "input does not match the declared exact table schema",
             )
         })?;
-        let side = if index == 0 {
-            self.spec.left()
-        } else {
-            self.spec.right()
-        };
-        let side_status = if index == 0 {
-            &mut self.status.left
-        } else {
-            &mut self.status.right
-        };
-        if self.terminal || side_status.ended {
+        let status = side_status(&mut self.status, index);
+        if self.terminal || status.ended {
             return Err(reason(
                 &self.name,
                 StreamingFailureReason::AsofProtocolError,
                 "input received data after end-of-input",
             ));
         }
+        let input = ValidatedInput {
+            index,
+            watermark: status.watermark_micros.map(crate::EventTime::as_micros),
+        };
         let batches = batch.table_payload()?.batches();
-        validate_nulls(batches, side, &self.name, ingress)?;
-        let watermark = side_status
-            .watermark_micros
-            .map(crate::EventTime::as_micros);
+        validate_nulls(batches, input.side(&self.spec), &self.name, ingress)?;
+        self.validate_late_rows(batches, input)?;
+        Ok(input)
+    }
+
+    fn validate_late_rows(&mut self, batches: &[RecordBatch], input: ValidatedInput) -> Result<()> {
         let late = batches
             .iter()
             .map(|batch| {
-                times(batch, side)
+                times(batch, input.side(&self.spec))
                     .values()
                     .iter()
-                    .filter(|time| watermark.is_some_and(|wm| **time < wm))
+                    .filter(|time| input.is_late(**time))
                     .count() as u64
             })
             .sum();
-        side_status.late_rows = super::checked(&self.name, side_status.late_rows, late)?;
+        let status = side_status(&mut self.status, input.index);
+        status.late_rows = super::checked(&self.name, status.late_rows, late)?;
         if late > 0 && self.spec.late_policy() == AsofLatePolicy::Error {
             return Err(reason(
                 &self.name,
@@ -89,7 +78,7 @@ impl StreamAsofJoinOperator {
                 "input contains event time below its accepted watermark",
             ));
         }
-        Ok(ValidatedInput { index, watermark })
+        Ok(())
     }
 
     pub(super) async fn prepare_admission(
@@ -98,53 +87,16 @@ impl StreamAsofJoinOperator {
         batch: &Batch,
         context: &StreamOperatorContext<'_>,
     ) -> Result<Admission> {
-        let identity_workspace = match self.identity_workspace(batch, input) {
-            Ok(reservation) => reservation,
-            Err(error) => {
-                self.validate_duplicates_without_workspace(batch, input, context)
-                    .await?;
-                return Err(error);
-            }
-        };
-        let index = input.index;
+        let identity_workspace = self
+            .reserve_admission_identities(batch, input, context)
+            .await?;
         let (rows, duplicates) =
             self.admission_identities(batch.table_payload()?.batches(), input, context)?;
-        let side_status = if index == 0 {
-            &mut self.status.left
-        } else {
-            &mut self.status.right
-        };
-        side_status.duplicate_rows =
-            super::checked(&self.name, side_status.duplicate_rows, duplicates)?;
-        if duplicates > 0 {
-            return Err(reason(
-                &self.name,
-                StreamingFailureReason::AsofDuplicateIdentity,
-                "input contains a duplicate key/event-time/sequence identity",
-            ));
-        }
-        let accepted = super::checked(&self.name, side_status.accepted_rows, rows.len() as u64)?;
-        let retained = self.state.inventory(None, &self.name)?.identities;
-        if super::checked(&self.name, retained, rows.len() as u64)?
-            > self.spec.limits().max_state_rows()
-        {
-            return Err(reason(
-                &self.name,
-                StreamingFailureReason::AsofStateLimitExceeded,
-                "stream_asof_join.limits.max_state_rows exceeded",
-            ));
-        }
+        self.record_duplicates(input.index, duplicates)?;
+        let accepted = self.check_admission_rows(input.index, rows.len() as u64)?;
         let payload_workspace = self.input_workspace(batch, input)?;
         let limit = usize::try_from(self.spec.limits().max_state_bytes()).expect("validated");
-        let rows = rows
-            .into_iter()
-            .map(|(identity, batch, row)| {
-                Ok((
-                    identity,
-                    StateSegment::new(super::codec::encode_batch(&batch.slice(row, 1), limit)?),
-                ))
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let rows = encode_rows(rows, limit)?;
         Ok(Admission {
             rows,
             accepted,
@@ -152,41 +104,68 @@ impl StreamAsofJoinOperator {
             _payload_workspace: payload_workspace,
         })
     }
+
+    async fn reserve_admission_identities(
+        &mut self,
+        batch: &Batch,
+        input: ValidatedInput,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<MemoryReservation> {
+        match self.identity_workspace(batch, input) {
+            Ok(reservation) => Ok(reservation),
+            Err(error) => {
+                self.validate_duplicates_without_workspace(batch, input, context)
+                    .await?;
+                Err(error)
+            }
+        }
+    }
+
+    pub(super) fn record_duplicates(&mut self, index: usize, duplicates: u64) -> Result<()> {
+        let status = side_status(&mut self.status, index);
+        status.duplicate_rows = super::checked(&self.name, status.duplicate_rows, duplicates)?;
+        if duplicates > 0 {
+            return Err(reason(
+                &self.name,
+                StreamingFailureReason::AsofDuplicateIdentity,
+                "input contains a duplicate key/event-time/sequence identity",
+            ));
+        }
+        Ok(())
+    }
+
+    fn check_admission_rows(&mut self, index: usize, rows: u64) -> Result<u64> {
+        let status = side_status(&mut self.status, index);
+        let accepted = super::checked(&self.name, status.accepted_rows, rows)?;
+        let retained = self.state.inventory(None, &self.name)?.identities;
+        if super::checked(&self.name, retained, rows)? > self.spec.limits().max_state_rows() {
+            return Err(reason(
+                &self.name,
+                StreamingFailureReason::AsofStateLimitExceeded,
+                "stream_asof_join.limits.max_state_rows exceeded",
+            ));
+        }
+        Ok(accepted)
+    }
+
     fn admission_identities<'a>(
         &self,
         batches: &'a [RecordBatch],
         input: ValidatedInput,
         context: &StreamOperatorContext<'_>,
     ) -> Result<(Vec<InputRow<'a>>, u64)> {
-        let side = if input.index == 0 {
-            self.spec.left()
-        } else {
-            self.spec.right()
-        };
+        let side = input.side(&self.spec);
         let mut seen = BTreeSet::new();
         let mut rows = Vec::new();
         let mut duplicates = 0;
         for batch in batches {
             for row in 0..batch.num_rows() {
                 context.check_cancelled()?;
-                if input
-                    .watermark
-                    .is_some_and(|wm| times(batch, side).value(row) < wm)
-                {
+                if input.is_late(times(batch, side).value(row)) {
                     continue;
                 }
-                let identity = (
-                    times(batch, side).value(row),
-                    state::encoded_columns(batch, row, side.keys())?,
-                    state::encoded_columns(batch, row, side.sequence_by())?,
-                );
-                let exists = if input.index == 0 {
-                    self.state.left.contains_key(&identity)
-                } else {
-                    self.state.right.get(&identity.1).is_some_and(|bucket| {
-                        bucket.contains_key(&(identity.0, identity.2.clone()))
-                    })
-                };
+                let identity = encoded_identity(batch, row, side)?;
+                let exists = self.state.contains_identity(input.index, &identity);
                 if exists || !seen.insert(identity.clone()) {
                     duplicates += 1;
                 }
@@ -202,7 +181,7 @@ impl Admission {
         &mut self,
         ingress: &str,
         state: &mut state::State,
-        status: &mut super::StreamAsofJoinStatus,
+        status: &mut StreamAsofJoinStatus,
     ) {
         if ingress == "left" {
             for (identity, payload) in self.rows.drain(..) {
@@ -265,4 +244,57 @@ pub(super) fn times<'a>(
         .as_any()
         .downcast_ref()
         .expect("validated timestamp")
+}
+
+impl ValidatedInput {
+    pub(super) fn side(self, spec: &StreamAsofJoinSpec) -> &AsofJoinSide {
+        if self.index == 0 {
+            spec.left()
+        } else {
+            spec.right()
+        }
+    }
+
+    pub(super) fn is_late(self, time: i64) -> bool {
+        self.watermark.is_some_and(|watermark| time < watermark)
+    }
+}
+
+fn ingress_index(ingress: &str, node: &str) -> Result<usize> {
+    match ingress {
+        "left" => Ok(0),
+        "right" => Ok(1),
+        _ => Err(reason(
+            node,
+            StreamingFailureReason::AsofInvalidInput,
+            "unknown ingress",
+        )),
+    }
+}
+
+fn side_status(status: &mut StreamAsofJoinStatus, index: usize) -> &mut StreamAsofJoinSideStatus {
+    if index == 0 {
+        &mut status.left
+    } else {
+        &mut status.right
+    }
+}
+
+fn encoded_identity(batch: &RecordBatch, row: usize, side: &AsofJoinSide) -> Result<LeftOrder> {
+    Ok((
+        times(batch, side).value(row),
+        state::encoded_columns(batch, row, side.keys())?,
+        state::encoded_columns(batch, row, side.sequence_by())?,
+    ))
+}
+
+fn encode_rows(rows: Vec<InputRow<'_>>, limit: usize) -> Result<Vec<(LeftOrder, StateSegment)>> {
+    rows.into_iter()
+        .map(|(identity, batch, row)| {
+            Ok((
+                identity,
+                StateSegment::new(super::codec::encode_batch(&batch.slice(row, 1), limit)?),
+            ))
+        })
+        .collect()
 }

@@ -19,6 +19,7 @@ from calc_flow.symbolic.nodes import CInt, CMap, CSeq, CStr, CValue, Node, build
 if TYPE_CHECKING:
     from calc_flow.symbolic.analyzer import TableFacts, _Analyzer
     from calc_flow.symbolic.expr import TableExpr
+    from calc_flow.symbolic.types import Field
 
 
 class _AsofJoinOptions(TypedDict, total=False):
@@ -151,9 +152,26 @@ def declare_asof(
     )
 
 
+def _output_schema(
+    operands: tuple[TableFacts, TableFacts], spec: AsofJoinSpec
+) -> tuple[Field, ...]:
+    from calc_flow.symbolic.types import Field
+
+    return tuple(
+        Field(
+            f"{side.prefix}__{field.name}",
+            field.data_type,
+            field.nullable if index == 0 else True,
+        )
+        for index, (facts, side) in enumerate(
+            zip(operands, (spec.left, spec.right), strict=True)
+        )
+        for field in facts.schema
+    )
+
+
 def analyze_asof(analyzer: _Analyzer, node: Node, path: str) -> TableFacts:
     from calc_flow.symbolic.analyzer import TableFacts
-    from calc_flow.symbolic.types import Field
 
     if len(node.args) != 2:
         analyzer.issue(
@@ -172,15 +190,7 @@ def analyze_asof(analyzer: _Analyzer, node: Node, path: str) -> TableFacts:
     from calc_flow.symbolic.asof_analysis import validate_asof
 
     validate_asof(analyzer, node, (left, right), spec, path)
-    schema = tuple(
-        Field(
-            f"{side.prefix}__{field.name}",
-            field.data_type,
-            field.nullable if index == 0 else True,
-        )
-        for index, (facts, side) in enumerate(((left, spec.left), (right, spec.right)))
-        for field in facts.schema
-    )
+    schema = _output_schema((left, right), spec)
     names = tuple(field.name for field in schema)
     if len(set(names)) != len(names):
         analyzer.issue(

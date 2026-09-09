@@ -3,11 +3,16 @@ use datafusion::arrow::{
     record_batch::RecordBatch,
     row::{RowConverter, SortField},
 };
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, LazyLock},
+};
 
 pub(super) type Encoding = Arc<Vec<u8>>;
 pub(super) type LeftOrder = (i64, Encoding, Encoding);
 pub(super) type RightOrder = (i64, Encoding);
+
+static EMPTY_ENCODING: LazyLock<Encoding> = LazyLock::new(|| Arc::new(Vec::new()));
 
 #[derive(Clone, Default)]
 pub(super) struct State {
@@ -16,10 +21,20 @@ pub(super) struct State {
 }
 
 impl State {
+    pub fn contains_identity(&self, index: usize, identity: &LeftOrder) -> bool {
+        if index == 0 {
+            self.left.contains_key(identity)
+        } else {
+            self.right
+                .get(&identity.1)
+                .is_some_and(|bucket| bucket.contains_key(&(identity.0, identity.2.clone())))
+        }
+    }
+
     pub fn candidate(&self, key: &Encoding, time: i64, tolerance: u64) -> Option<&StateSegment> {
         let bucket = self.right.get(key)?;
         let found = if let Some(next) = time.checked_add(1) {
-            bucket.range(..(next, Arc::new(Vec::new()))).next_back()
+            bucket.range(..(next, EMPTY_ENCODING.clone())).next_back()
         } else {
             bucket.last_key_value()
         }?;
@@ -70,32 +85,17 @@ pub(super) struct Inventory {
 impl State {
     pub fn inventory(&self, prepared: Option<&StateSegment>, name: &str) -> Result<Inventory> {
         let mut total = Inventory::default();
-        for ((_, key, sequence), row) in &self.left {
-            total.identities = super::checked(name, total.identities, 1)?;
-            total.bytes = super::checked(name, total.bytes, 256 + 64 + 64)?;
-            total.bytes = allocation_charge(total.bytes, key, name)?;
-            total.bytes = allocation_charge(total.bytes, sequence, name)?;
-            total.bytes = allocation_charge(total.bytes, &row.bytes_arc(), name)?;
-        }
+        self.left.iter().try_for_each(|((_, key, sequence), row)| {
+            total.charge_left(key, sequence, row, name)
+        })?;
         for (key, bucket) in &self.right {
-            total.bytes = super::checked(name, total.bytes, 64)?;
-            total.bytes = allocation_charge(total.bytes, key, name)?;
+            total.charge_allocation(key, name)?;
             for ((_, sequence), row) in bucket {
-                total.identities = super::checked(name, total.identities, 1)?;
-                total.bytes = super::checked(name, total.bytes, 256 + 64)?;
-                total.bytes = allocation_charge(total.bytes, sequence, name)?;
-                if let Some(row) = row {
-                    total.right_payloads = super::checked(name, total.right_payloads, 1)?;
-                    total.bytes = super::checked(name, total.bytes, 64)?;
-                    total.bytes = allocation_charge(total.bytes, &row.bytes_arc(), name)?;
-                } else {
-                    total.identity_only = super::checked(name, total.identity_only, 1)?;
-                }
+                total.charge_right(sequence, row.as_ref(), name)?;
             }
         }
         if let Some(prepared) = prepared {
-            total.bytes = super::checked(name, total.bytes, 64)?;
-            total.bytes = allocation_charge(total.bytes, &prepared.bytes_arc(), name)?;
+            total.charge_allocation(&prepared.bytes_arc(), name)?;
         }
         Ok(total)
     }
@@ -135,6 +135,47 @@ impl State {
     }
 }
 
-fn allocation_charge(current: u64, bytes: &Arc<Vec<u8>>, name: &str) -> Result<u64> {
+impl Inventory {
+    fn charge_left(
+        &mut self,
+        key: &Encoding,
+        sequence: &Encoding,
+        row: &StateSegment,
+        name: &str,
+    ) -> Result<()> {
+        self.identities = super::checked(name, self.identities, 1)?;
+        self.bytes = super::checked(name, self.bytes, 256 + 64 + 64)?;
+        self.bytes = allocation_charge(self.bytes, key, name)?;
+        self.bytes = allocation_charge(self.bytes, sequence, name)?;
+        self.bytes = allocation_charge(self.bytes, &row.bytes_arc(), name)?;
+        Ok(())
+    }
+
+    fn charge_right(
+        &mut self,
+        sequence: &Encoding,
+        row: Option<&StateSegment>,
+        name: &str,
+    ) -> Result<()> {
+        self.identities = super::checked(name, self.identities, 1)?;
+        self.bytes = super::checked(name, self.bytes, 256 + 64)?;
+        self.bytes = allocation_charge(self.bytes, sequence, name)?;
+        if let Some(row) = row {
+            self.right_payloads = super::checked(name, self.right_payloads, 1)?;
+            self.charge_allocation(&row.bytes_arc(), name)?;
+        } else {
+            self.identity_only = super::checked(name, self.identity_only, 1)?;
+        }
+        Ok(())
+    }
+
+    fn charge_allocation(&mut self, bytes: &Encoding, name: &str) -> Result<()> {
+        self.bytes = super::checked(name, self.bytes, 64)?;
+        self.bytes = allocation_charge(self.bytes, bytes, name)?;
+        Ok(())
+    }
+}
+
+fn allocation_charge(current: u64, bytes: &Encoding, name: &str) -> Result<u64> {
     super::checked(name, current, bytes.capacity() as u64)
 }

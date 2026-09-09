@@ -1,10 +1,12 @@
 use super::{
-    StreamAsofJoinOperator,
+    AsofJoinSide, StreamAsofJoinOperator,
     admission::{ValidatedInput, times},
     identity_compare,
 };
-use crate::{Batch, Result, StreamOperatorContext, StreamingFailureReason};
+use crate::{Batch, Result, StreamOperatorContext};
 use datafusion::arrow::record_batch::RecordBatch;
+
+type InputRow<'a> = (&'a RecordBatch, usize);
 
 impl StreamAsofJoinOperator {
     pub(super) async fn validate_duplicates_without_workspace(
@@ -13,112 +15,125 @@ impl StreamAsofJoinOperator {
         input: ValidatedInput,
         context: &StreamOperatorContext<'_>,
     ) -> Result<()> {
-        let side = if input.index == 0 {
-            self.spec.left()
-        } else {
-            self.spec.right()
-        };
+        let side = input.side(&self.spec);
         let batches = batch.table_payload()?.batches();
         let mut duplicates = 0;
         for (batch_index, record) in batches.iter().enumerate() {
             for row in 0..record.num_rows() {
                 context.check_cancelled()?;
-                let time = times(record, side).value(row);
-                if input.watermark.is_some_and(|wm| time < wm) {
+                if input.is_late(times(record, side).value(row)) {
                     continue;
                 }
-                let mut exists = self.existing_identity(record, row, input.index, context)?;
-                for (previous_index, previous) in batches[..=batch_index].iter().enumerate() {
-                    if exists {
-                        break;
-                    }
-                    let end = if previous_index == batch_index {
-                        row
-                    } else {
-                        previous.num_rows()
-                    };
-                    for prior in 0..end {
-                        context.check_cancelled()?;
-                        if times(previous, side).value(prior) == time
-                            && identity_compare::equal(
-                                (record, row),
-                                (previous, prior),
-                                side.keys(),
-                            )
-                            && identity_compare::equal(
-                                (record, row),
-                                (previous, prior),
-                                side.sequence_by(),
-                            )
-                        {
-                            exists = true;
-                            break;
-                        }
-                    }
-                }
+                let exists =
+                    self.duplicate_input_identity(batches, (batch_index, row), input, context)?;
                 duplicates += u64::from(exists);
                 tokio::task::yield_now().await;
             }
         }
-        let status = if input.index == 0 {
-            &mut self.status.left
-        } else {
-            &mut self.status.right
-        };
-        status.duplicate_rows = super::checked(&self.name, status.duplicate_rows, duplicates)?;
-        if duplicates == 0 {
-            return Ok(());
-        }
-        Err(super::reason(
-            &self.name,
-            StreamingFailureReason::AsofDuplicateIdentity,
-            "input contains a duplicate key/event-time/sequence identity",
-        ))
+        self.record_duplicates(input.index, duplicates)
+    }
+
+    fn duplicate_input_identity(
+        &self,
+        batches: &[RecordBatch],
+        current: (usize, usize),
+        input: ValidatedInput,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<bool> {
+        Ok(
+            self.existing_identity((&batches[current.0], current.1), input, context)?
+                || prior_identity(
+                    batches,
+                    current.0,
+                    current.1,
+                    input.side(&self.spec),
+                    context,
+                )?,
+        )
     }
 
     fn existing_identity(
         &self,
-        batch: &RecordBatch,
-        row: usize,
-        index: usize,
+        row: InputRow<'_>,
+        input: ValidatedInput,
         context: &StreamOperatorContext<'_>,
     ) -> Result<bool> {
-        let side = if index == 0 {
-            self.spec.left()
+        let side = input.side(&self.spec);
+        if input.index == 0 {
+            self.existing_left_identity(row, side, context)
         } else {
-            self.spec.right()
-        };
-        let time = times(batch, side).value(row);
-        if index == 0 {
-            for (existing, key, sequence) in self.state.left.keys() {
+            self.existing_right_identity(row, side, context)
+        }
+    }
+
+    fn existing_left_identity(
+        &self,
+        row: InputRow<'_>,
+        side: &AsofJoinSide,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<bool> {
+        for (time, key, sequence) in self.state.left.keys() {
+            context.check_cancelled()?;
+            if times(row.0, side).value(row.1) == *time
+                && identity_compare::encoded_equal(row.0, row.1, side.keys(), key)
+                && identity_compare::encoded_equal(row.0, row.1, side.sequence_by(), sequence)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn existing_right_identity(
+        &self,
+        row: InputRow<'_>,
+        side: &AsofJoinSide,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<bool> {
+        for (key, bucket) in &self.state.right {
+            context.check_cancelled()?;
+            if !identity_compare::encoded_equal(row.0, row.1, side.keys(), key) {
+                continue;
+            }
+            for (time, sequence) in bucket.keys() {
                 context.check_cancelled()?;
-                if *existing == time
-                    && identity_compare::encoded_equal(batch, row, side.keys(), key)
-                    && identity_compare::encoded_equal(batch, row, side.sequence_by(), sequence)
+                if times(row.0, side).value(row.1) == *time
+                    && identity_compare::encoded_equal(row.0, row.1, side.sequence_by(), sequence)
                 {
                     return Ok(true);
-                }
-            }
-        } else {
-            for (key, bucket) in &self.state.right {
-                context.check_cancelled()?;
-                if identity_compare::encoded_equal(batch, row, side.keys(), key) {
-                    for (existing, sequence) in bucket.keys() {
-                        context.check_cancelled()?;
-                        if *existing == time
-                            && identity_compare::encoded_equal(
-                                batch,
-                                row,
-                                side.sequence_by(),
-                                sequence,
-                            )
-                        {
-                            return Ok(true);
-                        }
-                    }
                 }
             }
         }
         Ok(false)
     }
+}
+
+fn prior_identity(
+    batches: &[RecordBatch],
+    batch_index: usize,
+    row: usize,
+    side: &AsofJoinSide,
+    context: &StreamOperatorContext<'_>,
+) -> Result<bool> {
+    let current = (&batches[batch_index], row);
+    for (index, previous) in batches[..=batch_index].iter().enumerate() {
+        let end = if index == batch_index {
+            row
+        } else {
+            previous.num_rows()
+        };
+        for prior in 0..end {
+            context.check_cancelled()?;
+            if same_identity(current, (previous, prior), side) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn same_identity(left: InputRow<'_>, right: InputRow<'_>, side: &AsofJoinSide) -> bool {
+    times(left.0, side).value(left.1) == times(right.0, side).value(right.1)
+        && identity_compare::equal(left, right, side.keys())
+        && identity_compare::equal(left, right, side.sequence_by())
 }

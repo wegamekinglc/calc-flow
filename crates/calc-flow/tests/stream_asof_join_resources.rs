@@ -329,13 +329,7 @@ async fn run_trace(trace: Trace, observation: &mut Observation) {
             break;
         }
         observation.observe(&mut op);
-        if matches!(trace, Trace::Advancing | Trace::HotKey) {
-            assert_eq!(op.status().pending_left_rows, 0);
-            assert_eq!(
-                op.status().retained_right_rows,
-                u64::try_from((round + 1).min(4) * KEYS).unwrap()
-            );
-        }
+        assert_retained_history(&op, trace, round);
     }
     let cx = StreamOperatorContext::with_ingress_progress(
         &job,
@@ -344,6 +338,16 @@ async fn run_trace(trace: Trace, observation: &mut Observation) {
         progress(watermarks[0], watermarks[1]),
     );
     finish_trace(&mut op, &cx, &mut collector, observation).await;
+}
+
+fn assert_retained_history(op: &StreamAsofJoinOperator, trace: Trace, round: usize) {
+    if matches!(trace, Trace::Advancing | Trace::HotKey) {
+        assert_eq!(op.status().pending_left_rows, 0);
+        assert_eq!(
+            op.status().retained_right_rows,
+            u64::try_from((round + 1).min(4) * KEYS).unwrap()
+        );
+    }
 }
 
 async fn finish_trace(

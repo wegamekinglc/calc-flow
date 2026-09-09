@@ -88,12 +88,14 @@ async def main() -> None:
             ):
                 break
             await asyncio.sleep(0.001)
-        assert not pending.done()  # Equal watermarks cannot finalize the trade at 105.
+        if pending.done():
+            raise RuntimeError("Equal watermarks cannot finalize the trade at 105")
         print("Both watermarks equal 105: no final output yet.")
         advance.set()
         batches = [await pending, *[batch async for batch in result]]
     output = pa.concat_tables(batches)
-    assert output["quote__price"].to_pylist() == [10.2, None]
+    if output["quote__price"].to_pylist() != [10.2, None]:
+        raise RuntimeError("Expected the recent quote and an unmatched trade")
     print(output.select(["trade__time", "trade__price", "quote__price"]).to_pydict())
 
 

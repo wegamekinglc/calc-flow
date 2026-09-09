@@ -72,6 +72,19 @@ _ASOF_RAW_CODES = frozenset(
 )
 
 
+def _request_node_operator(body: dict[str, Any], index: object) -> object:
+    graph = body.get("graph")
+    nodes = graph.get("nodes") if isinstance(graph, dict) else None
+    if (
+        not isinstance(nodes, list)
+        or type(index) is not int
+        or not 0 <= index < len(nodes)
+    ):
+        return None
+    node = nodes[index]
+    return node.get("operator") if isinstance(node, dict) else None
+
+
 def _asof_request_issue(entry: dict[str, Any], body: object) -> bool:
     if entry.get("type") not in _ASOF_RAW_CODES or not isinstance(body, dict):
         return False
@@ -80,17 +93,7 @@ def _asof_request_issue(entry: dict[str, Any], body: object) -> bool:
         loc = loc[1:]
     if len(loc) < 4 or loc[:2] != ("graph", "nodes") or loc[3] != "operator":
         return False
-    graph = body.get("graph")
-    nodes = graph.get("nodes") if isinstance(graph, dict) else None
-    index = loc[2]
-    if (
-        not isinstance(nodes, list)
-        or type(index) is not int
-        or not 0 <= index < len(nodes)
-    ):
-        return False
-    node = nodes[index]
-    operator = node.get("operator") if isinstance(node, dict) else None
+    operator = _request_node_operator(body, loc[2])
     return isinstance(operator, dict) and operator.get("kind") == "stream_asof_join"
 
 

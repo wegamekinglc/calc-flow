@@ -92,21 +92,25 @@ def _identity_field(
     return field
 
 
+def _declared_side_metadata(
+    analyzer: _Analyzer, facts: TableFacts, side: AsofJoinSide, path: str
+) -> None:
+    for name, requested, declared in (
+        ("event_time", side.event_time, facts.event_time),
+        ("sequence_by", tuple(side.sequence_by), facts.sequence_by),
+    ):
+        if not declared or requested != declared:
+            analyzer.issue(
+                f"{path}.{name}",
+                "ordering_required",
+                f"ASOF {name} must match current declared input metadata",
+            )
+
+
 def _side_metadata(
     analyzer: _Analyzer, facts: TableFacts, side: AsofJoinSide, path: str
 ) -> None:
-    if not facts.event_time or side.event_time != facts.event_time:
-        analyzer.issue(
-            f"{path}.event_time",
-            "ordering_required",
-            "ASOF event_time must match current declared input metadata",
-        )
-    if not facts.sequence_by or tuple(side.sequence_by) != facts.sequence_by:
-        analyzer.issue(
-            f"{path}.sequence_by",
-            "ordering_required",
-            "ASOF sequence_by must match current declared input metadata",
-        )
+    _declared_side_metadata(analyzer, facts, side, path)
     time = _identity_field(analyzer, facts, side.event_time, f"{path}.event_time")
     if time is not None and time.data_type != _TIME_TYPE:
         analyzer.issue(
@@ -125,6 +129,27 @@ def _side_metadata(
             )
 
 
+def _key_types(
+    analyzer: _Analyzer, fields: tuple[Field, Field], path: str, index: int
+) -> None:
+    left, right = fields
+    if left.data_type != right.data_type:
+        analyzer.issue(
+            f"{path}.left.keys[{index}]",
+            "type_mismatch",
+            "ASOF key pairs require identical Arrow types",
+        )
+    for side, field in zip(("left", "right"), fields, strict=True):
+        if field.data_type not in _KEY_TYPES and not field.data_type.startswith(
+            "timestamp["
+        ):
+            analyzer.issue(
+                f"{path}.{side}.keys[{index}]",
+                "type_mismatch",
+                "ASOF key requires a supported exact Arrow type",
+            )
+
+
 def _keys(
     analyzer: _Analyzer,
     facts: tuple[TableFacts, TableFacts],
@@ -136,24 +161,9 @@ def _keys(
             _identity_field(analyzer, table, name, f"{path}.{side}.keys[{index}]")
             for side, table, name in zip(("left", "right"), facts, names, strict=True)
         )
-        if any(field is None for field in fields):
-            continue
         left, right = fields
-        if left.data_type != right.data_type:
-            analyzer.issue(
-                f"{path}.left.keys[{index}]",
-                "type_mismatch",
-                "ASOF key pairs require identical Arrow types",
-            )
-        for side, field in zip(("left", "right"), fields, strict=True):
-            if field.data_type not in _KEY_TYPES and not field.data_type.startswith(
-                "timestamp["
-            ):
-                analyzer.issue(
-                    f"{path}.{side}.keys[{index}]",
-                    "type_mismatch",
-                    "ASOF key requires a supported exact Arrow type",
-                )
+        if left is not None and right is not None:
+            _key_types(analyzer, (left, right), path, index)
 
 
 def validate_asof(

@@ -170,7 +170,7 @@ mod tests {
     #[test]
     fn asof_fallback_encoded_equality_matches_arrow_typed_rows() {
         let texts = [
-            "".to_owned(),
+            String::new(),
             "é".repeat(4),
             "a".repeat(32),
             "é".repeat(16) + "x",

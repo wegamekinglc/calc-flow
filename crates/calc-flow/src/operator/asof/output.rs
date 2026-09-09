@@ -68,35 +68,8 @@ impl OutputRuntime {
         let right = candidate_batch(rows, true, &schemas[1], &schema_digests[1])?;
         let query = query(spec, schemas);
         let context = self.context()?;
-        let mut tables = CandidateTables {
-            context,
-            active: true,
-        };
-        context
-            .register_batch("asof_left", left)
-            .map_err(|error| super::fusion_error(&error))?;
-        context
-            .register_batch("asof_right", right)
-            .map_err(|error| super::fusion_error(&error))?;
-        // Allow cancellation before bounded query planning and execution.
-        tokio::task::yield_now().await;
-        let result = async { context.sql(&query).await?.collect().await }.await;
-        tables.clear()?;
-        let batches = result
-            .map_err(|error| {
-                if matches!(
-                    error.find_root(),
-                    datafusion::error::DataFusionError::ResourcesExhausted(_)
-                ) {
-                    super::reason(
-                        node,
-                        crate::StreamingFailureReason::AsofWorkspaceLimitExceeded,
-                        "ASOF DataFusion workspace reservation exceeded",
-                    )
-                } else {
-                    super::fusion_error(&error)
-                }
-            })?
+        let batches = query_candidates(context, left, right, &query, node)
+            .await?
             .into_iter()
             .map(|batch| {
                 RecordBatch::try_new(schemas[2].clone(), batch.columns().to_vec())
@@ -113,7 +86,25 @@ struct CandidateTables<'a> {
     active: bool,
 }
 
-impl CandidateTables<'_> {
+impl<'a> CandidateTables<'a> {
+    fn register(
+        context: &'a SessionContext,
+        left: RecordBatch,
+        right: RecordBatch,
+    ) -> Result<Self> {
+        let tables = Self {
+            context,
+            active: true,
+        };
+        context
+            .register_batch("asof_left", left)
+            .map_err(|error| super::fusion_error(&error))?;
+        context
+            .register_batch("asof_right", right)
+            .map_err(|error| super::fusion_error(&error))?;
+        Ok(tables)
+    }
+
     fn clear(&mut self) -> Result<()> {
         self.context
             .deregister_table("asof_left")
@@ -134,6 +125,39 @@ impl Drop for CandidateTables<'_> {
             let _ = self.context.deregister_table("asof_left");
             let _ = self.context.deregister_table("asof_right");
         }
+    }
+}
+
+async fn query_candidates(
+    context: &SessionContext,
+    left: RecordBatch,
+    right: RecordBatch,
+    query: &str,
+    node: &str,
+) -> Result<Vec<RecordBatch>> {
+    let mut tables = CandidateTables::register(context, left, right)?;
+    // Allow cancellation before bounded query planning and execution.
+    tokio::task::yield_now().await;
+    let result = async { context.sql(query).await?.collect().await }.await;
+    tables.clear()?;
+    result.map_err(|error| materialization_error(&error, node))
+}
+
+fn materialization_error(
+    error: &datafusion::error::DataFusionError,
+    node: &str,
+) -> crate::CalcFlowError {
+    if matches!(
+        error.find_root(),
+        datafusion::error::DataFusionError::ResourcesExhausted(_)
+    ) {
+        super::reason(
+            node,
+            crate::StreamingFailureReason::AsofWorkspaceLimitExceeded,
+            "ASOF DataFusion workspace reservation exceeded",
+        )
+    } else {
+        super::fusion_error(error)
     }
 }
 
