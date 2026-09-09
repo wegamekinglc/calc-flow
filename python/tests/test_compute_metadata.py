@@ -105,3 +105,79 @@ def test_async_convenience_accepts_arrow_metadata(entry):
     asyncio.run(run())
     assert batch.to_pyarrow().schema.equals(schema, check_metadata=True)
     assert batch.metadata == {"sequence": 3}
+
+
+@pytest.mark.parametrize("metadata", [None, {}, {b"source": b"quotes"}])
+@pytest.mark.parametrize("row_count", [0, 1, 3])
+@pytest.mark.parametrize("input_kind", ["table", "record_batch", "batch"])
+def test_compute_preserves_zero_column_metadata_rows(
+    metadata, row_count, input_kind, monkeypatch
+):
+    record = (
+        pa.record_batch([pa.array(range(row_count), type=pa.int64())], names=["x"])
+        .replace_schema_metadata(metadata)
+        .select([])
+    )
+    table = pa.Table.from_batches([record])
+    envelope = {"source": "quotes", "sequence": 7}
+    supplied = table
+    if input_kind == "record_batch":
+        supplied = record
+    elif input_kind == "batch":
+        supplied = cf.Batch.from_pyarrow(table, metadata=envelope)
+    original = supplied.to_pyarrow() if input_kind == "batch" else supplied
+    schema = original.schema
+    captured = []
+    execute = cf.BatchExecutionPlan.execute
+
+    def capture(self, inputs, *, options=None):
+        captured.append(inputs["input"])
+        return execute(self, inputs, options=options)
+
+    monkeypatch.setattr(cf.BatchExecutionPlan, "execute", capture)
+    result = cf.compute(supplied, lambda t: t.select(value=cf.lit(1)))
+    assert result.to_pydict() == {"value": [1] * row_count}
+    assert len(captured) == 1
+    assert captured[0].num_rows == row_count
+    assert captured[0].to_pyarrow().schema.metadata is None
+    assert captured[0].metadata == (envelope if input_kind == "batch" else {})
+    assert supplied.num_rows == table.num_rows == record.num_rows == row_count
+    original = supplied.to_pyarrow() if input_kind == "batch" else supplied
+    assert original.schema.equals(schema, check_metadata=True)
+    assert original.schema.metadata == schema.metadata
+    assert table.schema.metadata == record.schema.metadata == metadata
+    if input_kind == "batch":
+        assert supplied.metadata == envelope
+
+
+@pytest.mark.parametrize("entry", ["compute", "table", "program"])
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_collection_preserves_zero_column_metadata_rows(entry, asynchronous):
+    data = (
+        pa.table({"x": pa.chunked_array([[1], [2, 3]])})
+        .replace_schema_metadata({b"source": b"quotes"})
+        .select([])
+    )
+    table = cf.table_input("quotes", schema=data.schema)
+    expression = table.select(value=cf.lit(1))
+    program = cf.Program("metadata", outputs={"answer": expression})
+    if entry == "compute":
+        collect = cf.compute_async if asynchronous else cf.compute
+        result = collect(data, lambda t: t.select(value=cf.lit(1)))
+    elif entry == "table":
+        collect = expression.collect_async if asynchronous else expression.collect
+        result = collect(data)
+    else:
+        collect = program.collect_async if asynchronous else program.collect
+        result = collect({"quotes": data})
+    if asynchronous:
+
+        async def run():
+            return await result
+
+        result = asyncio.run(run())
+    if entry == "program":
+        result = result["answer"]
+    assert result.to_pydict() == {"value": [1, 1, 1]}
+    assert data.num_rows == 3
+    assert data.schema.metadata == {b"source": b"quotes"}

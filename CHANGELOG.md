@@ -9,6 +9,11 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-09: Fix silent row loss when Python metadata normalization receives
+  zero-column Arrow inputs with schema metadata (DAL-192). `compute` and
+  collection (including async forms) and async iterable streams preserve input
+  row counts while retaining caller metadata and `Batch.metadata`.
+
 - 2026-09-09: Add the independent `stream_asof_join@1` native operator for
   bounded backward stream matching. Typed sequence identities make equal-time
   selection deterministic; strict dual-watermark finality preserves each
