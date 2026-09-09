@@ -4,9 +4,10 @@
 **Implementation base:** `eda1583751abbd1ca4d246fcb8ee6b70f57d9b09` (#259)
 **PR:** [#260](https://github.com/wegamekinglc/calc-flow/pull/260), targeting `main`
 **Review state:** source review approved, including PR remediation through local
-commit `55b62df` and the final reviewed checkpoint/codec, checkout-policy and
-cancellation-test changes. Focused verification and final-wheel/contract checks
-passed. Final remote CI and PR metadata gates remain pending.
+commit `65e503d` and the final reviewed checkpoint/codec, checkout-policy,
+cancellation-test and fault-settlement watchdog changes. Focused verification
+and final-wheel/contract checks passed. Final remote CI and PR metadata gates
+remain pending.
 
 ## Summary
 
@@ -134,6 +135,21 @@ results below do not imply that final remote checks have passed.
   runner assertions; its bounded startup watchdog is five seconds and failed
   startup paths cancel and await the launch task. Optimized example22 passed,
   withholding output at equal watermark 105 and producing `[10.2, None]`.
+  A later Linux C901 ratchet failure was reproduced, then cleared by extracting
+  that unchanged startup wait into a module-level helper. The focused
+  cancellation test passed again, along with Ruff, formatting and the actual
+  complexity ratchet; no baseline changed.
+- **Fault-test settlement:** Windows at `65e503d` reported **788 passed,
+  1 failed, 4 ignored** in the core library: `m5_fault_manifest_write_restart`
+  reached the outer five-second checkpoint/job wait before restart construction.
+  The unchanged test passed locally in isolation; CI did not identify the slow
+  settlement phase. Source review confirmed this wait also covers filesystem
+  settlement, coordinator joining and runner shutdown. Only the two outer waits
+  in the shared fault helper now use a bounded **30-second** test watchdog,
+  with status and fault/cancellation diagnostics on timeout. The engine's
+  **five-second** checkpoint deadline and every recovery/cleanup assertion remain
+  unchanged. All **48 fault cases**, test-configuration Clippy and the complexity
+  ratchet passed. Windows verification remains a final CI requirement.
 - **Studio first-input regression:** an actual-component MutationObserver test
   first failed with expected alias `rhs` overwritten by `right`. Removing the
   redundant mount-reset effect produced **22 passing** alias/App tests. The
