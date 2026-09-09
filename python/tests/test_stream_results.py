@@ -468,9 +468,7 @@ def test_stream_metadata_normalization_preserves_caller_batch_and_buffers() -> N
     )
 
 
-@pytest.mark.parametrize("metadata", [None, {}, {b"origin": b"test"}])
-@pytest.mark.parametrize("input_kind", ["table", "record_batch", "batch"])
-def test_stream_preserves_zero_column_metadata_rows(metadata, input_kind) -> None:
+def _zero_column_stream_inputs(metadata, input_kind):
     records = [
         pa.record_batch([pa.array(range(count), type=pa.int64())], names=["x"])
         .replace_schema_metadata(metadata)
@@ -486,6 +484,13 @@ def test_stream_preserves_zero_column_metadata_rows(metadata, input_kind) -> Non
             cf.Batch.from_pyarrow(table, metadata={"sequence": index})
             for index, table in enumerate(tables)
         ]
+    return records, tables, supplied
+
+
+@pytest.mark.parametrize("metadata", [None, {}, {b"origin": b"test"}])
+@pytest.mark.parametrize("input_kind", ["table", "record_batch", "batch"])
+def test_stream_preserves_zero_column_metadata_rows(metadata, input_kind) -> None:
+    records, tables, supplied = _zero_column_stream_inputs(metadata, input_kind)
     schemas = [
         (batch.to_pyarrow() if input_kind == "batch" else batch).schema
         for batch in supplied
