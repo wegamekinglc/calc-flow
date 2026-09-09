@@ -1,10 +1,12 @@
-# Branch Review: bounded backward ASOF Join
+# PR #260 Review: bounded backward ASOF Join
 
 **Branch:** `feature/bounded-backward-asof-join`
 **Implementation base:** `eda1583751abbd1ca4d246fcb8ee6b70f57d9b09` (#259)
-**Review state:** final source review of the isolated feature worktree;
-focused implementation, final wheel, affected consumer, and generated-contract
-checks complete. Approved for the requested PR handoff; CI is not yet green.
+**PR:** [#260](https://github.com/wegamekinglc/calc-flow/pull/260), targeting `main`
+**Review state:** source review approved, including PR remediation through local
+commit `55b62df` and the final reviewed checkpoint/codec, checkout-policy and
+cancellation-test changes. Focused verification and final-wheel/contract checks
+passed. Final remote CI and PR metadata gates remain pending.
 
 ## Summary
 
@@ -14,18 +16,21 @@ checkpoint recovery, Python expression/builder declarations, and Studio project
 and status contracts. Review cross-references the same-slug specification
 FR1–24/AC1–18, API note, and critic's C1/C2/C3 requirements.
 
-The assigned implementation worktree is already isolated from the user's
-primary checkout and remains implementation-owned. No feature PR or immutable
-feature commit exists at this review stage, so there are no feature check runs
-or prior GitHub reviews to consult. The parent verified that #259 merged as
-`06c0223` on `main`, with an identical source tree to the implementation base.
-Publication must attach the reviewed feature to its final commit and PR base.
+The assigned worktree is isolated from the user's primary checkout and remains
+implementation-owned. The original implementation review preceded PR creation;
+its acceptance and resource evidence is retained below as historical evidence.
+PR #260 now exists, and its CI failures and Copilot finding have been examined
+during remediation. The parent verified that #259 merged as `06c0223` on `main`,
+with an identical source tree to the implementation base. The user subsequently
+authorized fixing all PR issues and merging after the required gates pass.
+The parent owns the final commit, actual-head remote audit and merge.
 
 ## Build and Test Results
 
-The following are actual focused local results reported by the implementation
-and independent test owners and reconciled with the reviewed source. They are
-not full-suite or CI results. Cargo checks use the isolated worktree with
+The following are the original implementation acceptance results reported by the
+implementation and independent test owners and reconciled with the reviewed
+source. They are not full-suite or CI results; final PR remediation results
+follow in their own section. Cargo checks use the isolated worktree with
 `CARGO_HOME` at the repository's `target/cargo-home`,
 `CARGO_TARGET_DIR=target/cargo`, `CARGO_PROFILE_DEV_DEBUG=0`, and
 `CARGO_INCREMENTAL=0`.
@@ -93,11 +98,71 @@ Additional local detail is in `target/asof-evidence/{stage-0,stage-1,native-fina
 and `target/asof-python-evidence/summary.md`. This committed review includes
 the essential results and limitations so it does not depend on ignored files.
 
+## PR Remediation Review
+
+The initial PR head was `2392a69`; the subsequent published remediation head was
+`e03f075`. Required checks on those heads exposed canonical-schema and frozen
+fixture checkout bytes, an outdated Python operator inventory, native test-cfg
+lint and complexity findings, a Studio first-input race, and a Python startup
+watchdog failure. Those failures are historical CI evidence; the focused local
+results below do not imply that final remote checks have passed.
+
+- **Native refactors:** the reviewer read complete changed modules, including
+  new `checkpoint/{encoding,validation}.rs` and `codec/framing.rs`, against the
+  prior implementation. Checkpoint bytes, IPC/schema framing, error precedence,
+  identity ordering, counter/progress guards and reservations across awaits and
+  installation remain unchanged. The checkpoint test module is preserved
+  verbatim and now follows all production items. Final directed native tests
+  passed **56 cases**: lib **26** (operator 10, operator-task 8, managed runner 8),
+  state **21**, corruption **4** and frozen inner compatibility **5**.
+  The final-source checkpoint allocation regression also passed **1 test**,
+  `test_asof_checkpoint_encoding_allocations_scale_with_retained_state` in
+  `stream_asof_join_resources`; the four unchanged large resource traces were
+  not repeated during this refactor review.
+- **Lint and complexity:** lib Clippy passed in the test profile with the actual
+  `--test` compiler configuration verified, covering the CI-only test-module
+  placement diagnostic. Ordinary lib and the three affected integration targets
+  also passed Clippy with `-D warnings`. The final native ASOF complexity scan
+  covered **234 functions**, maximum **8**, with **zero violations**. Helper
+  extractions preserve semantics and add no lint exemptions. `State::candidate`
+  reuses an immutable empty encoding while preserving its typed predecessor
+  bounds; the parent resolved the corresponding Copilot thread.
+- **Fresh-wheel Python:** four ASOF modules, project-v3 tests and the focused
+  cancellation test passed **141 tests** using the final freshly built wheel.
+  This selection differs from the original 144-test acceptance command above.
+  The cancellation test retains source-entry, cancellation, close and consumed
+  runner assertions; its bounded startup watchdog is five seconds and failed
+  startup paths cancel and await the launch task. Optimized example22 passed,
+  withholding output at equal watermark 105 and producing `[10.2, None]`.
+- **Studio first-input regression:** an actual-component MutationObserver test
+  first failed with expected alias `rhs` overwritten by `right`. Removing the
+  redundant mount-reset effect produced **22 passing** alias/App tests. The
+  final accessible-selector regression passed again; affected ESLint and
+  TypeScript checks passed. Existing App rename/persistence assertions remain
+  unchanged, and the new test restores its React environment and DOM resources.
+- **Windows fixture bytes:** narrow `.gitattributes` rules enforce LF for the
+  frozen inner JSON and disable text conversion for binary state segments.
+  A real checkout with `core.autocrlf=true` produced all **13 JSON/binary files**
+  byte-identical to the committed fixtures. No frozen vector was re-recorded and
+  no byte-comparison assertion was normalized or weakened.
+- **Contracts and formatting:** the project-schema artifact now matches Rust's
+  canonical generator, and the Python inventory includes the additive ASOF kind.
+  Final project-schema/OpenAPI/TypeScript regeneration produced no drift and
+  preserves all prior definitions and ordered alternatives. Affected formatting,
+  Ruff, TypeScript and whitespace checks passed. No public API, state version,
+  dependency or inner-join compatibility contract changed during remediation.
+
+Commands, logs and reviewed-file hashes are retained under
+`target/pr260-evidence/`; the essential counts and limitations are included here
+for remote reviewers. The final source bytes were rechecked against the review
+hashes after native and wheel verification. No full local matrix was repeated.
+
 ## Blocking Issues
 
-**None.** Final wheel, generated-contract repeat, affected consumer verification,
-and scoped binding lint passed. All review findings and acceptance-test gaps
-below are closed.
+**No unresolved source findings.** Final wheel, generated-contract repeat,
+affected consumer verification and focused lint passed. All source findings and
+acceptance-test gaps below are closed. Final remote CI, coverage, performance,
+Codacy and PR metadata verification still gate the authorized merge.
 The following blocking findings were resolved and their final source reread:
 
 - **`operator/asof/workspace.rs`, `admission.rs`, `duplicate_fallback.rs`:**
@@ -171,7 +236,7 @@ local Markdown target checks and `git diff --check` passed.
 | FR17–19, FR24               | AC12       | Reset preserves shared snapshots; deterministic logical counters and terminal equalities; PyO3 integer-extrema check; backend ASOF14 and frontend SSE6 preserve i64/u64 decimal strings, nulls, and bools                                                     |
 | FR20–23                     | AC13–14    | Root/fluent/advanced builders; 25 actual native stream cases; logical-name binding and SourceBinding policy ownership; capability fail-closed matrix; fan-out owner identity; approved compositions and explicit rejected paths; explain/optimizer boundaries |
 | FR24 and verification scope | AC15, AC17 | Frozen native/Python inner vectors, existing inner directed tests, Studio import/view/save, generated schema/OpenAPI/TS comparison, scoped format/lint/type checks; final wheel and second contract generation passed                                         |
-| Documentation and delivery  | AC18       | Example22 and synchronized guides explain finality, late policy, resource limits, and delivery; final specialist verdict and PR publication/one CI snapshot remain publication steps                                                                          |
+| Documentation and delivery  | AC18       | Example22 and synchronized guides explain finality, late policy, resource limits, and delivery; PR #260 published; implementation and remediation source reviews approved; final remote gates remain pending                                                  |
 
 The specification's former planned runtime/Python test target names were
 reconciled to the actual inline runtime modules and focused Python files.
@@ -246,13 +311,14 @@ a new ASOF editor.
 
 ## Verdict
 
-**Approve — implementation review complete.** All reviewed source blockers,
-acceptance-test gaps, final wheel checks, generated-contract checks, and scoped
-lint checks are closed. The unchanged dependency-only lint limitation and unrun
-full matrices are recorded above.
+**Approve — implementation and PR remediation source review complete.** All
+reviewed source findings, acceptance-test gaps, final-wheel checks,
+generated-contract checks and scoped lint checks are closed. The original
+dependency-only lint limitation and unrun full local matrices remain recorded.
 
-PR publication and its one nonblocking CI snapshot remain the parent's AC18
-delivery steps; attach this review to the final feature commit and the identical
-merged base. Required CI, cross-platform, coverage, and performance results must
-be green before any separately authorized merge. This review neither authorizes
-merging nor claims pending or absent CI is green.
+The user has authorized merging PR #260 after its issues and required gates are
+resolved. The parent must attach this review to the final pushed commit and
+verify that commit's PR metadata, review threads, Codacy, required CI,
+cross-platform, coverage and performance results before merging. Those remote
+gates remain pending at this handoff. This source approval does not claim the
+final remote checks are green or that the PR has merged.

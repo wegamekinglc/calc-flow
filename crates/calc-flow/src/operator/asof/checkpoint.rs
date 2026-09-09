@@ -1,11 +1,21 @@
-use super::{StreamAsofJoinOperator, StreamAsofJoinStatus, codec::BoundedWriter, state::State};
+mod encoding;
+mod validation;
+
+use super::{
+    StreamAsofJoinOperator, StreamAsofJoinStatus,
+    state::{Encoding, Inventory, RightOrder, State},
+};
 use crate::{
     CalcFlowError, Epoch, IngressProgressSnapshot, OperatorStateSnapshot, Result, StateSegment,
     StreamOperatorContext,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use std::{collections::BTreeMap, io::Write as _, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc};
+
+pub(super) use encoding::encoded_length;
+use encoding::{Decoder, encode_state, restore_charge};
+use validation::{validate_counters, validate_progress};
 
 const MAGIC: &[u8; 8] = b"CFASOF01";
 const SEGMENT: &str = "asof-state-v1";
@@ -47,44 +57,13 @@ impl StreamAsofJoinOperator {
         let limit = usize::try_from(self.spec.limits().max_state_bytes()).expect("validated");
         let length = encoded_length(state, &self.name)?;
         let workspace = self.reserve_workspace(length)?;
-        if state.left.is_empty() && state.right.is_empty() {
-            return Ok(PreparedCheckpoint {
-                segment: None,
-                _workspace: workspace,
-            });
-        }
-        let mut writer = BoundedWriter::with_capacity(
-            usize::try_from(length).expect("reserved address domain"),
-            limit,
-        );
-        write_bytes(&mut writer, MAGIC)?;
-        write_u64(&mut writer, state.left.len() as u64)?;
-        write_u64(&mut writer, state.right.len() as u64)?;
-        for ((time, key, sequence), payload) in &state.left {
-            context.check_cancelled()?;
-            write_bytes(&mut writer, &time.to_le_bytes())?;
-            write_blob(&mut writer, key)?;
-            write_blob(&mut writer, sequence)?;
-            write_blob(&mut writer, payload.bytes())?;
-            tokio::task::yield_now().await;
-        }
-        for (key, bucket) in &state.right {
-            write_blob(&mut writer, key)?;
-            write_u64(&mut writer, bucket.len() as u64)?;
-            for ((time, sequence), payload) in bucket {
-                context.check_cancelled()?;
-                write_bytes(&mut writer, &time.to_le_bytes())?;
-                write_blob(&mut writer, sequence)?;
-                write_blob(
-                    &mut writer,
-                    payload.as_ref().map_or(&[], StateSegment::bytes),
-                )?;
-                tokio::task::yield_now().await;
-            }
-        }
-        let segment = StateSegment::new(writer.bytes);
+        let segment = if state.left.is_empty() && state.right.is_empty() {
+            None
+        } else {
+            Some(encode_state(state, length, limit, context).await?)
+        };
         Ok(PreparedCheckpoint {
-            segment: Some(segment),
+            segment,
             _workspace: workspace,
         })
     }
@@ -127,6 +106,34 @@ impl StreamAsofJoinOperator {
         &self,
         snapshot: &OperatorStateSnapshot,
     ) -> Result<DecodedSnapshot> {
+        let metadata = self.restore_metadata(snapshot)?;
+        let segment = snapshot_segment(snapshot)?;
+        let workspace = self.reserve_workspace(
+            segment
+                .map(|segment| restore_charge(segment.bytes(), self.spec.limits().max_state_rows()))
+                .transpose()?
+                .unwrap_or(0),
+        )?;
+        let state = segment
+            .map(|segment| self.decode_state(segment))
+            .transpose()?
+            .unwrap_or_default();
+        self.validate_restored_state(&state, segment, &metadata.metrics)?;
+        validate_counters(
+            &metadata.metrics,
+            metadata.terminal,
+            metadata.next_output_sequence,
+        )?;
+        Ok(DecodedSnapshot {
+            state,
+            metrics: metadata.metrics,
+            terminal: metadata.terminal,
+            sequence: metadata.next_output_sequence,
+            _workspace: workspace,
+        })
+    }
+
+    fn restore_metadata<'a>(&self, snapshot: &'a OperatorStateSnapshot) -> Result<Metadata<'a>> {
         super::metadata::validate_shape(&snapshot.inline_metadata)?;
         let metadata = Metadata::deserialize(serde::de::value::MapDeserializer::new(
             snapshot
@@ -135,6 +142,11 @@ impl StreamAsofJoinOperator {
                 .map(|(key, value)| (key.as_str(), value)),
         ))
         .map_err(|error: serde_json::Error| mismatch(&error.to_string()))?;
+        self.validate_metadata(&metadata)?;
+        Ok(metadata)
+    }
+
+    fn validate_metadata(&self, metadata: &Metadata<'_>) -> Result<()> {
         if metadata.kind != "stream_asof_join"
             || metadata.state_version != 1
             || metadata.layout_version != 1
@@ -146,89 +158,61 @@ impl StreamAsofJoinOperator {
                 "ASOF kind, schema, configuration or state version differs",
             ));
         }
-        if snapshot.segments.len() > 1 || snapshot.segments.keys().any(|key| key != SEGMENT) {
-            return Err(mismatch("unexpected ASOF segment inventory"));
-        }
-        let workspace = self.reserve_workspace(
-            snapshot
-                .segments
-                .get(SEGMENT)
-                .map(|segment| restore_charge(segment.bytes(), self.spec.limits().max_state_rows()))
-                .transpose()?
-                .unwrap_or(0),
-        )?;
-        let state = snapshot
-            .segments
-            .get(SEGMENT)
-            .map(|segment| self.decode_state(segment))
-            .transpose()?
-            .unwrap_or_default();
-        let inventory = state.inventory(snapshot.segments.get(SEGMENT), &self.name)?;
-        let metrics = metadata.metrics;
-        if inventory.identities != metrics.state_rows
-            || inventory.bytes != metrics.state_bytes
-            || inventory.right_payloads != metrics.retained_right_rows
-            || inventory.identity_only != metrics.identity_only_rows
-            || state.left.len() as u64 != metrics.pending_left_rows
-        {
-            return Err(mismatch("ASOF recomputed state charge or gauges differ"));
-        }
+        Ok(())
+    }
+
+    fn validate_restored_state(
+        &self,
+        state: &State,
+        segment: Option<&StateSegment>,
+        metrics: &StreamAsofJoinStatus,
+    ) -> Result<()> {
+        let inventory = state.inventory(segment, &self.name)?;
+        validate_gauges(&inventory, state.left.len() as u64, metrics)?;
         if inventory.identities > self.spec.limits().max_state_rows()
             || inventory.bytes > self.spec.limits().max_state_bytes()
         {
             return Err(mismatch("ASOF restored state exceeds current limits"));
         }
-        validate_counters(&metrics, metadata.terminal, metadata.next_output_sequence)?;
-        Ok(DecodedSnapshot {
-            state,
-            metrics,
-            terminal: metadata.terminal,
-            sequence: metadata.next_output_sequence,
-            _workspace: workspace,
-        })
+        Ok(())
     }
 
     fn decode_state(&self, segment: &StateSegment) -> Result<State> {
         if hex::encode(Sha256::digest(segment.bytes())) != segment.sha256() {
             return Err(mismatch("ASOF segment checksum mismatch"));
         }
-        let mut decoder = Decoder {
-            bytes: segment.bytes(),
-            max_rows: self.spec.limits().max_state_rows(),
-            rows: 0,
-        };
-        if decoder.take(8)? != MAGIC {
-            return Err(mismatch("ASOF segment magic differs"));
-        }
-        let left_count = decoder.count()?;
-        let bucket_count = decoder.count()?;
+        let mut decoder = Decoder::new(segment.bytes(), self.spec.limits().max_state_rows());
+        let (left_count, bucket_count) = decoder.header()?;
         let mut state = State::default();
         for _ in 0..left_count {
-            decoder.row()?;
-            let time = decoder.time()?;
-            let key = Arc::new(decoder.blob()?.to_vec());
-            let sequence = Arc::new(decoder.blob()?.to_vec());
-            let bytes = decoder.blob()?;
-            self.validate_payload(bytes, false, &(time, key.clone(), sequence.clone()))?;
-            let identity = (time, key, sequence);
-            if state
-                .left
-                .last_key_value()
-                .is_some_and(|(last, _)| last >= &identity)
-            {
-                return Err(mismatch("ASOF left identity order is not strict"));
-            }
-            state
-                .left
-                .insert(identity, StateSegment::new(bytes.to_vec()));
+            self.decode_left_row(&mut decoder, &mut state)?;
         }
         for _ in 0..bucket_count {
             self.decode_bucket(&mut decoder, &mut state)?;
         }
-        if !decoder.bytes.is_empty() {
-            return Err(mismatch("ASOF segment contains trailing data"));
-        }
+        decoder.finish("ASOF segment contains trailing data")?;
         Ok(state)
+    }
+
+    fn decode_left_row(&self, decoder: &mut Decoder<'_>, state: &mut State) -> Result<()> {
+        decoder.row()?;
+        let time = decoder.time()?;
+        let key = Arc::new(decoder.blob()?.to_vec());
+        let sequence = Arc::new(decoder.blob()?.to_vec());
+        let bytes = decoder.blob()?;
+        self.validate_payload(bytes, false, &(time, key.clone(), sequence.clone()))?;
+        let identity = (time, key, sequence);
+        if state
+            .left
+            .last_key_value()
+            .is_some_and(|(last, _)| last >= &identity)
+        {
+            return Err(mismatch("ASOF left identity order is not strict"));
+        }
+        state
+            .left
+            .insert(identity, StateSegment::new(bytes.to_vec()));
+        Ok(())
     }
 
     fn decode_bucket(&self, decoder: &mut Decoder<'_>, state: &mut State) -> Result<()> {
@@ -247,32 +231,54 @@ impl StreamAsofJoinOperator {
         }
         let mut bucket = BTreeMap::new();
         for _ in 0..count {
-            decoder.row()?;
-            let time = decoder.time()?;
-            let sequence = Arc::new(decoder.blob()?.to_vec());
-            super::identity::validate(
-                &sequence,
-                &self.schemas[1],
-                self.spec.right().sequence_by(),
-            )?;
-            let bytes = decoder.blob()?;
-            if !bytes.is_empty() {
-                self.validate_payload(bytes, true, &(time, key.clone(), sequence.clone()))?;
-            }
-            let identity = (time, sequence);
-            if bucket
-                .last_key_value()
-                .is_some_and(|(last, _)| last >= &identity)
-            {
-                return Err(mismatch("ASOF right identity order is not strict"));
-            }
-            bucket.insert(
-                identity,
-                (!bytes.is_empty()).then(|| StateSegment::new(bytes.to_vec())),
-            );
+            self.decode_right_row(decoder, &key, &mut bucket)?;
         }
         state.right.insert(key, bucket);
         Ok(())
+    }
+
+    fn decode_right_row(
+        &self,
+        decoder: &mut Decoder<'_>,
+        key: &Encoding,
+        bucket: &mut BTreeMap<RightOrder, Option<StateSegment>>,
+    ) -> Result<()> {
+        decoder.row()?;
+        let time = decoder.time()?;
+        let sequence = self.decode_right_sequence(decoder)?;
+        let bytes = decoder.blob()?;
+        self.validate_right_payload(bytes, time, key, &sequence)?;
+        let identity = (time, sequence);
+        if bucket
+            .last_key_value()
+            .is_some_and(|(last, _)| last >= &identity)
+        {
+            return Err(mismatch("ASOF right identity order is not strict"));
+        }
+        bucket.insert(
+            identity,
+            (!bytes.is_empty()).then(|| StateSegment::new(bytes.to_vec())),
+        );
+        Ok(())
+    }
+
+    fn validate_right_payload(
+        &self,
+        bytes: &[u8],
+        time: i64,
+        key: &Encoding,
+        sequence: &Encoding,
+    ) -> Result<()> {
+        if !bytes.is_empty() {
+            self.validate_payload(bytes, true, &(time, key.clone(), sequence.clone()))?;
+        }
+        Ok(())
+    }
+
+    fn decode_right_sequence(&self, decoder: &mut Decoder<'_>) -> Result<Encoding> {
+        let sequence = Arc::new(decoder.blob()?.to_vec());
+        super::identity::validate(&sequence, &self.schemas[1], self.spec.right().sequence_by())?;
+        Ok(sequence)
     }
 
     fn validate_payload(
@@ -291,21 +297,7 @@ impl StreamAsofJoinOperator {
         if row.schema() != self.schemas[usize::from(right)] {
             return Err(mismatch("ASOF row schema differs"));
         }
-        for column in side
-            .keys()
-            .iter()
-            .chain(side.sequence_by())
-            .map(String::as_str)
-            .chain(std::iter::once(side.event_time()))
-        {
-            if row
-                .column(row.schema().index_of(column).expect("validated schema"))
-                .null_count()
-                != 0
-            {
-                return Err(mismatch("ASOF restored identity contains null"));
-            }
-        }
+        validate_nonnull_identity(&row, side)?;
         let time = row
             .column(row.schema().index_of(side.event_time()).expect("validated"))
             .as_any()
@@ -373,205 +365,55 @@ impl StreamAsofJoinOperator {
     }
 }
 
-fn validate_counters(metrics: &StreamAsofJoinStatus, terminal: bool, sequence: u64) -> Result<()> {
-    if metrics.matched_rows.checked_add(metrics.unmatched_rows) != Some(metrics.emitted_left_rows)
-        || metrics
-            .emitted_left_rows
-            .checked_add(metrics.pending_left_rows)
-            != Some(metrics.left.accepted_rows)
-        || metrics
-            .evicted_right_rows
-            .checked_add(metrics.retained_right_rows)
-            != Some(metrics.right.accepted_rows)
-        || metrics.identity_only_rows > metrics.evicted_right_rows
-        || sequence != metrics.emitted_left_rows
-        || (terminal && metrics.state_rows != 0)
-    {
-        return Err(mismatch(
-            "ASOF output sequence, counters or terminal state contradict retained rows",
-        ));
+fn snapshot_segment(snapshot: &OperatorStateSnapshot) -> Result<Option<&StateSegment>> {
+    if snapshot.segments.len() > 1 || snapshot.segments.keys().any(|key| key != SEGMENT) {
+        return Err(mismatch("unexpected ASOF segment inventory"));
     }
-    if [&metrics.left, &metrics.right]
-        .into_iter()
-        .any(|side| side.watermark_micros.is_some() || side.idle || side.ended)
-        || metrics.output_watermark_micros.is_some()
-    {
-        return Err(mismatch("ASOF checkpoint must not own runtime progress"));
-    }
-    Ok(())
+    Ok(snapshot.segments.get(SEGMENT))
 }
 
-fn validate_progress(
-    state: &State,
-    tolerance: u64,
-    terminal: bool,
-    progress: &IngressProgressSnapshot,
-    output_frontier: Option<crate::EventTime>,
+fn validate_gauges(
+    inventory: &Inventory,
+    pending_left_rows: u64,
+    metrics: &StreamAsofJoinStatus,
 ) -> Result<()> {
-    if progress.by_ingress().len() != 2
-        || progress.get("left").is_none()
-        || progress.get("right").is_none()
+    if inventory.identities != metrics.state_rows
+        || inventory.bytes != metrics.state_bytes
+        || inventory.right_payloads != metrics.retained_right_rows
+        || inventory.identity_only != metrics.identity_only_rows
+        || pending_left_rows != metrics.pending_left_rows
     {
-        return Err(mismatch("ASOF restore requires exact two-ingress progress"));
-    }
-    if terminal != super::all_ended(progress) {
-        return Err(mismatch("ASOF terminal state contradicts ingress EOF"));
-    }
-    if state
-        .left
-        .keys()
-        .any(|(time, _, _)| output_frontier.is_some_and(|frontier| *time <= frontier.as_micros()))
-    {
-        return Err(mismatch("ASOF pending row is behind output frontier"));
-    }
-    if let (Some(output), Some(input)) = (output_frontier, super::frontier(progress))
-        && output.as_micros() >= input
-    {
-        return Err(mismatch(
-            "ASOF output frontier is ahead of safe input progress",
-        ));
-    }
-    let input = super::frontier(progress);
-    if state
-        .left
-        .keys()
-        .any(|(time, _, _)| input.is_some_and(|frontier| *time < frontier))
-    {
-        return Err(mismatch(
-            "ASOF snapshot contains already-finalizable pending left rows",
-        ));
-    }
-    if !terminal && input.is_none() && output_frontier.is_some() {
-        return Err(mismatch(
-            "ASOF output frontier has no established input progress",
-        ));
-    }
-    let left = progress
-        .get("left")
-        .expect("validated two-ingress progress");
-    let future = if left.state() == crate::IngressState::Ended {
-        i128::MAX
-    } else {
-        left.watermark()
-            .map_or(i128::MIN, |wm| i128::from(wm.as_micros()))
-    };
-    let pending = state
-        .left
-        .first_key_value()
-        .map_or(i128::MAX, |(key, _)| i128::from(key.0));
-    let threshold = future.min(pending);
-    if state.right.values().any(|bucket| {
-        bucket.iter().any(|((time, _), row)| {
-            row.is_none() && i128::from(*time) + i128::from(tolerance) >= threshold
-        })
-    }) {
-        return Err(mismatch(
-            "ASOF identity-only state discarded a potentially matching payload",
-        ));
-    }
-    let right = progress
-        .get("right")
-        .expect("validated two-ingress progress");
-    if state.right.values().any(|bucket| {
-        bucket.iter().any(|((time, _), row)| {
-            row.is_none()
-                && (right.state() == crate::IngressState::Ended
-                    || right.watermark().is_some_and(|wm| *time < wm.as_micros()))
-        })
-    }) {
-        return Err(mismatch(
-            "ASOF identity-only state outlived its closed ingress boundary",
-        ));
+        return Err(mismatch("ASOF recomputed state charge or gauges differ"));
     }
     Ok(())
 }
 
-struct Decoder<'a> {
-    bytes: &'a [u8],
-    max_rows: u64,
-    rows: u64,
-}
-impl<'a> Decoder<'a> {
-    fn take(&mut self, count: usize) -> Result<&'a [u8]> {
-        if count > self.bytes.len() {
-            return Err(mismatch("ASOF truncated segment"));
+fn validate_nonnull_identity(
+    row: &datafusion::arrow::record_batch::RecordBatch,
+    side: &super::AsofJoinSide,
+) -> Result<()> {
+    for column in side
+        .keys()
+        .iter()
+        .chain(side.sequence_by())
+        .map(String::as_str)
+        .chain(std::iter::once(side.event_time()))
+    {
+        if row
+            .column(row.schema().index_of(column).expect("validated schema"))
+            .null_count()
+            != 0
+        {
+            return Err(mismatch("ASOF restored identity contains null"));
         }
-        let (value, rest) = self.bytes.split_at(count);
-        self.bytes = rest;
-        Ok(value)
     }
-    fn integer(&mut self) -> Result<u64> {
-        Ok(u64::from_le_bytes(
-            self.take(8)?.try_into().expect("eight bytes"),
-        ))
-    }
-    fn time(&mut self) -> Result<i64> {
-        Ok(i64::from_le_bytes(
-            self.take(8)?.try_into().expect("eight bytes"),
-        ))
-    }
-    fn count(&mut self) -> Result<u64> {
-        let count = self.integer()?;
-        if count > self.max_rows {
-            return Err(mismatch("ASOF declared row count exceeds limits"));
-        }
-        Ok(count)
-    }
-    fn row(&mut self) -> Result<()> {
-        self.rows = self
-            .rows
-            .checked_add(1)
-            .filter(|rows| *rows <= self.max_rows)
-            .ok_or_else(|| mismatch("ASOF decoded row count exceeds limits"))?;
-        Ok(())
-    }
-    fn blob(&mut self) -> Result<&'a [u8]> {
-        let size = usize::try_from(self.integer()?)
-            .map_err(|_| mismatch("ASOF field length exceeds address domain"))?;
-        self.take(size)
-    }
+    Ok(())
 }
-fn write_bytes(writer: &mut BoundedWriter, bytes: &[u8]) -> Result<()> {
-    writer
-        .write_all(bytes)
-        .map_err(|error| mismatch(&error.to_string()))
-}
-fn write_u64(writer: &mut BoundedWriter, value: u64) -> Result<()> {
-    write_bytes(writer, &value.to_le_bytes())
-}
-fn write_blob(writer: &mut BoundedWriter, value: &[u8]) -> Result<()> {
-    write_u64(writer, value.len() as u64)?;
-    write_bytes(writer, value)
-}
+
 fn mismatch(message: &str) -> CalcFlowError {
     CalcFlowError::CheckpointMismatch {
         message: message.into(),
     }
-}
-
-pub(super) fn encoded_length(state: &State, name: &str) -> Result<u64> {
-    if state.left.is_empty() && state.right.is_empty() {
-        return Ok(0);
-    }
-    let mut size = 24;
-    for ((_, key, sequence), payload) in &state.left {
-        size = super::checked(name, size, 32)?;
-        for bytes in [key.as_slice(), sequence.as_slice(), payload.bytes()] {
-            size = super::checked(name, size, bytes.len() as u64)?;
-        }
-    }
-    for (key, bucket) in &state.right {
-        size = super::checked(name, size, 16 + key.len() as u64)?;
-        for ((_, sequence), payload) in bucket {
-            size = super::checked(name, size, 24 + sequence.len() as u64)?;
-            size = super::checked(
-                name,
-                size,
-                payload.as_ref().map_or(0, |row| row.bytes().len() as u64),
-            )?;
-        }
-    }
-    Ok(size)
 }
 
 #[cfg(test)]
@@ -672,48 +514,4 @@ mod tests {
             .is_err()
         );
     }
-}
-
-fn restore_charge(bytes: &[u8], max_rows: u64) -> Result<u64> {
-    let mut decoder = Decoder {
-        bytes,
-        max_rows,
-        rows: 0,
-    };
-    if decoder.take(8)? != MAGIC {
-        return Err(mismatch("ASOF segment magic differs"));
-    }
-    let left = decoder.count()?;
-    let buckets = decoder.count()?;
-    let mut largest_payload = 0;
-    let mut largest_identity = 0;
-    for _ in 0..left {
-        decoder.row()?;
-        decoder.time()?;
-        largest_identity = largest_identity.max(decoder.blob()?.len() as u64);
-        largest_identity = largest_identity.max(decoder.blob()?.len() as u64);
-        largest_payload = largest_payload.max(decoder.blob()?.len() as u64);
-    }
-    for _ in 0..buckets {
-        largest_identity = largest_identity.max(decoder.blob()?.len() as u64);
-        let count = decoder.count()?;
-        for _ in 0..count {
-            decoder.row()?;
-            decoder.time()?;
-            largest_identity = largest_identity.max(decoder.blob()?.len() as u64);
-            largest_payload = largest_payload.max(decoder.blob()?.len() as u64);
-        }
-    }
-    if !decoder.bytes.is_empty() {
-        return Err(mismatch("ASOF segment contains trailing bytes"));
-    }
-    (bytes.len() as u64)
-        .checked_add(
-            largest_payload
-                .checked_mul(4)
-                .ok_or_else(|| mismatch("ASOF decode workspace overflowed"))?
-                .max(largest_identity),
-        )
-        .and_then(|value| value.checked_add(decoder.rows.checked_mul(384)?))
-        .ok_or_else(|| mismatch("ASOF decode workspace overflowed"))
 }

@@ -460,16 +460,26 @@ def test_cancelling_start_reaps_launch_and_consumes_runner(tmp_path: Path) -> No
             ManagedCheckpointRuntime(tmp_path),
         )
         launch = asyncio.create_task(runner.start_async())
-        await asyncio.wait_for(source.entered.wait(), timeout=1)
-        launch.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await launch
-        assert source.closed.is_set()
-        with pytest.raises(
-            RuntimeError,
-            match=r"streaming runner has already been consumed by start\(\)",
-        ):
-            await runner.start_async()
+        try:
+            # Managed checkpoint I/O precedes the source-open cancellation target.
+            try:
+                await asyncio.wait_for(source.entered.wait(), timeout=5)
+            except TimeoutError:
+                if launch.done():
+                    await launch
+                raise
+            launch.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await launch
+            assert source.closed.is_set()
+            with pytest.raises(
+                RuntimeError,
+                match=r"streaming runner has already been consumed by start\(\)",
+            ):
+                await runner.start_async()
+        finally:
+            launch.cancel()
+            await asyncio.gather(launch, return_exceptions=True)
 
     asyncio.run(exercise())
 

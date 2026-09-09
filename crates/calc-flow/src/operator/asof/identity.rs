@@ -51,15 +51,19 @@ fn string(bytes: &mut &[u8]) -> Result<()> {
         if length == 255 {
             value.extend_from_slice(&block[..width]);
         } else {
-            if length == 0 || length > width || block[length..width].iter().any(|byte| *byte != 0) {
-                return Err(invalid());
-            }
-            value.extend_from_slice(&block[..length]);
+            value.extend_from_slice(string_tail(block, width, length)?);
             std::str::from_utf8(&value).map_err(|_| invalid())?;
             return Ok(());
         }
         block_index += 1;
     }
+}
+
+fn string_tail(block: &[u8], width: usize, length: usize) -> Result<&[u8]> {
+    if length == 0 || length > width || block[length..width].iter().any(|byte| *byte != 0) {
+        return Err(invalid());
+    }
+    Ok(&block[..length])
 }
 
 fn take<'a>(bytes: &mut &'a [u8], length: usize) -> Result<&'a [u8]> {
