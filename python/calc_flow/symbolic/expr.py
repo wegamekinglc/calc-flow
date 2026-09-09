@@ -10,7 +10,7 @@ from __future__ import annotations
 import inspect
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Concatenate, Literal, overload
+from typing import TYPE_CHECKING, Concatenate, Literal, Unpack, overload
 
 import pyarrow as pa
 
@@ -49,11 +49,15 @@ from calc_flow.symbolic.types import (
 )
 
 if TYPE_CHECKING:
+    from datetime import timedelta
+
     from calc_flow._native import ExecutionOptions
+    from calc_flow.asof_join_spec import AsofStateLimits
     from calc_flow.compute import TableData
     from calc_flow.pipeline import Runtime
     from calc_flow.runtime import StreamRuntimeConfig, WatermarkPolicy
     from calc_flow.stream import StreamInput, StreamResults
+    from calc_flow.symbolic.asof import _AsofJoinOptions
     from calc_flow.symbolic.program import FeatureSet
 
 type ColumnOperand = ColumnExpr | ScalarLiteral
@@ -460,6 +464,25 @@ class TableExpr(Expr[object]):
         from calc_flow.symbolic.sql import sql
 
         return sql(query, input=self)
+
+    def stream_asof_join(
+        self,
+        right: TableExpr,
+        /,
+        *,
+        tolerance: timedelta,
+        limits: AsofStateLimits,
+        **options: Unpack[_AsofJoinOptions],
+    ) -> TableExpr:
+        """Attach the latest historical right row after both inputs finalize.
+
+        Accepts the same ``keys``, ``late_policy`` and ``prefixes`` options as
+        ``cf.table.stream_asof_join``. Use ``stream`` to execute this declaration;
+        finite ``collect`` and ``compute`` do not provide batch ASOF semantics.
+        """
+        from calc_flow.symbolic.asof import _AsofOptions, declare_asof
+
+        return declare_asof(self, right, tolerance, limits, _AsofOptions(**options))
 
     def stream(
         self,

@@ -38,6 +38,7 @@ impl CompiledBatchOperator {
             NodeOperator::Union(_)
             | NodeOperator::Window(_)
             | NodeOperator::StreamJoin(_)
+            | NodeOperator::StreamAsofJoin(_)
             | NodeOperator::Stream(_) => Err(CalcFlowError::Compile {
                 message: format!(
                     "node {:?} is stream-only; batch graphs compose multi-input logic through SQL aliases",
@@ -190,6 +191,7 @@ impl PipelineBuilder {
                 NodeOperator::Union(_)
                     | NodeOperator::Window(_)
                     | NodeOperator::StreamJoin(_)
+                    | NodeOperator::StreamAsofJoin(_)
                     | NodeOperator::Stream(_)
             ) {
                 return Err(CalcFlowError::Compile {

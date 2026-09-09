@@ -15,6 +15,7 @@ On this page:
 - [SQL operators](#sql-operators)
 - [Rolling windows](#rolling-windows)
 - [Cross-section statistics](#cross-section-statistics)
+- [Bounded backward ASOF Join](#bounded-backward-asof-join)
 - [Stream compilation and continuous runtime](#stream-compilation-and-continuous-runtime)
 - [Batches](#batches)
 - [UDFs and external providers](#udfs-and-external-providers)
@@ -97,8 +98,8 @@ asynchronous and accepts only `Batch` values.
 
 `ExpressionOperator`, `SqlOperator`, and `RollingOperator` are built-in
 operators that implement both `BatchOperator` and `StreamOperator`;
-`UnionOperator`, `WindowAggregateOperator`, and `StreamJoinOperator` are
-stream-only. Add them through `PipelineBuilder::add_node`, which accepts a
+`UnionOperator`, `WindowAggregateOperator`, `StreamJoinOperator`, and
+`StreamAsofJoinOperator` are stream-only. Add them through `PipelineBuilder::add_node`, which accepts a
 `NodeOperator` conversion from a boxed built-in, custom batch operator, or
 custom stream operator.
 
@@ -423,6 +424,23 @@ aligned epoch cut as an Arrow IPC base segment with state version 1 —
 configuration-hash and schema-fingerprint metadata plus bounded inline
 manifest fields — and a restored operator reproduces the same ordered
 output, watermark frontier, output sequence, and metrics.
+
+## Bounded backward ASOF Join
+
+`StreamAsofJoinSpec::new(left, right, tolerance, limits)` takes two validated
+`AsofJoinSide` values, an exact microsecond `std::time::Duration`, and positive
+whole-operator `AsofStateLimits`. It defaults to `AsofLatePolicy::Error`;
+`with_late_policy` selects `Drop`. `StreamAsofJoinOperator::new` takes the node
+name, exact left/right `SchemaRef` values, and that spec. Add it through
+`PipelineBuilder::add_node` and compile in stream mode.
+
+The operator exposes `spec()` and payload-free `status()` and implements
+`StreamOperator` with `checkpoint`, `restore`, and `reset`. Its independent
+state/layout/accounting version is 1. `StreamingJob::stream_asof_join_status()`
+returns status by node ID. The [ASOF guide](asof-join-guide.md) defines exact
+input types, inclusive predecessor selection, dual-watermark finality,
+whole-operator budgets, and recovery; [architecture](design.md#bounded-backward-asof-join)
+explains native state and DataFusion ownership.
 
 ## Stream compilation and continuous runtime
 

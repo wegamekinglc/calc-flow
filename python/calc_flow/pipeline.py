@@ -11,6 +11,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from calc_flow import _native
+from calc_flow.asof_join_spec import AsofJoinSpec
 from calc_flow.capabilities import (
     ProviderArrayRules,
     ProviderOptionsSchema,
@@ -1016,6 +1017,65 @@ class PipelineBuilder:
                             "name": "output",
                             "required": True,
                             "schema": [],
+                        }
+                    ],
+                }
+            )
+
+        return self._from_json(_updated_project(self._project_json, add))
+
+    def stream_asof_join(
+        self,
+        name: str,
+        *,
+        left_schema: Sequence[ArrowFieldSpec],
+        right_schema: Sequence[ArrowFieldSpec],
+        spec: AsofJoinSpec,
+    ) -> PipelineBuilder:
+        """Return a new builder containing one final bounded backward ASOF join."""
+        from calc_flow.asof_join_spec import _asof_wire_spec
+
+        if type(name) is not str or not name:
+            raise TypeError("name must be a non-empty string")
+        if type(spec) is not AsofJoinSpec:
+            raise TypeError("spec must be a calc_flow.AsofJoinSpec")
+        sides = (
+            ("left", _arrow_fields(left_schema, "left_schema"), spec.left),
+            ("right", _arrow_fields(right_schema, "right_schema"), spec.right),
+        )
+        inputs = [
+            {"kind": "table", "name": port, "required": True, "schema": fields}
+            for port, fields, _ in sides
+        ]
+        output = [
+            {
+                **field,
+                "name": f"{side.prefix}__{field['name']}",
+                "nullable": field["nullable"] if port == "left" else True,
+            }
+            for port, fields, side in sides
+            for field in fields
+        ]
+
+        names = [field["name"] for field in output]
+        if len(set(names)) != len(names):
+            raise ValueError("ASOF prefixes produce an output field collision")
+
+        def add(project: dict[str, Any]) -> None:
+            project["graph"]["nodes"].append(
+                {
+                    "id": name,
+                    "input_ports": inputs,
+                    "operator": {
+                        "kind": "stream_asof_join",
+                        "spec": _asof_wire_spec(spec),
+                    },
+                    "output_ports": [
+                        {
+                            "kind": "table",
+                            "name": "output",
+                            "required": True,
+                            "schema": output,
                         }
                     ],
                 }

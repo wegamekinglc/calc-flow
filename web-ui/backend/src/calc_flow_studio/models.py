@@ -17,6 +17,8 @@ from pydantic import (
     model_validator,
 )
 
+from calc_flow_studio.asof_metrics import StreamAsofJoinMetrics
+
 type JSONValue = (
     None | bool | int | float | str | list[JSONValue] | dict[str, JSONValue]
 )
@@ -429,6 +431,14 @@ type StreamingFailureReasonCode = Literal[
     "join_match_limit_exceeded",
     "join_counter_overflow",
     "join_time_conversion_failed",
+    "asof_invalid_input",
+    "asof_duplicate_identity",
+    "asof_late_row",
+    "asof_state_limit_exceeded",
+    "asof_workspace_limit_exceeded",
+    "asof_output_limit_exceeded",
+    "asof_counter_overflow",
+    "asof_protocol_error",
 ]
 
 
@@ -467,6 +477,7 @@ class RunEvent(StrictModel):
     backpressure_events: int | None = Field(default=None, ge=0)
     late_rows: int | None = Field(default=None, ge=0)
     stream_joins: tuple[StreamJoinMetrics, ...] | None = None
+    stream_asof_joins: tuple[StreamAsofJoinMetrics, ...] | None = None
 
 
 class OutputFieldPreview(StrictModel):

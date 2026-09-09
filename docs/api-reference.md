@@ -109,6 +109,16 @@ separate durable-recovery path. Multi-output streams yield named events rather
 than synchronized dictionaries. See [Python contracts](python-api.md#streaming-results)
 and the [streaming guide](streaming-guide.md).
 
+### Bounded backward ASOF Join
+
+`cf.table.stream_asof_join` and `TableExpr.stream_asof_join` declare a native
+stream-only match with required `tolerance` and `limits`, plus optional `keys`,
+`late_policy`, and `prefixes`. Exact non-null event time and sequence are
+inherited from each operand. The result preserves every accepted left row and
+makes right fields nullable; final output waits for strict progress on both
+inputs. See the [Python entry points](python-api.md#bounded-backward-asof-join)
+and [ASOF contract](asof-join-guide.md).
+
 ### Batch
 
 | Member                                      | Contract                                                |
@@ -131,6 +141,8 @@ and the [streaming guide](streaming-guide.md).
 - `stream_join(name, *, left_schema, right_schema, left_keys, right_keys,
   left_event_time, right_event_time, bounds, limits, left_prefix="left",
   right_prefix="right")`;
+- `stream_asof_join(name, *, left_schema, right_schema, spec)` with immutable
+  `AsofJoinSpec`, `AsofJoinSide`, and `AsofStateLimits`;
 - `connect(source_node, target_node, *, source_port="output",
   target_port="input")`;
 - `compile_batch(runtime=None) -> BatchExecutionPlan`;
@@ -346,29 +358,30 @@ analysis, and compilation contract.
 The `calc_flow` crate re-exports its supported public types from
 [`lib.rs`](../crates/calc-flow/src/lib.rs).
 
-| Area                | Primary APIs                                                                                                                                           |
-|---------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Data                | `Batch`, `BatchKind`, `BatchMetadata`, `TableBatch`                                                                                                    |
-| Batch graph         | `PipelineBuilder`, `Edge`, `PortEndpoint`, `BatchExecutionPlan`                                                                                        |
-| Stream plan         | `StreamExecutionPlan`, `StreamRequirements`, `DeliveryGuarantee`, `StreamRuntimeConfig`                                                                |
-| Operator traits     | `Port`, `OperatorMetadata`, `NodeOperator`, `BatchOperator`, `StreamOperator`, `StreamOperatorLifecycle`, `OperatorStateSnapshot`                      |
-| Built-in operators  | `ExpressionOperator`, `SqlOperator`, `RollingOperator`, `CrossSectionOperator`, `UnionOperator`, `WindowAggregateOperator`, `StreamJoinOperator`       |
-| Window model        | `WindowSpec`, `WindowGeometry`, `AggregateSpec`, `AggregateFunction`, `MAX_WINDOW_OVERLAP`                                                             |
-| Rolling model       | `RollingSpec`, `RollingOutputSpec`, `RollingNumericalProfile`, `LatePolicySpec`, `LateErrorScope`, `RollingValuePolicy`                                |
-| Cross-section model | `CrossSectionSpec`, `CrossSectionGroupingSpec`, `CrossSectionOutputSpec`, `CrossSectionValuePolicy`, `RankTieMethod`, `SortDirection`, `NullPlacement` |
-| Stream join model   | `StreamJoinSpec`, `StreamJoinType`, `JoinTimeBounds`, `JoinStateLimits`, `StreamJoinStatus`                                                            |
-| Execution           | `ExecutionOptions`, `RunResult`, `RunMetadata`, `NodeTiming`                                                                                           |
-| Stream model        | `StreamMessage`, `StreamMessageKind`, `StreamJobContext`, `EventTime`, `Epoch`                                                                         |
-| Stream channel      | `EdgeBudget`, `EnvelopeCost`, `ChannelMetrics`, `EdgeSender`, `EdgeReceiver`, `edge_channel`                                                           |
-| State backend       | `StateBackend`, `StateLineageBackend`, `StateLineageKey`, `StateHandle`, `LocalStateBackend`                                                           |
-| State manifest      | `CheckpointManifest`, `CheckpointManifestFields`, `ManifestExpectation`, `OperatorManifestEntry`, `RecoveryStatus`                                     |
-| UDF/providers       | `UdfRegistry`, `UdfReference`, `ProviderRegistry`, `BatchOperatorFactory`, `StreamOperatorFactory`                                                     |
-| Sources and sinks   | `StreamSource`, `StreamSink`, `TransactionalStreamSink`, `SourceBinding`, `SinkBinding`                                                                |
-| Continuous runtime  | `StreamingRunner`, `StreamingJob`, `ManagedCheckpointRuntime`, `Cursor`, `SourceEvent`, `JobStatus`, `JobOutcome`                                      |
-| Static inputs       | `StaticInputSpec`, `StaticInputDigest`, `StaticMutability`, `STATIC_INPUT_DIGEST_VERSION`, `StaticArraySnapshot`, `StaticArrayValues`                  |
-| Projects            | `ProjectSpec`, `compile_project`, `validate_project`                                                                                                   |
-| Persistence         | `FileProjectStore`, `LocalStateBackend`, `CheckpointManifest`                                                                                          |
-| Errors              | `CalcFlowError`, `Result<T>`                                                                                                                           |
+| Area                  | Primary APIs                                                                                                                                                               |
+|-----------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Data                  | `Batch`, `BatchKind`, `BatchMetadata`, `TableBatch`                                                                                                                        |
+| Batch graph           | `PipelineBuilder`, `Edge`, `PortEndpoint`, `BatchExecutionPlan`                                                                                                            |
+| Stream plan           | `StreamExecutionPlan`, `StreamRequirements`, `DeliveryGuarantee`, `StreamRuntimeConfig`                                                                                    |
+| Operator traits       | `Port`, `OperatorMetadata`, `NodeOperator`, `BatchOperator`, `StreamOperator`, `StreamOperatorLifecycle`, `OperatorStateSnapshot`                                          |
+| Built-in operators    | `ExpressionOperator`, `SqlOperator`, `RollingOperator`, `CrossSectionOperator`, `UnionOperator`, `WindowAggregateOperator`, `StreamJoinOperator`, `StreamAsofJoinOperator` |
+| Window model          | `WindowSpec`, `WindowGeometry`, `AggregateSpec`, `AggregateFunction`, `MAX_WINDOW_OVERLAP`                                                                                 |
+| Rolling model         | `RollingSpec`, `RollingOutputSpec`, `RollingNumericalProfile`, `LatePolicySpec`, `LateErrorScope`, `RollingValuePolicy`                                                    |
+| Cross-section model   | `CrossSectionSpec`, `CrossSectionGroupingSpec`, `CrossSectionOutputSpec`, `CrossSectionValuePolicy`, `RankTieMethod`, `SortDirection`, `NullPlacement`                     |
+| Stream join model     | `StreamJoinSpec`, `StreamJoinType`, `JoinTimeBounds`, `JoinStateLimits`, `StreamJoinStatus`                                                                                |
+| ASOF join model       | `StreamAsofJoinSpec`, `AsofJoinSide`, `AsofStateLimits`, `AsofLatePolicy`, `StreamAsofJoinStatus`, `StreamAsofJoinSideStatus`                                              |
+| Execution             | `ExecutionOptions`, `RunResult`, `RunMetadata`, `NodeTiming`                                                                                                               |
+| Stream model          | `StreamMessage`, `StreamMessageKind`, `StreamJobContext`, `EventTime`, `Epoch`                                                                                             |
+| Stream channel        | `EdgeBudget`, `EnvelopeCost`, `ChannelMetrics`, `EdgeSender`, `EdgeReceiver`, `edge_channel`                                                                               |
+| State backend         | `StateBackend`, `StateLineageBackend`, `StateLineageKey`, `StateHandle`, `LocalStateBackend`                                                                               |
+| State manifest        | `CheckpointManifest`, `CheckpointManifestFields`, `ManifestExpectation`, `OperatorManifestEntry`, `RecoveryStatus`                                                         |
+| UDF/providers         | `UdfRegistry`, `UdfReference`, `ProviderRegistry`, `BatchOperatorFactory`, `StreamOperatorFactory`                                                                         |
+| Sources and sinks     | `StreamSource`, `StreamSink`, `TransactionalStreamSink`, `SourceBinding`, `SinkBinding`                                                                                    |
+| Continuous runtime    | `StreamingRunner`, `StreamingJob`, `ManagedCheckpointRuntime`, `Cursor`, `SourceEvent`, `JobStatus`, `JobOutcome`                                                          |
+| Static inputs         | `StaticInputSpec`, `StaticInputDigest`, `StaticMutability`, `STATIC_INPUT_DIGEST_VERSION`, `StaticArraySnapshot`, `StaticArrayValues`                                      |
+| Projects              | `ProjectSpec`, `compile_project`, `validate_project`                                                                                                                       |
+| Persistence           | `FileProjectStore`, `LocalStateBackend`, `CheckpointManifest`                                                                                                              |
+| Errors                | `CalcFlowError`, `Result<T>`                                                                                                                                               |
 
 `compile_project` produces a `BatchExecutionPlan`. `compile_batch` and
 `compile_stream` are the Rust graph-compilation entry points. A
@@ -443,10 +456,13 @@ field before React receives it. Unknown capability-rule identities, unknown
 lifecycle vocabulary, and inconsistent `stateVersion`/`stateful` combinations
 are rejected by the backend response models as well as the decoder.
 Validation and job responses use generated discriminated unions, so
-backend and frontend must be deployed from the same generated contract. SSE
-event payloads are not part of that generated contract: the events route
-serializes the backend event model directly, and the frontend maintains the
-corresponding event type by hand.
+backend and frontend must be deployed from the same generated contract.
+The SSE route documents each `data` payload as the generated `RunEvent` model;
+its framing and resume protocol remain a stream rather than a JSON response.
+The frontend event type consumes the generated ASOF metric shape. ASOF
+`stream_asof_joins` counters/gauges/watermark microseconds use canonical decimal
+strings, absent watermarks are null, and idle/ended are booleans. Python status
+keeps integer values; existing inner metrics retain their representation.
 
 Project writes that fail validation answer `422` with a structured envelope on
 `POST /projects`, `POST /projects/import`, and `PUT /projects/{id}`: the

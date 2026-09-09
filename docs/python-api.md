@@ -18,6 +18,7 @@ On this page:
 - [Reusable programs and collection](#reusable-programs-and-collection)
 - [SQL and pipeline composition](#sql-and-pipeline-composition)
 - [Streaming results](#streaming-results)
+- [Bounded backward ASOF Join](#bounded-backward-asof-join)
 - [Choosing an integration API](#choosing-an-integration-api)
 - [Table batches and builder](#table-batches-and-builder)
 - [Multi-input SQL](#multi-input-sql)
@@ -258,8 +259,10 @@ expressions and SQL produce results as batches arrive.
 mapping by logical dynamic input name. Omitted mapping entries use the default.
 Select `BoundedOutOfOrderness` for disorder, `SourceProvidedWatermarks` for
 iterable-provided progress, or `DisabledWatermarks` for intentional EOF-driven
-finalization. Explicit policies replace the default order validation. Unknown
-or static names, invalid policies, and overrides of a `SourceBinding` fail.
+finalization on supported graphs. ASOF rejects disabled watermarks on every
+reachable source before startup. Explicit policies replace the default order
+validation. Unknown or static names, invalid policies, and overrides of a
+`SourceBinding` fail.
 See [watermark policies](streaming-guide.md#watermark-policies) for inclusive
 cutoffs, late-data errors, and multi-source progress.
 
@@ -283,6 +286,29 @@ the iterator nor its temporary checkpoints provide durable restart or
 exactly-once processing. For those contracts, use explicit source/sink bindings,
 `Program.compile_stream`, `StreamingRunner`, and `ManagedCheckpointRuntime`.
 See [explicit connectors and recovery](streaming-guide.md#explicit-connectors-and-recovery).
+
+## Bounded backward ASOF Join
+
+`cf.table.stream_asof_join` and `TableExpr.stream_asof_join` declare a
+stream-only backward match. They require `tolerance=timedelta(...)` and
+`limits=AsofStateLimits(max_state_rows, max_state_bytes)`, with optional
+`keys`, `late_policy`, and `prefixes`. Time/sequence come from input temporal
+metadata, and omitted keys use each input's entity keys.
+
+The operator chooses at most one historical right row per accepted left row
+and preserves unmatched left rows with nullable right fields. Equal-time ties
+use a typed sequence order. Both input watermarks must strictly pass the left
+time, or the corresponding input must end, before any final result is emitted.
+Run [example 22](../examples/22_stream_asof_join.py) and read the
+[ASOF guide](asof-join-guide.md) for exact types, inclusive tolerance, late and
+duplicate rules, composition, bounded resources, status, and delivery.
+
+The immutable root exports `AsofJoinSide(keys, event_time, sequence_by, prefix)`
+and `AsofJoinSpec(left, right, tolerance, limits, late_policy="error")` support
+explicit graph declarations. The advanced method is
+`PipelineBuilder.stream_asof_join(name, *, left_schema, right_schema, spec)`;
+its schema arguments are `ArrowFieldSpec` sequences. Both declaration paths
+lower to the same native operator. Batch execution and collection reject ASOF.
 
 ## Choosing an integration API
 
@@ -501,17 +527,19 @@ name/version pair fails construction. `ProviderArrayRules` pairs the exact
 stores both tuples sorted by identity.
 
 The `operators` tuple contains exactly `cross_section@1`, `expression@1`,
-`rolling@1`, `sql@1`, `stream_join@1`, and `window@1`, with truths anchored in
+`rolling@1`, `sql@1`, `stream_asof_join@1`, `stream_join@1`, and `window@1`,
+with truths anchored in
 the engine implementation:
 
-| Operator          | Modes         | Finality                | Checkpoint support    | State version | State layouts |
-|-------------------|---------------|-------------------------|-----------------------|---------------|---------------|
-| `cross_section@1` | batch, stream | group_final_append_only | checkpointed_stateful | 1             | 1             |
-| `expression@1`    | batch, stream | per_row_final           | stateless             | —             | —             |
-| `rolling@1`       | batch, stream | per_row_final           | checkpointed_stateful | 1             | 1, 2          |
-| `sql@1`           | batch, stream | unproven                | stateless             | —             | —             |
-| `stream_join@1`   | stream        | unproven                | checkpointed_stateful | 1             | 1             |
-| `window@1`        | stream        | group_final_append_only | checkpointed_stateful | 1             | 1             |
+| Operator             | Modes           | Finality                  | Checkpoint support      | State version   | State layouts   |
+|----------------------|-----------------|---------------------------|-------------------------|-----------------|-----------------|
+| `cross_section@1`    | batch, stream   | group_final_append_only   | checkpointed_stateful   | 1               | 1               |
+| `expression@1`       | batch, stream   | per_row_final             | stateless               | —               | —               |
+| `rolling@1`          | batch, stream   | per_row_final             | checkpointed_stateful   | 1               | 1, 2            |
+| `sql@1`              | batch, stream   | unproven                  | stateless               | —               | —               |
+| `stream_asof_join@1` | stream          | group_final_append_only   | checkpointed_stateful   | 1               | 1               |
+| `stream_join@1`      | stream          | unproven                  | checkpointed_stateful   | 1               | 1               |
+| `window@1`           | stream          | group_final_append_only   | checkpointed_stateful   | 1               | 1               |
 
 The Python capability catalog currently reports only layouts `1` and `2`
 for `rolling@1`, while the native operator writes columnar checkpoint layout
@@ -520,9 +548,10 @@ inventory alone to decide rolling checkpoint compatibility. See
 [native rolling state](symbolic-design.md#native-rolling-state) for the
 implemented encoding and restore rules.
 
-`cross_section@1`, `rolling@1`, `stream_join@1`, and `window@1` are the stateful
-operators and the only ones that require a watermark; `cross_section@1`,
-`expression@1`, `rolling@1`, and `window@1` are micro-batch invariant. All six
+`cross_section@1`, `rolling@1`, `stream_asof_join@1`, `stream_join@1`, and
+`window@1` are the stateful operators and the only ones that require a watermark;
+`cross_section@1`, `expression@1`, `rolling@1`, `stream_asof_join@1`, and
+`window@1` are micro-batch invariant. All seven
 report `deterministic=True` and `replay_safe=True`. For `sql@1` those two claims
 hold from the engine viewpoint: exactly-once stream
 plans reject nodes that select volatile registered UDFs, and stream
@@ -964,7 +993,10 @@ and cleanup still completes.
 values, status, and outcomes cross the boundary as defensive copies. Status
 and outcomes are typed: `job.status()` returns a `JobStatus` mapping that
 includes `stream_joins`, a per-node mapping of `StreamJoinStatus` values with
-`StreamJoinSideStatus` per side (empty when the graph has no Join node).
+`StreamJoinSideStatus` per side (empty when the graph has no inner Join node).
+The separate `stream_asof_joins` mapping contains `StreamAsofJoinStatus` with
+`StreamAsofJoinSideStatus` per side, retaining exact Python integer counters and
+watermark microseconds. See [ASOF status](asof-join-guide.md#recovery-status-and-delivery).
 Managed checkpoint recovery reopens a live replayable source with a cursor
 bound to the exact source-map key. A terminal manifest instead returns
 completed without reopening ended sources or duplicating final output. See

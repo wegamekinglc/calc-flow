@@ -9,6 +9,7 @@ On this page:
 - [Compilation](#symbolic-compilation)
 - [Event-time window aggregation](#symbolic-event-time-window-aggregation)
 - [Bounded stream joins](#symbolic-bounded-stream-joins)
+- [Bounded backward ASOF Join](#symbolic-bounded-backward-asof-join)
 - [Matrix compilation](#symbolic-matrix-compilation)
 
 ## Symbolic declarations and static analysis
@@ -33,16 +34,17 @@ The declaration catalog is intentionally wider than the implemented project
 lowerers. Use this availability matrix when constructing user-facing formula
 editors or validating stored declarations:
 
-| Domain                   | Construct/analyze | Batch/stream compile   | Current lowering boundary                                             |
-|--------------------------|-------------------|------------------------|-----------------------------------------------------------------------|
-| row-local columns        | yes               | yes                    | portable scalar types and the documented SQL allowlist                |
-| SQL table stages         | yes               | yes; one stream alias  | native SELECT/CTE schema; row-local expressions after SQL             |
-| rolling `ts`             | yes               | yes                    | source/alias/row-local operands and earlier rolling results           |
-| cross-section `cs`       | yes               | yes                    | staged values; event time and partitions resolve to inputs or aliases |
-| relational stream joins  | yes               | stream only            | independent/nested native joins with proved post-join ordering        |
-| symbolic matrix          | yes               | exact supported shape  | one static `weights` parameter and one allowlisted matmul             |
-| event `window`           | yes               | stream with aggregates | fixed UTC tumbling/hopping; stateless table work on either side       |
-| standalone array outputs | yes               | no                     | arrays compile only through the supported table attachment            |
+| Domain                     | Construct/analyze   | Batch/stream compile     | Current lowering boundary                                               |
+|----------------------------|---------------------|--------------------------|-------------------------------------------------------------------------|
+| row-local columns          | yes                 | yes                      | portable scalar types and the documented SQL allowlist                  |
+| SQL table stages           | yes                 | yes; one stream alias    | native SELECT/CTE schema; row-local expressions after SQL               |
+| rolling `ts`               | yes                 | yes                      | source/alias/row-local operands and earlier rolling results             |
+| cross-section `cs`         | yes                 | yes                      | staged values; event time and partitions resolve to inputs or aliases   |
+| relational stream joins    | yes                 | stream only              | independent/nested native joins with proved post-join ordering          |
+| backward ASOF joins        | yes                 | stream only              | strict final left preservation; typed identity and bounded state        |
+| symbolic matrix            | yes                 | exact supported shape    | one static `weights` parameter and one allowlisted matmul               |
+| event `window`             | yes                 | stream with aggregates   | fixed UTC tumbling/hopping; stateless table work on either side         |
+| standalone array outputs   | yes                 | no                       | arrays compile only through the supported table attachment              |
 
 `Program.analyze` reports `unsupported_type` for stateful operands outside
 the current materialization boundary, so a clean analysis does not advertise
@@ -440,6 +442,35 @@ ordinary `<node>.output` names. See
 segmented two-source execution and the
 [`13_symbolic_relational_dag.py`](../examples/13_symbolic_relational_dag.py)
 for an ordered nested join.
+
+## Symbolic bounded backward ASOF Join
+
+`table.stream_asof_join` and the equivalent `TableExpr.stream_asof_join` method
+create the independent `stream_asof_join@1` primitive. Required `tolerance` and
+`AsofStateLimits` settings combine with optional `keys`, `late_policy`, and
+`prefixes`; time/sequence metadata is resolved from the operands. The
+[ASOF guide](asof-join-guide.md) defines these entry points and exact types.
+
+Each unique declaration digest owns one native ASOF state across outputs.
+Analysis verifies the native stream-only, watermark-requiring,
+`group_final_append_only`, checkpointed-stateful capability and layout 1;
+missing or inconsistent evidence fails closed. All ordered side settings,
+tolerance, late policy, prefixes, and limits participate in identity. Output
+ordering derives from the left side, and every right field is nullable.
+
+Supported paths include row-local inputs, shared fan-out, independent and
+chained ASOF nodes, mixed inner/ASOF joins with complete valid ordering,
+post-ASOF rolling/cross-section, and single-alias stream SQL after ASOF.
+SQL into ASOF, event-window/ASOF chains, and matrix attachment around ASOF are
+rejected; unrelated legal branches and independent windows may coexist.
+Optimization cannot move a filter across the ASOF finality boundary or change
+its candidate set. See the [composition matrix](asof-join-guide.md#composition-and-explanation).
+
+`Program.explain(mode="stream")` shows resolved selection/ordering, strict
+watermark closure, limits, frontier lag, and state ownership. `compile_stream`
+lateness settings apply to rolling/cross-section stages; ASOF uses its own
+spec's late policy and has no allowed-lateness parameter. Batch analysis,
+compilation, and collection reject ASOF. There is no Python matching engine.
 
 ## Symbolic matrix compilation
 

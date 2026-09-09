@@ -23,6 +23,7 @@ On this page:
 - [Streaming path](#streaming-path)
 - [Stateful windows](#stateful-windows)
 - [Stateful stream join](#stateful-stream-join)
+- [Bounded backward ASOF Join](#bounded-backward-asof-join)
 - [Rolling windows](#rolling-windows)
 - [Cross-section groups](#cross-section-groups)
 - [Checkpoint transaction](#checkpoint-transaction)
@@ -166,7 +167,7 @@ allowed-lateness updates, retractions, and early triggers remain unavailable.
 
 ## Stateful stream join
 
-`StreamJoinOperator` is the bounded two-input stateful stream component. Its
+`StreamJoinOperator` is the bounded inner Join stream component. Its
 `StreamJoinSpec` declares a two-input inner equi-Join over inclusive asymmetric
 event-time bounds, explicit per-side state and per-batch match limits, and
 output prefixes; the output schema is derived from the prefixed input columns.
@@ -178,6 +179,34 @@ null keys, and rows strictly older than their own ingress watermark are never
 retained. The operator checkpoints its delta-based state and an independent
 output frontier, and exposes a payload-free per-node status through the job
 status surface.
+
+## Bounded backward ASOF Join
+
+`StreamAsofJoinOperator` owns the separate `stream_asof_join@1` state. Rust
+ordered indexes use typed Arrow row encodings for exact keys and sequence
+ordering; each final left row selects at most one right predecessor in its
+inclusive tolerance. A reused DataFusion session performs the bounded
+ordinal-and-key left join, prefixed projection, and ordinal ordering. This
+avoids an all-matches intermediate and keeps Python limited to declarations,
+analysis, and lowering.
+
+Pending left rows and right history use compact owned IPC payloads; identity
+and index allocations plus the prepared checkpoint segment join the versioned
+persistent byte charge. A separate workspace budget equal to the configured
+state-byte limit includes admission copies, candidate/output arrays, DataFusion
+reservations, encoding, and restore. It is not a process RSS ceiling.
+
+Asynchronous data/progress handlers prepare a complete compacted state segment
+with bounded workspace and cancellation points. Each preparation is
+`O(retained state)` and repeats for each accepted output chunk; total handler
+work includes those repeated preparations.
+checkpoint capture shares the prepared allocation and bounded metadata. Capture
+cost does not imply constant-cost handlers. The runtime owns persisted ingress
+progress and output frontier, which ASOF cross-validates with restored state.
+It closes left rows only after both sides strictly pass their time, retains idle
+watermarks, and forwards a conservative frontier. See the
+[ASOF contract](asof-join-guide.md) for finality, accounting, composition, and
+source/sink delivery requirements.
 
 ## Rolling windows
 

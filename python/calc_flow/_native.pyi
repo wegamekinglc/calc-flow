@@ -16,6 +16,14 @@ type StreamingFailureReasonCode = Literal[
     "join_match_limit_exceeded",
     "join_counter_overflow",
     "join_time_conversion_failed",
+    "asof_invalid_input",
+    "asof_duplicate_identity",
+    "asof_late_row",
+    "asof_state_limit_exceeded",
+    "asof_workspace_limit_exceeded",
+    "asof_output_limit_exceeded",
+    "asof_counter_overflow",
+    "asof_protocol_error",
 ]
 
 class _ArrowCStream(Protocol):

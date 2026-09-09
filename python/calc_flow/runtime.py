@@ -26,6 +26,14 @@ type StreamingFailureReasonCode = Literal[
     "join_match_limit_exceeded",
     "join_counter_overflow",
     "join_time_conversion_failed",
+    "asof_invalid_input",
+    "asof_duplicate_identity",
+    "asof_late_row",
+    "asof_state_limit_exceeded",
+    "asof_workspace_limit_exceeded",
+    "asof_output_limit_exceeded",
+    "asof_counter_overflow",
+    "asof_protocol_error",
 ]
 
 
@@ -622,6 +630,7 @@ class JobStatus(TypedDict):
     operators: dict[str, dict[str, object]]
     sinks: dict[str, dict[str, object]]
     stream_joins: dict[str, StreamJoinStatus]
+    stream_asof_joins: dict[str, StreamAsofJoinStatus]
     checkpoint: dict[str, object]
 
 
@@ -642,6 +651,33 @@ class StreamJoinStatus(TypedDict):
     emitted_match_rows: int
     state_limit_failures: int
     match_limit_failures: int
+
+
+class StreamAsofJoinSideStatus(TypedDict):
+    accepted_rows: int
+    late_rows: int
+    duplicate_rows: int
+    watermark_micros: int | None
+    idle: bool
+    ended: bool
+
+
+class StreamAsofJoinStatus(TypedDict):
+    left: StreamAsofJoinSideStatus
+    right: StreamAsofJoinSideStatus
+    pending_left_rows: int
+    retained_right_rows: int
+    identity_only_rows: int
+    state_rows: int
+    state_bytes: int
+    emitted_left_rows: int
+    matched_rows: int
+    unmatched_rows: int
+    evicted_right_rows: int
+    state_limit_failures: int
+    workspace_limit_failures: int
+    output_limit_failures: int
+    output_watermark_micros: int | None
 
 
 def _outcome(value: Mapping[str, object]) -> JobOutcome:

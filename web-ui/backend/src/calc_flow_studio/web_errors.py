@@ -59,9 +59,49 @@ def native_issue_dicts(error: Exception) -> list[dict[str, str]]:
     ]
 
 
+_ASOF_RAW_CODES = frozenset(
+    {
+        "invalid_type",
+        "out_of_range",
+        "unknown_field",
+        "missing_field",
+        "invalid_asof_keys",
+        "invalid_asof_sequence",
+        "invalid_asof_late_policy",
+    }
+)
+
+
+def _asof_request_issue(entry: dict[str, Any], body: object) -> bool:
+    if entry.get("type") not in _ASOF_RAW_CODES or not isinstance(body, dict):
+        return False
+    loc = tuple(entry.get("loc", ()))
+    if loc[:1] == ("body",):
+        loc = loc[1:]
+    if len(loc) < 4 or loc[:2] != ("graph", "nodes") or loc[3] != "operator":
+        return False
+    graph = body.get("graph")
+    nodes = graph.get("nodes") if isinstance(graph, dict) else None
+    index = loc[2]
+    if (
+        not isinstance(nodes, list)
+        or type(index) is not int
+        or not 0 <= index < len(nodes)
+    ):
+        return False
+    node = nodes[index]
+    operator = node.get("operator") if isinstance(node, dict) else None
+    return isinstance(operator, dict) and operator.get("kind") == "stream_asof_join"
+
+
 def join_validation_error_detail(error: Any) -> dict[str, object] | None:
     errors = error.errors()
-    join_errors = [entry for entry in errors if entry.get("type") in JOIN_ISSUE_CODES]
+    join_errors = [
+        entry
+        for entry in errors
+        if entry.get("type") in JOIN_ISSUE_CODES
+        or _asof_request_issue(entry, getattr(error, "body", None))
+    ]
     if not join_errors or len(join_errors) != len(errors):
         return None
     return invalid_report_detail(

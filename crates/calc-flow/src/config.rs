@@ -1,3 +1,5 @@
+mod asof;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
@@ -20,10 +22,11 @@ use crate::{
     RollingOperator, RollingSpec, SecretHandle, SecretReference, SecretResolver,
     SecretResolverKind, SinkBinding as RuntimeSinkBinding, SinkRecovery,
     SourceBinding as RuntimeSourceBinding, SourceCapabilities, SourceEvent, SourceSchema,
-    SqlOperator, StaticInputSpec, StreamExecutionPlan, StreamJoinOperator, StreamJoinSpec,
-    StreamRequirements, StreamSink, StreamSource, TransactionSupport, TransactionalStreamSink,
-    UdfKind, UdfReference, UdfRegistrySnapshot, UnionOperator, WatermarkPolicy,
-    WindowAggregateOperator, WindowSpec, validate_delivery_guarantee, validate_selected_udfs,
+    SqlOperator, StaticInputSpec, StreamAsofJoinSpec, StreamExecutionPlan, StreamJoinOperator,
+    StreamJoinSpec, StreamRequirements, StreamSink, StreamSource, TransactionSupport,
+    TransactionalStreamSink, UdfKind, UdfReference, UdfRegistrySnapshot, UnionOperator,
+    WatermarkPolicy, WindowAggregateOperator, WindowSpec, validate_delivery_guarantee,
+    validate_selected_udfs,
 };
 
 pub const PROJECT_FORMAT_VERSION: u32 = 3;
@@ -154,6 +157,8 @@ pub enum OperatorSpec {
     CrossSection { spec: CrossSectionSpec },
     /// Bounded two-input event-time inner Join for stream graphs.
     StreamJoin { spec: StreamJoinSpec },
+    /// Bounded backward ASOF with left-preserving final append-only output.
+    StreamAsofJoin { spec: StreamAsofJoinSpec },
     External {
         provider: String,
         name: String,
@@ -630,7 +635,10 @@ fn validate_stream_join_watermarks(
     issues: &mut Vec<ValidationIssue>,
 ) {
     for node in &project.graph.nodes {
-        if !matches!(node.operator, OperatorSpec::StreamJoin { .. }) {
+        if !matches!(
+            node.operator,
+            OperatorSpec::StreamJoin { .. } | OperatorSpec::StreamAsofJoin { .. }
+        ) {
             continue;
         }
         for binding_id in plan.reachable_source_binding_ids_for_operator(&node.id) {
@@ -1298,6 +1306,9 @@ fn project_node_operator(
         OperatorSpec::Rolling { spec } => rolling_node(node, &inputs, &outputs, spec),
         OperatorSpec::CrossSection { spec } => cross_section_node(node, &inputs, &outputs, spec),
         OperatorSpec::StreamJoin { spec } => stream_join_node(node, &inputs, &outputs, spec, mode),
+        OperatorSpec::StreamAsofJoin { spec } => {
+            asof::build_node(node, &inputs, &outputs, spec, mode)
+        }
         OperatorSpec::External {
             provider,
             name,
@@ -1757,6 +1768,7 @@ fn project_requires_datafusion(project: &ProjectSpec) -> bool {
             OperatorSpec::Expression { .. }
                 | OperatorSpec::Sql { .. }
                 | OperatorSpec::StreamJoin { .. }
+                | OperatorSpec::StreamAsofJoin { .. }
         )
     })
 }
@@ -2080,6 +2092,10 @@ fn validate_operator(
         }
         OperatorSpec::StreamJoin { spec } => {
             validate_stream_join_operator(node, index, spec, mode, &base, issues);
+            join_table_io()
+        }
+        OperatorSpec::StreamAsofJoin { spec } => {
+            asof::validate_node(node, index, spec, mode, &base, issues);
             join_table_io()
         }
         OperatorSpec::External {
@@ -3011,6 +3027,7 @@ fn operator_udfs(operator: &OperatorSpec) -> &[UdfReference] {
         | OperatorSpec::Rolling { .. }
         | OperatorSpec::CrossSection { .. }
         | OperatorSpec::StreamJoin { .. }
+        | OperatorSpec::StreamAsofJoin { .. }
         | OperatorSpec::External { .. } => &[],
     }
 }

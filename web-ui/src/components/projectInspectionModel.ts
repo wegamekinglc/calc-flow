@@ -136,7 +136,7 @@ const structuredSourceExpressions = (node: NodeConfig): string[] => {
   if (operator.kind === 'cross_section') {
     return operator.spec.outputs.map(crossSectionSource);
   }
-  if (operator.kind === 'window' || operator.kind === 'stream_join') {
+  if (operator.kind === 'window' || operator.kind === 'stream_join' || operator.kind === 'stream_asof_join') {
     return [stableJson(operator.spec)];
   }
   return [];
@@ -228,6 +228,10 @@ const stateFact = (node: NodeConfig): string => {
       operator.spec.limits;
     return `bounded · rows≤${rows} per side · bytes≤${bytes} per side`;
   }
+  if (operator.kind === 'stream_asof_join') {
+    const { max_state_rows: rows, max_state_bytes: bytes } = operator.spec.limits;
+    return `bounded · rows≤${rows} total · bytes≤${bytes} total`;
+  }
   if (operator.kind === 'window') return 'bounded by declared window';
   if (operator.kind === 'external') return 'unknown · provider lifecycle not encoded';
   return 'stateless';
@@ -254,6 +258,9 @@ const watermarkFact = (node: NodeConfig): string => {
       `left=${operator.spec.left_event_time}`,
       `right=${operator.spec.right_event_time}`,
     ].join(' · ');
+  }
+  if (operator.kind === 'stream_asof_join') {
+    return 'required on both inputs · strictly past left time · idle waits';
   }
   if (operator.kind === 'window') return 'required by window finality';
   if (operator.kind === 'external') {

@@ -87,6 +87,29 @@ const staticWeights = (
 });
 
 describe('lowered ProjectDocument inspection', () => {
+
+  it('shows ASOF state limits, strict finality and the complete declaration', () => {
+    const node: NodeConfig = {
+      id: 'match', input_ports: [], output_ports: [],
+      operator: {
+        kind: 'stream_asof_join',
+        spec: {
+          left: { keys: ['symbol'], event_time: 'time', sequence_by: ['sequence'], prefix: 'trade' },
+          right: { keys: ['symbol'], event_time: 'time', sequence_by: ['sequence'], prefix: 'quote' },
+          tolerance_micros: 60_000_000,
+          late_policy: 'drop',
+          limits: { max_state_rows: 100_000, max_state_bytes: 67_108_864 },
+        },
+      },
+    };
+    const inspection = inspectLoweredNode(projectWith(node), node);
+    expect(inspection.state).toBe('bounded · rows≤100000 total · bytes≤67108864 total');
+    expect(inspection.watermark).toBe('required on both inputs · strictly past left time · idle waits');
+    expect(inspection.sourceExpressions).toHaveLength(1);
+    if (node.operator.kind !== 'stream_asof_join') throw new Error('ASOF fixture required');
+    expect(JSON.parse(inspection.sourceExpressions[0] ?? '')).toEqual(node.operator.spec);
+  });
+
   it('renders deterministic symbolic matrix provenance and copy facts', () => {
     const node = symbolicMatrixNode();
     const project = projectWith(node, {

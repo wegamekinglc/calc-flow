@@ -631,6 +631,22 @@ export interface components {
                     /** @default true */
                     nullable: boolean;
                 };
+                /** @description Exact identity and output naming declaration for one ASOF input. */
+                AsofJoinSide: {
+                    event_time: string;
+                    keys: string[];
+                    prefix: string;
+                    sequence_by: string[];
+                };
+                /** @description Policy for rows strictly below their own ingress watermark. */
+                AsofLatePolicy: "error" | "drop";
+                /** @description Total logical state limits, shared by both ASOF inputs. */
+                AsofStateLimits: {
+                    /** Format: uint64 */
+                    max_state_bytes: number;
+                    /** Format: uint64 */
+                    max_state_rows: number;
+                };
                 /** @enum {string} */
                 BatchKind: "table" | "array";
                 /** @description Exact identity of a connector implementation. */
@@ -1034,6 +1050,10 @@ export interface components {
                     /** @constant */
                     kind: "stream_join";
                     spec: components["schemas"]["ProjectCreateRequest"]["$defs"]["StreamJoinSpec"];
+                } | {
+                    /** @constant */
+                    kind: "stream_asof_join";
+                    spec: components["schemas"]["ProjectCreateRequest"]["$defs"]["StreamAsofJoinSpec"];
                 } | {
                     /** @constant */
                     kind: "external";
@@ -1669,6 +1689,15 @@ export interface components {
                 };
                 /** @description The declared mutability of one static input; only `Static` exists in v1. */
                 StaticMutability: "static";
+                /** @description Version-one backward, left-preserving, final ASOF configuration. */
+                StreamAsofJoinSpec: {
+                    late_policy: components["schemas"]["ProjectCreateRequest"]["$defs"]["AsofLatePolicy"];
+                    left: components["schemas"]["ProjectCreateRequest"]["$defs"]["AsofJoinSide"];
+                    limits: components["schemas"]["ProjectCreateRequest"]["$defs"]["AsofStateLimits"];
+                    right: components["schemas"]["ProjectCreateRequest"]["$defs"]["AsofJoinSide"];
+                    /** Format: uint64 */
+                    tolerance_micros: number;
+                };
                 /** @description Immutable declaration for a two-input bounded inner stream Join. */
                 StreamJoinSpec: {
                     bounds: components["schemas"]["ProjectCreateRequest"]["$defs"]["JoinTimeBounds"];
@@ -1786,6 +1815,22 @@ export interface components {
                     name: string;
                     /** @default true */
                     nullable: boolean;
+                };
+                /** @description Exact identity and output naming declaration for one ASOF input. */
+                AsofJoinSide: {
+                    event_time: string;
+                    keys: string[];
+                    prefix: string;
+                    sequence_by: string[];
+                };
+                /** @description Policy for rows strictly below their own ingress watermark. */
+                AsofLatePolicy: "error" | "drop";
+                /** @description Total logical state limits, shared by both ASOF inputs. */
+                AsofStateLimits: {
+                    /** Format: uint64 */
+                    max_state_bytes: number;
+                    /** Format: uint64 */
+                    max_state_rows: number;
                 };
                 /** @enum {string} */
                 BatchKind: "table" | "array";
@@ -2190,6 +2235,10 @@ export interface components {
                     /** @constant */
                     kind: "stream_join";
                     spec: components["schemas"]["ProjectDocument"]["$defs"]["StreamJoinSpec"];
+                } | {
+                    /** @constant */
+                    kind: "stream_asof_join";
+                    spec: components["schemas"]["ProjectDocument"]["$defs"]["StreamAsofJoinSpec"];
                 } | {
                     /** @constant */
                     kind: "external";
@@ -2825,6 +2874,15 @@ export interface components {
                 };
                 /** @description The declared mutability of one static input; only `Static` exists in v1. */
                 StaticMutability: "static";
+                /** @description Version-one backward, left-preserving, final ASOF configuration. */
+                StreamAsofJoinSpec: {
+                    late_policy: components["schemas"]["ProjectDocument"]["$defs"]["AsofLatePolicy"];
+                    left: components["schemas"]["ProjectDocument"]["$defs"]["AsofJoinSide"];
+                    limits: components["schemas"]["ProjectDocument"]["$defs"]["AsofStateLimits"];
+                    right: components["schemas"]["ProjectDocument"]["$defs"]["AsofJoinSide"];
+                    /** Format: uint64 */
+                    tolerance_micros: number;
+                };
                 /** @description Immutable declaration for a two-input bounded inner stream Join. */
                 StreamJoinSpec: {
                     bounds: components["schemas"]["ProjectDocument"]["$defs"]["JoinTimeBounds"];
@@ -3060,6 +3118,42 @@ export interface components {
              */
             max_job_resident_memory_bytes: number;
         };
+        /** RunEvent */
+        RunEvent: {
+            /** Backpressure Events */
+            backpressure_events?: number | null;
+            /** Epoch */
+            epoch?: number | null;
+            /** Late Rows */
+            late_rows?: number | null;
+            /** Message */
+            message: string;
+            /** Queue Bytes */
+            queue_bytes?: number | null;
+            /** Queue Envelopes */
+            queue_envelopes?: number | null;
+            /** Queue Rows */
+            queue_rows?: number | null;
+            /** Sequence */
+            sequence: number;
+            /** State */
+            state?: string | null;
+            /** Stream Asof Joins */
+            stream_asof_joins?: components["schemas"]["StreamAsofJoinMetrics"][] | null;
+            /** Stream Joins */
+            stream_joins?: components["schemas"]["StreamJoinMetrics"][] | null;
+            /** Throughput Rows */
+            throughput_rows?: number | null;
+            /**
+             * Timestamp
+             * Format: date-time
+             */
+            timestamp: string;
+            /** Type */
+            type: string;
+            /** Watermark */
+            watermark?: string | null;
+        };
         /** RunningJobResponse */
         RunningJobResponse: {
             /**
@@ -3141,8 +3235,72 @@ export interface components {
             /** Version */
             version: string;
         };
+        SignedDecimal: string;
+        /** StreamAsofJoinMetrics */
+        StreamAsofJoinMetrics: {
+            emitted_left_rows: components["schemas"]["UnsignedDecimal"];
+            evicted_right_rows: components["schemas"]["UnsignedDecimal"];
+            identity_only_rows: components["schemas"]["UnsignedDecimal"];
+            left: components["schemas"]["StreamAsofJoinSideMetrics"];
+            matched_rows: components["schemas"]["UnsignedDecimal"];
+            /** Node Id */
+            node_id: string;
+            output_limit_failures: components["schemas"]["UnsignedDecimal"];
+            output_watermark_micros: components["schemas"]["SignedDecimal"] | null;
+            pending_left_rows: components["schemas"]["UnsignedDecimal"];
+            retained_right_rows: components["schemas"]["UnsignedDecimal"];
+            right: components["schemas"]["StreamAsofJoinSideMetrics"];
+            state_bytes: components["schemas"]["UnsignedDecimal"];
+            state_limit_failures: components["schemas"]["UnsignedDecimal"];
+            state_rows: components["schemas"]["UnsignedDecimal"];
+            unmatched_rows: components["schemas"]["UnsignedDecimal"];
+            workspace_limit_failures: components["schemas"]["UnsignedDecimal"];
+        };
+        /** StreamAsofJoinSideMetrics */
+        StreamAsofJoinSideMetrics: {
+            accepted_rows: components["schemas"]["UnsignedDecimal"];
+            duplicate_rows: components["schemas"]["UnsignedDecimal"];
+            /** Ended */
+            ended: boolean;
+            /** Idle */
+            idle: boolean;
+            late_rows: components["schemas"]["UnsignedDecimal"];
+            watermark_micros: components["schemas"]["SignedDecimal"] | null;
+        };
+        /** StreamJoinMetrics */
+        StreamJoinMetrics: {
+            /** Emitted Match Rows */
+            emitted_match_rows: number;
+            left: components["schemas"]["StreamJoinSideMetrics"];
+            /** Match Limit Failures */
+            match_limit_failures: number;
+            /** Node Id */
+            node_id: string;
+            right: components["schemas"]["StreamJoinSideMetrics"];
+            /** State Limit Failures */
+            state_limit_failures: number;
+        };
+        /** StreamJoinSideMetrics */
+        StreamJoinSideMetrics: {
+            /** Evicted Rows */
+            evicted_rows: number;
+            /** Late Affected Batches */
+            late_affected_batches: number;
+            /** Late Rows */
+            late_rows: number;
+            /** Max Lateness Micros */
+            max_lateness_micros?: number | null;
+            /** Null Event Time Rows */
+            null_event_time_rows: number;
+            /** Null Key Rows */
+            null_key_rows: number;
+            /** Retained Bytes */
+            retained_bytes: number;
+            /** Retained Rows */
+            retained_rows: number;
+        };
         /** @enum {string} */
-        StreamingFailureReasonCode: "join_state_limit_exceeded" | "join_match_limit_exceeded" | "join_counter_overflow" | "join_time_conversion_failed";
+        StreamingFailureReasonCode: "join_state_limit_exceeded" | "join_match_limit_exceeded" | "join_counter_overflow" | "join_time_conversion_failed" | "asof_invalid_input" | "asof_duplicate_identity" | "asof_late_row" | "asof_state_limit_exceeded" | "asof_workspace_limit_exceeded" | "asof_output_limit_exceeded" | "asof_counter_overflow" | "asof_protocol_error";
         /** UdfCapabilityResponse */
         UdfCapabilityResponse: {
             /** Inputtypes */
@@ -3187,6 +3345,7 @@ export interface components {
             /** Version */
             version: string;
         };
+        UnsignedDecimal: string;
         /** ValidValidationReport */
         ValidValidationReport: {
             /** Fingerprint */
@@ -3442,13 +3601,13 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Successful Response */
+            /** @description SSE stream; each data field contains one RunEvent. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "text/event-stream": components["schemas"]["RunEvent"];
                 };
             };
             /** @description Validation Error */

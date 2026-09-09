@@ -23,6 +23,8 @@ pages explain how the implementation provides those behaviors.
    `20_streaming_pipeline.py` and `21_streaming_outputs.py` for `stream` and
    named events. Continue to sources, sinks, event time, windows, bounded joins,
    and recovery in examples 04, 08, 10, 12, and 13.
+   [Backward ASOF Join](asof-join-guide.md) uses example 22 for final
+   trade/quote matching, watermark waiting, state bounds, and recovery.
 4. [Expression workflows](symbolic-workflows.md): financial features, analysis,
    composition, and batch/stream execution; examples 09–13.
 5. [Projects and persistence](projects-guide.md): validate, serialize, save,
