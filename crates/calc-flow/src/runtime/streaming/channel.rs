@@ -358,8 +358,15 @@ impl EdgeSender {
     /// cannot be measured or exceeds a budget limit by itself, and
     /// [`CalcFlowError::EdgeClosed`] when the receiver is closed or dropped.
     pub async fn send(&mut self, message: StreamMessage) -> Result<()> {
-        let cost = EnvelopeCost::of_message(&message)?;
-        self.shared.reject_oversize(&cost)?;
+        self.send_observed(message, None).await
+    }
+
+    pub(crate) async fn send_observed(
+        &mut self,
+        message: StreamMessage,
+        observation: Option<&crate::operator::rolling_metrics::RollingMetricsRecorder>,
+    ) -> Result<()> {
+        let cost = self.shared.message_cost(&message)?;
         let notified = self.shared.capacity_available.notified();
         tokio::pin!(notified);
         let mut blocked_since: Option<tokio::time::Instant> = None;
@@ -376,63 +383,36 @@ impl EdgeSender {
                     });
                 }
                 if fits(&state.charged, &cost, &self.shared.budget) {
-                    let blocked_elapsed = blocked_since.map(|started| started.elapsed());
-                    let metrics_blocked_elapsed = metrics_blocked_since
-                        .as_ref()
-                        .map(|timer| timer.elapsed(&self.shared.edge, "blocked_duration"))
-                        .transpose()?;
-                    self.shared.metrics.record_edge_enqueue(
-                        &self.shared.edge,
-                        EdgeTraffic::of_message(&message, cost)?,
-                        metrics_blocked_elapsed,
+                    let blocked_elapsed = self.shared.prepare_enqueue(
+                        &mut state,
+                        &message,
+                        cost,
+                        blocked_since,
+                        metrics_blocked_since.as_ref(),
                     )?;
-                    state.charged = state.charged.checked_add(&cost).map_err(|error| {
-                        // `fits` rejected every component sum that could
-                        // overflow, so reaching this branch violates the
-                        // channel's locked admission invariant.
-                        CalcFlowError::Internal {
-                            message: format!(
-                                "edge {:?} charge overflowed after a successful capacity check: {error}",
-                                self.shared.edge
-                            ),
-                        }
-                    })?;
-                    state.high_water = state.high_water.max_components(&state.charged);
                     state.queue.push_back((message, cost));
-                    if let Some(elapsed) = blocked_elapsed {
-                        state.blocked_duration = state
-                            .blocked_duration
-                            .checked_add(elapsed)
-                            .ok_or_else(|| CalcFlowError::InvalidArgument {
-                                field: format!(
-                                    "runtime.metrics.{}.blocked_duration",
-                                    self.shared.edge
-                                ),
-                                message: "counter overflow".into(),
-                            })?;
-                    }
+                    self.shared
+                        .record_enqueued_wait(&mut state, blocked_elapsed)?;
                     drop(state);
                     self.shared.message_available.notify_one();
                     return Ok(());
                 }
-                if blocked_since.is_none() {
-                    let next_blocked = state.blocked_sends.checked_add(1).ok_or_else(|| {
-                        CalcFlowError::InvalidArgument {
-                            field: format!("runtime.metrics.{}.blocked_sends", self.shared.edge),
-                            message: "counter overflow".into(),
-                        }
-                    })?;
-                    self.shared.metrics.record_edge_blocked(&self.shared.edge)?;
-                    state.blocked_sends = next_blocked;
-                    blocked_since = Some(tokio::time::Instant::now());
-                    metrics_blocked_since = Some(self.shared.metrics.timer());
-                }
+                self.shared.begin_wait(
+                    &mut state,
+                    &mut blocked_since,
+                    &mut metrics_blocked_since,
+                )?;
             }
             // Lost-wakeup safety at this await rests on the type-level
             // single-producer invariant I10 (see the module doc): with at
             // most one waiting sender, a release notification can never be
             // consumed by a waiter that cannot make progress.
-            notified.as_mut().await;
+            {
+                let _wait = observation.map(|recorder| {
+                    recorder.stage(crate::operator::rolling_metrics::RollingStage::SendWait)
+                });
+                notified.as_mut().await;
+            }
             // A woken send hands the wakeup on before re-checking the
             // budget. Under I10 this is a no-op: the sender is the only
             // task that ever waits on `capacity_available`, its consumed
@@ -571,6 +551,80 @@ impl Drop for EdgeSender {
 }
 
 impl Shared {
+    fn message_cost(&self, message: &StreamMessage) -> Result<EnvelopeCost> {
+        let cost = EnvelopeCost::of_message(message)?;
+        self.reject_oversize(&cost)?;
+        Ok(cost)
+    }
+
+    fn prepare_enqueue(
+        &self,
+        state: &mut ChannelState,
+        message: &StreamMessage,
+        cost: EnvelopeCost,
+        blocked_since: Option<tokio::time::Instant>,
+        metrics_blocked_since: Option<&MetricsTimer>,
+    ) -> Result<Option<Duration>> {
+        let blocked_elapsed = blocked_since.map(|started| started.elapsed());
+        let metrics_blocked_elapsed = metrics_blocked_since
+            .map(|timer| timer.elapsed(&self.edge, "blocked_duration"))
+            .transpose()?;
+        self.metrics.record_edge_enqueue(
+            &self.edge,
+            EdgeTraffic::of_message(message, cost)?,
+            metrics_blocked_elapsed,
+        )?;
+        state.charged = state.charged.checked_add(&cost).map_err(|error| {
+            // The caller holds the lock after `fits` rejected every overflow.
+            CalcFlowError::Internal {
+                message: format!(
+                    "edge {:?} charge overflowed after a successful capacity check: {error}",
+                    self.edge
+                ),
+            }
+        })?;
+        state.high_water = state.high_water.max_components(&state.charged);
+        Ok(blocked_elapsed)
+    }
+
+    fn record_enqueued_wait(
+        &self,
+        state: &mut ChannelState,
+        blocked_elapsed: Option<Duration>,
+    ) -> Result<()> {
+        if let Some(elapsed) = blocked_elapsed {
+            state.blocked_duration =
+                state.blocked_duration.checked_add(elapsed).ok_or_else(|| {
+                    CalcFlowError::InvalidArgument {
+                        field: format!("runtime.metrics.{}.blocked_duration", self.edge),
+                        message: "counter overflow".into(),
+                    }
+                })?;
+        }
+        Ok(())
+    }
+
+    fn begin_wait(
+        &self,
+        state: &mut ChannelState,
+        blocked_since: &mut Option<tokio::time::Instant>,
+        metrics_blocked_since: &mut Option<MetricsTimer>,
+    ) -> Result<()> {
+        if blocked_since.is_none() {
+            let next_blocked = state.blocked_sends.checked_add(1).ok_or_else(|| {
+                CalcFlowError::InvalidArgument {
+                    field: format!("runtime.metrics.{}.blocked_sends", self.edge),
+                    message: "counter overflow".into(),
+                }
+            })?;
+            self.metrics.record_edge_blocked(&self.edge)?;
+            state.blocked_sends = next_blocked;
+            *blocked_since = Some(tokio::time::Instant::now());
+            *metrics_blocked_since = Some(self.metrics.timer());
+        }
+        Ok(())
+    }
+
     /// Rejects a message that can never fit within the budget, before any
     /// wait (S10.3).
     fn reject_oversize(&self, cost: &EnvelopeCost) -> Result<()> {
@@ -616,6 +670,91 @@ mod tests {
         )])
         .unwrap();
         StreamMessage::data(Batch::table(vec![record], BatchMetadata::default()).unwrap())
+    }
+
+    #[derive(Default)]
+    struct RollingTestClock(Mutex<Duration>);
+
+    impl crate::operator::rolling_metrics::RollingMetricsClock for RollingTestClock {
+        fn now(&self) -> Duration {
+            *self.0.lock()
+        }
+    }
+
+    #[tokio::test]
+    async fn rolling_wait_observer_includes_repeated_wakes_and_cancelled_waits() {
+        use crate::operator::rolling_metrics::{RollingCallback, RollingMetricsStore};
+
+        let clock = Arc::new(RollingTestClock::default());
+        let store = RollingMetricsStore::with_clock(clock.clone());
+        let cancellation = crate::CancellationToken::new();
+        let callback = store.begin(RollingCallback::Watermark, cancellation.clone());
+        let recorder = callback.recorder();
+        let (mut sender, receiver) = edge_channel(
+            "rolling->output",
+            EdgeBudget {
+                max_rows: 2,
+                max_bytes: 1024,
+            },
+        )
+        .unwrap();
+        sender.send(data_message(&[1, 2])).await.unwrap();
+        let mut send = Box::pin(sender.send_observed(data_message(&[3, 4]), Some(&recorder)));
+        assert!(futures::poll!(send.as_mut()).is_pending());
+        *clock.0.lock() = Duration::from_nanos(3);
+        receiver.shared.capacity_available.notify_waiters();
+        assert!(futures::poll!(send.as_mut()).is_pending());
+        *clock.0.lock() = Duration::from_nanos(10);
+        cancellation.cancel();
+        drop(send);
+        drop(callback);
+        let metrics = store.snapshot();
+        assert_eq!(metrics.watermark.cancelled, 1);
+        assert_eq!(
+            metrics.watermark.send_wait_duration,
+            Duration::from_nanos(10)
+        );
+        assert_eq!(
+            metrics.watermark.callback_duration,
+            Duration::from_nanos(10)
+        );
+        assert_eq!(receiver.metrics().blocked_sends, 1);
+        assert_eq!(receiver.metrics().blocked_duration, Duration::ZERO);
+        assert_eq!(receiver.metrics().charged_rows, 2);
+    }
+
+    #[tokio::test]
+    async fn rolling_wait_observer_counts_closed_receiver_but_excludes_other_work() {
+        use crate::operator::rolling_metrics::{RollingCallback, RollingMetricsStore};
+
+        let clock = Arc::new(RollingTestClock::default());
+        let store = RollingMetricsStore::with_clock(clock.clone());
+        let callback = store.begin(RollingCallback::End, crate::CancellationToken::new());
+        let recorder = callback.recorder();
+        let (mut sender, mut receiver) = edge_channel(
+            "rolling->output",
+            EdgeBudget {
+                max_rows: 1,
+                max_bytes: 1024,
+            },
+        )
+        .unwrap();
+        sender.send(data_message(&[1])).await.unwrap();
+        *clock.0.lock() = Duration::from_nanos(2);
+        let mut send = Box::pin(sender.send_observed(data_message(&[2]), Some(&recorder)));
+        assert!(futures::poll!(send.as_mut()).is_pending());
+        *clock.0.lock() = Duration::from_nanos(9);
+        receiver.close();
+        let result = send.await;
+        assert!(matches!(result, Err(CalcFlowError::EdgeClosed { .. })));
+        *clock.0.lock() = Duration::from_nanos(14);
+        callback.complete(&result);
+        let metrics = store.snapshot();
+        assert_eq!(metrics.end.failed, 1);
+        assert_eq!(metrics.end.send_wait_duration, Duration::from_nanos(7));
+        assert_eq!(metrics.end.other_duration, Duration::from_nanos(7));
+        assert_eq!(metrics.end.callback_duration, Duration::from_nanos(14));
+        assert_eq!(receiver.metrics().blocked_duration, Duration::ZERO);
     }
 
     #[tokio::test]

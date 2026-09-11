@@ -349,6 +349,10 @@ impl OwningContinuousJob {
         self.job.stream_asof_join_status()
     }
 
+    pub(crate) fn rolling_metrics(&self) -> BTreeMap<String, crate::RollingMetrics> {
+        self.job.rolling_metrics()
+    }
+
     pub(crate) async fn trigger_checkpoint(&self) -> Result<Epoch> {
         match self.job.trigger_checkpoint().await {
             Ok(epoch) => Ok(epoch),

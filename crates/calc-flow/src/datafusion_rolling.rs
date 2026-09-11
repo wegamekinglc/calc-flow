@@ -14,13 +14,14 @@ use datafusion::{
         context::{QueryPlanner, SessionState},
         memory_pool::{MemoryConsumer, MemoryReservation},
     },
+    functions_aggregate::{average::Avg, count::Count as CountAggregate},
     logical_expr::{
         Expr, LogicalPlan, WindowFrameBound, WindowFrameUnits, WindowFunctionDefinition,
         expr::{WindowFunction, WindowFunctionParams},
     },
     physical_expr::{
         Distribution, EquivalenceProperties, OrderingRequirements,
-        expressions::Column,
+        expressions::{Column, Literal},
         window::{SlidingAggregateWindowExpr, WindowExpr},
     },
     physical_plan::{
@@ -42,11 +43,15 @@ use crate::operator::{
     DataFusionRollingWindow,
 };
 
+mod sql_aggregate;
+use sql_aggregate::{SqlRollingKernel, SqlRollingState};
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RollingRewriteAuditSnapshot {
     pub candidate_windows: usize,
     pub rewritten_windows: usize,
     pub fallback_reasons: Vec<String>,
+    contains_count: bool,
 }
 
 #[derive(Debug, Default)]
@@ -92,12 +97,15 @@ impl QueryPlanner for CalcFlowQueryPlanner {
             return Ok(plan);
         }
 
+        let original = Arc::clone(&plan);
         let mut rewritten_windows = 0;
         let transformed = plan.transform_up(|node| {
             let Some(window) = node.downcast_ref::<BoundedWindowAggExec>() else {
                 return Ok(Transformed::no(node));
             };
-            let Some(exec) = CalcFlowRollingExec::try_from_window(window)? else {
+            let Some(exec) =
+                CalcFlowRollingExec::try_from_window(window, eligibility.contains_count)?
+            else {
                 return Ok(Transformed::no(node));
             };
             rewritten_windows += exec.window_count;
@@ -110,6 +118,11 @@ impl QueryPlanner for CalcFlowQueryPlanner {
                 "physical_window_shape_not_supported:{}_of_{}",
                 rewritten_windows, audit.candidate_windows
             ));
+            if audit.contains_count {
+                audit.rewritten_windows = 0;
+                self.audit.replace(audit);
+                return Ok(original);
+            }
         }
         self.audit.replace(audit);
         Ok(transformed.data)
@@ -126,6 +139,9 @@ fn inspect_logical_node(plan: &LogicalPlan, audit: &mut RollingRewriteAuditSnaps
     if let LogicalPlan::Window(window) = plan {
         for expression in &window.window_expr {
             audit.candidate_windows += 1;
+            audit.contains_count |= logical_window_function(expression)
+                .and_then(inspect_logical_aggregate)
+                .is_ok_and(|is_count| is_count);
             if let Err(reason) = inspect_logical_window(expression) {
                 audit.fallback_reasons.push(reason.to_owned());
             }
@@ -138,8 +154,8 @@ fn inspect_logical_node(plan: &LogicalPlan, audit: &mut RollingRewriteAuditSnaps
 
 fn inspect_logical_window(expression: &Expr) -> Result<(), &'static str> {
     let window = logical_window_function(expression)?;
-    inspect_logical_aggregate(window)?;
-    inspect_logical_parameters(&window.params)
+    let is_count = inspect_logical_aggregate(window)?;
+    inspect_logical_parameters(&window.params, is_count)
 }
 
 fn logical_window_function(expression: &Expr) -> Result<&WindowFunction, &'static str> {
@@ -153,19 +169,29 @@ fn logical_window_function(expression: &Expr) -> Result<&WindowFunction, &'stati
     Ok(window)
 }
 
-fn inspect_logical_aggregate(window: &WindowFunction) -> Result<(), &'static str> {
+fn inspect_logical_aggregate(window: &WindowFunction) -> Result<bool, &'static str> {
     let WindowFunctionDefinition::AggregateUDF(function) = &window.fun else {
         return Err("window_function_is_not_an_aggregate");
     };
-    if !function.name().eq_ignore_ascii_case("avg") {
-        return Err("window_aggregate_is_not_avg");
+    if function.inner().downcast_ref::<Avg>().is_some() {
+        return Ok(false);
     }
-    Ok(())
+    if function.inner().downcast_ref::<CountAggregate>().is_some() {
+        return Ok(true);
+    }
+    Err("window_aggregate_is_not_avg")
 }
 
-fn inspect_logical_parameters(parameters: &WindowFunctionParams) -> Result<(), &'static str> {
-    if !logical_avg_argument_supported(parameters) {
-        return Err("avg_argument_is_not_one_column");
+fn inspect_logical_parameters(
+    parameters: &WindowFunctionParams,
+    is_count: bool,
+) -> Result<(), &'static str> {
+    if !logical_argument_supported(parameters, is_count) {
+        return Err(if is_count {
+            "count_argument_is_not_one_column"
+        } else {
+            "avg_argument_is_not_one_column"
+        });
     }
     if !logical_partition_supported(parameters) {
         return Err("partition_keys_are_not_simple_columns");
@@ -174,7 +200,11 @@ fn inspect_logical_parameters(parameters: &WindowFunctionParams) -> Result<(), &
         return Err("ordering_is_not_simple_ascending_columns");
     }
     if !logical_options_supported(parameters) {
-        return Err("avg_filter_distinct_or_null_treatment_is_not_supported");
+        return Err(if is_count {
+            "count_filter_distinct_or_null_treatment_is_not_supported"
+        } else {
+            "avg_filter_distinct_or_null_treatment_is_not_supported"
+        });
     }
     if !logical_frame_supported(parameters) {
         return Err("window_frame_is_not_bounded_rows_to_current_row");
@@ -182,8 +212,19 @@ fn inspect_logical_parameters(parameters: &WindowFunctionParams) -> Result<(), &
     Ok(())
 }
 
-fn logical_avg_argument_supported(parameters: &WindowFunctionParams) -> bool {
-    matches!(parameters.args.as_slice(), [Expr::Column(_)])
+fn logical_argument_supported(parameters: &WindowFunctionParams, is_count: bool) -> bool {
+    match parameters.args.as_slice() {
+        [Expr::Column(_)] => true,
+        [Expr::Literal(value, _)] if is_count => count_literal_supported(value),
+        _ => false,
+    }
+}
+
+fn count_literal_supported(value: &ScalarValue) -> bool {
+    matches!(
+        value,
+        ScalarValue::Int64(Some(1)) | ScalarValue::UInt8(Some(1))
+    )
 }
 
 fn logical_partition_supported(parameters: &WindowFunctionParams) -> bool {
@@ -223,11 +264,88 @@ fn bounded_preceding_rows(bound: &WindowFrameBound) -> Option<u64> {
     }
 }
 
+#[derive(Clone, Debug)]
+enum RollingExecutionKernel {
+    Shared(DataFusionRollingKernel),
+    Sql(SqlRollingKernel),
+}
+
+enum RollingExecutionState {
+    Shared(DataFusionRollingState),
+    Sql(SqlRollingState),
+}
+
+struct RollingExecutionBatch {
+    columns: Vec<datafusion::arrow::array::ArrayRef>,
+    state: RollingExecutionState,
+    metrics: DataFusionRollingMetrics,
+}
+
+impl RollingExecutionKernel {
+    fn compile(
+        schema: &datafusion::arrow::datatypes::Schema,
+        partitions: &[usize],
+        order: &[usize],
+        windows: &[DataFusionRollingWindow],
+        sql_compatibility: bool,
+    ) -> Option<Self> {
+        if sql_compatibility {
+            SqlRollingKernel::compile(schema, partitions, order, windows).map(Self::Sql)
+        } else {
+            DataFusionRollingKernel::compile(schema, partitions, order, windows).map(Self::Shared)
+        }
+    }
+
+    fn initial_state(&self) -> RollingExecutionState {
+        match self {
+            Self::Shared(_) => RollingExecutionState::Shared(DataFusionRollingState::default()),
+            Self::Sql(_) => RollingExecutionState::Sql(SqlRollingState::default()),
+        }
+    }
+
+    fn fingerprint(&self) -> &str {
+        match self {
+            Self::Shared(kernel) => kernel.fingerprint(),
+            Self::Sql(kernel) => kernel.fingerprint(),
+        }
+    }
+
+    fn estimated_state_bytes_per_entity(&self) -> usize {
+        match self {
+            Self::Shared(kernel) => kernel.estimated_state_bytes_per_entity(),
+            Self::Sql(kernel) => kernel.estimated_state_bytes_per_entity(),
+        }
+    }
+
+    fn update_and_fill(
+        &self,
+        state: &RollingExecutionState,
+        input: &RecordBatch,
+    ) -> crate::Result<RollingExecutionBatch> {
+        match (self, state) {
+            (Self::Shared(kernel), RollingExecutionState::Shared(state)) => {
+                let result = kernel.update_and_fill(state, input)?;
+                Ok(RollingExecutionBatch {
+                    columns: result.columns,
+                    state: RollingExecutionState::Shared(result.state),
+                    metrics: result.metrics,
+                })
+            }
+            (Self::Sql(kernel), RollingExecutionState::Sql(state)) => {
+                kernel.update_and_fill(state, input)
+            }
+            _ => Err(crate::CalcFlowError::Internal {
+                message: "SQL rolling state does not match the physical kernel".to_owned(),
+            }),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct CalcFlowRollingExec {
     input: Arc<dyn ExecutionPlan>,
     schema: SchemaRef,
-    kernel: DataFusionRollingKernel,
+    kernel: RollingExecutionKernel,
     window_count: usize,
     required_distribution: Distribution,
     required_ordering: Option<OrderingRequirements>,
@@ -236,7 +354,10 @@ struct CalcFlowRollingExec {
 }
 
 impl CalcFlowRollingExec {
-    fn try_from_window(window: &BoundedWindowAggExec) -> DataFusionResult<Option<Self>> {
+    fn try_from_window(
+        window: &BoundedWindowAggExec,
+        sql_compatibility: bool,
+    ) -> DataFusionResult<Option<Self>> {
         if !matches!(window.input_order_mode, InputOrderMode::Sorted) {
             return Ok(None);
         }
@@ -244,11 +365,12 @@ impl CalcFlowRollingExec {
             return Ok(None);
         };
         let input = Arc::clone(window.input());
-        let Some(kernel) = DataFusionRollingKernel::compile(
+        let Some(kernel) = RollingExecutionKernel::compile(
             input.schema().as_ref(),
             &partition_indices,
             &order_indices,
             &windows,
+            sql_compatibility,
         ) else {
             return Ok(None);
         };
@@ -304,8 +426,12 @@ fn physical_windows(
     };
     let mut windows = Vec::with_capacity(window.window_expr().len());
     for expression in window.window_expr() {
-        let Some(window) =
-            physical_window(expression.as_ref(), &partition_indices, &order_indices)?
+        let Some(window) = physical_window(
+            expression.as_ref(),
+            window,
+            &partition_indices,
+            &order_indices,
+        )?
         else {
             return Ok(None);
         };
@@ -316,6 +442,7 @@ fn physical_windows(
 
 fn physical_window(
     expression: &dyn WindowExpr,
+    parent: &BoundedWindowAggExec,
     partition_indices: &[usize],
     order_indices: &[usize],
 ) -> DataFusionResult<Option<DataFusionRollingWindow>> {
@@ -328,10 +455,12 @@ fn physical_window(
     else {
         return Ok(None);
     };
-    if !physical_avg_supported(sliding) {
+    let Some(is_count) = physical_aggregate_supported(sliding) else {
         return Ok(None);
-    }
-    let Some(input_index) = physical_window_input(expression) else {
+    };
+    let Some(input_index) = physical_window_input(expression)
+        .or_else(|| count_literal_input(expression, parent, is_count))
+    else {
         return Ok(None);
     };
     let Some(rows) = physical_window_rows(expression) else {
@@ -342,6 +471,7 @@ fn physical_window(
         input_index,
         output_name: field.name().to_owned(),
         rows,
+        is_count,
     }))
 }
 
@@ -354,12 +484,48 @@ fn physical_window_order_matches(
         && physical_order_columns(expression.order_by()).as_deref() == Some(order_indices)
 }
 
-fn physical_avg_supported(expression: &SlidingAggregateWindowExpr) -> bool {
+fn physical_aggregate_supported(expression: &SlidingAggregateWindowExpr) -> Option<bool> {
     let aggregate = expression.get_aggregate_expr();
-    aggregate.fun().name().eq_ignore_ascii_case("avg")
-        && !aggregate.is_distinct()
-        && !aggregate.ignore_nulls()
-        && aggregate.order_bys().is_empty()
+    if aggregate.is_distinct() || aggregate.ignore_nulls() || !aggregate.order_bys().is_empty() {
+        return None;
+    }
+    if aggregate.fun().inner().downcast_ref::<Avg>().is_some() {
+        return Some(false);
+    }
+    aggregate
+        .fun()
+        .inner()
+        .downcast_ref::<CountAggregate>()
+        .map(|_| true)
+}
+
+fn count_literal_input(
+    expression: &dyn WindowExpr,
+    parent: &BoundedWindowAggExec,
+    is_count: bool,
+) -> Option<usize> {
+    if !is_count {
+        return None;
+    }
+    let arguments = expression.expressions();
+    let [argument] = arguments.as_slice() else {
+        return None;
+    };
+    if !count_literal_supported(argument.downcast_ref::<Literal>()?.value()) {
+        return None;
+    }
+    parent.window_expr().iter().find_map(|candidate| {
+        let sliding = candidate
+            .as_any()
+            .downcast_ref::<SlidingAggregateWindowExpr>()?;
+        if physical_aggregate_supported(sliding) != Some(false)
+            || candidate.get_window_frame() != expression.get_window_frame()
+        {
+            return None;
+        }
+        let index = physical_window_input(candidate.as_ref())?;
+        (!parent.input().schema().field(index).is_nullable()).then_some(index)
+    })
 }
 
 fn physical_window_input(expression: &dyn WindowExpr) -> Option<usize> {
@@ -410,7 +576,7 @@ impl DisplayAs for CalcFlowRollingExec {
         match format {
             DisplayFormatType::Default | DisplayFormatType::Verbose => write!(
                 f,
-                "CalcFlowRollingExec: windows={}, kernel={}, state_bytes_per_entity={}",
+                "CalcFlowRollingExec: windows={}, route=sorted_partitions, kernel={}, state_bytes_per_entity={}",
                 self.window_count,
                 self.kernel.fingerprint(),
                 self.kernel.estimated_state_bytes_per_entity()
@@ -491,7 +657,7 @@ impl ExecutionPlan for CalcFlowRollingExec {
             input,
             schema: Arc::clone(&self.schema),
             kernel: self.kernel.clone(),
-            state: DataFusionRollingState::default(),
+            state: self.kernel.initial_state(),
             reservation,
             metrics: RollingPartitionMetrics::new(&self.metrics, partition),
         };
@@ -533,8 +699,8 @@ impl ExecutionPlan for CalcFlowRollingExec {
 struct RollingStream {
     input: SendableRecordBatchStream,
     schema: SchemaRef,
-    kernel: DataFusionRollingKernel,
-    state: DataFusionRollingState,
+    kernel: RollingExecutionKernel,
+    state: RollingExecutionState,
     reservation: MemoryReservation,
     metrics: RollingPartitionMetrics,
 }

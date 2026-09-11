@@ -244,6 +244,7 @@ impl ProgressExecutionTrace {
 
 #[derive(Clone, Debug)]
 enum TraceMode {
+    Live,
     Record,
     Replay {
         expected: ProgressExecutionTrace,
@@ -254,6 +255,7 @@ enum TraceMode {
 #[derive(Clone, Debug)]
 pub(crate) struct TraceController {
     completed: ProgressExecutionTrace,
+    counters: super::status::ProgressCounters,
     mode: TraceMode,
     next_record: u64,
     next_position: u64,
@@ -263,6 +265,7 @@ impl TraceController {
     pub(crate) fn record() -> Self {
         Self {
             completed: ProgressExecutionTrace::default(),
+            counters: super::status::ProgressCounters::default(),
             mode: TraceMode::Record,
             next_record: 0,
             next_position: 0,
@@ -272,6 +275,7 @@ impl TraceController {
     pub(crate) fn replay(request: ProgressReplayRequest) -> Self {
         Self {
             completed: ProgressExecutionTrace::default(),
+            counters: super::status::ProgressCounters::default(),
             mode: TraceMode::Replay {
                 expected: request.expected,
                 cursor: 0,
@@ -298,6 +302,7 @@ impl TraceController {
         let restored = Self::restore_prefix(prefix, next_record, next_position)?;
         Ok(Self {
             completed: restored.completed,
+            counters: restored.counters,
             mode: TraceMode::Replay {
                 expected: request.expected,
                 cursor: prefix_len,
@@ -350,7 +355,10 @@ impl TraceController {
         }
         self.next_record += 1;
         self.next_position += 1;
-        self.completed.records.push(record);
+        self.counters.observe_record(&record);
+        if !matches!(self.mode, TraceMode::Live) {
+            self.completed.records.push(record);
+        }
         Ok(())
     }
 
@@ -361,6 +369,32 @@ impl TraceController {
             return Err(CalcFlowError::InvalidArgument {
                 field: "runtime.progress.replay.trace".into(),
                 message: "expected execution trace has an unconsumed suffix".into(),
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn use_live_mode(&mut self) -> Result<()> {
+        if matches!(self.mode, TraceMode::Replay { .. }) {
+            return Err(CalcFlowError::InvalidArgument {
+                field: "runtime.progress.trace.mode".into(),
+                message: "a replay driver cannot discard its execution trace".into(),
+            });
+        }
+        self.mode = TraceMode::Live;
+        self.completed = ProgressExecutionTrace::default();
+        Ok(())
+    }
+
+    pub(crate) const fn counters(&self) -> super::status::ProgressCounters {
+        self.counters
+    }
+
+    pub(crate) fn require_recorded_prefix(&self) -> Result<()> {
+        if matches!(self.mode, TraceMode::Live) {
+            return Err(CalcFlowError::InvalidArgument {
+                field: "runtime.progress.snapshot.trace_mode".into(),
+                message: "logical snapshots require a complete recorded execution trace".into(),
             });
         }
         Ok(())
@@ -397,8 +431,13 @@ impl TraceController {
                 message: "trace prefix and next coordinates are not exact".into(),
             });
         }
+        let mut counters = super::status::ProgressCounters::default();
+        for record in &trace.records {
+            counters.observe_record(record);
+        }
         Ok(Self {
             completed: trace,
+            counters,
             mode: TraceMode::Record,
             next_record,
             next_position,

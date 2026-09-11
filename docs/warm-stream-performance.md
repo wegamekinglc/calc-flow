@@ -94,9 +94,26 @@ The sparse matrix is the Cartesian product of history, append and active-entity
 counts. Omitting `--append-entities` preserves the original seven-point matrix
 and complete-tick timestamps. These layouts must not be pooled together.
 
-### Opt-in callback diagnostics
+### Native rolling stages
 
-The private native job diagnostics are disabled by default. Enabling them
+Managed Native rolling jobs expose bounded lifetime stage observations through
+`StreamingJob::rolling_metrics()` and Python `status()["rolling_metrics"]`.
+These are separate from the opt-in Python bridge trace below. The
+[runtime observation contract](runtime-envelope.md#status-and-metrics) defines
+the exclusive nanosecond stages, attempted work counters, callback outcomes
+and overflow behavior.
+
+Capture a baseline snapshot after preload and a final snapshot after the
+measured callback has settled. Report their difference separately from the
+application timer: receipt of the sink table does not itself prove every
+callback has completed. Restoring a checkpoint starts new observations rather
+than restoring elapsed timers. Use sampled stacks for CPU attribution and an
+allocation instrument for allocation counts/bytes; stage counters cannot
+substitute for either measurement.
+
+### Opt-in Python bridge callback diagnostics
+
+The private Python bridge trace is disabled by default. Enabling it
 records up to 1,024 completed or cancelled callback requests, evicts the oldest
 records at capacity and reports how many were dropped. Draining returns JSON
 and resets the buffer/counter; terminal root cleanup does not erase records.

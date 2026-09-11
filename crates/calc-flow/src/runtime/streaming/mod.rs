@@ -14,6 +14,7 @@ pub(crate) mod checkpoint;
 mod checkpoint_runtime;
 mod checkpoint_status;
 mod context;
+pub(crate) mod entity_work;
 pub(crate) mod failure;
 #[allow(
     dead_code,

@@ -37,6 +37,7 @@ use crate::{
     state::{SegmentDescriptor, SegmentKind, StateInventory},
 };
 
+use super::rolling_metrics::{RollingMetricsRecorder, RollingStage, RollingWork};
 use super::{
     BatchOperator, BatchOperatorContext, LateMetricDelta, OperatorMetadata, StreamCollector,
     StreamOperator, StreamOperatorContext, accumulate_late_metrics, expression::required_input,
@@ -52,7 +53,17 @@ mod state_v3;
 use super::checkpoint::{checkpoint_mismatch, compile_error, internal_error, state_format};
 #[cfg(test)]
 use kernel::KernelSelection;
+#[cfg(test)]
+pub(crate) use kernel::entity_parallel_tests::entity_parallel_test_pair;
 use kernel::{RollingKernelPlan, RollingKernelState};
+pub(crate) use kernel::{
+    StreamKernelUpdate,
+    entity_parallel::{
+        ActualNumericWork, LaneProgress, LocatedPanic, NumericJoinSeed, NumericLaneExit,
+        NumericLaneOutcome, NumericLaneRequest, NumericLaneStop, ScratchPlan,
+        merge_numeric_results, run_numeric_lane,
+    },
+};
 
 /// Semantic configuration version of the first rolling operator release.
 pub const ROLLING_CONFIGURATION_VERSION: u32 = 1;
@@ -96,13 +107,14 @@ impl RollingNumericalProfile {
     }
 }
 
-/// One SQL AVG window accepted by the crate-private `DataFusion` rolling
+/// One SQL AVG/COUNT window accepted by the crate-private `DataFusion` rolling
 /// physical planner.
 #[derive(Clone, Debug)]
 pub(crate) struct DataFusionRollingWindow {
     pub input_index: usize,
     pub output_name: String,
     pub rows: u64,
+    pub is_count: bool,
 }
 
 /// Immutable typed rolling plan shared with `CalcFlowRollingExec`.
@@ -114,7 +126,7 @@ pub(crate) struct DataFusionRollingKernel {
 /// Per-partition transition state owned by one `DataFusion` execution stream.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct DataFusionRollingState {
-    inner: RollingKernelState,
+    inner: kernel::SortedRollingState,
 }
 
 /// Deterministic execution facts forwarded to `DataFusion` physical metrics.
@@ -145,7 +157,10 @@ impl DataFusionRollingKernel {
         order_indices: &[usize],
         windows: &[DataFusionRollingWindow],
     ) -> Option<Self> {
-        if windows.is_empty() || !kernel::supports_datafusion_primitive("mean") {
+        if windows.is_empty()
+            || windows.iter().any(|window| window.is_count)
+            || !kernel::supports_datafusion_primitive("mean")
+        {
             return None;
         }
         let (&event_time_index, sequence_indices) = order_indices.split_first()?;
@@ -218,10 +233,9 @@ impl DataFusionRollingKernel {
         state: &DataFusionRollingState,
         input: &RecordBatch,
     ) -> Result<DataFusionRollingBatch> {
-        let execution = self
-            .plan
-            .update_and_fill(&state.inner, input, "datafusion.rolling")?
-            .ok_or_else(|| internal_error("DataFusion input violated the planned rolling order"))?;
+        let execution =
+            self.plan
+                .update_sorted_and_fill(&state.inner, input, "datafusion.rolling")?;
         let metrics = execution.metrics;
         Ok(DataFusionRollingBatch {
             columns: execution.columns,
@@ -1128,6 +1142,8 @@ impl StreamOperator for RollingOperator {
         context: &StreamOperatorContext<'_>,
         _output: &mut dyn StreamCollector,
     ) -> Result<()> {
+        let observer = context.rolling_metrics();
+        let validation = observer.map(|recorder| recorder.stage(RollingStage::InputValidation));
         if ingress != "input" {
             return Err(operator_error(
                 context.operator_id(),
@@ -1143,13 +1159,24 @@ impl StreamOperator for RollingOperator {
             ));
         }
         let watermark = context.input_watermark();
-        if self.try_buffer_ordered(batch.table_payload()?, watermark)? {
+        drop(validation);
+        if self.try_buffer_ordered(batch.table_payload()?, watermark, observer)? {
             self.install_context_identity(context);
             return Ok(());
         }
-        self.materialize_ordered_buffer()?;
-        let rows = read_buffered_rows(batch.table_payload()?, &self.compiled, &self.name)?;
-        let (accepted, metrics) = self.classify_envelope(rows, watermark, context.operator_id())?;
+        self.materialize_ordered_buffer(observer)?;
+        let rows = {
+            let _stage = observer.map(|recorder| recorder.stage(RollingStage::InputValidation));
+            let rows = read_buffered_rows(batch.table_payload()?, &self.compiled, &self.name)?;
+            if let Some(recorder) = observer {
+                for _ in self.input_ports[0].schema().unwrap().fields() {
+                    recorder.add(RollingWork::ScalarValueConversions, rows.len());
+                }
+            }
+            rows
+        };
+        let (accepted, metrics) =
+            self.classify_envelope(rows, watermark, context.operator_id(), observer)?;
         let next_metrics = accumulate_late_metrics(self.state.metrics, metrics)?;
         for (identity, row) in accepted {
             self.state.buffer.insert(identity, row);
@@ -1187,16 +1214,26 @@ impl StreamOperator for RollingOperator {
             ));
         }
         if self.state.ordered.is_empty() {
-            let closing = self.closing_keys(watermark.as_micros(), context.operator_id())?;
-            let rows = self.take_buffered(&closing);
+            let rows = {
+                let _stage = context
+                    .rolling_metrics()
+                    .map(|recorder| recorder.stage(RollingStage::OrderingProof));
+                let closing = self.closing_keys(watermark.as_micros(), context.operator_id())?;
+                self.take_buffered(&closing)
+            };
             self.emit_rows(rows, context, output).await?;
         } else {
-            let records = self.state.ordered.take_closed(
-                watermark,
-                &self.compiled,
-                self.spec.allowed_lateness_micros,
-                context.operator_id(),
-            )?;
+            let records = {
+                let _stage = context
+                    .rolling_metrics()
+                    .map(|recorder| recorder.stage(RollingStage::OrderingProof));
+                self.state.ordered.take_closed(
+                    watermark,
+                    &self.compiled,
+                    self.spec.allowed_lateness_micros,
+                    context.operator_id(),
+                )?
+            };
             self.emit_ordered(records, context, output).await?;
         }
         self.install_context_identity(context);
@@ -1241,7 +1278,10 @@ impl StreamOperator for RollingOperator {
                 "rolling checkpoint epoch did not advance strictly",
             ));
         }
-        self.materialize_ordered_buffer()?;
+        self.materialize_ordered_buffer(None)?;
+        self.state
+            .histories
+            .materialize_columnar(&self.compiled, &self.name, None)?;
         let encoded = self.encode_state(epoch)?;
         let (descriptor, segments) = match encoded {
             Some(prepared) => {
@@ -1361,13 +1401,19 @@ impl RollingOperator {
         rows: Vec<BufferedRow>,
         watermark: Option<EventTime>,
         node_id: &str,
+        observer: Option<&RollingMetricsRecorder>,
     ) -> Result<(BTreeMap<RowIdentity, BufferedRow>, LateMetricDelta)> {
+        let _validation = observer.map(|recorder| recorder.stage(RollingStage::InputValidation));
         let mut accepted = BTreeMap::new();
         let mut metrics = PreparedLateMetrics::default();
         for (row_index, row) in rows.into_iter().enumerate() {
             if self.is_late(row.identity.event_time, watermark, row_index, node_id)? {
                 record_late_row(&mut metrics, watermark, row.identity.event_time, node_id)?;
                 continue;
+            }
+            let _ordering = observer.map(|recorder| recorder.stage(RollingStage::OrderingProof));
+            if let Some(recorder) = observer {
+                recorder.add(RollingWork::OrderProofRows, 1);
             }
             if self.state.buffer.contains_key(&row.identity) || accepted.contains_key(&row.identity)
             {
@@ -1450,6 +1496,12 @@ impl RollingOperator {
         if rows.is_empty() {
             return Ok(());
         }
+        let observer = context.rolling_metrics();
+        self.state.histories.materialize_columnar(
+            &self.compiled,
+            context.operator_id(),
+            observer,
+        )?;
         let output_schema = self.output_ports[0]
             .schema()
             .expect("rolling output always has an exact schema");
@@ -1460,16 +1512,19 @@ impl RollingOperator {
             &self.compiled,
             output_schema,
             context.operator_id(),
+            observer,
         )?;
         let (record, next_kernel_state, touched) = if let Some(typed) = typed {
             typed
         } else {
-            let computed = compute_output_columns(
+            let computed = compute_output_columns_observed(
                 &rows,
                 &self.state.histories,
                 &self.compiled,
                 context.operator_id(),
+                observer,
             )?;
+            let _stage = observer.map(|recorder| recorder.stage(RollingStage::ArrowOutput));
             (
                 build_output_record(
                     &rows,
@@ -1481,6 +1536,10 @@ impl RollingOperator {
                 computed.touched,
             )
         };
+        if let Some(recorder) = observer {
+            recorder.add(RollingWork::OutputRowsPrepared, record.num_rows());
+        }
+        let budget_stage = observer.map(|recorder| recorder.stage(RollingStage::BudgetPreparation));
         let batches = chunk_output_record(
             &record,
             context.operator_id(),
@@ -1493,6 +1552,10 @@ impl RollingOperator {
                 "output chunk count does not fit the sequence range",
             )
         })?;
+        if let Some(recorder) = observer {
+            recorder.add(RollingWork::OutputChunksPrepared, batches.len());
+        }
+        drop(budget_stage);
         for batch in batches {
             output.emit("output", batch).await?;
         }
@@ -1501,6 +1564,7 @@ impl RollingOperator {
             .next_output_sequence
             .checked_add(chunk_count)
             .ok_or_else(|| operator_error(context.operator_id(), "output sequence overflowed"))?;
+        let _stage = observer.map(|recorder| recorder.stage(RollingStage::HistoryMaintenance));
         self.state.histories.apply(touched);
         self.state.typed_kernel_state = next_kernel_state.map(Box::new);
         Ok(())
@@ -2603,6 +2667,17 @@ fn chunk_output_record(
     first_sequence: u64,
     budget: crate::EdgeBudget,
 ) -> Result<Vec<Batch>> {
+    if record.num_rows() != 0
+        && record.num_rows() <= budget.max_rows
+        && row_cost::RowCosts::try_total(record)?.is_some_and(|bytes| bytes <= budget.max_bytes)
+    {
+        let metadata = BatchMetadata::new(operator_id, first_sequence, BTreeMap::new())?;
+        let batch = Batch::table(vec![record.clone()], metadata)?;
+        first_sequence.checked_add(1).ok_or_else(|| {
+            operator_error(operator_id, "output sequence overflowed before emission")
+        })?;
+        return Ok(vec![batch]);
+    }
     let row_costs = row_cost::RowCosts::try_new(record)?;
     let mut batches = Vec::new();
     let mut start = 0_usize;
@@ -2816,6 +2891,7 @@ fn build_typed_stream_output(
     compiled: &CompiledRollingSpec,
     output_schema: &SchemaRef,
     node_id: &str,
+    observer: Option<&RollingMetricsRecorder>,
 ) -> Result<Option<TypedStreamOutput>> {
     if !compiled.kernel_plan.supports_typed_transition() {
         return Ok(None);
@@ -2827,19 +2903,29 @@ fn build_typed_stream_output(
     let prior = if let Some(state) = state {
         state
     } else {
+        let _stage = observer.map(|recorder| recorder.stage(RollingStage::StatePreparation));
         restored_state = reconstruct_typed_state(histories, compiled, &input_schema, node_id)?;
         &restored_state
     };
-    let input = build_input_record(rows, input_schema, node_id)?;
+    let input = {
+        let _stage = observer.map(|recorder| recorder.stage(RollingStage::ArrowOutput));
+        build_input_record(rows, input_schema, node_id)?
+    };
     let execution = compiled
         .kernel_plan
-        .update_stream_and_fill(prior, &input, node_id)?
+        .update_stream_and_fill(prior, &input, node_id, observer)?
         .ok_or_else(|| {
             internal_error("typed rolling stream rows did not satisfy canonical ordering")
         })?;
     let columns = execution.columns;
-    let record = build_output_record(rows, columns, output_schema, node_id)?;
-    let touched = typed_history_updates(rows, histories, compiled, node_id)?;
+    let record = {
+        let _stage = observer.map(|recorder| recorder.stage(RollingStage::ArrowOutput));
+        build_output_record(rows, columns, output_schema, node_id)?
+    };
+    let touched = {
+        let _stage = observer.map(|recorder| recorder.stage(RollingStage::HistoryMaintenance));
+        typed_history_updates(rows, histories, compiled, node_id)?
+    };
     Ok(Some((record, Some(execution.state), touched)))
 }
 
@@ -3431,6 +3517,7 @@ impl BufferedRow {
 #[derive(Clone, Debug, Default)]
 struct EntityRollingState {
     rows: VecDeque<Vec<ScalarValue>>,
+    columnar: ordered_stream::ColumnarHistory,
     windows: Vec<WindowState>,
     transition_count: u64,
 }
@@ -3439,6 +3526,7 @@ impl EntityRollingState {
     fn fresh(compiled: &CompiledRollingSpec) -> Self {
         Self {
             rows: VecDeque::new(),
+            columnar: ordered_stream::ColumnarHistory::default(),
             windows: fresh_windows(compiled),
             transition_count: 0,
         }
@@ -4049,6 +4137,16 @@ fn compute_output_columns(
     compiled: &CompiledRollingSpec,
     node_id: &str,
 ) -> Result<ComputedOutputs> {
+    compute_output_columns_observed(rows, histories, compiled, node_id, None)
+}
+
+fn compute_output_columns_observed(
+    rows: &[BufferedRow],
+    histories: &RollingHistories,
+    compiled: &CompiledRollingSpec,
+    node_id: &str,
+    observer: Option<&RollingMetricsRecorder>,
+) -> Result<ComputedOutputs> {
     if rows.is_empty() {
         return Ok(ComputedOutputs {
             columns: compiled
@@ -4059,20 +4157,36 @@ fn compute_output_columns(
             touched: Vec::new(),
         });
     }
+    let arrow_stage = observer.map(|recorder| recorder.stage(RollingStage::ArrowOutput));
     let mut derived: Vec<Vec<Option<ScalarValue>>> = compiled
         .outputs
         .iter()
         .map(|_| vec![None; rows.len()])
         .collect();
-    let entities = group_rows_by_entity(rows);
+    drop(arrow_stage);
+    let entities = {
+        let _stage = observer.map(|recorder| recorder.stage(RollingStage::EntityResolution));
+        let entities = group_rows_by_entity(rows);
+        if let Some(recorder) = observer {
+            recorder.add(RollingWork::ResolvedRows, rows.len());
+            recorder.add(RollingWork::TouchedEntities, entities.len());
+        }
+        entities
+    };
     let mut touched = Vec::with_capacity(entities.len());
     for (entity, indices) in entities {
-        let mut entity_state = histories
-            .by_entity
-            .get(entity)
-            .cloned()
-            .unwrap_or_else(|| EntityRollingState::fresh(compiled));
+        let mut entity_state = {
+            let _stage = observer.map(|recorder| recorder.stage(RollingStage::StatePreparation));
+            let prior = histories.by_entity.get(entity);
+            if let Some(recorder) = observer {
+                recorder.add(RollingWork::CopiedEntities, usize::from(prior.is_some()));
+            }
+            prior
+                .cloned()
+                .unwrap_or_else(|| EntityRollingState::fresh(compiled))
+        };
         {
+            let _stage = observer.map(|recorder| recorder.stage(RollingStage::NumericUpdate));
             let view = EntityRowView {
                 rows,
                 indices: &indices,
@@ -4086,6 +4200,9 @@ fn compute_output_columns(
                     .ok_or_else(|| {
                         operator_error(node_id, "rolling entity transition count overflowed")
                     })?;
+                if let Some(recorder) = observer {
+                    recorder.add(RollingWork::NumericRows, 1);
+                }
                 slide_windows(
                     &view,
                     position,
@@ -4107,12 +4224,14 @@ fn compute_output_columns(
                 }
             }
         }
+        let _stage = observer.map(|recorder| recorder.stage(RollingStage::HistoryMaintenance));
         for &row_index in &indices {
             entity_state.rows.push_back(rows[row_index].values.clone());
         }
         evict_retained_history(&mut entity_state, compiled);
         touched.push((entity.clone(), entity_state));
     }
+    let _stage = observer.map(|recorder| recorder.stage(RollingStage::ArrowOutput));
     let columns = encode_derived_columns(derived, compiled, node_id)?;
     Ok(ComputedOutputs { columns, touched })
 }
@@ -7274,6 +7393,7 @@ mod tests {
             &compiled,
             &output_schema,
             "rolling",
+            None,
         )
         .unwrap()
         .unwrap();
@@ -7346,6 +7466,7 @@ mod tests {
             &compiled,
             &output_schema,
             "rolling",
+            None,
         )
         .unwrap()
         .unwrap();
@@ -7923,15 +8044,22 @@ mod tests {
         assert_eq!(second.metrics.scalar_value_conversions, 0);
     }
 
-    fn single_entity_history(operator: &RollingOperator) -> &VecDeque<Vec<ScalarValue>> {
-        &operator
+    fn single_entity_retained_prices(operator: &RollingOperator) -> &Float64Array {
+        operator
             .state
             .histories
             .by_entity
             .values()
             .next()
             .unwrap()
-            .rows
+            .columnar
+            .records
+            .front()
+            .unwrap()
+            .column(3)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
     }
 
     #[tokio::test]
@@ -7989,7 +8117,7 @@ mod tests {
             &[1.0, 2.0],
         );
         let second = float64_fast_record(&[(3, "a", 3, Some(5.0))]);
-        let retained_row = single_entity_history(&operator).back().unwrap().as_ptr();
+        let retained_row = single_entity_retained_prices(&operator).values()[1..].as_ptr();
         let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(2)));
         operator
             .process_data(
@@ -8022,7 +8150,7 @@ mod tests {
             &[4.0]
         );
         assert_eq!(
-            single_entity_history(&operator).front().unwrap().as_ptr(),
+            single_entity_retained_prices(&operator).values().as_ptr(),
             retained_row,
             "an unchanged retained row must not be cloned on append"
         );
@@ -8092,6 +8220,1108 @@ mod tests {
         assert!(
             large <= small + 100,
             "one touched entity: small={small}, large={large}"
+        );
+    }
+
+    #[test]
+    fn ordered_tail_history_allocations_are_columnar() {
+        use crate::{CancellationToken, StreamJobContext};
+
+        fn allocations(window: u64) -> u64 {
+            let spec = kernel_spec(json!([aggregate_output("mean", "price", "mean", window)]));
+            let mut operator =
+                RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
+            let job = StreamJobContext::new(
+                7,
+                TEST_FINGERPRINT,
+                JsonMap::new(),
+                None,
+                CancellationToken::new(),
+            );
+            let context = StreamOperatorContext::new(&job, "rolling", None);
+            let rows = (1..=8192_u64)
+                .map(|index| (i64::try_from(index).unwrap(), "a", index, Some(1.0)))
+                .collect::<Vec<_>>();
+            let input = float64_fast_record(&rows);
+            let mut collector = crate::EdgeCollector::new(operator.output_ports().to_vec());
+            futures::executor::block_on(operator.process_data(
+                "input",
+                Batch::table(vec![input], BatchMetadata::default()).unwrap(),
+                &context,
+                &mut collector,
+            ))
+            .unwrap();
+            allocation_counter::measure(|| {
+                futures::executor::block_on(operator.on_watermark(
+                    EventTime::from_micros(8192),
+                    &context,
+                    &mut collector,
+                ))
+                .unwrap();
+            })
+            .count_total
+        }
+
+        let small = allocations(32);
+        let large = allocations(4096);
+        println!("retained history allocations: tail32={small}, tail4096={large}");
+        assert!(
+            large <= small + 100,
+            "one entity, 8192 input rows: tail32={small}, tail4096={large}"
+        );
+    }
+
+    #[test]
+    fn sparse_fixed_width_appends_amortize_retained_buffer_copies() {
+        use crate::{CancellationToken, StreamJobContext};
+
+        let first = fixed_width_history_record(1, 1024);
+        let spec = kernel_spec(json!([aggregate_output("mean", "price", "mean", 1024)]));
+        let mut operator = RollingOperator::new("rolling", first.schema(), spec).unwrap();
+        let job = StreamJobContext::new(
+            7,
+            TEST_FINGERPRINT,
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        );
+        let mut collector = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        let context = StreamOperatorContext::new(&job, "rolling", None);
+        futures::executor::block_on(operator.process_data(
+            "input",
+            Batch::table(vec![first], BatchMetadata::default()).unwrap(),
+            &context,
+            &mut collector,
+        ))
+        .unwrap();
+        futures::executor::block_on(operator.on_watermark(
+            EventTime::from_micros(1024),
+            &context,
+            &mut collector,
+        ))
+        .unwrap();
+        collector.drain("output");
+        let initial = single_entity_retained_prices(&operator).to_data();
+        let initial_bytes = single_entity_retained_prices(&operator).get_buffer_memory_size();
+        let mut backing = initial.buffers()[0].data_ptr();
+        drop(initial);
+        let mut copies = 0;
+        let measured = allocation_counter::measure(|| {
+            for time in 1025..=1792 {
+                let context = StreamOperatorContext::new(
+                    &job,
+                    "rolling",
+                    Some(EventTime::from_micros(i64::from(time - 1))),
+                );
+                let input = Batch::table(
+                    vec![fixed_width_history_record(time, 1)],
+                    BatchMetadata::default(),
+                )
+                .unwrap();
+                futures::executor::block_on(operator.process_data(
+                    "input",
+                    input,
+                    &context,
+                    &mut collector,
+                ))
+                .unwrap();
+                futures::executor::block_on(operator.on_watermark(
+                    EventTime::from_micros(i64::from(time)),
+                    &context,
+                    &mut collector,
+                ))
+                .unwrap();
+                collector.drain("output");
+                let current = single_entity_retained_prices(&operator).to_data();
+                copies += usize::from(current.buffers()[0].data_ptr() != backing);
+                backing = current.buffers()[0].data_ptr();
+            }
+        });
+        assert!(
+            copies <= 8,
+            "768 sparse appends copied the retained prefix {copies} times"
+        );
+        let history = operator.state.histories.by_entity.values().next().unwrap();
+        assert_eq!(
+            history
+                .columnar
+                .records
+                .iter()
+                .map(RecordBatch::num_rows)
+                .sum::<usize>(),
+            1024
+        );
+        assert_eq!(history.transition_count, 1792);
+        assert!(
+            single_entity_retained_prices(&operator).get_buffer_memory_size() <= initial_bytes / 2
+        );
+        println!(
+            "768 sparse appends: prefix copies={copies}, allocations={}, allocated bytes={}",
+            measured.count_total, measured.bytes_total
+        );
+    }
+
+    fn fixed_width_history_record(first: u32, rows: u32) -> RecordBatch {
+        use datafusion::arrow::array::TimestampMicrosecondArray;
+
+        let times = (first..first + rows)
+            .map(|time| Some(i64::from(time)))
+            .collect::<TimestampMicrosecondArray>()
+            .with_timezone("UTC");
+        let symbols = UInt64Array::from_iter_values((0..rows).map(|_| 1));
+        let sequences = UInt64Array::from_iter_values((first..first + rows).map(u64::from));
+        let prices = Float64Array::from_iter_values((0..rows).map(|_| 1.0));
+        let schema = Schema::new(vec![
+            Field::new("ts", times.data_type().clone(), false),
+            Field::new("symbol", DataType::UInt64, false),
+            Field::new("sequence", DataType::UInt64, false),
+            Field::new("price", DataType::Float64, false),
+        ]);
+        RecordBatch::try_new(
+            Arc::new(schema),
+            vec![
+                Arc::new(times),
+                Arc::new(symbols),
+                Arc::new(sequences),
+                Arc::new(prices),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn native_rolling_observations_report_work_without_materializing_histories() {
+        use crate::operator::rolling_metrics::{RollingCallback, RollingMetricsStore};
+        use crate::{CancellationToken, StreamJobContext};
+
+        let spec = kernel_spec(json!([aggregate_output("mean", "price", "mean", 20)]));
+        let mut operator =
+            RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
+        let cancellation = CancellationToken::new();
+        let job = StreamJobContext::new(
+            7,
+            TEST_FINGERPRINT,
+            JsonMap::new(),
+            None,
+            cancellation.clone(),
+        );
+        let store = RollingMetricsStore::default();
+        let mut collector = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        let mut watermark = None;
+        for rows in [
+            vec![(1, "a", 1, Some(1.0)), (2, "b", 2, Some(2.0))],
+            vec![(3, "a", 3, Some(3.0)), (4, "b", 4, Some(4.0))],
+        ] {
+            let input = float64_fast_record(&rows);
+            let callback = store.begin(RollingCallback::Data, cancellation.clone());
+            let context = StreamOperatorContext::new(&job, "rolling", watermark)
+                .with_rolling_metrics(callback.recorder());
+            let result = operator
+                .process_data(
+                    "input",
+                    Batch::table(vec![input], BatchMetadata::default()).unwrap(),
+                    &context,
+                    &mut collector,
+                )
+                .await;
+            callback.complete(&result);
+            result.unwrap();
+            let callback = store.begin(RollingCallback::Watermark, cancellation.clone());
+            let context = StreamOperatorContext::new(&job, "rolling", watermark)
+                .with_rolling_metrics(callback.recorder());
+            let next = EventTime::from_micros(rows.last().unwrap().0);
+            let result = operator.on_watermark(next, &context, &mut collector).await;
+            callback.complete(&result);
+            result.unwrap();
+            watermark = Some(next);
+            collector.drain("output");
+        }
+        let observations = store.snapshot();
+        assert_eq!(observations.data.order_proof_rows, 4);
+        assert_eq!(observations.watermark.resolved_rows, 4);
+        assert_eq!(observations.watermark.touched_entities, 4);
+        assert_eq!(observations.watermark.copied_entities, 2);
+        assert_eq!(observations.watermark.numeric_rows, 4);
+        assert_eq!(observations.watermark.history_rows_materialized, 0);
+        assert_eq!(observations.watermark.scalar_value_conversions, 4);
+        assert_eq!(observations.watermark.output_rows_prepared, 4);
+        assert_eq!(observations.watermark.output_chunks_prepared, 2);
+    }
+
+    #[tokio::test]
+    async fn late_rejection_does_not_report_unperformed_order_proof() {
+        use crate::operator::rolling_metrics::{RollingCallback, RollingMetricsStore};
+        use crate::{CancellationToken, StreamJobContext};
+
+        let spec = kernel_spec(json!([aggregate_output("mean", "price", "mean", 2)]));
+        let mut operator =
+            RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
+        let cancellation = CancellationToken::new();
+        let job = StreamJobContext::new(
+            7,
+            TEST_FINGERPRINT,
+            JsonMap::new(),
+            None,
+            cancellation.clone(),
+        );
+        let store = RollingMetricsStore::default();
+        let callback = store.begin(RollingCallback::Data, cancellation);
+        let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(2)))
+            .with_rolling_metrics(callback.recorder());
+        let mut collector = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        let input = float64_fast_record(&[(1, "a", 1, Some(1.0))]);
+        let result = operator
+            .process_data(
+                "input",
+                Batch::table(vec![input], BatchMetadata::default()).unwrap(),
+                &context,
+                &mut collector,
+            )
+            .await;
+        callback.complete(&result);
+        assert!(result.unwrap_err().to_string().contains("late_row"));
+        assert!(operator.state.buffer.is_empty());
+        let metrics = store.snapshot().data;
+        assert_eq!(metrics.failed, 1);
+        assert_eq!(
+            metrics.order_proof_rows, 0,
+            "lateness rejects the row before ordered encoding or duplicate lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn all_late_drop_skips_duplicate_checks_and_reports_no_order_proof() {
+        assert_drop_late_observations(&[1, 1, 2], &[]).await;
+    }
+
+    #[tokio::test]
+    async fn mixed_late_drop_counts_only_nonlate_duplicate_checks() {
+        assert_drop_late_observations(&[3, 1, 1, 2, 4], &[3, 4]).await;
+    }
+
+    async fn assert_drop_late_observations(times: &[i64], accepted_times: &[i64]) {
+        let (mut operator, job, store, mut collector) = late_observation_fixture(true);
+        observe_late_data(&mut operator, &job, &store, times, &mut collector)
+            .await
+            .unwrap();
+        let metrics = store.snapshot().data;
+        assert_eq!(metrics.succeeded, 1);
+        assert_eq!(metrics.failed, 0);
+        assert_eq!(
+            metrics.order_proof_rows,
+            u64::try_from(accepted_times.len()).unwrap()
+        );
+        assert_eq!(operator.state.buffer.len(), accepted_times.len());
+        assert_eq!(operator.state.metrics.late_rows, 3);
+        assert_eq!(operator.state.metrics.affected_batches, 1);
+        assert_eq!(operator.state.metrics.max_lateness_micros, Some(1));
+        assert!(collector.drain("output").is_empty());
+        let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(2)));
+        operator.on_end(&context, &mut collector).await.unwrap();
+        let emitted = collector.drain("output");
+        let actual_times = emitted
+            .iter()
+            .flat_map(|message| {
+                message
+                    .as_data()
+                    .unwrap()
+                    .table_payload()
+                    .unwrap()
+                    .batches()
+                    .iter()
+            })
+            .flat_map(|record| {
+                record
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<datafusion::arrow::array::TimestampMicrosecondArray>()
+                    .unwrap()
+                    .values()
+                    .iter()
+                    .copied()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual_times, accepted_times);
+    }
+
+    #[tokio::test]
+    async fn mixed_late_error_reports_attempted_prefix_and_rejects_the_envelope() {
+        assert_rejected_late_envelope(
+            false,
+            &[3, 1, 1, 4],
+            "late_row: envelope rejected at row_index=1; event_time_micros=1, closed_at_watermark_micros=2",
+            1,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn duplicate_after_late_drop_preserves_envelope_metrics_and_state() {
+        assert_rejected_late_envelope(true, &[1, 3, 3, 4], "duplicate row identity", 2).await;
+    }
+
+    async fn assert_rejected_late_envelope(
+        drop_late: bool,
+        times: &[i64],
+        expected_error: &str,
+        expected_order_proofs: u64,
+    ) {
+        let (mut operator, job, store, mut collector) = late_observation_fixture(drop_late);
+        let error = observe_late_data(&mut operator, &job, &store, times, &mut collector)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, CalcFlowError::Operator { ref node_id, ref message } if node_id == "rolling" && message.contains(expected_error)),
+            "unexpected error: {error}"
+        );
+        let metrics = store.snapshot().data;
+        assert_eq!(metrics.failed, 1);
+        assert_eq!(metrics.succeeded, 0);
+        assert_eq!(metrics.order_proof_rows, expected_order_proofs);
+        assert_eq!(operator.state.metrics, LateMetricDelta::default());
+        assert!(operator.state.buffer.is_empty());
+        assert!(operator.state.ordered.is_empty());
+        assert!(operator.state.histories.by_entity.is_empty());
+        assert!(operator.state.typed_kernel_state.is_none());
+        assert!(operator.state.operator_id.is_none());
+        assert!(operator.state.pipeline_fingerprint.is_none());
+        assert_eq!(operator.state.next_output_sequence, 0);
+        assert!(collector.drain("output").is_empty());
+        observe_late_data(&mut operator, &job, &store, &[3, 4], &mut collector)
+            .await
+            .unwrap();
+        let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(2)));
+        operator.on_end(&context, &mut collector).await.unwrap();
+        let emitted = collector.drain("output");
+        assert_eq!(emitted.len(), 1);
+        let output = emitted[0].as_data().unwrap();
+        assert_eq!(output.metadata().sequence(), 0);
+        let means = output.table_payload().unwrap().batches()[0]
+            .column(6)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(means.values().as_ref(), &[3.0, 3.5]);
+        assert_eq!(operator.state.metrics, LateMetricDelta::default());
+    }
+
+    fn late_observation_fixture(
+        drop_late: bool,
+    ) -> (
+        RollingOperator,
+        crate::StreamJobContext,
+        crate::operator::rolling_metrics::RollingMetricsStore,
+        crate::EdgeCollector,
+    ) {
+        use crate::operator::rolling_metrics::RollingMetricsStore;
+        use crate::{CancellationToken, StreamJobContext};
+
+        let mut spec = kernel_spec(json!([aggregate_output("mean", "price", "mean", 2)]));
+        if drop_late {
+            spec.late_policy = LatePolicySpec::Drop { metrics_version: 1 };
+        }
+        let operator = RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
+        let collector = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        let job = StreamJobContext::new(
+            7,
+            TEST_FINGERPRINT,
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        );
+        (operator, job, RollingMetricsStore::default(), collector)
+    }
+
+    async fn observe_late_data(
+        operator: &mut RollingOperator,
+        job: &crate::StreamJobContext,
+        store: &crate::operator::rolling_metrics::RollingMetricsStore,
+        times: &[i64],
+        collector: &mut crate::EdgeCollector,
+    ) -> Result<()> {
+        use crate::CancellationToken;
+        use crate::operator::rolling_metrics::RollingCallback;
+
+        let rows = times
+            .iter()
+            .map(|&time| {
+                (
+                    time,
+                    "a",
+                    u64::try_from(time).unwrap(),
+                    Some(f64::from(i32::try_from(time).unwrap())),
+                )
+            })
+            .collect::<Vec<_>>();
+        let input =
+            Batch::table(vec![float64_fast_record(&rows)], BatchMetadata::default()).unwrap();
+        let callback = store.begin(RollingCallback::Data, CancellationToken::new());
+        let context = StreamOperatorContext::new(job, "rolling", Some(EventTime::from_micros(2)))
+            .with_rolling_metrics(callback.recorder());
+        let result = operator
+            .process_data("input", input, &context, collector)
+            .await;
+        callback.complete(&result);
+        result
+    }
+
+    fn parallel_rollback_record(start: usize, count: usize) -> RecordBatch {
+        let names = (0..64)
+            .map(|entity| format!("e{entity:04}"))
+            .collect::<Vec<_>>();
+        float64_fast_record(
+            &(start..start + count)
+                .map(|row| {
+                    (
+                        i64::try_from(row).unwrap(),
+                        names[row % 64].as_str(),
+                        u64::try_from(row).unwrap(),
+                        Some(f64::from(u32::try_from(row % 101).unwrap())),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    #[tokio::test]
+    async fn failed_parallel_ordered_emission_preserves_committed_snapshot() {
+        use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
+        use crate::runtime::streaming::entity_work::JobEntityWorkOwner;
+        use crate::{CancellationToken, StreamJobContext};
+
+        struct Reject;
+        #[async_trait]
+        impl StreamCollector for Reject {
+            async fn emit(&mut self, _port: &str, _batch: Batch) -> Result<()> {
+                Err(internal_error("expected parallel collector rejection"))
+            }
+        }
+
+        let spec = kernel_spec(json!([
+            aggregate_output("mean", "price", "fast", 5),
+            aggregate_output("mean", "price", "slow", 20)
+        ]));
+        let mut operator =
+            RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
+        let job = StreamJobContext::new(
+            7,
+            TEST_FINGERPRINT,
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        );
+        let context = StreamOperatorContext::new(&job, "rolling", None);
+        let mut collector = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data(
+                "input",
+                Batch::table(
+                    vec![parallel_rollback_record(0, 1_280)],
+                    BatchMetadata::default(),
+                )
+                .unwrap(),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        operator
+            .on_watermark(EventTime::from_micros(1_279), &context, &mut collector)
+            .await
+            .unwrap();
+        collector.drain("output");
+        assert!(operator.state.typed_kernel_state.is_some());
+
+        // Materialize the existing history once; compare the same epoch's
+        // complete encoded snapshot without advancing checkpoint state again.
+        let epoch = Epoch::new(1).unwrap();
+        let snapshot = operator.checkpoint(epoch).unwrap();
+        let committed = |operator: &RollingOperator| {
+            (
+                operator.encode_state(epoch).unwrap(),
+                format!("{:?}", operator.state.typed_kernel_state),
+                (
+                    operator.state.last_input_watermark,
+                    operator.state.next_output_sequence,
+                    operator.state.ended,
+                    operator.state.metrics,
+                    operator.state.pipeline_fingerprint.clone(),
+                    operator.state.operator_id.clone(),
+                    operator.state.last_checkpoint_epoch,
+                ),
+                retained_buffer_addresses(operator),
+            )
+        };
+        let before = committed(&operator);
+        let (segment_id, bytes) = before.0.as_ref().unwrap();
+        assert_eq!(snapshot.segments[segment_id].bytes(), bytes);
+
+        let launches = Arc::new(AtomicU64::new(0));
+        let owner = JobEntityWorkOwner::new(7, Arc::clone(&launches));
+        let task = owner.test_client(3, "operator:rolling".into());
+        let scope = task.callback_scope();
+        let parallel_context =
+            StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(1_279)))
+                .with_entity_work(task.context_client().unwrap());
+        let result = operator
+            .emit_ordered(
+                vec![parallel_rollback_record(1_280, 64_000)],
+                &parallel_context,
+                &mut Reject,
+            )
+            .await;
+        scope.settle_abandoned().await;
+        drop(parallel_context);
+        drop(scope);
+        owner.close_admission();
+        assert!(owner.drain().await.is_empty());
+
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected parallel collector rejection")
+        );
+        assert_eq!(launches.load(AtomicOrdering::SeqCst), 2);
+        assert_eq!(committed(&operator), before);
+        assert!(operator.state.buffer.is_empty());
+        assert!(operator.state.ordered.is_empty());
+        assert!(collector.drain("output").is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_ordered_emission_preserves_both_history_and_typed_state() {
+        assert_rejected_compaction_preserves_state(false).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_ordered_emission_preserves_both_history_and_typed_state() {
+        assert_rejected_compaction_preserves_state(true).await;
+    }
+
+    async fn assert_rejected_compaction_preserves_state(cancelled: bool) {
+        use crate::CancellationToken;
+        use crate::operator::rolling_metrics::{RollingCallback, RollingMetricsStore};
+
+        struct Reject(bool);
+        #[async_trait]
+        impl StreamCollector for Reject {
+            async fn emit(&mut self, _port: &str, _batch: Batch) -> Result<()> {
+                if self.0 {
+                    Err(CalcFlowError::Cancelled { run_id: "7".into() })
+                } else {
+                    Err(internal_error("expected collector rejection"))
+                }
+            }
+        }
+
+        let (mut operator, job, mut collector) = rolling_with_large_retained_label().await;
+        let prior = format!("{:?}", operator.state.typed_kernel_state);
+        let prior_buffers = retained_buffer_addresses(&operator);
+        let sequence = operator.state.next_output_sequence;
+        let next = Batch::table(
+            vec![float64_fast_record(&[(3, "a", 3, Some(5.0))])],
+            BatchMetadata::default(),
+        )
+        .unwrap();
+        let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(2)));
+        operator
+            .process_data("input", next.clone(), &context, &mut collector)
+            .await
+            .unwrap();
+        let store = RollingMetricsStore::default();
+        let callback = store.begin(RollingCallback::Watermark, CancellationToken::new());
+        let observed_context = context.with_rolling_metrics(callback.recorder());
+        let result = operator
+            .on_watermark(
+                EventTime::from_micros(3),
+                &observed_context,
+                &mut Reject(cancelled),
+            )
+            .await;
+        callback.complete(&result);
+        let error = result.unwrap_err();
+        if cancelled {
+            assert!(matches!(error, CalcFlowError::Cancelled { run_id } if run_id == "7"));
+        } else {
+            assert!(error.to_string().contains("expected collector rejection"));
+        }
+        assert_eq!(format!("{:?}", operator.state.typed_kernel_state), prior);
+        assert_eq!(operator.state.next_output_sequence, sequence);
+        assert_eq!(
+            operator.state.last_input_watermark,
+            Some(EventTime::from_micros(2))
+        );
+        assert_eq!(retained_buffer_addresses(&operator), prior_buffers);
+        let history = operator.state.histories.by_entity.values().next().unwrap();
+        assert_eq!(history.transition_count, 2);
+        assert!(
+            history.columnar.records[0]
+                .column(5)
+                .get_buffer_memory_size()
+                >= 8 * 1024 * 1024
+        );
+        assert_eq!(
+            single_entity_retained_prices(&operator).values().as_ref(),
+            &[1.0, 3.0]
+        );
+        let metrics = store.snapshot().watermark;
+        assert_eq!(metrics.failed, u64::from(!cancelled));
+        assert_eq!(metrics.cancelled, u64::from(cancelled));
+        assert_eq!(metrics.numeric_rows, 1);
+        assert_eq!(metrics.output_rows_prepared, 1);
+        assert_eq!(metrics.output_chunks_prepared, 1);
+        assert!(collector.drain("output").is_empty());
+        assert_retry_releases_evicted_label(&mut operator, &job, &mut collector, next, sequence)
+            .await;
+    }
+
+    async fn rolling_with_large_retained_label() -> (
+        RollingOperator,
+        crate::StreamJobContext,
+        crate::EdgeCollector,
+    ) {
+        use crate::{CancellationToken, StreamJobContext};
+
+        let spec = kernel_spec(json!([aggregate_output("mean", "price", "mean", 2)]));
+        let mut operator =
+            RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
+        let job = StreamJobContext::new(
+            7,
+            TEST_FINGERPRINT,
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        );
+        let context = StreamOperatorContext::new(&job, "rolling", None);
+        let mut collector = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        let first = with_large_first_label(&float64_fast_record(&[
+            (1, "a", 1, Some(1.0)),
+            (2, "a", 2, Some(3.0)),
+        ]));
+        operator
+            .process_data(
+                "input",
+                Batch::table(vec![first], BatchMetadata::default()).unwrap(),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        operator
+            .on_watermark(EventTime::from_micros(2), &context, &mut collector)
+            .await
+            .unwrap();
+        collector.drain("output");
+        (operator, job, collector)
+    }
+
+    fn retained_buffer_addresses(operator: &RollingOperator) -> Vec<usize> {
+        operator
+            .state
+            .histories
+            .by_entity
+            .values()
+            .flat_map(|history| &history.columnar.records)
+            .flat_map(RecordBatch::columns)
+            .flat_map(|column| {
+                let data = column.to_data();
+                data.buffers()
+                    .iter()
+                    .map(|buffer| buffer.as_ptr() as usize)
+                    .chain(data.nulls().map(|nulls| nulls.buffer().as_ptr() as usize))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    async fn assert_retry_releases_evicted_label(
+        operator: &mut RollingOperator,
+        job: &crate::StreamJobContext,
+        collector: &mut crate::EdgeCollector,
+        next: Batch,
+        sequence: u64,
+    ) {
+        let context = StreamOperatorContext::new(job, "rolling", Some(EventTime::from_micros(2)));
+        operator
+            .process_data("input", next, &context, collector)
+            .await
+            .unwrap();
+        operator
+            .on_watermark(EventTime::from_micros(3), &context, collector)
+            .await
+            .unwrap();
+        let emitted = collector.drain("output");
+        assert_eq!(emitted.len(), 1);
+        let output = emitted[0].as_data().unwrap();
+        assert_eq!(output.metadata().sequence(), sequence);
+        let means = output.table_payload().unwrap().batches()[0]
+            .column(6)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(means.values().as_ref(), &[4.0]);
+        assert_eq!(operator.state.next_output_sequence, sequence + 1);
+        let history = operator.state.histories.by_entity.values().next().unwrap();
+        assert_eq!(history.transition_count, 3);
+        let retained = history
+            .columnar
+            .records
+            .iter()
+            .flat_map(|record| {
+                record
+                    .column(3)
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap()
+                    .values()
+                    .iter()
+                    .copied()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(retained, [3.0, 5.0]);
+        assert!(
+            history
+                .columnar
+                .records
+                .iter()
+                .map(|record| record.column(5).get_buffer_memory_size())
+                .sum::<usize>()
+                < 1024
+        );
+    }
+
+    #[tokio::test]
+    async fn general_rolling_observations_distinguish_routing_from_numeric_work() {
+        use crate::operator::rolling_metrics::{RollingCallback, RollingMetricsStore};
+        use crate::{CancellationToken, StreamJobContext};
+
+        let mut operator =
+            RollingOperator::new("rolling", Arc::new(input_schema()), valid_spec()).unwrap();
+        let cancellation = CancellationToken::new();
+        let job = StreamJobContext::new(
+            7,
+            TEST_FINGERPRINT,
+            JsonMap::new(),
+            None,
+            cancellation.clone(),
+        );
+        let store = RollingMetricsStore::default();
+        let mut collector = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        for index in 1..=2_u32 {
+            let row = full_row(
+                i64::from(index),
+                "a",
+                u64::from(index),
+                vec![ScalarValue::Float64(Some(f64::from(index)))],
+            );
+            let callback = store.begin(RollingCallback::Watermark, cancellation.clone());
+            let context = StreamOperatorContext::new(&job, "rolling", None)
+                .with_rolling_metrics(callback.recorder());
+            let result = operator
+                .emit_rows(vec![row], &context, &mut collector)
+                .await;
+            callback.complete(&result);
+            result.unwrap();
+        }
+        let metrics = store.snapshot().watermark;
+        assert_eq!(metrics.resolved_rows, 2);
+        assert_eq!(metrics.touched_entities, 2);
+        assert_eq!(metrics.copied_entities, 1);
+        assert_eq!(metrics.numeric_rows, 2);
+        assert_eq!(metrics.output_rows_prepared, 2);
+    }
+
+    #[tokio::test]
+    async fn columnar_history_compacts_input_and_survives_checkpoint_or_fallback() {
+        use crate::{CancellationToken, StreamJobContext};
+
+        for checkpoint in [false, true] {
+            let spec = kernel_spec(json!([
+                aggregate_output("mean", "price", "mean2", 2),
+                aggregate_output("mean", "price", "mean5", 5)
+            ]));
+            let mut operator =
+                RollingOperator::new("rolling", Arc::new(kernel_schema()), spec.clone()).unwrap();
+            let job = StreamJobContext::new(
+                7,
+                TEST_FINGERPRINT,
+                JsonMap::new(),
+                None,
+                CancellationToken::new(),
+            );
+            let rows = (1..=128_u32)
+                .map(|index| {
+                    (
+                        i64::from(index),
+                        if index % 2 == 0 { "a" } else { "b" },
+                        u64::from(index),
+                        Some(f64::from(index)),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let input = float64_fast_record(&rows);
+            let context = StreamOperatorContext::new(&job, "rolling", None);
+            let mut collector = crate::EdgeCollector::new(operator.output_ports().to_vec());
+            operator
+                .process_data(
+                    "input",
+                    Batch::table(vec![input.clone()], BatchMetadata::default()).unwrap(),
+                    &context,
+                    &mut collector,
+                )
+                .await
+                .unwrap();
+            operator
+                .on_watermark(EventTime::from_micros(128), &context, &mut collector)
+                .await
+                .unwrap();
+            collector.drain("output");
+            for history in operator.state.histories.by_entity.values() {
+                assert!(history.rows.is_empty());
+                assert_eq!(history.transition_count, 64);
+                let retained = history.columnar.records.front().unwrap();
+                assert_eq!(retained.num_rows(), 5);
+                assert!(
+                    retained.column(3).get_buffer_memory_size()
+                        < input.column(3).get_buffer_memory_size() / 4
+                );
+            }
+            if checkpoint {
+                let snapshot = operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
+                for history in operator.state.histories.by_entity.values() {
+                    assert!(history.columnar.records.is_empty());
+                    assert_eq!(history.rows.len(), 5);
+                }
+                let mut restored =
+                    RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
+                StreamOperator::restore(&mut restored, &snapshot).unwrap();
+                operator = restored;
+            }
+            let next =
+                float64_fast_record(&[(132, "a", 132, Some(132.0)), (130, "a", 130, Some(130.0))]);
+            let context =
+                StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(128)));
+            operator
+                .process_data(
+                    "input",
+                    Batch::table(vec![next], BatchMetadata::default()).unwrap(),
+                    &context,
+                    &mut collector,
+                )
+                .await
+                .unwrap();
+            operator
+                .on_watermark(EventTime::from_micros(132), &context, &mut collector)
+                .await
+                .unwrap();
+            let emitted = collector.drain("output");
+            let record = &emitted[0]
+                .as_data()
+                .unwrap()
+                .table_payload()
+                .unwrap()
+                .batches()[0];
+            let means = record
+                .column(7)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            assert_eq!(means.values().as_ref(), &[126.0, 128.0]);
+            assert_eq!(operator.state.histories.by_entity.len(), 2);
+        }
+    }
+
+    #[test]
+    fn whole_record_budget_proof_avoids_per_row_scratch() {
+        let rows = (1..=8192_u64)
+            .map(|index| (i64::try_from(index).unwrap(), "中文", index, None))
+            .collect::<Vec<_>>();
+        let input = float64_fast_record(&rows);
+        let measured = allocation_counter::measure(|| {
+            let chunks = chunk_output_record(
+                &input,
+                "rolling",
+                0,
+                crate::EdgeBudget::new(8192, usize::MAX).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(chunks.len(), 1);
+            assert_eq!(chunks[0].num_rows(), input.num_rows());
+        });
+        println!(
+            "whole-record budget allocated bytes: {}",
+            measured.bytes_total
+        );
+        assert!(
+            measured.bytes_total < 16_384,
+            "whole-record budget preparation allocated {} bytes",
+            measured.bytes_total
+        );
+    }
+
+    #[tokio::test]
+    async fn columnar_history_releases_evicted_large_variable_width_values() {
+        assert_releases_evicted_large_label(2).await;
+    }
+
+    #[tokio::test]
+    async fn columnar_history_compaction_accounts_for_bytes_not_only_rows() {
+        assert_releases_evicted_large_label(20).await;
+    }
+
+    fn with_large_first_label(record: &RecordBatch) -> RecordBatch {
+        use datafusion::arrow::array::StringArray;
+
+        let mut columns = record.columns().to_vec();
+        let labels = std::iter::once("x".repeat(8 * 1024 * 1024))
+            .chain((1..record.num_rows()).map(|_| "y".to_owned()))
+            .collect::<Vec<_>>();
+        columns[5] = Arc::new(StringArray::from(labels));
+        RecordBatch::try_new(record.schema(), columns).unwrap()
+    }
+
+    async fn assert_releases_evicted_large_label(window: u32) {
+        use crate::{CancellationToken, StreamJobContext};
+
+        let spec = kernel_spec(json!([aggregate_output(
+            "mean",
+            "price",
+            "mean",
+            u64::from(window)
+        )]));
+        let mut operator =
+            RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
+        let job = StreamJobContext::new(
+            7,
+            TEST_FINGERPRINT,
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        );
+        let mut collector = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        let rows = (1..=window)
+            .map(|index| {
+                (
+                    i64::from(index),
+                    "a",
+                    u64::from(index),
+                    Some(f64::from(index)),
+                )
+            })
+            .collect::<Vec<_>>();
+        let first = with_large_first_label(&float64_fast_record(&rows));
+        let context = StreamOperatorContext::new(&job, "rolling", None);
+        operator
+            .process_data(
+                "input",
+                Batch::table(vec![first], BatchMetadata::default()).unwrap(),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        operator
+            .on_watermark(
+                EventTime::from_micros(i64::from(window)),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        collector.drain("output");
+
+        let next = window + 1;
+        let second = float64_fast_record(&[(i64::from(next), "a", u64::from(next), Some(5.0))]);
+        let context = StreamOperatorContext::new(
+            &job,
+            "rolling",
+            Some(EventTime::from_micros(i64::from(window))),
+        );
+        operator
+            .process_data(
+                "input",
+                Batch::table(vec![second], BatchMetadata::default()).unwrap(),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        operator
+            .on_watermark(
+                EventTime::from_micros(i64::from(next)),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        collector.drain("output");
+        let history = operator.state.histories.by_entity.values().next().unwrap();
+        let retained_label_bytes: usize = history
+            .columnar
+            .records
+            .iter()
+            .map(|record| record.column(5).get_buffer_memory_size())
+            .sum();
+        assert_eq!(
+            history
+                .columnar
+                .records
+                .iter()
+                .map(RecordBatch::num_rows)
+                .sum::<usize>(),
+            usize::try_from(window).unwrap()
+        );
+        assert!(
+            retained_label_bytes < 1024,
+            "{window} live short/null labels retain {retained_label_bytes} bytes after the 8 MiB label leaves the window"
+        );
+    }
+
+    #[test]
+    fn whole_record_budget_proof_preserves_exact_limits_and_sequence_errors() {
+        let input = float64_fast_record(&[(1, "中文", 1, Some(1.0)), (2, "中文", 2, None)]);
+        let bytes = row_cost::RowCosts::try_total(&input).unwrap().unwrap();
+        let exact = chunk_output_record(
+            &input,
+            "rolling",
+            u64::MAX - 1,
+            crate::EdgeBudget::new(2, bytes).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(exact.len(), 1);
+        let split = chunk_output_record(
+            &input,
+            "rolling",
+            0,
+            crate::EdgeBudget::new(2, bytes - 1).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(split.len(), 2);
+        let row = input.slice(1, 1);
+        let bytes = row_cost::RowCosts::try_total(&row).unwrap().unwrap();
+        let error = chunk_output_record(
+            &row,
+            "rolling",
+            0,
+            crate::EdgeBudget::new(1, bytes - 1).unwrap(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, CalcFlowError::InvalidArgument { field, .. } if field == "message.bytes")
+        );
+        let budget = crate::EdgeBudget::new(2, usize::MAX).unwrap();
+        assert!(
+            chunk_output_record(&input, "rolling", u64::MAX, budget)
+                .unwrap_err()
+                .to_string()
+                .contains("output sequence overflowed before emission")
+        );
+        assert!(
+            chunk_output_record(&input.slice(0, 0), "rolling", u64::MAX, budget)
+                .unwrap()
+                .is_empty()
         );
     }
 
@@ -8375,6 +9605,7 @@ mod tests {
             &compiled,
             &output_schema,
             "rolling",
+            None,
         )
         .unwrap()
         .unwrap();
@@ -8420,6 +9651,7 @@ mod tests {
             &compiled,
             &output_schema,
             "rolling",
+            None,
         )
         .unwrap()
         .unwrap();

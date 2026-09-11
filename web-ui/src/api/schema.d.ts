@@ -906,7 +906,7 @@ export interface components {
                      */
                     collect_diagnostics: boolean;
                     /**
-                     * @description Enables the fail-closed bounded SQL `AVG` rolling rewrite.
+                     * @description Enables bounded SQL `AVG` and compatible paired `COUNT` rolling rewrites.
                      * @default true
                      */
                     enable_rolling_rewrite: boolean;
@@ -2091,7 +2091,7 @@ export interface components {
                      */
                     collect_diagnostics: boolean;
                     /**
-                     * @description Enables the fail-closed bounded SQL `AVG` rolling rewrite.
+                     * @description Enables bounded SQL `AVG` and compatible paired `COUNT` rolling rewrites.
                      * @default true
                      */
                     enable_rolling_rewrite: boolean;

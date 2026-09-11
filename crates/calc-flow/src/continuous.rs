@@ -162,6 +162,7 @@ use crate::{
     },
 };
 
+pub use crate::operator::rolling_metrics::{RollingCallbackMetrics, RollingMetrics};
 pub use crate::runtime::streaming::projection::{
     CheckpointPhase, CheckpointStatus, ComponentKind, EdgeStatus, JobOutcome, JobState, JobStatus,
     OperatorStatus, OutputDeliveryStatus, SinkDelivery, SinkStatus, SourceStatus, StreamingError,
@@ -1113,6 +1114,25 @@ impl StreamingJob {
     #[must_use]
     pub fn stream_asof_join_status(&self) -> BTreeMap<String, crate::StreamAsofJoinStatus> {
         self.inner.stream_asof_join_status()
+    }
+
+    /// Returns payload-free Native rolling metrics keyed by operator node ID.
+    ///
+    /// These lifetime observations distinguish successful, failed, cancelled
+    /// and interrupted callbacks. Active callbacks publish their work when
+    /// they settle; this accessor does not wait for them. Jobs without Native
+    /// rolling nodes return an empty map. Restored jobs start fresh counters.
+    ///
+    /// ```no_run
+    /// # fn inspect(job: &calc_flow::StreamingJob) {
+    /// for (node, metrics) in job.rolling_metrics() {
+    ///     println!("{node}: {} completed data callbacks", metrics.data.succeeded);
+    /// }
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn rolling_metrics(&self) -> BTreeMap<String, RollingMetrics> {
+        self.inner.rolling_metrics()
     }
 
     /// Requests a manual checkpoint and waits for durable completion.

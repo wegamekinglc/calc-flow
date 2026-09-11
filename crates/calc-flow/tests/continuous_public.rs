@@ -638,6 +638,98 @@ fn ending_runner(root: &Path, probe: LifecycleProbe) -> StreamingRunner {
     .unwrap()
 }
 
+fn empty_rolling_runner(root: &Path) -> StreamingRunner {
+    use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+            false,
+        ),
+        Field::new("symbol", DataType::Utf8, false),
+        Field::new("sequence", DataType::UInt64, false),
+        Field::new("price", DataType::Float64, true),
+    ]));
+    let spec = serde_json::from_value(serde_json::json!({
+        "configuration_version": 1,
+        "state_layout_version": 1,
+        "partition_by": ["symbol"],
+        "event_time": "ts",
+        "sequence_by": ["sequence"],
+        "outputs": [{"kind": "lag", "primitive_version": 1, "input": "price", "output": "previous", "periods": 1}],
+        "allowed_lateness_micros": 0,
+        "late_policy": {"kind": "error", "scope": "envelope"},
+        "value_policy": "stateful_numeric_v1"
+    })).unwrap();
+    let plan = PipelineBuilder::new("rolling-observations")
+        .unwrap()
+        .add_node(
+            "rolling",
+            calc_flow::RollingOperator::new("rolling", schema, spec).unwrap(),
+        )
+        .unwrap()
+        .compile_stream(
+            &UdfRegistry::new().snapshot(),
+            &StreamRequirements::default(),
+        )
+        .unwrap();
+    let input = plan.source_binding_ids()[0].to_owned();
+    let output = plan.sink_binding_ids()[0].to_owned();
+    let probe = LifecycleProbe::default();
+    StreamingRunner::new(
+        plan,
+        BTreeMap::from([(
+            input,
+            SourceBinding::new(EndingSource {
+                probe: probe.clone(),
+            }),
+        )]),
+        BTreeMap::from([(
+            output,
+            vec![SinkBinding::transactional("sink", TransactionalSink { probe }).unwrap()],
+        )]),
+        ManagedCheckpointRuntime::new(root).unwrap(),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn public_rolling_metrics_have_copied_lifetime_snapshots_and_fresh_recovery() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("rolling");
+    let job = empty_rolling_runner(&root).start().await.unwrap();
+    assert_eq!(job.wait().await.state, JobState::Completed);
+    let snapshot: BTreeMap<String, calc_flow::RollingMetrics> = job.rolling_metrics();
+    assert_eq!(snapshot.len(), 1);
+    assert_eq!(snapshot["rolling"].data.started, 0);
+    assert_eq!(snapshot["rolling"].end.started, 1);
+    assert_eq!(snapshot["rolling"].end.succeeded, 1);
+    assert!(!snapshot["rolling"].overflowed);
+    let mut changed = snapshot.clone();
+    changed.get_mut("rolling").unwrap().end.started = 17;
+    assert_eq!(job.rolling_metrics(), snapshot);
+
+    let restored = empty_rolling_runner(&root).start().await.unwrap();
+    assert_eq!(restored.wait().await.state, JobState::Completed);
+    let metrics = restored.rolling_metrics();
+    assert_eq!(metrics.len(), 1);
+    assert_eq!(metrics["rolling"], calc_flow::RollingMetrics::default());
+    let callback: calc_flow::RollingCallbackMetrics = metrics["rolling"].end.clone();
+    assert_eq!(callback.started, 0);
+}
+
+#[tokio::test]
+async fn public_rolling_metrics_are_empty_without_native_rolling() {
+    let directory = tempfile::tempdir().unwrap();
+    let job = ending_runner(directory.path(), LifecycleProbe::default())
+        .start()
+        .await
+        .unwrap();
+    assert_eq!(job.wait().await.state, JobState::Completed);
+    assert!(job.rolling_metrics().is_empty());
+}
+
 #[tokio::test]
 async fn public_job_checkpoints_and_cancel_settles_connectors() {
     let probe = LifecycleProbe::default();

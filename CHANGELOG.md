@@ -9,6 +9,22 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-12: Optimize proven UInt64 modulo filters and compatible COUNT/AVG
+  full-window SQL rolling plans, retaining fallback for unproved expressions.
+  Reduce Native entity/history preparation and output charging; add bounded
+  rolling stage metrics, eligible rolling/projection task pairing and job-owned
+  entity lanes. Specialized Float64 mean readouts and output merging preserve
+  numerical profiles, ordering, exact resource budgets and checkpoint
+  compatibility. Cancellation and failure retain ownership through actual
+  worker joins and cleanup. Operator failures publish their original error and
+  signal cancellation before releasing input and output endpoints, preventing
+  cascading edge closures from masking ASOF and checkpoint callback failures.
+  CI verifies a complete report from an identical source tree before replacing
+  a coverage comparison base with missing flags, preserving measurement identity
+  and coverage thresholds. The entity-parallel gain target remains unmet;
+  final full-matrix, tail-latency and memory/recovery measurements remain
+  follow-up work, not claimed performance acceptance.
+
 - 2026-09-09: Fix silent row loss when Python metadata normalization receives
   zero-column Arrow inputs with schema metadata (DAL-192). `compute` and
   collection (including async forms) and async iterable streams preserve input

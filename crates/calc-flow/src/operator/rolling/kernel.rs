@@ -33,7 +33,17 @@ use super::{
     },
     internal_error, operator_error,
 };
-use crate::Result;
+use crate::{
+    Result,
+    operator::rolling_metrics::{RollingMetricsRecorder, RollingStage, RollingWork},
+};
+
+mod sorted;
+pub(super) use sorted::SortedRollingState;
+pub(super) mod entity_parallel;
+
+#[cfg(test)]
+pub(super) mod entity_parallel_tests;
 
 const ROLLING_KERNEL_PLAN_VERSION: u32 = 1;
 
@@ -270,7 +280,7 @@ pub(super) struct RollingKernelExecution {
 }
 
 /// A transactional replacement of only the entities touched by a stream batch.
-pub(super) struct StreamKernelUpdate {
+pub(crate) struct StreamKernelUpdate {
     execution: RollingKernelExecution,
 }
 
@@ -314,6 +324,20 @@ pub(super) struct RollingKernelState {
     last_identity: Option<Vec<u8>>,
 }
 
+struct PreparedStreamState {
+    state: RollingKernelState,
+    entity_ids: Vec<usize>,
+    last_identity: Option<Vec<u8>>,
+    metrics: RollingKernelMetrics,
+}
+
+struct PreparedTypedFill {
+    columns: Vec<TypedGroupInput>,
+    event_times: TimestampMicrosecondArray,
+    row_count: usize,
+    stream: PreparedStreamState,
+}
+
 impl RollingKernelPlan {
     /// Prepares a private ordered-buffer transition without cloning resident
     /// state for inactive entities. The caller has already validated order,
@@ -323,29 +347,42 @@ impl RollingKernelPlan {
         state: &RollingKernelState,
         input: &RecordBatch,
         node_id: &str,
+        observer: Option<&RollingMetricsRecorder>,
     ) -> Result<StreamKernelUpdate> {
+        let stream = self.prepare_ordered_stream_state(state, input, node_id, observer)?;
+        let fill = self.prepare_typed_fill(input, stream, node_id, observer)?;
+        self.finish_typed_fill(fill, node_id, observer)
+            .map(|execution| StreamKernelUpdate { execution })
+    }
+
+    fn prepare_ordered_stream_state(
+        &self,
+        state: &RollingKernelState,
+        input: &RecordBatch,
+        node_id: &str,
+        observer: Option<&RollingMetricsRecorder>,
+    ) -> Result<PreparedStreamState> {
         self.validate_state(state, node_id)?;
         let started = Instant::now();
+        let entity_stage = observer.map(|recorder| recorder.stage(RollingStage::EntityResolution));
         let rows = encode_rows(input, &self.partition_columns, node_id)?;
         let keys = encoded_keys(&rows, input.num_rows());
-        let mut local = state.touched_entities(&keys, &self.fingerprint);
-        let entity_ids = local.resolve_entities(&keys, &self.groups);
+        let (local, entity_ids) =
+            state.prepare_stream_entities(keys, &self.groups, &self.fingerprint, observer);
         let entity_encode_ns = nanos(started.elapsed());
+        drop(entity_stage);
         let last_identity = self.last_ordered_identity(input, node_id)?;
-        let execution = self.fill_typed(
-            input,
-            &entity_ids,
-            local,
+        Ok(PreparedStreamState {
+            state: local,
+            entity_ids,
             last_identity,
-            node_id,
-            RollingKernelMetrics {
+            metrics: RollingKernelMetrics {
                 entity_encode_ns,
                 input_rows: input.num_rows(),
                 output_rows: input.num_rows(),
                 ..RollingKernelMetrics::default()
             },
-        )?;
-        Ok(StreamKernelUpdate { execution })
+        })
     }
 
     fn last_ordered_identity(&self, input: &RecordBatch, node_id: &str) -> Result<Option<Vec<u8>>> {
@@ -366,9 +403,17 @@ impl RollingKernelPlan {
         &self,
         input: &RecordBatch,
         node_id: &str,
+        observer: Option<&RollingMetricsRecorder>,
     ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-        self.validate_required_values(input, node_id)?;
+        {
+            let _stage = observer.map(|recorder| recorder.stage(RollingStage::InputValidation));
+            self.validate_required_values(input, node_id)?;
+        }
+        let _stage = observer.map(|recorder| recorder.stage(RollingStage::OrderingProof));
         let rows = encode_rows(input, &self.order_columns, node_id)?;
+        if let Some(recorder) = observer {
+            recorder.add(RollingWork::OrderProofRows, input.num_rows());
+        }
         if !self.canonical_order_is_proven(input, &rows, None, node_id)? {
             return Ok(None);
         }
@@ -577,7 +622,7 @@ impl RollingKernelPlan {
         seeded
             .kernel_fingerprint
             .get_or_insert_with(|| self.fingerprint.clone());
-        let entity_ids = seeded.resolve_entities(&entity_keys, &self.groups);
+        let entity_ids = seeded.resolve_entities(entity_keys, &self.groups);
         for (row_index, values) in seeds.iter().enumerate() {
             let entity = &mut seeded.states[entity_ids[row_index]];
             self.seed_restored_entity(entity, transition_counts[row_index], values, node_id)?;
@@ -646,7 +691,7 @@ impl RollingKernelPlan {
         input: &RecordBatch,
         node_id: &str,
     ) -> Result<Option<RollingKernelExecution>> {
-        self.update_and_fill_with_prior_order(state, input, true, node_id)
+        self.update_and_fill_with_prior_order(state, input, true, node_id, None)
     }
 
     /// Applies one finalized stream micro-batch.
@@ -659,8 +704,9 @@ impl RollingKernelPlan {
         state: &RollingKernelState,
         input: &RecordBatch,
         node_id: &str,
+        observer: Option<&RollingMetricsRecorder>,
     ) -> Result<Option<RollingKernelExecution>> {
-        self.update_and_fill_with_prior_order(state, input, false, node_id)
+        self.update_and_fill_with_prior_order(state, input, false, node_id, observer)
     }
 
     fn update_and_fill_with_prior_order(
@@ -669,36 +715,47 @@ impl RollingKernelPlan {
         input: &RecordBatch,
         compare_prior_order: bool,
         node_id: &str,
+        observer: Option<&RollingMetricsRecorder>,
     ) -> Result<Option<RollingKernelExecution>> {
         if self.selection != KernelSelection::OrderedPrimitive {
             return Ok(None);
         }
         self.validate_state(state, node_id)?;
 
-        let input_validation_ns = self.validate_input_timed(input, node_id)?;
-        let Some(order_proof) =
+        let input_validation_ns = {
+            let _stage = observer.map(|recorder| recorder.stage(RollingStage::InputValidation));
+            self.validate_input_timed(input, node_id)?
+        };
+        let Some(order_proof) = ({
+            let _stage = observer.map(|recorder| recorder.stage(RollingStage::OrderingProof));
+            if let Some(recorder) = observer {
+                recorder.add(RollingWork::OrderProofRows, input.num_rows());
+            }
             self.prove_input_order(input, compare_prior_order.then_some(state), node_id)?
-        else {
+        }) else {
             return Ok(None);
         };
         let (next_state, entity_ids, entity_encode_ns) =
-            self.resolve_batch_entities(state, input, node_id)?;
+            self.resolve_batch_entities(state, input, node_id, observer)?;
 
         self.fill_typed(
             input,
-            &entity_ids,
-            next_state,
-            order_proof.last_identity,
-            node_id,
-            RollingKernelMetrics {
-                input_validation_ns,
-                order_proof_ns: order_proof.elapsed_ns,
-                entity_encode_ns,
-                order_proof_rows: input.num_rows(),
-                input_rows: input.num_rows(),
-                output_rows: input.num_rows(),
-                ..RollingKernelMetrics::default()
+            PreparedStreamState {
+                entity_ids,
+                state: next_state,
+                last_identity: order_proof.last_identity,
+                metrics: RollingKernelMetrics {
+                    input_validation_ns,
+                    order_proof_ns: order_proof.elapsed_ns,
+                    entity_encode_ns,
+                    order_proof_rows: input.num_rows(),
+                    input_rows: input.num_rows(),
+                    output_rows: input.num_rows(),
+                    ..RollingKernelMetrics::default()
+                },
             },
+            node_id,
+            observer,
         )
         .map(Some)
     }
@@ -735,15 +792,32 @@ impl RollingKernelPlan {
         state: &RollingKernelState,
         input: &RecordBatch,
         node_id: &str,
+        observer: Option<&RollingMetricsRecorder>,
     ) -> Result<(RollingKernelState, Vec<usize>, u64)> {
         let started = Instant::now();
+        let _stage = observer.map(|recorder| recorder.stage(RollingStage::EntityResolution));
         let rows = encode_rows(input, &self.partition_columns, node_id)?;
         let keys = encoded_keys(&rows, input.num_rows());
-        let mut next_state = state.clone();
+        let mut next_state = {
+            let _stage = observer.map(|recorder| recorder.stage(RollingStage::StatePreparation));
+            let next_state = state.clone();
+            if let Some(recorder) = observer {
+                recorder.add(RollingWork::CopiedEntities, state.states.len());
+            }
+            next_state
+        };
         next_state
             .kernel_fingerprint
             .get_or_insert_with(|| self.fingerprint.clone());
-        let entity_ids = next_state.resolve_entities(&keys, &self.groups);
+        let entity_ids = next_state.resolve_entities(keys, &self.groups);
+        if let Some(recorder) = observer {
+            recorder.add(RollingWork::ResolvedRows, entity_ids.len());
+            let touched = entity_ids
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>();
+            recorder.add(RollingWork::TouchedEntities, touched.len());
+        }
         Ok((next_state, entity_ids, nanos(started.elapsed())))
     }
 
@@ -812,12 +886,22 @@ impl RollingKernelPlan {
     fn fill_typed(
         &self,
         input: &RecordBatch,
-        entity_ids: &[usize],
-        mut state: RollingKernelState,
-        last_identity: Option<Vec<u8>>,
+        stream: PreparedStreamState,
         node_id: &str,
-        mut metrics: RollingKernelMetrics,
+        observer: Option<&RollingMetricsRecorder>,
     ) -> Result<RollingKernelExecution> {
+        let fill = self.prepare_typed_fill(input, stream, node_id, observer)?;
+        self.finish_typed_fill(fill, node_id, observer)
+    }
+
+    fn prepare_typed_fill(
+        &self,
+        input: &RecordBatch,
+        stream: PreparedStreamState,
+        node_id: &str,
+        observer: Option<&RollingMetricsRecorder>,
+    ) -> Result<PreparedTypedFill> {
+        let validation = observer.map(|recorder| recorder.stage(RollingStage::InputValidation));
         let inputs = self.typed_inputs(input, node_id)?;
         let event_times = input
             .column(self.event_time_index)
@@ -828,31 +912,68 @@ impl RollingKernelPlan {
                     node_id,
                     "rolling event-time value is not a microsecond timestamp",
                 )
-            })?;
+            })?
+            .clone();
+        drop(validation);
+        Ok(PreparedTypedFill {
+            columns: inputs,
+            event_times,
+            row_count: input.num_rows(),
+            stream,
+        })
+    }
+
+    fn finish_typed_fill(
+        &self,
+        fill: PreparedTypedFill,
+        node_id: &str,
+        observer: Option<&RollingMetricsRecorder>,
+    ) -> Result<RollingKernelExecution> {
+        let PreparedTypedFill {
+            columns: inputs,
+            event_times,
+            row_count,
+            stream,
+        } = fill;
+        let PreparedStreamState {
+            mut state,
+            entity_ids,
+            last_identity,
+            mut metrics,
+        } = stream;
+        let arrow_stage = observer.map(|recorder| recorder.stage(RollingStage::ArrowOutput));
         let mut builders = self
             .outputs
             .iter()
-            .map(|output| DerivedBuilder::new(*output, input.num_rows()))
+            .map(|output| DerivedBuilder::new(*output, row_count))
             .collect::<Vec<_>>();
+        drop(arrow_stage);
 
         let kernel_start = Instant::now();
+        let numeric_stage = observer.map(|recorder| recorder.stage(RollingStage::NumericUpdate));
         fill_typed_rows(
             self,
-            &inputs,
-            event_times,
+            TypedRowInputs {
+                columns: &inputs,
+                event_times: &event_times,
+                entity_ids: &entity_ids,
+            },
             &mut state.states,
             &mut builders,
-            entity_ids,
             node_id,
+            observer,
         )?;
         let kernel_ns = nanos(kernel_start.elapsed());
+        drop(numeric_stage);
 
         let output_start = Instant::now();
+        let arrow_stage = observer.map(|recorder| recorder.stage(RollingStage::ArrowOutput));
         let columns = builders
             .into_iter()
             .map(DerivedBuilder::finish)
             .collect::<Result<Vec<_>>>()?;
         let output_build_ns = nanos(output_start.elapsed());
+        drop(arrow_stage);
         let state_bytes = state
             .states
             .iter()
@@ -867,7 +988,7 @@ impl RollingKernelPlan {
         metrics.state_bytes = state_bytes;
         Ok(RollingKernelExecution {
             columns,
-            entity_ids: entity_ids.to_vec(),
+            entity_ids,
             metrics,
             state,
         })
@@ -993,27 +1114,75 @@ fn cast_primitive(array: &ArrayRef, target: &DataType, node_id: &str) -> Result<
 }
 
 impl RollingKernelState {
-    fn touched_entities(&self, keys: &[Vec<u8>], fingerprint: &str) -> Self {
-        let mut local = Self {
-            kernel_fingerprint: Some(fingerprint.into()),
-            ..Self::default()
-        };
+    fn prepare_stream_entities<'a>(
+        &self,
+        keys: impl ExactSizeIterator<Item = &'a [u8]>,
+        groups: &[TypedGroupPlan],
+        fingerprint: &str,
+        observer: Option<&RollingMetricsRecorder>,
+    ) -> (Self, Vec<usize>) {
+        let mut entities = HashMap::new();
+        let mut distinct_keys = Vec::new();
+        let mut counts = Vec::<usize>::new();
+        let mut resolved = Vec::with_capacity(keys.len());
         for key in keys {
-            if !local.entities.contains_key(key)
-                && let Some(&index) = self.entities.get(key)
-            {
-                local.entities.insert(key.clone(), local.states.len());
-                local.states.push(self.states[index].clone());
-            }
+            let index = *entities.entry(key).or_insert_with(|| {
+                let index = distinct_keys.len();
+                distinct_keys.push(key);
+                counts.push(0);
+                index
+            });
+            counts[index] += 1;
+            resolved.push(index);
         }
-        local
+        if let Some(recorder) = observer {
+            recorder.add(RollingWork::ResolvedRows, resolved.len());
+            recorder.add(RollingWork::TouchedEntities, distinct_keys.len());
+        }
+        let state_stage = observer.map(|recorder| recorder.stage(RollingStage::StatePreparation));
+        let mut copied = 0;
+        let states = distinct_keys
+            .iter()
+            .zip(counts)
+            .map(|(&key, count)| {
+                self.entities.get(key).map_or_else(
+                    || TypedEntityState::new(groups, count),
+                    |&index| {
+                        copied += 1;
+                        self.states[index].clone()
+                    },
+                )
+            })
+            .collect();
+        if let Some(recorder) = observer {
+            recorder.add(RollingWork::CopiedEntities, copied);
+        }
+        drop(state_stage);
+        let entities = distinct_keys
+            .into_iter()
+            .enumerate()
+            .map(|(index, key)| (key.to_vec(), index))
+            .collect();
+        (
+            Self {
+                kernel_fingerprint: Some(fingerprint.into()),
+                entities,
+                states,
+                last_identity: None,
+            },
+            resolved,
+        )
     }
 
-    fn resolve_entities(&mut self, keys: &[Vec<u8>], groups: &[TypedGroupPlan]) -> Vec<usize> {
+    fn resolve_entities<'a>(
+        &mut self,
+        keys: impl ExactSizeIterator<Item = &'a [u8]> + Clone,
+        groups: &[TypedGroupPlan],
+    ) -> Vec<usize> {
         // Resident entities already own their window capacities. Counting
         // their rows again cannot improve allocation sizing.
         let mut resolved = Vec::with_capacity(keys.len());
-        for key in keys {
+        for key in keys.clone() {
             let Some(&entity_id) = self.entities.get(key) else {
                 return self.resolve_new_entities(keys, groups);
             };
@@ -1022,54 +1191,70 @@ impl RollingKernelState {
         resolved
     }
 
-    fn resolve_new_entities(&mut self, keys: &[Vec<u8>], groups: &[TypedGroupPlan]) -> Vec<usize> {
+    fn resolve_new_entities<'a>(
+        &mut self,
+        keys: impl ExactSizeIterator<Item = &'a [u8]> + Clone,
+        groups: &[TypedGroupPlan],
+    ) -> Vec<usize> {
         let mut counts = HashMap::<&[u8], usize>::new();
-        for key in keys {
-            let count = counts.entry(key.as_slice()).or_default();
+        for key in keys.clone() {
+            let count = counts.entry(key).or_default();
             *count = count.saturating_add(1);
         }
-        keys.iter()
-            .map(|key| {
-                if let Some(&entity_id) = self.entities.get(key.as_slice()) {
-                    return entity_id;
-                }
-                let entity_id = self.states.len();
-                let row_count = counts[key.as_slice()];
-                self.entities.insert(key.clone(), entity_id);
-                self.states.push(TypedEntityState::new(groups, row_count));
-                entity_id
-            })
-            .collect()
+        keys.map(|key| {
+            if let Some(&entity_id) = self.entities.get(key) {
+                return entity_id;
+            }
+            let entity_id = self.states.len();
+            let row_count = counts[key];
+            self.entities.insert(key.to_vec(), entity_id);
+            self.states.push(TypedEntityState::new(groups, row_count));
+            entity_id
+        })
+        .collect()
     }
+}
+
+#[derive(Clone, Copy)]
+struct TypedRowInputs<'a> {
+    columns: &'a [TypedGroupInput],
+    event_times: &'a TimestampMicrosecondArray,
+    entity_ids: &'a [usize],
 }
 
 fn fill_typed_rows(
     plan: &RollingKernelPlan,
-    inputs: &[TypedGroupInput],
-    event_times: &TimestampMicrosecondArray,
+    inputs: TypedRowInputs<'_>,
     states: &mut [TypedEntityState],
     builders: &mut [DerivedBuilder],
-    entity_ids: &[usize],
     node_id: &str,
+    observer: Option<&RollingMetricsRecorder>,
 ) -> Result<()> {
-    for (row_index, &entity_id) in entity_ids.iter().enumerate() {
-        let entity = &mut states[entity_id];
-        entity.transition_count = entity
-            .transition_count
-            .checked_add(1)
-            .ok_or_else(|| operator_error(node_id, "rolling entity transition count overflowed"))?;
-        update_typed_groups(
-            inputs,
-            event_times.value(row_index),
-            entity,
-            row_index,
-            plan.numerical_profile,
-            plan.nan_as_value,
-            node_id,
-        )?;
-        append_typed_outputs(&plan.outputs, builders, entity, node_id)?;
+    let mut processed = 0;
+    let result = (|| {
+        for (row_index, &entity_id) in inputs.entity_ids.iter().enumerate() {
+            let entity = &mut states[entity_id];
+            entity.transition_count = entity.transition_count.checked_add(1).ok_or_else(|| {
+                operator_error(node_id, "rolling entity transition count overflowed")
+            })?;
+            processed += 1;
+            update_typed_groups(
+                inputs.columns,
+                inputs.event_times.value(row_index),
+                entity,
+                row_index,
+                plan.numerical_profile,
+                plan.nan_as_value,
+                node_id,
+            )?;
+            append_typed_outputs(&plan.outputs, builders, entity, node_id)?;
+        }
+        Ok(())
+    })();
+    if let Some(recorder) = observer {
+        recorder.add(RollingWork::NumericRows, processed);
     }
-    Ok(())
+    result
 }
 
 fn update_typed_groups(
@@ -1531,10 +1716,11 @@ fn encode_rows(
         })
 }
 
-fn encoded_keys(entity_rows: &datafusion::arrow::row::Rows, row_count: usize) -> Vec<Vec<u8>> {
-    (0..row_count)
-        .map(|row_index| entity_rows.row(row_index).data().to_vec())
-        .collect()
+fn encoded_keys(
+    entity_rows: &datafusion::arrow::row::Rows,
+    row_count: usize,
+) -> impl ExactSizeIterator<Item = &[u8]> + Clone {
+    (0..row_count).map(|row_index| entity_rows.row(row_index).data())
 }
 
 #[derive(Clone, Debug)]
@@ -1723,10 +1909,28 @@ struct TimedSample<V> {
 /// expire, and front-removal mechanics so the Rows/Duration policy is
 /// written once. `expire` takes the per-state removal callback so the
 /// accumulator stays outside the generic.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct SlidingSampleQueue<V> {
     frame: TypedFrame,
     values: VecDeque<TimedSample<V>>,
+}
+
+impl<V: Clone> Clone for SlidingSampleQueue<V> {
+    fn clone(&self) -> Self {
+        let values = match self.frame {
+            TypedFrame::Rows(_) => {
+                // Preserve the spare slide slot in a transactional row-window copy.
+                let mut values = VecDeque::with_capacity(self.values.capacity());
+                values.extend(self.values.iter().cloned());
+                values
+            }
+            TypedFrame::Duration(_) => self.values.clone(),
+        };
+        Self {
+            frame: self.frame,
+            values,
+        }
+    }
 }
 
 impl<V: Copy> SlidingSampleQueue<V> {
@@ -3098,15 +3302,21 @@ mod tests {
     fn resident_entity_resolution_allocates_only_the_result() {
         let keys = (0_u8..64).map(|key| vec![key]).collect::<Vec<_>>();
         let mut state = RollingKernelState::default();
-        let expected = state.resolve_entities(&keys, &[]);
+        let expected = state.resolve_entities(keys.iter().map(Vec::as_slice), &[]);
         let measured = allocation_counter::measure(|| {
-            assert_eq!(state.resolve_entities(&keys, &[]), expected);
+            assert_eq!(
+                state.resolve_entities(keys.iter().map(Vec::as_slice), &[]),
+                expected
+            );
         });
         assert_eq!(measured.count_total, 1);
-        let mixed = vec![vec![63], vec![64], vec![64], vec![0]];
-        assert_eq!(state.resolve_entities(&mixed, &[]), vec![63, 64, 64, 0]);
+        let mixed = [vec![63], vec![64], vec![64], vec![0]];
+        assert_eq!(
+            state.resolve_entities(mixed.iter().map(Vec::as_slice), &[]),
+            vec![63, 64, 64, 0]
+        );
         assert_eq!(state.states.len(), 65);
-        assert!(state.resolve_entities(&[], &[]).is_empty());
+        assert!(state.resolve_entities(std::iter::empty(), &[]).is_empty());
     }
 
     use std::sync::Arc;
@@ -3188,6 +3398,114 @@ mod tests {
             }],
             profile,
         )
+    }
+
+    #[test]
+    fn ordered_stream_key_allocations_depend_on_entities_instead_of_rows() {
+        fn allocations(row_count: usize, warm: bool) -> u64 {
+            let kernel = numeric_plan(RollingNumericalProfile::StableV1);
+            let input = batch(
+                (0..row_count)
+                    .map(|index| Some(i64::try_from(index).unwrap()))
+                    .collect(),
+                (0..row_count)
+                    .map(|index| Some(u64::try_from(index).unwrap()))
+                    .collect(),
+                (0..row_count)
+                    .map(|index| if index % 2 == 0 { "a" } else { "b" })
+                    .collect(),
+                vec![Some(1.0); row_count],
+            );
+            let mut state = RollingKernelState::default();
+            if warm {
+                kernel
+                    .prepare_ordered_stream(&state, &input.slice(0, 2), "r", None)
+                    .unwrap()
+                    .commit(&mut state);
+            }
+            allocation_counter::measure(|| {
+                let output = kernel
+                    .prepare_ordered_stream(&state, &input, "r", None)
+                    .unwrap();
+                assert_eq!(output.entity_ids().len(), row_count);
+            })
+            .count_total
+        }
+
+        for warm in [false, true] {
+            let small = allocations(32, warm);
+            let large = allocations(4096, warm);
+            println!("ordered key allocations: warm={warm}, rows32={small}, rows4096={large}");
+            assert!(
+                large <= small + 20,
+                "two entities, warm={warm}: small={small}, large={large}"
+            );
+        }
+    }
+
+    #[test]
+    fn prepared_window_clone_does_not_reallocate_on_its_first_slide() {
+        let mut resident = Float64NumericState::new(TypedFrame::Rows(20), 32);
+        for index in 1..=32_u32 {
+            resident
+                .update(
+                    i64::from(index),
+                    Some(f64::from(index)),
+                    RollingNumericalProfile::StableV1,
+                    u64::from(index),
+                    "rolling",
+                )
+                .unwrap();
+        }
+        let measured = allocation_counter::measure(|| {
+            let mut prepared = resident.clone();
+            prepared
+                .update(
+                    33,
+                    Some(33.0),
+                    RollingNumericalProfile::StableV1,
+                    33,
+                    "rolling",
+                )
+                .unwrap();
+            assert_eq!(prepared.accumulator.valid_count, 20);
+            assert_eq!(prepared.accumulator.mean.to_bits(), 23.5_f64.to_bits());
+        });
+        assert_eq!(resident.accumulator.mean.to_bits(), 22.5_f64.to_bits());
+        println!("prepared row-window copy allocations: {measured:?}");
+        assert_eq!(measured.count_total, 1, "{measured:?}");
+    }
+
+    #[test]
+    fn mean_only_state_still_requires_the_m2_refold_trigger() {
+        let mut current = Float64NumericState::new(TypedFrame::Rows(2), 4);
+        let mut without_m2 = current.clone();
+        for (index, sample) in [1e155, 1e155, 1e155, -1e155].into_iter().enumerate() {
+            let time = i64::try_from(index).unwrap();
+            let count = u64::try_from(index + 1).unwrap();
+            current
+                .update(
+                    time,
+                    Some(sample),
+                    RollingNumericalProfile::StableV1,
+                    count,
+                    "r",
+                )
+                .unwrap();
+            add_float64(&mut without_m2.accumulator, sample, "r").unwrap();
+            without_m2.samples.push(time, Some(sample));
+            without_m2.expire(time).unwrap();
+            without_m2.accumulator.m2 = 0.0;
+            without_m2
+                .repair_accumulator(RollingNumericalProfile::StableV1, count, "r")
+                .unwrap();
+        }
+        println!(
+            "mean-only specialization counterexample: current={}, without_m2={}",
+            current.accumulator.mean, without_m2.accumulator.mean
+        );
+        assert_eq!(current.accumulator.mean.to_bits(), 0.0_f64.to_bits());
+        assert!(without_m2.accumulator.mean.abs() > 1e130);
     }
 
     #[test]
@@ -3338,7 +3656,7 @@ mod tests {
         assert!(duplicate.is_err());
         assert!(
             kernel
-                .update_stream_and_fill(&first_output.state, &first, "r")
+                .update_stream_and_fill(&first_output.state, &first, "r", None)
                 .unwrap()
                 .is_some()
         );

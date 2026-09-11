@@ -93,6 +93,7 @@ pub(crate) enum TerminalCause {
     ExplicitCancel,
     DeadlineExceeded,
     TaskFailure { primary_task_id: TaskId },
+    RunnerFailure,
 }
 
 #[derive(Clone, Debug)]
@@ -115,6 +116,7 @@ pub(crate) enum LaunchDeliveryState {
     Provisional,
     ReadyUnclaimed,
     Claimed,
+    Finalizing,
     CancelRequested,
     Failed,
 }

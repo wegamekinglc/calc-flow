@@ -7,7 +7,9 @@ use super::{
     aggregate::IngressActivity,
     driver::DriverPhase,
     prepare::{BindingIdentity, BindingOrdinal},
-    trace::AdmissionGateState,
+    trace::{
+        AdmissionDecisionRecord, AdmissionGateState, ProgressTraceRecord, SettlementDisposition,
+    },
     types::LogicalInstant,
 };
 
@@ -34,6 +36,73 @@ pub(crate) struct ProgressCounters {
     pub(crate) maximum_inbox_fences_per_drain: u64,
     pub(crate) maximum_selected_items_per_drain: u64,
     pub(crate) maximum_due_timers_per_drain: u64,
+}
+
+impl ProgressCounters {
+    pub(super) fn observe_record(&mut self, record: &ProgressTraceRecord) {
+        self.trace_records = self.trace_records.saturating_add(1);
+        match record {
+            ProgressTraceRecord::Admission(record) => {
+                self.admission_attempts = self.admission_attempts.saturating_add(1);
+                match record.decision {
+                    AdmissionDecisionRecord::Accepted { .. } => {
+                        self.accepted_envelopes = self.accepted_envelopes.saturating_add(1);
+                    }
+                    AdmissionDecisionRecord::ImmediateRejected { .. } => {
+                        self.immediate_rejections = self.immediate_rejections.saturating_add(1);
+                    }
+                }
+            }
+            ProgressTraceRecord::Drain(record) => {
+                self.drain_epochs = self.drain_epochs.saturating_add(1);
+                let inbox_fences = u64::try_from(record.inbox_fences.len()).unwrap_or(u64::MAX);
+                let selected_items =
+                    u64::try_from(record.selected_items_in_ready_order.len()).unwrap_or(u64::MAX);
+                let due_timers =
+                    u64::try_from(record.due_timers_in_ready_order.len()).unwrap_or(u64::MAX);
+                self.inbox_fences = self.inbox_fences.saturating_add(inbox_fences);
+                self.due_timers = self.due_timers.saturating_add(due_timers);
+                self.maximum_inbox_fences_per_drain =
+                    self.maximum_inbox_fences_per_drain.max(inbox_fences);
+                self.maximum_selected_items_per_drain =
+                    self.maximum_selected_items_per_drain.max(selected_items);
+                self.maximum_due_timers_per_drain =
+                    self.maximum_due_timers_per_drain.max(due_timers);
+            }
+            ProgressTraceRecord::Terminal(record) => {
+                self.terminal_transitions = self.terminal_transitions.saturating_add(1);
+                self.gate_transitions = self.gate_transitions.saturating_add(
+                    u64::try_from(record.transitions_in_binding_order.len()).unwrap_or(u64::MAX),
+                );
+            }
+            ProgressTraceRecord::Settlement(record) => {
+                self.settlement_attempts = self.settlement_attempts.saturating_add(1);
+                match record.disposition {
+                    SettlementDisposition::CommitSuccess => {
+                        self.commit_success_settlements =
+                            self.commit_success_settlements.saturating_add(1);
+                    }
+                    SettlementDisposition::TransactionError { .. } => {
+                        self.transaction_error_settlements =
+                            self.transaction_error_settlements.saturating_add(1);
+                    }
+                    SettlementDisposition::PostEndTailReject => {
+                        self.post_end_tail_settlements =
+                            self.post_end_tail_settlements.saturating_add(1);
+                    }
+                    SettlementDisposition::Cancelled => {
+                        self.cancelled_settlements = self.cancelled_settlements.saturating_add(1);
+                    }
+                    SettlementDisposition::Fatal => {
+                        self.fatal_settlements = self.fatal_settlements.saturating_add(1);
+                    }
+                }
+            }
+            ProgressTraceRecord::DriverPhaseFailure { .. } => {
+                self.driver_phase_failures = self.driver_phase_failures.saturating_add(1);
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

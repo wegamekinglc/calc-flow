@@ -30,6 +30,7 @@ mod connector;
 mod context;
 mod continuous;
 mod datafusion;
+mod datafusion_predicate;
 mod datafusion_rolling;
 mod error;
 mod expression;
@@ -68,10 +69,11 @@ pub use continuous::{
     CheckpointPhase, CheckpointStatus, ComponentKind, Cursor, DurableCursorAcknowledger,
     EdgeStatus, JobOutcome, JobState, JobStatus, ManagedCheckpointRuntime,
     NativeWatermarkCapability, OperatorStatus, OutputDeliveryStatus, ReplayPositioning,
-    SinkBinding, SinkDelivery, SinkRecovery, SinkStatus, SourceBinding, SourceCapabilities,
-    SourceCheckpointGate, SourceDeliveryCapability, SourceEvent, SourceSchema, SourceStatus,
-    StreamSink, StreamSource, StreamingError, StreamingErrorCategory, StreamingFailureReason,
-    StreamingJob, StreamingRunner, TerminalCause, TransactionalStreamSink, WatermarkPolicy,
+    RollingCallbackMetrics, RollingMetrics, SinkBinding, SinkDelivery, SinkRecovery, SinkStatus,
+    SourceBinding, SourceCapabilities, SourceCheckpointGate, SourceDeliveryCapability, SourceEvent,
+    SourceSchema, SourceStatus, StreamSink, StreamSource, StreamingError, StreamingErrorCategory,
+    StreamingFailureReason, StreamingJob, StreamingRunner, TerminalCause, TransactionalStreamSink,
+    WatermarkPolicy,
 };
 pub use datafusion::{
     DATAFUSION_ACTIVE_ENTITIES_METADATA_KEY, DataFusionConfig, DataFusionParallelismMode,

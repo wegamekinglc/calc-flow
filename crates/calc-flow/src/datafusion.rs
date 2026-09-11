@@ -25,6 +25,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::{
     Batch, BatchMetadata, CalcFlowError, Result, UdfKind, UdfReference, UdfRegistrySnapshot,
+    datafusion_predicate::UInt64ModuloPredicate,
     datafusion_rolling::{CalcFlowQueryPlanner, RollingRewriteAudit},
     expression::{sql_projection, validate_select_query},
     validate_selected_udfs,
@@ -65,7 +66,7 @@ pub struct DataFusionConfig {
     pub min_rows_per_partition: usize,
     /// Inputs below this row count remain single-partition in automatic mode.
     pub small_rows_threshold: usize,
-    /// Enables the fail-closed bounded SQL `AVG` rolling rewrite.
+    /// Enables bounded SQL `AVG` and compatible paired `COUNT` rolling rewrites.
     pub enable_rolling_rewrite: bool,
     /// Collects plan strings and recursively traversed physical metrics.
     pub collect_diagnostics: bool,
@@ -583,7 +584,8 @@ impl DataFusionRuntime {
                 .with_target_partitions(target_partitions);
             let state = SessionStateBuilder::new()
                 .with_config(session)
-                .with_default_features();
+                .with_default_features()
+                .with_optimizer_rule(Arc::new(UInt64ModuloPredicate));
             let state = if self.config.enable_rolling_rewrite {
                 state
                     .with_query_planner(Arc::new(CalcFlowQueryPlanner::new(Arc::clone(
