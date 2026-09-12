@@ -44,6 +44,8 @@ use super::{
     expression::required_input, validate_operator_name,
 };
 
+mod late;
+
 /// Semantic configuration version of the first cross-section release.
 pub const CROSS_SECTION_CONFIGURATION_VERSION: u32 = 1;
 /// Durable state-layout version of the first cross-section release.
@@ -526,6 +528,8 @@ struct CrossSectionStreamState {
     identity_groups: BTreeMap<RowIdentity, GroupKey>,
     last_input_watermark: Option<EventTime>,
     next_output_sequence: u64,
+    next_late_output_sequence: u64,
+    late_output_failed: bool,
     ended: bool,
     metrics: LateMetricDelta,
     pipeline_fingerprint: Option<String>,
@@ -616,6 +620,14 @@ impl CrossSectionOperator {
         next_metrics: LateMetricDelta,
         context: &StreamOperatorContext<'_>,
     ) -> Result<()> {
+        self.install_accepted_rows(accepted);
+        context.record_window_metrics(metrics.late_rows, metrics.max_lateness_micros, 0)?;
+        self.state.metrics = next_metrics;
+        self.install_context_identity(context);
+        Ok(())
+    }
+
+    fn install_accepted_rows(&mut self, accepted: AcceptedRows) {
         for (group, identity, row) in accepted {
             self.state
                 .groups
@@ -624,10 +636,6 @@ impl CrossSectionOperator {
                 .insert(identity.clone(), row);
             self.state.identity_groups.insert(identity, group);
         }
-        context.record_window_metrics(metrics.late_rows, metrics.max_lateness_micros, 0)?;
-        self.state.metrics = next_metrics;
-        self.install_context_identity(context);
-        Ok(())
     }
 }
 
@@ -643,8 +651,15 @@ impl StreamOperator for CrossSectionOperator {
         ingress: &str,
         batch: Batch,
         context: &StreamOperatorContext<'_>,
-        _output: &mut dyn StreamCollector,
+        output: &mut dyn StreamCollector,
     ) -> Result<()> {
+        if matches!(self.spec.late_policy, LatePolicySpec::SideOutput { .. }) {
+            self.validate_stream_data(ingress, &batch, context)?;
+            let watermark = context.input_watermark();
+            return self
+                .process_late_data(&batch, watermark, context, output)
+                .await;
+        }
         let (accepted, metrics, next_metrics) =
             self.prepare_stream_data(ingress, &batch, context)?;
         self.install_stream_data(accepted, metrics, next_metrics, context)
@@ -770,6 +785,8 @@ impl StreamOperator for CrossSectionOperator {
             identity_groups,
             last_input_watermark: metadata.last_input_watermark,
             next_output_sequence: metadata.next_output_sequence,
+            next_late_output_sequence: 0,
+            late_output_failed: false,
             ended: metadata.ended,
             metrics: metadata.metrics,
             pipeline_fingerprint: metadata.pipeline_fingerprint,
@@ -788,6 +805,10 @@ impl StreamOperator for CrossSectionOperator {
 impl CrossSectionOperator {
     fn observe_context(&self, context: &StreamOperatorContext<'_>) -> Result<()> {
         super::late_output::ensure_execution_enabled(self.spec.late_policy, context.operator_id())?;
+        super::late_output::ensure_can_continue(
+            self.state.late_output_failed,
+            context.operator_id(),
+        )?;
         if self
             .state
             .pipeline_fingerprint
@@ -906,8 +927,7 @@ impl CrossSectionOperator {
                     watermark.as_micros()
                 ),
             )),
-            LatePolicySpec::Drop { .. } => Ok(true),
-            LatePolicySpec::SideOutput { .. } => Err(super::late_output::disabled_error(node_id)),
+            LatePolicySpec::Drop { .. } | LatePolicySpec::SideOutput { .. } => Ok(true),
         }
     }
 
@@ -1674,7 +1694,16 @@ impl CompiledCrossSectionSpec {
     /// Computes the group membership key of one row: the exact event time or
     /// the containing bucket start plus the partition key (SCE-00 D6).
     fn group_key(&self, row: &BufferedRow, node_id: &str) -> Result<GroupKey> {
-        let event_time = row.identity.event_time;
+        let base = self.group_base(row.identity.event_time, node_id)?;
+        let partition = self
+            .partition_columns
+            .iter()
+            .map(|column| KeyValue::from_nullable_scalar(&row.values[column.index], node_id))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(GroupKey { base, partition })
+    }
+
+    fn group_base(&self, event_time: i64, node_id: &str) -> Result<i64> {
         let base = match self.grouping {
             CrossSectionGroupingSpec::ExactTime => event_time,
             CrossSectionGroupingSpec::FixedBucket { width_micros } => {
@@ -1687,12 +1716,7 @@ impl CompiledCrossSectionSpec {
                     })?
             }
         };
-        let partition = self
-            .partition_columns
-            .iter()
-            .map(|column| KeyValue::from_nullable_scalar(&row.values[column.index], node_id))
-            .collect::<Result<Vec<_>>>()?;
-        Ok(GroupKey { base, partition })
+        Ok(base)
     }
 
     /// Finality coordinate of one group: `t + L` for exact groups and
@@ -3126,6 +3150,7 @@ fn format_error(error: &serde_json::Error) -> CalcFlowError {
 
 #[cfg(test)]
 mod tests {
+    mod late;
 
     #[tokio::test]
     async fn test_side_output_direct_batch_execution_is_rejected() {

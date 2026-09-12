@@ -14,10 +14,11 @@ use crate::operator::rolling_metrics::{RollingMetricsRecorder, RollingStage, Rol
 use crate::runtime::streaming::entity_work::ReservePair;
 
 use super::{
-    Arc, Array, BTreeMap, Batch, CompiledRollingSpec, CompiledWindowGroup, EventTime, KeyValue,
-    RecordBatch, Result, RollingHistories, RollingOperator, ScalarValue, StreamCollector,
-    StreamOperatorContext, TableBatch, VecDeque, chunk_output_record, closing_coordinate,
-    concat_batches, internal_error, operator_error, read_buffered_row, reconstruct_typed_state,
+    Arc, Array, BTreeMap, Batch, BufferedRow, CompiledRollingSpec, CompiledWindowGroup, EventTime,
+    KeyValue, RecordBatch, Result, RollingHistories, RollingOperator, RowIdentity, ScalarValue,
+    StreamCollector, StreamOperatorContext, TableBatch, VecDeque, chunk_output_record,
+    closing_coordinate, concat_batches, internal_error, operator_error, read_buffered_row,
+    reconstruct_typed_state,
 };
 
 #[derive(Default)]
@@ -27,6 +28,11 @@ pub(super) struct OrderedStreamBuffer {
 }
 
 impl OrderedStreamBuffer {
+    pub(super) fn clear(&mut self) {
+        self.records.clear();
+        self.last_identity = None;
+    }
+
     pub(super) fn is_empty(&self) -> bool {
         self.records.is_empty()
     }
@@ -177,10 +183,17 @@ impl RollingOperator {
         &mut self,
         observer: Option<&RollingMetricsRecorder>,
     ) -> Result<()> {
+        let materialized = self.prepare_ordered_buffer(observer)?;
+        self.state.buffer.extend(materialized);
+        self.state.ordered.clear();
+        Ok(())
+    }
+
+    pub(super) fn prepare_ordered_buffer(
+        &self,
+        observer: Option<&RollingMetricsRecorder>,
+    ) -> Result<BTreeMap<RowIdentity, BufferedRow>> {
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::InputValidation));
-        if self.state.ordered.is_empty() {
-            return Ok(());
-        }
         let mut materialized = BTreeMap::new();
         for record in &self.state.ordered.records {
             for index in 0..record.num_rows() {
@@ -191,9 +204,7 @@ impl RollingOperator {
                 materialized.insert(row.identity.clone(), row);
             }
         }
-        self.state.buffer.extend(materialized);
-        self.state.ordered.take_all();
-        Ok(())
+        Ok(materialized)
     }
 
     fn ensure_ordered_kernel_state(
