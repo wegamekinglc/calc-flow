@@ -618,26 +618,10 @@ fn derive_late_outputs(
     let mut origins = BTreeMap::new();
     for node_id in order {
         let operator = &builder.nodes[node_id].operator;
-        let identity: &dyn std::any::Any = operator.metadata();
-        let policy = identity
-            .downcast_ref::<crate::RollingOperator>()
-            .map(|operator| operator.spec().late_policy)
-            .or_else(|| {
-                identity
-                    .downcast_ref::<crate::CrossSectionOperator>()
-                    .map(|operator| operator.spec().late_policy)
-            });
-        if matches!(policy, Some(crate::LatePolicySpec::SideOutput { .. })) {
-            if execution_mode != "stream" {
-                return Err(CalcFlowError::Compile {
-                    message: format!(
-                        "node {node_id:?}: unsupported_mode: late side output requires stream mode"
-                    ),
-                });
-            }
-            let output = PortEndpoint::new(node_id, "late")?;
-            origins.insert(output.clone(), output);
-        }
+        origins.extend(
+            native_late_output(node_id, operator, execution_mode)?
+                .map(|output| (output.clone(), output)),
+        );
         for (index, edge) in builder
             .edges
             .iter()
@@ -661,6 +645,33 @@ fn derive_late_outputs(
         }
     }
     Ok(origins)
+}
+
+fn native_late_output(
+    node_id: &str,
+    operator: &NodeOperator,
+    execution_mode: &str,
+) -> Result<Option<PortEndpoint>> {
+    let identity: &dyn std::any::Any = operator.metadata();
+    let policy = identity
+        .downcast_ref::<crate::RollingOperator>()
+        .map(|operator| operator.spec().late_policy)
+        .or_else(|| {
+            identity
+                .downcast_ref::<crate::CrossSectionOperator>()
+                .map(|operator| operator.spec().late_policy)
+        });
+    if !matches!(policy, Some(crate::LatePolicySpec::SideOutput { .. })) {
+        return Ok(None);
+    }
+    if execution_mode != "stream" {
+        return Err(CalcFlowError::Compile {
+            message: format!(
+                "node {node_id:?}: unsupported_mode: late side output requires stream mode"
+            ),
+        });
+    }
+    PortEndpoint::new(node_id, "late").map(Some)
 }
 
 fn accepts_late_input(operator: &NodeOperator) -> bool {
