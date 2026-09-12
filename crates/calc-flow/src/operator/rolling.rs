@@ -46,6 +46,7 @@ use super::{
 
 mod generated_kernel_manifest;
 mod kernel;
+mod late;
 mod ordered_stream;
 mod row_cost;
 mod state_v3;
@@ -1094,6 +1095,8 @@ struct RollingStreamState {
     histories: RollingHistories,
     last_input_watermark: Option<EventTime>,
     next_output_sequence: u64,
+    next_late_output_sequence: u64,
+    late_output_failed: bool,
     ended: bool,
     metrics: LateMetricDelta,
     pipeline_fingerprint: Option<String>,
@@ -1157,7 +1160,7 @@ impl StreamOperator for RollingOperator {
         ingress: &str,
         batch: Batch,
         context: &StreamOperatorContext<'_>,
-        _output: &mut dyn StreamCollector,
+        output: &mut dyn StreamCollector,
     ) -> Result<()> {
         let observer = context.rolling_metrics();
         let validation = observer.map(|recorder| recorder.stage(RollingStage::InputValidation));
@@ -1177,6 +1180,11 @@ impl StreamOperator for RollingOperator {
         }
         let watermark = context.input_watermark();
         drop(validation);
+        if matches!(self.spec.late_policy, LatePolicySpec::SideOutput { .. }) {
+            return self
+                .process_late_data(&batch, watermark, context, output)
+                .await;
+        }
         if self.try_buffer_ordered(batch.table_payload()?, watermark, observer)? {
             self.install_context_identity(context);
             return Ok(());
@@ -1359,6 +1367,8 @@ impl StreamOperator for RollingOperator {
             histories: restored.histories,
             last_input_watermark: metadata.last_input_watermark,
             next_output_sequence: metadata.next_output_sequence,
+            next_late_output_sequence: 0,
+            late_output_failed: false,
             ended: metadata.ended,
             metrics: metadata.metrics,
             pipeline_fingerprint: metadata.pipeline_fingerprint,
@@ -1378,6 +1388,10 @@ impl StreamOperator for RollingOperator {
 impl RollingOperator {
     fn observe_context(&self, context: &StreamOperatorContext<'_>) -> Result<()> {
         super::late_output::ensure_execution_enabled(self.spec.late_policy, context.operator_id())?;
+        super::late_output::ensure_can_continue(
+            self.state.late_output_failed,
+            context.operator_id(),
+        )?;
         if self
             .state
             .pipeline_fingerprint
@@ -1470,8 +1484,7 @@ impl RollingOperator {
                     watermark.as_micros()
                 ),
             )),
-            LatePolicySpec::Drop { .. } => Ok(true),
-            LatePolicySpec::SideOutput { .. } => Err(super::late_output::disabled_error(node_id)),
+            LatePolicySpec::Drop { .. } | LatePolicySpec::SideOutput { .. } => Ok(true),
         }
     }
 
@@ -6012,6 +6025,7 @@ fn format_error(error: &serde_json::Error) -> CalcFlowError {
 
 #[cfg(test)]
 mod tests {
+    mod late;
 
     #[tokio::test]
     async fn test_side_output_direct_batch_execution_is_rejected() {

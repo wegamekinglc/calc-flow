@@ -1,10 +1,17 @@
 //! Shared diagnostic output schema for rolling and cross-section operators.
 
+#[cfg(test)]
+mod tests;
+
 use std::sync::Arc;
 
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 
 use crate::{BatchKind, CalcFlowError, LatePolicySpec, Port, Result};
+
+pub(super) mod identity;
+mod plan;
+pub(super) use plan::{LateOutputPlan, PreparedLateOutput};
 
 pub(crate) fn output_ports(
     policy: LatePolicySpec,
@@ -97,6 +104,16 @@ pub(crate) fn validate_input(policy: LatePolicySpec, input: &Schema, kind: &str)
 pub(crate) fn ensure_execution_enabled(policy: LatePolicySpec, node_id: &str) -> Result<()> {
     if matches!(policy, LatePolicySpec::SideOutput { .. }) {
         return Err(disabled_error(node_id));
+    }
+    Ok(())
+}
+
+pub(super) fn ensure_can_continue(failed: bool, node_id: &str) -> Result<()> {
+    if failed {
+        return Err(CalcFlowError::Operator {
+            node_id: node_id.into(),
+            message: "late output emission failed or was cancelled; live callback retry is forbidden; recover from a durable cut".into(),
+        });
     }
     Ok(())
 }

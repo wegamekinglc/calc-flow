@@ -28,7 +28,7 @@ use crate::{
     IngressProgressSnapshot, IngressState, ManifestIngressState, OperatorIngressManifestEntry,
     OperatorMetadata, Port, Result, StreamCollector, StreamOperatorContext,
     operator::{
-        LateMetricDelta, LateMetricSink, accumulate_late_metrics,
+        LateMetricDelta, LateMetricSink, PreparedLateMetrics, accumulate_late_metrics,
         rolling_metrics::{
             RollingCallback, RollingCallbackGuard, RollingMetricsRecorder, RollingMetricsStore,
             RollingStage, RollingWork,
@@ -198,23 +198,40 @@ impl OperatorProgress {
     }
 }
 
+impl OperatorProgressSnapshot {
+    fn late_metrics(&self) -> LateMetricDelta {
+        LateMetricDelta {
+            late_rows: self.late_rows,
+            affected_batches: self.affected_batches,
+            max_lateness_micros: self.max_lateness_micros,
+            null_event_time_rows: self.null_event_time_rows,
+            null_event_time_batches: self.null_event_time_batches,
+        }
+    }
+
+    fn install_late_metrics(&mut self, next: LateMetricDelta) {
+        self.late_rows = next.late_rows;
+        self.affected_batches = next.affected_batches;
+        self.max_lateness_micros = next.max_lateness_micros;
+        self.null_event_time_rows = next.null_event_time_rows;
+        self.null_event_time_batches = next.null_event_time_batches;
+    }
+}
+
 impl LateMetricSink for OperatorProgress {
     fn record(&self, delta: LateMetricDelta) -> Result<()> {
         let mut progress = self.0.lock();
-        let current = LateMetricDelta {
-            late_rows: progress.late_rows,
-            affected_batches: progress.affected_batches,
-            max_lateness_micros: progress.max_lateness_micros,
-            null_event_time_rows: progress.null_event_time_rows,
-            null_event_time_batches: progress.null_event_time_batches,
-        };
-        let next = accumulate_late_metrics(current, delta)?;
-        progress.late_rows = next.late_rows;
-        progress.affected_batches = next.affected_batches;
-        progress.max_lateness_micros = next.max_lateness_micros;
-        progress.null_event_time_rows = next.null_event_time_rows;
-        progress.null_event_time_batches = next.null_event_time_batches;
+        let next = accumulate_late_metrics(progress.late_metrics(), delta)?;
+        progress.install_late_metrics(next);
         Ok(())
+    }
+
+    fn prepare(self: Arc<Self>, delta: LateMetricDelta) -> Result<PreparedLateMetrics> {
+        let next = accumulate_late_metrics(self.0.lock().late_metrics(), delta)?;
+        // One task serializes this node's late writes; fan-out progress stays independent.
+        Ok(PreparedLateMetrics::new(move || {
+            self.0.lock().install_late_metrics(next);
+        }))
     }
 }
 
@@ -1792,6 +1809,38 @@ pub(super) mod tests {
             BatchMetadata::new(source, sequence, BTreeMap::new()).unwrap(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn test_late_progress_prepare_is_invisible_checked_and_preserves_other_progress() {
+        use crate::operator::{LateMetricDelta, LateMetricSink};
+        let progress = Arc::new(OperatorProgress::default());
+        let delta = LateMetricDelta {
+            late_rows: 2,
+            affected_batches: 1,
+            max_lateness_micros: Some(7),
+            ..Default::default()
+        };
+        let prepared = Arc::clone(&progress).prepare(delta).unwrap();
+        assert_eq!(progress.snapshot().late_rows, 0);
+        drop(prepared);
+        assert_eq!(progress.snapshot().late_rows, 0);
+        let prepared = Arc::clone(&progress).prepare(delta).unwrap();
+        progress.record_output().unwrap();
+        prepared.commit();
+        assert_eq!(progress.snapshot().fully_fanned_out_batches, 1);
+        assert_eq!(progress.snapshot().late_rows, 2);
+        assert_eq!(progress.snapshot().max_lateness_micros, Some(7));
+        let before = progress.snapshot();
+        assert!(
+            Arc::clone(&progress)
+                .prepare(LateMetricDelta {
+                    late_rows: u64::MAX,
+                    ..Default::default()
+                })
+                .is_err()
+        );
+        assert_eq!(progress.snapshot(), before);
     }
 
     #[tokio::test]
