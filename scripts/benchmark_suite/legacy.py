@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 from scripts.benchmark_suite.catalog import CONTRACT
+from scripts.benchmark_suite.frontend import dependency_metadata, metadata_problem
 from scripts.benchmark_suite.normalize import pytest_rows, read_json, vitest_rows
 from scripts.benchmark_suite.process import ROOT, child_environment, command, install
 from scripts.benchmark_suite.provenance import harness_sha256
@@ -87,6 +88,7 @@ async def _pytest_run(shard: dict, source: Path, site: Path, output: Path) -> di
 
 async def _frontend_run(source: Path, output: Path) -> dict:
     frontend = source / "web-ui"
+    identity = dependency_metadata((frontend / "package-lock.json").read_bytes())
     runner = frontend / "node_modules/.cache/calc-flow-benchmark.mjs"
     runner.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(ROOT / "scripts/benchmark_suite/frontend.mjs", runner)
@@ -100,11 +102,8 @@ async def _frontend_run(source: Path, output: Path) -> dict:
         source / "target/benchmark-suite/vitest.json", output / "vitest.json"
     )
     rows = vitest_rows(output / "vitest.json")
-    lock = hashlib.sha256(
-        (source / "web-ui/package-lock.json").read_bytes()
-    ).hexdigest()
     return {
-        name: {**row, "metadata": {**row["metadata"], "dependency_fingerprint": lock}}
+        name: {**row, "metadata": {**row["metadata"], **identity}}
         for name, row in rows.items()
     }
 
@@ -179,10 +178,15 @@ def block_problem(name: str, blocks: dict) -> str | None:
     for key in ("rows", "scope"):
         if any(row[key] != rows[0][key] for row in rows):
             return f"benchmark {key} changed; no timing classification"
-    return _fingerprint_problem([row["metadata"] for row in rows])
+    return _fingerprint_problem(
+        [row["metadata"] for row in rows],
+        frontend=rows[0]["scope"] == "vitest-native-boundary",
+    )
 
 
-def _fingerprint_problem(metadata: list[dict]) -> str | None:
+def _fingerprint_problem(metadata: list[dict], *, frontend: bool = False) -> str | None:
+    if frontend and (problem := metadata_problem(metadata)):
+        return problem
     for key in (
         "machine_fingerprint",
         "dependency_fingerprint",
