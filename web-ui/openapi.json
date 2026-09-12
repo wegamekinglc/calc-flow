@@ -1789,15 +1789,15 @@
                   "metrics_version": {
                     "description": "Metric transaction version; must equal `1`.",
                     "format": "uint32",
-                    "maximum": 1,
-                    "minimum": 1,
+                    "maximum": 1.0,
+                    "minimum": 1.0,
                     "type": "integer"
                   },
                   "schema_version": {
                     "description": "Diagnostic schema version; must equal `1`.",
                     "format": "uint32",
-                    "maximum": 1,
-                    "minimum": 1,
+                    "maximum": 1.0,
+                    "minimum": 1.0,
                     "type": "integer"
                   }
                 },
@@ -4772,15 +4772,15 @@
                   "metrics_version": {
                     "description": "Metric transaction version; must equal `1`.",
                     "format": "uint32",
-                    "maximum": 1,
-                    "minimum": 1,
+                    "maximum": 1.0,
+                    "minimum": 1.0,
                     "type": "integer"
                   },
                   "schema_version": {
                     "description": "Diagnostic schema version; must equal `1`.",
                     "format": "uint32",
-                    "maximum": 1,
-                    "minimum": 1,
+                    "maximum": 1.0,
+                    "minimum": 1.0,
                     "type": "integer"
                   }
                 },
