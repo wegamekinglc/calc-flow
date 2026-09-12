@@ -15,7 +15,7 @@ on:
         default: false
   push:
     tags:
-      - "v4.*"
+      - "v5.*"
 permissions:
   contents: read
 concurrency:
@@ -340,8 +340,8 @@ jobs:
           requirements = requires("calc-flow-studio") or []
           assert any(
               requirement.lower().startswith("calc-flow-python")
-              and ">=4.0.0" in requirement
-              and "<5" in requirement
+              and ">=5.0.0" in requirement
+              and "<6" in requirement
               for requirement in requirements
           )
           index = next(route for route in app.routes if route.path == "/").endpoint()

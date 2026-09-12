@@ -871,3 +871,497 @@ fn runtime_config_rejects_durations_exceeding_the_microsecond_range() {
     let error = plan.runtime_config_hash(&config).unwrap_err();
     assert!(error.to_string().contains("checkpoint_interval"));
 }
+
+fn late_rolling(policy: calc_flow::LatePolicySpec) -> calc_flow::RollingOperator {
+    use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Microsecond, Some(Arc::from("UTC"))),
+            false,
+        ),
+        Field::new("key", DataType::Utf8, false),
+        Field::new("seq", DataType::UInt64, false),
+        Field::new("x", DataType::Float64, true),
+    ]));
+    let spec = calc_flow::RollingSpec {
+        configuration_version: 1,
+        state_layout_version: 1,
+        numerical_profile: calc_flow::RollingNumericalProfile::default(),
+        partition_by: vec!["key".into()],
+        event_time: "ts".into(),
+        sequence_by: vec!["seq".into()],
+        outputs: vec![calc_flow::RollingOutputSpec::Lag {
+            primitive_version: 1,
+            input: "x".into(),
+            output: "lag".into(),
+            periods: 1,
+        }],
+        allowed_lateness_micros: 0,
+        late_policy: policy,
+        value_policy: calc_flow::RollingValuePolicy::StatefulNumericV1,
+    };
+    calc_flow::RollingOperator::new("roll", schema, spec).unwrap()
+}
+
+fn late_policy() -> calc_flow::LatePolicySpec {
+    serde_json::from_value(serde_json::json!({
+        "kind": "side_output", "metrics_version": 1, "schema_version": 1
+    }))
+    .unwrap()
+}
+
+fn late_builder() -> PipelineBuilder {
+    PipelineBuilder::new("late-contract")
+        .unwrap()
+        .add_node("roll", late_rolling(late_policy()))
+        .unwrap()
+}
+
+#[test]
+fn test_side_output_native_batch_compile_rejects_new_policy() {
+    let error = late_builder()
+        .compile_batch(&udfs())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("roll") && error.contains("unsupported_mode"),
+        "{error}"
+    );
+}
+
+fn late_path_builder(path: &str) -> (PipelineBuilder, &'static str) {
+    let operator = late_rolling(late_policy());
+    let input = operator.output_ports()[1].schema().unwrap().clone();
+    let output = operator.input_ports()[0].schema().unwrap().clone();
+    match path {
+        "direct" => (late_builder(), "roll"),
+        "expression" => (
+            late_builder()
+                .add_node(
+                    "project",
+                    Box::new(
+                        ExpressionOperator::new(
+                            "project",
+                            "",
+                            vec!["ts".into(), "key".into(), "seq".into(), "x".into()],
+                            None,
+                            vec![],
+                        )
+                        .unwrap()
+                        .with_ports(
+                            late_table_port("input", &input),
+                            late_table_port("output", &output),
+                        )
+                        .unwrap(),
+                    ),
+                )
+                .unwrap()
+                .connect(edge(("roll", "late"), ("project", "input")))
+                .unwrap(),
+            "project",
+        ),
+        "sql" => (
+            late_builder()
+                .add_node(
+                    "project",
+                    Box::new(
+                        SqlOperator::new(
+                            "project",
+                            "SELECT ts, key, seq, x FROM events",
+                            vec!["events".into()],
+                            vec![],
+                        )
+                        .unwrap()
+                        .with_ports(
+                            vec![late_table_port("events", &input)],
+                            late_table_port("output", &output),
+                        )
+                        .unwrap(),
+                    ),
+                )
+                .unwrap()
+                .connect(edge(("roll", "late"), ("project", "events")))
+                .unwrap(),
+            "project",
+        ),
+        _ => unreachable!(),
+    }
+}
+
+fn late_successor(
+    successor: &str,
+    input: datafusion::arrow::datatypes::SchemaRef,
+) -> (calc_flow::NodeOperator, &'static str) {
+    match successor {
+        "rolling" => {
+            let spec = late_rolling(calc_flow::LatePolicySpec::Drop { metrics_version: 1 })
+                .spec()
+                .clone();
+            (
+                calc_flow::RollingOperator::new("next", input, spec)
+                    .unwrap()
+                    .into(),
+                "input",
+            )
+        }
+        "cross_section" => {
+            let spec = serde_json::from_value(serde_json::json!({
+            "configuration_version": 1, "state_layout_version": 1,
+            "event_time": "ts", "entity_by": ["key"], "partition_by": [], "sequence_by": ["seq"],
+            "grouping": {"kind": "exact_time"},
+            "outputs": [{"kind": "rank", "primitive_version": 1, "input": "x", "output": "rank", "direction": "ascending", "tie_method": "average", "null_placement": "exclude", "min_samples": 1}],
+            "allowed_lateness_micros": 0, "late_policy": {"kind": "drop", "metrics_version": 1},
+            "value_policy": "nan_exclude_preserve_v1"
+        })).unwrap();
+            (
+                calc_flow::CrossSectionOperator::new("next", input, spec)
+                    .unwrap()
+                    .into(),
+                "input",
+            )
+        }
+        "window" => (
+            calc_flow::WindowAggregateOperator::new(
+                "next",
+                input,
+                calc_flow::WindowSpec::tumbling("ts", Duration::from_secs(1)).unwrap(),
+            )
+            .unwrap()
+            .into(),
+            "input",
+        ),
+        "union" => (
+            Box::new(
+                UnionOperator::new(
+                    "next",
+                    vec![
+                        late_table_port("left", &input),
+                        late_table_port("right", &input),
+                    ],
+                )
+                .unwrap(),
+            )
+            .into(),
+            "left",
+        ),
+        "external" | "array" => (
+            (Box::new(StreamOnlyOperator {
+                input_ports: [late_table_port("input", &input)],
+                output_ports: [Port::new(
+                    "output",
+                    if successor == "array" {
+                        BatchKind::Array
+                    } else {
+                        BatchKind::Table
+                    },
+                    true,
+                    None,
+                )
+                .unwrap()],
+            }) as Box<dyn StreamOperator>)
+                .into(),
+            "input",
+        ),
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn test_side_output_native_rejects_temporal_merge_and_external_successors() {
+    for path in ["direct", "expression", "sql"] {
+        for successor in [
+            "rolling",
+            "cross_section",
+            "window",
+            "union",
+            "external",
+            "array",
+        ] {
+            let (builder, source) = late_path_builder(path);
+            let operator = late_rolling(late_policy());
+            let input = if path == "direct" {
+                operator.output_ports()[1].schema()
+            } else {
+                operator.input_ports()[0].schema()
+            }
+            .unwrap()
+            .clone();
+            let (operator, ingress) = late_successor(successor, input);
+            let port = if source == "roll" { "late" } else { "output" };
+            let error = builder
+                .add_node("next", operator)
+                .unwrap()
+                .connect(edge((source, port), ("next", ingress)))
+                .unwrap()
+                .compile_stream(&udfs(), &StreamRequirements::default())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("temporal_output_unavailable"),
+                "{path}/{successor}: {error}"
+            );
+            assert!(
+                error.contains("roll.late") && error.contains("next"),
+                "{error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_side_output_native_allows_stateless_routes_and_changes_lineage() {
+    for path in ["direct", "expression", "sql"] {
+        let (builder, _) = late_path_builder(path);
+        let plan = builder
+            .compile_stream(&udfs(), &StreamRequirements::default())
+            .unwrap();
+        assert_eq!(plan.sink_binding_ids().len(), 2);
+    }
+    let old = PipelineBuilder::new("late-contract")
+        .unwrap()
+        .add_node(
+            "roll",
+            late_rolling(calc_flow::LatePolicySpec::Drop { metrics_version: 1 }),
+        )
+        .unwrap()
+        .compile_stream(&udfs(), &StreamRequirements::default())
+        .unwrap();
+    let new = late_builder()
+        .compile_stream(&udfs(), &StreamRequirements::default())
+        .unwrap();
+    assert_ne!(old.fingerprint(), new.fingerprint());
+    assert_eq!(old.sink_binding_ids(), ["output"]);
+    assert_eq!(new.sink_binding_ids(), ["late", "output"]);
+}
+
+struct UnopenedLateSource(Arc<std::sync::atomic::AtomicUsize>);
+
+#[async_trait]
+impl calc_flow::StreamSource for UnopenedLateSource {
+    fn capabilities(&self) -> calc_flow::SourceCapabilities {
+        calc_flow::SourceCapabilities {
+            replay_positioning: calc_flow::ReplayPositioning::Unsupported,
+            delivery: calc_flow::SourceDeliveryCapability::Lossy,
+            max_batch_rows: 1,
+            max_batch_bytes: 4096,
+            schema: calc_flow::SourceSchema::DynamicOrUnknown,
+            native_watermarks: calc_flow::NativeWatermarkCapability::NeverEmits,
+        }
+    }
+    async fn open(&mut self, _cursor: Option<calc_flow::Cursor>) -> Result<()> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    async fn next(&mut self) -> Result<Option<calc_flow::SourceEvent>> {
+        Ok(None)
+    }
+    async fn close(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
+struct UnopenedLateSink;
+
+#[async_trait]
+impl calc_flow::StreamSink for UnopenedLateSink {
+    async fn open(&mut self) -> Result<()> {
+        panic!("disabled capability must not open a sink")
+    }
+    async fn write(&mut self, _batch: &Batch) -> Result<()> {
+        Ok(())
+    }
+    async fn close(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn test_side_output_runner_requires_both_bindings_and_stays_disabled() {
+    for outputs in [vec!["output"], vec!["late"], vec!["late", "output"]] {
+        let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let plan = late_builder()
+            .compile_stream(&udfs(), &StreamRequirements::default())
+            .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let result = calc_flow::StreamingRunner::new(
+            plan,
+            BTreeMap::from([(
+                "input".into(),
+                calc_flow::SourceBinding::new(UnopenedLateSource(opens.clone())),
+            )]),
+            outputs
+                .iter()
+                .map(|name| {
+                    (
+                        String::from(*name),
+                        vec![
+                            calc_flow::SinkBinding::ordinary(
+                                &format!("{name}_sink"),
+                                UnopenedLateSink,
+                            )
+                            .unwrap(),
+                        ],
+                    )
+                })
+                .collect(),
+            calc_flow::ManagedCheckpointRuntime::new(directory.path()).unwrap(),
+        );
+        let error = match result {
+            Ok(_) => panic!("side output must stay disabled"),
+            Err(error) => error.to_string(),
+        };
+        if outputs.len() == 1 {
+            let missing = if outputs[0] == "output" {
+                "late"
+            } else {
+                "output"
+            };
+            assert!(
+                error.contains("missing graph output") && error.contains(missing),
+                "{error}"
+            );
+        } else {
+            assert!(
+                error.contains("late side output execution is not enabled"),
+                "{error}"
+            );
+        }
+        assert_eq!(opens.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+}
+
+#[test]
+fn test_side_output_policy_migration_handles_all_variants_exhaustively() {
+    fn output_count(policy: calc_flow::LatePolicySpec) -> usize {
+        match policy {
+            calc_flow::LatePolicySpec::Error { .. } | calc_flow::LatePolicySpec::Drop { .. } => 1,
+            calc_flow::LatePolicySpec::SideOutput { .. } => 2,
+        }
+    }
+    assert_eq!(output_count(late_policy()), 2);
+    assert_eq!(
+        output_count(calc_flow::LatePolicySpec::Drop { metrics_version: 1 }),
+        1
+    );
+    assert_eq!(
+        output_count(calc_flow::LatePolicySpec::Error {
+            scope: calc_flow::LateErrorScope::Envelope
+        }),
+        1
+    );
+}
+
+fn late_table_port(name: &str, schema: &datafusion::arrow::datatypes::Schema) -> Port {
+    Port::new(
+        name,
+        BatchKind::Table,
+        true,
+        Some(
+            schema
+                .fields()
+                .iter()
+                .map(|field| field.as_ref().clone())
+                .collect(),
+        ),
+    )
+    .unwrap()
+}
+
+#[test]
+fn test_side_output_type_erased_native_operator_keeps_contract() {
+    let batch = Box::new(late_rolling(late_policy())) as Box<dyn BatchOperator>;
+    let error = PipelineBuilder::new("erased")
+        .unwrap()
+        .add_node("roll", batch)
+        .unwrap()
+        .compile_batch(&udfs())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("unsupported_mode"), "{error}");
+    let stream = Box::new(late_rolling(late_policy())) as Box<dyn StreamOperator>;
+    let directory = tempfile::tempdir().unwrap();
+    let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let plan = PipelineBuilder::new("erased")
+        .unwrap()
+        .add_node("roll", stream)
+        .unwrap()
+        .compile_stream(&udfs(), &StreamRequirements::default())
+        .unwrap();
+    let result = calc_flow::StreamingRunner::new(
+        plan,
+        BTreeMap::from([(
+            "input".into(),
+            calc_flow::SourceBinding::new(UnopenedLateSource(opens.clone())),
+        )]),
+        ["output", "late"]
+            .into_iter()
+            .map(|name| {
+                (
+                    name.into(),
+                    vec![
+                        calc_flow::SinkBinding::ordinary(&format!("{name}_sink"), UnopenedLateSink)
+                            .unwrap(),
+                    ],
+                )
+            })
+            .collect(),
+        calc_flow::ManagedCheckpointRuntime::new(directory.path()).unwrap(),
+    );
+    assert!(result.is_err());
+    assert_eq!(opens.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[test]
+fn test_side_output_normal_path_retains_temporal_contract() {
+    let source = late_rolling(late_policy());
+    let input = source.output_ports()[0].schema().unwrap().clone();
+    let mut spec = source.spec().clone();
+    spec.late_policy = calc_flow::LatePolicySpec::Drop { metrics_version: 1 };
+    let calc_flow::RollingOutputSpec::Lag { output, .. } = &mut spec.outputs[0] else {
+        unreachable!()
+    };
+    *output = "lag2".into();
+    let next = calc_flow::RollingOperator::new("next", input, spec).unwrap();
+    let plan = PipelineBuilder::new("normal-temporal")
+        .unwrap()
+        .add_node("roll", source)
+        .unwrap()
+        .add_node("next", next)
+        .unwrap()
+        .connect(edge(("roll", "output"), ("next", "input")))
+        .unwrap()
+        .compile_stream(&udfs(), &StreamRequirements::default())
+        .unwrap();
+    assert_eq!(plan.sink_binding_ids(), ["late", "output"]);
+}
+
+#[test]
+fn test_side_output_diagnostic_names_do_not_forge_origin() {
+    let input = late_rolling(late_policy()).output_ports()[1]
+        .schema()
+        .unwrap()
+        .clone();
+    let source = ExpressionOperator::new("project", "x = x", vec![], None, vec![])
+        .unwrap()
+        .with_ports(
+            late_table_port("input", &input),
+            late_table_port("output", &input),
+        )
+        .unwrap();
+    let spec = late_rolling(calc_flow::LatePolicySpec::Drop { metrics_version: 1 })
+        .spec()
+        .clone();
+    let next = calc_flow::RollingOperator::new("next", input, spec).unwrap();
+    let plan = PipelineBuilder::new("diagnostic-names")
+        .unwrap()
+        .add_node("project", Box::new(source))
+        .unwrap()
+        .add_node("next", next)
+        .unwrap()
+        .connect(edge(("project", "output"), ("next", "input")))
+        .unwrap()
+        .compile_stream(&udfs(), &StreamRequirements::default())
+        .unwrap();
+    assert_eq!(plan.sink_binding_ids(), ["output"]);
+}

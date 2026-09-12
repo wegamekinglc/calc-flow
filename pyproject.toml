@@ -1,6 +1,6 @@
 [project]
 name = "calc-flow-python"
-version = "4.0.0"
+version = "5.0.0"
 description = "Python expression API for batch and streaming calculations on a Rust runtime"
 readme = "README.md"
 license = "Apache-2.0"

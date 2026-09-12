@@ -940,6 +940,36 @@
             "metrics_version"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Route late rows to a diagnostic table in stream mode.\n\nThe configuration contract is available; execution remains disabled\nuntil the dual-output runtime and recovery contract is complete.",
+          "properties": {
+            "kind": {
+              "const": "side_output",
+              "type": "string"
+            },
+            "metrics_version": {
+              "description": "Metric transaction version; must equal `1`.",
+              "format": "uint32",
+              "maximum": 1,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "schema_version": {
+              "description": "Diagnostic schema version; must equal `1`.",
+              "format": "uint32",
+              "maximum": 1,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "metrics_version",
+            "schema_version"
+          ],
+          "type": "object"
         }
       ]
     },

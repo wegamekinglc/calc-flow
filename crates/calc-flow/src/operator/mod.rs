@@ -6,6 +6,7 @@ mod checkpoint;
 mod cross_section;
 mod expression;
 mod join;
+pub(crate) mod late_output;
 pub(crate) mod rolling;
 pub(crate) mod rolling_metrics;
 mod sql;
@@ -237,7 +238,9 @@ pub(crate) fn is_portable_identifier(value: &str) -> bool {
 /// The supertrait guarantees the batch and stream compilers can never drift
 /// on metadata semantics; method signatures are identical to the retired v2
 /// `Operator` trait's.
-pub trait OperatorMetadata: Send + Sync {
+/// Implementations own their data (`'static`) so compilation can recover
+/// built-in operator identity after conversion to a trait object.
+pub trait OperatorMetadata: Send + Sync + std::any::Any {
     fn name(&self) -> &str;
     fn input_ports(&self) -> &[Port];
     fn output_ports(&self) -> &[Port];

@@ -47,7 +47,7 @@ def test_empty_runtime_capabilities_are_frozen_and_session_scoped() -> None:
     assert snapshot.scope.kind == "runtime_session"
     assert snapshot.scope.revision == 0
     assert snapshot.scope.session_id == repeated.scope.session_id
-    assert snapshot.package_version == "4.0.0"
+    assert snapshot.package_version == "5.0.0"
     assert snapshot.project_format_versions == (3,)
     assert snapshot.batch_kinds == ("array", "table")
     assert snapshot.operators == (

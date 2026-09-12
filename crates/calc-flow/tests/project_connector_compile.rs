@@ -828,3 +828,162 @@ mod static_input_declarations {
         assert_eq!(sink_opens.load(Ordering::SeqCst), 0);
     }
 }
+
+fn late_connector_project(kind: &str) -> ProjectSpec {
+    let mut value = serde_json::to_value(stream_project(true)).unwrap();
+    let input = serde_json::json!({"name": "input", "kind": "table", "required": true, "schema": [
+        {"name": "ts", "data_type": "timestamp[us, UTC]", "nullable": false},
+        {"name": "key", "data_type": "string", "nullable": false},
+        {"name": "seq", "data_type": "uint64", "nullable": false},
+        {"name": "x", "data_type": "float64", "nullable": true}
+    ]});
+    let mut spec = serde_json::json!({
+        "configuration_version": 1, "state_layout_version": 1, "event_time": "ts", "sequence_by": ["seq"],
+        "partition_by": ["key"], "allowed_lateness_micros": 0,
+        "late_policy": {"kind": "side_output", "metrics_version": 1, "schema_version": 1},
+        "value_policy": "stateful_numeric_v1",
+        "outputs": [{"kind": "lag", "primitive_version": 1, "input": "x", "output": "lag", "periods": 1}]
+    });
+    if kind == "cross_section" {
+        spec["entity_by"] = serde_json::json!(["key"]);
+        spec["grouping"] = serde_json::json!({"kind": "exact_time"});
+        spec["value_policy"] = serde_json::json!("nan_exclude_preserve_v1");
+        spec["outputs"] = serde_json::json!([{"kind": "rank", "primitive_version": 1, "input": "x", "output": "rank", "direction": "ascending", "tie_method": "average", "null_placement": "exclude", "min_samples": 1}]);
+    }
+    value["graph"]["nodes"] = serde_json::json!([{"id": "calc", "operator": {"kind": kind, "spec": spec}, "input_ports": [input]}]);
+    let mut late = value["sinks"][0].clone();
+    late["binding"] = serde_json::json!("late");
+    value["sinks"].as_array_mut().unwrap().push(late);
+    serde_json::from_value(value).unwrap()
+}
+
+#[test]
+fn test_side_output_connector_projects_require_complete_sink_coverage() {
+    let connectors = compile_test_registry().snapshot();
+    let providers = ProviderRegistry::default();
+    let udfs = UdfRegistry::new().snapshot();
+    for kind in ["rolling", "cross_section"] {
+        let project = late_connector_project(kind);
+        let plan = compile_stream_project(
+            &project,
+            &providers,
+            &udfs,
+            &connectors,
+            &StreamRequirements::default(),
+        )
+        .unwrap();
+        assert!(plan.has_project_bindings());
+        assert_eq!(plan.sink_binding_ids(), ["late", "output"]);
+        for missing in ["late", "output"] {
+            let mut invalid = project.clone();
+            invalid.sinks.retain(|sink| sink.binding != missing);
+            let error = compile_stream_project(
+                &invalid,
+                &providers,
+                &udfs,
+                &connectors,
+                &StreamRequirements::default(),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                error.contains("sinks")
+                    && error.contains("sink_output_mismatch")
+                    && error.contains(missing),
+                "{error}"
+            );
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let result = StreamingRunner::new(
+            plan,
+            BTreeMap::new(),
+            BTreeMap::new(),
+            ManagedCheckpointRuntime::new(directory.path()).unwrap(),
+        );
+        let error = match result {
+            Ok(_) => panic!("side output must remain disabled"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("late side output execution is not enabled"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn test_side_output_connector_projects_propagate_late_origin() {
+    let connectors = compile_test_registry().snapshot();
+    for kind in ["rolling", "cross_section"] {
+        for projection in ["direct", "expression", "sql"] {
+            let mut value = serde_json::to_value(late_connector_project(kind)).unwrap();
+            let normal_schema = value["graph"]["nodes"][0]["input_ports"][0]["schema"].clone();
+            let mut late_schema = normal_schema.as_array().unwrap().clone();
+            for (name, data_type) in [
+                ("node", "string"),
+                ("input_port", "string"),
+                ("event_time_micros", "int64"),
+                ("closing_time_micros", "int64"),
+                ("watermark_micros", "int64"),
+                ("reason", "string"),
+                ("source", "string"),
+                ("sequence", "uint64"),
+                ("row_index", "uint64"),
+            ] {
+                late_schema.push(serde_json::json!({"name": format!("_cf_late_{name}"), "data_type": data_type, "nullable": false}));
+            }
+            let late_schema = serde_json::json!(late_schema);
+            let mut source = ("calc", "late");
+            let mut edges = Vec::new();
+            if projection != "direct" {
+                let (operator, ingress) = if projection == "expression" {
+                    (
+                        serde_json::json!({"kind": "expression", "select": ["ts", "key", "seq", "x"]}),
+                        "input",
+                    )
+                } else {
+                    (
+                        serde_json::json!({"kind": "sql", "query": "SELECT ts, key, seq, x FROM events", "aliases": ["events"]}),
+                        "events",
+                    )
+                };
+                value["graph"]["nodes"].as_array_mut().unwrap().push(serde_json::json!({"id": "project", "operator": operator,
+                    "input_ports": [{"name": ingress, "kind": "table", "required": true, "schema": late_schema}],
+                    "output_ports": [{"name": "output", "kind": "table", "required": true, "schema": normal_schema}]
+                }));
+                edges.push(serde_json::json!({"source_node": "calc", "source_port": "late", "target_node": "project", "target_port": ingress}));
+                source = ("project", "output");
+            }
+            let merge_schema = if projection == "direct" {
+                &late_schema
+            } else {
+                &normal_schema
+            };
+            value["graph"]["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({
+                    "id": "merge", "operator": {"kind": "union"}, "input_ports": [
+                        {"name": "left", "kind": "table", "required": true, "schema": merge_schema},
+                        {"name": "right", "kind": "table", "required": true, "schema": merge_schema}
+                    ]
+                }));
+            edges.push(serde_json::json!({"source_node": source.0, "source_port": source.1, "target_node": "merge", "target_port": "left"}));
+            value["graph"]["edges"] = serde_json::json!(edges);
+            let project: ProjectSpec = serde_json::from_value(value).unwrap();
+            let error = compile_stream_project(
+                &project,
+                &ProviderRegistry::default(),
+                &UdfRegistry::new().snapshot(),
+                &connectors,
+                &StreamRequirements::default(),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                error.contains("temporal_output_unavailable") && error.contains("calc.late"),
+                "{kind}/{projection}: {error}"
+            );
+        }
+    }
+}
