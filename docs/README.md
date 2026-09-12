@@ -69,6 +69,8 @@ The [project schema](../schemas/project-v3.schema.json) and
 4. [Warm-stream measurements](warm-stream-performance.md): persistent jobs,
    sparse appends, latency interpretation, and reproduction.
 5. [Python release guide](python-release.md): packaging and publication.
+6. [Original performance development plan](plans/cross-library-performance.md):
+   the initial SQL and native-streaming optimization scope and validation rules.
 
 ## History and maintenance
 

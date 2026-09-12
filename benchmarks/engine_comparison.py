@@ -268,6 +268,9 @@ class EngineCase:
             seconds = (time.perf_counter_ns() - started) / 1e9
         return {"seconds": seconds, "correctness": self.validate(result)}
 
+    def finish(self) -> dict:
+        return {"state": "completed"}
+
     def close(self) -> None:
         if self.loop is not None:
             self.loop.run_until_complete(self.loop.shutdown_asyncgens())

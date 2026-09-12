@@ -1274,6 +1274,10 @@ impl PyStreamingJob {
             "stream_asof_joins",
             stream_asof_status_to_py(py, &job.stream_asof_join_status())?,
         )?;
+        status.set_item(
+            "rolling_metrics",
+            rolling_metrics_to_py(py, &job.rolling_metrics())?,
+        )?;
         Ok(status)
     }
 
@@ -1736,6 +1740,60 @@ fn stream_join_status_to_py<'py>(
     Ok(values)
 }
 
+fn rolling_metrics_to_py<'py>(
+    py: Python<'py>,
+    statuses: &BTreeMap<String, calc_flow::RollingMetrics>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let values = PyDict::new(py);
+    for (node_id, status) in statuses {
+        let value = PyDict::new(py);
+        set_py_items!(value, {
+            "data" => rolling_callback_to_py(py, &status.data)?,
+            "watermark" => rolling_callback_to_py(py, &status.watermark)?,
+            "end" => rolling_callback_to_py(py, &status.end)?,
+            "overflowed" => status.overflowed,
+        });
+        values.set_item(node_id, value)?;
+    }
+    Ok(values)
+}
+
+fn rolling_callback_to_py<'py>(
+    py: Python<'py>,
+    status: &calc_flow::RollingCallbackMetrics,
+) -> PyResult<Bound<'py, PyDict>> {
+    let value = PyDict::new(py);
+    set_py_items!(value, {
+        "started" => status.started,
+        "succeeded" => status.succeeded,
+        "failed" => status.failed,
+        "cancelled" => status.cancelled,
+        "interrupted" => status.interrupted,
+        "callback_duration_ns" => status.callback_duration.as_nanos(),
+        "input_validation_duration_ns" => status.input_validation_duration.as_nanos(),
+        "ordering_proof_duration_ns" => status.ordering_proof_duration.as_nanos(),
+        "entity_resolution_duration_ns" => status.entity_resolution_duration.as_nanos(),
+        "state_preparation_duration_ns" => status.state_preparation_duration.as_nanos(),
+        "numeric_update_duration_ns" => status.numeric_update_duration.as_nanos(),
+        "history_maintenance_duration_ns" => status.history_maintenance_duration.as_nanos(),
+        "arrow_output_duration_ns" => status.arrow_output_duration.as_nanos(),
+        "budget_preparation_duration_ns" => status.budget_preparation_duration.as_nanos(),
+        "send_wait_duration_ns" => status.send_wait_duration.as_nanos(),
+        "other_duration_ns" => status.other_duration.as_nanos(),
+        "input_rows" => status.input_rows,
+        "order_proof_rows" => status.order_proof_rows,
+        "resolved_rows" => status.resolved_rows,
+        "touched_entities" => status.touched_entities,
+        "copied_entities" => status.copied_entities,
+        "numeric_rows" => status.numeric_rows,
+        "history_rows_materialized" => status.history_rows_materialized,
+        "scalar_value_conversions" => status.scalar_value_conversions,
+        "output_rows_prepared" => status.output_rows_prepared,
+        "output_chunks_prepared" => status.output_chunks_prepared,
+    });
+    Ok(value)
+}
+
 fn stream_join_status_value_to_py<'py>(
     py: Python<'py>,
     status: &calc_flow::StreamJoinStatus,
@@ -2168,6 +2226,71 @@ mod tests {
         PyContinuousStreamingRunner, PyManagedCheckpointRuntime, checked_static_array_shape,
     };
     use crate::{batch::PyBatch, pipeline::PyStreamExecutionPlan};
+
+    #[test]
+    fn rolling_status_preserves_nanoseconds_full_integer_range_and_snapshots() {
+        Python::initialize();
+        Python::attach(|py| {
+            let mut observation = calc_flow::RollingMetrics::default();
+            observation.data.input_rows = u64::MAX;
+            observation.data.callback_duration = std::time::Duration::MAX;
+            observation.end.callback_duration = std::time::Duration::from_nanos(1);
+            observation.overflowed = true;
+            let statuses = BTreeMap::from([("rolling".into(), observation)]);
+            let values = super::rolling_metrics_to_py(py, &statuses).unwrap();
+            let node = values.get_item("rolling").unwrap().unwrap();
+            let data = node.get_item("data").unwrap();
+            assert_eq!(
+                data.get_item("input_rows")
+                    .unwrap()
+                    .extract::<u64>()
+                    .unwrap(),
+                u64::MAX
+            );
+            assert_eq!(
+                data.get_item("callback_duration_ns")
+                    .unwrap()
+                    .extract::<u128>()
+                    .unwrap(),
+                std::time::Duration::MAX.as_nanos()
+            );
+            assert_eq!(
+                node.get_item("end")
+                    .unwrap()
+                    .get_item("callback_duration_ns")
+                    .unwrap()
+                    .extract::<u64>()
+                    .unwrap(),
+                1
+            );
+            assert!(
+                node.get_item("overflowed")
+                    .unwrap()
+                    .extract::<bool>()
+                    .unwrap()
+            );
+            data.set_item("input_rows", 0).unwrap();
+            let fresh = super::rolling_metrics_to_py(py, &statuses).unwrap();
+            assert_eq!(
+                fresh
+                    .get_item("rolling")
+                    .unwrap()
+                    .unwrap()
+                    .get_item("data")
+                    .unwrap()
+                    .get_item("input_rows")
+                    .unwrap()
+                    .extract::<u64>()
+                    .unwrap(),
+                u64::MAX
+            );
+            assert!(
+                super::rolling_metrics_to_py(py, &BTreeMap::new())
+                    .unwrap()
+                    .is_empty()
+            );
+        });
+    }
 
     #[test]
     fn asof_status_preserves_native_integer_ranges() {
@@ -3047,7 +3170,7 @@ mod tests {
                 .unwrap();
             py.run(
                 &CString::new(
-                    "import asyncio\nasync def exercise():\n    assert 'consumed=false' in repr(runner)\n    job = await runner.start_async()\n    assert job.id > 0\n    while 'transactional.write:1' not in events:\n        await asyncio.sleep(0)\n    epoch = await job.trigger_checkpoint_async()\n    assert epoch >= 1\n    source.release.set()\n    status = job.status()\n    assert status['job_id'] == job.id\n    assert set(status) == {'job_id', 'state', 'terminal_cause', 'delivery', 'task_count', 'task_errors', 'metrics_overflowed', 'watermark_micros', 'edges', 'sources', 'operators', 'sinks', 'checkpoint', 'stream_joins', 'stream_asof_joins'}\n    assert status['stream_joins'] == {}
+                    "import asyncio\nasync def exercise():\n    assert 'consumed=false' in repr(runner)\n    job = await runner.start_async()\n    assert job.id > 0\n    while 'transactional.write:1' not in events:\n        await asyncio.sleep(0)\n    epoch = await job.trigger_checkpoint_async()\n    assert epoch >= 1\n    source.release.set()\n    status = job.status()\n    assert status['job_id'] == job.id\n    assert set(status) == {'job_id', 'state', 'terminal_cause', 'delivery', 'task_count', 'task_errors', 'metrics_overflowed', 'watermark_micros', 'edges', 'sources', 'operators', 'sinks', 'checkpoint', 'stream_joins', 'stream_asof_joins', 'rolling_metrics'}\n    assert status['stream_joins'] == {}
     outcome = await job.wait_async()\n    assert outcome['state'] == 'completed', outcome\n    assert outcome['cause'] == 'natural_end'\n    assert outcome['errors'] == ()\n    assert 'state=completed' in repr(job)\nasyncio.run(exercise())\nassert 'source.open' in events\nassert 'sink.open' in events\nassert 'sink.write:1' in events\nassert 'source.close' in events\nassert 'sink.close' in events\nassert any(value.startswith('transactional.begin:') for value in events)\nassert any(value.startswith('transactional.pre_commit:') for value in events)\nassert any(value.startswith('transactional.commit:') for value in events)\nassert 'transactional.close' in events",
                 )
                 .unwrap(),

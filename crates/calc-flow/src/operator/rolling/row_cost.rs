@@ -83,6 +83,21 @@ impl Offsets<'_> {
             Self::Wide(offsets) => add_offset_charges(rows, offsets),
         }
     }
+
+    fn total_width(&self) -> usize {
+        match self {
+            Self::Narrow(offsets) => offset_width(offsets),
+            Self::Wide(offsets) => offset_width(offsets),
+        }
+    }
+}
+
+fn offset_width<O: OffsetSizeTrait>(offsets: &[O]) -> usize {
+    let first = offsets.first().expect("Arrow offsets contain a start");
+    let last = offsets.last().expect("Arrow offsets contain an end");
+    (*last - *first)
+        .to_usize()
+        .expect("validated Arrow offsets fit the address space")
 }
 
 #[derive(Default)]
@@ -128,9 +143,22 @@ impl<'a> ColumnCharges<'a> {
         self.add_null_charges(&mut rows)?;
         Ok(RowCosts::Variable(rows))
     }
+
+    fn total(&self, row_count: usize) -> Option<usize> {
+        let fixed = self.fixed.checked_mul(row_count)?;
+        self.variable
+            .iter()
+            .map(Offsets::total_width)
+            .chain(self.validity.iter().map(|nulls| nulls.null_count()))
+            .try_fold(fixed, usize::checked_add)
+    }
 }
 
 impl RowCosts {
+    pub(super) fn try_total(record: &RecordBatch) -> Result<Option<usize>> {
+        Ok(ColumnCharges::read(record)?.and_then(|charges| charges.total(record.num_rows())))
+    }
+
     pub(super) fn try_new(record: &RecordBatch) -> Result<Option<Self>> {
         let Some(charges) = ColumnCharges::read(record)? else {
             return Ok(None);
@@ -206,13 +234,16 @@ mod tests {
         .unwrap();
         for record in [record.clone(), record.slice(1, 3), record.slice(2, 1)] {
             let costs = RowCosts::try_new(&record).unwrap().unwrap();
+            let mut expected_total = 0;
             for index in 0..record.num_rows() {
                 let oracle = Batch::table(vec![record.slice(index, 1)], BatchMetadata::default())
                     .unwrap()
                     .estimated_bytes()
                     .unwrap();
                 assert_eq!(costs.get(index), oracle, "row {index}");
+                expected_total += oracle;
             }
+            assert_eq!(RowCosts::try_total(&record).unwrap(), Some(expected_total));
         }
     }
 
@@ -227,5 +258,40 @@ mod tests {
             RowCosts::try_new(&record).unwrap(),
             Some(RowCosts::Fixed(8))
         ));
+    }
+
+    #[test]
+    fn whole_record_charge_matches_row_sums_without_per_row_allocations() {
+        fn record(rows: usize) -> RecordBatch {
+            RecordBatch::try_from_iter(vec![
+                (
+                    "value",
+                    Arc::new(Float64Array::from(vec![Some(1.0); rows])) as ArrayRef,
+                ),
+                (
+                    "text",
+                    Arc::new(StringArray::from(
+                        (0..rows)
+                            .map(|index| if index % 3 == 0 { None } else { Some("中文") })
+                            .collect::<Vec<_>>(),
+                    )) as ArrayRef,
+                ),
+            ])
+            .unwrap()
+        }
+
+        for record in [record(32), record(4096).slice(3, 4000), record(0)] {
+            let rows = RowCosts::try_new(&record).unwrap().unwrap();
+            let expected = (0..record.num_rows()).map(|row| rows.get(row)).sum();
+            let measured = allocation_counter::measure(|| {
+                assert_eq!(RowCosts::try_total(&record).unwrap(), Some(expected));
+            });
+            assert!(
+                measured.bytes_total < 1024,
+                "row count {}: {} allocated bytes",
+                record.num_rows(),
+                measured.bytes_total
+            );
+        }
     }
 }

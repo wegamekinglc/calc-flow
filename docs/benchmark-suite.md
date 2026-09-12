@@ -15,6 +15,7 @@ On this page:
 - [Revision comparisons and regression gate](#revision-comparisons-and-regression-gate)
 - [Reports and failure behavior](#reports-and-failure-behavior)
 - [Local reproduction](#local-reproduction)
+- [Performance-plan diagnostics](#performance-plan-diagnostics)
 
 ## Complete inventory
 
@@ -204,3 +205,80 @@ shard's own `summary.md` is useful locally; the complete summarizer deliberately
 fails when shards are missing. To update dependencies, regenerate and commit
 `benchmarks/requirements.lock` using the command in its header. CI checks lock
 drift before its adapter tests.
+
+## Performance-plan diagnostics
+
+`scripts/measure_performance_plan.py` supplements the complete suite with an
+explicit inventory for filter coercion, full-window SQL and Native SMA,
+continuing history, sparse appends, batch/entity/window sensitivity, and
+small-request tails. It uses the same workload adapters and thread settings
+for both release wheels. The separately named `filter_uint64_modulo` query
+does not replace the original `filter` query. Native warm cases retain their
+partial-window semantics and advancing cursors; they do not substitute for
+the empty-state full-window comparison.
+
+```bash
+python -m scripts.measure_performance_plan --group all --list
+python -m scripts.measure_performance_plan \
+  --baseline-build target/performance/baseline-build.json \
+  --candidate-build target/performance/candidate-build.json \
+  --group core --root target/performance/core-results
+```
+
+The explicit `entity-parallel` group compares the predeclared warm
+H64k/A64k/E64/B64k dual-SMA target and same-shaped single-SMA control using
+two rounds of ten pairs. `entity-parallel-tail` selects exactly those same
+workloads with three fresh process pairs and 1,000 appends per pair. Both
+groups are additional to `all`; the original small-append `tail` inventory
+remains intact. Use the matched serial-route release as the baseline for
+independent entity-parallel evidence, with owner initialization on both sides.
+
+```bash
+python -m scripts.measure_performance_plan --group entity-parallel-tail --list
+python -m scripts.measure_performance_plan \
+  --baseline-build target/performance/entity-control-build.json \
+  --candidate-build target/performance/candidate-build.json \
+  --group entity-parallel-tail --root target/performance/entity-tail-results
+```
+
+This tail group collects 3,000 samples per revision and workload, with the
+same complete Arrow timing boundary and advancing state as the median group.
+It reports descriptive tail quantiles and first-sink latency; its existence
+does not establish that the parallel route ran, that tails improved, or that
+the target median gate passed. Retain separate path-use, lifecycle, skew and
+memory evidence for the final candidate.
+
+The build records identify the clean source commit/tree, release profile,
+features, compiler and lockfile, and the wheel and extracted native paths and
+SHA-256 hashes. The controller verifies the wheel/native relationship and
+the module actually imported by each worker. Keep these records with the
+original release build logs; a manually asserted clean flag is not build
+provenance. Core-only workers inspect NumPy and PyArrow without importing
+unmeasured external engines.
+
+Every warmup and measured output is also compared directly between revisions
+through temporary Arrow IPC files outside timing. Schema metadata, validity,
+identities, payloads, row counts and special-value classifications must agree;
+finite values retain the workload's `1e-10` tolerances. SQL output is aligned
+by its existing unique key outside timing; Native delivered order is preserved
+and checked directly. Files are removed after each pair to bound retained
+comparison data.
+
+Warm completion also checks the sink's total delivered rows and rejects any
+extra table after EOF. Terminal global or rolling-metric overflow, unfinished
+callback observations and inconsistent exclusive-stage sums invalidate the
+evidence. Different-binary candidate SQL diagnostics must demonstrate the
+expected COUNT/AVG physical rewrite or UInt64 filter predicate; a successful
+query returning the right values through fallback is not path-use evidence.
+
+Core and sensitivity cases use two fresh process pairs with ten alternating
+AB/BA pairs per round and the suite's exact median confidence interval.
+Tail cases use three fresh process pairs with 1,000 appends each, retaining
+all samples and reporting P50/P95/P99 separately from median confidence
+intervals. Tail quantiles remain descriptive; a median interval does not
+establish a tail-latency improvement. Identical-wheel runs are explicitly
+labeled harness self-checks. Missing cases and failed correctness remain
+errors, and inconclusive timing is not a passed improvement gate.
+Every worker response and comparison is journaled outside timing, and each
+completed round is saved before the next begins. A later failure retains
+earlier raw samples and any failed Arrow comparison files for diagnosis.

@@ -1,4 +1,11 @@
 mod asof;
+mod operator_fusion;
+mod supervision;
+use supervision::{SupervisionHome, SupervisorLoan};
+#[cfg(test)]
+mod entity_work_tests;
+#[cfg(test)]
+mod supervision_loan_tests;
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -34,6 +41,7 @@ use super::{
             ParticipantSet, spawn_checkpoint_coordinator,
         },
     },
+    entity_work::JobEntityWorkOwner,
     job::{
         ContinuousJobSpec, OrdinarySinkBinding, OwningContinuousJob, StableSinkId,
         ValidatedContinuousJob, ValidatedOrdinarySink, preflight_job,
@@ -42,7 +50,7 @@ use super::{
     operator_task::{
         OperatorCheckpointAck, OperatorCheckpointCommand, OperatorCheckpointPort, OperatorIngress,
         OperatorProgress, OperatorProgressSnapshot, OperatorRestoreState, OperatorTaskInputs,
-        OperatorTerminalPort, spawn_operator_task,
+        OperatorTerminalPort, spawn_operator_task, spawn_operator_task_pair,
     },
     progress::{
         DurableProgressRestore, DurableSourceCut, LiveProgressCoordinator, LiveProgressEvidence,
@@ -59,10 +67,11 @@ use super::{
         spawn_source_tasks_gated_with_live_progress,
     },
     supervisor::{
-        SupervisionReport, TaskId, TaskRegistry, TaskStatus, TaskSupervisor, TerminalArbiter,
-        TerminalDecision, panic_message,
+        SupervisionReport, TaskFailure, TaskId, TaskRegistry, TaskStatus, TaskSupervisor,
+        TerminalArbiter, TerminalDecision, panic_message,
     },
 };
+use crate::operator::rolling_metrics::RollingMetricsStore;
 use crate::pipeline::{
     OperatorCheckpointCapability, RuntimeSinkRoute, RuntimeSourceRoute, RuntimeStreamNode,
     StreamRuntimePlanParts,
@@ -132,6 +141,16 @@ pub(super) struct JobCore {
     checkpoint_enabled: bool,
     manual_checkpoint: Mutex<Option<CheckpointCoordinatorHandle>>,
     operation_cancel_requested: AtomicBool,
+    entity_work: JobEntityWorkOwner,
+    supervision: SupervisionHome,
+    #[cfg(test)]
+    owned_lane_launches: Arc<AtomicU64>,
+    #[cfg(test)]
+    driver_abort: Mutex<Option<tokio::task::AbortHandle>>,
+    #[cfg(test)]
+    panic_after_prepared_report: AtomicBool,
+    #[cfg(test)]
+    report_publication_gate: Mutex<Option<Arc<DriverReportGate>>>,
     #[cfg(test)]
     terminal_commit_seam: Mutex<Option<TerminalCommitTestSeam>>,
     #[cfg(test)]
@@ -143,6 +162,7 @@ struct RuntimeStatus {
     tasks: TaskRegistry,
     sources: BTreeMap<String, SourceProgress>,
     nodes: BTreeMap<String, OperatorProgress>,
+    rolling_metrics: BTreeMap<String, RollingMetricsStore>,
     sinks: BTreeMap<String, SinkProgress>,
     sink_outputs: BTreeMap<String, String>,
     progress: Option<LiveProgressStatusHandle>,
@@ -160,6 +180,8 @@ impl JobCore {
         pipeline_name: String,
     ) -> Self {
         let sink_outputs = status_projection.sink_outputs();
+        #[cfg(test)]
+        let owned_lane_launches = Arc::new(AtomicU64::new(0));
         Self {
             launch_id,
             job_id,
@@ -185,11 +207,57 @@ impl JobCore {
             checkpoint_enabled,
             manual_checkpoint: Mutex::new(None),
             operation_cancel_requested: AtomicBool::new(false),
+            entity_work: JobEntityWorkOwner::new(
+                job_id,
+                #[cfg(test)]
+                owned_lane_launches.clone(),
+            ),
+            supervision: SupervisionHome::default(),
+            #[cfg(test)]
+            owned_lane_launches,
+            #[cfg(test)]
+            driver_abort: Mutex::new(None),
+            #[cfg(test)]
+            panic_after_prepared_report: AtomicBool::new(false),
+            #[cfg(test)]
+            report_publication_gate: Mutex::new(None),
             #[cfg(test)]
             terminal_commit_seam: Mutex::new(None),
             #[cfg(test)]
             launch_probe: None,
         }
+    }
+
+    fn prepare_driver_report(&self, report: DriverReport) -> LaunchId {
+        self.supervision.prepare(report);
+        #[cfg(test)]
+        assert!(
+            !self.panic_after_prepared_report.load(Ordering::SeqCst),
+            "injected panic after owned report preparation"
+        );
+        self.launch_id
+    }
+
+    #[cfg(test)]
+    fn abort_driver_for_test(&self) {
+        self.driver_abort
+            .lock()
+            .as_ref()
+            .expect("registered job driver")
+            .abort();
+    }
+
+    #[cfg(test)]
+    fn panic_after_prepared_report_for_test(&self) {
+        self.panic_after_prepared_report
+            .store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    fn pause_report_publication_for_test(&self) -> Arc<DriverReportGate> {
+        let gate = Arc::new(DriverReportGate::default());
+        *self.report_publication_gate.lock() = Some(gate.clone());
+        gate
     }
 
     fn request_cancel(&self, reaper_owned: bool) {
@@ -412,6 +480,16 @@ impl Drop for JobOwnershipToken {
 impl ContinuousJob {
     pub(crate) fn id(&self) -> u64 {
         self.core.job_id
+    }
+
+    pub(crate) fn rolling_metrics(&self) -> BTreeMap<String, crate::RollingMetrics> {
+        self.core
+            .runtime_status
+            .lock()
+            .rolling_metrics
+            .iter()
+            .map(|(id, store)| (id.clone(), store.snapshot()))
+            .collect()
     }
 
     /// Collects the payload-free status of every Join node, keyed by node ID.
@@ -1411,7 +1489,10 @@ async fn runner_lifecycle(
                 Some(RunnerCommand::Start { launch_id, core: job_core, job, checkpoint }) if active.is_none() && !shutting_down => {
                     active = Some(launch_id);
                     job_core.state.lock().owner = DriverOwnership::Driving;
-                    drivers.spawn(run_job_driver(launch_id, Arc::clone(&job_core), *job, checkpoint.map(|checkpoint| *checkpoint)));
+                    let driver = drivers.spawn(run_job_driver(launch_id, Arc::clone(&job_core), *job, checkpoint.map(|checkpoint| *checkpoint)));
+                    #[cfg(test)]
+                    { *job_core.driver_abort.lock() = Some(driver.clone()); }
+                    drop(driver);
                 }
                 Some(RunnerCommand::Start { launch_id, core: job_core, job, checkpoint }) if !shutting_down => {
                     pending = Some(PendingStart { launch_id, core: job_core, job, checkpoint });
@@ -1437,13 +1518,10 @@ async fn runner_lifecycle(
             },
             joined = drivers.join_next(), if active.is_some() => {
                 if let Some(joined) = joined {
-                    let report = match joined {
-                        Ok(report) => report,
-                        Err(error) => DriverReport::aborted(
-                            active.expect("an active driver owns the join"),
-                            &error.to_string(),
-                        ),
-                    };
+                    let launch_id = active.expect("an active driver owns the join");
+                    let job_core = runner_core.registry.lock().live_jobs[&launch_id].clone();
+                    let join_error = joined.err().map(|error| error.to_string());
+                    let report = settle_driver_report(&job_core, join_error.as_deref()).await;
                     publish_driver_report(&runner_core, report);
                     active = None;
                     if runner_core.stop_after_first_job {
@@ -1452,12 +1530,15 @@ async fn runner_lifecycle(
                     } else if !shutting_down && let Some(next) = pending.take() {
                         active = Some(next.launch_id);
                         next.core.state.lock().owner = DriverOwnership::Driving;
-                        drivers.spawn(run_job_driver(
+                        let driver = drivers.spawn(run_job_driver(
                             next.launch_id,
                             Arc::clone(&next.core),
                             *next.job,
                             next.checkpoint.map(|checkpoint| *checkpoint),
                         ));
+                        #[cfg(test)]
+                        { *next.core.driver_abort.lock() = Some(driver.clone()); }
+                        drop(driver);
                     }
                 }
             }
@@ -1472,6 +1553,148 @@ async fn runner_lifecycle(
             .load(Ordering::Acquire),
         "injected runner lifecycle shutdown panic"
     );
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct DriverReportGate {
+    entered: Notify,
+    release: Notify,
+}
+
+async fn settle_driver_report(core: &Arc<JobCore>, join_error: Option<&str>) -> DriverReport {
+    if let Some(mut loan) = core.supervision.take(core.entity_work.clone()) {
+        let report = loan.join_all().await;
+        if !core.supervision.has_report() {
+            core.supervision
+                .prepare(unprepared_driver_report(core, report, join_error));
+        }
+        drop(loan);
+    }
+    if !core.supervision.has_report() {
+        core.entity_work.close_admission();
+        let secondary = core.entity_work.drain().await;
+        let mut failed = unprepared_driver_report(
+            core,
+            SupervisionReport {
+                primary_error_count: 0,
+                errors: Vec::new(),
+            },
+            join_error,
+        );
+        failed
+            .cleanup_failures
+            .extend(secondary.into_iter().map(task_runtime_failure));
+        core.supervision.prepare(failed);
+    }
+    #[cfg(test)]
+    {
+        let gate = core.report_publication_gate.lock().clone();
+        if let Some(gate) = gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
+    }
+    core.supervision.clear_joined();
+    core.supervision
+        .take_report()
+        .expect("the lifecycle publishes one owned report")
+}
+
+fn unprepared_driver_report(
+    core: &JobCore,
+    report: SupervisionReport,
+    join_error: Option<&str>,
+) -> DriverReport {
+    let progress = {
+        let status = core.runtime_status.lock();
+        RuntimeTaskProgress {
+            sources: status.sources.clone(),
+            sinks: status.sinks.clone(),
+        }
+    };
+    let selected = core.state.lock().selected_cause.clone();
+    if report.primary_error_count > 0
+        || matches!(
+            selected,
+            Some(TerminalCause::ExplicitCancel | TerminalCause::DeadlineExceeded)
+        )
+    {
+        return finish_running_report(
+            core.launch_id,
+            selected,
+            false,
+            report,
+            &progress,
+            &core.metrics,
+        );
+    }
+    let claimed = {
+        let mut state = core.state.lock();
+        if state.launch_delivery == LaunchDeliveryState::Claimed {
+            true
+        } else {
+            // Seal handle delivery under the same lock used by StartObserver.
+            state.launch_delivery = LaunchDeliveryState::Finalizing;
+            false
+        }
+    };
+    if claimed {
+        failed_running_driver_report(
+            core,
+            report,
+            &progress,
+            join_error.unwrap_or("missing prepared driver report"),
+        )
+    } else {
+        let mut failed = DriverReport::aborted(
+            core.launch_id,
+            join_error.unwrap_or("missing prepared driver report"),
+        );
+        failed.cleanup_failures.extend(runtime_failures(
+            report,
+            &progress.sources,
+            &progress.sinks,
+        ));
+        failed
+    }
+}
+
+fn failed_running_driver_report(
+    core: &JobCore,
+    report: SupervisionReport,
+    progress: &RuntimeTaskProgress,
+    message: &str,
+) -> DriverReport {
+    let mut errors = vec![Arc::new(RuntimeFailure {
+        origin: FailureOrigin::RunnerLifecycle,
+        error: CalcFlowError::Internal {
+            message: format!("job driver join failed: {message}"),
+        },
+    })];
+    errors.extend(runtime_failures(report, &progress.sources, &progress.sinks));
+    let state = if errors
+        .iter()
+        .any(|failure| matches!(failure.error, CalcFlowError::RecoveryRequired { .. }))
+    {
+        ContinuousJobState::RecoveryRequired
+    } else {
+        ContinuousJobState::Failed
+    };
+    let cause = TerminalCause::RunnerFailure;
+    core.metrics.record_terminal(state, cause.clone());
+    if let Some(overflow) = core.metrics.account_terminal_errors_once(&errors) {
+        errors.push(overflow);
+    }
+    DriverReport {
+        launch_id: core.launch_id,
+        completion: DriverCompletion::Outcome(Arc::new(ContinuousJobOutcome {
+            state,
+            cause,
+            errors,
+        })),
+        cleanup_failures: Vec::new(),
+    }
 }
 
 fn begin_lifecycle_shutdown(runner: &RunnerCore, pending: &mut Option<PendingStart>) {
@@ -1686,7 +1909,7 @@ async fn run_job_driver(
     core: Arc<JobCore>,
     validated: ValidatedContinuousJob,
     checkpoint: Option<ValidatedCheckpointRuntime>,
-) -> DriverReport {
+) -> LaunchId {
     let ValidatedContinuousJob {
         context,
         mut plan,
@@ -1697,6 +1920,22 @@ async fn run_job_driver(
         delivery_proofs: _,
         static_inputs: _,
     } = validated;
+    core.runtime_status.lock().rolling_metrics = plan
+        .nodes
+        .iter()
+        .filter(|node| {
+            matches!(
+                &node.operator,
+                crate::pipeline::CompiledStreamOperator::Rolling(_)
+            )
+        })
+        .map(|node| {
+            (
+                node.operator_id.as_str().to_owned(),
+                RollingMetricsStore::default(),
+            )
+        })
+        .collect();
     let cancellation = context.cancellation().clone();
     let checkpoint = match checkpoint {
         Some(checkpoint) => match open_checkpoint_runtime(checkpoint, &cancellation).await {
@@ -1705,12 +1944,12 @@ async fn run_job_driver(
                     .metrics
                     .record_checkpoint_orphan_cleanup(checkpoint.startup_orphans_removed)
                 {
-                    return checkpoint_start_failure(launch_id, error);
+                    return core.prepare_driver_report(checkpoint_start_failure(launch_id, error));
                 }
                 Some(checkpoint)
             }
             Err(error) => {
-                return DriverReport {
+                return core.prepare_driver_report(DriverReport {
                     launch_id,
                     completion: DriverCompletion::StartFailed(StartFailure {
                         primary: Arc::new(RuntimeFailure {
@@ -1721,7 +1960,7 @@ async fn run_job_driver(
                         cleanup_failures: Vec::new(),
                     }),
                     cleanup_failures: Vec::new(),
-                };
+                });
             }
         },
         None => None,
@@ -1733,7 +1972,7 @@ async fn run_job_driver(
         && let Some(selected) = checkpoint.selected.as_ref()
     {
         if let Err(error) = validate_manifest_operator_capabilities(&selected.manifest, &plan) {
-            return checkpoint_start_failure(launch_id, error);
+            return core.prepare_driver_report(checkpoint_start_failure(launch_id, error));
         }
         match manifest_is_terminal(&selected.manifest, &plan) {
             Ok(true) => {
@@ -1747,30 +1986,32 @@ async fn run_job_driver(
                 match restored {
                     Ok(nodes) => core.runtime_status.lock().nodes.extend(nodes),
                     Err(error) => {
-                        return checkpoint_start_failure(
+                        return core.prepare_driver_report(checkpoint_start_failure(
                             launch_id,
                             sanitize_managed_recovery_error(error, checkpoint.managed),
-                        );
+                        ));
                     }
                 }
                 drop(sources);
-                return recover_terminal_manifest(
-                    launch_id,
-                    &core,
-                    &checkpoint.transaction,
-                    &checkpoint.identity,
-                    selected,
-                    sinks,
-                    checkpoint.managed,
-                )
-                .await;
+                return core.prepare_driver_report(
+                    recover_terminal_manifest(
+                        launch_id,
+                        &core,
+                        &checkpoint.transaction,
+                        &checkpoint.identity,
+                        selected,
+                        sinks,
+                        checkpoint.managed,
+                    )
+                    .await,
+                );
             }
             Ok(false) => {}
             Err(error) => {
-                return checkpoint_start_failure(
+                return core.prepare_driver_report(checkpoint_start_failure(
                     launch_id,
                     sanitize_managed_recovery_error(error, checkpoint.managed),
-                );
+                ));
             }
         }
     }
@@ -1791,10 +2032,10 @@ async fn run_job_driver(
             {
                 Ok(restored) => restored,
                 Err(error) => {
-                    return checkpoint_start_failure(
+                    return core.prepare_driver_report(checkpoint_start_failure(
                         launch_id,
                         sanitize_managed_recovery_error(error, checkpoint.managed),
-                    );
+                    ));
                 }
             }
         }
@@ -1830,7 +2071,7 @@ async fn run_job_driver(
             let managed_recovery = checkpoint
                 .as_ref()
                 .is_some_and(|checkpoint| checkpoint.managed && checkpoint.selected.is_some());
-            return DriverReport {
+            return core.prepare_driver_report(DriverReport {
                 launch_id,
                 completion: DriverCompletion::StartFailed(StartFailure {
                     primary: sanitize_managed_recovery_failure(primary, managed_recovery),
@@ -1838,14 +2079,14 @@ async fn run_job_driver(
                     cleanup_failures: Vec::new(),
                 }),
                 cleanup_failures: Vec::new(),
-            };
+            });
         }
         Err(EntryFailure::Cancelled) => {
-            return cancelled_driver_report(launch_id, &core.metrics);
+            return core.prepare_driver_report(cancelled_driver_report(launch_id, &core.metrics));
         }
     };
     if let Some(report) = cancel_after_operator_entry(launch_id, &core, &mut runtime).await {
-        return report;
+        return core.prepare_driver_report(report);
     }
     let mut resources = connector_resources(sources, sinks);
     let open_failures = if checkpoint.is_some() {
@@ -1854,22 +2095,26 @@ async fn run_job_driver(
         open_connector_resources(&mut resources, &core.launch_cancel).await
     };
     if !open_failures.is_empty() {
-        return finish_failed_launch(
-            launch_id,
-            open_failures,
-            &mut resources,
-            &mut runtime.supervisor,
-        )
-        .await;
+        return core.prepare_driver_report(
+            finish_failed_launch(
+                launch_id,
+                open_failures,
+                &mut resources,
+                &mut runtime.supervisor,
+            )
+            .await,
+        );
     }
     if core.launch_cancel.is_cancelled() {
-        return finish_cancelled_launch(
-            launch_id,
-            &mut resources,
-            &mut runtime.supervisor,
-            &core.metrics,
-        )
-        .await;
+        return core.prepare_driver_report(
+            finish_cancelled_launch(
+                launch_id,
+                &mut resources,
+                &mut runtime.supervisor,
+                &core.metrics,
+            )
+            .await,
+        );
     }
 
     let (opened_sources, opened_sinks) = opened_connector_bindings(std::mem::take(&mut resources));
@@ -1900,16 +2145,18 @@ async fn run_job_driver(
         };
         if let Err(error) = recovery {
             let mut resources = connector_resources(opened_sources, opened_sinks);
-            return finish_failed_launch(
-                launch_id,
-                vec![Arc::new(RuntimeFailure {
-                    origin: FailureOrigin::Preflight,
-                    error,
-                })],
-                &mut resources,
-                &mut runtime.supervisor,
-            )
-            .await;
+            return core.prepare_driver_report(
+                finish_failed_launch(
+                    launch_id,
+                    vec![Arc::new(RuntimeFailure {
+                        origin: FailureOrigin::Preflight,
+                        error,
+                    })],
+                    &mut resources,
+                    &mut runtime.supervisor,
+                )
+                .await,
+            );
         }
     }
     let task_progress = register_boundary_tasks(
@@ -1933,12 +2180,12 @@ async fn run_job_driver(
     if !await_handle_claim(&core).await {
         runtime.supervisor.cancel();
         let report = runtime.supervisor.join_all().await;
-        return cancelled_driver_report_with_task_cleanup(
+        return core.prepare_driver_report(cancelled_driver_report_with_task_cleanup(
             launch_id,
             report,
             &task_progress,
             &core.metrics,
-        );
+        ));
     }
     if runtime.data_gate.send(true).is_err() {
         cancellation.cancel();
@@ -2515,7 +2762,7 @@ enum EntryFailure {
 }
 
 struct RegisteredRuntime {
-    supervisor: TaskSupervisor,
+    supervisor: SupervisorLoan,
     data_gate: watch::Sender<bool>,
     source_outputs: BTreeMap<String, Vec<EdgeSender>>,
     sink_inputs: BTreeMap<String, EdgeReceiver>,
@@ -2734,10 +2981,13 @@ async fn run_operator_entry(
     mut restores: BTreeMap<String, OperatorRestoreState>,
     checkpoint: Option<OperatorCheckpointRegistration>,
 ) -> Result<RegisteredRuntime, EntryFailure> {
-    let mut supervisor = TaskSupervisor::new_with_terminal_arbiter(
+    let supervisor = TaskSupervisor::new_with_terminal_arbiter(
         cancellation.clone(),
         core.terminal_arbiter.clone(),
     );
+    let mut supervisor = core
+        .supervision
+        .install(supervisor, core.entity_work.clone());
     core.runtime_status.lock().tasks = supervisor.registry();
     let (entry_tx, _) = watch::channel(false);
     let (data_tx, _) = watch::channel(false);
@@ -2822,47 +3072,82 @@ fn register_operator_nodes(
     nodes: Vec<RuntimeStreamNode>,
     registration: &mut OperatorRegistration<'_>,
 ) -> Result<(), EntryFailure> {
-    for node in nodes {
-        let node_id = node.operator_id.as_str().to_owned();
-        debug_assert_eq!(node.node_id, node_id);
-        let progress = OperatorProgress::default();
-        let ingresses =
-            take_node_ingresses(&node, registration.receivers).map_err(preflight_entry_failure)?;
-        let outputs =
-            take_node_outputs(&node, registration.senders).map_err(preflight_entry_failure)?;
-        let task_context = registration
-            .context
-            .for_node(&node_id)
-            .map_err(preflight_entry_failure)?;
-        spawn_operator_task(
-            registration.supervisor,
-            OperatorTaskInputs {
-                node_id: node_id.clone(),
-                operator: node.operator,
-                checkpoint_capability: node.checkpoint_capability,
-                ingresses,
-                outputs,
-                output_ports: node.output_ports,
-                context: task_context,
-                progress: progress.clone(),
-                metrics: registration.metrics.clone(),
-                entry_gate: registration.entry_tx.subscribe(),
-                entry_ack: registration.ack_tx.clone(),
-                data_gate: registration.data_tx.subscribe(),
-                launch_cancel: registration.core.launch_cancel.clone(),
-                checkpoint: registration
-                    .checkpoint
-                    .map(|checkpoint| checkpoint.port(&node_id)),
-                restore: registration.restores.remove(&node_id),
-            },
-        );
+    let mut nodes = nodes.into_iter().peekable();
+    while let Some(first) = nodes.next() {
+        let pair = nodes
+            .peek()
+            .is_some_and(|second| operator_fusion::eligible_pair(&first, second));
+        let first = prepare_operator_task(first, registration)?;
+        if pair {
+            let second = prepare_operator_task(
+                nodes.next().expect("eligible adjacent node exists"),
+                registration,
+            )?;
+            spawn_operator_task_pair(registration.supervisor, first, second);
+        } else {
+            spawn_operator_task(registration.supervisor, first);
+        }
+    }
+    Ok(())
+}
+
+fn prepare_operator_task(
+    node: RuntimeStreamNode,
+    registration: &mut OperatorRegistration<'_>,
+) -> Result<OperatorTaskInputs, EntryFailure> {
+    let node_id = node.operator_id.as_str().to_owned();
+    debug_assert_eq!(node.node_id, node_id);
+    let progress = OperatorProgress::with_optional_rolling_metrics(
         registration
             .runtime_status
             .lock()
-            .nodes
-            .insert(node_id, progress);
-    }
-    Ok(())
+            .rolling_metrics
+            .get(&node_id)
+            .cloned(),
+    );
+    let ingresses =
+        take_node_ingresses(&node, registration.receivers).map_err(preflight_entry_failure)?;
+    let outputs =
+        take_node_outputs(&node, registration.senders).map_err(preflight_entry_failure)?;
+    let task_context = registration
+        .context
+        .for_node(&node_id)
+        .map_err(preflight_entry_failure)?;
+    let inputs = OperatorTaskInputs {
+        entity_work: matches!(
+            &node.operator,
+            crate::pipeline::CompiledStreamOperator::Rolling(_)
+        )
+        .then(|| {
+            registration
+                .core
+                .entity_work
+                .unbound_client(format!("operator:{node_id}").into())
+        }),
+        node_id: node_id.clone(),
+        operator: node.operator,
+        checkpoint_capability: node.checkpoint_capability,
+        ingresses,
+        outputs,
+        output_ports: node.output_ports,
+        context: task_context,
+        progress: progress.clone(),
+        metrics: registration.metrics.clone(),
+        entry_gate: registration.entry_tx.subscribe(),
+        entry_ack: registration.ack_tx.clone(),
+        data_gate: registration.data_tx.subscribe(),
+        launch_cancel: registration.core.launch_cancel.clone(),
+        checkpoint: registration
+            .checkpoint
+            .map(|checkpoint| checkpoint.port(&node_id)),
+        restore: registration.restores.remove(&node_id),
+    };
+    registration
+        .runtime_status
+        .lock()
+        .nodes
+        .insert(node_id, progress);
+    Ok(inputs)
 }
 
 async fn await_operator_entry(
@@ -4361,9 +4646,9 @@ async fn drive_running_job(
     deadline: Option<chrono::DateTime<Utc>>,
     cancellation: CancellationToken,
     progress: RuntimeTaskProgress,
-    supervisor: &mut TaskSupervisor,
+    supervisor: &mut SupervisorLoan,
     metrics: &MetricsRecorder,
-) -> DriverReport {
+) -> LaunchId {
     let deadline_for_wait = deadline;
     let deadline_wait = async move {
         match deadline_for_wait {
@@ -4415,14 +4700,14 @@ async fn drive_running_job(
             biased;
             () = cancellation.cancelled(), if committed_terminal.is_none() => {}
             report = &mut join => {
-                return finish_running_report(
+                return core.prepare_driver_report(finish_running_report(
                     launch_id,
                     committed_terminal,
                     graceful_requested,
                     report,
                     &progress,
                     metrics,
-                );
+                ));
             }
             () = core.changed.notified() => {}
             () = &mut deadline_wait, if !deadline_fired => {
@@ -4465,7 +4750,7 @@ fn finish_running_report(
         TerminalCause::ExplicitCancel | TerminalCause::DeadlineExceeded => {
             ContinuousJobState::Cancelled
         }
-        TerminalCause::TaskFailure { .. } => errors
+        TerminalCause::TaskFailure { .. } | TerminalCause::RunnerFailure => errors
             .first()
             .map_or(ContinuousJobState::Failed, |failure| {
                 classify_failure_state(failure)
@@ -4554,7 +4839,7 @@ fn source_task_identity(task_name: &str) -> Option<(&str, &str)> {
     matches!(unit, "pump" | "task").then_some((binding_id, unit))
 }
 
-fn task_runtime_failure(failure: super::supervisor::TaskFailure) -> Arc<RuntimeFailure> {
+fn task_runtime_failure(failure: TaskFailure) -> Arc<RuntimeFailure> {
     Arc::new(RuntimeFailure {
         origin: FailureOrigin::Task {
             task_id: failure.task_id,

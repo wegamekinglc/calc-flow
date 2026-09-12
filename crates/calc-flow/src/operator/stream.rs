@@ -11,6 +11,8 @@ use crate::{
 };
 
 use super::OperatorMetadata;
+use super::rolling_metrics::RollingMetricsRecorder;
+use crate::runtime::streaming::entity_work::ScopedEntityWorkClient;
 
 /// Lifecycle proof exposed by an external stream operator.
 ///
@@ -216,6 +218,8 @@ pub struct StreamOperatorContext<'a> {
     ingress_progress: IngressProgressSnapshot,
     output_budget: EdgeBudget,
     late_metrics: Arc<dyn LateMetricSink>,
+    rolling_metrics: Option<RollingMetricsRecorder>,
+    entity_work: Option<ScopedEntityWorkClient>,
 }
 
 impl<'a> StreamOperatorContext<'a> {
@@ -232,6 +236,8 @@ impl<'a> StreamOperatorContext<'a> {
             ingress_progress: IngressProgressSnapshot::default(),
             output_budget: EdgeBudget::default(),
             late_metrics: Arc::new(LateMetricRecorder::default()),
+            rolling_metrics: None,
+            entity_work: None,
         }
     }
 
@@ -249,6 +255,8 @@ impl<'a> StreamOperatorContext<'a> {
             ingress_progress,
             output_budget: EdgeBudget::default(),
             late_metrics: Arc::new(LateMetricRecorder::default()),
+            rolling_metrics: None,
+            entity_work: None,
         }
     }
 
@@ -267,7 +275,27 @@ impl<'a> StreamOperatorContext<'a> {
             ingress_progress,
             output_budget,
             late_metrics,
+            rolling_metrics: None,
+            entity_work: None,
         }
+    }
+
+    pub(crate) fn with_rolling_metrics(mut self, metrics: RollingMetricsRecorder) -> Self {
+        self.rolling_metrics = Some(metrics);
+        self
+    }
+
+    pub(crate) fn rolling_metrics(&self) -> Option<&RollingMetricsRecorder> {
+        self.rolling_metrics.as_ref()
+    }
+
+    pub(crate) fn with_entity_work(mut self, client: ScopedEntityWorkClient) -> Self {
+        self.entity_work = Some(client);
+        self
+    }
+
+    pub(crate) fn entity_work(&self) -> Option<&ScopedEntityWorkClient> {
+        self.entity_work.as_ref()
     }
 
     /// Returns the owning job's immutable context.

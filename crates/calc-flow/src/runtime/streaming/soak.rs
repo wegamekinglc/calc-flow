@@ -4182,19 +4182,14 @@ async fn run_checkpoint_restart_fault_case(
                 && checkpoint_status_matches
                 && first_status.checkpoint.failure_category
                     == Some(PublicStreamingErrorCategory::Internal)
-                && first_outcome.errors.iter().any(|error| {
-                    error.category() == PublicStreamingErrorCategory::Operator
-                        && error.epoch().is_none()
-                        && error.checkpoint_phase().is_none()
-                        && error.component_kind() == Some(PublicComponentKind::Operator)
-                        && matches!(error.component_id(), Some("window" | "branch_a"))
-                })
-                && first_outcome.errors.iter().any(|error| {
-                    error.category() == PublicStreamingErrorCategory::Internal
-                        && error.epoch().is_none()
-                        && error.checkpoint_phase().is_none()
-                        && error.component_kind() == Some(PublicComponentKind::Edge)
-                })
+                && first_outcome.errors.len() == 1
+                && exact_error(
+                    PublicStreamingErrorCategory::Operator,
+                    None,
+                    None,
+                    Some(PublicComponentKind::Operator),
+                    Some("window"),
+                )
         }
         (CheckpointFaultPoint::PartialAlignment, CheckpointFaultMode::Panic) => {
             first_outcome.state == PublicJobState::Failed
@@ -4212,13 +4207,16 @@ async fn run_checkpoint_restart_fault_case(
             first_outcome.state == PublicJobState::Failed
                 && first_outcome.cause == PublicTerminalCause::Failure
                 && checkpoint_status_matches
-                && first_outcome.errors.iter().any(|error| {
-                    error.category() == PublicStreamingErrorCategory::Operator
-                        && error.epoch().is_none()
-                        && error.checkpoint_phase().is_none()
-                        && error.component_kind() == Some(PublicComponentKind::Operator)
-                        && matches!(error.component_id(), Some("branch_a" | "branch_b"))
-                })
+                && first_status.checkpoint.failure_category
+                    == Some(PublicStreamingErrorCategory::Internal)
+                && first_outcome.errors.len() == 1
+                && exact_error(
+                    PublicStreamingErrorCategory::Operator,
+                    None,
+                    None,
+                    Some(PublicComponentKind::Operator),
+                    Some("merge"),
+                )
         }
         (CheckpointFaultPoint::Compaction, CheckpointFaultMode::Io)
         | (

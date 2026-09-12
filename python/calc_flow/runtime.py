@@ -631,7 +631,48 @@ class JobStatus(TypedDict):
     sinks: dict[str, dict[str, object]]
     stream_joins: dict[str, StreamJoinStatus]
     stream_asof_joins: dict[str, StreamAsofJoinStatus]
+    rolling_metrics: dict[str, RollingMetrics]
     checkpoint: dict[str, object]
+
+
+class RollingCallbackMetrics(TypedDict):
+    """Lifetime attempted work and exclusive elapsed stages in nanoseconds."""
+
+    started: int
+    succeeded: int
+    failed: int
+    cancelled: int
+    interrupted: int
+    callback_duration_ns: int
+    input_validation_duration_ns: int
+    ordering_proof_duration_ns: int
+    entity_resolution_duration_ns: int
+    state_preparation_duration_ns: int
+    numeric_update_duration_ns: int
+    history_maintenance_duration_ns: int
+    arrow_output_duration_ns: int
+    budget_preparation_duration_ns: int
+    send_wait_duration_ns: int
+    other_duration_ns: int
+    input_rows: int
+    order_proof_rows: int
+    resolved_rows: int
+    touched_entities: int
+    copied_entities: int
+    numeric_rows: int
+    history_rows_materialized: int
+    scalar_value_conversions: int
+    output_rows_prepared: int
+    output_chunks_prepared: int
+
+
+class RollingMetrics(TypedDict):
+    """Payload-free Native observations for this job, independent of checkpoints."""
+
+    data: RollingCallbackMetrics
+    watermark: RollingCallbackMetrics
+    end: RollingCallbackMetrics
+    overflowed: bool
 
 
 class StreamJoinSideStatus(TypedDict):

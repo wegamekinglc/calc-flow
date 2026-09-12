@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 import tomllib
 import unittest
 from pathlib import Path
@@ -51,6 +52,11 @@ class ReleaseConfigTests(unittest.TestCase):
                 "python -m unittest scripts.test_profile_warm_stream" in workflow,
                 f"{name} must execute warm profiling controller tests",
             )
+            for module in (
+                "scripts.test_performance_plan",
+                "scripts.test_entity_parallel_inventory",
+            ):
+                self.assertIn(module, workflow, f"{name} must execute {module}")
 
     def test_current_python_surfaces_do_not_use_removed_compile_method(self) -> None:
         paths = [
@@ -481,7 +487,7 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn("  docs-check:\n", linux)
         self.assertIn('run: git diff --check "$BASE_SHA" "$HEAD_SHA"', linux)
         docs_check = linux.split("  docs-check:\n", 1)[1].split(
-            "  connector-containers:\n", 1
+            "  coverage-baseline:\n", 1
         )[0]
         self.assertNotIn("if: needs.changes.outputs.docs_only", docs_check)
 
@@ -637,6 +643,37 @@ class ReleaseConfigTests(unittest.TestCase):
             finish,
         )
         self.assertIn("parallel-finished: true", finish)
+
+    def test_coverage_comparison_uses_one_verified_base_without_relabeling(
+        self,
+    ) -> None:
+        workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
+        self.assertIn("  coverage-baseline:\n", workflow)
+        baseline = workflow.split("  coverage-baseline:\n", 1)[1].split(
+            "  connector-containers:\n", 1
+        )[0]
+        self.assertIn("scripts/resolve_coverage_baseline.py", baseline)
+        self.assertIn("statuses: read", baseline)
+        self.assertIn(
+            "github.event.pull_request.base.sha || github.event.before", baseline
+        )
+        self.assertIn("if: needs.changes.outputs.docs_only != 'true'", baseline)
+        self.assertNotIn("continue-on-error", baseline)
+        self.assertIn("coverage-baseline.json", baseline)
+        for job in ("lint-and-test", "studio-backend", "rust-coverage"):
+            section = re.split(
+                r"\n  (?=\S)", workflow.split(f"  {job}:\n", 1)[1], maxsplit=1
+            )[0]
+            self.assertIn("- coverage-baseline", section)
+            self.assertIn(
+                "compare-sha: ${{ needs.coverage-baseline.outputs.compare_sha }}",
+                section,
+            )
+            self.assertNotIn("git-commit:", section)
+            self.assertNotIn("carryforward:", section)
+        gate = workflow.split("  linux-gate:\n", 1)[1]
+        self.assertIn("- coverage-baseline", gate)
+        self.assertIn('"$COVERAGE_BASELINE_RESULT"', gate)
 
     def test_performance_workflows_cover_p1_and_p2_evidence(self) -> None:
         from scripts.benchmark_suite.catalog import shards

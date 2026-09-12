@@ -147,6 +147,26 @@ impl ExpressionOperator {
         &self.query
     }
 
+    pub(crate) fn is_exact_column_projection(
+        &self,
+        input: &SchemaRef,
+        output: Option<&SchemaRef>,
+    ) -> bool {
+        self.udfs.is_empty()
+            && self
+                .stream_state
+                .resources
+                .as_ref()
+                .is_none_or(|(_, _, selected)| selected.is_empty())
+            && self.input_ports[0].schema() == Some(input)
+            && self.output_ports[0].schema() == output
+            && self
+                .column_projection
+                .as_ref()
+                .and_then(|projection| projection.schema(input))
+                .is_some_and(|(_, schema)| output.is_none_or(|output| schema == *output))
+    }
+
     /// Plans the exact stream output schema without processing any rows.
     ///
     /// This internal adapter seam is for expressions without selected UDFs.

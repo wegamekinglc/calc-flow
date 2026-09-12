@@ -63,6 +63,16 @@ the environment variables listed in [AGENTS.md](../AGENTS.md#commands).
 Missing services block an attempted full coverage run; skipping that run locally
 does not prove coverage or block a scoped handoff that records CI as unverified.
 
+Linux CI validates the Coveralls comparison before uploading its Rust, Python,
+and Studio reports. If a base build contains only some of those flags, the
+[baseline resolver](../scripts/resolve_coverage_baseline.py) requires a complete,
+successful first-attempt Linux run from that base's merged PR, with the same
+full source tree at the actual measurement commit. All three uploads use that
+verified comparison SHA; the original measurement identities and failed runs
+remain intact. CI retains the comparison provenance as an artifact. An
+unverifiable partial base blocks CI. Complete bases and absent reports keep the
+default comparison, and coverage thresholds remain unchanged.
+
 After checks, confirm generated contracts and whitespace:
 
 ```bash

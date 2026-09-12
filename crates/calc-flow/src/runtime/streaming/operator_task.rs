@@ -13,20 +13,35 @@ use tokio::sync::{mpsc, watch};
 use super::{
     EdgeReceiver, EdgeSender, EnvelopeCost, StreamMessage, StreamMessageKind,
     context::{StreamTaskContext, wait_for_task_gate},
+    entity_work::TaskEntityWorkClient,
     metrics::MetricsRecorder,
     progress::{
         aggregate::{AggregateInput, IngressActivity, MultiInputProgress, ProgressEmissionKind},
         prepare::BindingOrdinal,
     },
-    supervisor::{TaskId, TaskSupervisor, panic_message},
+    supervisor::{
+        PreparedPair, RetainedTaskResult, TaskId, TaskSupervisor, contain_task_panic, panic_message,
+    },
 };
 use crate::{
     Batch, CalcFlowError, CancellationToken, EdgeBudget, Epoch, EventTime, IngressProgress,
     IngressProgressSnapshot, IngressState, ManifestIngressState, OperatorIngressManifestEntry,
-    Port, Result, StreamCollector, StreamOperatorContext,
-    operator::{LateMetricDelta, LateMetricSink, accumulate_late_metrics},
+    OperatorMetadata, Port, Result, StreamCollector, StreamOperatorContext,
+    operator::{
+        LateMetricDelta, LateMetricSink, accumulate_late_metrics,
+        rolling_metrics::{
+            RollingCallback, RollingCallbackGuard, RollingMetricsRecorder, RollingMetricsStore,
+            RollingStage, RollingWork,
+        },
+    },
     pipeline::{CompiledStreamOperator, OperatorCheckpointCapability},
 };
+
+#[cfg(test)]
+mod performance_evidence;
+
+#[cfg(test)]
+mod cooperation_tests;
 
 pub(crate) struct OperatorEntryAck {
     pub(crate) node_id: String,
@@ -97,9 +112,36 @@ pub(crate) struct OperatorProgressSnapshot {
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct OperatorProgress(Arc<Mutex<OperatorProgressSnapshot>>);
+pub(crate) struct OperatorProgress(
+    Arc<Mutex<OperatorProgressSnapshot>>,
+    Option<RollingMetricsStore>,
+);
 
 impl OperatorProgress {
+    pub(crate) fn with_optional_rolling_metrics(metrics: Option<RollingMetricsStore>) -> Self {
+        Self(Arc::default(), metrics)
+    }
+
+    #[cfg(test)]
+    fn with_rolling_metrics() -> Self {
+        Self::with_optional_rolling_metrics(Some(RollingMetricsStore::default()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn rolling_metrics(&self) -> Option<crate::RollingMetrics> {
+        self.1.as_ref().map(RollingMetricsStore::snapshot)
+    }
+
+    fn begin_rolling(
+        &self,
+        callback: RollingCallback,
+        cancellation: &CancellationToken,
+    ) -> Option<RollingCallbackGuard> {
+        self.1
+            .as_ref()
+            .map(|store| store.begin(callback, cancellation.clone()))
+    }
+
     pub(crate) fn snapshot(&self) -> OperatorProgressSnapshot {
         self.0.lock().clone()
     }
@@ -177,6 +219,7 @@ impl LateMetricSink for OperatorProgress {
 }
 
 pub(crate) struct OperatorTaskInputs {
+    pub(crate) entity_work: Option<TaskEntityWorkClient>,
     pub(crate) node_id: String,
     pub(crate) operator: CompiledStreamOperator,
     pub(crate) checkpoint_capability: OperatorCheckpointCapability,
@@ -200,11 +243,126 @@ pub(crate) fn spawn_operator_task(
 ) -> TaskId {
     let task_name = format!("operator:{}", inputs.node_id);
     supervisor.spawn_with_failure_signal(task_name, move |failure_signal| {
-        run_operator_task(inputs, failure_signal.task_id())
+        run_retained_operator_task(
+            inputs,
+            failure_signal.task_id(),
+            OperatorCooperation::Disabled,
+        )
     })
 }
 
-async fn run_operator_task(mut inputs: OperatorTaskInputs, task_id: TaskId) -> Result<()> {
+pub(crate) fn spawn_operator_task_pair(
+    supervisor: &mut TaskSupervisor,
+    first: OperatorTaskInputs,
+    second: OperatorTaskInputs,
+) -> [TaskId; 2] {
+    let pair = prepare_operator_task_pair(supervisor, first, second);
+    supervisor.spawn_prepared_pair(pair)
+}
+
+pub(crate) fn prepare_operator_task_pair(
+    supervisor: &mut TaskSupervisor,
+    first: OperatorTaskInputs,
+    second: OperatorTaskInputs,
+) -> PreparedPair<
+    impl Future<Output = RetainedTaskResult<Option<OperatorTaskInputs>>> + use<>,
+    impl Future<Output = RetainedTaskResult<Option<OperatorTaskInputs>>> + use<>,
+> {
+    let first_name = format!("operator:{}", first.node_id);
+    let second_name = format!("operator:{}", second.node_id);
+    let cooperation = pair_cooperation(&first.operator, &second.operator);
+    let pair = supervisor.prepare_pair_with_failure_signals(
+        &first_name,
+        move |signal| run_retained_operator_task(first, signal.task_id(), cooperation),
+        &second_name,
+        move |signal| run_retained_operator_task(second, signal.task_id(), cooperation),
+    );
+    if cooperation == OperatorCooperation::BoundedData {
+        pair.with_readiness()
+    } else {
+        pair
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum OperatorCooperation {
+    Disabled,
+    EveryMessage,
+    BoundedData,
+}
+
+fn pair_cooperation(
+    first: &CompiledStreamOperator,
+    second: &CompiledStreamOperator,
+) -> OperatorCooperation {
+    let (CompiledStreamOperator::Rolling(rolling), CompiledStreamOperator::Expression(expression)) =
+        (first, second)
+    else {
+        return OperatorCooperation::EveryMessage;
+    };
+    let Some(input) = rolling.output_ports()[0].schema() else {
+        return OperatorCooperation::EveryMessage;
+    };
+    if expression.is_exact_column_projection(input, expression.output_ports()[0].schema()) {
+        OperatorCooperation::BoundedData
+    } else {
+        OperatorCooperation::EveryMessage
+    }
+}
+
+impl OperatorCooperation {
+    fn after_dispatch(self, kind: StreamMessageKind, skipped_data: &mut bool) -> bool {
+        match self {
+            Self::Disabled => false,
+            Self::EveryMessage => true,
+            Self::BoundedData if kind == StreamMessageKind::Data && !*skipped_data => {
+                *skipped_data = true;
+                false
+            }
+            Self::BoundedData => {
+                *skipped_data = false;
+                true
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+async fn run_operator_task(inputs: OperatorTaskInputs, task_id: TaskId) -> Result<()> {
+    run_operator_task_with_cooperation(inputs, task_id, OperatorCooperation::Disabled).await
+}
+
+#[cfg(test)]
+async fn run_operator_task_with_cooperation(
+    mut inputs: OperatorTaskInputs,
+    task_id: TaskId,
+    cooperation: OperatorCooperation,
+) -> Result<()> {
+    run_operator_task_body(&mut inputs, task_id, cooperation).await
+}
+
+async fn run_retained_operator_task(
+    mut inputs: OperatorTaskInputs,
+    task_id: TaskId,
+    cooperation: OperatorCooperation,
+) -> RetainedTaskResult<Option<OperatorTaskInputs>> {
+    let result = contain_task_panic(
+        task_id,
+        run_operator_task_body(&mut inputs, task_id, cooperation),
+    )
+    .await
+    .and_then(std::convert::identity);
+    // A failing task must not wake its peers by dropping endpoints before the
+    // supervisor has published its result and completed failure convergence.
+    let retained = result.is_err().then_some(inputs);
+    RetainedTaskResult { result, retained }
+}
+
+async fn run_operator_task_body(
+    inputs: &mut OperatorTaskInputs,
+    task_id: TaskId,
+    cooperation: OperatorCooperation,
+) -> Result<()> {
     if !wait_for_task_gate(
         &mut inputs.entry_gate,
         &inputs.launch_cancel,
@@ -215,7 +373,7 @@ async fn run_operator_task(mut inputs: OperatorTaskInputs, task_id: TaskId) -> R
     {
         return Ok(());
     }
-    let Some(input_progress) = reset_and_acknowledge(&mut inputs, task_id)? else {
+    let Some(input_progress) = reset_and_acknowledge(inputs, task_id)? else {
         return Ok(());
     };
     if !wait_for_task_gate(
@@ -228,8 +386,11 @@ async fn run_operator_task(mut inputs: OperatorTaskInputs, task_id: TaskId) -> R
     {
         return Ok(());
     }
-    let result = run_operator_loop(&mut inputs, input_progress).await;
-    normalize_cancelled_result(&inputs, result)
+    if let Some(client) = &mut inputs.entity_work {
+        client.activate(task_id);
+    }
+    let result = run_operator_loop(inputs, input_progress, cooperation).await;
+    normalize_cancelled_result(inputs, result)
 }
 
 fn reset_and_acknowledge(
@@ -362,6 +523,7 @@ fn normalize_cancelled_result(inputs: &OperatorTaskInputs, result: Result<()>) -
 async fn run_operator_loop(
     inputs: &mut OperatorTaskInputs,
     mut input_progress: OperatorInputProgress,
+    cooperation: OperatorCooperation,
 ) -> Result<()> {
     if inputs.ingresses.is_empty() {
         return Err(CalcFlowError::Internal {
@@ -371,19 +533,43 @@ async fn run_operator_loop(
     let mut barrier_alignment = OperatorBarrierAlignment::with_expected_epoch(
         inputs.restore.as_ref().map(|restore| restore.next_epoch),
     );
+    let mut skipped_data = false;
+    let mut handoff_due = false;
     loop {
         if inputs
             .ingresses
             .values()
             .all(|ingress| ingress.saw_explicit_eof)
         {
-            return finish_operator(inputs, &input_progress).await;
+            finish_operator(inputs, &input_progress).await?;
+            if cooperation != OperatorCooperation::Disabled {
+                tokio::task::yield_now().await;
+            }
+            return Ok(());
         }
-        let Some((ingress_name, message)) =
+        let mut receive_suspended = false;
+        let received = if cooperation == OperatorCooperation::BoundedData {
+            receive_operator_message_observing_pending(
+                inputs,
+                &barrier_alignment,
+                &mut receive_suspended,
+            )
+            .await?
+        } else {
             receive_operator_message(inputs, &barrier_alignment).await?
-        else {
+        };
+        let Some((ingress_name, message)) = received else {
             return Ok(());
         };
+        if receive_suspended {
+            skipped_data = false;
+        } else if handoff_due {
+            tokio::task::yield_now().await;
+            if inputs.context.job().cancellation().is_cancelled() {
+                return Ok(());
+            }
+        }
+        let kind = message.kind();
         dispatch_or_cancel(
             inputs,
             &ingress_name,
@@ -392,6 +578,14 @@ async fn run_operator_loop(
             &mut barrier_alignment,
         )
         .await?;
+        handoff_due = cooperation.after_dispatch(kind, &mut skipped_data);
+        if handoff_due
+            && (cooperation != OperatorCooperation::BoundedData
+                || kind == StreamMessageKind::EndOfInput)
+        {
+            tokio::task::yield_now().await;
+            handoff_due = false;
+        }
     }
 }
 
@@ -399,6 +593,10 @@ async fn finish_operator(
     inputs: &mut OperatorTaskInputs,
     input_progress: &OperatorInputProgress,
 ) -> Result<()> {
+    let work = inputs
+        .entity_work
+        .as_ref()
+        .map(TaskEntityWorkClient::callback_scope);
     let input_watermark = input_progress.input_watermark();
     let cancellation = inputs.context.job().cancellation().clone();
     let output_budget = effective_output_budget(&inputs.outputs);
@@ -411,6 +609,12 @@ async fn finish_operator(
         output_budget,
         late_metrics,
     );
+    inputs.progress.record_on_end()?;
+    let callback = inputs
+        .progress
+        .begin_rolling(RollingCallback::End, &cancellation);
+    let context = attach_rolling_context(context, callback.as_ref());
+    let context = attach_entity_context(context, inputs.entity_work.as_ref());
     let mut collector = ChannelStreamCollector::new(
         &inputs.node_id,
         inputs.context.job().job_id(),
@@ -419,12 +623,27 @@ async fn finish_operator(
         inputs.context.job().cancellation(),
         &inputs.progress,
         &inputs.metrics,
-    );
-    inputs.progress.record_on_end()?;
-    tokio::select! {
+    )
+    .with_rolling_metrics(context.rolling_metrics());
+    let result = tokio::select! {
         biased;
-        result = inputs.operator.on_end(&context, &mut collector) => result?,
-        () = cancellation.cancelled() => return Ok(()),
+        result = inputs.operator.on_end(&context, &mut collector) => Some(result),
+        () = cancellation.cancelled() => None,
+    };
+    if let Some(result) = result {
+        if let Some(callback) = callback {
+            callback.complete(&result);
+        }
+        if let Some(work) = &work {
+            work.settle_abandoned().await;
+        }
+        result?;
+    } else {
+        drop(callback);
+        if let Some(work) = &work {
+            work.settle_abandoned().await;
+        }
+        return Ok(());
     }
     forward_control(
         &mut inputs.outputs,
@@ -474,6 +693,20 @@ async fn complete_terminal_checkpoint(
     send_operator_checkpoint_ack(inputs, ack).await
 }
 
+async fn receive_operator_message_observing_pending(
+    inputs: &mut OperatorTaskInputs,
+    barrier_alignment: &OperatorBarrierAlignment,
+    suspended: &mut bool,
+) -> Result<Option<(String, StreamMessage)>> {
+    let mut receive = std::pin::pin!(receive_operator_message(inputs, barrier_alignment));
+    std::future::poll_fn(|context| {
+        let result = receive.as_mut().poll(context);
+        *suspended |= result.is_pending();
+        result
+    })
+    .await
+}
+
 async fn receive_operator_message(
     inputs: &mut OperatorTaskInputs,
     barrier_alignment: &OperatorBarrierAlignment,
@@ -500,12 +733,19 @@ async fn dispatch_or_cancel(
     input_progress: &mut OperatorInputProgress,
     barrier_alignment: &mut OperatorBarrierAlignment,
 ) -> Result<()> {
+    let work = inputs
+        .entity_work
+        .as_ref()
+        .map(TaskEntityWorkClient::callback_scope);
     let cancellation = inputs.context.job().cancellation().clone();
     let result = tokio::select! {
         biased;
         result = dispatch_message(inputs, ingress_name, message, input_progress, barrier_alignment) => result,
         () = cancellation.cancelled() => Ok(()),
     };
+    if let Some(work) = &work {
+        work.settle_abandoned().await;
+    }
     if cancellation.is_cancelled() && matches!(result, Err(CalcFlowError::Cancelled { .. })) {
         Ok(())
     } else {
@@ -914,6 +1154,14 @@ async fn dispatch_data(
     let processing_timer = inputs.metrics.timer();
     let output_budget = effective_output_budget(&inputs.outputs);
     let late_metrics: Arc<dyn LateMetricSink> = Arc::new(inputs.progress.clone());
+    let callback = inputs
+        .progress
+        .begin_rolling(RollingCallback::Data, inputs.context.job().cancellation());
+    if let Some(callback) = &callback {
+        callback
+            .recorder()
+            .add(RollingWork::InputRows, batch.num_rows());
+    }
     let context = StreamOperatorContext::for_task(
         inputs.context.job(),
         &inputs.node_id,
@@ -922,6 +1170,8 @@ async fn dispatch_data(
         output_budget,
         late_metrics,
     );
+    let context = attach_rolling_context(context, callback.as_ref());
+    let context = attach_entity_context(context, inputs.entity_work.as_ref());
     let mut collector = ChannelStreamCollector::new(
         &inputs.node_id,
         inputs.context.job().job_id(),
@@ -930,11 +1180,15 @@ async fn dispatch_data(
         inputs.context.job().cancellation(),
         &inputs.progress,
         &inputs.metrics,
-    );
+    )
+    .with_rolling_metrics(context.rolling_metrics());
     let result = inputs
         .operator
         .process_data(ingress_name, batch, &context, &mut collector)
         .await;
+    if let Some(callback) = callback {
+        callback.complete(&result);
+    }
     inputs
         .progress
         .observe_datafusion_runtime(inputs.operator.datafusion_runtime_initialized());
@@ -957,6 +1211,10 @@ async fn dispatch_watermark_handler(
     let processing_timer = inputs.metrics.timer();
     let output_budget = effective_output_budget(&inputs.outputs);
     let late_metrics: Arc<dyn LateMetricSink> = Arc::new(inputs.progress.clone());
+    let callback = inputs.progress.begin_rolling(
+        RollingCallback::Watermark,
+        inputs.context.job().cancellation(),
+    );
     let context = StreamOperatorContext::for_task(
         inputs.context.job(),
         &inputs.node_id,
@@ -965,6 +1223,8 @@ async fn dispatch_watermark_handler(
         output_budget,
         late_metrics,
     );
+    let context = attach_rolling_context(context, callback.as_ref());
+    let context = attach_entity_context(context, inputs.entity_work.as_ref());
     let mut collector = ChannelStreamCollector::new(
         &inputs.node_id,
         inputs.context.job().job_id(),
@@ -973,14 +1233,39 @@ async fn dispatch_watermark_handler(
         inputs.context.job().cancellation(),
         &inputs.progress,
         &inputs.metrics,
-    );
-    inputs
+    )
+    .with_rolling_metrics(context.rolling_metrics());
+    let result = inputs
         .operator
         .on_watermark(watermark, &context, &mut collector)
-        .await?;
+        .await;
+    if let Some(callback) = callback {
+        callback.complete(&result);
+    }
+    result?;
     inputs
         .metrics
         .record_operator_watermark(&inputs.node_id, &processing_timer)
+}
+
+fn attach_rolling_context<'a>(
+    context: StreamOperatorContext<'a>,
+    callback: Option<&RollingCallbackGuard>,
+) -> StreamOperatorContext<'a> {
+    match callback {
+        Some(callback) => context.with_rolling_metrics(callback.recorder()),
+        None => context,
+    }
+}
+
+fn attach_entity_context<'a>(
+    context: StreamOperatorContext<'a>,
+    task: Option<&TaskEntityWorkClient>,
+) -> StreamOperatorContext<'a> {
+    match task.and_then(TaskEntityWorkClient::context_client) {
+        Some(client) => context.with_entity_work(client),
+        None => context,
+    }
 }
 
 fn effective_output_budget(outputs: &BTreeMap<String, Vec<EdgeSender>>) -> EdgeBudget {
@@ -1345,6 +1630,7 @@ pub(crate) struct ChannelStreamCollector<'a> {
     cancellation: &'a CancellationToken,
     progress: &'a OperatorProgress,
     metrics: &'a MetricsRecorder,
+    rolling_metrics: Option<RollingMetricsRecorder>,
 }
 
 impl<'a> ChannelStreamCollector<'a> {
@@ -1365,13 +1651,23 @@ impl<'a> ChannelStreamCollector<'a> {
             cancellation,
             progress,
             metrics,
+            rolling_metrics: None,
         }
+    }
+
+    fn with_rolling_metrics(mut self, observation: Option<&RollingMetricsRecorder>) -> Self {
+        self.rolling_metrics = observation.cloned();
+        self
     }
 }
 
 #[async_trait]
 impl StreamCollector for ChannelStreamCollector<'_> {
     async fn emit(&mut self, port: &str, batch: Batch) -> Result<()> {
+        let validation = self
+            .rolling_metrics
+            .as_ref()
+            .map(|recorder| recorder.stage(RollingStage::BudgetPreparation));
         let message = validate_emission(self.node_id, self.output_ports, port, batch)?;
         let cost = EnvelopeCost::of_message(&message)?;
         let senders = self
@@ -1379,7 +1675,15 @@ impl StreamCollector for ChannelStreamCollector<'_> {
             .get_mut(port)
             .ok_or_else(|| runtime_routes_error(self.node_id, port))?;
         validate_senders(senders, &message, self.node_id, port)?;
-        send_emission(senders, message, self.cancellation, self.job_id).await?;
+        drop(validation);
+        send_emission(
+            senders,
+            message,
+            self.cancellation,
+            self.job_id,
+            self.rolling_metrics.as_ref(),
+        )
+        .await?;
         self.metrics.record_operator_output(self.node_id, cost)?;
         self.progress.record_output()
     }
@@ -1420,6 +1724,7 @@ async fn send_emission(
     message: StreamMessage,
     cancellation: &CancellationToken,
     job_id: u64,
+    observation: Option<&RollingMetricsRecorder>,
 ) -> Result<()> {
     for sender in senders {
         tokio::select! {
@@ -1429,7 +1734,7 @@ async fn send_emission(
                     run_id: job_id.to_string(),
                 });
             }
-            result = sender.send(message.clone()) => result?,
+            result = sender.send_observed(message.clone(), observation) => result?,
         }
     }
     Ok(())
@@ -1444,6 +1749,7 @@ fn runtime_routes_error(node_id: &str, port: &str) -> CalcFlowError {
 #[cfg(test)]
 pub(super) mod tests {
     mod asof_tests;
+    mod error_propagation_tests;
 
     use std::{
         any::Any,
@@ -1523,6 +1829,7 @@ pub(super) mod tests {
         let (_data, data_gate) = watch::channel(true);
         let (entry_ack, _ack) = mpsc::unbounded_channel();
         let mut inputs = OperatorTaskInputs {
+            entity_work: None,
             node_id: "node".into(),
             operator: CompiledStreamOperator::External(Box::new(operator)),
             checkpoint_capability: OperatorCheckpointCapability::Stateless,
@@ -1915,6 +2222,23 @@ pub(super) mod tests {
         mpsc::UnboundedReceiver<OperatorEntryAck>,
         PendingTask,
     ) {
+        let (cancellation, entered, dropped, ack, task, _) =
+            handler_task_with_progress(handler, resolution, message).await;
+        (cancellation, entered, dropped, ack, task)
+    }
+
+    async fn handler_task_with_progress(
+        handler: PendingHandler,
+        resolution: HandlerResolution,
+        message: StreamMessage,
+    ) -> (
+        CancellationToken,
+        Arc<AtomicBool>,
+        Arc<AtomicBool>,
+        mpsc::UnboundedReceiver<OperatorEntryAck>,
+        PendingTask,
+        OperatorProgress,
+    ) {
         let cancellation = CancellationToken::new();
         let context =
             StreamJobContext::new(7, "fingerprint", JsonMap::new(), None, cancellation.clone());
@@ -1974,8 +2298,10 @@ pub(super) mod tests {
         let (_entry, entry_gate) = watch::channel(true);
         let (_data, data_gate) = watch::channel(true);
         let (entry_ack, ack) = mpsc::unbounded_channel();
+        let progress = OperatorProgress::with_rolling_metrics();
         let task = Box::pin(run_operator_task(
             OperatorTaskInputs {
+                entity_work: None,
                 node_id: "node".into(),
                 operator: CompiledStreamOperator::External(Box::new(operator)),
                 checkpoint_capability: OperatorCheckpointCapability::Stateless,
@@ -1986,7 +2312,7 @@ pub(super) mod tests {
                 outputs: BTreeMap::from([("output".into(), vec![output_sender])]),
                 output_ports: BTreeMap::from([("output".into(), output_port)]),
                 context: context.for_node("node").unwrap(),
-                progress: OperatorProgress::default(),
+                progress: progress.clone(),
                 metrics,
                 entry_gate,
                 entry_ack,
@@ -1997,7 +2323,201 @@ pub(super) mod tests {
             },
             TaskId::new(0),
         ));
-        (cancellation, entered, poll_dropped, ack, task)
+        (cancellation, entered, poll_dropped, ack, task, progress)
+    }
+
+    #[tokio::test]
+    async fn rolling_metrics_finalize_cancelled_or_dropped_callbacks_before_task_returns() {
+        for (handler, message) in [
+            (PendingHandler::Data, StreamMessage::data(batch("S", 0))),
+            (
+                PendingHandler::Watermark,
+                StreamMessage::watermark(EventTime::from_micros(9)),
+            ),
+            (PendingHandler::End, StreamMessage::end_of_input()),
+        ] {
+            for cancel in [false, true] {
+                let (cancellation, entered, dropped, _ack, mut task, progress) =
+                    handler_task_with_progress(
+                        handler,
+                        HandlerResolution::Pending,
+                        message.clone(),
+                    )
+                    .await;
+                assert!(matches!(futures::poll!(task.as_mut()), Poll::Pending));
+                assert!(entered.load(Ordering::SeqCst));
+                if cancel {
+                    cancellation.cancel();
+                    assert!(matches!(futures::poll!(task.as_mut()), Poll::Ready(Ok(()))));
+                }
+                drop(task);
+                assert!(dropped.load(Ordering::SeqCst));
+                let metrics = progress.rolling_metrics().unwrap();
+                let callback = match handler {
+                    PendingHandler::Data => metrics.data,
+                    PendingHandler::Watermark => metrics.watermark,
+                    PendingHandler::End => metrics.end,
+                };
+                assert_eq!(callback.started, 1);
+                assert_eq!(callback.cancelled, u64::from(cancel));
+                assert_eq!(callback.interrupted, u64::from(!cancel));
+                assert_eq!(callback.succeeded + callback.failed, 0);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn rolling_metrics_dispatch_attaches_wait_observation_to_cancelled_emission() {
+        use crate::operator::rolling_metrics::{RollingMetricsClock, RollingMetricsStore};
+
+        struct StepClock(AtomicUsize);
+        impl RollingMetricsClock for StepClock {
+            fn now(&self) -> Duration {
+                Duration::from_nanos(u64::try_from(self.0.fetch_add(17, Ordering::SeqCst)).unwrap())
+            }
+        }
+        let cancellation = CancellationToken::new();
+        let job =
+            StreamJobContext::new(7, "fingerprint", JsonMap::new(), None, cancellation.clone());
+        let store = RollingMetricsStore::with_clock(Arc::new(StepClock(AtomicUsize::new(0))));
+        let progress = OperatorProgress::with_optional_rolling_metrics(Some(store));
+        let output_port = Port::new("output", BatchKind::Table, false, None).unwrap();
+        let (mut sender, receiver) = crate::edge_channel(
+            "output->sink",
+            EdgeBudget {
+                max_rows: 1,
+                max_bytes: 1024,
+            },
+        )
+        .unwrap();
+        sender
+            .send(StreamMessage::data(batch("S", 0)))
+            .await
+            .unwrap();
+        let operator = ProbeOperator {
+            input_ports: vec![Port::new("input", BatchKind::Table, true, None).unwrap()],
+            output_ports: vec![output_port.clone()],
+            behavior: Behavior::Forward,
+            watermarks: Arc::default(),
+            ends: Arc::default(),
+            observed: Arc::default(),
+        };
+        let (_entry, entry_gate) = watch::channel(true);
+        let (_data, data_gate) = watch::channel(true);
+        let (entry_ack, _ack) = mpsc::unbounded_channel();
+        let mut inputs = OperatorTaskInputs {
+            entity_work: None,
+            node_id: "node".into(),
+            operator: CompiledStreamOperator::External(Box::new(operator)),
+            checkpoint_capability: OperatorCheckpointCapability::Stateless,
+            ingresses: BTreeMap::new(),
+            outputs: BTreeMap::from([("output".into(), vec![sender])]),
+            output_ports: BTreeMap::from([("output".into(), output_port)]),
+            context: job.for_node("node").unwrap(),
+            progress: progress.clone(),
+            metrics: super::MetricsRecorder::default(),
+            entry_gate,
+            entry_ack,
+            data_gate,
+            launch_cancel: CancellationToken::new(),
+            checkpoint: None,
+            restore: None,
+        };
+        let mut dispatch = Box::pin(super::dispatch_data(
+            &mut inputs,
+            "input",
+            StreamMessage::data(batch("S", 1)),
+            None,
+            IngressProgressSnapshot::default(),
+        ));
+        assert!(futures::poll!(dispatch.as_mut()).is_pending());
+        cancellation.cancel();
+        let result = dispatch.await;
+        assert!(matches!(result, Err(CalcFlowError::Cancelled { .. })));
+        let metrics = progress.rolling_metrics().unwrap();
+        assert_eq!(metrics.data.started, 1);
+        assert_eq!(metrics.data.cancelled, 1);
+        assert!(metrics.data.send_wait_duration > Duration::ZERO);
+        assert!(metrics.data.budget_preparation_duration > Duration::ZERO);
+        assert_eq!(progress.snapshot().fully_fanned_out_batches, 0);
+        assert_eq!(receiver.metrics().blocked_duration, Duration::ZERO);
+        assert_eq!(receiver.metrics().charged_rows, 1);
+    }
+
+    #[tokio::test]
+    async fn rolling_metrics_publish_interrupted_callbacks_when_tokio_aborts_task() {
+        let (_, entered, dropped, _ack, task, progress) = handler_task_with_progress(
+            PendingHandler::Data,
+            HandlerResolution::Pending,
+            StreamMessage::data(batch("S", 0)),
+        )
+        .await;
+        let task = tokio::spawn(task);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !entered.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(dropped.load(Ordering::SeqCst));
+        let metrics = progress.rolling_metrics().unwrap();
+        assert_eq!(metrics.data.started, 1);
+        assert_eq!(metrics.data.interrupted, 1);
+        assert_eq!(metrics.data.cancelled, 0);
+        assert_eq!(metrics.data.input_rows, 1);
+    }
+
+    #[tokio::test]
+    async fn rolling_metrics_do_not_start_when_eof_entry_accounting_fails() {
+        let (_, entered, _, _ack, mut task, progress) = handler_task_with_progress(
+            PendingHandler::End,
+            HandlerResolution::Pending,
+            StreamMessage::end_of_input(),
+        )
+        .await;
+        progress.0.lock().on_end_calls = u64::MAX;
+        assert!(matches!(futures::poll!(task.as_mut()), Poll::Ready(Err(_))));
+        assert!(!entered.load(Ordering::SeqCst));
+        assert_eq!(progress.rolling_metrics().unwrap().end.started, 0);
+    }
+
+    #[tokio::test]
+    async fn rolling_metrics_preserve_selected_error_when_cancellation_is_ready() {
+        for (handler, message) in [
+            (PendingHandler::Data, StreamMessage::data(batch("S", 0))),
+            (
+                PendingHandler::Watermark,
+                StreamMessage::watermark(EventTime::from_micros(9)),
+            ),
+            (PendingHandler::End, StreamMessage::end_of_input()),
+        ] {
+            let ready = Arc::new(AtomicBool::new(false));
+            let (cancellation, _, _, _ack, mut task, progress) = handler_task_with_progress(
+                handler,
+                HandlerResolution::ErrorWhen(ready.clone()),
+                message,
+            )
+            .await;
+            assert!(matches!(futures::poll!(task.as_mut()), Poll::Pending));
+            ready.store(true, Ordering::SeqCst);
+            cancellation.cancel();
+            assert!(matches!(
+                futures::poll!(task.as_mut()),
+                Poll::Ready(Err(CalcFlowError::Operator { .. }))
+            ));
+            let metrics = progress.rolling_metrics().unwrap();
+            let callback = match handler {
+                PendingHandler::Data => metrics.data,
+                PendingHandler::Watermark => metrics.watermark,
+                PendingHandler::End => metrics.end,
+            };
+            assert_eq!(callback.started, 1);
+            assert_eq!(callback.failed, 1);
+            assert_eq!(callback.cancelled + callback.interrupted, 0);
+        }
     }
 
     async fn pending_handler_task(
@@ -2277,6 +2797,7 @@ pub(super) mod tests {
         spawn_operator_task(
             &mut supervisor,
             OperatorTaskInputs {
+                entity_work: None,
                 node_id: "node".into(),
                 operator,
                 checkpoint_capability,
@@ -2349,6 +2870,7 @@ pub(super) mod tests {
             StreamMessage::data(batch("S", 0)),
             &cancellation,
             47,
+            None,
         )
         .await
         .unwrap_err();

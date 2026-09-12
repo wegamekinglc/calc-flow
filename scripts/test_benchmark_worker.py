@@ -13,6 +13,7 @@ class BenchmarkWorkerTests(unittest.TestCase):
     def setUp(self):
         engine = ModuleType("benchmarks.engine_comparison")
         self.factory = Mock()
+        self.factory.return_value.finish.return_value = {"state": "completed"}
         engine.EngineCase = self.factory
         self.modules = patch.dict("sys.modules", {engine.__name__: engine})
         self.modules.start()
@@ -67,3 +68,31 @@ class BenchmarkWorkerTests(unittest.TestCase):
     def test_unknown_request_is_a_protocol_error(self):
         with self.assertRaisesRegex(ValueError, "unknown worker request"):
             dispatch({"operation": "inject"}, None, self.root)
+
+    def test_diagnostic_case_finishes_its_owned_job_before_close(self):
+        diagnostics = ModuleType("benchmarks.performance_diagnostics")
+        diagnostics.NativeDiagnosticCase = Mock()
+        active = diagnostics.NativeDiagnosticCase.return_value
+        active.sample.return_value = {"seconds": 1.0}
+        active.finish.return_value = {"state": "completed", "after_status": {}}
+        with patch.dict("sys.modules", {diagnostics.__name__: diagnostics}):
+            _, prepared = dispatch(
+                {"operation": "prepare", "case": {"family": "native-diagnostic"}},
+                None,
+                self.root,
+            )
+            self.assertIs(prepared, active)
+            response, prepared = dispatch({"operation": "finish"}, active, self.root)
+        self.assertEqual(response, active.finish.return_value)
+        self.assertIsNone(prepared)
+        active.finish.assert_called_once_with()
+        active.close.assert_called_once_with()
+
+    def test_unknown_workload_family_is_rejected_before_any_case_starts(self):
+        with self.assertRaisesRegex(ValueError, "unsupported benchmark family"):
+            dispatch(
+                {"operation": "prepare", "case": {"family": "unknown"}},
+                None,
+                self.root,
+            )
+        self.factory.assert_not_called()

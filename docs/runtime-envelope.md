@@ -407,9 +407,15 @@ failures are reported in stable task-ID order, and panics become
 signal cancellation before potentially blocking teardown work, so siblings
 can converge promptly.
 
+Failed operators retain their ingress and output endpoints until the original
+result is recorded and job cancellation is signalled. Edge closures caused by
+that failure therefore cannot displace the originating operator error,
+including failures during checkpoint alignment and state staging. Independent
+simultaneous failures still retain their stable task-ID ordering.
+
 ## Operator tasks and barrier alignment
 
-One operator task owns each compiled stream operator. It selects ready
+One logical operator task owns each compiled stream operator. It selects ready
 ingresses without weakening per-ingress FIFO, validates data emissions before
 the first send, fans out over real bounded edges, and owns one lazy
 operator-scoped DataFusion runtime when table work requires it. Aggregate
@@ -536,6 +542,14 @@ ownership to the reaper, and a later start or runner shutdown joins it. Task
 failure wins over explicit cancel, which wins over deadline expiry; concurrent
 and repeated observers receive one immutable outcome.
 
+If a claimed job's driver is aborted, its owned work is joined before an
+outcome is published to existing waiters. Preserve an already prepared outcome
+or committed terminal decision, including a primary task failure. Otherwise
+the driver failure uses the existing public
+`Failure` cause and runner-lifecycle error origin, without inventing a logical
+task identity. A start-only failure cannot replace an outcome after the job
+has been delivered.
+
 Private source, operator, and sink tasks, the task supervisor, and runner
 connector-open/close paths create operational
 `CalcFlowError::TaskPanicked` values with a stable task ID. Together these
@@ -574,15 +588,100 @@ durations are not CPU-time measurements and are not additive across concurrent
 operators. In particular, rolling finalization happens in the watermark
 handler, not necessarily in the Data handler.
 
+`StreamingJob::rolling_metrics()` provides a separate lifetime observation
+map for Native rolling nodes. Python exposes it as `status()["rolling_metrics"]`
+with integer nanosecond durations. Each node has independent Data, watermark
+and end-of-input records. `started` counts callbacks immediately; finalized
+work and one of `succeeded`, `failed`, `cancelled` or `interrupted` publish
+together after each callback and its job-owned CPU work settle. The first
+completion or Drop freezes the outcome; later cancellation or cleanup cannot
+replace it. Snapshots can therefore include a started callback whose outcome
+is still pending, including after its async future is dropped while CPU work
+is drained. Callbacks without outstanding CPU work publish immediately at
+completion or Drop. Restored jobs start fresh observations, including zeroed
+entries for terminal recovery.
+
+The finalized callback duration is divided into ten exclusive elapsed stages:
+input validation, ordering proof, entity resolution, state preparation,
+numeric update, history maintenance, Arrow output, budget preparation, send
+waiting, and other work. Nested stage scopes pause their parent attribution;
+the stage sum equals the inclusive callback duration. Send waiting measures
+actual capacity awaits, including failed and cancelled waits. These wall-clock
+intervals include scheduling delay and must not be presented as CPU samples
+or added across concurrent operators.
+
+An owned two-lane numeric computation has one parent `numeric_update` interval
+covering dispatch, blocking-pool queueing, execution and joins. Lane CPU times
+are not summed. If the async callback is dropped first, subsequent drain time
+belongs to `other`; retained stage handles cannot reopen a named stage. The
+inclusive callback observation ends when the owned work settles and can extend
+beyond the original async operator timer. It is not necessarily a subset of
+`processing_duration`. Terminal status waits for the owned work to be joined
+and its actual work counters to settle.
+
+Work counters include unsuccessful attempts and retries. Numeric row counts
+include actual speculative transitions in a private lane that is later
+discarded; they are not a claim about the serial prefix before failure. Late
+rows rejected before ordering checks do not increment `order_proof_rows`;
+`output_rows_prepared` does not prove sink delivery. Existing edge accounting
+and operator timers keep their original meanings. Observations are bounded
+and payload-free, with no row/key samples or per-callback history. Checked
+overflow preserves the previous coherent aggregate and sets `overflowed`;
+exclude that observation from performance evidence. Diagnostic overflow does
+not change the application's result. The managed runner collects these
+observations without a project configuration switch.
+
 ## Execution paths
 
 For canonical ordered input and supported bounded typed row windows, rolling
 buffers immutable Arrow batches until finality and computes directly from
-their columns. It stages touched-entity kernel updates and newly retained
-history rows, then commits them after successful output emission. Unchanged
-retained rows are not cloned. Overlapping, unordered, or late envelopes and
+their columns. Borrowed encoded keys avoid allocating an owned entity ID per
+row. Only touched entities prepare private kernel state; numerical state
+needed by the released West/M2/refold behavior is retained even for mean-only
+outputs.
+
+An already initialized, ordered Native Float64 StableV1 mean calculation can
+assign whole entities to two owned CPU lanes. The narrow path requires one or
+two numeric groups and one or two derived Float64 mean/difference columns,
+Rows frames of 5 or 20, and validated typed queues no longer than those frames. A finalized
+batch has 64,000 to 256,000 rows and at least 16 touched entities; each lane
+has at least 16,000 rows and no more than 5/8 of the batch. Initial state
+creation, the first reconstruction after restore, unsupported shapes, small
+or skewed batches and unavailable admission use the original serial loop.
+Preparing a serial fallback does not repeat entity resolution or state copying.
+
+Each job admits at most one two-lane pair. A private 16 MiB limit accounts for
+the additional declared scratch capacities; it is not an allocator or process
+RSS limit. Joining the CPU handles does not free this reservation while lane
+results or merge scratch are still live. Each entity retains its original
+transition and readout order, and a serial merge restores the original row
+order. Validation, history preparation, output budgets and emit-to-commit
+boundaries remain with the original operator. CPU lanes have no output,
+watermark, checkpoint or state-commit authority.
+
+Cancellation is local to the owned computation and does not set the job token.
+Partial launch, task abortion and driver takeover retain the work handles and
+drain them asynchronously before terminal publication. Ordinary errors do not
+cancel a second lane that may still encounter an earlier row's failure;
+failure selection preserves original row/check order after both lanes settle.
+A selected panic resumes with its original payload only while the callback is
+still active, keeping the original logical task identity. After callback Drop,
+the frozen outcome remains; late panics are secondary task diagnostics and do
+not revive the callback. No unfinished CPU work is detached after a timeout,
+and no Tokio executor thread blocks waiting for a join.
+
+Retained history uses compact Arrow tails. A partial slice is copied when its
+backing buffers exceed both a small byte floor and twice its logical retained
+size, preventing an evicted large variable-width value from pinning the old
+allocation indefinitely. This preparation and any fallible allocation happen
+before output emission. Successful emission commits the prepared state and
+history; failed or cancelled emission preserves the prior committed state.
+Exact column-wise byte charging avoids a per-row cost vector when the complete
+output fits the edge budget. Oversized output still uses exact chunk limits.
+
+Overlapping, unordered, or late envelopes and
 unsupported window/type shapes use the general path. Checkpointing
-materializes pending columnar buffers into the durable layout;
+materializes pending buffers and retained histories into the durable layout;
 watermark, lateness, duplicate, null, output-budget, and recovery semantics
 are enforced on both paths.
 
@@ -597,13 +696,56 @@ Per-request context copies, cancellation ownership, source polling order, and
 bounded runtime backpressure remain in force; the bridge does not prefetch
 source events.
 
+The runner can pair adjacent Native rolling and exact column-only projection
+nodes in one physical Tokio driver. Eligibility requires one connecting edge,
+an exact input schema and an internally proven column-projection output,
+no extra ingress or rolling fan-out, and no declared or selected UDF. An
+explicit output schema must match the proof; an omitted output schema keeps
+its original port contract and project fingerprint. Arithmetic and filter
+projections keep separate drivers. Pairing retains both logical task IDs,
+ports, bounded channels,
+entry acknowledgements and checkpoint/terminal participants; public task
+counts continue to describe logical tasks.
+If one paired member settles before its companion, both logical registrations
+remain counted until the shared driver is joined. Terminal convergence clears
+the registrations.
+
+The qualified pair's shared driver records each member's wake requests and
+gives a ready downstream member priority at each scheduling decision. It polls
+each member at most once per driver poll. If upstream wakes downstream before
+downstream has been polled in that turn, downstream can run in the same turn;
+new wake requests for an already polled member remain pending for a later turn.
+Other internal paired tasks retain their existing downstream-first driver.
+The wake state owns flags and a parent waker, not child futures or stream
+payloads. Completion or destruction closes it and releases the parent waker;
+late child wakes cannot reactivate a completed pair.
+
+Each member cooperates after at most two immediately ready data messages and
+after every complete control message,
+so a downstream watermark can finish before the next large rolling callback
+starts. A receive that actually suspends supplies a natural handoff and resets
+the data budget. Otherwise, an exhausted budget yields before dispatching the
+next successfully received message, holding at most that one message. Explicit
+EOF retains its immediate handoff. An already selected receive error returns
+without a new yield or cancellation check that could replace it.
+It adds no yield between output emission and the rolling state's commit.
+Existing FIFO, watermark, barrier, cancellation and error ownership remain in
+force. A task that has already settled keeps its recorded outcome if its
+paired driver is subsequently aborted.
+
 ## Progress and replay
 
 The runtime prepares each source policy during whole-job preflight, then
 routes raw source data/control through one job-scoped progress driver. That
 driver alone owns the logical clock, binding/local/global ordering, finite
-inbox fences, timer heap, idle epochs, aggregate progress, completion receipts,
-and the lossless admission/drain/terminal/settlement execution trace.
+inbox fences, timer heap, idle epochs, aggregate progress and completion receipts.
+Managed live jobs retain checked trace coordinates and incremental cumulative
+admission/drain/terminal/settlement counters without retaining completed trace
+records. The `trace_records` counter still counts all committed records during
+the process lifetime; it does not report a retained buffer size. Admission and
+drain transactions therefore do not copy the complete past execution, and
+status does not rescan that history. Explicit record/replay drivers continue to
+retain a lossless execution trace.
 Multi-ingress progress uses the minimum watermark of known active inputs; idle
 and ended inputs are excluded. Data and legal watermarks reactivate before
 processing, and all-ended emits one plain `EndOfInput` without a sentinel
@@ -611,15 +753,20 @@ watermark. Stateful operators may maintain a more conservative output
 frontier; ASOF retains idle input progress and applies the strict closure
 contract described under [operator tasks](#operator-tasks-and-barrier-alignment).
 
-The crate-private transient snapshot captures the exact prepared/config,
+For a record/replay driver, the crate-private transient snapshot captures the
+exact prepared/config,
 upstream cursor/control, trace, gate/fence, allocator, aggregate, and timer
 coordinate only at a receipt-quiescent boundary. Restore requires paused
 upstreams at exact captured positions and field-for-field equality before any
 state or runtime side effect is installed. This remains an in-process replay
-surface, not the durable format. The checkpoint runtime separately projects
+surface, not the durable format. A managed live driver rejects this operation
+because it has no complete replay prefix. The checkpoint runtime separately
+projects
 only bounded semantic source and operator progress into manifest entries and
 reconstructs fresh process-local trace, receipt, and timer coordinates during
-recovery.
+recovery. Fresh and durably restored managed jobs both use bounded live trace
+storage; their source cursor, sequence, watermark and idle/end facts continue
+to come from the manifest.
 
 The progress driver forwards old/equal/new event-time rows unchanged. It
 neither classifies nor drops late rows and exposes no late-row runtime metric.

@@ -953,7 +953,9 @@ impl From<&InternalTerminalCause> for TerminalCause {
             InternalTerminalCause::GracefulShutdown => Self::GracefulShutdown,
             InternalTerminalCause::ExplicitCancel => Self::ExplicitCancel,
             InternalTerminalCause::DeadlineExceeded => Self::DeadlineExceeded,
-            InternalTerminalCause::TaskFailure { .. } => Self::Failure,
+            InternalTerminalCause::TaskFailure { .. } | InternalTerminalCause::RunnerFailure => {
+                Self::Failure
+            }
         }
     }
 }

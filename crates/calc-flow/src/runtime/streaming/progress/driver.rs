@@ -24,9 +24,7 @@ use super::{
         CapturedBindingCoordinate, CapturedLogicalCoordinate, PausedExactUpstreams, RestoreRequest,
         StreamProgressSnapshot,
     },
-    status::{
-        BindingProgressStatus, LiveProgressStatusHandle, ProgressCounters, StreamProgressStatus,
-    },
+    status::{BindingProgressStatus, LiveProgressStatusHandle, StreamProgressStatus},
     trace::{
         AcceptedEnvelopeIdentity, AdmissionAttemptRecord, AdmissionDecisionRecord,
         AdmissionGateCloseCoordinate, AdmissionGateSnapshot, AdmissionGateState,
@@ -156,6 +154,130 @@ mod checkpoint_cut_tests {
     }
 
     #[tokio::test]
+    async fn live_coordinator_does_not_retain_completed_progress_records() {
+        let prepared = Arc::new(
+            prepare_stream_job(
+                "compiled",
+                &[source("left")],
+                StreamProgressRuntimeConfig::default(),
+            )
+            .unwrap(),
+        );
+        let (sender, mut receiver) = edge_channel(
+            "left",
+            EdgeBudget {
+                max_rows: 8,
+                max_bytes: 1 << 20,
+            },
+        )
+        .unwrap();
+        let coordinator = LiveProgressCoordinator::new(
+            &prepared,
+            BTreeMap::from([("left".into(), vec![sender])]),
+            CancellationToken::new(),
+        )
+        .unwrap();
+        for sequence in 0..32_u8 {
+            coordinator
+                .submit(
+                    binding("left"),
+                    RawIngressEvent::Data(batch(u64::from(sequence))),
+                    exact(sequence),
+                )
+                .await
+                .unwrap();
+            let output = receiver.recv().await.unwrap().unwrap();
+            assert_eq!(
+                output.as_data().unwrap().metadata().sequence(),
+                u64::from(sequence)
+            );
+        }
+        let driver = coordinator.0.driver.lock().await;
+        let status = driver.status();
+        assert_eq!(status.counters.accepted_envelopes, 32);
+        assert_eq!(status.counters.commit_success_settlements, 32);
+        assert_eq!(status.unsettled_receipts, 0);
+        assert!(status.counters.trace_records >= 96);
+        let admission = driver.admission.lock();
+        assert_eq!(admission.trace.completed().records.len(), 0);
+        assert_eq!(admission.trace.completed().records.capacity(), 0);
+        drop(admission);
+        let paused =
+            super::PausedExactUpstreams::new(BTreeMap::from([(binding("left"), exact(31))]))
+                .unwrap();
+        assert!(matches!(
+            driver.capture_snapshot(&paused),
+            Err(crate::CalcFlowError::InvalidArgument { field, .. })
+                if field == "runtime.progress.snapshot.trace_mode"
+        ));
+    }
+
+    async fn assert_bounded_restored_progress(
+        prepared: &Arc<super::PreparedStreamJob>,
+        durable: &BTreeMap<String, crate::SourceManifestEntry>,
+    ) {
+        let restored = super::super::durable::restore_durable_progress(
+            prepared,
+            durable,
+            super::LogicalInstant::ZERO,
+        )
+        .unwrap();
+        assert_eq!(restored.sources["left"].cursor, durable["left"].cursor);
+        assert_eq!(restored.sources["left"].next_sequence, 8);
+        assert!(restored.sources["right"].ended);
+        let budget = EdgeBudget {
+            max_rows: 8,
+            max_bytes: 1 << 20,
+        };
+        let (left_sender, mut left_receiver) = edge_channel("left", budget).unwrap();
+        let (right_sender, _right_receiver) = edge_channel("right", budget).unwrap();
+        let coordinator = LiveProgressCoordinator::new_restored(
+            prepared,
+            BTreeMap::from([
+                ("left".into(), vec![left_sender]),
+                ("right".into(), vec![right_sender]),
+            ]),
+            CancellationToken::new(),
+            &restored,
+        )
+        .unwrap();
+        assert_eq!(
+            coordinator
+                .0
+                .driver
+                .lock()
+                .await
+                .status()
+                .counters
+                .trace_records,
+            0
+        );
+        for sequence in 8..40_u8 {
+            coordinator
+                .submit(
+                    binding("left"),
+                    RawIngressEvent::Data(batch(u64::from(sequence))),
+                    exact(sequence),
+                )
+                .await
+                .unwrap();
+            let output = left_receiver.recv().await.unwrap().unwrap();
+            assert_eq!(
+                output.as_data().unwrap().metadata().sequence(),
+                u64::from(sequence)
+            );
+        }
+        let driver = coordinator.0.driver.lock().await;
+        let status = driver.status();
+        assert_eq!(status.counters.accepted_envelopes, 32);
+        assert_eq!(status.counters.commit_success_settlements, 32);
+        assert_eq!(status.unsettled_receipts, 0);
+        let admission = driver.admission.lock();
+        assert!(admission.trace.completed().records.is_empty());
+        assert_eq!(admission.trace.completed().records.capacity(), 0);
+    }
+
+    #[tokio::test]
     async fn progress_owner_serializes_the_cut_and_skips_ended_routes() {
         let prepared = Arc::new(
             prepare_stream_job(
@@ -229,6 +351,7 @@ mod checkpoint_cut_tests {
         );
         assert_eq!(durable["right"].sequence, 1);
         assert!(durable["right"].ended);
+        assert_bounded_restored_progress(&prepared, &durable).await;
         coordinator
             .submit(binding("left"), RawIngressEvent::Data(batch(8)), exact(3))
             .await
@@ -1846,6 +1969,7 @@ impl<C: DriverLogicalClock> StreamProgressDriver<C> {
             });
         }
         let admission = self.admission.lock();
+        admission.trace.require_recorded_prefix()?;
         if admission.unsettled_receipts != 0
             || admission
                 .bindings
@@ -2045,11 +2169,9 @@ impl<C: DriverLogicalClock> StreamProgressDriver<C> {
 
     pub(crate) fn status(&self) -> StreamProgressStatus {
         let admission = self.admission.lock();
-        let counters = progress_counters(
-            admission.trace.completed(),
-            self.state.aggregate.next_global_sequence(),
-            self.state.timer_heap.len(),
-        );
+        let mut counters = admission.trace.counters();
+        counters.progress_emissions = self.state.aggregate.next_global_sequence();
+        counters.timer_entries = u64::try_from(self.state.timer_heap.len()).unwrap_or(u64::MAX);
         let bindings = self
             .state
             .bindings
@@ -2107,14 +2229,15 @@ impl<C: DriverLogicalClock> StreamProgressDriver<C> {
     }
 }
 
+#[cfg(test)]
 fn progress_counters(
     trace: &ProgressExecutionTrace,
     progress_emissions: u64,
     timer_entries: usize,
-) -> ProgressCounters {
-    let mut counters = ProgressCounters {
+) -> super::status::ProgressCounters {
+    let mut counters = super::status::ProgressCounters {
         trace_records: u64::try_from(trace.records.len()).unwrap_or(u64::MAX),
-        ..ProgressCounters::default()
+        ..super::status::ProgressCounters::default()
     };
     for record in &trace.records {
         match record {
@@ -2980,6 +3103,8 @@ impl LiveProgressCoordinator {
                 message: "runtime source routes contain an unprepared progress binding".into(),
             });
         }
+        // Managed durable recovery uses manifest facts, not an in-process replay prefix.
+        driver.admission.lock().trace.use_live_mode()?;
         let status = LiveProgressStatusHandle::new(driver.status());
         Ok(Self(Arc::new(LiveProgressInner {
             sender,
@@ -4741,6 +4866,78 @@ mod tests {
         }
     }
 
+    fn assert_live_counter_equivalence(trace: &ProgressExecutionTrace) {
+        let mut recorded = super::TraceController::record();
+        let mut live = super::TraceController::record();
+        live.use_live_mode().unwrap();
+        for record in &trace.records {
+            recorded.append(record.clone()).unwrap();
+            live.append(record.clone()).unwrap();
+            assert_eq!(
+                live.counters(),
+                super::progress_counters(recorded.completed(), 0, 0)
+            );
+            assert_eq!(recorded.counters(), live.counters());
+            assert_eq!(
+                recorded.next_coordinates().unwrap(),
+                live.next_coordinates().unwrap()
+            );
+            assert!(live.completed().records.is_empty());
+            assert_eq!(live.completed().records.capacity(), 0);
+            let before = live.counters();
+            let coordinates = live.next_coordinates().unwrap();
+            assert!(live.append(record.clone()).is_err());
+            assert_eq!(live.counters(), before);
+            assert_eq!(live.next_coordinates().unwrap(), coordinates);
+        }
+        assert_eq!(recorded.completed(), trace);
+        let mut exhausted = live.clone();
+        exhausted.set_next_coordinates_for_test(u64::MAX);
+        let before = exhausted.counters();
+        assert!(exhausted.append(trace.records[0].clone()).is_err());
+        assert_eq!(exhausted.counters(), before);
+        assert_eq!(exhausted.next_record(), u64::MAX);
+        assert_eq!(exhausted.next_position(), u64::MAX);
+        assert!(exhausted.completed().records.is_empty());
+        assert_eq!(live.counters(), recorded.counters());
+    }
+
+    #[tokio::test]
+    async fn cached_trace_counters_preserve_recorded_prefix_and_replay() {
+        let trace = terminal_tail_trace().await;
+        let next = u64::try_from(trace.records.len()).unwrap();
+        let mut restored =
+            super::TraceController::restore_prefix(trace.clone(), next, next).unwrap();
+        let expected = super::progress_counters(&trace, 0, 0);
+        assert_eq!(restored.counters(), expected);
+        restored.require_recorded_prefix().unwrap();
+        restored.use_live_mode().unwrap();
+        assert_eq!(restored.counters(), expected);
+        assert_eq!(restored.next_record(), next);
+        assert!(restored.require_recorded_prefix().is_err());
+        assert_eq!(restored.completed().records.capacity(), 0);
+
+        let request = ProgressReplayRequest::prevalidate(trace.clone()).unwrap();
+        let mut replay = super::TraceController::replay(request.clone());
+        assert!(replay.use_live_mode().is_err());
+        for record in &trace.records {
+            replay.append(record.clone()).unwrap();
+            assert_eq!(
+                replay.counters(),
+                super::progress_counters(replay.completed(), 0, 0)
+            );
+        }
+        replay.finish_replay().unwrap();
+        assert_eq!(replay.completed(), &trace);
+        let before = replay.counters();
+        assert!(replay.append(trace.records[0].clone()).is_err());
+        assert_eq!(replay.counters(), before);
+        let from_prefix =
+            super::TraceController::replay_from_prefix(trace, next, next, request).unwrap();
+        assert_eq!(from_prefix.counters(), expected);
+        from_prefix.finish_replay().unwrap();
+    }
+
     #[tokio::test]
     async fn progress_recording_stress_captures_one_hundred_seed_artifacts() {
         let mut saw_phase_failure = false;
@@ -4748,6 +4945,7 @@ mod tests {
             let first = record_seed_artifact(seed).await;
             let second = record_seed_artifact(seed).await;
             assert_eq!(first, second, "progress artifact diverged at seed {seed}");
+            assert_live_counter_equivalence(&first.execution_trace);
             assert!(!first.ordered_raw_attempts.is_empty());
             assert!(!first.logical_clock_trace.is_empty());
             assert_eq!(first.terminal_unsettled_receipts, 0);
@@ -4874,6 +5072,16 @@ mod tests {
         );
         assert!(fatal.drain_ready().is_err());
         assert!(receipt.wait_settled().await.is_err());
+
+        for trace in [
+            success.trace(),
+            transaction.trace(),
+            tail_trace.clone(),
+            cancelled.trace(),
+            fatal.trace(),
+        ] {
+            assert_live_counter_equivalence(&trace);
+        }
 
         let dispositions = success
             .trace()

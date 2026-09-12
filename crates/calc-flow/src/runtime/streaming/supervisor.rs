@@ -12,6 +12,8 @@ use tokio::{sync::oneshot, task::JoinSet};
 
 use crate::{CalcFlowError, CancellationToken, Result};
 
+mod ready_pair;
+
 /// Stable identity assigned in supervisor registration order (spec D5.1).
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct TaskId(u64);
@@ -40,9 +42,19 @@ pub(crate) struct TaskStatus {
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct TaskRegistry(Arc<Mutex<BTreeMap<TaskId, TaskStatus>>>);
+pub(crate) struct TaskRegistry(
+    Arc<Mutex<BTreeMap<TaskId, TaskStatus>>>,
+    #[cfg(test)] Arc<Mutex<Vec<tokio::task::AbortHandle>>>,
+);
 
 impl TaskRegistry {
+    #[cfg(test)]
+    pub(crate) fn abort_all_for_test(&self) {
+        for handle in self.1.lock().iter() {
+            handle.abort();
+        }
+    }
+
     pub(crate) fn snapshot(&self) -> BTreeMap<TaskId, TaskStatus> {
         self.0.lock().clone()
     }
@@ -199,6 +211,143 @@ struct TaskExit {
     result: Result<()>,
 }
 
+/// Resources that must outlive failure publication and sibling convergence.
+pub(crate) struct RetainedTaskResult<R> {
+    pub(crate) result: Result<()>,
+    pub(crate) retained: R,
+}
+
+pub(crate) trait TaskOutput: Send + 'static {
+    type Retained: Send + 'static;
+
+    fn into_parts(self) -> (Result<()>, Self::Retained);
+}
+
+impl TaskOutput for Result<()> {
+    type Retained = ();
+
+    fn into_parts(self) -> (Result<()>, ()) {
+        (self, ())
+    }
+}
+
+impl<R: Send + 'static> TaskOutput for RetainedTaskResult<R> {
+    type Retained = R;
+
+    fn into_parts(self) -> (Result<()>, R) {
+        (self.result, self.retained)
+    }
+}
+
+struct TaskRegistration {
+    task_id: TaskId,
+    task_name: String,
+    failure_signal: TaskFailureSignal,
+    settled: Arc<Mutex<BTreeMap<TaskId, TaskExit>>>,
+}
+
+pub(crate) struct PreparedPair<F, G> {
+    first_task: TaskRegistration,
+    second_task: TaskRegistration,
+    first: F,
+    second: G,
+    readiness: bool,
+    #[cfg(test)]
+    observer: Option<ready_pair::Observer>,
+}
+
+impl<F, G> PreparedPair<F, G>
+where
+    F: Future + Send,
+    F::Output: TaskOutput,
+    G: Future + Send,
+    G::Output: TaskOutput,
+{
+    pub(crate) fn ids(&self) -> [TaskId; 2] {
+        [self.first_task.task_id, self.second_task.task_id]
+    }
+
+    pub(crate) fn with_readiness(mut self) -> Self {
+        self.readiness = true;
+        self
+    }
+
+    #[cfg(test)]
+    fn observe(mut self, observer: ready_pair::Observer) -> Self {
+        self.observer = Some(observer);
+        self
+    }
+
+    pub(crate) async fn run(self, started: bool) -> Vec<TaskId> {
+        let first = self.first_task.run(started, self.first);
+        let second = self.second_task.run(started, self.second);
+        let [first, second] = if self.readiness {
+            ready_pair::run(
+                first,
+                second,
+                #[cfg(test)]
+                self.observer,
+            )
+            .await
+        } else {
+            let (second, first) = tokio::join!(biased; second, first);
+            [first, second]
+        };
+        vec![first, second]
+    }
+}
+
+impl TaskRegistration {
+    async fn run<Fut>(self, started: bool, future: Fut) -> TaskId
+    where
+        Fut: Future + Send,
+        Fut::Output: TaskOutput,
+    {
+        let completion = if started {
+            contain_task_panic(self.task_id, future).await
+        } else {
+            Err(CalcFlowError::Internal {
+                message: format!("task {:?} start gate was dropped", self.task_name),
+            })
+        };
+        let (result, retained) = match completion {
+            Ok(output) => {
+                let (result, retained) = output.into_parts();
+                (result, Some(retained))
+            }
+            Err(error) => (Err(error), None),
+        };
+        let failed = result.is_err();
+        if failed {
+            self.failure_signal.record_before_cancellation();
+        }
+        let exit = TaskExit {
+            task_id: self.task_id,
+            task_name: self.task_name,
+            result,
+        };
+        // A sibling can keep a shared driver pending after this member settles.
+        // Publish before convergence can yield, so aborting that driver cannot
+        // replace an already completed result with a spurious join failure.
+        self.settled.lock().insert(self.task_id, exit);
+        if failed {
+            self.failure_signal.converge_after_failure().await;
+        }
+        drop(retained);
+        self.task_id
+    }
+}
+
+pub(crate) async fn contain_task_panic<F: Future>(task_id: TaskId, future: F) -> Result<F::Output> {
+    AssertUnwindSafe(future)
+        .catch_unwind()
+        .await
+        .map_err(|payload| CalcFlowError::TaskPanicked {
+            task_id: task_id.as_u64(),
+            message: panic_message(payload.as_ref()),
+        })
+}
+
 /// Lets a task record its failure trigger before teardown work completes.
 #[derive(Clone)]
 pub(crate) struct TaskFailureSignal {
@@ -239,12 +388,15 @@ impl TaskFailureSignal {
 /// round; every later convergence error remains secondary (D5/S8.4).
 pub(crate) struct TaskSupervisor {
     cancellation: CancellationToken,
-    tasks: JoinSet<TaskExit>,
-    stable_ids: HashMap<tokio::task::Id, TaskId>,
+    tasks: JoinSet<Vec<TaskId>>,
+    settled: Arc<Mutex<BTreeMap<TaskId, TaskExit>>>,
+    stable_ids: HashMap<tokio::task::Id, Vec<TaskId>>,
     registry: TaskRegistry,
     joined_errors: Vec<TaskFailure>,
     terminal_arbiter: TerminalArbiter,
     next_task_id: u64,
+    #[cfg(test)]
+    ready_pair_spawns: usize,
 }
 
 impl TaskSupervisor {
@@ -259,11 +411,14 @@ impl TaskSupervisor {
         Self {
             cancellation,
             tasks: JoinSet::new(),
+            settled: Arc::new(Mutex::new(BTreeMap::new())),
             stable_ids: HashMap::new(),
             registry: TaskRegistry::default(),
             joined_errors: Vec::new(),
             terminal_arbiter,
             next_task_id: 0,
+            #[cfg(test)]
+            ready_pair_spawns: 0,
         }
     }
 
@@ -283,46 +438,20 @@ impl TaskSupervisor {
     ) -> TaskId
     where
         F: FnOnce(TaskFailureSignal) -> Fut,
-        Fut: Future<Output = Result<()>> + Send + 'static,
+        Fut: Future + Send + 'static,
+        Fut::Output: TaskOutput,
     {
-        let task_id = TaskId::new(self.next_task_id);
-        self.next_task_id = self
-            .next_task_id
-            .checked_add(1)
-            .expect("a streaming job cannot register u64::MAX tasks");
-        let task_name = name.into();
-        let task_name_in_task = task_name.clone();
-        let failure_signal = TaskFailureSignal {
-            task_id,
-            cancellation: self.cancellation.clone(),
-            terminal_arbiter: self.terminal_arbiter.clone(),
-        };
-        let future = make_future(failure_signal.clone());
+        let task = self.reserve_task(name);
+        let task_id = task.task_id;
+        let future = make_future(task.failure_signal.clone());
         let (start_tx, start_rx) = oneshot::channel();
-        self.registry.insert(task_id, task_name);
-        let abort_handle = self.tasks.spawn(async move {
-            let result = match start_rx.await {
-                Ok(()) => match AssertUnwindSafe(future).catch_unwind().await {
-                    Ok(result) => result,
-                    Err(payload) => Err(CalcFlowError::TaskPanicked {
-                        task_id: task_id.as_u64(),
-                        message: panic_message(payload.as_ref()),
-                    }),
-                },
-                Err(_) => Err(CalcFlowError::Internal {
-                    message: format!("task {task_name_in_task:?} start gate was dropped"),
-                }),
-            };
-            if result.is_err() {
-                failure_signal.converge_after_failure().await;
-            }
-            TaskExit {
-                task_id,
-                task_name: task_name_in_task,
-                result,
-            }
-        });
-        self.stable_ids.insert(abort_handle.id(), task_id);
+        self.registry.insert(task_id, task.task_name.clone());
+        let abort_handle = self
+            .tasks
+            .spawn(async move { vec![task.run(start_rx.await.is_ok(), future).await] });
+        self.stable_ids.insert(abort_handle.id(), vec![task_id]);
+        #[cfg(test)]
+        self.registry.1.lock().push(abort_handle.clone());
         start_tx
             .send(())
             .expect("the newly registered task still owns its start gate");
@@ -333,8 +462,112 @@ impl TaskSupervisor {
         self.cancellation.cancel();
     }
 
+    #[cfg(test)]
+    pub(crate) fn spawn_pair_with_failure_signals<F, Fut, G, Gut>(
+        &mut self,
+        first_name: &str,
+        first: F,
+        second_name: &str,
+        second: G,
+    ) -> [TaskId; 2]
+    where
+        F: FnOnce(TaskFailureSignal) -> Fut,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+        G: FnOnce(TaskFailureSignal) -> Gut,
+        Gut: Future<Output = Result<()>> + Send + 'static,
+    {
+        let pair = self.prepare_pair_with_failure_signals(first_name, first, second_name, second);
+        self.spawn_prepared_pair(pair)
+    }
+
+    pub(crate) fn prepare_pair_with_failure_signals<F, Fut, G, Gut>(
+        &mut self,
+        first_name: &str,
+        first: F,
+        second_name: &str,
+        second: G,
+    ) -> PreparedPair<Fut, Gut>
+    where
+        F: FnOnce(TaskFailureSignal) -> Fut,
+        Fut: Future + Send + 'static,
+        Fut::Output: TaskOutput,
+        G: FnOnce(TaskFailureSignal) -> Gut,
+        Gut: Future + Send + 'static,
+        Gut::Output: TaskOutput,
+    {
+        let first_task = self.reserve_task(first_name);
+        let second_task = self.reserve_task(second_name);
+        let first = first(first_task.failure_signal.clone());
+        let second = second(second_task.failure_signal.clone());
+        let ids = [first_task.task_id, second_task.task_id];
+        self.registry.insert(ids[0], first_task.task_name.clone());
+        self.registry.insert(ids[1], second_task.task_name.clone());
+        PreparedPair {
+            first_task,
+            second_task,
+            first,
+            second,
+            readiness: false,
+            #[cfg(test)]
+            observer: None,
+        }
+    }
+
+    pub(crate) fn spawn_prepared_pair<F, G>(&mut self, pair: PreparedPair<F, G>) -> [TaskId; 2]
+    where
+        F: Future + Send + 'static,
+        F::Output: TaskOutput,
+        G: Future + Send + 'static,
+        G::Output: TaskOutput,
+    {
+        let ids = pair.ids();
+        #[cfg(test)]
+        {
+            self.ready_pair_spawns += usize::from(pair.readiness);
+        }
+        let (start_tx, start_rx) = oneshot::channel();
+        let abort_handle = self
+            .tasks
+            .spawn(async move { pair.run(start_rx.await.is_ok()).await });
+        self.stable_ids.insert(abort_handle.id(), ids.to_vec());
+        #[cfg(test)]
+        self.registry.1.lock().push(abort_handle.clone());
+        start_tx
+            .send(())
+            .expect("the newly registered pair still owns its start gate");
+        ids
+    }
+
+    fn reserve_task(&mut self, name: impl Into<String>) -> TaskRegistration {
+        let task_id = TaskId::new(self.next_task_id);
+        self.next_task_id = self
+            .next_task_id
+            .checked_add(1)
+            .expect("a streaming job cannot register u64::MAX tasks");
+        TaskRegistration {
+            task_id,
+            task_name: name.into(),
+            failure_signal: TaskFailureSignal {
+                task_id,
+                cancellation: self.cancellation.clone(),
+                terminal_arbiter: self.terminal_arbiter.clone(),
+            },
+            settled: Arc::clone(&self.settled),
+        }
+    }
+
     pub(crate) fn task_count(&self) -> usize {
         self.registry.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn physical_driver_count(&self) -> usize {
+        self.tasks.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ready_pair_spawn_count(&self) -> usize {
+        self.ready_pair_spawns
     }
 
     pub(crate) fn registry(&self) -> TaskRegistry {
@@ -344,48 +577,39 @@ impl TaskSupervisor {
     /// Joins every registered task, cancelling siblings after the first
     /// failed task becomes observable.
     pub(crate) async fn join_all(&mut self) -> SupervisionReport {
+        self.settle_tasks().await;
+        self.take_report()
+    }
+
+    pub(crate) fn cancel_and_abort(&mut self) {
+        self.cancel();
+        self.tasks.abort_all();
+    }
+
+    pub(crate) async fn settle_tasks(&mut self) {
         while let Some(joined) = self.tasks.join_next_with_id().await {
-            let exit = match joined {
-                Ok((tokio_id, exit)) => {
+            let exits = match joined {
+                Ok((tokio_id, exits)) => {
                     self.stable_ids.remove(&tokio_id);
-                    exit
+                    exits
                 }
                 Err(error) => {
-                    let task_id = self
-                        .stable_ids
-                        .remove(&error.id())
-                        .unwrap_or(TaskId::new(u64::MAX));
-                    let task_name = self.registry.remove(task_id).map_or_else(
-                        || "unknown supervised task".into(),
-                        |status| status.task_name,
-                    );
-                    let failure = TaskFailure {
-                        task_id,
-                        task_name,
-                        error: CalcFlowError::Internal {
-                            message: format!("supervised task join failed: {error}"),
-                        },
-                    };
-                    let failure_signal = TaskFailureSignal {
-                        task_id,
-                        cancellation: self.cancellation.clone(),
-                        terminal_arbiter: self.terminal_arbiter.clone(),
-                    };
-                    failure_signal.record_before_cancellation();
-                    failure_signal.cancel_siblings();
-                    self.joined_errors.push(failure);
+                    self.record_join_failure(&error);
                     continue;
                 }
             };
-            self.registry.remove(exit.task_id);
-            if let Err(error) = exit.result {
-                self.joined_errors.push(TaskFailure {
-                    task_id: exit.task_id,
-                    task_name: exit.task_name,
-                    error,
-                });
+            for task_id in exits {
+                let exit = self
+                    .settled
+                    .lock()
+                    .remove(&task_id)
+                    .expect("a joined task publishes its exit before returning");
+                self.record_settled(exit);
             }
         }
+    }
+
+    pub(crate) fn take_report(&mut self) -> SupervisionReport {
         let primary_failures = self.terminal_arbiter.primary_failures();
         self.joined_errors.sort_by_key(|failure| {
             (
@@ -401,6 +625,49 @@ impl TaskSupervisor {
         SupervisionReport {
             primary_error_count,
             errors: std::mem::take(&mut self.joined_errors),
+        }
+    }
+
+    fn record_join_failure(&mut self, error: &tokio::task::JoinError) {
+        let task_ids = self
+            .stable_ids
+            .remove(&error.id())
+            .unwrap_or_else(|| vec![TaskId::new(u64::MAX)]);
+        for task_id in task_ids {
+            let settled = self.settled.lock().remove(&task_id);
+            if let Some(exit) = settled {
+                self.record_settled(exit);
+                continue;
+            }
+            let task_name = self.registry.remove(task_id).map_or_else(
+                || "unknown supervised task".into(),
+                |status| status.task_name,
+            );
+            let failure_signal = TaskFailureSignal {
+                task_id,
+                cancellation: self.cancellation.clone(),
+                terminal_arbiter: self.terminal_arbiter.clone(),
+            };
+            failure_signal.record_before_cancellation();
+            failure_signal.cancel_siblings();
+            self.joined_errors.push(TaskFailure {
+                task_id,
+                task_name,
+                error: CalcFlowError::Internal {
+                    message: format!("supervised task join failed: {error}"),
+                },
+            });
+        }
+    }
+
+    fn record_settled(&mut self, exit: TaskExit) {
+        self.registry.remove(exit.task_id);
+        if let Err(error) = exit.result {
+            self.joined_errors.push(TaskFailure {
+                task_id: exit.task_id,
+                task_name: exit.task_name,
+                error,
+            });
         }
     }
 }
@@ -446,6 +713,222 @@ mod tests {
 
     use super::{TaskId, TaskSupervisor, TerminalArbiter, TerminalDecision, panic_message};
     use crate::{CalcFlowError, CancellationToken};
+
+    #[tokio::test]
+    async fn fused_pair_keeps_logical_identities_in_one_physical_task() {
+        let mut supervisor = TaskSupervisor::new(CancellationToken::new());
+        let barrier = Arc::new(Barrier::new(2));
+        let first_barrier = Arc::clone(&barrier);
+        let ids = supervisor.spawn_pair_with_failure_signals(
+            "operator:rolling",
+            move |signal| async move {
+                assert_eq!(signal.task_id(), TaskId::new(0));
+                first_barrier.wait().await;
+                Ok(())
+            },
+            "operator:projection",
+            move |signal| async move {
+                assert_eq!(signal.task_id(), TaskId::new(1));
+                barrier.wait().await;
+                Ok(())
+            },
+        );
+        assert_eq!(ids, [TaskId::new(0), TaskId::new(1)]);
+        let registry = supervisor.registry();
+        assert_eq!(registry.snapshot()[&ids[0]].task_name, "operator:rolling");
+        assert_eq!(
+            registry.snapshot()[&ids[1]].task_name,
+            "operator:projection"
+        );
+        assert_eq!(supervisor.task_count(), 2);
+        assert_eq!(supervisor.physical_driver_count(), 1);
+        assert!(supervisor.join_all().await.errors.is_empty());
+        assert!(registry.snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn fused_panic_cancels_waiting_member_with_original_failure_identity() {
+        let cancellation = CancellationToken::new();
+        let mut supervisor = TaskSupervisor::new(cancellation.clone());
+        let waiting_finished = Arc::new(AtomicBool::new(false));
+        let finished = Arc::clone(&waiting_finished);
+        supervisor.spawn_pair_with_failure_signals(
+            "operator:rolling",
+            move |_| async move {
+                cancellation.cancelled().await;
+                finished.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+            "operator:projection",
+            |_| async {
+                panic!("fused projection failure");
+                #[allow(unreachable_code)]
+                Ok(())
+            },
+        );
+        let report = supervisor.join_all().await;
+        assert_eq!(report.errors.len(), 1);
+        assert_eq!(report.errors[0].task_name, "operator:projection");
+        assert_eq!(report.errors[0].task_id, TaskId::new(1));
+        assert!(matches!(
+            &report.errors[0].error,
+            CalcFlowError::TaskPanicked { task_id: 1, message }
+                if message == "fused projection failure"
+        ));
+        assert!(waiting_finished.load(Ordering::SeqCst));
+        assert_eq!(supervisor.task_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn fused_simultaneous_failures_keep_both_primary_identities() {
+        let mut supervisor = TaskSupervisor::new(CancellationToken::new());
+        supervisor.spawn_pair_with_failure_signals(
+            "operator:rolling",
+            |_| async {
+                Err(CalcFlowError::Internal {
+                    message: "first".into(),
+                })
+            },
+            "operator:projection",
+            |_| async {
+                Err(CalcFlowError::Internal {
+                    message: "second".into(),
+                })
+            },
+        );
+        let report = supervisor.join_all().await;
+        assert_eq!(report.primary_errors().len(), 2);
+        assert_eq!(report.errors[0].task_id, TaskId::new(0));
+        assert_eq!(report.errors[1].task_id, TaskId::new(1));
+        assert_eq!(supervisor.task_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn aborting_fused_driver_drops_both_futures_and_clears_registry() {
+        struct MarkDropped(Arc<AtomicBool>);
+        impl Drop for MarkDropped {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let first = Arc::new(AtomicBool::new(false));
+        let second = Arc::new(AtomicBool::new(false));
+        let first_owned = MarkDropped(Arc::clone(&first));
+        let second_owned = MarkDropped(Arc::clone(&second));
+        let mut supervisor = TaskSupervisor::new(CancellationToken::new());
+        supervisor.spawn_pair_with_failure_signals(
+            "operator:rolling",
+            move |_| async move {
+                let _owned = first_owned;
+                std::future::pending().await
+            },
+            "operator:projection",
+            move |_| async move {
+                let _owned = second_owned;
+                std::future::pending().await
+            },
+        );
+        supervisor.tasks.abort_all();
+        let report = supervisor.join_all().await;
+        assert_eq!(report.errors.len(), 2);
+        assert!(first.load(Ordering::SeqCst));
+        assert!(second.load(Ordering::SeqCst));
+        assert_eq!(supervisor.task_count(), 0);
+        assert!(supervisor.stable_ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn aborting_fused_driver_preserves_an_already_settled_member() {
+        for outcome in ["ok", "error", "panic"] {
+            let mut supervisor = TaskSupervisor::new(CancellationToken::new());
+            let (entered_tx, entered_rx) = oneshot::channel();
+            supervisor.spawn_pair_with_failure_signals(
+                "operator:rolling",
+                move |_| async move {
+                    entered_tx.send(()).unwrap();
+                    match outcome {
+                        "ok" => Ok(()),
+                        "error" => Err(CalcFlowError::Internal {
+                            message: "original rolling failure".into(),
+                        }),
+                        _ => panic!("original rolling panic"),
+                    }
+                },
+                "operator:projection",
+                |_| std::future::pending(),
+            );
+            entered_rx.await.unwrap();
+            supervisor.tasks.abort_all();
+            let report = supervisor.join_all().await;
+            let completed_error = report
+                .errors
+                .iter()
+                .find(|error| error.task_id == TaskId::new(0));
+            match outcome {
+                "ok" => assert!(
+                    completed_error.is_none(),
+                    "completed success became a join failure"
+                ),
+                "error" => assert!(matches!(
+                    &completed_error.unwrap().error,
+                    CalcFlowError::Internal { message } if message == "original rolling failure"
+                )),
+                _ => assert!(matches!(
+                    &completed_error.unwrap().error,
+                    CalcFlowError::TaskPanicked { task_id: 0, message } if message == "original rolling panic"
+                )),
+            }
+            assert_eq!(report.errors.last().unwrap().task_id, TaskId::new(1));
+            assert!(supervisor.settled.lock().is_empty());
+            assert_eq!(supervisor.task_count(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn aborting_driver_preserves_published_retained_failure() {
+        let mut supervisor = TaskSupervisor::new(CancellationToken::new());
+        let (mut sender, receiver) =
+            crate::edge_channel("retained-edge", crate::EdgeBudget::default()).unwrap();
+        let lifetime = Arc::new(());
+        let weak = Arc::downgrade(&lifetime);
+        let (entered, ready) = oneshot::channel();
+        let pair = supervisor.prepare_pair_with_failure_signals(
+            "waiting",
+            |_| std::future::pending::<crate::Result<()>>(),
+            "failed",
+            |_| async move {
+                entered.send(()).unwrap();
+                super::RetainedTaskResult {
+                    result: Err(CalcFlowError::OperatorReason {
+                        node_id: "asof".into(),
+                        reason_code: crate::StreamingFailureReason::AsofDuplicateIdentity,
+                        message: "original downstream failure".into(),
+                    }),
+                    retained: (receiver, lifetime),
+                }
+            },
+        );
+        supervisor.spawn_prepared_pair(pair);
+        ready.await.unwrap();
+        supervisor.cancel_and_abort();
+        let report = supervisor.join_all().await;
+        assert_eq!(supervisor.task_count(), 0);
+        assert!(weak.upgrade().is_none());
+        assert_eq!(report.primary_errors().len(), 1, "{report:?}");
+        assert_eq!(report.errors[0].task_id, TaskId::new(1));
+        assert!(matches!(
+            report.errors[0].error,
+            CalcFlowError::OperatorReason {
+                reason_code: crate::StreamingFailureReason::AsofDuplicateIdentity,
+                ..
+            }
+        ));
+        assert_eq!(report.errors[1].task_id, TaskId::new(0));
+        assert!(matches!(
+            sender.send(crate::StreamMessage::end_of_input()).await,
+            Err(CalcFlowError::EdgeClosed { .. })
+        ));
+    }
 
     #[test]
     fn terminal_arbiter_prioritizes_one_locked_snapshot_and_keeps_graceful_nonterminal() {

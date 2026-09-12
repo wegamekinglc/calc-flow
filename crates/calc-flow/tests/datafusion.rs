@@ -347,6 +347,112 @@ async fn bounded_float64_avg_rewrites_utc_event_time() {
     assert!(metrics[0].physical_plan.contains("CalcFlowRollingExec"));
 }
 
+fn rolling_nullable_peer_input() -> Batch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            "event_time",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            false,
+        ),
+        Field::new("sequence", DataType::UInt64, false),
+        Field::new("symbol", DataType::Utf8, true),
+        Field::new("price", DataType::Float64, true),
+    ]));
+    let record = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(TimestampMicrosecondArray::from(vec![
+                1, 1, 1, 1, 1, 1, 2, 2, 2,
+            ])),
+            Arc::new(UInt64Array::from(vec![1, 1, 1, 1, 1, 1, 2, 2, 2])),
+            Arc::new(StringArray::from(vec![
+                Some("b"),
+                None,
+                Some("a"),
+                Some("b"),
+                None,
+                Some("a"),
+                Some("b"),
+                None,
+                Some("a"),
+            ])),
+            Arc::new(Float64Array::from(vec![
+                10.0, 2.0, 1.0, 10.0, 2.0, 1.0, 30.0, 6.0, 5.0,
+            ])),
+        ],
+    )
+    .unwrap();
+    Batch::table(
+        vec![
+            record.slice(0, 4),
+            RecordBatch::new_empty(schema),
+            record.slice(4, 5),
+        ],
+        BatchMetadata::default(),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn sorted_sql_rolling_preserves_null_partitions_peers_and_batch_boundaries() {
+    let tables = BTreeMap::from([("input".to_owned(), rolling_nullable_peer_input())]);
+    let query = "SELECT symbol, event_time, sequence, price, \
+        avg(price) OVER (PARTITION BY symbol ORDER BY event_time, sequence \
+        ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS sma2, \
+        avg(price) OVER (PARTITION BY symbol ORDER BY event_time, sequence \
+        ROWS BETWEEN 4 PRECEDING AND CURRENT ROW) AS sma5 \
+        FROM input ORDER BY symbol NULLS FIRST, event_time, sequence";
+    let fallback = DataFusionRuntime::new(DataFusionConfig {
+        batch_size: 2,
+        enable_rolling_rewrite: false,
+        ..DataFusionConfig::default()
+    })
+    .unwrap();
+    let expected = fallback.sql(query, &tables, None).await.unwrap();
+    for partitions in [1, 4] {
+        let rewritten = DataFusionRuntime::new(DataFusionConfig {
+            batch_size: 2,
+            target_partitions: partitions,
+            min_rows_per_partition: 1,
+            ..DataFusionConfig::default()
+        })
+        .unwrap();
+        for _ in 0..2 {
+            let actual = rewritten.sql(query, &tables, None).await.unwrap();
+            let actual = actual.table_payload().unwrap();
+            let expected = expected.table_payload().unwrap();
+            assert_eq!(actual.schema(), expected.schema());
+            let actual = concat_batches(actual.schema(), actual.batches()).unwrap();
+            let expected = concat_batches(expected.schema(), expected.batches()).unwrap();
+            assert_eq!(
+                actual.project(&[0, 1, 2, 3]).unwrap(),
+                expected.project(&[0, 1, 2, 3]).unwrap()
+            );
+            for index in [4, 5] {
+                let actual = actual
+                    .column(index)
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
+                let expected = expected
+                    .column(index)
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
+                for (actual, expected) in actual.values().iter().zip(expected.values()) {
+                    assert!((actual - expected).abs() <= 1e-12);
+                }
+            }
+        }
+        for metric in rewritten.metrics() {
+            assert_eq!(metric.rolling_rewritten_windows, 2);
+            assert!(metric.rolling_fallback_reasons.is_empty());
+            assert!(metric.physical_plan.contains("route=sorted_partitions"));
+            assert_eq!(metric.window_partition_count, partitions);
+        }
+    }
+}
+
 #[tokio::test]
 async fn unsupported_sql_window_stays_on_the_datafusion_fallback() {
     let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();

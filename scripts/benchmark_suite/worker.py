@@ -10,10 +10,14 @@ from importlib.metadata import version
 from pathlib import Path
 
 
-def environment() -> dict:
-    import polars as pl
-
+def environment(scope: str = "all") -> dict:
     from scripts.profile_warm_stream import _worker_environment
+
+    if scope == "core":
+        return _worker_environment()
+    if scope != "all":
+        raise ValueError("unsupported benchmark dependency scope")
+    import polars as pl
 
     return {
         **_worker_environment(),
@@ -79,7 +83,25 @@ class WarmCase:
 def prepare_case(case: dict, root: Path):
     from benchmarks.engine_comparison import EngineCase
 
-    factory = WarmCase if case["family"] == "warm" else EngineCase
+    match case["family"]:
+        case "warm":
+            factory = WarmCase
+        case "engines":
+            factory = EngineCase
+        case "engine-diagnostic":
+            from benchmarks.performance_diagnostics import EngineDiagnosticCase
+
+            factory = EngineDiagnosticCase
+        case "sql-diagnostic":
+            from benchmarks.performance_diagnostics import SqlDiagnosticCase
+
+            factory = SqlDiagnosticCase
+        case "native-diagnostic":
+            from benchmarks.performance_diagnostics import NativeDiagnosticCase
+
+            factory = NativeDiagnosticCase
+        case _:
+            raise ValueError("unsupported benchmark family")
     active = factory(case, root)
     try:
         warmup = active.sample()
@@ -90,9 +112,7 @@ def prepare_case(case: dict, root: Path):
 
 
 def finish_case(active) -> dict:
-    outcome = (
-        active.finish() if isinstance(active, WarmCase) else {"state": "completed"}
-    )
+    outcome = active.finish()
     active.close()
     return outcome
 
@@ -107,7 +127,7 @@ def dispatch(message: dict, active, root: Path):
     _require_prepared(operation, active)
     match operation:
         case "hello":
-            return environment(), active
+            return environment(message.get("scope", "all")), active
         case "prepare":
             if active is not None:
                 raise ValueError("a benchmark is already active")
