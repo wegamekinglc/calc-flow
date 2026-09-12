@@ -911,6 +911,10 @@ impl StreamingRunner {
             sinks = project_sinks;
         }
         validate_binding_shapes(&plan, &sources, &sinks).map_err(safe_error)?;
+        plan.ensure_execution_enabled().map_err(|_| {
+            invalid_shape_id(ComponentKind::Operator,
+                "unsupported_capability: late side output execution is not enabled; dual-output runtime and recovery validation is pending")
+        })?;
         Ok(Self {
             plan,
             sources,

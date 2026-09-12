@@ -619,6 +619,7 @@ impl std::fmt::Debug for StreamExecutionPlan {
 /// The compiled continuously running plan (plan task M1.1).
 pub struct StreamExecutionPlan {
     name: String,
+    late_outputs: BTreeMap<PortEndpoint, PortEndpoint>,
     nodes: Vec<RuntimeStreamNode>,
     external_inputs: BTreeMap<String, PortEndpoint>,
     external_outputs: BTreeMap<String, PortEndpoint>,
@@ -682,6 +683,7 @@ impl PipelineBuilder {
         let nodes = build_runtime_nodes(self, &graph.order, table.as_ref());
         Ok(StreamExecutionPlan {
             name,
+            late_outputs: graph.late_outputs,
             nodes,
             external_inputs: graph.external_inputs,
             external_outputs: graph.external_outputs,
@@ -1127,13 +1129,24 @@ impl StreamExecutionPlan {
         self.table.is_some()
     }
 
+    pub(crate) fn ensure_execution_enabled(&self) -> Result<()> {
+        if let Some(origin) = self.late_outputs.values().next() {
+            return Err(crate::operator::late_output::disabled_error(
+                &origin.node_id,
+            ));
+        }
+        Ok(())
+    }
+
     /// Consumes the compiled plan into directly owned runtime wiring.
     pub(crate) fn into_runtime_parts(
         self,
         default_budget: EdgeBudget,
     ) -> Result<StreamRuntimePlanParts> {
+        self.ensure_execution_enabled()?;
         let StreamExecutionPlan {
             name,
+            late_outputs: _,
             mut nodes,
             external_inputs,
             external_outputs,

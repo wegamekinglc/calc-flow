@@ -998,6 +998,19 @@ export interface components {
                      * @description Metric transaction version; must equal `1`.
                      */
                     metrics_version: number;
+                } | {
+                    /** @constant */
+                    kind: "side_output";
+                    /**
+                     * Format: uint32
+                     * @description Metric transaction version; must equal `1`.
+                     */
+                    metrics_version: number;
+                    /**
+                     * Format: uint32
+                     * @description Diagnostic schema version; must equal `1`.
+                     */
+                    schema_version: number;
                 };
                 NodeSpec: {
                     id: string;
@@ -2183,6 +2196,19 @@ export interface components {
                      * @description Metric transaction version; must equal `1`.
                      */
                     metrics_version: number;
+                } | {
+                    /** @constant */
+                    kind: "side_output";
+                    /**
+                     * Format: uint32
+                     * @description Metric transaction version; must equal `1`.
+                     */
+                    metrics_version: number;
+                    /**
+                     * Format: uint32
+                     * @description Diagnostic schema version; must equal `1`.
+                     */
+                    schema_version: number;
                 };
                 NodeSpec: {
                     id: string;

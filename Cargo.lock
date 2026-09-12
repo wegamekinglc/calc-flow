@@ -553,7 +553,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "calc-flow"
-version = "4.0.0"
+version = "5.0.0"
 dependencies = [
  "allocation-counter",
  "async-trait",
@@ -582,7 +582,7 @@ dependencies = [
 
 [[package]]
 name = "calc-flow-connectors"
-version = "4.0.0"
+version = "5.0.0"
 dependencies = [
  "arrow",
  "arrow-csv",
@@ -617,7 +617,7 @@ dependencies = [
 
 [[package]]
 name = "calc-flow-python"
-version = "4.0.0"
+version = "5.0.0"
 dependencies = [
  "async-trait",
  "calc-flow",

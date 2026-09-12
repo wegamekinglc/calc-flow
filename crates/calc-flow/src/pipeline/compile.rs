@@ -50,6 +50,7 @@ pub(crate) struct CompiledGraph {
     pub(crate) external_inputs: BTreeMap<String, PortEndpoint>,
     pub(crate) external_outputs: BTreeMap<String, PortEndpoint>,
     pub(crate) fingerprint: String,
+    pub(crate) late_outputs: BTreeMap<PortEndpoint, PortEndpoint>,
     pub(crate) table: Option<TablePlanResources>,
 }
 
@@ -64,6 +65,7 @@ pub(crate) fn compile_graph(
         .values()
         .any(|node| node.operator.requires_datafusion());
     let order = validate_and_order(builder, requires_datafusion)?;
+    let late_outputs = derive_late_outputs(builder, &order, execution_mode)?;
     let selected_catalog = selected_udf_catalog(&builder.nodes, udfs)?;
     let selected_udfs = selected_catalog
         .iter()
@@ -88,6 +90,7 @@ pub(crate) fn compile_graph(
         external_inputs,
         external_outputs,
         fingerprint,
+        late_outputs,
         table,
     })
 }
@@ -605,4 +608,66 @@ fn schema_value(schema: &SchemaRef) -> Value {
         .finished_data()
         .to_vec();
     Value::String(hex::encode(bytes))
+}
+
+fn derive_late_outputs(
+    builder: &PipelineBuilder,
+    order: &[String],
+    execution_mode: &str,
+) -> Result<BTreeMap<PortEndpoint, PortEndpoint>> {
+    let mut origins = BTreeMap::new();
+    for node_id in order {
+        let operator = &builder.nodes[node_id].operator;
+        let identity: &dyn std::any::Any = operator.metadata();
+        let policy = identity
+            .downcast_ref::<crate::RollingOperator>()
+            .map(|operator| operator.spec().late_policy)
+            .or_else(|| {
+                identity
+                    .downcast_ref::<crate::CrossSectionOperator>()
+                    .map(|operator| operator.spec().late_policy)
+            });
+        if matches!(policy, Some(crate::LatePolicySpec::SideOutput { .. })) {
+            if execution_mode != "stream" {
+                return Err(CalcFlowError::Compile {
+                    message: format!(
+                        "node {node_id:?}: unsupported_mode: late side output requires stream mode"
+                    ),
+                });
+            }
+            let output = PortEndpoint::new(node_id, "late")?;
+            origins.insert(output.clone(), output);
+        }
+        for (index, edge) in builder
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(_, edge)| edge.target.node_id == *node_id)
+        {
+            let Some(origin) = origins.get(&edge.source).cloned() else {
+                continue;
+            };
+            if !accepts_late_input(operator) {
+                return Err(CalcFlowError::Compile {
+                    message: format!(
+                        "graph.edges[{index}]: temporal_output_unavailable: input {node_id}.{} is derived from {}.{} and has no event-time progress contract; only built-in single-input expression/SQL successors are supported",
+                        edge.target.port, origin.node_id, origin.port,
+                    ),
+                });
+            }
+            for port in operator.output_ports() {
+                origins.insert(PortEndpoint::new(node_id, port.name())?, origin.clone());
+            }
+        }
+    }
+    Ok(origins)
+}
+
+fn accepts_late_input(operator: &NodeOperator) -> bool {
+    matches!(operator, NodeOperator::Expression(_) | NodeOperator::Sql(_))
+        && operator.input_ports().len() == 1
+        && operator
+            .output_ports()
+            .iter()
+            .all(|port| port.kind() == crate::BatchKind::Table)
 }

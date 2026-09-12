@@ -1,4 +1,5 @@
 mod asof;
+mod late_output;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -2044,6 +2045,7 @@ fn validate_operator(
     issues: &mut Vec<ValidationIssue>,
 ) {
     let base = format!("graph.nodes[{index}].operator");
+    late_output::validate_node(node, index, mode, issues);
     let (expected_inputs, expected_outputs) = match &node.operator {
         OperatorSpec::Expression {
             expression,
@@ -2084,11 +2086,11 @@ fn validate_operator(
         }
         OperatorSpec::Rolling { spec } => {
             validate_rolling_operator(node, index, spec, &base, issues);
-            single_table_io()
+            late_output_io(spec.late_policy)
         }
         OperatorSpec::CrossSection { spec } => {
             validate_cross_section_operator(node, index, spec, &base, issues);
-            single_table_io()
+            late_output_io(spec.late_policy)
         }
         OperatorSpec::StreamJoin { spec } => {
             validate_stream_join_operator(node, index, spec, mode, &base, issues);
@@ -2125,6 +2127,30 @@ fn validate_operator(
             false,
             issues,
         );
+    }
+}
+
+fn late_output_io(
+    policy: crate::LatePolicySpec,
+) -> (Option<Vec<&'static str>>, Option<Vec<&'static str>>) {
+    if matches!(policy, crate::LatePolicySpec::SideOutput { .. }) {
+        (Some(vec!["input"]), Some(vec!["output", "late"]))
+    } else {
+        single_table_io()
+    }
+}
+
+fn validate_late_output_ports(
+    node: &NodeSpec,
+    base: &str,
+    actual: &[Port],
+    issues: &mut Vec<ValidationIssue>,
+) {
+    if let Ok(configured) = configured_ports(node, false)
+        && let Err(error) = validate_derived_outputs(&configured, actual)
+    {
+        let path = format!("{}.output_ports", base.trim_end_matches(".operator"));
+        issues.push(issue(path, "schema_mismatch", error.to_string()));
     }
 }
 
@@ -2221,9 +2247,21 @@ fn validate_rolling_operator(
         ));
     } else if let Ok(input) = port_from_spec(&node.input_ports[0])
         && let Some(schema) = input.schema().cloned()
-        && let Err(error) = RollingOperator::new(&node.id, schema, spec.clone())
     {
-        issues.push(issue(base, "invalid_operator", error.to_string()));
+        match RollingOperator::new(&node.id, schema, spec.clone()) {
+            Ok(operator)
+                if matches!(spec.late_policy, crate::LatePolicySpec::SideOutput { .. }) =>
+            {
+                validate_late_output_ports(
+                    node,
+                    base,
+                    crate::OperatorMetadata::output_ports(&operator),
+                    issues,
+                );
+            }
+            Ok(_) => {}
+            Err(error) => issues.push(issue(base, "invalid_operator", error.to_string())),
+        }
     }
 }
 
@@ -2248,9 +2286,21 @@ fn validate_cross_section_build(
 ) {
     if let Ok(input) = port_from_spec(&node.input_ports[0])
         && let Some(schema) = input.schema().cloned()
-        && let Err(error) = CrossSectionOperator::new(&node.id, schema, spec.clone())
     {
-        issues.push(issue(base, "invalid_operator", error.to_string()));
+        match CrossSectionOperator::new(&node.id, schema, spec.clone()) {
+            Ok(operator)
+                if matches!(spec.late_policy, crate::LatePolicySpec::SideOutput { .. }) =>
+            {
+                validate_late_output_ports(
+                    node,
+                    base,
+                    crate::OperatorMetadata::output_ports(&operator),
+                    issues,
+                );
+            }
+            Ok(_) => {}
+            Err(error) => issues.push(issue(base, "invalid_operator", error.to_string())),
+        }
     }
 }
 

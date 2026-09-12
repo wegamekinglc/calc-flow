@@ -287,6 +287,18 @@ pub enum LatePolicySpec {
         /// Metric transaction version; must equal `1`.
         metrics_version: u32,
     },
+    /// Route late rows to a diagnostic table in stream mode.
+    ///
+    /// The configuration contract is available; execution remains disabled
+    /// until the dual-output runtime and recovery contract is complete.
+    SideOutput {
+        /// Metric transaction version; must equal `1`.
+        #[schemars(range(min = 1, max = 1))]
+        metrics_version: u32,
+        /// Diagnostic schema version; must equal `1`.
+        #[schemars(range(min = 1, max = 1))]
+        schema_version: u32,
+    },
 }
 
 /// Frozen null/NaN policy for rolling values (SCE-00 D3.2).
@@ -924,7 +936,7 @@ pub struct RollingOperator {
     name: String,
     spec: RollingSpec,
     input_ports: [Port; 1],
-    output_ports: [Port; 1],
+    output_ports: Vec<Port>,
     compiled: Box<CompiledRollingSpec>,
     state: RollingStreamState,
 }
@@ -943,6 +955,8 @@ impl RollingOperator {
         let configuration = configuration(&spec)?;
         let compiled = Box::new(compile_spec_full(&spec, &input_schema, &configuration)?);
         let output_schema = Arc::new(output_schema(&input_schema, &compiled.outputs));
+        let output_ports =
+            super::late_output::output_ports(spec.late_policy, &input_schema, output_schema)?;
         Ok(Self {
             name: name.into(),
             spec,
@@ -952,12 +966,7 @@ impl RollingOperator {
                 true,
                 Some(input_schema),
             )?],
-            output_ports: [Port::with_schema_ref(
-                "output",
-                BatchKind::Table,
-                true,
-                Some(output_schema),
-            )?],
+            output_ports,
             compiled,
             state: RollingStreamState::default(),
         })
@@ -1040,6 +1049,14 @@ impl BatchOperator for RollingOperator {
         inputs: &BTreeMap<String, Batch>,
         context: &BatchOperatorContext<'_>,
     ) -> Result<BTreeMap<String, Batch>> {
+        if matches!(self.spec.late_policy, LatePolicySpec::SideOutput { .. }) {
+            return Err(CalcFlowError::Compile {
+                message: format!(
+                    "node {:?}: unsupported_mode: late side output requires stream mode",
+                    self.name
+                ),
+            });
+        }
         let input = required_input(inputs, "input", &self.name, None)?;
         self.input_ports[0].validate(input, &format!("{}.input", self.name))?;
         context.run.check_cancelled()?;
@@ -1360,6 +1377,7 @@ impl StreamOperator for RollingOperator {
 
 impl RollingOperator {
     fn observe_context(&self, context: &StreamOperatorContext<'_>) -> Result<()> {
+        super::late_output::ensure_execution_enabled(self.spec.late_policy, context.operator_id())?;
         if self
             .state
             .pipeline_fingerprint
@@ -1453,6 +1471,7 @@ impl RollingOperator {
                 ),
             )),
             LatePolicySpec::Drop { .. } => Ok(true),
+            LatePolicySpec::SideOutput { .. } => Err(super::late_output::disabled_error(node_id)),
         }
     }
 
@@ -5148,6 +5167,7 @@ fn validate_arguments(spec: &RollingSpec) -> Result<()> {
     validate_key_names("rolling.partition_by", &spec.partition_by)?;
     validate_key_names("rolling.sequence_by", &spec.sequence_by)?;
     validate_outputs(&spec.outputs)?;
+    super::late_output::validate_policy(spec.late_policy, "rolling")?;
     if let LatePolicySpec::Drop { metrics_version } = spec.late_policy
         && metrics_version != 1
     {
@@ -5377,6 +5397,7 @@ fn compile_spec_against_schema(
     input_schema: &Schema,
     configuration_hash: String,
 ) -> Result<CompiledRollingSpec> {
+    super::late_output::validate_input(spec.late_policy, input_schema, "rolling")?;
     let event_time_index = exact_field_index(input_schema, &spec.event_time)?;
     validate_event_time(input_schema, event_time_index, &spec.event_time)?;
     let partition_columns = spec
@@ -5991,6 +6012,205 @@ fn format_error(error: &serde_json::Error) -> CalcFlowError {
 
 #[cfg(test)]
 mod tests {
+
+    #[tokio::test]
+    async fn test_side_output_direct_batch_execution_is_rejected() {
+        let mut spec = valid_spec();
+        spec.late_policy = LatePolicySpec::SideOutput {
+            metrics_version: 1,
+            schema_version: 1,
+        };
+        let input = Arc::new(input_schema());
+        let mut operator = RollingOperator::new("features", input.clone(), spec).unwrap();
+        let batch = Batch::table(
+            vec![RecordBatch::new_empty(input)],
+            BatchMetadata::default(),
+        )
+        .unwrap();
+        let run =
+            crate::RunContext::new(JsonMap::new(), None, crate::CancellationToken::new()).unwrap();
+        let error = operator
+            .process(
+                &BTreeMap::from([("input".into(), batch)]),
+                &BatchOperatorContext { run: &run },
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("unsupported_mode"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn test_side_output_direct_execution_stays_disabled() {
+        let mut spec = valid_spec();
+        spec.late_policy = LatePolicySpec::SideOutput {
+            metrics_version: 1,
+            schema_version: 1,
+        };
+        let input = Arc::new(input_schema());
+        let mut operator = RollingOperator::new("features", input.clone(), spec).unwrap();
+        let batch = Batch::table(
+            vec![RecordBatch::new_empty(input)],
+            BatchMetadata::default(),
+        )
+        .unwrap();
+        let job = crate::StreamJobContext::new(
+            1,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            JsonMap::new(),
+            None,
+            crate::CancellationToken::new(),
+        );
+        let context = StreamOperatorContext::new(&job, "features", None);
+        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        for error in [
+            operator
+                .process_data("input", batch, &context, &mut output)
+                .await
+                .unwrap_err(),
+            operator
+                .on_watermark(EventTime::from_micros(1), &context, &mut output)
+                .await
+                .unwrap_err(),
+            operator.on_end(&context, &mut output).await.unwrap_err(),
+        ] {
+            assert!(
+                error
+                    .to_string()
+                    .contains("late side output execution is not enabled"),
+                "{error}"
+            );
+        }
+        assert!(output.drain("output").is_empty());
+        assert!(output.drain("late").is_empty());
+        assert!(!operator.state.ended);
+        assert!(operator.state.last_input_watermark.is_none());
+    }
+
+    #[test]
+    fn test_side_output_validates_versions() {
+        for field in ["metrics_version", "schema_version"] {
+            for version in [0, 2] {
+                let mut policy = serde_json::json!({"kind": "side_output", "metrics_version": 1, "schema_version": 1});
+                policy[field] = serde_json::json!(version);
+                let mut spec = valid_spec();
+                spec.late_policy = serde_json::from_value(policy).unwrap();
+                let error = spec.validate(&input_schema()).unwrap_err();
+                assert!(
+                    matches!(error, CalcFlowError::InvalidArgument { field: ref name, .. } if name.ends_with(field)),
+                    "{error}"
+                );
+                assert!(RollingOperator::new("features", Arc::new(input_schema()), spec).is_err());
+            }
+            let mut policy = serde_json::json!({"kind": "side_output", "metrics_version": 1, "schema_version": 1});
+            policy.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<LatePolicySpec>(policy).is_err());
+        }
+    }
+
+    #[test]
+    fn test_side_output_validates_reserved_prefix() {
+        for name in ["_cf_late_reason", "_cf_late_future"] {
+            let mut fields = input_schema().fields().to_vec();
+            fields.push(Arc::new(Field::new(name, DataType::Utf8, true)));
+            let input = Arc::new(Schema::new(fields));
+            for policy in [
+                LatePolicySpec::Error {
+                    scope: LateErrorScope::Envelope,
+                },
+                LatePolicySpec::Drop { metrics_version: 1 },
+            ] {
+                let mut spec = valid_spec();
+                spec.late_policy = policy;
+                assert!(spec.validate(&input).is_ok());
+                assert_eq!(
+                    RollingOperator::new("features", input.clone(), spec)
+                        .unwrap()
+                        .output_ports()
+                        .len(),
+                    1
+                );
+            }
+            let mut spec = valid_spec();
+            spec.late_policy = LatePolicySpec::SideOutput {
+                metrics_version: 1,
+                schema_version: 1,
+            };
+            let error = spec.validate(&input).unwrap_err().to_string();
+            assert!(
+                error.contains(name) && error.contains("reserved"),
+                "{error}"
+            );
+            assert!(RollingOperator::new("features", input, spec).is_err());
+        }
+    }
+
+    #[test]
+    fn test_side_output_derives_exact_ports_and_preserves_arrow_metadata() {
+        let input = input_schema();
+        let fields = input
+            .fields()
+            .iter()
+            .map(|field| {
+                field.as_ref().clone().with_metadata(
+                    [("field_key".into(), "field_value".into())]
+                        .into_iter()
+                        .collect(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let input = Arc::new(Schema::new_with_metadata(
+            fields,
+            [("schema_key".into(), "schema_value".into())]
+                .into_iter()
+                .collect(),
+        ));
+        let mut spec = valid_spec();
+        let normal = spec.validate(&input).unwrap();
+        spec.late_policy = serde_json::from_value(serde_json::json!({
+            "kind": "side_output", "metrics_version": 1, "schema_version": 1
+        }))
+        .unwrap();
+        assert_eq!(spec.validate(&input).unwrap(), normal);
+        let operator = RollingOperator::new("features", input.clone(), spec).unwrap();
+        let ports = operator.output_ports();
+        assert_eq!(
+            ports.iter().map(Port::name).collect::<Vec<_>>(),
+            ["output", "late"]
+        );
+        assert!(
+            ports
+                .iter()
+                .all(|port| port.required() && port.kind() == BatchKind::Table)
+        );
+        assert_eq!(ports[0].schema(), Some(&normal));
+        let late = ports[1].schema().unwrap();
+        assert_eq!(late.metadata(), input.metadata());
+        assert_eq!(
+            &late.fields()[..input.fields().len()],
+            input.fields().as_ref()
+        );
+        let diagnostics = [
+            ("_cf_late_node", DataType::Utf8),
+            ("_cf_late_input_port", DataType::Utf8),
+            ("_cf_late_event_time_micros", DataType::Int64),
+            ("_cf_late_closing_time_micros", DataType::Int64),
+            ("_cf_late_watermark_micros", DataType::Int64),
+            ("_cf_late_reason", DataType::Utf8),
+            ("_cf_late_source", DataType::Utf8),
+            ("_cf_late_sequence", DataType::UInt64),
+            ("_cf_late_row_index", DataType::UInt64),
+        ];
+        assert_eq!(
+            late.fields().len(),
+            input.fields().len() + diagnostics.len()
+        );
+        for (field, (name, data_type)) in late.fields()[input.fields().len()..]
+            .iter()
+            .zip(diagnostics)
+        {
+            assert_eq!(field.as_ref(), &Field::new(name, data_type, false));
+        }
+    }
     use datafusion::arrow::array::Array;
     use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use serde_json::{Value, json};

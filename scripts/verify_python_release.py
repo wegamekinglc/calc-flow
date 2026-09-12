@@ -152,11 +152,11 @@ def project_configuration(root: Path = ROOT) -> ReleaseConfig:
     studio_requirement = studio_requirements[0]
     if _normalized_requirement(studio_requirement) != (
         "calc-flow-python",
-        tuple(sorted((f">={version}", "<5"))),
+        tuple(sorted((f">={version}", "<6"))),
     ):
         raise ValueError(
             f"Studio requirement {studio_requirement!r} does not cover "
-            f"{version} within v4"
+            f"{version} within v5"
         )
     return ReleaseConfig(version, requires_python, studio_requirement)
 

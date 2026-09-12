@@ -52,3 +52,21 @@ fn canonical_v3_schema_matches_the_committed_artifact() {
     let generated = serde_json::to_string_pretty(&generated).expect("schema encodes");
     assert_eq!(generated, committed);
 }
+
+#[test]
+fn test_side_output_schema_requires_both_explicit_v1_fields() {
+    let schema = project_json_schema().unwrap();
+    let variants = schema["$defs"]["LatePolicySpec"]["oneOf"]
+        .as_array()
+        .unwrap();
+    let side = variants
+        .iter()
+        .find(|variant| variant["properties"]["kind"]["const"] == "side_output")
+        .unwrap();
+    assert_eq!(side["additionalProperties"], false);
+    for field in ["metrics_version", "schema_version"] {
+        assert!(side["required"].as_array().unwrap().contains(&json!(field)));
+        assert_eq!(side["properties"][field]["minimum"], 1);
+        assert_eq!(side["properties"][field]["maximum"], 1);
+    }
+}

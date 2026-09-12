@@ -31,7 +31,7 @@ else:
 
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "4.0.0"
+VERSION = "5.0.0"
 PLATFORMS = {
     "linux-aarch64": "manylinux_2_28_aarch64",
     "linux-x86_64": "manylinux_2_28_x86_64",
@@ -103,7 +103,7 @@ class VerifyPythonReleaseTests(unittest.TestCase):
                 f"{dist_info}/METADATA",
                 self._metadata(
                     "calc-flow-studio",
-                    requires_dist="calc-flow-python<5,>=4.0.0",
+                    requires_dist="calc-flow-python<6,>=5.0.0",
                 ),
             )
             archive.writestr(
@@ -142,7 +142,7 @@ class VerifyPythonReleaseTests(unittest.TestCase):
         self._sdist()
 
     def test_versions_match_the_release_tag(self) -> None:
-        config = validate_versions(root=ROOT, tag="v4.0.0")
+        config = validate_versions(root=ROOT, tag="v5.0.0")
 
         self.assertEqual(config.version, VERSION)
         self.assertEqual(config.requires_python, ">=3.13")
@@ -151,13 +151,13 @@ class VerifyPythonReleaseTests(unittest.TestCase):
         with patch(
             "scripts.verify_python_release.ensure_version_is_new_on_pypi"
         ) as check:
-            validate_versions(root=ROOT, tag="v4.0.0", check_pypi=True)
+            validate_versions(root=ROOT, tag="v5.0.0", check_pypi=True)
 
         check.assert_called_once_with("calc-flow-python", VERSION)
 
     def test_versions_reject_a_mismatched_release_tag(self) -> None:
-        with self.assertRaisesRegex(ValueError, "must equal 'v4.0.0'"):
-            validate_versions(root=ROOT, tag="v4.0.1")
+        with self.assertRaisesRegex(ValueError, "must equal 'v5.0.0'"):
+            validate_versions(root=ROOT, tag="v5.0.1")
 
     def test_complete_release_has_a_stable_relative_manifest(self) -> None:
         self._complete_release()
@@ -197,12 +197,12 @@ class VerifyPythonReleaseTests(unittest.TestCase):
             "scripts.verify_python_release.HTTPSConnection",
             return_value=connection,
         ) as constructor:
-            ensure_version_is_new_on_pypi("calc-flow-python", "4.0.0+candidate")
+            ensure_version_is_new_on_pypi("calc-flow-python", "5.0.0+candidate")
 
         constructor.assert_called_once_with("pypi.org", timeout=20)
         connection.request.assert_called_once_with(
             "GET",
-            "/pypi/calc-flow-python/4.0.0%2Bcandidate/json",
+            "/pypi/calc-flow-python/5.0.0%2Bcandidate/json",
             headers={"Accept": "application/json"},
         )
         response.read.assert_called_once_with()
@@ -253,13 +253,13 @@ class ReleaseBaselineTests(unittest.TestCase):
             resolve_release_baseline(self.directory)
 
     def test_tag_must_be_annotated_and_point_at_candidate(self) -> None:
-        self.git("tag", "v4.0.0")
+        self.git("tag", "v5.0.0")
         with self.assertRaisesRegex(ValueError, "annotated"):
-            resolve_release_baseline(self.directory, tag="v4.0.0")
+            resolve_release_baseline(self.directory, tag="v5.0.0")
 
-        self.git("tag", "-a", "v4.0.1", self.baseline, "-m", "Wrong head")
+        self.git("tag", "-a", "v5.0.1", self.baseline, "-m", "Wrong head")
         with self.assertRaisesRegex(ValueError, "candidate HEAD"):
-            resolve_release_baseline(self.directory, tag="v4.0.1")
+            resolve_release_baseline(self.directory, tag="v5.0.1")
 
     def test_rehearsal_accepts_an_explicit_ancestor_sha(self) -> None:
         self.assertEqual(
@@ -271,12 +271,12 @@ class ReleaseBaselineTests(unittest.TestCase):
         self.git(
             "tag",
             "-a",
-            "v4.0.0",
+            "v5.0.0",
             "-m",
-            f"Release 4.0.0\n\nBenchmark-Baseline: {self.baseline}",
+            f"Release 5.0.0\n\nBenchmark-Baseline: {self.baseline}",
         )
         self.assertEqual(
-            resolve_release_baseline(self.directory, tag="v4.0.0"),
+            resolve_release_baseline(self.directory, tag="v5.0.0"),
             self.baseline,
         )
 
@@ -315,12 +315,12 @@ class ReleaseBaselineTests(unittest.TestCase):
         self.git(
             "tag",
             "-a",
-            "v4.0.0",
+            "v5.0.0",
             "-m",
             f"Benchmark-Baseline: {self.baseline}",
         )
         with self.assertRaisesRegex(ValueError, "disagree"):
-            resolve_release_baseline(self.directory, initial="f" * 40, tag="v4.0.0")
+            resolve_release_baseline(self.directory, initial="f" * 40, tag="v5.0.0")
 
 
 if __name__ == "__main__":

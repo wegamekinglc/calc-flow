@@ -157,28 +157,46 @@ class ReleaseConfigTests(unittest.TestCase):
             (ROOT / "web-ui/package-lock.json").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(workspace["workspace"]["package"]["version"], "4.0.0")
-        self.assertEqual(binding["dependencies"]["calc-flow"]["version"], "=4.0.0")
-        self.assertEqual(package["project"]["version"], "4.0.0")
+        self.assertEqual(workspace["workspace"]["package"]["version"], "5.0.0")
+        self.assertEqual(binding["dependencies"]["calc-flow"]["version"], "=5.0.0")
+        for name in ("calc-flow", "calc-flow-connectors", "calc-flow-python"):
+            manifest = tomllib.loads(
+                (ROOT / "crates" / name / "Cargo.toml").read_text(encoding="utf-8")
+            )
+            self.assertTrue(manifest["package"]["version"]["workspace"])
+            for dependency in ("calc-flow", "calc-flow-connectors"):
+                if dependency in manifest["dependencies"]:
+                    self.assertEqual(
+                        manifest["dependencies"][dependency]["version"], "=5.0.0"
+                    )
+        lock = tomllib.loads((ROOT / "Cargo.lock").read_text(encoding="utf-8"))
+        for package_entry in lock["package"]:
+            if package_entry["name"] in (
+                "calc-flow",
+                "calc-flow-connectors",
+                "calc-flow-python",
+            ):
+                self.assertEqual(package_entry["version"], "5.0.0")
+        self.assertEqual(package["project"]["version"], "5.0.0")
         self.assertEqual(package["project"]["name"], "calc-flow-python")
         self.assertEqual(package["tool"]["maturin"]["module-name"], "calc_flow._native")
-        self.assertEqual(studio["project"]["version"], "4.0.0")
-        self.assertIn("calc-flow-python>=4.0.0,<5", studio["project"]["dependencies"])
-        self.assertEqual(frontend["version"], "4.0.0")
-        self.assertEqual(frontend_lock["version"], "4.0.0")
-        self.assertEqual(frontend_lock["packages"][""]["version"], "4.0.0")
+        self.assertEqual(studio["project"]["version"], "5.0.0")
+        self.assertIn("calc-flow-python>=5.0.0,<6", studio["project"]["dependencies"])
+        self.assertEqual(frontend["version"], "5.0.0")
+        self.assertEqual(frontend_lock["version"], "5.0.0")
+        self.assertEqual(frontend_lock["packages"][""]["version"], "5.0.0")
         self.assertIn(
-            '__version__ = "4.0.0"',
+            '__version__ = "5.0.0"',
             (ROOT / "python/calc_flow/__init__.py").read_text(encoding="utf-8"),
         )
         self.assertIn(
-            'version="4.0.0"',
+            'version="5.0.0"',
             (ROOT / "web-ui/backend/src/calc_flow_studio/app.py").read_text(
                 encoding="utf-8"
             ),
         )
         openapi = json.loads((ROOT / "web-ui/openapi.json").read_text(encoding="utf-8"))
-        self.assertEqual(openapi["info"]["version"], "4.0.0")
+        self.assertEqual(openapi["info"]["version"], "5.0.0")
 
         release_text = "\n".join(
             (ROOT / path).read_text(encoding="utf-8")
@@ -188,16 +206,16 @@ class ReleaseConfigTests(unittest.TestCase):
             )
         )
         self.assertNotIn(">=2.0.0a1", release_text)
-        self.assertIn(">=4.0.0", release_text)
+        self.assertIn(">=5.0.0", release_text)
 
         release_workflow = (ROOT / ".github/workflows/release.yml").read_text(
             encoding="utf-8"
         )
-        self.assertIn('- "v4.*"', release_workflow)
-        self.assertNotIn('- "v3.*"', release_workflow)
+        self.assertIn('- "v5.*"', release_workflow)
+        self.assertNotIn('- "v4.*"', release_workflow)
         self.assertIn('assert "/api/v3/catalog"', release_workflow)
-        self.assertIn('and ">=4.0.0" in requirement', release_workflow)
-        self.assertIn('and "<5" in requirement', release_workflow)
+        self.assertIn('and ">=5.0.0" in requirement', release_workflow)
+        self.assertIn('and "<6" in requirement', release_workflow)
         self.assertEqual(release_workflow.count("--save-baseline exact-"), 4)
         self.assertIn("--criterion-dir", release_workflow)
         self.assertIn("--criterion-baseline exact-baseline", release_workflow)
