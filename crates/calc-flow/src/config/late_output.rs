@@ -1,4 +1,4 @@
-//! Field-level diagnostics for the staged late-output project contract.
+//! Field-level diagnostics for the late-output project contract.
 
 use crate::{CalcFlowError, LatePolicySpec};
 
@@ -45,8 +45,9 @@ pub(super) fn validate_node(
     }
     if mode == CompileMode::Batch {
         issues.push(issue(
-            format!("{base}.operator.spec.late_policy"), "unsupported_mode",
-            "late side output requires stream mode; execution remains disabled until dual-output runtime and recovery validation is complete",
+            format!("{base}.operator.spec.late_policy"),
+            "unsupported_mode",
+            "late side output requires stream mode",
         ));
     }
 }

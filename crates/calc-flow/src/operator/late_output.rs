@@ -6,12 +6,61 @@ mod tests;
 use std::sync::Arc;
 
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use serde::{Deserialize, Serialize};
 
 use crate::{BatchKind, CalcFlowError, LatePolicySpec, Port, Result};
 
 pub(super) mod identity;
 mod plan;
 pub(super) use plan::{LateOutputPlan, PreparedLateOutput};
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct LateOutputSnapshot {
+    version: u32,
+    schema_version: u32,
+    next_sequence: u64,
+}
+
+impl LateOutputSnapshot {
+    pub(super) fn new(policy: LatePolicySpec, next_sequence: u64) -> Option<Self> {
+        match policy {
+            LatePolicySpec::SideOutput { schema_version, .. } => Some(Self {
+                version: 1,
+                schema_version,
+                next_sequence,
+            }),
+            _ => None,
+        }
+    }
+
+    pub(super) fn restore_sequence(policy: LatePolicySpec, snapshot: Option<&Self>) -> Result<u64> {
+        match (policy, snapshot) {
+            (LatePolicySpec::SideOutput { schema_version, .. }, Some(snapshot))
+                if snapshot.version == 1 && snapshot.schema_version == schema_version =>
+            {
+                Ok(snapshot.next_sequence)
+            }
+            (LatePolicySpec::SideOutput { .. }, _) => Err(CalcFlowError::CheckpointMismatch {
+                message: "checkpoint is missing a compatible late_output version 1 object".into(),
+            }),
+            (_, Some(_)) => Err(CalcFlowError::CheckpointMismatch {
+                message: "checkpoint unexpectedly contains late_output for a disabled policy"
+                    .into(),
+            }),
+            (_, None) => Ok(0),
+        }
+    }
+}
+
+pub(super) fn deserialize_snapshot<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<LateOutputSnapshot>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    LateOutputSnapshot::deserialize(deserializer).map(Some)
+}
 
 pub(crate) fn output_ports(
     policy: LatePolicySpec,
@@ -101,13 +150,6 @@ pub(crate) fn validate_input(policy: LatePolicySpec, input: &Schema, kind: &str)
     Ok(())
 }
 
-pub(crate) fn ensure_execution_enabled(policy: LatePolicySpec, node_id: &str) -> Result<()> {
-    if matches!(policy, LatePolicySpec::SideOutput { .. }) {
-        return Err(disabled_error(node_id));
-    }
-    Ok(())
-}
-
 pub(super) fn ensure_can_continue(failed: bool, node_id: &str) -> Result<()> {
     if failed {
         return Err(CalcFlowError::Operator {
@@ -116,12 +158,4 @@ pub(super) fn ensure_can_continue(failed: bool, node_id: &str) -> Result<()> {
         });
     }
     Ok(())
-}
-
-pub(crate) fn disabled_error(node_id: &str) -> CalcFlowError {
-    CalcFlowError::Compile {
-        message: format!(
-            "node {node_id:?}: unsupported_capability: late side output execution is not enabled; dual-output runtime and recovery validation is pending"
-        ),
-    }
 }

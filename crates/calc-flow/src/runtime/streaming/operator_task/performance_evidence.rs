@@ -150,6 +150,7 @@ impl Fixture {
         let (entry_ack, _ack) = mpsc::unbounded_channel();
         Self {
             inputs: OperatorTaskInputs {
+                late_output_ports: std::collections::BTreeSet::new(),
                 entity_work: None,
                 node_id: "rolling".into(),
                 operator: CompiledStreamOperator::Rolling(operator),

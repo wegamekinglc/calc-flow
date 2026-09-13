@@ -150,6 +150,36 @@ fn new_operator() -> CrossSectionOperator {
     CrossSectionOperator::new("cross_section", input_schema(), spec()).unwrap()
 }
 
+fn late_operator() -> CrossSectionOperator {
+    let mut spec = spec();
+    spec.late_policy = calc_flow::LatePolicySpec::SideOutput {
+        metrics_version: 1,
+        schema_version: 1,
+    };
+    CrossSectionOperator::new("cross_section", input_schema(), spec).unwrap()
+}
+
+#[test]
+fn test_late_snapshot_extension_restores_sequence_and_reset() {
+    let mut operator = late_operator();
+    let mut snapshot = operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    assert_eq!(
+        snapshot.inline_metadata["late_output"],
+        serde_json::json!({
+            "version": 1, "schema_version": 1, "next_sequence": 0
+        })
+    );
+    snapshot.inline_metadata.get_mut("late_output").unwrap()["next_sequence"] = 7.into();
+    StreamOperator::restore(&mut operator, &snapshot).unwrap();
+    let restored = operator.checkpoint(Epoch::new(2).unwrap()).unwrap();
+    assert_eq!(restored.inline_metadata["late_output"]["next_sequence"], 7);
+    StreamOperator::reset(&mut operator).unwrap();
+    let reset = operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    assert_eq!(reset.inline_metadata["late_output"]["next_sequence"], 0);
+    let legacy = new_operator().checkpoint(Epoch::new(1).unwrap()).unwrap();
+    assert!(!legacy.inline_metadata.contains_key("late_output"));
+}
+
 fn symbols(batch: &Batch) -> Vec<String> {
     let mut values = Vec::new();
     for record in batch.table_payload().unwrap().batches() {
@@ -520,4 +550,92 @@ async fn terminal_flush_after_restore_releases_state_for_a_duplicate_identity() 
         .unwrap();
     let empty = restored.checkpoint(Epoch::new(2).unwrap()).unwrap();
     assert!(empty.segments.is_empty(), "flushed state was not released");
+}
+
+#[test]
+fn test_late_snapshot_rejects_corruption_without_installing_state() {
+    let mut operator = late_operator();
+    let mut snapshot = operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    snapshot.inline_metadata.get_mut("late_output").unwrap()["next_sequence"] = 7.into();
+    StreamOperator::restore(&mut operator, &snapshot).unwrap();
+    let valid = serde_json::json!({"version": 1, "schema_version": 1, "next_sequence": 7});
+    let malformed = [
+        None,
+        Some(serde_json::Value::Null),
+        Some(serde_json::json!({})),
+        Some(serde_json::json!({"version": 2, "schema_version": 1, "next_sequence": 7})),
+        Some(serde_json::json!({"version": 1, "schema_version": 2, "next_sequence": 7})),
+        Some(serde_json::json!({"version": 1, "schema_version": 1, "next_sequence": -1})),
+        Some(serde_json::json!({"version": 1, "schema_version": 1, "next_sequence": "7"})),
+        Some(serde_json::json!({"version": 1, "schema_version": 1, "next_sequence": 7.5})),
+        Some(serde_json::json!({"version": 1, "schema_version": 1, "next_sequence": 1e30})),
+        Some(
+            serde_json::json!({"version": 1, "schema_version": 1, "next_sequence": 7, "outbox": []}),
+        ),
+    ];
+    for extension in malformed {
+        let mut corrupt = snapshot.clone();
+        corrupt.inline_metadata.remove("late_output");
+        if let Some(extension) = extension {
+            corrupt
+                .inline_metadata
+                .insert("late_output".into(), extension);
+        }
+        assert!(
+            StreamOperator::restore(&mut operator, &corrupt).is_err(),
+            "{corrupt:?}"
+        );
+    }
+    for field in ["configuration_hash", "state_schema_fingerprint"] {
+        let mut corrupt = snapshot.clone();
+        corrupt.inline_metadata.insert(field.into(), "wrong".into());
+        assert!(StreamOperator::restore(&mut operator, &corrupt).is_err());
+    }
+    let after = operator.checkpoint(Epoch::new(2).unwrap()).unwrap();
+    assert_eq!(after.inline_metadata["late_output"], valid);
+    let mut old = new_operator();
+    let legacy = old.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    assert!(StreamOperator::restore(&mut operator, &legacy).is_err());
+    for extension in [valid, serde_json::Value::Null] {
+        let mut corrupt = legacy.clone();
+        corrupt
+            .inline_metadata
+            .insert("late_output".into(), extension);
+        assert!(StreamOperator::restore(&mut old, &corrupt).is_err());
+    }
+}
+
+#[tokio::test]
+async fn test_late_restored_sequence_overflow_rejects_envelope_without_output_or_state_change() {
+    let mut operator = late_operator();
+    let mut snapshot = operator.checkpoint(Epoch::INITIAL).unwrap();
+    snapshot.inline_metadata.get_mut("late_output").unwrap()["next_sequence"] = u64::MAX.into();
+    StreamOperator::restore(&mut operator, &snapshot).unwrap();
+    let job = new_job();
+    let mut output = EdgeCollector::new(operator.output_ports().to_vec());
+    let error = operator
+        .process_data(
+            "input",
+            input_batch(&[(5, "a", None, 1, Some(5.0)), (20, "a", None, 2, Some(20.0))]),
+            &context(&job, Some(10)),
+            &mut output,
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("sequence"), "{error}");
+    assert!(output.drain("late").is_empty());
+    assert!(output.drain("output").is_empty());
+    let after = operator.checkpoint(Epoch::new(2).unwrap()).unwrap();
+    for field in [
+        "late_output",
+        "next_output_sequence",
+        "metrics",
+        "last_input_watermark",
+        "segment_inventory",
+    ] {
+        assert_eq!(
+            after.inline_metadata[field],
+            snapshot.inline_metadata[field]
+        );
+    }
 }

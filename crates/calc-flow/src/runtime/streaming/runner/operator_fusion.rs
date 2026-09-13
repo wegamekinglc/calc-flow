@@ -404,6 +404,7 @@ mod tests {
         let input = Port::new("input", BatchKind::Table, true, None).unwrap();
         let output = Port::new("output", BatchKind::Table, false, None).unwrap();
         OperatorTaskInputs {
+            late_output_ports: std::collections::BTreeSet::new(),
             entity_work: None,
             node_id: name.into(),
             operator: crate::pipeline::CompiledStreamOperator::External(Box::new(CallbackProbe {

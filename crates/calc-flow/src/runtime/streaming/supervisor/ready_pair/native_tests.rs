@@ -157,6 +157,7 @@ fn native_inputs(
     entry_ack: &mpsc::UnboundedSender<OperatorEntryAck>,
 ) -> OperatorTaskInputs {
     OperatorTaskInputs {
+        late_output_ports: node.late_output_ports,
         entity_work: None,
         context: context.for_node(&node.node_id).unwrap(),
         node_id: node.node_id,

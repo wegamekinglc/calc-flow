@@ -383,7 +383,7 @@ impl EdgeSender {
                     });
                 }
                 if fits(&state.charged, &cost, &self.shared.budget) {
-                    let blocked_elapsed = self.shared.prepare_enqueue(
+                    self.shared.prepare_enqueue(
                         &mut state,
                         &message,
                         cost,
@@ -391,8 +391,6 @@ impl EdgeSender {
                         metrics_blocked_since.as_ref(),
                     )?;
                     state.queue.push_back((message, cost));
-                    self.shared
-                        .record_enqueued_wait(&mut state, blocked_elapsed)?;
                     drop(state);
                     self.shared.message_available.notify_one();
                     return Ok(());
@@ -564,8 +562,15 @@ impl Shared {
         cost: EnvelopeCost,
         blocked_since: Option<tokio::time::Instant>,
         metrics_blocked_since: Option<&MetricsTimer>,
-    ) -> Result<Option<Duration>> {
+    ) -> Result<()> {
         let blocked_elapsed = blocked_since.map(|started| started.elapsed());
+        let blocked_duration = state
+            .blocked_duration
+            .checked_add(blocked_elapsed.unwrap_or_default())
+            .ok_or_else(|| CalcFlowError::InvalidArgument {
+                field: format!("runtime.metrics.{}.blocked_duration", self.edge),
+                message: "counter overflow".into(),
+            })?;
         let metrics_blocked_elapsed = metrics_blocked_since
             .map(|timer| timer.elapsed(&self.edge, "blocked_duration"))
             .transpose()?;
@@ -584,23 +589,7 @@ impl Shared {
             }
         })?;
         state.high_water = state.high_water.max_components(&state.charged);
-        Ok(blocked_elapsed)
-    }
-
-    fn record_enqueued_wait(
-        &self,
-        state: &mut ChannelState,
-        blocked_elapsed: Option<Duration>,
-    ) -> Result<()> {
-        if let Some(elapsed) = blocked_elapsed {
-            state.blocked_duration =
-                state.blocked_duration.checked_add(elapsed).ok_or_else(|| {
-                    CalcFlowError::InvalidArgument {
-                        field: format!("runtime.metrics.{}.blocked_duration", self.edge),
-                        message: "counter overflow".into(),
-                    }
-                })?;
-        }
+        state.blocked_duration = blocked_duration;
         Ok(())
     }
 
@@ -991,5 +980,30 @@ mod tests {
         assert_eq!(edge.channel.charged_rows, 0);
         assert_eq!(edge.channel.charged_bytes, 0);
         assert!(edge.drop_invariant_violated);
+    }
+    #[tokio::test]
+    async fn test_wait_counter_overflow_rejects_before_enqueue_and_releases_input() {
+        let (mut sender, mut receiver) =
+            edge_channel("overflow", EdgeBudget::new(1, 8).unwrap()).unwrap();
+        sender.send(data_message(&[1])).await.unwrap();
+        sender.shared.state.lock().blocked_duration = Duration::MAX;
+        let message = data_message(&[2]);
+        let reference = Arc::downgrade(
+            message
+                .as_data()
+                .unwrap()
+                .table_payload()
+                .unwrap()
+                .batches()[0]
+                .column(0),
+        );
+        let mut waiting = Box::pin(sender.send(message));
+        assert!(futures::poll!(waiting.as_mut()).is_pending());
+        receiver.recv().await.unwrap().unwrap();
+        let error = waiting.await.unwrap_err();
+        assert!(error.to_string().contains("blocked_duration"));
+        assert_eq!(receiver.metrics().queue_depth, 0);
+        assert_eq!(receiver.metrics().charged_bytes, 0);
+        assert!(reference.upgrade().is_none());
     }
 }

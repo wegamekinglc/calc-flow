@@ -1397,3 +1397,151 @@ async fn sink_rejects_empty_output_name() {
     let error = FileSinkConfig::from_options(&options).expect_err("empty output rejected");
     assert!(error.to_string().contains("directory name"), "{error}");
 }
+
+#[tokio::test]
+async fn test_file_recovery_commits_prepared_epoch_and_rejects_incomplete_staging() {
+    for corruption in ["none", "evidence", "manifest", "part"] {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let mut sink = Harness::sink(root, "out");
+        sink.open().await.unwrap();
+        sink.begin_epoch(Epoch::INITIAL).await.unwrap();
+        sink.write(&sample_batch(2)).await.unwrap();
+        let mut evidence = sink.pre_commit(Epoch::INITIAL).await.unwrap();
+        sink.close().await.unwrap();
+        let staging = root.join("out/.staging/epoch=1");
+        match corruption {
+            "evidence" => {
+                evidence.insert("rows".into(), json!(99));
+            }
+            "manifest" => std::fs::remove_file(staging.join("manifest.json")).unwrap(),
+            "part" => std::fs::remove_file(staging.join("part-0000.parquet")).unwrap(),
+            _ => {}
+        }
+        let recovery = calc_flow::SinkRecovery::from_parts(
+            Epoch::INITIAL,
+            true,
+            calc_flow::SinkDelivery::Transactional,
+            evidence,
+        );
+        let mut restored = Harness::sink(root, "out");
+        restored.open().await.unwrap();
+        let result = restored.recover(&recovery).await;
+        if corruption == "none" {
+            result.unwrap();
+            assert_eq!(Harness::committed_epochs(root, "out"), ["epoch=1"]);
+            assert!(!staging.exists());
+            restored.recover(&recovery).await.unwrap();
+        } else {
+            assert!(result.is_err(), "{corruption}");
+            assert!(Harness::committed_epochs(root, "out").is_empty());
+            assert!(staging.exists());
+        }
+        restored.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn test_file_recovery_rejects_unlisted_epoch_entries_without_mutating_output() {
+    for committed in [false, true] {
+        for entry_name in [
+            "part-unprepared.parquet",
+            "manifest.json.tmp",
+            "unexpected-directory",
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path();
+            let mut sink = Harness::sink(root, "out");
+            sink.open().await.unwrap();
+            sink.begin_epoch(Epoch::INITIAL).await.unwrap();
+            sink.write(&sample_batch(2)).await.unwrap();
+            let evidence = sink.pre_commit(Epoch::INITIAL).await.unwrap();
+            if committed {
+                sink.commit(Epoch::INITIAL, &evidence).await.unwrap();
+            }
+            let epoch_dir = root.join(if committed {
+                "out/epoch=1"
+            } else {
+                "out/.staging/epoch=1"
+            });
+            let extra = epoch_dir.join(entry_name);
+            if entry_name == "unexpected-directory" {
+                std::fs::create_dir(&extra).unwrap();
+            } else {
+                std::fs::copy(epoch_dir.join("part-0000.parquet"), &extra).unwrap();
+            }
+            let manifest = std::fs::read(epoch_dir.join("manifest.json")).unwrap();
+            let recovery = calc_flow::SinkRecovery::from_parts(
+                Epoch::INITIAL,
+                true,
+                calc_flow::SinkDelivery::Transactional,
+                evidence,
+            );
+            let mut restored = Harness::sink(root, "out");
+            restored.open().await.unwrap();
+            let error = restored
+                .recover(&recovery)
+                .await
+                .expect_err("unexpected epoch entries must reject recovery");
+            assert!(error.to_string().contains("unexpected"), "{error}");
+            assert_eq!(
+                std::fs::read(epoch_dir.join("manifest.json")).unwrap(),
+                manifest
+            );
+            assert!(extra.exists());
+            assert_eq!(root.join("out/epoch=1").exists(), committed);
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_file_recovery_rejects_evidence_identity_mismatch_without_mutation() {
+    for committed in [false, true] {
+        for field in ["epoch", "output"] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path();
+            let mut sink = Harness::sink(root, "out");
+            sink.open().await.unwrap();
+            sink.begin_epoch(Epoch::INITIAL).await.unwrap();
+            sink.write(&sample_batch(2)).await.unwrap();
+            let mut evidence = sink.pre_commit(Epoch::INITIAL).await.unwrap();
+            if committed {
+                sink.commit(Epoch::INITIAL, &evidence).await.unwrap();
+            }
+            evidence.insert(
+                field.into(),
+                if field == "epoch" {
+                    json!(2)
+                } else {
+                    json!("other")
+                },
+            );
+            let epoch_dir = root.join(if committed {
+                "out/epoch=1"
+            } else {
+                "out/.staging/epoch=1"
+            });
+            let manifest = serde_json::to_vec(&evidence).unwrap();
+            std::fs::write(epoch_dir.join("manifest.json"), &manifest).unwrap();
+            let recovery = calc_flow::SinkRecovery::from_parts(
+                Epoch::INITIAL,
+                true,
+                calc_flow::SinkDelivery::Transactional,
+                evidence,
+            );
+            let mut restored = Harness::sink(root, "out");
+            restored.open().await.unwrap();
+            let error = restored
+                .recover(&recovery)
+                .await
+                .expect_err("evidence must match the requested epoch and output");
+            assert!(error.to_string().contains("identity"), "{error}");
+            assert_eq!(
+                std::fs::read(epoch_dir.join("manifest.json")).unwrap(),
+                manifest
+            );
+            assert!(epoch_dir.join("part-0000.parquet").is_file());
+            assert_eq!(root.join("out/epoch=1").exists(), committed);
+        }
+    }
+}

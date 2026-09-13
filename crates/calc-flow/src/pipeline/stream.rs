@@ -284,6 +284,7 @@ pub(crate) struct RuntimeStreamNode {
     pub(crate) output_ports: BTreeMap<String, Port>,
     pub(crate) ingress_edges: BTreeMap<String, String>,
     pub(crate) output_edges: BTreeMap<String, Vec<String>>,
+    pub(crate) late_output_ports: BTreeSet<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -619,7 +620,6 @@ impl std::fmt::Debug for StreamExecutionPlan {
 /// The compiled continuously running plan (plan task M1.1).
 pub struct StreamExecutionPlan {
     name: String,
-    late_outputs: BTreeMap<PortEndpoint, PortEndpoint>,
     nodes: Vec<RuntimeStreamNode>,
     external_inputs: BTreeMap<String, PortEndpoint>,
     external_outputs: BTreeMap<String, PortEndpoint>,
@@ -680,10 +680,9 @@ impl PipelineBuilder {
             .collect::<BTreeMap<_, _>>();
         let name = self.name.clone();
         let table = graph.table;
-        let nodes = build_runtime_nodes(self, &graph.order, table.as_ref());
+        let nodes = build_runtime_nodes(self, &graph.order, table.as_ref(), &graph.late_outputs);
         Ok(StreamExecutionPlan {
             name,
-            late_outputs: graph.late_outputs,
             nodes,
             external_inputs: graph.external_inputs,
             external_outputs: graph.external_outputs,
@@ -702,6 +701,7 @@ fn build_runtime_nodes(
     mut builder: PipelineBuilder,
     order: &[String],
     table: Option<&TablePlanResources>,
+    late_outputs: &BTreeMap<PortEndpoint, PortEndpoint>,
 ) -> Vec<RuntimeStreamNode> {
     let inbound = builder
         .edges
@@ -774,6 +774,11 @@ fn build_runtime_nodes(
                 output_ports,
                 ingress_edges,
                 output_edges,
+                late_output_ports: late_outputs
+                    .keys()
+                    .filter(|endpoint| endpoint.node_id == *node_id)
+                    .map(|endpoint| endpoint.port.clone())
+                    .collect(),
             }
         })
         .collect()
@@ -1129,24 +1134,13 @@ impl StreamExecutionPlan {
         self.table.is_some()
     }
 
-    pub(crate) fn ensure_execution_enabled(&self) -> Result<()> {
-        if let Some(origin) = self.late_outputs.values().next() {
-            return Err(crate::operator::late_output::disabled_error(
-                &origin.node_id,
-            ));
-        }
-        Ok(())
-    }
-
     /// Consumes the compiled plan into directly owned runtime wiring.
     pub(crate) fn into_runtime_parts(
         self,
         default_budget: EdgeBudget,
     ) -> Result<StreamRuntimePlanParts> {
-        self.ensure_execution_enabled()?;
         let StreamExecutionPlan {
             name,
-            late_outputs: _,
             mut nodes,
             external_inputs,
             external_outputs,

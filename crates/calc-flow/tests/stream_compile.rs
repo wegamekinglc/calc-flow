@@ -1177,7 +1177,7 @@ impl calc_flow::StreamSink for UnopenedLateSink {
 }
 
 #[test]
-fn test_side_output_runner_requires_both_bindings_and_stays_disabled() {
+fn test_side_output_runner_requires_both_bindings_before_open() {
     for outputs in [vec!["output"], vec!["late"], vec!["late", "output"]] {
         let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let plan = late_builder()
@@ -1207,11 +1207,8 @@ fn test_side_output_runner_requires_both_bindings_and_stays_disabled() {
                 .collect(),
             calc_flow::ManagedCheckpointRuntime::new(directory.path()).unwrap(),
         );
-        let error = match result {
-            Ok(_) => panic!("side output must stay disabled"),
-            Err(error) => error.to_string(),
-        };
         if outputs.len() == 1 {
+            let error = result.err().expect("missing output must fail").to_string();
             let missing = if outputs[0] == "output" {
                 "late"
             } else {
@@ -1222,10 +1219,7 @@ fn test_side_output_runner_requires_both_bindings_and_stays_disabled() {
                 "{error}"
             );
         } else {
-            assert!(
-                error.contains("late side output execution is not enabled"),
-                "{error}"
-            );
+            assert!(result.is_ok(), "both outputs are bound");
         }
         assert_eq!(opens.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
@@ -1308,7 +1302,7 @@ fn test_side_output_type_erased_native_operator_keeps_contract() {
             .collect(),
         calc_flow::ManagedCheckpointRuntime::new(directory.path()).unwrap(),
     );
-    assert!(result.is_err());
+    assert!(result.is_ok());
     assert_eq!(opens.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 
