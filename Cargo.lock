@@ -591,6 +591,7 @@ dependencies = [
  "bytes",
  "calc-flow",
  "chrono",
+ "clap",
  "datafusion",
  "flate2",
  "futures-util",

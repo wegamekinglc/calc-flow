@@ -20,14 +20,17 @@ use calc_flow::{
     Batch, BatchMetadata, CalcFlowError, Cursor, DecodeBounds, DeliveryGuarantee, EventTime,
     FormatDecoder, JobState, JsonMap, ManagedCheckpointRuntime, NativeWatermarkCapability,
     PipelineBuilder, ReplayPositioning, Result, RollingOperator, SinkBinding, SourceBinding,
-    SourceCapabilities, SourceDeliveryCapability, SourceEvent, SourceSchema, StreamRequirements,
-    StreamRuntimeConfig, StreamSource, StreamingJob, StreamingRunner, UdfRegistry, WatermarkPolicy,
+    SourceCapabilities, SourceDeliveryCapability, SourceEvent, SourceSchema, StreamExecutionPlan,
+    StreamRequirements, StreamRuntimeConfig, StreamSource, StreamingJob, StreamingRunner,
+    UdfRegistry, WatermarkPolicy,
 };
 use calc_flow_connectors::{FileSinkConfig, TransactionalParquetSink, parquet::ParquetCodec};
+use clap::{Arg, Command, value_parser};
 use serde_json::{Value, json};
 use tokio::sync::Notify;
 
 type ExampleResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+type CommittedFiles = BTreeMap<PathBuf, Vec<u8>>;
 
 const TRACE: &str = r#"[
   {"watermark":10},
@@ -100,20 +103,22 @@ async fn load_trace(root: &Path) -> ExampleResult<Vec<SourceEvent>> {
     records
         .iter()
         .enumerate()
-        .map(|(index, record)| {
-            if let Some(watermark) = record["watermark"].as_i64() {
-                return Ok(SourceEvent::Watermark(EventTime::from_micros(watermark)));
-            }
-            let times: Vec<i32> = serde_json::from_value(record["times"].clone())?;
-            Ok(SourceEvent::Data {
-                batch: batch(
-                    &times,
-                    record["sequence"].as_u64().ok_or("missing sequence")?,
-                )?,
-                cursor: cursor(index + 1)?,
-            })
-        })
+        .map(|(index, record)| trace_event(index, record))
         .collect()
+}
+
+fn trace_event(index: usize, record: &Value) -> ExampleResult<SourceEvent> {
+    if let Some(watermark) = record["watermark"].as_i64() {
+        return Ok(SourceEvent::Watermark(EventTime::from_micros(watermark)));
+    }
+    let times: Vec<i32> = serde_json::from_value(record["times"].clone())?;
+    Ok(SourceEvent::Data {
+        batch: batch(
+            &times,
+            record["sequence"].as_u64().ok_or("missing sequence")?,
+        )?,
+        cursor: cursor(index + 1)?,
+    })
 }
 
 #[derive(Default)]
@@ -180,11 +185,7 @@ impl StreamSource for ReplaySource {
     }
 }
 
-async fn runner(
-    root: &Path,
-    pause_at: Option<usize>,
-    lifecycle: Arc<Lifecycle>,
-) -> ExampleResult<StreamingRunner> {
+fn plan() -> ExampleResult<StreamExecutionPlan> {
     let operator = RollingOperator::new(
         "roll",
         schema(),
@@ -210,7 +211,11 @@ async fn runner(
         )?;
     assert_eq!(plan.source_binding_ids(), ["input"]);
     assert_eq!(plan.sink_binding_ids(), ["late", "output"]);
-    let sinks = [("output", "normal"), ("late", "late")]
+    Ok(plan)
+}
+
+fn sinks(root: &Path) -> Result<BTreeMap<String, Vec<SinkBinding>>> {
+    [("output", "normal"), ("late", "late")]
         .into_iter()
         .map(|(binding, name)| {
             let sink = TransactionalParquetSink::new(FileSinkConfig {
@@ -222,7 +227,14 @@ async fn runner(
                 vec![SinkBinding::transactional(name, sink)?],
             ))
         })
-        .collect::<Result<BTreeMap<_, _>>>()?;
+        .collect()
+}
+
+async fn runner(
+    root: &Path,
+    pause_at: Option<usize>,
+    lifecycle: Arc<Lifecycle>,
+) -> ExampleResult<StreamingRunner> {
     let source = ReplaySource {
         events: load_trace(root).await?,
         offset: 0,
@@ -230,12 +242,12 @@ async fn runner(
         lifecycle,
     };
     Ok(StreamingRunner::new(
-        plan,
+        plan()?,
         BTreeMap::from([(
             "input".into(),
             SourceBinding::new(source).with_watermark_policy(WatermarkPolicy::SourceProvided),
         )]),
-        sinks,
+        sinks(root)?,
         ManagedCheckpointRuntime::new(root.join("state"))?,
     )?
     .with_runtime_config(StreamRuntimeConfig {
@@ -288,6 +300,12 @@ async fn cut(root: &Path) -> ExampleResult<()> {
     assert_eq!(epoch.as_u64(), 1);
     assert_eq!(stopped.state, JobState::Cancelled);
     assert_eq!(stopped.completed_epoch, Some(epoch));
+    check_empty_manifests(root).await?;
+    println!("cut: epoch=1, source next offset=2, normal/late manifests each contain 0 rows");
+    Ok(())
+}
+
+async fn check_empty_manifests(root: &Path) -> ExampleResult<()> {
     for name in ["normal", "late"] {
         let path = root
             .join("outputs")
@@ -299,11 +317,10 @@ async fn cut(root: &Path) -> ExampleResult<()> {
         assert_eq!(manifest["rows"], 0);
         assert_eq!(manifest["parts"], json!([]));
     }
-    println!("cut: epoch=1, source next offset=2, normal/late manifests each contain 0 rows");
     Ok(())
 }
 
-fn committed_files(root: &Path, name: &str) -> ExampleResult<BTreeMap<PathBuf, Vec<u8>>> {
+fn committed_files(root: &Path, name: &str) -> ExampleResult<CommittedFiles> {
     let directory = root.join("outputs").join(name);
     let mut files = BTreeMap::new();
     for epoch in std::fs::read_dir(&directory)? {
@@ -311,15 +328,32 @@ fn committed_files(root: &Path, name: &str) -> ExampleResult<BTreeMap<PathBuf, V
         if !epoch.file_name().to_string_lossy().starts_with("epoch=") {
             continue;
         }
-        for file in std::fs::read_dir(epoch.path())? {
-            let path = file?.path();
-            files.insert(
-                path.strip_prefix(&directory)?.to_path_buf(),
-                std::fs::read(path)?,
-            );
-        }
+        files.extend(epoch_files(&directory, &epoch.path())?);
     }
     Ok(files)
+}
+
+fn epoch_files(directory: &Path, epoch: &Path) -> ExampleResult<CommittedFiles> {
+    let mut files = BTreeMap::new();
+    for file in std::fs::read_dir(epoch)? {
+        let path = file?.path();
+        files.insert(
+            path.strip_prefix(directory)?.to_path_buf(),
+            std::fs::read(path)?,
+        );
+    }
+    Ok(files)
+}
+
+async fn committed_outputs(root: &Path) -> ExampleResult<[CommittedFiles; 2]> {
+    let root = root.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        Ok([
+            committed_files(&root, "normal")?,
+            committed_files(&root, "late")?,
+        ])
+    })
+    .await?
 }
 
 fn output_rows(root: &Path, name: &str) -> ExampleResult<Vec<(i64, u64)>> {
@@ -402,13 +436,17 @@ fn check_exact_value(actual: f64, expected: f64) {
     );
 }
 
-fn check_outputs(root: &Path) -> ExampleResult<()> {
-    let normal = output_rows(root, "normal")?;
-    let late = output_rows(root, "late")?;
-    assert_eq!(normal, [(20, 0), (40, 11)]);
-    assert_eq!(late, [(6, 10)]);
-    println!("independent readback (ts, seq): normal={normal:?}, late={late:?}");
-    Ok(())
+async fn check_outputs(root: &Path) -> ExampleResult<()> {
+    let root = root.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let normal = output_rows(&root, "normal")?;
+        let late = output_rows(&root, "late")?;
+        assert_eq!(normal, [(20, 0), (40, 11)]);
+        assert_eq!(late, [(6, 10)]);
+        println!("independent readback (ts, seq): normal={normal:?}, late={late:?}");
+        Ok(())
+    })
+    .await?
 }
 
 async fn complete(root: &Path, opens: &[usize]) -> ExampleResult<u64> {
@@ -428,7 +466,7 @@ async fn complete(root: &Path, opens: &[usize]) -> ExampleResult<u64> {
 async fn resume(root: &Path) -> ExampleResult<()> {
     let terminal = complete(root, &[2]).await?;
     assert!(terminal > 1);
-    check_outputs(root)?;
+    check_outputs(root).await?;
     tokio::fs::write(root.join("terminal-epoch.txt"), terminal.to_string()).await?;
     println!("resume: opened source at offset=2, terminal epoch={terminal}");
     Ok(())
@@ -438,45 +476,114 @@ async fn verify(root: &Path) -> ExampleResult<()> {
     let expected: u64 = tokio::fs::read_to_string(root.join("terminal-epoch.txt"))
         .await?
         .parse()?;
-    let before = [
-        committed_files(root, "normal")?,
-        committed_files(root, "late")?,
-    ];
+    let before = committed_outputs(root).await?;
     assert_eq!(complete(root, &[]).await?, expected);
-    assert_eq!(
-        [
-            committed_files(root, "normal")?,
-            committed_files(root, "late")?
-        ],
-        before
-    );
-    check_outputs(root)?;
+    assert_eq!(committed_outputs(root).await?, before);
+    check_outputs(root).await?;
     println!(
         "terminal restart: epoch={expected}, Source.open=0, both committed directories unchanged"
     );
     Ok(())
 }
 
+async fn demo() -> ExampleResult<()> {
+    let temporary = tokio::task::spawn_blocking(tempfile::tempdir).await??;
+    let root = temporary.path().join("late-files-v1");
+    cut(&root).await?;
+    resume(&root).await?;
+    verify(&root).await?;
+    tokio::task::spawn_blocking(move || temporary.close()).await??;
+    println!("removed temporary demo state and outputs");
+    Ok(())
+}
+
+fn cli() -> Command {
+    Command::new("late_output_recovery")
+        .about("Replay a persisted source trace, or run all phases in a temporary directory")
+        .subcommands(["cut", "resume", "verify"].map(|phase| {
+            Command::new(phase).arg(
+                Arg::new("root")
+                    .value_name("ROOT")
+                    .value_parser(value_parser!(PathBuf))
+                    .required(true),
+            )
+        }))
+}
+
 #[tokio::main]
 async fn main() -> ExampleResult<()> {
-    let args: Vec<_> = std::env::args_os().skip(1).collect();
-    match args.as_slice() {
-        [] => {
-            let temporary = tempfile::tempdir()?;
-            let root = temporary.path().join("late-files-v1");
-            cut(&root).await?;
-            resume(&root).await?;
-            verify(&root).await?;
-            temporary.close()?;
-            println!("removed temporary demo state and outputs");
-        }
-        [phase, root] => match phase.to_str() {
-            Some("cut") => cut(Path::new(root)).await?,
-            Some("resume") => resume(Path::new(root)).await?,
-            Some("verify") => verify(Path::new(root)).await?,
-            _ => return Err("phase must be cut, resume, or verify".into()),
-        },
-        _ => return Err("usage: late_output_recovery [cut|resume|verify NEW_ROOT]".into()),
+    let arguments = cli().get_matches();
+    let Some((phase, arguments)) = arguments.subcommand() else {
+        return demo().await;
+    };
+    let root = arguments.get_one::<PathBuf>("root").expect("required root");
+    match phase {
+        "cut" => cut(root).await,
+        "resume" => resume(root).await,
+        "verify" => verify(root).await,
+        _ => Err("phase must be cut, resume, or verify".into()),
     }
-    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_accepts_default_and_explicit_phases() {
+        assert!(
+            cli()
+                .try_get_matches_from(["example"])
+                .unwrap()
+                .subcommand()
+                .is_none()
+        );
+        for phase in ["cut", "resume", "verify"] {
+            let parsed = cli()
+                .try_get_matches_from(["example", phase, "state root"])
+                .unwrap();
+            let (actual, arguments) = parsed.subcommand().unwrap();
+            assert_eq!(actual, phase);
+            assert_eq!(
+                arguments.get_one::<PathBuf>("root").unwrap(),
+                Path::new("state root")
+            );
+        }
+    }
+
+    #[test]
+    fn cli_rejects_invalid_commands_before_io() {
+        for arguments in [
+            vec!["example", "unknown", "root"],
+            vec!["example", "cut"],
+            vec!["example", "resume", ""],
+            vec!["example", "verify", "root", "extra"],
+        ] {
+            assert!(cli().try_get_matches_from(arguments).is_err());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_preserves_non_unicode_root_paths() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+        let root = OsString::from_vec(b"state-\xff".to_vec());
+        let parsed = cli()
+            .try_get_matches_from([
+                OsString::from("example"),
+                OsString::from("cut"),
+                root.clone(),
+            ])
+            .unwrap();
+        assert_eq!(
+            parsed
+                .subcommand()
+                .unwrap()
+                .1
+                .get_one::<PathBuf>("root")
+                .unwrap(),
+            &PathBuf::from(root)
+        );
+    }
 }
