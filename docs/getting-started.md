@@ -246,8 +246,10 @@ it with the source installation steps before starting Studio.
 
 ## Verify the installation
 
-Confirm that Calc Flow reports version `4.0.0` and that the native extension
-loads from the environment rather than `python/calc_flow/`.
+For a build from this checkout, confirm that Calc Flow reports version `5.0.0`.
+A published installation reports the release selected by the package manager,
+which can differ from the current source version. Confirm that the native
+extension loads from the environment rather than `python/calc_flow/`.
 
 ### Linux and WSL
 

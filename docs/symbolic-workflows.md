@@ -11,7 +11,7 @@ providers and application-owned Python sources and sinks can still invoke
 Python through their normal interfaces. Studio does not contain a second
 symbolic compiler. This guide connects the public declarations to batch,
 continuous, recovery, array-provider, inspection, and performance workflows
-implemented in Calc Flow 4.0.
+implemented in Calc Flow.
 
 The complete declaration reference is in the [expression API](symbolic-api.md).
 Use this guide to choose an executable example and understand the boundary

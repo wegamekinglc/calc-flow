@@ -6,9 +6,10 @@ For a guided first calculation, read [batch calculations](batch-guide.md).
 This page describes the Python application API and its contracts; the full
 expression catalog has its own [reference](symbolic-api.md).
 
-The `calc-flow-python==4.0.0` package exposes Python expressions and Arrow
+The `calc-flow-python` package exposes Python expressions and Arrow
 execution over the internal Rust runtime through PyO3. Python 3.13 or newer
-is required.
+is required. This page describes version `5.0.0` in the current checkout;
+use a source build when the published package has a different version.
 
 On this page:
 
@@ -160,18 +161,18 @@ Explicit input sequences are respected, including `inputs=()`; missing reference
 inputs become analysis errors. Conflicting roots with the same name fail.
 Declarations and output mappings are copied and remain immutable.
 
-| Method                                                                                                   | Result and input contract                                                        |
-|----------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------|
-| `table_expr.collect(inputs, /, *, runtime=None, options=None)`                                           | One Arrow table; one table root accepts data directly, otherwise use a mapping   |
-| `program.collect(inputs, /, *, runtime=None, options=None)`                                              | `dict[str, pyarrow.Table]` in logical output order; always supply a mapping      |
-| `table_expr.collect_async(...)` / `program.collect_async(...)`                                           | Awaitable forms of the same contracts                                            |
-| `table_expr.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`                            | Owned async iterator of Arrow tables                                             |
-| `program.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`                               | Owned async iterator of named `StreamOutput` events; input mapping required      |
-| `program.analyze(runtime=None, /, *, mode="batch")`                                                      | Immutable analysis result                                                        |
-| `program.explain(runtime=None, /, *, mode="batch")`                                                      | Deterministic explanation text                                                   |
-| `program.compile_batch(runtime=None, /)`                                                                 | Explicit batch execution plan                                                    |
-| `program.compile_stream(runtime=None, /, *, allowed_lateness_micros=0, late_policy="error")`             | Explicit stream plan for a runner                                                |
-| `program.to_project(runtime=None, /, *, mode="batch", allowed_lateness_micros=0, late_policy="error")`   | Validated, data-only project-v3 document                                         |
+| Method                                                                                                 | Result and input contract                                                      |
+|--------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------|
+| `table_expr.collect(inputs, /, *, runtime=None, options=None)`                                         | One Arrow table; one table root accepts data directly, otherwise use a mapping |
+| `program.collect(inputs, /, *, runtime=None, options=None)`                                            | `dict[str, pyarrow.Table]` in logical output order; always supply a mapping    |
+| `table_expr.collect_async(...)` / `program.collect_async(...)`                                         | Awaitable forms of the same contracts                                          |
+| `table_expr.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`                          | Owned async iterator of Arrow tables                                           |
+| `program.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`                             | Owned async iterator of named `StreamOutput` events; input mapping required    |
+| `program.analyze(runtime=None, /, *, mode="batch")`                                                    | Immutable analysis result                                                      |
+| `program.explain(runtime=None, /, *, mode="batch")`                                                    | Deterministic explanation text                                                 |
+| `program.compile_batch(runtime=None, /)`                                                               | Explicit batch execution plan                                                  |
+| `program.compile_stream(runtime=None, /, *, allowed_lateness_micros=0, late_policy="error")`           | Explicit stream plan for a runner                                              |
+| `program.to_project(runtime=None, /, *, mode="batch", allowed_lateness_micros=0, late_policy="error")` | Validated, data-only project-v3 document                                       |
 
 Collection mappings use declared input names, and the returned mapping uses
 logical output names. Missing, extra, or wrong-kind inputs fail with named paths.
@@ -537,15 +538,15 @@ The `operators` tuple contains exactly `cross_section@1`, `expression@1`,
 with truths anchored in
 the engine implementation:
 
-| Operator             | Modes           | Finality                  | Checkpoint support      | State version   | State layouts   |
-|----------------------|-----------------|---------------------------|-------------------------|-----------------|-----------------|
-| `cross_section@1`    | batch, stream   | group_final_append_only   | checkpointed_stateful   | 1               | 1               |
-| `expression@1`       | batch, stream   | per_row_final             | stateless               | —               | —               |
-| `rolling@1`          | batch, stream   | per_row_final             | checkpointed_stateful   | 1               | 1, 2            |
-| `sql@1`              | batch, stream   | unproven                  | stateless               | —               | —               |
-| `stream_asof_join@1` | stream          | group_final_append_only   | checkpointed_stateful   | 1               | 1               |
-| `stream_join@1`      | stream          | unproven                  | checkpointed_stateful   | 1               | 1               |
-| `window@1`           | stream          | group_final_append_only   | checkpointed_stateful   | 1               | 1               |
+| Operator             | Modes         | Finality                | Checkpoint support    | State version | State layouts |
+|----------------------|---------------|-------------------------|-----------------------|---------------|---------------|
+| `cross_section@1`    | batch, stream | group_final_append_only | checkpointed_stateful | 1             | 1             |
+| `expression@1`       | batch, stream | per_row_final           | stateless             | —             | —             |
+| `rolling@1`          | batch, stream | per_row_final           | checkpointed_stateful | 1             | 1, 2          |
+| `sql@1`              | batch, stream | unproven                | stateless             | —             | —             |
+| `stream_asof_join@1` | stream        | group_final_append_only | checkpointed_stateful | 1             | 1             |
+| `stream_join@1`      | stream        | unproven                | checkpointed_stateful | 1             | 1             |
+| `window@1`           | stream        | group_final_append_only | checkpointed_stateful | 1             | 1             |
 
 The Python capability catalog currently reports only layouts `1` and `2`
 for `rolling@1`, while the native operator writes columnar checkpoint layout

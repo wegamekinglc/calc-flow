@@ -1,7 +1,7 @@
 # Calc Flow Studio
 
 `calc-flow-studio` packages the local FastAPI service and built React client for
-Calc Flow. It depends on the matching v4 `calc-flow-python` native package and serves
+Calc Flow. It depends on the matching v5 `calc-flow-python` native package and serves
 the continuous-job API under `/api/v3`.
 
 Studio is built as a separate wheel and is not published to PyPI. Follow the

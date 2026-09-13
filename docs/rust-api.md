@@ -15,6 +15,7 @@ On this page:
 - [SQL operators](#sql-operators)
 - [Rolling windows](#rolling-windows)
 - [Cross-section statistics](#cross-section-statistics)
+- [Late-row policy contract](#late-row-policy-contract)
 - [Bounded backward ASOF Join](#bounded-backward-asof-join)
 - [Stream compilation and continuous runtime](#stream-compilation-and-continuous-runtime)
 - [Batches](#batches)
@@ -25,8 +26,11 @@ On this page:
 
 ## Build and document
 
+Work from the repository root for the current native runtime and its examples.
+Choose focused local checks under [Verification](../AGENTS.md#verification);
+the full crate commands are:
+
 ```bash
-cargo add calc-flow@4.0.0
 cargo test -p calc-flow --all-targets
 RUSTDOCFLAGS="-D warnings" cargo doc -p calc-flow --no-deps
 ```
@@ -96,7 +100,8 @@ asynchronous and accepts only `Batch` values.
 
 ### Engine boundary
 
-`ExpressionOperator`, `SqlOperator`, and `RollingOperator` are built-in
+`ExpressionOperator`, `SqlOperator`, `RollingOperator`, and
+`CrossSectionOperator` are built-in
 operators that implement both `BatchOperator` and `StreamOperator`;
 `UnionOperator`, `WindowAggregateOperator`, `StreamJoinOperator`, and
 `StreamAsofJoinOperator` are stream-only. Add them through `PipelineBuilder::add_node`, which accepts a
@@ -132,14 +137,17 @@ execution. The canonical SQL example is
 [`crates/calc-flow/examples/sql_join.rs`](../crates/calc-flow/examples/sql_join.rs),
 which joins `orders` to `fees` for `net = amount - fee`:
 
-The run-scoped physical planner has one fail-closed rolling extension. A
-bounded ascending `AVG(Float64) OVER (PARTITION BY simple_columns ORDER BY
-non_null_timestamp_us, non_null_sequence... ROWS n PRECEDING ... CURRENT
-ROW)` may execute through the crate-private `CalcFlowRollingExec`; it reuses
-the same typed `RollingKernelPlan` transition as `RollingOperator`. Filters,
-`DISTINCT`, explicit null treatment, descending or expression order keys,
-`RANGE`/`GROUPS`, future or unbounded frames, other aggregates and unsupported
-types remain on DataFusion's standard window executor. `DataFusionQueryMetric`
+The run-scoped physical planner can rewrite bounded ascending `AVG(Float64)`
+windows and compatible same-column, same-frame `COUNT` guards through the
+crate-private `CalcFlowRollingExec`. AVG-only queries use the shared Native
+numerical profile; queries admitted by COUNT use SQL sum/count transitions
+throughout. The optimizer requires proven partition/order keys and sorted
+physical input. If physical rewriting cannot cover every candidate window in
+a query containing COUNT, the planner restores the original DataFusion plan
+and reports zero rewritten windows. AVG-only queries can retain successful
+partial physical rewrites while unsupported windows use DataFusion. See the
+[rolling rewrite boundary](sql-datafusion-performance.md#rolling-rewrite-boundary)
+for exact eligibility and numerical semantics. `DataFusionQueryMetric`
 reports the candidate/rewrite counts, stable fallback reasons, configured and
 effective partition counts, and the physical plan. Fixed parallelism is
 adapted downward below 65,536 input rows per useful partition and is never
@@ -247,8 +255,8 @@ dictionary, projected retained history, a columnar reorder buffer, recurrence
 state, and kernel/numerical fingerprints. Restore continues to read the
 declaration's v1/v2 layout, while newly emitted descriptors and pipeline
 capabilities report writer layout v3. `allowed_lateness_micros` and a
-`LatePolicySpec` of `Error` (envelope scope) or `Drop` (metrics version 1)
-classify late rows
+`LatePolicySpec` of `Error` (envelope scope), `Drop` (metrics version 1), or
+stream-only `SideOutput` (metrics and schema version 1) classify late rows
 against the input watermark, and `RollingValuePolicy` is the frozen
 `stateful_numeric_v1`, which preserves a null or NaN current or referenced
 value.
@@ -327,8 +335,10 @@ orders the complete input canonically and classifies no late rows: every row
 is final at end-of-input. Stream evaluation buffers rows until the input
 watermark passes each row's closing coordinate — its event time plus the
 allowed lateness — then emits the ordered final rows, rejecting the whole
-envelope under the `error` policy or dropping each late row and recording
-the late metrics under `drop`. Duplicate row identities are rejected. Rolling
+envelope under `error`, dropping each late row and recording metrics under
+`drop`, or routing it to `late` under `side_output`. See the
+[late-row policy contract](#late-row-policy-contract) for diagnostic routing
+and recovery. Duplicate row identities are rejected. Rolling
 stream state checkpoints at the aligned epoch cut using columnar writer
 layout `3`. It stores projected history, buffered rows, and recurrence state;
 restore validates the schema and fingerprints before rebuilding the kernel.
@@ -360,7 +370,8 @@ optional, and empty means one global group per grouping coordinate — an
 event time, or per UTC `[start, start + width)` bucket with the Unix-epoch
 origin flooring toward negative infinity), one `CrossSectionOutputSpec` per
 output, `allowed_lateness_micros`, a `LatePolicySpec` of `Error` (envelope
-scope) or `Drop` (metrics version 1), and the frozen
+scope), `Drop` (metrics version 1), or stream-only `SideOutput` (metrics and
+schema version 1), and the frozen
 `CrossSectionValuePolicy` `NanExcludePreserveV1`. A row identity is the
 `(event_time, entity_by, sequence_by)` value.
 
@@ -416,14 +427,60 @@ once in the same canonical order, releasing its rows and identity index.
 End of input flushes every open group once without synthesizing a sentinel
 watermark; a repeated end is a no-op and data after end is rejected. A row
 whose group has closed is late: the `error` policy rejects the whole
-envelope before any state changes, and the `drop` policy discards the row
-and records the late metrics. Duplicate row identities are rejected
+envelope before any state changes, `drop` discards the row and records the
+late metrics, and `side_output` routes it to the diagnostic `late` port.
+Duplicate row identities are rejected
 transactionally — within one envelope across partition groups, and across
 envelopes while the identity is still open. Open groups checkpoint at the
 aligned epoch cut as an Arrow IPC base segment with state version 1 —
 configuration-hash and schema-fingerprint metadata plus bounded inline
 manifest fields — and a restored operator reproduces the same ordered
 output, watermark frontier, output sequence, and metrics.
+
+## Late-row policy contract
+
+Rolling and cross-section specifications share `LatePolicySpec`.
+`Error { scope: LateErrorScope::Envelope }` rejects the complete input envelope
+atomically; its serialized form requires `kind: "error"` and `scope: "envelope"`.
+`Drop { metrics_version: 1 }` discards late rows and records their metrics.
+
+`SideOutput { metrics_version: 1, schema_version: 1 }` routes late rows to a
+required `late` table port alongside `output` in native streaming execution.
+The late schema retains input fields and metadata and appends non-null
+`_cf_late_*` diagnostics for node, input port, event time, closing time,
+watermark, reason, source, sequence, and row index. Input names starting with
+`_cf_late_` are reserved for this policy. The generated
+[project schema](../schemas/project-v3.schema.json) defines its version fields.
+
+Batch compilation rejects side output with `unsupported_mode`. Stream graphs
+can expose `late` as an output or pass it through built-in single-input
+expression/SQL successors. Other successor kinds are rejected with
+`temporal_output_unavailable`; diagnostic output has no event-time progress
+contract. The runtime forwards neither watermark nor idle messages on `late`
+or its derived outputs, while barrier and end-of-input retain FIFO order and
+participate in the same checkpoint epochs as normal output.
+
+Native operators prepare the whole input envelope and bounded diagnostic
+chunks before emitting. Accepted state, metrics, and independent normal/late
+output sequences advance only after successful emission. Failed or cancelled
+emission forbids live callback retry; resume from a compatible durable cut.
+Side-output checkpoints include a strict `late_output` inline object with
+`version: 1`, `schema_version: 1`, and a `uint64` `next_sequence`, including
+when no late row has been emitted. Restore validates this object before
+installing state and restores the independent late sequence. Missing, null,
+malformed, unknown-field, or incompatible objects are rejected; error/drop
+checkpoints omit the object and reject one supplied for those policies.
+
+Managed recovery covers both outputs, including empty late epochs and terminal
+restart. Delivery remains a per-output contract: exactly-once requires the
+normal source, operator, and transactional sink proofs; ordinary sinks can
+observe replay duplicates. The [file connector](connectors/file.md) describes
+transactional Parquet recovery. Project and manifest formats remain 3, with
+rolling writer layout 3 and cross-section state layout 1.
+
+Python expression compilation accepts only `late_policy="error"` or `"drop"`;
+use native specifications or a stream project for side output. ASOF and
+event-window lateness retain their separate operator contracts.
 
 ## Bounded backward ASOF Join
 

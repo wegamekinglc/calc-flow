@@ -100,7 +100,7 @@ Python package is not a second engine.
 | `web-ui/src/`                  | React + TypeScript + Vite + React Flow studio; API types generated from `web-ui/openapi.json`                                            |
 | `schemas/`                     | `project-v3.schema.json`, the canonical generated project contract                                                                       |
 | `examples/`                    | Executable Python expression and integration examples                                                                                    |
-| `benchmarks/`                  | pytest-benchmark harness (informational)                                                                                                 |
+| `benchmarks/`                  | Benchmark workloads; unified CI regression gates and informational comparisons                                                           |
 
 ## Data and execution model
 
@@ -191,7 +191,7 @@ response types are in `web-ui/src/api/schema.d.ts`.
 
 ## Project contracts
 
-Calc Flow 4.0 accepts strict project-v3 documents and exposes the Studio
+Calc Flow accepts strict project-v3 documents and exposes the Studio
 `/api/v3` surface. Read [projects and persistence](docs/projects-guide.md)
 for validation, serialization, and reloading a graph. Historical changes are
 recorded in [CHANGELOG.md](CHANGELOG.md).
