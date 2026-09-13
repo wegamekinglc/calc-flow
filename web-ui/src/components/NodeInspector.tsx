@@ -1,4 +1,5 @@
 import { SchemaEditor } from './SchemaEditor';
+import { LatePolicyEditor } from './LatePolicyEditor';
 import { InputAliasEditor } from './InputAliasEditor';
 import type { SqlInputAliasEdit } from './inputAliasEditorModel';
 import type {
@@ -10,7 +11,7 @@ import type {
   UdfReference,
 } from '../types';
 import type { LoweredNodeInspection } from './projectInspectionModel';
-import { derivedInputNames, derivedOutputNames } from '../portNamesModel';
+import { derivedInputNames, derivedOutputNames, hasLateOutput, lateOutputSchema } from '../portNamesModel';
 
 interface NodeInspectorProps {
   node: NodeConfig;
@@ -20,6 +21,9 @@ interface NodeInspectorProps {
   onChange: (node: NodeConfig) => void;
   onSqlAliasEdit: (edit: SqlInputAliasEdit) => void;
   onDelete: () => void;
+  streamMode?: boolean;
+  lateOutputSupported?: boolean;
+  lateOutputInUse?: boolean;
 }
 
 type ExpressionOperator = Extract<OperatorSpec, { kind: 'expression' }>;
@@ -81,6 +85,9 @@ export function NodeInspector({
   onChange,
   onSqlAliasEdit,
   onDelete,
+  streamMode = false,
+  lateOutputSupported = false,
+  lateOutputInUse = true,
 }: NodeInspectorProps) {
   const patchNode = (change: Partial<NodeConfig>) => onChange({ ...node, ...change });
   const patchExpression = (change: Partial<ExpressionOperator>) => {
@@ -108,7 +115,10 @@ export function NodeInspector({
 
   const schema = (direction: 'input' | 'output', name: string): ArrowFieldConfig[] => {
     const ports = direction === 'input' ? node.input_ports : node.output_ports;
-    return ports.find((port) => port.name === name)?.schema ?? [];
+    const existing = ports.find((port) => port.name === name);
+    if (existing) return existing.schema;
+    return direction === 'output' && name === 'late' && hasLateOutput(node)
+      ? lateOutputSchema(node) : [];
   };
 
   const updateSchema = (
@@ -124,7 +134,7 @@ export function NodeInspector({
         name: portName,
         kind: existing?.kind ?? (isTable ? 'table' : 'array'),
         required: existing?.required ?? true,
-        schema: portName === name ? fields : (existing?.schema ?? []),
+        schema: portName === name ? fields : schema(direction, portName),
       };
     });
     patchNode(direction === 'input' ? { input_ports: ports } : { output_ports: ports });
@@ -323,6 +333,11 @@ export function NodeInspector({
             />
           </label>
         </section>
+      )}
+
+      {(node.operator.kind === 'rolling' || node.operator.kind === 'cross_section') && (
+        <LatePolicyEditor node={node} operator={node.operator} streamMode={streamMode}
+          supported={lateOutputSupported} inUse={lateOutputInUse} onChange={onChange} />
       )}
 
       <section className="inspector-section">

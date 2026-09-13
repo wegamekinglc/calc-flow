@@ -43,7 +43,7 @@ import {
   type DataSourceFormat,
 } from './components/dataSourceEditorModel';
 import { editSqlInputAliases } from './components/inputAliasEditorModel';
-import { derivedInputNames, derivedOutputNames } from './portNamesModel';
+import { derivedInputNames, derivedOutputNames, lateOutputInUse, withProjectGraph } from './portNamesModel';
 import { firstOf } from './types';
 import { isJobActive } from './jobStatusModel';
 import {
@@ -206,13 +206,10 @@ export const connectProject = (
       && current.target_port === edge.target_port,
   );
   if (duplicate) return project;
-  return {
-    ...project,
-    graph: {
-      ...project.graph,
-      edges: [...project.graph.edges, edge],
-    },
-  };
+  return withProjectGraph(project, {
+    ...project.graph,
+    edges: [...project.graph.edges, edge],
+  });
 };
 
 const fileToBase64 = async (file: File): Promise<string> => {
@@ -393,17 +390,14 @@ export default function App() {
       const structuralChanges = changes.filter((change) => change.type === 'remove');
       if (!structuralChanges.length) return;
       const changed = applyEdgeChanges(structuralChanges, flowEdges);
-      updateProject((current) => ({
-        ...current,
-        graph: {
-          ...current.graph,
-          edges: changed.map((edge) => ({
-            source_node: edge.source,
-            target_node: edge.target,
-            source_port: String(edge.data?.sourcePort ?? edge.sourceHandle ?? 'output'),
-            target_port: String(edge.data?.targetPort ?? edge.targetHandle ?? 'input'),
-          })),
-        },
+      updateProject((current) => withProjectGraph(current, {
+        ...current.graph,
+        edges: changed.map((edge) => ({
+          source_node: edge.source,
+          target_node: edge.target,
+          source_port: String(edge.data?.sourcePort ?? edge.sourceHandle ?? 'output'),
+          target_port: String(edge.data?.targetPort ?? edge.targetHandle ?? 'input'),
+        })),
       }));
     },
     [flowEdges, updateProject],
@@ -713,35 +707,28 @@ export default function App() {
 
   const addNode = (kind: EditableNodeKind) => {
     const node = makeNode(kind, project.graph.nodes);
-    updateProject((current) => ({
-      ...current,
-      graph: { ...current.graph, nodes: [...current.graph.nodes, node] },
+    updateProject((current) => withProjectGraph(current, {
+      ...current.graph, nodes: [...current.graph.nodes, node],
     }));
     setSelectedNodeId(node.id);
   };
 
   const updateNode = (node: NodeConfig) => {
-    updateProject((current) => ({
-      ...current,
-      graph: {
-        ...current.graph,
-        nodes: current.graph.nodes.map((item) => (item.id === node.id ? node : item)),
-      },
+    updateProject((current) => withProjectGraph(current, {
+      ...current.graph,
+      nodes: current.graph.nodes.map((item) => (item.id === node.id ? node : item)),
     }));
   };
 
   const deleteSelectedNode = () => {
     if (!selectedNode) return;
     const nodes = project.graph.nodes.filter((node) => node.id !== selectedNode.id);
-    updateProject((current) => ({
-      ...current,
-      graph: {
-        ...current.graph,
-        nodes: current.graph.nodes.filter((node) => node.id !== selectedNode.id),
-        edges: current.graph.edges.filter(
-          (edge) => edge.source_node !== selectedNode.id && edge.target_node !== selectedNode.id,
-        ),
-      },
+    updateProject((current) => withProjectGraph(current, {
+      ...current.graph,
+      nodes: current.graph.nodes.filter((node) => node.id !== selectedNode.id),
+      edges: current.graph.edges.filter(
+        (edge) => edge.source_node !== selectedNode.id && edge.target_node !== selectedNode.id,
+      ),
     }));
     setSelectedNodeId(nodes[0]?.id ?? '');
   };
@@ -909,6 +896,11 @@ export default function App() {
         {selectedNode ? (
           <NodeInspector
             node={selectedNode}
+            streamMode={project.runtime.mode === 'stream'}
+            lateOutputInUse={lateOutputInUse(project, selectedNode)}
+            lateOutputSupported={capabilities?.runtime.lateOutput?.operators.some(
+              (kind) => kind === selectedNode.operator.kind,
+            ) ?? false}
             inspection={inspectLoweredNode(project, selectedNode)}
             arrowTypes={ARROW_TYPES}
             udfs={catalog ?? []}

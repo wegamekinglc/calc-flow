@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { Dispatch } from 'react';
+import { externalOutputs, hasLateOutput } from '../portNamesModel';
 
 import type {
   ConnectorCapability,
@@ -102,8 +103,13 @@ export function StreamConfigEditor({
     ? project.runtime.options
     : null;
   const streamMode = streamOptions !== null;
+  const lateOutput = project.graph.nodes.some(hasLateOutput);
+  const outputs = externalOutputs(project.graph);
+  const unresolved = project.sinks.filter((sink) => !outputs.some((output) => output.binding === sink.binding));
+  const unbound = outputs.filter((output) => !project.sinks.some((sink) => sink.binding === output.binding));
 
   const setMode = (mode: 'batch' | 'stream') => {
+    if (mode === project.runtime.mode || (mode === 'batch' && lateOutput)) return;
     if (mode === 'stream') {
       const source = defaultSource(sources[0]);
       const sink = defaultSink(sinks[0]);
@@ -169,6 +175,7 @@ export function StreamConfigEditor({
         <button
           type="button"
           className={!streamMode ? 'active' : ''}
+          disabled={lateOutput}
           onClick={() => {
             setMode('batch');
           }}
@@ -185,6 +192,11 @@ export function StreamConfigEditor({
           Stream
         </button>
       </fieldset>
+      {lateOutput && <p className="muted">
+        Side output requires stream mode. Keep both output bindings explicit.
+        Delivery is checked per sink; ordinary late sinks can repeat after recovery.
+        Two sinks are not guaranteed to become visible together.
+      </p>}
 
       {streamOptions && (
         <>
@@ -303,17 +315,31 @@ export function StreamConfigEditor({
               disabled={!sinks.length}
               onClick={() => {
                 const sink = defaultSink(sinks[0]);
-                if (sink) onChange({ ...project, sinks: [...project.sinks, sink] });
+                if (sink) onChange({ ...project, sinks: [...project.sinks, {
+                  ...sink, binding: unbound[0]?.binding ?? sink.binding,
+                }] });
               }}
             >
               Add
             </button>
           </div>
+          {lateOutput && unbound.length > 0 && <p className="field-error">
+            Unbound outputs: {unbound.map((output) => output.binding).join(', ')}
+          </p>}
+          {unresolved.length > 0 && <p className="field-error">
+            Rebind sinks without an external output: {unresolved.map((sink) => sink.binding).join(', ')}
+          </p>}
+          <datalist id="graph-output-bindings">
+            {outputs.map((output) => <option key={output.binding} value={output.binding}>
+              {output.nodeId}.{output.port} → {output.binding}
+            </option>)}
+          </datalist>
           {project.sinks.map((sink, index) => (
             <article className="binding-card" key={sink.binding}>
               <label>
                 Graph output
                 <input
+                  list="graph-output-bindings"
                   value={sink.binding}
                   onChange={(event) => {
                     updateSink(index, { binding: event.target.value });

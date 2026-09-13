@@ -1,4 +1,5 @@
 import type { EditableProject, NodeConfig, PortConfig } from '../types';
+import { withProjectGraph } from '../portNamesModel';
 
 export type SqlInputAliasEdit =
   | { type: 'add' }
@@ -88,14 +89,11 @@ export const editSqlInputAliases = (
         )
       : project.graph.edges;
 
-  return {
-    ...project,
-    graph: {
-      ...project.graph,
-      nodes: project.graph.nodes.map((candidate) =>
-        candidate.id === nodeId ? node : candidate,
-      ),
-      edges,
-    },
-  };
+  return withProjectGraph(project, {
+    ...project.graph,
+    nodes: project.graph.nodes.map((candidate) =>
+      candidate.id === nodeId ? node : candidate,
+    ),
+    edges,
+  });
 };

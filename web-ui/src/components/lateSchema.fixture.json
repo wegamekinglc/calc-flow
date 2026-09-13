@@ -1,0 +1,118 @@
+{
+  "input": [
+    {
+      "name": "ts",
+      "data_type": "timestamp[us, UTC]",
+      "nullable": false
+    },
+    {
+      "name": "symbol",
+      "data_type": "string",
+      "nullable": false
+    },
+    {
+      "name": "seq",
+      "data_type": "uint64",
+      "nullable": false
+    },
+    {
+      "name": "x",
+      "data_type": "float64",
+      "nullable": false
+    }
+  ],
+  "output": [
+    {
+      "name": "ts",
+      "data_type": "timestamp[us, UTC]",
+      "nullable": false
+    },
+    {
+      "name": "symbol",
+      "data_type": "string",
+      "nullable": false
+    },
+    {
+      "name": "seq",
+      "data_type": "uint64",
+      "nullable": false
+    },
+    {
+      "name": "x",
+      "data_type": "float64",
+      "nullable": false
+    },
+    {
+      "name": "result",
+      "data_type": "float64",
+      "nullable": true
+    }
+  ],
+  "late": [
+    {
+      "name": "ts",
+      "data_type": "timestamp[us, UTC]",
+      "nullable": false
+    },
+    {
+      "name": "symbol",
+      "data_type": "string",
+      "nullable": false
+    },
+    {
+      "name": "seq",
+      "data_type": "uint64",
+      "nullable": false
+    },
+    {
+      "name": "x",
+      "data_type": "float64",
+      "nullable": false
+    },
+    {
+      "name": "_cf_late_node",
+      "data_type": "string",
+      "nullable": false
+    },
+    {
+      "name": "_cf_late_input_port",
+      "data_type": "string",
+      "nullable": false
+    },
+    {
+      "name": "_cf_late_event_time_micros",
+      "data_type": "int64",
+      "nullable": false
+    },
+    {
+      "name": "_cf_late_closing_time_micros",
+      "data_type": "int64",
+      "nullable": false
+    },
+    {
+      "name": "_cf_late_watermark_micros",
+      "data_type": "int64",
+      "nullable": false
+    },
+    {
+      "name": "_cf_late_reason",
+      "data_type": "string",
+      "nullable": false
+    },
+    {
+      "name": "_cf_late_source",
+      "data_type": "string",
+      "nullable": false
+    },
+    {
+      "name": "_cf_late_sequence",
+      "data_type": "uint64",
+      "nullable": false
+    },
+    {
+      "name": "_cf_late_row_index",
+      "data_type": "uint64",
+      "nullable": false
+    }
+  ]
+}

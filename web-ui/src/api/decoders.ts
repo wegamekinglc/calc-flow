@@ -254,7 +254,9 @@ const runtimeCapabilitiesAt = (value: unknown, path: string): void => {
     'udfs',
     'providers',
     'connectors',
+    ...('lateOutput' in runtime ? ['lateOutput'] : []),
   ], path);
+  if ('lateOutput' in runtime) lateOutputAt(runtime.lateOutput, `${path}.lateOutput`);
   const scope = objectAt(runtime.scope, `${path}.scope`);
   exactKeys(scope, ['kind', 'sessionId', 'revision'], `${path}.scope`);
   if (scope.kind !== 'runtimeSession') fail(`${path}.scope.kind`, "expected 'runtimeSession'");
@@ -443,6 +445,14 @@ const runtimeCapabilitiesAt = (value: unknown, path: string): void => {
       jsonAt(option, `${itemPath}.optionsSchema.${name}`);
     });
   });
+};
+
+const lateOutputAt = (value: unknown, path: string): void => {
+  const feature = objectAt(value, path);
+  exactKeys(feature, ['operators', 'schemaVersion', 'metricsVersion'], path);
+  stringArrayAt(feature.operators, ['cross_section', 'rolling'], `${path}.operators`);
+  if (feature.schemaVersion !== 1) fail(`${path}.schemaVersion`, 'expected 1');
+  if (feature.metricsVersion !== 1) fail(`${path}.metricsVersion`, 'expected 1');
 };
 
 const previewCapabilitiesAt = (value: unknown, path: string): void => {

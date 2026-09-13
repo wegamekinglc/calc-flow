@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from functools import partial
 from pathlib import Path
 
 from calc_flow import FileProjectStore, Runtime
@@ -16,6 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
+from calc_flow_studio.openapi import project_openapi
 from calc_flow_studio.routes import (
     API_PREFIX,
     ProjectStoreProtocol,
@@ -105,7 +107,8 @@ def create_app(
 
     register_capability_routes(app, selected_runtime, selected_run_manager)
     register_project_routes(app, projects, selected_runtime)
-    register_job_routes(app, projects, selected_run_manager)
+    register_job_routes(app, projects, selected_run_manager, selected_runtime)
+    app.openapi = partial(project_openapi, app)
 
     frontend = (
         Path(frontend_directory)

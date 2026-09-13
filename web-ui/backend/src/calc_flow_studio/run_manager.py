@@ -37,10 +37,12 @@ from calc_flow import (
 from pydantic import ValidationError
 
 from calc_flow_studio.asof_metrics import stream_asof_progress
+from calc_flow_studio.late_output import supported_late_operators
 from calc_flow_studio.models import (
     CapabilitiesResponse,
     JobResponse,
     JSONValue,
+    LateOutputCapabilityResponse,
     LazyBuiltinWorkerRegistration,
     PreviewCapabilitiesResponse,
     PreviewLimit,
@@ -1292,6 +1294,16 @@ class RunManager:
                 snapshot,
                 registrations,
                 self._lazy_builtins,
+            )
+            late_output = LateOutputCapabilityResponse(
+                operators=supported_late_operators(self._runtime)
+            )
+            response = response.model_copy(
+                update={
+                    "runtime": response.runtime.model_copy(
+                        update={"late_output": late_output}
+                    )
+                }
             )
 
             with self._lock:

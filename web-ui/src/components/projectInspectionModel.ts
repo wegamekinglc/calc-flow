@@ -1,4 +1,5 @@
 import type { NodeConfig, ProjectDocument } from '../types';
+import { hasLateOutput } from '../portNamesModel';
 
 export interface LoweredNodeInspection {
   contract: 'strict ProjectDocument v3';
@@ -246,7 +247,7 @@ const watermarkFact = (node: NodeConfig): string => {
   const operator = node.operator;
   if (operator.kind === 'rolling' || operator.kind === 'cross_section') {
     return [
-      'required',
+      hasLateOutput(node) ? 'required · output only' : 'required',
       `event_time=${operator.spec.event_time}`,
       `lateness=${operator.spec.allowed_lateness_micros}µs`,
       `policy=${latePolicyKind(operator.spec.late_policy)}`,

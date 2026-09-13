@@ -110,6 +110,18 @@ const job = (status: string) => ({
 });
 
 describe('capabilities decoder', () => {
+  it('accepts runtime-probed late output support and rejects unknown versions', () => {
+    const base = capabilitiesFixture();
+    const feature = { operators: ['rolling'], schemaVersion: 1, metricsVersion: 1 };
+    const document = { ...base, runtime: { ...base.runtime, lateOutput: feature } };
+    expect(decodeCapabilitiesResponse(document)).toEqual(document);
+    expect(() => decodeCapabilitiesResponse({ ...document, runtime: {
+      ...document.runtime, lateOutput: { ...feature, schemaVersion: 2 },
+    } })).toThrow(/lateOutput.schemaVersion/);
+    expect(() => decodeCapabilitiesResponse({ ...document, runtime: {
+      ...document.runtime, lateOutput: { ...feature, operators: ['window'] },
+    } })).toThrow(/lateOutput.operators/);
+  });
   it('accepts the closed runtime connector capability axes', () => {
     const document = capabilitiesFixture();
 
