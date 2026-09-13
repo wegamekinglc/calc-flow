@@ -858,7 +858,8 @@ class ReleaseConfigTests(unittest.TestCase):
                 f"version `{version}` in the current checkout",
                 "uv add calc-flow-python",
                 "uv run maturin develop",
-                "use a source build when the published package has a different version.",
+                "use a source build when the published package has a "
+                "different version.",
             ),
             "docs/rust-api.md": (
                 "`calc-flow` crate",
