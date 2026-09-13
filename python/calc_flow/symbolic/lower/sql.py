@@ -40,6 +40,8 @@ def _walk_nodes(node: Node) -> tuple[Node, ...]:
         if current.digest in found:
             return
         found[current.digest] = current
+        if current.op.name in {"late_output", "late_rows"}:
+            return
         for child in current.args:
             visit(child)
 
@@ -65,6 +67,8 @@ def _shared_tables(program: Program, analyzer: _Analyzer) -> frozenset[str]:
 _TABLE_BOUNDARIES = frozenset(
     {
         "sql",
+        "late_output",
+        "late_rows",
         "attach_columns",
         "stream_join",
         "window_tumbling",
@@ -78,7 +82,7 @@ def _expression_frontiers(program: Program) -> tuple[Node, ...]:
     for _, value in program.outputs:
         candidates[value.digest] = value._node
         for node in _walk_nodes(value._node):
-            if node.op.name in _TABLE_BOUNDARIES:
+            if node.op.name in _TABLE_BOUNDARIES - {"late_output", "late_rows"}:
                 for child in node.args:
                     candidates[child.digest] = child
     return tuple(node for node in candidates.values() if _is_row_fragment(node))
@@ -161,6 +165,10 @@ class _SQLGraph:
         existing = self.materialized.get(node.digest)
         if existing is not None:
             return existing
+        if node.op.name in {"late_output", "late_rows"}:
+            from calc_flow.symbolic.lower.late_output import append_late_outputs
+
+            return append_late_outputs(self, node)
         if node.op.name == "table_input":
             self.schemas[node.digest] = self.analyzer.table(node, "sql.input").schema
             return self.graph.source(node)
@@ -222,7 +230,8 @@ class _SQLGraph:
             if boundary.digest == node.digest:
                 continue
             if (
-                boundary.op.name in {"sql", "attach_columns", "stream_join"}
+                boundary.op.name
+                in {"sql", "attach_columns", "stream_join", "late_output", "late_rows"}
                 or boundary.digest in self.shared
             ):
                 self.table(boundary)
@@ -394,7 +403,7 @@ def lower_sql_program(
     late_policy: str,
 ) -> dict[str, object] | None:
     if not any(
-        node.op.name == "sql"
+        node.op.name in {"sql", "late_output", "late_rows"}
         for _, value in program.outputs
         for node in _walk_nodes(value._node)
     ):

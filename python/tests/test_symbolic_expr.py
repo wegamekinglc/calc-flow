@@ -88,6 +88,7 @@ def test_public_surface_is_the_frozen_export_list() -> None:
         "Expr",
         "FeatureSet",
         "Field",
+        "LateOutputs",
         "Parameter",
         "Program",
         "RowFrame",
@@ -107,6 +108,7 @@ def test_public_surface_is_the_frozen_export_list() -> None:
         "table_input",
         "ts",
         "window",
+        "with_late_output",
     ]
     for name in symbolic.__all__:
         assert hasattr(symbolic, name)

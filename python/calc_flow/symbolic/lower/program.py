@@ -841,8 +841,8 @@ def compile_program_stream(
 ) -> StreamExecutionPlan:
     """Lower one program to a strict project-v3 continuous plan.
 
-    The validated lateness arguments are written into every lowered rolling
-    node; row-local programs are unaffected by them.
+    The validated lateness arguments configure unmarked stateful stages;
+    paired declarations retain their local policy and row-local programs are unaffected.
     """
 
     selected = _require_runtime(runtime, "compile_stream")

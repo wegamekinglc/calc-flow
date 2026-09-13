@@ -12,24 +12,28 @@ from typing import NoReturn
 
 from calc_flow.errors import CompileError
 
+AMBIGUOUS_LATE_STAGE = "ambiguous_late_stage"
 CAPABILITY_MISMATCH = "capability_mismatch"
 DUPLICATE_NAME = "duplicate_name"
 INVALID_LITERAL = "invalid_literal"
 ORDERING_REQUIRED = "ordering_required"
 SCHEMA_MISMATCH = "schema_mismatch"
 UNBOUNDED_STATE = "unbounded_state"
+UNCONSUMED_OUTPUT = "unconsumed_output"
 UNKNOWN_PRIMITIVE_VERSION = "unknown_primitive_version"
 UNRESOLVED_TYPE = "unresolved_type"
 UNSUPPORTED_MODE = "unsupported_mode"
 UNSUPPORTED_TYPE = "unsupported_type"
 
 ISSUE_CODES: tuple[str, ...] = (
+    AMBIGUOUS_LATE_STAGE,
     CAPABILITY_MISMATCH,
     DUPLICATE_NAME,
     INVALID_LITERAL,
     ORDERING_REQUIRED,
     SCHEMA_MISMATCH,
     UNBOUNDED_STATE,
+    UNCONSUMED_OUTPUT,
     UNKNOWN_PRIMITIVE_VERSION,
     UNRESOLVED_TYPE,
     UNSUPPORTED_MODE,
@@ -37,6 +41,7 @@ ISSUE_CODES: tuple[str, ...] = (
 )
 
 __all__ = [
+    "AMBIGUOUS_LATE_STAGE",
     "CAPABILITY_MISMATCH",
     "DUPLICATE_NAME",
     "INVALID_LITERAL",
@@ -44,6 +49,7 @@ __all__ = [
     "ORDERING_REQUIRED",
     "SCHEMA_MISMATCH",
     "UNBOUNDED_STATE",
+    "UNCONSUMED_OUTPUT",
     "UNKNOWN_PRIMITIVE_VERSION",
     "UNRESOLVED_TYPE",
     "UNSUPPORTED_MODE",

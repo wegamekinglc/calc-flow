@@ -621,6 +621,31 @@ def _window_explain_lines(
     return tuple(lines)
 
 
+def _late_policy_lines(nodes: list[dict[str, object]]) -> tuple[str, ...]:
+    states = tuple(
+        node
+        for node in nodes
+        if node["operator"]["kind"] in {"rolling", "cross_section"}
+    )
+    if not any(
+        node["operator"]["spec"]["late_policy"]["kind"] == "side_output"
+        for node in states
+    ):
+        return ()
+    return tuple(
+        f"    late policy {node['id']}"
+        f" kind={node['operator']['spec']['late_policy']['kind']}"
+        " allowed_lateness_micros="
+        f"{node['operator']['spec']['allowed_lateness_micros']}"
+        + (
+            " schema_version=1 outputs=output,late"
+            if node["operator"]["spec"]["late_policy"]["kind"] == "side_output"
+            else " outputs=output"
+        )
+        for node in states
+    )
+
+
 def explain_optimization(document: dict[str, object], /) -> tuple[str, ...]:
     """Render deterministic physical sharing and bounded cost facts."""
 
@@ -655,6 +680,7 @@ def explain_optimization(document: dict[str, object], /) -> tuple[str, ...]:
         *lines,
         *_window_explain_lines(document, nodes),
         *explain_asof(nodes),
+        *_late_policy_lines(nodes),
         *(kernels or ("    rolling kernels none",)),
         "  costs",
         *(state or ("    state none",)),

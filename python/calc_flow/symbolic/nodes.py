@@ -333,6 +333,11 @@ _NO_ATTRS: dict[str, PrimitiveSpec] = {
 
 _PRIMITIVES: dict[str, PrimitiveSpec] = {
     "sql": PrimitiveSpec(frozenset({"query", "aliases"}), CMap(())),
+    "late_output": PrimitiveSpec(
+        frozenset({"allowed_lateness_micros", "schema_version", "metrics_version"}),
+        CMap(()),
+    ),
+    "late_rows": PrimitiveSpec(frozenset(), CMap(())),
     "table_input": PrimitiveSpec(
         frozenset({"name", "schema", "entity_by", "event_time", "sequence_by"}),
         CMap.from_mapping(
