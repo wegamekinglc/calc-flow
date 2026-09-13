@@ -123,6 +123,46 @@ def _project(tmp_path: Path, kind: str = "rolling") -> dict:
     }
 
 
+@pytest.mark.parametrize("kind", ["rolling", "cross_section"])
+def test_normal_schema_edit_matches_frontend_fixture_and_native_validation(
+    tmp_path, kind
+):
+    fields = json.loads(
+        (
+            Path(__file__).parents[2] / "src/components/lateSchema.fixture.json"
+        ).read_text()
+    )
+    document = _project(tmp_path, kind)
+    node = document["graph"]["nodes"][0]
+    node["operator"]["spec"]["outputs"][0]["output"] = "result"
+    assert node["input_ports"][0]["schema"] == fields["input"]
+    app = create_app(
+        project_directory=tmp_path / "projects", checkpoint_directory=tmp_path / "jobs"
+    )
+    with TestClient(app) as client:
+        assert client.post("/api/v3/projects", json=document).status_code == 201
+        path = "/api/v3/projects/late_contract"
+        assert client.post(path + "/validate").json()["valid"] is True
+        node["output_ports"] = [
+            {"name": name, "kind": "table", "required": True, "schema": fields[name]}
+            for name in ("output", "late")
+        ]
+        updated = client.put(path, json=document)
+        assert updated.status_code == 200, updated.text
+        assert (
+            updated.json()["graph"]["nodes"][0]["output_ports"] == node["output_ports"]
+        )
+        assert client.post(path + "/validate").json()["valid"] is True
+        node["output_ports"][1]["schema"] = []
+        invalid = client.put(path, json=document)
+        assert invalid.status_code == 422, invalid.text
+        issue = invalid.json()["detail"]["issues"][0]
+        assert (issue["code"], issue["path"]) == (
+            "schema_mismatch",
+            "graph.nodes[0].output_ports",
+        )
+
+
 class _StoredProject:
     def __init__(self, document: dict) -> None:
         self.project = ProjectDocument.model_validate(document)

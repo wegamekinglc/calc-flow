@@ -237,7 +237,20 @@ def test_capabilities_response_is_a_closed_camel_case_v2_contract() -> None:
 
     response = CapabilitiesResponse.model_validate(document)
 
-    assert response.model_dump(mode="json", by_alias=True) == document
+    expected = {
+        **document,
+        "runtime": {
+            **document["runtime"],
+            "lateOutput": {"operators": [], "metricsVersion": 1, "schemaVersion": 1},
+        },
+    }
+    assert response.model_dump(mode="json", by_alias=True) == expected
+    assert (
+        response.model_dump(mode="json", by_alias=True, exclude_unset=True) == document
+    )
+    assert response.runtime.late_output.operators == ()
+    assert "lateOutput" not in document["runtime"]
+    assert CapabilitiesResponse.model_validate(expected) == response
     with pytest.raises(ValidationError):
         CapabilitiesResponse.model_validate({**document, "optionalFutureField": True})
     with pytest.raises(ValidationError):

@@ -1,4 +1,5 @@
 import type { Dispatch } from 'react';
+import { lateOutputSchema } from '../portNamesModel';
 import type { NodeConfig, OperatorSpec } from '../types';
 
 type StatefulOperator = Extract<OperatorSpec, { kind: 'rolling' | 'cross_section' }>;
@@ -24,24 +25,13 @@ const withPolicy = (operator: StatefulOperator, late_policy: Policy): StatefulOp
     ? { kind: 'rolling', spec: { ...operator.spec, late_policy } }
     : { kind: 'cross_section', spec: { ...operator.spec, late_policy } };
 
-const diagnosticTypes: readonly (readonly [string, string])[] = [
-  ['node', 'string'], ['input_port', 'string'],
-  ['event_time_micros', 'int64'], ['closing_time_micros', 'int64'],
-  ['watermark_micros', 'int64'], ['reason', 'string'], ['source', 'string'],
-  ['sequence', 'uint64'], ['row_index', 'uint64'],
-];
-
-const diagnosticFields = () => diagnosticTypes.map(([name, data_type]) => ({
-  name: `_cf_late_${name}`, data_type, nullable: false,
-}));
-
 const policyPorts = (node: NodeConfig, kind: string) => {
   if (node.output_ports.length === 0) return node.output_ports;
   const normal = node.output_ports.filter((port) => port.name !== 'late');
   if (kind !== 'side_output') return normal;
   return [...normal, {
     name: 'late', kind: 'table' as const, required: true,
-    schema: [...(node.input_ports[0]?.schema ?? []), ...diagnosticFields()],
+    schema: lateOutputSchema(node),
   }];
 };
 

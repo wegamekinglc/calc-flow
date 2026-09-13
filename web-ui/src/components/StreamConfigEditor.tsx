@@ -105,6 +105,7 @@ export function StreamConfigEditor({
   const streamMode = streamOptions !== null;
   const lateOutput = project.graph.nodes.some(hasLateOutput);
   const outputs = externalOutputs(project.graph);
+  const unresolved = project.sinks.filter((sink) => !outputs.some((output) => output.binding === sink.binding));
   const unbound = outputs.filter((output) => !project.sinks.some((sink) => sink.binding === output.binding));
 
   const setMode = (mode: 'batch' | 'stream') => {
@@ -324,6 +325,9 @@ export function StreamConfigEditor({
           </div>
           {lateOutput && unbound.length > 0 && <p className="field-error">
             Unbound outputs: {unbound.map((output) => output.binding).join(', ')}
+          </p>}
+          {unresolved.length > 0 && <p className="field-error">
+            Rebind sinks without an external output: {unresolved.map((sink) => sink.binding).join(', ')}
           </p>}
           <datalist id="graph-output-bindings">
             {outputs.map((output) => <option key={output.binding} value={output.binding}>

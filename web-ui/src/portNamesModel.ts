@@ -1,4 +1,18 @@
-import type { NodeConfig, ProjectDocument } from './types';
+import type { ArrowFieldConfig, NodeConfig, ProjectDocument } from './types';
+
+const diagnosticTypes: readonly (readonly [string, string])[] = [
+  ['node', 'string'], ['input_port', 'string'],
+  ['event_time_micros', 'int64'], ['closing_time_micros', 'int64'],
+  ['watermark_micros', 'int64'], ['reason', 'string'], ['source', 'string'],
+  ['sequence', 'uint64'], ['row_index', 'uint64'],
+];
+
+export const lateOutputSchema = (node: NodeConfig): ArrowFieldConfig[] => [
+  ...(node.input_ports[0]?.schema ?? []),
+  ...diagnosticTypes.map(([name, data_type]) => ({
+    name: `_cf_late_${name}`, data_type, nullable: false,
+  })),
+];
 
 export const hasLateOutput = (node: NodeConfig): boolean =>
   (node.operator.kind === 'rolling' || node.operator.kind === 'cross_section')
@@ -31,8 +45,35 @@ export const externalOutputs = (graph: ProjectDocument['graph']) => {
   }));
 };
 
+interface OutputIdentity {
+  nodeId: string;
+  port: string;
+}
+
+const qualifiedOutput = (output: OutputIdentity): string => `${output.nodeId}.${output.port}`;
+
+export const withProjectGraph = (
+  project: ProjectDocument,
+  graph: ProjectDocument['graph'],
+): ProjectDocument => {
+  const previous = new Map(externalOutputs(project.graph).map((output) => [output.binding, output]));
+  const current = new Map(externalOutputs(graph).map((output) => [qualifiedOutput(output), output.binding]));
+  return {
+    ...project,
+    graph,
+    sinks: project.sinks.map((sink) => {
+      const output = previous.get(sink.binding);
+      const identity = output ? qualifiedOutput(output) : sink.binding;
+      // Retain disconnected consumers for explicit rebinding instead of assigning a different route.
+      const binding = current.get(identity) ?? identity;
+      return binding === sink.binding ? sink : { ...sink, binding };
+    }),
+  };
+};
+
 export const lateOutputInUse = (project: ProjectDocument, node: NodeConfig): boolean => {
   if (project.graph.edges.some((edge) => edge.source_node === node.id && edge.source_port === 'late')) return true;
   const output = externalOutputs(project.graph).find((item) => item.nodeId === node.id && item.port === 'late');
-  return project.sinks.some((sink) => sink.binding === output?.binding);
+  return project.sinks.some((sink) =>
+    sink.binding === output?.binding || sink.binding === `${node.id}.late`);
 };
