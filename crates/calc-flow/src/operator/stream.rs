@@ -329,6 +329,12 @@ impl<'a> StreamOperatorContext<'a> {
         self.output_budget
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_test_output_budget(mut self, budget: EdgeBudget) -> Self {
+        self.output_budget = budget;
+        self
+    }
+
     /// Verifies that the owning job remains active.
     ///
     /// # Errors
@@ -386,6 +392,13 @@ impl<'a> StreamOperatorContext<'a> {
             null_event_time_batches: u64::from(null_event_time_rows > 0),
         })
     }
+
+    pub(crate) fn prepare_window_metrics(
+        &self,
+        delta: LateMetricDelta,
+    ) -> Result<PreparedLateMetrics> {
+        Arc::clone(&self.late_metrics).prepare(delta)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -400,6 +413,24 @@ pub(crate) struct LateMetricDelta {
 
 pub(crate) trait LateMetricSink: Send + Sync {
     fn record(&self, delta: LateMetricDelta) -> Result<()>;
+
+    fn prepare(self: Arc<Self>, _delta: LateMetricDelta) -> Result<PreparedLateMetrics> {
+        Err(CalcFlowError::Internal {
+            message: "late metric sink does not support staged updates".into(),
+        })
+    }
+}
+
+pub(crate) struct PreparedLateMetrics(Box<dyn FnOnce() + Send>);
+
+impl PreparedLateMetrics {
+    pub(crate) fn new(commit: impl FnOnce() + Send + 'static) -> Self {
+        Self(Box::new(commit))
+    }
+
+    pub(crate) fn commit(self) {
+        (self.0)();
+    }
 }
 
 #[derive(Default)]
@@ -411,6 +442,12 @@ impl LateMetricSink for LateMetricRecorder {
         let next = accumulate_late_metrics(*current, delta)?;
         *current = next;
         Ok(())
+    }
+
+    fn prepare(self: Arc<Self>, delta: LateMetricDelta) -> Result<PreparedLateMetrics> {
+        let next = accumulate_late_metrics(*self.0.lock(), delta)?;
+        // Native callbacks serialize metric writes across prepare/emit/install.
+        Ok(PreparedLateMetrics::new(move || *self.0.lock() = next))
     }
 }
 
@@ -609,6 +646,33 @@ impl StreamCollector for EdgeCollector {
 mod tests {
     use super::*;
     use crate::CancellationToken;
+
+    #[test]
+    fn test_late_metrics_prepare_is_invisible_and_commit_has_no_fallible_arithmetic() {
+        let recorder = Arc::new(LateMetricRecorder::default());
+        let delta = LateMetricDelta {
+            late_rows: 2,
+            affected_batches: 1,
+            max_lateness_micros: Some(9),
+            ..LateMetricDelta::default()
+        };
+        let prepared = recorder.clone().prepare(delta).unwrap();
+        assert_eq!(*recorder.0.lock(), LateMetricDelta::default());
+        drop(prepared);
+        assert_eq!(*recorder.0.lock(), LateMetricDelta::default());
+        recorder.clone().prepare(delta).unwrap().commit();
+        assert_eq!(*recorder.0.lock(), delta);
+        assert!(
+            recorder
+                .clone()
+                .prepare(LateMetricDelta {
+                    late_rows: u64::MAX,
+                    ..LateMetricDelta::default()
+                })
+                .is_err()
+        );
+        assert_eq!(*recorder.0.lock(), delta);
+    }
 
     #[test]
     fn late_row_recorder_accumulates_drops_batches_and_max_lateness() {

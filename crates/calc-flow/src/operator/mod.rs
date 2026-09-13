@@ -54,7 +54,9 @@ pub use window::{
 };
 
 pub(crate) use expression::expression_query;
-pub(crate) use stream::{LateMetricDelta, LateMetricSink, accumulate_late_metrics};
+pub(crate) use stream::{
+    LateMetricDelta, LateMetricSink, PreparedLateMetrics, accumulate_late_metrics,
+};
 pub(crate) use window::WINDOW_STATE_LAYOUT_VERSION;
 
 use std::{
