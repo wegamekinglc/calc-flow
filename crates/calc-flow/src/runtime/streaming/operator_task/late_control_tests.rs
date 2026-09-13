@@ -309,65 +309,7 @@ async fn test_late_controls_and_restored_derivatives_keep_fifo_without_frontiers
                 let mut restores = BTreeMap::new();
                 for sequence in 0..2 {
                     let observed = run_graph(kind, path, restores).await;
-                    assert_eq!(
-                        observed
-                            .late
-                            .iter()
-                            .map(StreamMessage::kind)
-                            .collect::<Vec<_>>(),
-                        [
-                            StreamMessageKind::Data,
-                            StreamMessageKind::Barrier,
-                            StreamMessageKind::EndOfInput
-                        ],
-                        "{kind}/{path}"
-                    );
-                    assert!(
-                        observed
-                            .normal
-                            .iter()
-                            .any(|message| message.as_watermark()
-                                == Some(EventTime::from_micros(10)))
-                            || sequence == 1
-                    );
-                    assert!(observed.normal.iter().any(StreamMessage::is_idle));
-                    assert_eq!(
-                        observed.normal[observed.normal.len() - 2].kind(),
-                        StreamMessageKind::Barrier
-                    );
-                    assert!(observed.normal.last().unwrap().is_end_of_input());
-                    if path == "direct" {
-                        assert_eq!(
-                            observed.late[0].as_data().unwrap().metadata().sequence(),
-                            sequence
-                        );
-                    }
-                    if path == "sql" {
-                        let batch = &observed.late[0]
-                            .as_data()
-                            .unwrap()
-                            .table_payload()
-                            .unwrap()
-                            .batches()[0];
-                        let counts = batch
-                            .column_by_name("n")
-                            .unwrap()
-                            .as_any()
-                            .downcast_ref::<Int64Array>()
-                            .unwrap();
-                        assert_eq!(counts.values(), &[1]);
-                    }
-                    for (id, restore) in &observed.restores {
-                        if id != "roll" {
-                            assert!(
-                                restore
-                                    .progress
-                                    .values()
-                                    .all(|progress| progress.watermark.is_none())
-                            );
-                            assert!(restore.output_frontier.is_none());
-                        }
-                    }
+                    assert_observed_controls(kind, path, sequence, &observed);
                     restores = observed.restores;
                 }
             }
@@ -375,6 +317,67 @@ async fn test_late_controls_and_restored_derivatives_keep_fifo_without_frontiers
     })
     .await
     .unwrap();
+}
+
+fn assert_observed_controls(kind: &str, path: &str, sequence: u64, observed: &Observed) {
+    assert_eq!(
+        observed
+            .late
+            .iter()
+            .map(StreamMessage::kind)
+            .collect::<Vec<_>>(),
+        [
+            StreamMessageKind::Data,
+            StreamMessageKind::Barrier,
+            StreamMessageKind::EndOfInput
+        ],
+        "{kind}/{path}"
+    );
+    assert!(
+        observed
+            .normal
+            .iter()
+            .any(|message| message.as_watermark() == Some(EventTime::from_micros(10)))
+            || sequence == 1
+    );
+    assert!(observed.normal.iter().any(StreamMessage::is_idle));
+    assert_eq!(
+        observed.normal[observed.normal.len() - 2].kind(),
+        StreamMessageKind::Barrier
+    );
+    assert!(observed.normal.last().unwrap().is_end_of_input());
+    if path == "direct" {
+        assert_eq!(
+            observed.late[0].as_data().unwrap().metadata().sequence(),
+            sequence
+        );
+    }
+    if path == "sql" {
+        let batch = &observed.late[0]
+            .as_data()
+            .unwrap()
+            .table_payload()
+            .unwrap()
+            .batches()[0];
+        let counts = batch
+            .column_by_name("n")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(counts.values(), &[1]);
+    }
+    for (id, restore) in &observed.restores {
+        if id != "roll" {
+            assert!(
+                restore
+                    .progress
+                    .values()
+                    .all(|progress| progress.watermark.is_none())
+            );
+            assert!(restore.output_frontier.is_none());
+        }
+    }
 }
 
 struct Collectors {

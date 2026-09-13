@@ -528,6 +528,19 @@ async fn test_late_files_empty_mixed_and_all_late_epochs_recover_and_restart_ter
                 probe.paused.notified().await;
                 let epoch = first.trigger_checkpoint().await.unwrap();
                 for name in ["normal", "late"] {
+                    let manifest: serde_json::Value = serde_json::from_slice(
+                        &std::fs::read(
+                            root.path()
+                                .join("outputs")
+                                .join(name)
+                                .join(format!("epoch={}", epoch.as_u64()))
+                                .join("manifest.json"),
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap();
+                    assert_eq!(manifest["epoch"], epoch.as_u64());
+                    assert_eq!(manifest["output"], name);
                     for event in ["prepare", "commit"] {
                         assert!(probe.sink_events.lock().unwrap().contains(&(
                             name,
@@ -536,13 +549,13 @@ async fn test_late_files_empty_mixed_and_all_late_epochs_recover_and_restart_ter
                         )));
                     }
                 }
-                assert_eq!(first.status().checkpoint.sink_precommit_acks, 2);
-                assert_eq!(first.status().checkpoint.sink_commit_acks, 2);
                 assert_eq!(
                     rows(root.path(), "late").len(),
                     times.iter().filter(|time| **time <= 10).count()
                 );
-                assert_eq!(first.cancel().await.state, JobState::Cancelled);
+                let cancelled = first.cancel().await;
+                assert_eq!(cancelled.state, JobState::Cancelled);
+                assert_eq!(cancelled.completed_epoch, Some(epoch));
                 assert_settled(&first);
                 let second = runner(root.path(), times, None, probe.clone())
                     .start()

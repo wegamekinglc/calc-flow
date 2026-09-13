@@ -8,7 +8,7 @@
 //! output, and unrelated user files outside the managed epoch directories
 //! are never touched.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
@@ -266,6 +266,24 @@ fn read_manifest(dir: &Path) -> Option<JsonMap> {
     serde_json::from_slice(&bytes).ok()
 }
 
+fn validate_recovery_identity(
+    directory: &Path,
+    evidence: &JsonMap,
+    epoch: Epoch,
+    output: &str,
+) -> Result<()> {
+    if evidence.get("epoch").and_then(Value::as_u64) != Some(epoch.as_u64())
+        || evidence.get("output").and_then(Value::as_str) != Some(output)
+    {
+        return Err(TransactionalParquetSink::fail(
+            "recover",
+            directory,
+            "epoch manifest identity disagrees with the requested epoch or output",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_recovery_directory(directory: &Path, evidence: &JsonMap) -> Result<()> {
     let stored = read_manifest(directory).ok_or_else(|| {
         TransactionalParquetSink::fail("recover", directory, "epoch is missing its manifest")
@@ -287,26 +305,56 @@ fn validate_recovery_directory(directory: &Path, evidence: &JsonMap) -> Result<(
                 "epoch manifest has no part inventory",
             )
         })?;
-    for part in parts {
-        let name = part
-            .as_str()
-            .filter(|name| {
-                let mut components = Path::new(name).components();
-                matches!(components.next(), Some(std::path::Component::Normal(_)))
-                    && components.next().is_none()
-            })
-            .ok_or_else(|| {
-                TransactionalParquetSink::fail(
-                    "recover",
-                    directory,
-                    "epoch manifest has an invalid part name",
-                )
-            })?;
-        if !directory.join(name).is_file() {
+    parts
+        .iter()
+        .try_for_each(|part| validate_recovery_part(directory, part))?;
+    validate_recovery_inventory(directory, parts)
+}
+
+fn validate_recovery_part(directory: &Path, part: &Value) -> Result<()> {
+    let name = part
+        .as_str()
+        .filter(|name| {
+            let mut components = Path::new(name).components();
+            matches!(components.next(), Some(std::path::Component::Normal(_)))
+                && components.next().is_none()
+        })
+        .ok_or_else(|| {
+            TransactionalParquetSink::fail(
+                "recover",
+                directory,
+                "epoch manifest has an invalid part name",
+            )
+        })?;
+    if !directory.join(name).is_file() {
+        return Err(TransactionalParquetSink::fail(
+            "recover",
+            directory,
+            "epoch is missing a prepared Parquet part",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_recovery_inventory(directory: &Path, parts: &[Value]) -> Result<()> {
+    let expected = parts
+        .iter()
+        .filter_map(Value::as_str)
+        .chain(["manifest.json"])
+        .collect::<BTreeSet<_>>();
+    let io_error = || TransactionalParquetSink::map_io("recover", directory.to_path_buf());
+    for entry in std::fs::read_dir(directory).map_err(io_error())? {
+        let entry = entry.map_err(io_error())?;
+        if !entry.file_type().map_err(io_error())?.is_file()
+            || !entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| expected.contains(name))
+        {
             return Err(TransactionalParquetSink::fail(
                 "recover",
                 directory,
-                "epoch is missing a prepared Parquet part",
+                "epoch contains an unexpected entry outside its prepared file inventory",
             ));
         }
     }
@@ -427,8 +475,10 @@ impl TransactionalStreamSink for TransactionalParquetSink {
     }
 
     async fn recover(&mut self, recovery: &SinkRecovery) -> Result<()> {
-        let staging = self.config.staging_dir(recovery.epoch());
-        let final_dir = self.config.final_dir(recovery.epoch());
+        let epoch = recovery.epoch();
+        let output = self.config.output.clone();
+        let staging = self.config.staging_dir(epoch);
+        let final_dir = self.config.final_dir(epoch);
         let evidence = recovery.pre_commit().clone();
         self.blocking(final_dir.clone(), "recover", move || {
             if evidence.is_empty() && !final_dir.exists() && !staging.exists() {
@@ -439,6 +489,7 @@ impl TransactionalStreamSink for TransactionalParquetSink {
             } else {
                 &staging
             };
+            validate_recovery_identity(directory, &evidence, epoch, &output)?;
             validate_recovery_directory(directory, &evidence)?;
             commit_staged(&staging, &final_dir, &evidence)
         })
