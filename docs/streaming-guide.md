@@ -285,6 +285,12 @@ neither a global deduplication key nor a replay cursor. The late output
 `Batch` has its own sequence, persisted independently in checkpoints;
 `_cf_late_sequence` remains the input metadata sequence.
 
+At source admission, `StreamingRunner` replaces the source-provided metadata
+source and sequence with the physical source binding ID and the runtime's
+per-source sequence. Diagnostics copy the metadata that reaches the selected
+operator, so a directly connected source uses those runtime-assigned values.
+The source's original `Batch` remains unchanged.
+
 Raw late rows retain input occurrence order, including repeated late
 occurrences. They are not sorted by event time. Neither `Watermark` nor
 `Idle` propagates down this branch. FIFO `Barrier` and EOF still propagate,
@@ -408,7 +414,10 @@ then cancelled and its tasks and queue credits settle.
 root. It checks that the source opens at offset 2. Separate Parquet reads check
 normal `(ts,seq)=[(20,0),(40,11)]` and late `[(6,10)]`. The normal lag of `x`
 is null at 20 and 20 at 40, proving the pre-cut state survives; the late row's
-diagnostics retain input binding source `input`, sequence 1, and row index 0.
+diagnostics contain source `input`, sequence 1, and row index 0. Although the
+source constructs batches with metadata source `trace-v1`, runtime admission
+replaces it with the physical binding ID `input` before the rolling node sees
+the envelope.
 `verify` starts another runner against the terminal checkpoint, checks
 `Source.open=0` and the unchanged terminal epoch, and compares committed file
 names and bytes in each output directory before and after restart. Each route's
