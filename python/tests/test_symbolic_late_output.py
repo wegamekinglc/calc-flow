@@ -496,6 +496,29 @@ def test_native_schema_error_retains_real_machine_path() -> None:
         )
 
 
+async def _assert_paired_lifecycle(
+    results: cf.StreamResults[cf.StreamOutput],
+    feed: ScriptedSource,
+    blocked: asyncio.Event,
+    failure: str,
+    failures: list[str],
+) -> None:
+    before = asyncio.all_tasks()
+    if failure == "cancel":
+        async with results:
+            await asyncio.wait_for(blocked.wait(), 5)
+            assert feed.index < len(feed.events)
+        assert results.job.status()["state"] == "cancelled"
+    else:
+        with pytest.raises(cf.StreamingRuntimeError) as caught:
+            async with results:
+                pass
+        assert "private-" not in str(caught.value)
+        assert failures == [failure]
+    assert asyncio.all_tasks() == before
+    assert feed.closed == feed.opened
+
+
 @pytest.mark.parametrize("failure", ["cancel", "sink_open", "source_open"])
 def test_paired_lifecycle_closes_resources_before_temporary_state(
     failure: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -555,23 +578,11 @@ def test_paired_lifecycle_closes_resources_before_temporary_state(
     monkeypatch.setattr(stream_module._QueueSink, "write", write_sink)
     monkeypatch.setattr(stream_module.shutil, "rmtree", remove_state)
 
-    async def run() -> None:
-        before = asyncio.all_tasks()
-        if failure == "cancel":
-            async with results:
-                await asyncio.wait_for(blocked.wait(), 5)
-                assert feed.index < len(feed.events)
-            assert results.job.status()["state"] == "cancelled"
-        else:
-            with pytest.raises(cf.StreamingRuntimeError) as caught:
-                async with results:
-                    pass
-            assert "private-" not in str(caught.value)
-            assert failures == [failure]
-        assert asyncio.all_tasks() == before
-        assert feed.closed == feed.opened
-
-    asyncio.run(asyncio.wait_for(run(), 15))
+    asyncio.run(
+        asyncio.wait_for(
+            _assert_paired_lifecycle(results, feed, blocked, failure, failures), 15
+        )
+    )
     assert opened_sinks <= closed_sinks
     assert list(tmp_path.iterdir()) == []
 
