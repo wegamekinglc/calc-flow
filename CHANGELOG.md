@@ -9,6 +9,29 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-13: Enable native rolling/cross-section late-output execution and
+  durable recovery. Diagnostic branches and their supported expression/SQL
+  derivatives carry data, barriers, and end-of-input without watermark or idle
+  progress. Checkpoints persist a strict `late_output` version-1 object and
+  restore the independent late sequence. Normal and late outputs participate
+  in aligned epochs and terminal recovery, with delivery proved per output.
+  Transactional Parquet recovery validates epoch/output identity, manifests,
+  and the complete prepared file inventory before finishing a staged commit.
+  Project/manifest formats and operator state layouts remain unchanged;
+  Python expression compilation still accepts only error/drop.
+
+- 2026-09-13: Extend the public rolling/cross-section `LatePolicySpec` and
+  project schema with `SideOutput { metrics_version: 1, schema_version: 1 }`,
+  a required `late` port, reserved diagnostic fields, and stream-only routing
+  validation. Align package versions at 5.0.0 and Studio's core dependency with
+  the v5 major. Native operators prepare whole-envelope state, metrics, and
+  bounded diagnostic output before sending; accepted state and independent
+  output sequences commit only after successful emission, and failed or
+  cancelled sends forbid live callback retry. Managed runner admission and
+  ordinary operator callbacks still reject side-output execution; this does
+  not enable durable late-output recovery. Project and manifest versions
+  remain 3, and Python expression compilation still accepts only error/drop.
+
 - 2026-09-12: Optimize proven UInt64 modulo filters and compatible COUNT/AVG
   full-window SQL rolling plans, retaining fallback for unproved expressions.
   Reduce Native entity/history preparation and output charging; add bounded

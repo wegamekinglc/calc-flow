@@ -82,5 +82,19 @@ Paths reject traversal and symlink escapes. Epoch staging stays below the
 configured output and becomes visible only through the transactional sink
 protocol.
 
+Recovery validates the requested epoch and output identity, requires the
+on-disk manifest to equal the durable recovery evidence, and checks that every
+listed Parquet part exists with no unexpected entries in the epoch directory.
+It can finish a prepared epoch from staging when the final directory is absent.
+A missing manifest or part, or inconsistent evidence, fails recovery before the
+job resumes. An epoch with neither recovery evidence nor a managed staging or
+final directory requires no recovery action.
+
+Native rolling/cross-section [late diagnostic output](../rust-api.md#late-row-policy-contract)
+can use a separate transactional file sink alongside normal output. Both sinks
+participate in the same checkpoint epochs, including an epoch with no late rows.
+Keep each sink's output identity and the checkpoint root stable for restart.
+Exactly-once delivery is still proved separately for each graph output.
+
 See the [connector overview](README.md) for shared delivery, secret,
 and recovery rules.

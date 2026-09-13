@@ -1,6 +1,6 @@
 # calc-flow-connectors
 
-Connector implementations for the Calc-Flow 4.0 continuous runtime. The
+Connector implementations for the Calc Flow continuous runtime. The
 crate owns the transport and codec glue; every connector registers through
 the trusted `calc_flow::ConnectorRegistry` and implements the A6-public
 `StreamSource` / `StreamSink` / `TransactionalStreamSink` lifecycles.

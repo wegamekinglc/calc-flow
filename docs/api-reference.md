@@ -1,15 +1,19 @@
-# Calc Flow 4.0 API reference
+# Calc Flow API reference
 
 [Documentation](README.md) / 3.1 API reference
 
 Python is the application API. Rust implements the internal runtime and exposes
 extension interfaces; Studio provides local project and job controls:
 
+The versions below describe this checkout. Published package versions can lag
+the source; use the [source installation](getting-started.md#build-and-install-from-source)
+for the contracts documented here.
+
 | Surface          | Package or path           | Purpose                                    |
 |------------------|---------------------------|--------------------------------------------|
-| Python API       | `calc-flow-python==4.0.0` | Expressions, Arrow execution, integrations |
-| Rust core        | `calc-flow = "4.0.0"`     | Internal runtime and extension contracts   |
-| Local Studio API | `calc-flow-studio==4.0.0` | Loopback FastAPI service and React assets  |
+| Python API       | `calc-flow-python==5.0.0` | Expressions, Arrow execution, integrations |
+| Rust core        | `calc-flow = "5.0.0"`     | Internal runtime and extension contracts   |
+| Local Studio API | `calc-flow-studio==5.0.0` | Loopback FastAPI service and React assets  |
 
 For examples and lifecycle detail, see the [executable example guide](examples.md),
 [Rust runtime reference](rust-api.md), [Python API](python-api.md), and
@@ -81,15 +85,15 @@ collection state, streaming ownership, and logical versus physical bindings.
 
 ### SQL, pipelines, and streaming results
 
-| Entry point                                                                  | Contract                                                          |
-|------------------------------------------------------------------------------|-------------------------------------------------------------------|
-| `sql(query, /, **tables)`                                                    | Lazy `TableExpr`; explicit aliases mapped to table declarations   |
-| `TableExpr.sql(query, /)`                                                    | Single-table SQL with the local alias `input`                     |
-| `Expr.pipe(function, /, *args, **kwargs)`                                    | Call the synchronous builder once and preserve its return type    |
-| `TableExpr.stream(inputs, /, *, runtime=None, config=None, watermarks=None)` | `StreamResults[pyarrow.Table]`                                    |
-| `Program.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`   | `StreamResults[StreamOutput]`; logical input mapping required     |
-| `StreamOutput.name` / `.table`                                               | Immutable named Arrow output event                                |
-| `StreamResults` async context / iteration / `aclose()` / `.job`              | One native job, one consumer, bounded output and owned cleanup    |
+| Entry point                                                                  | Contract                                                        |
+|------------------------------------------------------------------------------|-----------------------------------------------------------------|
+| `sql(query, /, **tables)`                                                    | Lazy `TableExpr`; explicit aliases mapped to table declarations |
+| `TableExpr.sql(query, /)`                                                    | Single-table SQL with the local alias `input`                   |
+| `Expr.pipe(function, /, *args, **kwargs)`                                    | Call the synchronous builder once and preserve its return type  |
+| `TableExpr.stream(inputs, /, *, runtime=None, config=None, watermarks=None)` | `StreamResults[pyarrow.Table]`                                  |
+| `Program.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`   | `StreamResults[StreamOutput]`; logical input mapping required   |
+| `StreamOutput.name` / `.table`                                               | Immutable named Arrow output event                              |
+| `StreamResults` async context / iteration / `aclose()` / `.job`              | One native job, one consumer, bounded output and owned cleanup  |
 
 SQL schema planning reads declarations, not data. Batch SQL accepts multiple
 aliases; a stream accepts one alias and executes the SQL per native batch.
@@ -281,6 +285,15 @@ table-to-array-to-table provider described in the
 `project_json_schema()` returns the Rust-generated schema and
 `validate_project_json()` returns canonical validated JSON.
 
+Rolling and cross-section `LatePolicySpec` supports `side_output` in native
+stream projects, with `metrics_version: 1` and `schema_version: 1`. Its `late`
+diagnostic port has no watermark/idle progress, but participates in aligned
+checkpoints and recovery alongside normal output. Batch mode rejects this
+policy. The `error` object requires `scope: "envelope"`. See the
+[late-row policy contract](rust-api.md#late-row-policy-contract) for native
+ports, routing, recovery, and the Python expression interface, which still
+accepts only error/drop.
+
 Project v3 carries an explicit batch or stream runtime. Stream documents bind
 graph endpoints to exact connector and format identities, refer to named
 secrets, configure watermarks and managed state, and request delivery per
@@ -358,30 +371,30 @@ analysis, and compilation contract.
 The `calc_flow` crate re-exports its supported public types from
 [`lib.rs`](../crates/calc-flow/src/lib.rs).
 
-| Area                  | Primary APIs                                                                                                                                                               |
-|-----------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Data                  | `Batch`, `BatchKind`, `BatchMetadata`, `TableBatch`                                                                                                                        |
-| Batch graph           | `PipelineBuilder`, `Edge`, `PortEndpoint`, `BatchExecutionPlan`                                                                                                            |
-| Stream plan           | `StreamExecutionPlan`, `StreamRequirements`, `DeliveryGuarantee`, `StreamRuntimeConfig`                                                                                    |
-| Operator traits       | `Port`, `OperatorMetadata`, `NodeOperator`, `BatchOperator`, `StreamOperator`, `StreamOperatorLifecycle`, `OperatorStateSnapshot`                                          |
-| Built-in operators    | `ExpressionOperator`, `SqlOperator`, `RollingOperator`, `CrossSectionOperator`, `UnionOperator`, `WindowAggregateOperator`, `StreamJoinOperator`, `StreamAsofJoinOperator` |
-| Window model          | `WindowSpec`, `WindowGeometry`, `AggregateSpec`, `AggregateFunction`, `MAX_WINDOW_OVERLAP`                                                                                 |
-| Rolling model         | `RollingSpec`, `RollingOutputSpec`, `RollingNumericalProfile`, `LatePolicySpec`, `LateErrorScope`, `RollingValuePolicy`                                                    |
-| Cross-section model   | `CrossSectionSpec`, `CrossSectionGroupingSpec`, `CrossSectionOutputSpec`, `CrossSectionValuePolicy`, `RankTieMethod`, `SortDirection`, `NullPlacement`                     |
-| Stream join model     | `StreamJoinSpec`, `StreamJoinType`, `JoinTimeBounds`, `JoinStateLimits`, `StreamJoinStatus`                                                                                |
-| ASOF join model       | `StreamAsofJoinSpec`, `AsofJoinSide`, `AsofStateLimits`, `AsofLatePolicy`, `StreamAsofJoinStatus`, `StreamAsofJoinSideStatus`                                              |
-| Execution             | `ExecutionOptions`, `RunResult`, `RunMetadata`, `NodeTiming`                                                                                                               |
-| Stream model          | `StreamMessage`, `StreamMessageKind`, `StreamJobContext`, `EventTime`, `Epoch`                                                                                             |
-| Stream channel        | `EdgeBudget`, `EnvelopeCost`, `ChannelMetrics`, `EdgeSender`, `EdgeReceiver`, `edge_channel`                                                                               |
-| State backend         | `StateBackend`, `StateLineageBackend`, `StateLineageKey`, `StateHandle`, `LocalStateBackend`                                                                               |
-| State manifest        | `CheckpointManifest`, `CheckpointManifestFields`, `ManifestExpectation`, `OperatorManifestEntry`, `RecoveryStatus`                                                         |
-| UDF/providers         | `UdfRegistry`, `UdfReference`, `ProviderRegistry`, `BatchOperatorFactory`, `StreamOperatorFactory`                                                                         |
-| Sources and sinks     | `StreamSource`, `StreamSink`, `TransactionalStreamSink`, `SourceBinding`, `SinkBinding`                                                                                    |
-| Continuous runtime    | `StreamingRunner`, `StreamingJob`, `ManagedCheckpointRuntime`, `Cursor`, `SourceEvent`, `JobStatus`, `JobOutcome`                                                          |
-| Static inputs         | `StaticInputSpec`, `StaticInputDigest`, `StaticMutability`, `STATIC_INPUT_DIGEST_VERSION`, `StaticArraySnapshot`, `StaticArrayValues`                                      |
-| Projects              | `ProjectSpec`, `compile_project`, `validate_project`                                                                                                                       |
-| Persistence           | `FileProjectStore`, `LocalStateBackend`, `CheckpointManifest`                                                                                                              |
-| Errors                | `CalcFlowError`, `Result<T>`                                                                                                                                               |
+| Area                | Primary APIs                                                                                                                                                               |
+|---------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Data                | `Batch`, `BatchKind`, `BatchMetadata`, `TableBatch`                                                                                                                        |
+| Batch graph         | `PipelineBuilder`, `Edge`, `PortEndpoint`, `BatchExecutionPlan`                                                                                                            |
+| Stream plan         | `StreamExecutionPlan`, `StreamRequirements`, `DeliveryGuarantee`, `StreamRuntimeConfig`                                                                                    |
+| Operator traits     | `Port`, `OperatorMetadata`, `NodeOperator`, `BatchOperator`, `StreamOperator`, `StreamOperatorLifecycle`, `OperatorStateSnapshot`                                          |
+| Built-in operators  | `ExpressionOperator`, `SqlOperator`, `RollingOperator`, `CrossSectionOperator`, `UnionOperator`, `WindowAggregateOperator`, `StreamJoinOperator`, `StreamAsofJoinOperator` |
+| Window model        | `WindowSpec`, `WindowGeometry`, `AggregateSpec`, `AggregateFunction`, `MAX_WINDOW_OVERLAP`                                                                                 |
+| Rolling model       | `RollingSpec`, `RollingOutputSpec`, `RollingNumericalProfile`, `LatePolicySpec`, `LateErrorScope`, `RollingValuePolicy`                                                    |
+| Cross-section model | `CrossSectionSpec`, `CrossSectionGroupingSpec`, `CrossSectionOutputSpec`, `CrossSectionValuePolicy`, `RankTieMethod`, `SortDirection`, `NullPlacement`                     |
+| Stream join model   | `StreamJoinSpec`, `StreamJoinType`, `JoinTimeBounds`, `JoinStateLimits`, `StreamJoinStatus`                                                                                |
+| ASOF join model     | `StreamAsofJoinSpec`, `AsofJoinSide`, `AsofStateLimits`, `AsofLatePolicy`, `StreamAsofJoinStatus`, `StreamAsofJoinSideStatus`                                              |
+| Execution           | `ExecutionOptions`, `RunResult`, `RunMetadata`, `NodeTiming`                                                                                                               |
+| Stream model        | `StreamMessage`, `StreamMessageKind`, `StreamJobContext`, `EventTime`, `Epoch`                                                                                             |
+| Stream channel      | `EdgeBudget`, `EnvelopeCost`, `ChannelMetrics`, `EdgeSender`, `EdgeReceiver`, `edge_channel`                                                                               |
+| State backend       | `StateBackend`, `StateLineageBackend`, `StateLineageKey`, `StateHandle`, `LocalStateBackend`                                                                               |
+| State manifest      | `CheckpointManifest`, `CheckpointManifestFields`, `ManifestExpectation`, `OperatorManifestEntry`, `RecoveryStatus`                                                         |
+| UDF/providers       | `UdfRegistry`, `UdfReference`, `ProviderRegistry`, `BatchOperatorFactory`, `StreamOperatorFactory`                                                                         |
+| Sources and sinks   | `StreamSource`, `StreamSink`, `TransactionalStreamSink`, `SourceBinding`, `SinkBinding`                                                                                    |
+| Continuous runtime  | `StreamingRunner`, `StreamingJob`, `ManagedCheckpointRuntime`, `Cursor`, `SourceEvent`, `JobStatus`, `JobOutcome`                                                          |
+| Static inputs       | `StaticInputSpec`, `StaticInputDigest`, `StaticMutability`, `STATIC_INPUT_DIGEST_VERSION`, `StaticArraySnapshot`, `StaticArrayValues`                                      |
+| Projects            | `ProjectSpec`, `compile_project`, `validate_project`                                                                                                                       |
+| Persistence         | `FileProjectStore`, `LocalStateBackend`, `CheckpointManifest`                                                                                                              |
+| Errors              | `CalcFlowError`, `Result<T>`                                                                                                                                               |
 
 `compile_project` produces a `BatchExecutionPlan`. `compile_batch` and
 `compile_stream` are the Rust graph-compilation entry points. A
@@ -504,7 +517,7 @@ manifest publication uses `CheckpointPublicationUnknownError`.
 ## Version and compatibility
 
 The Rust crate, Python binding, Studio package, and frontend are versioned
-`4.0.0`. Project format version `3` and checkpoint-manifest version `3` are
+`5.0.0` in this checkout. Project format version `3` and checkpoint-manifest version `3` are
 separate protocol values from the package version.
 
 Projects accept strict format `3`; Studio serves `/api/v3`. See

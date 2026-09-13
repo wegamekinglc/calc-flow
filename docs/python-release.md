@@ -31,7 +31,7 @@ The five core wheels cover this matrix:
 Every core filename starts with `calc_flow_python-` and uses `cp313-abi3`
 (CPython 3.13+). The verifier checks internal tags, `calc_flow._native`,
 metadata, license, exact version, platform family, source-distribution contents,
-Studio assets, and Studio's dependency on `calc-flow-python>=4.0.0,<5`.
+Studio assets, and Studio's dependency on `calc-flow-python>=5.0.0,<6`.
 
 ## Local packaging rehearsal
 
@@ -77,7 +77,7 @@ The `Release artifacts` workflow in `.github/workflows/release.yml`:
    There is no Studio publication job or Studio OIDC permission.
 
 Manual dispatches are build-only rehearsals, including dispatches on tags.
-Only a pushed `v4.*` tag can reach the publication job. No API token or
+Only a pushed `v5.*` tag can reach the publication job. No API token or
 `skip-existing` behavior is used.
 
 The acceptance job has a 180-minute limit to accommodate cold exact-ref Rust

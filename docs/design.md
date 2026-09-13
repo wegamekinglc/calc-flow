@@ -141,6 +141,8 @@ Every edge carries one typed `StreamMessage`: immutable data, watermark,
 barrier, idle, or end-of-input. Connectors may provide data, watermarks, and
 idle observations. Barrier and end-of-input construction stays inside the
 runtime, so an application cannot inject control traffic into a running job.
+Late diagnostic edges and their expression/SQL derivatives carry data,
+barriers, and end-of-input without watermark or idle progress.
 
 Rows and bytes are bounded independently on each edge. The source pauses at
 the async send boundary when downstream work is slow; it does not accumulate
@@ -243,7 +245,10 @@ allowed lateness, with equality closing — or at end of input. A closed group
 emits once in canonical order — groups by finality coordinate then key,
 rows by event time, entity, and sequence — and releases its state and
 identity index. Late rows follow the policy, with `error` rejecting the
-whole envelope and `drop` discarding the row while recording metrics. Open
+whole envelope, `drop` discarding the row while recording metrics, and native
+stream-only `side_output` routing it to a diagnostic port. Rolling and
+cross-section share the [late-row policy contract](rust-api.md#late-row-policy-contract),
+including routing restrictions and an independently restored late sequence. Open
 groups checkpoint at the aligned epoch cut as versioned Arrow IPC state —
 per-segment configuration-hash and schema-fingerprint metadata with bounded
 inline manifest fields — and restore reproduces the same ordered output,

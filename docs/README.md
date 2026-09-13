@@ -1,6 +1,6 @@
 # Calc Flow documentation
 
-Read these pages in order for an introduction to Calc Flow 4.0, or choose the
+Read these pages in order for an introduction to Calc Flow, or choose the
 feature you need. Function guides explain usage with runnable examples. Design
 pages explain how the implementation provides those behaviors.
 

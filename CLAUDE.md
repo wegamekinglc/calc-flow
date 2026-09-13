@@ -162,27 +162,29 @@ The full conventions are in [AGENTS.md](AGENTS.md#coding-style) and
 
 ```text
 crates/calc-flow  (Rust core: Batch, graph compiler, DataFusion, runners, stores)
+  ├─ crates/calc-flow-connectors  (trusted transport implementations)
   └─ crates/calc-flow-python  (PyO3 _native binding)
        └─ python/calc_flow  (Python expressions, Arrow execution + integrations)
             └─ web-ui/backend  (calc-flow-studio FastAPI, /api/v3, loopback only)
                   └─ web-ui/src  (React + TypeScript + Vite + React Flow studio, via REST)
 ```
 
-The native dependency edge is
+The native dependency edges are `crates/calc-flow ← calc-flow-connectors` and
 `crates/calc-flow ← crates/calc-flow-python ← python/calc_flow ← web-ui/backend`.
 The frontend talks to the backend over the `/api/v3` REST contract only.
 
-| Path                       | Purpose                                                                                                                                  |
-|----------------------------|------------------------------------------------------------------------------------------------------------------------------------------|
-| `crates/calc-flow/`        | Native core: batches, ports/operators, graph compiler, DataFusion runtime, UDF/provider registries, runners, checkpoints, project stores |
-| `crates/calc-flow-python/` | PyO3 binding exposing the core as `calc_flow._native`                                                                                    |
-| `python/calc_flow/`        | Python expressions and SQL, `pipe`, Arrow collection, owned stream results, lowering, and runtime integrations                           |
-| `web-ui/backend/`          | `calc-flow-studio` FastAPI service under `/api/v3`, loopback-bound, spawned bounded continuous-job workers                               |
-| `web-ui/src/`              | React + TypeScript + Vite + React Flow studio; API types generated from `web-ui/openapi.json`                                            |
-| `schemas/`                 | `project-v3.schema.json`, the canonical generated project contract                                                                       |
-| `examples/`                | Executable Python expression and integration examples                                                                                    |
-| `benchmarks/`              | pytest-benchmark harness (informational)                                                                                                 |
-| `docs/`                    | Published documentation                                                                                                                  |
+| Path                           | Purpose                                                                                                                                  |
+|--------------------------------|------------------------------------------------------------------------------------------------------------------------------------------|
+| `crates/calc-flow/`            | Native core: batches, ports/operators, graph compiler, DataFusion runtime, UDF/provider registries, runners, checkpoints, project stores |
+| `crates/calc-flow-connectors/` | Trusted transports and codecs behind native feature gates                                                                                |
+| `crates/calc-flow-python/`     | PyO3 binding exposing the core as `calc_flow._native`                                                                                    |
+| `python/calc_flow/`            | Python expressions and SQL, `pipe`, Arrow collection, owned stream results, lowering, and runtime integrations                           |
+| `web-ui/backend/`              | `calc-flow-studio` FastAPI service under `/api/v3`, loopback-bound, spawned bounded continuous-job workers                               |
+| `web-ui/src/`                  | React + TypeScript + Vite + React Flow studio; API types generated from `web-ui/openapi.json`                                            |
+| `schemas/`                     | `project-v3.schema.json`, the canonical generated project contract                                                                       |
+| `examples/`                    | Executable Python expression and integration examples                                                                                    |
+| `benchmarks/`                  | Benchmark workloads; unified CI regression gates and informational comparisons                                                           |
+| `docs/`                        | Published documentation                                                                                                                  |
 
 ### Python API boundary
 
@@ -283,10 +285,17 @@ documents are available in the
 
 ## Specialist agents
 
-The canonical calc-flow agent team (spec → design → critique → implement →
-test → review → document) is defined in `.codex/agents/`.
+The canonical calc-flow agent team is defined in `.codex/agents/`. Follow
+[its workflow](.codex/agents/README.md#workflow): clear work goes through
+implementation and independent review. After those steps, route changes to
+behavior, public Rust/Python APIs, Studio REST/OpenAPI contracts, commands,
+or other user-visible capabilities to `cf-doc-writer` for documentation
+reconciliation. Pure test changes and refactors that preserve those surfaces
+can skip documentation reconciliation; independent review still applies.
+Spec, API design, critique, testing, performance, and simplification specialists
+join when the request or its risks require them. Pure documentation goes through
+the doc writer and reviewer.
 `.claude/agents/` mirrors those definitions for Claude compatibility;
 synchronize team changes from `.codex/agents/` to `.claude/agents/`, never in
 the reverse direction. `cf-doc-writer` owns the freshness of `docs/` and
-curates `CHANGELOG.md`; invoke it when docs need reconciling against current
-code or a change may warrant a changelog entry.
+curates `CHANGELOG.md`.
