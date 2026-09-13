@@ -486,12 +486,16 @@ async fn verify(root: &Path) -> ExampleResult<()> {
     Ok(())
 }
 
+async fn run_phases(root: &Path) -> ExampleResult<()> {
+    cut(root).await?;
+    resume(root).await?;
+    verify(root).await
+}
+
 async fn demo() -> ExampleResult<()> {
     let temporary = tokio::task::spawn_blocking(tempfile::tempdir).await??;
     let root = temporary.path().join("late-files-v1");
-    cut(&root).await?;
-    resume(&root).await?;
-    verify(&root).await?;
+    run_phases(&root).await?;
     tokio::task::spawn_blocking(move || temporary.close()).await??;
     println!("removed temporary demo state and outputs");
     Ok(())
