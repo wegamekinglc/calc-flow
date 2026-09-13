@@ -825,27 +825,60 @@ class ReleaseConfigTests(unittest.TestCase):
                     self.assertNotIn(claim, text)
 
     def test_normative_docs_use_final_package_and_project_versions(self) -> None:
+        workspace = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+        package = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        studio = tomllib.loads(
+            (ROOT / "web-ui/backend/pyproject.toml").read_text(encoding="utf-8")
+        )
+        version = workspace["workspace"]["package"]["version"]
+        self.assertEqual(package["project"]["version"], version)
+        self.assertEqual(studio["project"]["version"], version)
+
         documentation = {
-            "README.md": ("Calc Flow 4.0", "uv add calc-flow-python"),
+            "README.md": ("# Calc Flow\n", "uv add calc-flow-python"),
             "docs/api-reference.md": (
-                "Calc Flow 4.0 API reference",
-                "`calc-flow-python==4.0.0`",
-                '`calc-flow = "4.0.0"`',
-                "`calc-flow-studio==4.0.0`",
+                "# Calc Flow API reference\n",
+                f"`calc-flow-python=={version}`",
+                f'`calc-flow = "{version}"`',
+                f"`calc-flow-studio=={version}`",
                 "Project format version `3`",
+                "Published package versions can lag",
+                "getting-started.md#build-and-install-from-source",
             ),
             "docs/getting-started.md": (
                 "uv add calc-flow-python",
-                "version `4.0.0`",
+                "## Build and install from source",
+                "For a build from this checkout, confirm that Calc Flow reports "
+                f"version `{version}`.",
+                "A published installation reports the release selected by the "
+                "package manager,",
             ),
-            "docs/python-api.md": ("`calc-flow-python==4.0.0`",),
-            "docs/rust-api.md": ("cargo add calc-flow@4.0.0",),
+            "docs/python-api.md": (
+                "`calc-flow-python`",
+                f"version `{version}` in the current checkout",
+                "uv add calc-flow-python",
+                "uv run maturin develop",
+                "use a source build when the published package has a different version.",
+            ),
+            "docs/rust-api.md": (
+                "`calc-flow` crate",
+                "Work from the repository root for the current native runtime",
+                "cargo test -p calc-flow --all-targets",
+                "cargo doc -p calc-flow --no-deps",
+            ),
         }
-        stale_package_claims = (
-            "Calc Flow 2.0",
-            'calc-flow = "2.0.0"',
-            "calc-flow==2.0.0",
-            "calc-flow@2.0.0",
+        stale_package_claims = tuple(
+            claim
+            for stale_version in ("2.0", "4.0")
+            for claim in (
+                f"Calc Flow {stale_version}",
+                f'calc-flow = "{stale_version}.0"',
+                f"calc-flow=={stale_version}.0",
+                f"calc-flow@{stale_version}.0",
+                f"calc-flow-python=={stale_version}.0",
+                f"calc-flow-studio=={stale_version}.0",
+                f"version `{stale_version}.0`",
+            )
         )
 
         for path, required in documentation.items():
