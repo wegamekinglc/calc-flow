@@ -180,16 +180,25 @@ def _is_single_stage(value: Node) -> bool:
     families = {node.op.name in _ROLLING_PRIMITIVES for node in states.values()}
     if len(families) != 1:
         return False
-    if any(
-        operand.op.name != "column_ref"
-        or operand.args[0].digest != value.args[0].digest
-        for node in states.values()
-        for operand in node.args
-    ):
+    if _has_non_column_operands(tuple(states.values()), value.args[0]):
         return False
+    return _same_cross_section_group(tuple(states.values()))
+
+
+def _has_non_column_operands(states: tuple[Node, ...], source: Node) -> bool:
+    return any(
+        operand.op.name != "column_ref" or operand.args[0].digest != source.digest
+        for node in states
+        for operand in node.args
+    )
+
+
+def _same_cross_section_group(states: tuple[Node, ...]) -> bool:
+    from calc_flow.symbolic.lower.segments import _CROSS_SECTION_PRIMITIVES
+
     groups = {
         (node.attr("grouping"), tuple(child.digest for child in node.args[1:]))
-        for node in states.values()
+        for node in states
         if node.op.name in _CROSS_SECTION_PRIMITIVES
     }
     return len(groups) <= 1

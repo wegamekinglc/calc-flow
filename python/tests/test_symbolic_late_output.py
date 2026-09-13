@@ -305,6 +305,19 @@ def source_binding(source: ScriptedSource) -> cf.SourceBinding:
     return cf.SourceBinding(source, watermark_policy=cf.SourceProvidedWatermarks())
 
 
+def _column_values(tables: list[pa.Table], name: str) -> list[object]:
+    return [value for table in tables for value in table[name].to_pylist()]
+
+
+def _assert_late_diagnostic(tables: list[pa.Table]) -> None:
+    (row,) = [row for table in tables for row in table.to_pylist()]
+    assert row["label"] == "raw"
+    assert row["_cf_late_event_time_micros"] == 0
+    assert row["_cf_late_watermark_micros"] == 1
+    assert row["_cf_late_reason"] == "late_row"
+    assert row["_cf_late_row_index"] == 0
+
+
 @pytest.mark.parametrize("kind", ["rolling", "cross_section"])
 @pytest.mark.parametrize("late_rows", [False, True])
 def test_one_owned_iterator_routes_scripted_watermarks_and_closes(
@@ -339,21 +352,13 @@ def test_one_owned_iterator_routes_scripted_watermarks_and_closes(
         assert feed.opened == feed.closed == 1
 
     asyncio.run(asyncio.wait_for(run(), 15))
-    values = {
-        name: [x for table in tables for x in table["x"].to_pylist()]
-        for name, tables in seen.items()
-    }
+    values = {name: _column_values(tables, "x") for name, tables in seen.items()}
     assert values == {
         "normal": [20.0] if late_rows else [10.0, 20.0],
         "late": [10.0] if late_rows else [],
     }
     if late_rows:
-        (row,) = [row for table in seen["late"] for row in table.to_pylist()]
-        assert row["label"] == "raw"
-        assert row["_cf_late_event_time_micros"] == 0
-        assert row["_cf_late_watermark_micros"] == 1
-        assert row["_cf_late_reason"] == "late_row"
-        assert row["_cf_late_row_index"] == 0
+        _assert_late_diagnostic(seen["late"])
     assert list(tmp_path.iterdir()) == []
 
 
@@ -548,12 +553,24 @@ class CollectSink:
         self.closed += 1
 
 
+def _assert_single_late_state_owner(root: Path) -> None:
+    import json
+
+    manifests = list((root / "manifests").glob("manifest-*.json"))
+    assert len(manifests) == 1
+    manifest = json.loads(manifests[0].read_text())
+    state_owners = [
+        key
+        for key, entry in manifest["operators"].items()
+        if "late_output" in entry["inline_metadata"]
+    ]
+    assert len(state_owners) == 1
+
+
 @pytest.mark.parametrize("kind", ["rolling", "cross_section"])
 def test_explicit_runner_restores_both_outputs_at_same_control_cut(
     kind: str, tmp_path: Path
 ) -> None:
-    import json
-
     source = quotes()
     value = (
         rolling(source)
@@ -606,15 +623,7 @@ def test_explicit_runner_restores_both_outputs_at_same_control_cut(
         job = await runner(feed, sinks, root).start_async()
         await asyncio.wait_for(feed.paused.wait(), 5)
         assert await job.trigger_checkpoint_async() == 1
-        manifests = list((root / "manifests").glob("manifest-*.json"))
-        assert len(manifests) == 1
-        manifest = json.loads(manifests[0].read_text())
-        state_owners = [
-            key
-            for key, entry in manifest["operators"].items()
-            if "late_output" in entry["inline_metadata"]
-        ]
-        assert len(state_owners) == 1
+        _assert_single_late_state_owner(root)
         if recover:
             assert (await job.cancel_async()).state == "cancelled"
             assert feed.closed == 1
