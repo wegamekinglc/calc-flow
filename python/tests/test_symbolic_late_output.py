@@ -340,8 +340,15 @@ def _column_values(tables: list[pa.Table], name: str) -> list[object]:
     return [value for table in tables for value in table[name].to_pylist()]
 
 
+def _rows_with_timestamp_micros(table: pa.Table) -> list[dict[str, object]]:
+    assert table.schema.field("ts").type == pa.timestamp("us", tz="UTC")
+    index = table.schema.get_field_index("ts")
+    return table.set_column(index, "ts", table["ts"].cast(pa.int64())).to_pylist()
+
+
 def _assert_late_diagnostic(tables: list[pa.Table]) -> None:
-    (row,) = [row for table in tables for row in table.to_pylist()]
+    (row,) = [row for table in tables for row in _rows_with_timestamp_micros(table)]
+    assert row["ts"] == 0
     assert row["label"] == "raw"
     assert row["_cf_late_event_time_micros"] == 0
     assert row["_cf_late_watermark_micros"] == 1
@@ -578,7 +585,7 @@ class CollectSink:
         pass
 
     async def write(self, value: cf.Batch) -> None:
-        self.rows.extend(value.to_pyarrow().to_pylist())
+        self.rows.extend(_rows_with_timestamp_micros(value.to_pyarrow()))
 
     async def close(self) -> None:
         self.closed += 1
