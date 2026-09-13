@@ -199,8 +199,9 @@ rolling/cross-section state owner; a Program consumes both through one iterator.
 The marker owns local policy/lateness and requires a single current stateful
 stage with existing-column operands and no upstream stateful stage.
 Late-derived paths permit only built-in single-input expression/SQL before
-sinks, carry no Watermark/Idle, and retain FIFO Barrier/EOF, aligned recovery,
-and per-output delivery. See [late-row routing](docs/streaming-guide.md#route-late-rows).
+sinks, carry no Watermark/Idle, and retain first-in, first-out (FIFO)
+Barrier/EOF ordering, aligned recovery, and per-output delivery.
+See [late-row routing](docs/streaming-guide.md#route-late-rows).
 
 Convenience `compute`/`collect` returns Arrow tables by logical names and creates
 a fresh batch plan per call. `TableExpr.stream` and `Program.stream` own a single

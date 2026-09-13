@@ -229,6 +229,10 @@ The explicit `RuntimeError` check remains active under Python optimization.
 The async context owns the job and removes temporary state after cleanup.
 This iterable example demonstrates routing; durable restart requires the
 explicit bindings described below.
+The formatted, standalone [26_late_side_output.py](../examples/26_late_side_output.py)
+includes the same checks and a 30-second deadline. Run it with
+`uv run --no-sync python examples/26_late_side_output.py`, or add `-O` after
+`python` to verify optimized execution.
 
 The selected stage must be one current rolling or cross-section
 `with_columns` or `filter` stage, with stateful operands referencing existing
@@ -372,6 +376,52 @@ Source/operator/Sink route; inspect each requested/effective guarantee.
 Transactional file sinks provide their own epoch protocol, not a distributed
 transaction across two destinations. The temporary state of `Program.stream`
 does not provide persistent restart or exactly-once application delivery.
+
+### Run the file recovery example
+
+The complete native
+[late_output_recovery.rs](../crates/calc-flow-connectors/examples/late_output_recovery.rs)
+uses the public Rust `StreamSource` and existing `TransactionalParquetSink`.
+Python's built-in file sinks are bound as part of a complete connector project;
+that plan cannot accept a separate Python Source binding. This native example
+supplies the replayable source and both file sinks explicitly, with no new API.
+Its single rolling node exposes source `input` and sinks `output` and `late`.
+
+From the repository root, these commands run three separate processes:
+
+```bash
+cargo run -p calc-flow-connectors --example late_output_recovery -- cut target/late-files-v1
+cargo run -p calc-flow-connectors --example late_output_recovery -- resume target/late-files-v1
+cargo run -p calc-flow-connectors --example late_output_recovery -- verify target/late-files-v1
+```
+
+Use a previously absent root; `cut` refuses an existing directory. It writes
+the immutable `trace-v1.json` and starts this new SideOutput lineage at source
+offset zero. That trace is `W=10 → [t=20] → W=30 → [t=6,t=40] → W=50`, in UTC
+microseconds, with `x=t` and zero allowed lateness. The source pauses after the
+first data envelope and reports next offset 2 in its cursor. A completed
+checkpoint commits epoch 1 in both `outputs/normal` and `outputs/late`;
+both manifests have zero rows because `t=20` is still buffered. The job is
+then cancelled and its tasks and queue credits settle.
+
+`resume` constructs fresh source, plan, sinks, and managed state at that same
+root. It checks that the source opens at offset 2. Separate Parquet reads check
+normal `(ts,seq)=[(20,0),(40,11)]` and late `[(6,10)]`. The normal lag of `x`
+is null at 20 and 20 at 40, proving the pre-cut state survives; the late row's
+diagnostics retain input binding source `input`, sequence 1, and row index 0.
+`verify` starts another runner against the terminal checkpoint, checks
+`Source.open=0` and the unchanged terminal epoch, and compares committed file
+names and bytes in each output directory before and after restart. Each route's
+requested and effective delivery is checked separately as exactly once.
+
+Keep the trace, plan and policy, state root, and both output identities stable
+between commands. A changed trace is rejected; a changed policy needs a new
+root and an explicit activation position. These commands retain their dedicated
+root for inspection. Once finished, remove only that demo directory with
+`rm -r target/late-files-v1` in Bash or
+`Remove-Item -Recurse target/late-files-v1` in PowerShell. Running the example
+without arguments performs all three phases in a temporary root and removes
+it on exit; only the explicit-root commands demonstrate process restarts.
 
 ## Stream ownership and SQL boundaries
 

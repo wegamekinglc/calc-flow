@@ -95,6 +95,8 @@ can use a separate transactional file sink alongside normal output. Both sinks
 participate in the same checkpoint epochs, including an epoch with no late rows.
 Keep each sink's output identity and the checkpoint root stable for restart.
 Exactly-once delivery is still proved separately for each graph output.
+The [file recovery example](../streaming-guide.md#run-the-file-recovery-example)
+checks these two directories independently across a cut and terminal restart.
 
 See the [connector overview](README.md) for shared delivery, secret,
 and recovery rules.

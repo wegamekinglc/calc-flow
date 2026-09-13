@@ -111,6 +111,10 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 [lints]
 workspace = true
 
+[[example]]
+name = "late_output_recovery"
+required-features = ["file"]
+
 [package.metadata.release]
 # Packaging and publication follow the M7-04 release decision.
 release = false

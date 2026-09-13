@@ -40,6 +40,7 @@ class RunExamplesTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         paths = [call.args[0][1] for call in run.call_args_list]
         self.assertIn("examples/15_file_source.py", paths)
+        self.assertIn("examples/26_late_side_output.py", paths)
         for path in (
             *run_examples.SERVICE_PYTHON_EXAMPLES,
             "examples/22_kafka_sink.py",
@@ -68,6 +69,16 @@ class RunExamplesTests(unittest.TestCase):
                     "continuous_runtime",
                     "windowed_streaming",
                 )
+            ]
+            + [
+                [
+                    "cargo",
+                    "run",
+                    "-p",
+                    "calc-flow-connectors",
+                    "--example",
+                    "late_output_recovery",
+                ]
             ],
         )
         self.assertFalse(

@@ -47,7 +47,7 @@ Use an explicit [watermark policy](streaming-guide.md#watermark-policies) for
 disorder or source-provided progress. Async iterables have no replay; use explicit
 sinks and a stable checkpoint root for durable recovery.
 
-Use the complete [late-row example](streaming-guide.md#route-late-rows) for paired
+Run [26_late_side_output.py](../examples/26_late_side_output.py) for paired
 normal/late outputs of one rolling stage. A single Program iterator checks
 `normal=[20.0]` and `late=[10.0]` using explicit source watermarks; the
 checks also run under `python -O`. Read
@@ -61,6 +61,11 @@ own a source/sink lifecycle, recover a completed stream, then restore a
 multi-stage rolling calculation from a checkpoint taken during processing.
 For runtime contributors, Rust's `continuous_runtime` and `windowed_streaming` demonstrate the native
 traits and watermark-driven tumbling windows.
+
+The native [late-output file recovery example](../crates/calc-flow-connectors/examples/late_output_recovery.rs)
+checks both output directories across an empty late epoch, a durable cut, and
+terminal restart. Its [three-phase commands](streaming-guide.md#run-the-file-recovery-example)
+use the same new persistent root across separate processes.
 
 Those examples use local application-owned connectors and temporary state
 directories. To connect a native transport, follow the path below.

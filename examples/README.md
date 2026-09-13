@@ -198,6 +198,12 @@ external services and are included in the default example runner.
   or durable iterable replay is required.
   Guide: [bounded backward ASOF Join](../docs/asof-join-guide.md).
 
+- [26_late_side_output.py](26_late_side_output.py) — consume both ports of one
+  rolling stage through one owned Program iterator. Explicit source watermarks
+  route `normal=[20.0]` and `late=[10.0]`; checks remain active under `python -O`.
+  Runs without external services and cleans up its job and temporary state.
+  Guide: [late-row routing](../docs/streaming-guide.md#route-late-rows).
+
 The explicitly registered [symbolic_event_window.py](symbolic_event_window.py)
 example computes grouped one-minute trade count, volume, low, high, and
 arithmetic average price. It checks native final output with explicit source
@@ -221,6 +227,20 @@ Run a Rust example with `cargo run -p calc-flow --example NAME`:
 - [windowed_streaming.rs](../crates/calc-flow/examples/windowed_streaming.rs)
   (`windowed_streaming`) checks deterministic one-minute window sums closed
   by a source watermark and end-of-input.
+
+The connector crate also provides
+[late_output_recovery.rs](../crates/calc-flow-connectors/examples/late_output_recovery.rs).
+Run it with `cargo run -p calc-flow-connectors --example late_output_recovery`.
+It uses the default `file` feature, a persisted immutable source trace with
+exact seek cursors, and two independent `TransactionalParquetSink` instances.
+It checks an empty late epoch, restores buffered rolling state from a durable
+cut, and restarts the terminal lineage without reopening the source or changing
+either committed directory. Both routes request and prove exactly-once delivery;
+their commits do not promise simultaneous visibility across destinations.
+The default run removes its temporary root after settling all jobs.
+For separate-process recovery with a persistent root, follow the
+[three-phase commands](../docs/streaming-guide.md#run-the-file-recovery-example).
+The user-example runner includes this native example too.
 
 The [Rust inventory](../crates/calc-flow/examples/README.md) also lists schema
 export/generation tools. They are excluded from the user-example runner
