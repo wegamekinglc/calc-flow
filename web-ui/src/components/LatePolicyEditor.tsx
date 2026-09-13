@@ -1,3 +1,4 @@
+import type { Dispatch } from 'react';
 import type { NodeConfig, OperatorSpec } from '../types';
 
 type StatefulOperator = Extract<OperatorSpec, { kind: 'rolling' | 'cross_section' }>;
@@ -9,7 +10,7 @@ interface Props {
   streamMode: boolean;
   supported: boolean;
   inUse: boolean;
-  onChange: (node: NodeConfig) => void;
+  onChange: Dispatch<NodeConfig>;
 }
 
 const policyFor = (kind: string): Policy => {

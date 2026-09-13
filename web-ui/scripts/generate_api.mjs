@@ -1,6 +1,6 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import process from 'node:process';
-import { fileURLToPath, URL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import openapiTS, { astToString, COMMENT_HEADER } from 'openapi-typescript';
 
 // A nullable default does not make an optional request property required.
@@ -13,7 +13,7 @@ export const typeSchema = (value) => {
 };
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const schema = JSON.parse(await readFile(new URL('../openapi.json', import.meta.url), 'utf8'));
+  const schema = JSON.parse(await readFile('openapi.json', 'utf8'));
   const ast = await openapiTS(typeSchema(schema));
-  await writeFile(new URL('../src/api/schema.d.ts', import.meta.url), COMMENT_HEADER + astToString(ast));
+  await writeFile('src/api/schema.d.ts', COMMENT_HEADER + astToString(ast));
 }
