@@ -1,4 +1,5 @@
 import { SchemaEditor } from './SchemaEditor';
+import { LatePolicyEditor } from './LatePolicyEditor';
 import { InputAliasEditor } from './InputAliasEditor';
 import type { SqlInputAliasEdit } from './inputAliasEditorModel';
 import type {
@@ -20,6 +21,9 @@ interface NodeInspectorProps {
   onChange: (node: NodeConfig) => void;
   onSqlAliasEdit: (edit: SqlInputAliasEdit) => void;
   onDelete: () => void;
+  streamMode?: boolean;
+  lateOutputSupported?: boolean;
+  lateOutputInUse?: boolean;
 }
 
 type ExpressionOperator = Extract<OperatorSpec, { kind: 'expression' }>;
@@ -81,6 +85,9 @@ export function NodeInspector({
   onChange,
   onSqlAliasEdit,
   onDelete,
+  streamMode = false,
+  lateOutputSupported = false,
+  lateOutputInUse = true,
 }: NodeInspectorProps) {
   const patchNode = (change: Partial<NodeConfig>) => onChange({ ...node, ...change });
   const patchExpression = (change: Partial<ExpressionOperator>) => {
@@ -323,6 +330,11 @@ export function NodeInspector({
             />
           </label>
         </section>
+      )}
+
+      {(node.operator.kind === 'rolling' || node.operator.kind === 'cross_section') && (
+        <LatePolicyEditor node={node} operator={node.operator} streamMode={streamMode}
+          supported={lateOutputSupported} inUse={lateOutputInUse} onChange={onChange} />
       )}
 
       <section className="inspector-section">

@@ -43,7 +43,7 @@ import {
   type DataSourceFormat,
 } from './components/dataSourceEditorModel';
 import { editSqlInputAliases } from './components/inputAliasEditorModel';
-import { derivedInputNames, derivedOutputNames } from './portNamesModel';
+import { derivedInputNames, derivedOutputNames, lateOutputInUse } from './portNamesModel';
 import { firstOf } from './types';
 import { isJobActive } from './jobStatusModel';
 import {
@@ -909,6 +909,11 @@ export default function App() {
         {selectedNode ? (
           <NodeInspector
             node={selectedNode}
+            streamMode={project.runtime.mode === 'stream'}
+            lateOutputInUse={lateOutputInUse(project, selectedNode)}
+            lateOutputSupported={capabilities?.runtime.lateOutput?.operators.some(
+              (kind) => kind === selectedNode.operator.kind,
+            ) ?? false}
             inspection={inspectLoweredNode(project, selectedNode)}
             arrowTypes={ARROW_TYPES}
             udfs={catalog ?? []}

@@ -478,6 +478,26 @@ export interface components {
          */
         JobResponse: components["schemas"]["JobResponseVariant"];
         JobResponseVariant: components["schemas"]["PendingJobResponse"] | components["schemas"]["RunningJobResponse"] | components["schemas"]["CompletedJobResponse"] | components["schemas"]["FailedJobResponse"] | components["schemas"]["CancelledJobResponse"];
+        /** LateOutputCapabilityResponse */
+        LateOutputCapabilityResponse: {
+            /**
+             * Metricsversion
+             * @default 1
+             * @constant
+             */
+            metricsVersion: 1;
+            /**
+             * Operators
+             * @default []
+             */
+            operators: ("cross_section" | "rolling")[];
+            /**
+             * Schemaversion
+             * @default 1
+             * @constant
+             */
+            schemaVersion: 1;
+        };
         /** LazyBuiltinWorkerRegistration */
         LazyBuiltinWorkerRegistration: {
             /** Name */
@@ -3216,6 +3236,7 @@ export interface components {
             batchKinds: ("table" | "array")[];
             /** Connectors */
             connectors: components["schemas"]["ConnectorCapabilityResponse"][];
+            lateOutput?: components["schemas"]["LateOutputCapabilityResponse"];
             /** Operators */
             operators: components["schemas"]["OperatorCapabilityResponse"][];
             /** Packageversion */
@@ -3510,13 +3531,13 @@ export interface operations {
                     "application/json": components["schemas"]["JobResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Invalid project document or request */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["ProjectInvalidResponse"];
                 };
             };
         };

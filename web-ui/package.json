@@ -10,7 +10,7 @@
     "build:wheel": "npm run sync:api && npm run build && uv build --project backend --wheel --out-dir ../dist",
     "test": "vitest run",
     "test:e2e": "playwright test",
-    "generate:api": "openapi-typescript openapi.json -o src/api/schema.d.ts",
+    "generate:api": "node scripts/generate_api.mjs",
     "sync:api": "UV_CACHE_DIR=/tmp/calc-flow-web-uv-cache uv run --project backend python scripts/export_openapi.py && npm run generate:api",
     "benchmark": "vitest bench --run"
   },

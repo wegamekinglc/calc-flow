@@ -24,6 +24,7 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import TypeAdapter, ValidationError
 from starlette.concurrency import run_in_threadpool
 
+from calc_flow_studio.late_output import project_late_issues
 from calc_flow_studio.models import (
     CapabilitiesResponse,
     JobCreateRequest,
@@ -203,7 +204,22 @@ async def _runtime_validation_report(
         )
     except CalcFlowError as error:
         raise native_error(error, operation="validate") from error
-    return _decode_report(_normalized_report(report))
+    validated = _decode_report(_normalized_report(report))
+    return _decode_report(project_late_issues(project.root, validated.model_dump()))
+
+
+def _require_valid(report: ValidationReport) -> None:
+    if report.valid:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail=invalid_report_detail(
+            [
+                {"path": issue.path, "code": issue.code, "message": issue.message}
+                for issue in report.issues
+            ]
+        ),
+    )
 
 
 def register_project_routes(
@@ -219,21 +235,7 @@ def register_project_routes(
 
     async def validate_for_storage(project: ProjectDocument) -> None:
         report = await _runtime_validation_report(project, runtime)
-        if report.valid is True:
-            return
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=invalid_report_detail(
-                [
-                    {
-                        "path": issue.path,
-                        "code": issue.code,
-                        "message": issue.message,
-                    }
-                    for issue in report.issues
-                ]
-            ),
-        )
+        _require_valid(report)
 
     @app.get(f"{API_PREFIX}/projects", response_model=tuple[ProjectSummary, ...])
     async def list_projects() -> tuple[ProjectSummary, ...]:
@@ -353,7 +355,10 @@ def register_project_routes(
 
 
 def register_job_routes(
-    app: FastAPI, projects: ProjectStoreProtocol, run_manager: RunManagerProtocol
+    app: FastAPI,
+    projects: ProjectStoreProtocol,
+    run_manager: RunManagerProtocol,
+    runtime: RuntimeProtocol,
 ) -> None:
     """Attach the continuous-job lifecycle and event-stream routes."""
 
@@ -367,9 +372,11 @@ def register_job_routes(
         f"{API_PREFIX}/jobs",
         response_model=JobResponse,
         status_code=status.HTTP_202_ACCEPTED,
+        responses=PROJECT_INVALID_422,
     )
     async def create_job(request: JobCreateRequest) -> JobResponse:
         project = await stored_project(request.project_id)
+        _require_valid(await _runtime_validation_report(project, runtime))
         try:
             return await run_in_threadpool(run_manager.submit_job, project)
         except KeyError as error:

@@ -521,6 +521,37 @@
           }
         ]
       },
+      "LateOutputCapabilityResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "metricsVersion": {
+            "const": 1,
+            "default": 1,
+            "title": "Metricsversion",
+            "type": "integer"
+          },
+          "operators": {
+            "default": [],
+            "items": {
+              "enum": [
+                "cross_section",
+                "rolling"
+              ],
+              "type": "string"
+            },
+            "title": "Operators",
+            "type": "array"
+          },
+          "schemaVersion": {
+            "const": 1,
+            "default": 1,
+            "title": "Schemaversion",
+            "type": "integer"
+          }
+        },
+        "title": "LateOutputCapabilityResponse",
+        "type": "object"
+      },
       "LazyBuiltinWorkerRegistration": {
         "additionalProperties": false,
         "properties": {
@@ -1841,7 +1872,8 @@
                   {
                     "type": "null"
                   }
-                ]
+                ],
+                "default": null
               }
             },
             "required": [
@@ -1880,6 +1912,7 @@
                     "type": "string"
                   },
                   "filter": {
+                    "default": null,
                     "type": [
                       "string",
                       "null"
@@ -2185,6 +2218,7 @@
                     "type": "null"
                   }
                 ],
+                "default": null,
                 "description": "Optional exact wire-format identity."
               },
               "options": {
@@ -2230,6 +2264,7 @@
                     "type": "null"
                   }
                 ],
+                "default": null,
                 "description": "Optional exact wire-format identity."
               },
               "options": {
@@ -2263,6 +2298,7 @@
                     "type": "null"
                   }
                 ],
+                "default": null,
                 "description": "Optional event-time watermark policy."
               }
             },
@@ -2306,6 +2342,7 @@
                     "type": "integer"
                   },
                   "idle_timeout_ms": {
+                    "default": null,
                     "format": "uint64",
                     "minimum": 0.0,
                     "type": [
@@ -4824,7 +4861,8 @@
                   {
                     "type": "null"
                   }
-                ]
+                ],
+                "default": null
               }
             },
             "required": [
@@ -4863,6 +4901,7 @@
                     "type": "string"
                   },
                   "filter": {
+                    "default": null,
                     "type": [
                       "string",
                       "null"
@@ -5168,6 +5207,7 @@
                     "type": "null"
                   }
                 ],
+                "default": null,
                 "description": "Optional exact wire-format identity."
               },
               "options": {
@@ -5213,6 +5253,7 @@
                     "type": "null"
                   }
                 ],
+                "default": null,
                 "description": "Optional exact wire-format identity."
               },
               "options": {
@@ -5246,6 +5287,7 @@
                     "type": "null"
                   }
                 ],
+                "default": null,
                 "description": "Optional event-time watermark policy."
               }
             },
@@ -5289,6 +5331,7 @@
                     "type": "integer"
                   },
                   "idle_timeout_ms": {
+                    "default": null,
                     "format": "uint64",
                     "minimum": 0.0,
                     "type": [
@@ -7416,6 +7459,9 @@
             "title": "Connectors",
             "type": "array"
           },
+          "lateOutput": {
+            "$ref": "#/components/schemas/LateOutputCapabilityResponse"
+          },
           "operators": {
             "items": {
               "$ref": "#/components/schemas/OperatorCapabilityResponse"
@@ -8121,11 +8167,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ProjectInvalidResponse"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Invalid project document or request"
           }
         },
         "summary": "Create Job"

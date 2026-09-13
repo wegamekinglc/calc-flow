@@ -248,6 +248,12 @@ class ConnectorCapabilityResponse(CapabilityModel):
     options_schema: dict[str, object]
 
 
+class LateOutputCapabilityResponse(CapabilityModel):
+    operators: tuple[Literal["cross_section", "rolling"], ...] = ()
+    schema_version: Literal[1] = 1
+    metrics_version: Literal[1] = 1
+
+
 class RuntimeCapabilitiesResponse(CapabilityModel):
     scope: RuntimeSessionScopeResponse
     package_version: str
@@ -258,6 +264,9 @@ class RuntimeCapabilitiesResponse(CapabilityModel):
     udfs: tuple[UdfCapabilityResponse, ...]
     providers: tuple[ProviderCapabilityResponse, ...]
     connectors: tuple[ConnectorCapabilityResponse, ...]
+    late_output: LateOutputCapabilityResponse = Field(
+        default_factory=LateOutputCapabilityResponse
+    )
 
 
 class SerializedWorkerRegistration(CapabilityModel):
