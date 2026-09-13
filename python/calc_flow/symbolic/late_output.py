@@ -158,12 +158,15 @@ def _analysis_boundary(
 
 
 def _is_single_stage(value: Node) -> bool:
+    from calc_flow.symbolic.analyzer import _contains_stateful_primitive
     from calc_flow.symbolic.lower.segments import (
         _CROSS_SECTION_PRIMITIVES,
         _ROLLING_PRIMITIVES,
     )
 
     if value.op.name not in {"with_columns", "filter"}:
+        return False
+    if _contains_stateful_primitive(value.args[0]):
         return False
     states: dict[str, Node] = {}
 

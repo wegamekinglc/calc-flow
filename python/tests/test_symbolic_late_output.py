@@ -305,6 +305,37 @@ def source_binding(source: ScriptedSource) -> cf.SourceBinding:
     return cf.SourceBinding(source, watermark_policy=cf.SourceProvidedWatermarks())
 
 
+@pytest.mark.parametrize("kind", ["rolling", "cross_section"])
+@pytest.mark.parametrize("transformed", [False, True])
+def test_stateful_stage_input_rejects_before_source_open(
+    kind: str, transformed: bool
+) -> None:
+    source = quotes()
+    first = (
+        rolling(source)
+        if kind == "rolling"
+        else source.with_columns(
+            rank=cf.cs.rank(source["x"], group=cf.exact_time(source["ts"]))
+        )
+    )
+    prepared = first.with_columns(named=first["x"] + 1.0) if transformed else first
+    pair = cf.with_late_output(
+        prepared.with_columns(second=cf.ts.mean(prepared["x"], window=cf.rows(2)))
+    )
+    program = cf.Program(
+        "multiple_stages", outputs={"normal": pair.output, "late": pair.late}
+    )
+    feed = ScriptedSource([])
+
+    async def run() -> None:
+        with pytest.raises(cf.CompileError, match="ambiguous_late_stage"):
+            async with program.stream({"quotes": source_binding(feed)}):
+                pass
+        assert feed.opened == feed.closed == 0
+
+    asyncio.run(asyncio.wait_for(run(), 15))
+
+
 def _column_values(tables: list[pa.Table], name: str) -> list[object]:
     return [value for table in tables for value in table[name].to_pylist()]
 
