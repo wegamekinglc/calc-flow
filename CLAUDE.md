@@ -194,6 +194,14 @@ type. SQL uses native schema planning and shares the expression graph; execution
 stays in Rust/DataFusion. SQL output has no inherited temporal ordering, and
 stream SQL accepts one alias with per-batch semantics.
 
+`with_late_output` declares immutable normal/late references to one native
+rolling/cross-section state owner; a Program consumes both through one iterator.
+The marker owns local policy/lateness and requires a single current stateful
+stage with existing-column operands and no upstream stateful stage.
+Late-derived paths permit only built-in single-input expression/SQL before
+sinks, carry no Watermark/Idle, and retain FIFO Barrier/EOF, aligned recovery,
+and per-output delivery. See [late-row routing](docs/streaming-guide.md#route-late-rows).
+
 Convenience `compute`/`collect` returns Arrow tables by logical names and creates
 a fresh batch plan per call. `TableExpr.stream` and `Program.stream` own a single
 native job with `async with` and `async for`, yielding tables or named
@@ -244,6 +252,8 @@ operational controls. Follow
   `StreamAsofJoinOperator` are stream-only.
   External operators resolve through lifecycle-specific factories in
   `ProviderRegistry`.
+  `OperatorMetadata: Send + Sync + Any` requires concrete operator types
+  to be `'static`.
 - `PipelineBuilder` consumes immutable graph-building steps. `compile_batch()`
   and `compile_stream()` validate endpoints, kinds, schemas, one-writer inputs,
   UDFs, cycles, deterministic topology, inputs/outputs, and fingerprint.

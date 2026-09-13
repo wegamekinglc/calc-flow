@@ -47,6 +47,13 @@ Use an explicit [watermark policy](streaming-guide.md#watermark-policies) for
 disorder or source-provided progress. Async iterables have no replay; use explicit
 sinks and a stable checkpoint root for durable recovery.
 
+Use the complete [late-row example](streaming-guide.md#route-late-rows) for paired
+normal/late outputs of one rolling stage. A single Program iterator checks
+`normal=[20.0]` and `late=[10.0]` using explicit source watermarks; the
+checks also run under `python -O`. Read
+[late-row routing](streaming-guide.md#route-late-rows) for schemas, physical
+bindings, and the separate durable-recovery contract.
+
 ## Operate a recoverable stream
 
 Read the [streaming guide](streaming-guide.md) while running 04 → 08 → 10:

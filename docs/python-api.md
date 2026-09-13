@@ -19,6 +19,7 @@ On this page:
 - [Reusable programs and collection](#reusable-programs-and-collection)
 - [SQL and pipeline composition](#sql-and-pipeline-composition)
 - [Streaming results](#streaming-results)
+- [LateOutputs and local late policy](#lateoutputs-and-local-late-policy)
 - [Bounded backward ASOF Join](#bounded-backward-asof-join)
 - [Choosing an integration API](#choosing-an-integration-api)
 - [Table batches and builder](#table-batches-and-builder)
@@ -293,6 +294,46 @@ the iterator nor its temporary checkpoints provide durable restart or
 exactly-once processing. For those contracts, use explicit source/sink bindings,
 `Program.compile_stream`, `StreamingRunner`, and `ManagedCheckpointRuntime`.
 See [explicit connectors and recovery](streaming-guide.md#explicit-connectors-and-recovery).
+
+## LateOutputs and local late policy
+
+`cf.with_late_output(value: TableExpr, /, *, allowed_lateness_micros: int = 0)
+-> LateOutputs` declares paired normal and diagnostic outputs.
+`LateOutputs` is frozen; its `output: TableExpr` and `late: TableExpr`
+share one native state owner. Allowed lateness must be an exact Python
+`int` in `0 <= L < 2**64`; booleans are rejected. Native closing-time
+arithmetic must also fit the event-time range.
+
+Consume both references explicitly in one Program, directly or through
+supported transforms. Omitting either yields `unconsumed_output`.
+One `Program.stream` iterator drains both names; opening independent streams
+for the two references is not a paired execution. Use the complete
+[late-row example](streaming-guide.md#route-late-rows) for the checked
+`normal=[20.0]`, `late=[10.0]` result with explicit
+`SourceProvidedWatermarks`.
+
+The declaration accepts one current rolling or cross-section `with_columns`
+or `filter` stage. Stateful operands must be existing columns of that input;
+name row-local precomputation before declaring the stage. Nested stateful
+operands, mixed state families, incompatible cross-section groups, and an
+already-stateful input fail with `ambiguous_late_stage`. Batch compilation
+and collection fail with `unsupported_mode`. Missing outputs and invalid
+graphs fail before Source opening.
+
+The marker's SideOutput policy and `allowed_lateness_micros` apply locally.
+The `late_policy="error"`/`"drop"` and lateness arguments on
+`Program.compile_stream` and `to_project` configure unmarked stages;
+there is no global `"side_output"` value. The marker and its settings remain
+part of declaration identity and exported native configuration.
+
+The late schema is the full stage input plus nine non-null `_cf_late_*`
+diagnostics. It has a distinct row lineage and no temporal ordering; it can
+feed only built-in single-input expressions or per-batch SQL before a Sink.
+Read the [late-row guide](streaming-guide.md#route-late-rows) for exact fields,
+closing-coordinate equality, control messages, resource/failure boundaries,
+and persistent recovery. The example's logical `normal`/`late` names map
+to physical `normal.output`/`late.output` Sink bindings; inspect
+`plan.sink_binding_ids` when using explicit runners or exported projects.
 
 ## Bounded backward ASOF Join
 

@@ -196,6 +196,11 @@ dashes span the full column width, including cell spaces.
   `UnionOperator`, `WindowAggregateOperator`, `StreamJoinOperator`, and
   `StreamAsofJoinOperator` are stream-only. External operators resolve through
   lifecycle-specific factories in `ProviderRegistry`.
+- `OperatorMetadata: Send + Sync + Any` requires concrete operator types to
+  be `'static`. Rolling/cross-section SideOutput exposes required `output`
+  and `late` table ports. Late-derived paths allow only built-in single-input
+  expression/SQL nodes before sinks, suppress Watermark/Idle, and retain FIFO
+  Barrier/EOF and aligned recovery. Delivery remains per output.
 - `PipelineBuilder` consumes immutable graph-building steps.
   `compile_batch()` and `compile_stream()` validate endpoints, kinds, schemas,
   one-writer inputs, UDFs, cycles, deterministic topology, inputs/outputs, and
@@ -249,6 +254,11 @@ selectors.
 - `Program.to_project` exports data-only native graphs without Python logical
   aliases or payloads. Reloaded projects and explicit runners use physical
   binding names; durable recovery uses explicit bindings and managed state.
+- `with_late_output` returns immutable `LateOutputs(output, late)` references
+  sharing one native rolling/cross-section state owner. A Program must consume
+  both; one owned iterator drains the named events. The marker supplies local
+  lateness/policy and accepts one current stateful stage with existing-column
+  operands and no upstream stateful stage. See `docs/streaming-guide.md`.
 - Advanced functional `PipelineBuilder` and formula/SQL strings emit the same
   strict project-v3 graph and compile through Rust `Runtime`. Explicit runtime,
   cached-plan state, provider registration, and stream/checkpoint contracts remain
