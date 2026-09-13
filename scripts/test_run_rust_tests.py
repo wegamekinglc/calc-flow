@@ -103,6 +103,11 @@ arguments = sys.argv[1:]
 with Path(os.environ["FAKE_CARGO_LOG"]).open("a") as log:
     log.write(json.dumps(arguments) + "\\n")
 
+if status := int(os.environ.get("FAKE_CARGO_EXIT", "0")):
+    calls = Path(os.environ["FAKE_CARGO_LOG"]).read_text().splitlines()
+    if len(calls) == int(os.environ.get("FAKE_CARGO_FAILURE_CALL", "1")):
+        raise SystemExit(status)
+
 if arguments[:3] == ["test", "-p", "calc-flow-python"]:
     if "--no-run" not in arguments:
         raise SystemExit(97)
@@ -214,6 +219,61 @@ if arguments[:3] == ["test", "-p", "calc-flow-python"]:
                 test_calls,
                 [["--test-threads=1"], ["--test-threads=1"]],
             )
+
+    def test_no_run_compiles_the_same_matrix_without_executing_tests(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as run_directory,
+            tempfile.TemporaryDirectory() as compile_directory,
+        ):
+            cargo, cargo_log, _ = self._fake_cargo(Path(run_directory))
+            baseline = self._run_harness(cargo, cargo_log)
+            self.assertEqual(baseline.returncode, 0, baseline.stderr)
+            baseline_calls = [
+                json.loads(line)
+                for line in cargo_log.read_text(encoding="utf-8").splitlines()
+            ]
+            cargo, cargo_log, test_log = self._fake_cargo(Path(compile_directory))
+
+            result = self._run_harness(cargo, cargo_log, "--no-run")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            calls = [
+                json.loads(line)
+                for line in cargo_log.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(
+                calls,
+                [
+                    call if "--no-run" in call else [*call, "--no-run"]
+                    for call in baseline_calls
+                ],
+            )
+            self.assertFalse(test_log.exists())
+
+    def test_no_run_propagates_each_compile_failure(self) -> None:
+        for failing_call in range(1, 5):
+            with (
+                self.subTest(failing_call=failing_call),
+                tempfile.TemporaryDirectory() as raw_directory,
+            ):
+                cargo, cargo_log, test_log = self._fake_cargo(Path(raw_directory))
+
+                result = self._run_harness(
+                    cargo,
+                    cargo_log,
+                    "--no-run",
+                    environment={
+                        "FAKE_CARGO_EXIT": "17",
+                        "FAKE_CARGO_FAILURE_CALL": str(failing_call),
+                    },
+                )
+
+                self.assertEqual(result.returncode, 17, result.stderr)
+                self.assertEqual(
+                    len(cargo_log.read_text(encoding="utf-8").splitlines()),
+                    failing_call,
+                )
+                self.assertFalse(test_log.exists())
 
     def test_compile_time_is_excluded_from_python_test_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as raw_directory:

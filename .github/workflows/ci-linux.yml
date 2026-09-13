@@ -623,6 +623,10 @@ jobs:
         uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Compile Rust tests
+        # Cache misses must not consume the runtime test step's budget.
+        timeout-minutes: 30
+        run: python3.13 scripts/run_rust_tests.py --no-run
       - name: Run Rust tests
         timeout-minutes: 30
         run: python3.13 scripts/run_rust_tests.py --python-stress-runs 3
