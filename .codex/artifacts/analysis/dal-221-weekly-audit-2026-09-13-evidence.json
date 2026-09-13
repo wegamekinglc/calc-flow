@@ -3,7 +3,7 @@
   "baseline": "7b5c3e912f3df11bccbafcddff546dc278abee4e",
   "branch": "docs/DAL-221-weekly-audit-2026-09-13",
   "recorded_at": "2026-09-13T05:18:08.186295+00:00",
-  "scope": "Latest-main Markdown inventory and hashes refreshed; semantic/link/style checks limited to main delta and six changed documents; original accepted checks reused where unchanged",
+  "scope": "Approved b3cc07c8 audit retained; inherited 5a1c8a3 version-contract test fix recorded; only two Markdown files and evidence refreshed for explicit CLAUDE documentation triggers",
   "baseline_scan": {
     "inventory": [
       {
@@ -7123,8 +7123,8 @@
       },
       {
         "path": ".codex/artifacts/analysis/dal-221-weekly-audit-2026-09-13.md",
-        "sha256": "168db3c0eec37a2b38419369bef9032e93838716cfa0a689f23eef185bf9cd87",
-        "lines": 234
+        "sha256": "504330549afa54cc3bc62dd8977a2a9823fe987a833f0ce32501d28dd238c798",
+        "lines": 285
       },
       {
         "path": ".codex/artifacts/analysis/dal-5-5-2-acceptance-audit.md",
@@ -7458,8 +7458,8 @@
       },
       {
         "path": "CLAUDE.md",
-        "sha256": "d6d7f94eea4c3517d0a3592e09cef9a84eeab1e167153d9d33a3e886713b6911",
-        "lines": 298
+        "sha256": "890e0f4613f2fce5875f993bce2945d129be9e0d0eee534c7de82361b300fa0d",
+        "lines": 301
       },
       {
         "path": "README.md",
@@ -7838,7 +7838,7 @@
       },
       {
         "source": ".codex/artifacts/analysis/dal-221-weekly-audit-2026-09-13.md",
-        "line": 42,
+        "line": 43,
         "target": "dal-221-weekly-audit-2026-09-13-evidence.json",
         "resolved": ".codex/artifacts/analysis/dal-221-weekly-audit-2026-09-13-evidence.json",
         "result": "ok"
@@ -15662,6 +15662,10 @@
     {
       "path": "crates/calc-flow/tests/cross_section_state.rs",
       "sha256": "f0774dc8369e346ec5e304546d70a03916e47ca3cd8bf19485ec53ea809db1be"
+    },
+    {
+      "path": "scripts/test_release_config.py",
+      "sha256": "eeca82a6f08c513882c6661980224577b5d55095e7da44db644c830142aa4d0e"
     }
   ],
   "scope_notes": [
@@ -15670,7 +15674,7 @@
     "Missing literal tumbling-window.md paths in two Claude guides are explicit invocation examples; not broken Markdown links.",
     "18 historical files / 73 tables retain pre-existing pipe alignment differences.",
     "Coveralls project page and crates.io API respond 403; neither counted as verified accessible.",
-    "SQL and attribution fixes preserved; latest-main late-output documentation reconciled; awaiting one coordinator-arranged focused independent review. No PR or agent synchronization.",
+    "Independent Approve applies only to b3cc07c8. Existing PR #274 now includes the later test fix and documentation closeout, awaiting coordinator-arranged final-head review. No agent writes; CI/Codacy gates retained.",
     "AST parsing is syntax/import surface evidence only, not runtime example execution."
   ],
   "checks": {
@@ -15682,7 +15686,7 @@
     "git_diff_check": "passed"
   },
   "initial_baseline": "f9b608559714cde474f883344835427778f584e3",
-  "updated_at": "2026-09-13T05:54:03.069345+00:00",
+  "updated_at": "2026-09-13T06:37:42.868488+00:00",
   "prior_review_revision": {
     "recorded_at": "2026-09-13T05:39:07.976452+00:00",
     "trigger_comment": "01a0993f-e005-70a2-bbb0-ee01b2b92e2b",
@@ -17604,5 +17608,297 @@
     "validation_limits": "Source and existing test assertions read as documentation evidence; no product test/build/performance run or new runtime acceptance claim",
     "handoff": "Final commit SHA, inspected empty trailers, attachment hashes and sole post-push CI snapshot delivered in issue comment and verification bundle; omitted here to avoid self-reference",
     "status": "Latest-main reconciliation and preserved SQL correction ready for one focused independent review; issue remains in_progress"
+  },
+  "main_increment_revision_scope": {
+    "snapshot_commit": "b3cc07c8b4cc206127cbd792f775a48361a50c7d",
+    "approval_comment": "01a0995f-ba46-766c-9fd9-20710797de6f",
+    "meaning": "Historical b3cc07c8 checks and counts; its pending-review status describes preparation time, superseded only for that commit by independent Approve. Current inventory is final_scan and codacy_closeout_revision.statistics."
+  },
+  "codacy_closeout_revision": {
+    "recorded_at": "2026-09-13T06:37:42.868488+00:00",
+    "trigger_comment": "01a09973-eba4-7ec4-81d9-1800dae924a5",
+    "starting_head": "5a1c8a37a4869f09b5dc1fa7ce63523801bd17ae",
+    "confirmed_main": "7b5c3e912f3df11bccbafcddff546dc278abee4e",
+    "branch_update": "Fast-forward only; preserve the tester commit",
+    "pr_url": "https://github.com/wegamekinglc/calc-flow/pull/274",
+    "approved_documentation_head": "b3cc07c8b4cc206127cbd792f775a48361a50c7d",
+    "approval_comment": "01a0995f-ba46-766c-9fd9-20710797de6f",
+    "approval_boundary": "Approve covers b3cc07c8 only; later test fix and this documentation/evidence revision require final-head independent review",
+    "inherited_test_fix": {
+      "owner": "cf-tester",
+      "commit": "5a1c8a37a4869f09b5dc1fa7ce63523801bd17ae",
+      "path": "scripts/test_release_config.py",
+      "sha256": "eeca82a6f08c513882c6661980224577b5d55095e7da44db644c830142aa4d0e",
+      "method": "ReleaseConfigTests.test_normative_docs_use_final_package_and_project_versions",
+      "change": "Derive package versions from Cargo/core/Studio manifests; retain project-v3, source-versus-published installation, and stale-version constraints",
+      "diagnosis_comment": "01a0996d-c215-79f5-9fae-691b554a6460",
+      "results_comment": "01a09972-fb95-7a01-a265-70093da2d37f",
+      "results_reused_not_rerun": [
+        {
+          "command": "python3.13 -m unittest scripts.test_release_config.ReleaseConfigTests.test_normative_docs_use_final_package_and_project_versions",
+          "exit_code": 0,
+          "result": "Ran 1 test in 0.003s; OK"
+        },
+        {
+          "command": "UV_CACHE_DIR=target/uv-cache uv tool run --from ruff==0.16.0 ruff format --check scripts/test_release_config.py",
+          "exit_code": 0,
+          "result": "1 file already formatted"
+        },
+        {
+          "command": "git diff --check",
+          "exit_code": 0,
+          "result": "passed"
+        }
+      ],
+      "reuse_basis": "This increment changes only CLAUDE prose and audit artifacts; test file, manifests, and the five normative documents read by the test remain byte-identical to 5a1c8a3",
+      "limits": "Targeted unittest result only; initial CI stopped at the scripts test gate before wheel build, artifact inspection and isolated install smoke; not a demonstrated wheel defect or successful wheel validation"
+    },
+    "codacy": {
+      "diagnosed_text": "implementation and independent review, then documentation when needed.",
+      "trigger": "behavior, public Rust/Python API, Studio REST/OpenAPI contract, commands or other user-visible capability changes",
+      "skip": "pure tests or refactors preserving those surfaces can skip documentation reconciliation",
+      "independent_review": "retained, including work that skips documentation; pure documentation still uses writer and reviewer",
+      "policy_basis": [
+        ".codex/agents/README.md",
+        ".codex/agents/cf-doc-writer.toml",
+        "AGENTS.md"
+      ],
+      "configuration_changes": [],
+      "remote_failure_clearance": "Not claimed; retain merge block pending actual checks and final-head review"
+    },
+    "changed_markdown": [
+      {
+        "path": "CLAUDE.md",
+        "before": {
+          "path": "CLAUDE.md",
+          "sha256": "d6d7f94eea4c3517d0a3592e09cef9a84eeab1e167153d9d33a3e886713b6911",
+          "lines": 298
+        },
+        "after": {
+          "path": "CLAUDE.md",
+          "sha256": "890e0f4613f2fce5875f993bce2945d129be9e0d0eee534c7de82361b300fa0d",
+          "lines": 301
+        }
+      },
+      {
+        "path": ".codex/artifacts/analysis/dal-221-weekly-audit-2026-09-13.md",
+        "before": {
+          "path": ".codex/artifacts/analysis/dal-221-weekly-audit-2026-09-13.md",
+          "sha256": "168db3c0eec37a2b38419369bef9032e93838716cfa0a689f23eef185bf9cd87",
+          "lines": 234
+        },
+        "after": {
+          "path": ".codex/artifacts/analysis/dal-221-weekly-audit-2026-09-13.md",
+          "sha256": "504330549afa54cc3bc62dd8977a2a9823fe987a833f0ce32501d28dd238c798",
+          "lines": 285
+        }
+      }
+    ],
+    "focused_links": {
+      "outbound": [
+        {
+          "source": "CLAUDE.md",
+          "line": 3,
+          "target": "README.md",
+          "resolved": "README.md",
+          "result": "ok"
+        },
+        {
+          "source": "CLAUDE.md",
+          "line": 3,
+          "target": "docs/",
+          "resolved": "docs",
+          "result": "ok"
+        },
+        {
+          "source": "CLAUDE.md",
+          "line": 7,
+          "target": "AGENTS.md",
+          "resolved": "AGENTS.md",
+          "result": "ok"
+        },
+        {
+          "source": "CLAUDE.md",
+          "line": 17,
+          "target": "https://github.com/wegamekinglc/calc-flow/tree/c87324ecaee30d8b883d3c30ae03704dee45f593",
+          "result": "external"
+        },
+        {
+          "source": "CLAUDE.md",
+          "line": 17,
+          "target": "docs/introduction.md",
+          "resolved": "docs/introduction.md",
+          "result": "ok"
+        },
+        {
+          "source": "CLAUDE.md",
+          "line": 32,
+          "target": "AGENTS.md#commands",
+          "resolved": "AGENTS.md",
+          "result": "ok"
+        },
+        {
+          "source": "CLAUDE.md",
+          "line": 32,
+          "target": "AGENTS.md#verification",
+          "resolved": "AGENTS.md",
+          "result": "ok"
+        },
+        {
+          "source": "CLAUDE.md",
+          "line": 99,
+          "target": "AGENTS.md#verification",
+          "resolved": "AGENTS.md",
+          "result": "ok"
+        },
+        {
+          "source": "CLAUDE.md",
+          "line": 133,
+          "target": "AGENTS.md#coding-style",
+          "resolved": "AGENTS.md",
+          "result": "ok"
+        },
+        {
+          "source": "CLAUDE.md",
+          "line": 133,
+          "target": ".claude/rules/code-style.md",
+          "resolved": ".claude/rules/code-style.md",
+          "result": "ok"
+        },
+        {
+          "source": "CLAUDE.md",
+          "line": 208,
+          "target": "AGENTS.md#python-application-api-and-binding",
+          "resolved": "AGENTS.md",
+          "result": "ok"
+        },
+        {
+          "source": "CLAUDE.md",
+          "line": 222,
+          "target": "docs/runtime-envelope.md",
+          "resolved": "docs/runtime-envelope.md",
+          "result": "ok"
+        },
+        {
+          "source": "CLAUDE.md",
+          "line": 253,
+          "target": "AGENTS.md#rust-core",
+          "resolved": "AGENTS.md",
+          "result": "ok"
+        },
+        {
+          "source": "CLAUDE.md",
+          "line": 277,
+          "target": "docs/",
+          "resolved": "docs",
+          "result": "ok"
+        },
+        {
+          "source": "CLAUDE.md",
+          "line": 277,
+          "target": "docs/README.md",
+          "resolved": "docs/README.md",
+          "result": "ok"
+        },
+        {
+          "source": "CLAUDE.md",
+          "line": 277,
+          "target": "docs/introduction.md",
+          "resolved": "docs/introduction.md",
+          "result": "ok"
+        },
+        {
+          "source": "CLAUDE.md",
+          "line": 277,
+          "target": "docs/design.md",
+          "resolved": "docs/design.md",
+          "result": "ok"
+        },
+        {
+          "source": "CLAUDE.md",
+          "line": 277,
+          "target": "CHANGELOG.md",
+          "resolved": "CHANGELOG.md",
+          "result": "ok"
+        },
+        {
+          "source": "CLAUDE.md",
+          "line": 277,
+          "target": "https://github.com/wegamekinglc/calc-flow/tree/1ba2521abcb9fd3dcdb0747ccfe026bcea31f7b3/docs",
+          "result": "external"
+        },
+        {
+          "source": "CLAUDE.md",
+          "line": 288,
+          "target": ".codex/agents/README.md#workflow",
+          "resolved": ".codex/agents/README.md",
+          "result": "ok"
+        },
+        {
+          "source": ".codex/artifacts/analysis/dal-221-weekly-audit-2026-09-13.md",
+          "line": 43,
+          "target": "dal-221-weekly-audit-2026-09-13-evidence.json",
+          "resolved": ".codex/artifacts/analysis/dal-221-weekly-audit-2026-09-13-evidence.json",
+          "result": "ok"
+        }
+      ],
+      "inbound": []
+    },
+    "focused_link_counts": {
+      "local_outbound": 19,
+      "external_not_requested": 2,
+      "inbound": 0
+    },
+    "style": "Both files: aligned pipe tables, no trailing whitespace, final newline; passed",
+    "claude_code_blocks_unchanged": true,
+    "statistics": {
+      "markdown_files": 134,
+      "markdown_lines": 52279,
+      "by_root": {
+        ".agents": 1,
+        ".claude": 14,
+        ".codex": 68,
+        "benchmarks": 6,
+        "crates": 2,
+        "design": 2,
+        "docs": 33,
+        "examples": 1,
+        "root": 4,
+        "tests": 1,
+        "web-ui": 2
+      },
+      "local_links": 837,
+      "external_link_occurrences": 63,
+      "source_evidence_files": 51,
+      "unchanged_markdown_reused": 132
+    },
+    "reused_evidence_sections": [
+      "baseline_scan",
+      "external_links",
+      "package_lookup",
+      "facts",
+      "late_policy_schema",
+      "agent_sync_plan",
+      "checks"
+    ],
+    "reuse_basis": "Git delta b3cc07c8..5a1c8a3 contains only the test file; this increment contains only the two named Markdown files and JSON. Retain 132 Markdown inventory entries, original 50 source hashes and agent field plan unchanged. Historical checks retain original observation times; no external revalidation or product execution.",
+    "pr_diff_scope": {
+      "documentation_and_evidence_files": 18,
+      "test_files": 1,
+      "this_increment_files": [
+        "CLAUDE.md",
+        ".codex/artifacts/analysis/dal-221-weekly-audit-2026-09-13.md",
+        ".codex/artifacts/analysis/dal-221-weekly-audit-2026-09-13-evidence.json"
+      ]
+    },
+    "not_rerun": [
+      "full Markdown audit",
+      "external links including both 403 responses",
+      "product tests or builds",
+      "tester unittest and Ruff",
+      "performance gates",
+      "agent reads or writes"
+    ],
+    "delivery_proof": "New commit, artifact SHA-256, actual trailer check, diff check and the one post-push nonblocking CI snapshot are supplied in the issue handoff/proof attachment; no self-referential commit or JSON hash"
   }
 }

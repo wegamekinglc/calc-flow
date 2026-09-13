@@ -1,11 +1,12 @@
 # DAL-221 全仓 Markdown 与 agent 文本审计（2026-09-13）
 
-首次文档审计和 agent 逐字段同步方案已经独立评审。本轮将同一分支更新到
-最新 main，完成 late-output 增量文档对齐，并保留 SQL P2 与归因修正，
-交回协调器安排一次统一聚焦复核。
-没有创建 PR、合并或触发其他成员；本轮没有改动 runtime 或 agent 配置。
-首次审计的 agent 文本写入集合为空，本轮复用该已获认可的结果。修订位于
-`docs/DAL-221-weekly-audit-2026-09-13`，提交与推送结果在 issue 交接评论中记录。
+文档审计、SQL 修正和 late-output 主线适配已在提交 `b3cc07c8` 获得
+独立 Approve；该结论不覆盖后续测试及文案修订。现有 PR 为 #274，分支
+`docs/DAL-221-weekly-audit-2026-09-13`，目标 main。本轮从测试专员提交
+`5a1c8a37a4869f09b5dc1fa7ce63523801bd17ae` 继续，明确 CLAUDE 文档收口
+触发条件并更新证据，交回协调器安排最终 head 的统一复核。
+agent 文本同步集合仍为空；本轮只改文档和证据，不修改测试、运行时、
+canonical agent 定义或 CI/Codacy 配置。新提交与快照随 issue 交接提供。
 
 ## 基线和范围
 
@@ -43,7 +44,7 @@ CHANGELOG。后者的日期、旧 API、设计选项和测量值保留其记录�
 见 [机器可读证据](dal-221-weekly-audit-2026-09-13-evidence.json)。
 本报告是新增的第 134 个 Markdown 文件，不计入基线 133 个。
 
-### 本轮最新主线基线
+### 已审主线增量基线（b3cc07c8）
 
 本轮先 fetch 并以 `git ls-remote` 确认：远端审查分支为
 `4d948d26921d4d3fd9e9604008efa53a93142e0b`，最新 main 为
@@ -58,6 +59,37 @@ rebase 到该 main，保留 SQL 修正和无归因 trailer 的提交正文。
 仍为 133 份、51,870 行，各文件字节与首次审计基线相同；分支含报告共
 134 份，最终逐文件清单、统计及新源文件哈希见 JSON。清单更新不代表
 重复执行整套语义、外链或示例审计。
+
+### PR 与 CI 收口的提交边界
+
+独立评审评论 `01a0995f-ba46-766c-9fd9-20710797de6f` 于
+2026-09-13 06:06:22 UTC 对 `b3cc07c8b4cc206127cbd792f775a48361a50c7d`
+给出“Approve，阻断项清零”。本轮 fetch 后 main 仍为 `7b5c3e9`，PR head
+已前进到 `5a1c8a3`；工作树仅快进接收该测试提交，没有改写他人提交。
+
+测试专员在诊断评论 `01a0996d-c215-79f5-9fae-691b554a6460` 确认：
+Linux package job 停在脚本 unittest，版本合同测试的五个子测试仍要求
+v4 文案；`uv build`、artifact inspectors 和隔离 wheel smoke 未执行。
+这是本 PR 的文档更新触发的测试维护问题，不能称为 wheel 编译/安装缺陷。
+`5a1c8a3` 仅修改 `scripts/test_release_config.py` 的
+`ReleaseConfigTests.test_normative_docs_use_final_package_and_project_versions`，
+从 Cargo、Python core 和 Studio manifests 读取源码版本，保留版本一致、
+project-v3、安装入口和过期声明约束，并区分源码构建与已发布包。
+整个 PR 因此包含 18 个文档/证据文件和 1 个测试文件，不再是纯文档 diff。
+
+复用测试专员交接评论 `01a09972-fb95-7a01-a265-70093da2d37f` 的实际结果：
+`python3.13 -m unittest scripts.test_release_config.ReleaseConfigTests.test_normative_docs_use_final_package_and_project_versions`
+运行 1 项测试、0.003 秒、OK；
+`UV_CACHE_DIR=target/uv-cache uv tool run --from ruff==0.16.0 ruff format --check scripts/test_release_config.py`
+报告 1 file already formatted；`git diff --check` 通过，三者均退出 0。
+这些结果仅证明该定向测试和文件格式，未验证 wheel 构建或安装。本轮不重跑。
+
+Codacy 的新增问题指向 `CLAUDE.md` 的 `Specialist agents` 段落，要求将
+“documentation when needed” 改为具体触发条件。本轮明确：行为、公共
+Rust/Python API、Studio REST/OpenAPI 合同、命令或其他用户可见能力变化
+后进入文档收口；纯测试或保留这些表面的重构可跳过文档收口，但独立评审
+仍然适用。纯文档仍经文档专员和 reviewer。该修订不改变 canonical 定义，
+也不放宽 Codacy 或 CI 门禁；是否清除远端检查失败由新 head 的检查确定。
 
 ## 发现与修订
 
@@ -93,7 +125,8 @@ side output，Python symbolic lowerer 仍只接受 error/drop。
 现行指南已去掉“执行禁用”结论；CHANGELOG 中前一条 staged 合同记录保留
 为历史，并由新的启用/恢复条目承接。历史 spec/API note 中的旧阶段约束
 继续按首次审计已认可的工程记录边界保留，不改写为现行使用承诺。
-本次没有设计新示例、编辑示例程序、产品源码、测试或生成契约。
+文档专员没有设计新示例、编辑示例程序、产品源码、测试或生成契约；
+测试文件的后续变化由上述 `5a1c8a3` 单独记录。
 
 ### CHANGELOG 判定
 
@@ -102,11 +135,13 @@ side output，Python symbolic lowerer 仍只接受 error/drop。
 及内部 envelope transaction，并明确执行仍禁用。依据为首次审计基线中的
 `f8ca77eaf241523c67ebd9156866b5bafeed07f6` 和 `f9b60855`；两项实现均漏记。
 没有把 5.0.0 源码版本写成已完成的公开发布或 late-output 恢复验收。
-SQL 措辞与提交元数据修正不构成基本能力变更。本轮为 `7b5c3e9` 已合入的
+SQL 措辞与提交元数据修正不构成基本能力变更。主线增量收口为 `7b5c3e9` 已合入的
 执行、检查点元数据和恢复能力新增一条同日记录；项目/manifest 格式仍为
 3，rolling writer layout 仍为 3、cross-section state layout 仍为 1。
+本轮版本合同测试修复与 CLAUDE 触发条件澄清不构成基本能力变化，
+不新增 CHANGELOG 条目。
 
-### 独立评审 P2 与提交归因修正
+### 已审的 P2 与提交归因修正（b3cc07c8）
 
 `docs/rust-api.md` 原先把物理改写失败时的整查询回退保证泛化到了所有查询。
 `CalcFlowQueryPlanner::create_physical_plan` 实际先进行逻辑资格检查；
@@ -197,7 +232,7 @@ MCP、名称、ID 及 squad 均没有写入。没有读取明文环境秘密。
 全仓回归、覆盖率或 benchmark。全量回归和常规性能门禁属于 CI。
 推送后只取一次非阻塞状态快照，结果写在交接评论；不等待或轮询。
 
-## 本轮实际检查与结果
+## 已审主线增量检查（b3cc07c8，本轮复用）
 
 - fetch/ls-remote 确认 main 和原审查 head；读取最新 `.codex/agents/README.md`。
   rebase 无冲突，比较确认本任务相对新 main 仍只有文档和证据改动。
@@ -221,14 +256,30 @@ MCP、名称、ID 及 squad 均没有写入。没有读取明文环境秘密。
 - 未重试两个 403，未重复整套审计，未运行产品测试、构建或性能门禁。
   推送后最多一次非阻塞 CI 快照，结果随交接提供，不等待或轮询。
 
+## 本轮 Codacy 文案与证据检查
+
+最新汇总为 **134 份 Markdown、52,279 行**，837 处本地链接、63 处外链，
+51 份源文件证据。本轮重新核验 19 处本地出站链接/锚点，入站引用为 0。
+
+- 仅核验 CLAUDE 与本报告的链接/锚点、入站引用、表格、尾随空白和末尾
+  换行；更新 JSON 内这两份 Markdown 的行数、SHA-256 和链接位置，再从
+  既有清单汇总全仓统计。其余 132 份 Markdown 没有变化，复用已审证据，
+  不重复全仓审计。CLAUDE 的命令和示例代码块未变。
+- 将已继承测试文件的当前哈希纳入证据；原 50 项源码哈希及 agent 字段
+  结果保持不变。本轮 JSON 可解析、相关哈希与实际字节一致，diff 格式
+  及提交 trailer 经核验；所有本地验证限于本次文档变化。
+- 更新现有 PR #274 的描述，补记版本合同测试修复、定向验证和评审边界。
+  推送后最多获取一次非阻塞 CI 快照，不等待、轮询或重跑 CI。
+
 ## 评审与剩余事项
 
-SQL P2、归因修正及已确认最新主线的 late-output 文档对齐均已完成，尚待
-协调器安排一次统一聚焦复核，没有自行宣告独立评审通过。
+`b3cc07c8` 的 SQL、归因和主线适配已有独立 Approve；`5a1c8a3` 的测试
+修复及本轮文档/证据修订尚待最终 head 的统一复核，不沿用旧 Approve
+宣称新 head 已审。本轮开始时协调器报告平台快照仍有 Codacy 失败，合并
+阻断保留；定向 unittest 通过不等于 wheel 构建、安装或 CI 全部通过。
 Coveralls 和 crate registry 的 403 是外部
 核验限制，保留原始状态，未声明通过。例子语法检查不替代运行结果，静态
 审计不证明产品行为、覆盖率、发布安装或性能门禁通过。
 
-交回协调器安排 `cf-reviewer` 聚焦复核 SQL 修正和新增主线适配；阻断项清零
-后再安排必要的 agent 文本同步和目标为 main 的 PR。本 issue 保持
-`in_progress`，没有“通过评审”或可合并结论。
+交回协调器安排 `cf-reviewer` 统一复核现有 PR #274 的最终 head。本 issue
+保持 `in_progress`；没有创建新 PR、合并或触发其他成员。

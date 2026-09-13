@@ -287,12 +287,15 @@ documents are available in the
 
 The canonical calc-flow agent team is defined in `.codex/agents/`. Follow
 [its workflow](.codex/agents/README.md#workflow): clear work goes through
-implementation and independent review, then documentation when needed.
+implementation and independent review. After those steps, route changes to
+behavior, public Rust/Python APIs, Studio REST/OpenAPI contracts, commands,
+or other user-visible capabilities to `cf-doc-writer` for documentation
+reconciliation. Pure test changes and refactors that preserve those surfaces
+can skip documentation reconciliation; independent review still applies.
 Spec, API design, critique, testing, performance, and simplification specialists
 join when the request or its risks require them. Pure documentation goes through
 the doc writer and reviewer.
 `.claude/agents/` mirrors those definitions for Claude compatibility;
 synchronize team changes from `.codex/agents/` to `.claude/agents/`, never in
 the reverse direction. `cf-doc-writer` owns the freshness of `docs/` and
-curates `CHANGELOG.md`; invoke it when docs need reconciling against current
-code or a change may warrant a changelog entry.
+curates `CHANGELOG.md`.
