@@ -90,6 +90,7 @@ impl TaskEnvironment {
         let (_, entry_gate) = watch::channel(true);
         let (_, data_gate) = watch::channel(true);
         OperatorTaskInputs {
+            late_output_ports: std::collections::BTreeSet::new(),
             entity_work: None,
             node_id: node_id.into(),
             output_ports: BTreeMap::from([("output".into(), operator.outputs[0].clone())]),

@@ -3114,6 +3114,7 @@ fn prepare_operator_task(
         .for_node(&node_id)
         .map_err(preflight_entry_failure)?;
     let inputs = OperatorTaskInputs {
+        late_output_ports: node.late_output_ports,
         entity_work: matches!(
             &node.operator,
             crate::pipeline::CompiledStreamOperator::Rolling(_)

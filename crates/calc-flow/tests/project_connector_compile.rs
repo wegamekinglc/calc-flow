@@ -900,13 +900,9 @@ fn test_side_output_connector_projects_require_complete_sink_coverage() {
             BTreeMap::new(),
             ManagedCheckpointRuntime::new(directory.path()).unwrap(),
         );
-        let error = match result {
-            Ok(_) => panic!("side output must remain disabled"),
-            Err(error) => error.to_string(),
-        };
         assert!(
-            error.contains("late side output execution is not enabled"),
-            "{error}"
+            result.is_ok(),
+            "validated dual bindings must create a runner"
         );
     }
 }

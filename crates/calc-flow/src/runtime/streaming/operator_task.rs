@@ -43,6 +43,9 @@ mod performance_evidence;
 #[cfg(test)]
 mod cooperation_tests;
 
+#[cfg(test)]
+mod late_control_tests;
+
 pub(crate) struct OperatorEntryAck {
     pub(crate) node_id: String,
     pub(crate) result: Result<()>,
@@ -243,6 +246,7 @@ pub(crate) struct OperatorTaskInputs {
     pub(crate) ingresses: BTreeMap<String, OperatorIngress>,
     pub(crate) outputs: BTreeMap<String, Vec<EdgeSender>>,
     pub(crate) output_ports: BTreeMap<String, Port>,
+    pub(crate) late_output_ports: BTreeSet<String>,
     pub(crate) context: StreamTaskContext,
     pub(crate) progress: OperatorProgress,
     pub(crate) metrics: MetricsRecorder,
@@ -664,6 +668,7 @@ async fn finish_operator(
     }
     forward_control(
         &mut inputs.outputs,
+        &inputs.late_output_ports,
         StreamMessage::end_of_input(),
         inputs.context.job(),
     )
@@ -1032,6 +1037,7 @@ async fn complete_barrier_if_ready(
     send_operator_checkpoint_ack(inputs, ack).await?;
     forward_control(
         &mut inputs.outputs,
+        &inputs.late_output_ports,
         StreamMessage::barrier(epoch),
         inputs.context.job(),
     )
@@ -1302,7 +1308,13 @@ async fn dispatch_idle(
     _ingress_name: &str,
     message: StreamMessage,
 ) -> Result<()> {
-    forward_control(&mut inputs.outputs, message, inputs.context.job()).await
+    forward_control(
+        &mut inputs.outputs,
+        &inputs.late_output_ports,
+        message,
+        inputs.context.job(),
+    )
+    .await
 }
 
 async fn dispatch_progress_transition(
@@ -1400,6 +1412,13 @@ async fn forward_join_output_frontier(
     ingress_progress: &IngressProgressSnapshot,
     output_frontier: &mut Option<EventTime>,
 ) -> Result<()> {
+    if inputs
+        .output_ports
+        .keys()
+        .all(|port| inputs.late_output_ports.contains(port))
+    {
+        return Ok(());
+    }
     if let Some(candidate) = inputs
         .operator
         .output_frontier_candidate(aggregate_input_frontier, ingress_progress)?
@@ -1407,6 +1426,7 @@ async fn forward_join_output_frontier(
     {
         forward_control(
             &mut inputs.outputs,
+            &inputs.late_output_ports,
             StreamMessage::watermark(candidate),
             inputs.context.job(),
         )
@@ -1620,10 +1640,16 @@ fn unsupported_control(
 
 async fn forward_control(
     outputs: &mut BTreeMap<String, Vec<EdgeSender>>,
+    late_output_ports: &BTreeSet<String>,
     message: StreamMessage,
     context: &super::StreamJobContext,
 ) -> Result<()> {
-    for senders in outputs.values_mut() {
+    for (port, senders) in outputs {
+        if late_output_ports.contains(port)
+            && (message.as_watermark().is_some() || message.is_idle())
+        {
+            continue;
+        }
         for sender in senders {
             tokio::select! {
                 biased;
@@ -1878,6 +1904,7 @@ pub(super) mod tests {
         let (_data, data_gate) = watch::channel(true);
         let (entry_ack, _ack) = mpsc::unbounded_channel();
         let mut inputs = OperatorTaskInputs {
+            late_output_ports: std::collections::BTreeSet::new(),
             entity_work: None,
             node_id: "node".into(),
             operator: CompiledStreamOperator::External(Box::new(operator)),
@@ -2350,6 +2377,7 @@ pub(super) mod tests {
         let progress = OperatorProgress::with_rolling_metrics();
         let task = Box::pin(run_operator_task(
             OperatorTaskInputs {
+                late_output_ports: std::collections::BTreeSet::new(),
                 entity_work: None,
                 node_id: "node".into(),
                 operator: CompiledStreamOperator::External(Box::new(operator)),
@@ -2455,6 +2483,7 @@ pub(super) mod tests {
         let (_data, data_gate) = watch::channel(true);
         let (entry_ack, _ack) = mpsc::unbounded_channel();
         let mut inputs = OperatorTaskInputs {
+            late_output_ports: std::collections::BTreeSet::new(),
             entity_work: None,
             node_id: "node".into(),
             operator: CompiledStreamOperator::External(Box::new(operator)),
@@ -2846,6 +2875,7 @@ pub(super) mod tests {
         spawn_operator_task(
             &mut supervisor,
             OperatorTaskInputs {
+                late_output_ports: std::collections::BTreeSet::new(),
                 entity_work: None,
                 node_id: "node".into(),
                 operator,

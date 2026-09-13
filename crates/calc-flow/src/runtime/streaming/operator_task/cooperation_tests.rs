@@ -182,6 +182,7 @@ fn traced_inputs(
     let node_id = inner.name().to_owned();
     let output_ports = [("output".into(), inner.output_ports()[0].clone())].into();
     OperatorTaskInputs {
+        late_output_ports: BTreeSet::new(),
         entity_work: None,
         context: context.for_node(&node_id).unwrap(),
         node_id,

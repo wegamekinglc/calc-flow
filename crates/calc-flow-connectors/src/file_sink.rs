@@ -266,6 +266,53 @@ fn read_manifest(dir: &Path) -> Option<JsonMap> {
     serde_json::from_slice(&bytes).ok()
 }
 
+fn validate_recovery_directory(directory: &Path, evidence: &JsonMap) -> Result<()> {
+    let stored = read_manifest(directory).ok_or_else(|| {
+        TransactionalParquetSink::fail("recover", directory, "epoch is missing its manifest")
+    })?;
+    if stored != *evidence {
+        return Err(TransactionalParquetSink::fail(
+            "recover",
+            directory,
+            "epoch manifest disagrees with the recovery evidence",
+        ));
+    }
+    let parts = evidence
+        .get("parts")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            TransactionalParquetSink::fail(
+                "recover",
+                directory,
+                "epoch manifest has no part inventory",
+            )
+        })?;
+    for part in parts {
+        let name = part
+            .as_str()
+            .filter(|name| {
+                let mut components = Path::new(name).components();
+                matches!(components.next(), Some(std::path::Component::Normal(_)))
+                    && components.next().is_none()
+            })
+            .ok_or_else(|| {
+                TransactionalParquetSink::fail(
+                    "recover",
+                    directory,
+                    "epoch manifest has an invalid part name",
+                )
+            })?;
+        if !directory.join(name).is_file() {
+            return Err(TransactionalParquetSink::fail(
+                "recover",
+                directory,
+                "epoch is missing a prepared Parquet part",
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl TransactionalStreamSink for TransactionalParquetSink {
     async fn open(&mut self) -> Result<()> {
@@ -380,26 +427,20 @@ impl TransactionalStreamSink for TransactionalParquetSink {
     }
 
     async fn recover(&mut self, recovery: &SinkRecovery) -> Result<()> {
+        let staging = self.config.staging_dir(recovery.epoch());
         let final_dir = self.config.final_dir(recovery.epoch());
         let evidence = recovery.pre_commit().clone();
         self.blocking(final_dir.clone(), "recover", move || {
-            if final_dir.exists() {
-                let committed = read_manifest(&final_dir).ok_or_else(|| {
-                    TransactionalParquetSink::fail(
-                        "recover",
-                        &final_dir,
-                        "committed epoch is missing its manifest",
-                    )
-                })?;
-                if committed != evidence {
-                    return Err(TransactionalParquetSink::fail(
-                        "recover",
-                        &final_dir,
-                        "committed epoch manifest disagrees with the recovery evidence",
-                    ));
-                }
+            if evidence.is_empty() && !final_dir.exists() && !staging.exists() {
+                return Ok(());
             }
-            Ok(())
+            let directory = if final_dir.exists() {
+                &final_dir
+            } else {
+                &staging
+            };
+            validate_recovery_directory(directory, &evidence)?;
+            commit_staged(&staging, &final_dir, &evidence)
         })
         .await
     }

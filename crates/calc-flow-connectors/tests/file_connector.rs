@@ -1397,3 +1397,46 @@ async fn sink_rejects_empty_output_name() {
     let error = FileSinkConfig::from_options(&options).expect_err("empty output rejected");
     assert!(error.to_string().contains("directory name"), "{error}");
 }
+
+#[tokio::test]
+async fn test_file_recovery_commits_prepared_epoch_and_rejects_incomplete_staging() {
+    for corruption in ["none", "evidence", "manifest", "part"] {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let mut sink = Harness::sink(root, "out");
+        sink.open().await.unwrap();
+        sink.begin_epoch(Epoch::INITIAL).await.unwrap();
+        sink.write(&sample_batch(2)).await.unwrap();
+        let mut evidence = sink.pre_commit(Epoch::INITIAL).await.unwrap();
+        sink.close().await.unwrap();
+        let staging = root.join("out/.staging/epoch=1");
+        match corruption {
+            "evidence" => {
+                evidence.insert("rows".into(), json!(99));
+            }
+            "manifest" => std::fs::remove_file(staging.join("manifest.json")).unwrap(),
+            "part" => std::fs::remove_file(staging.join("part-0000.parquet")).unwrap(),
+            _ => {}
+        }
+        let recovery = calc_flow::SinkRecovery::from_parts(
+            Epoch::INITIAL,
+            true,
+            calc_flow::SinkDelivery::Transactional,
+            evidence,
+        );
+        let mut restored = Harness::sink(root, "out");
+        restored.open().await.unwrap();
+        let result = restored.recover(&recovery).await;
+        if corruption == "none" {
+            result.unwrap();
+            assert_eq!(Harness::committed_epochs(root, "out"), ["epoch=1"]);
+            assert!(!staging.exists());
+            restored.recover(&recovery).await.unwrap();
+        } else {
+            assert!(result.is_err(), "{corruption}");
+            assert!(Harness::committed_epochs(root, "out").is_empty());
+            assert!(staging.exists());
+        }
+        restored.close().await.unwrap();
+    }
+}

@@ -1780,7 +1780,7 @@
               },
               {
                 "additionalProperties": false,
-                "description": "Route late rows to a diagnostic table in stream mode.\n\nThe configuration contract is available; execution remains disabled\nuntil the dual-output runtime and recovery contract is complete.",
+                "description": "Route late rows to a diagnostic table in stream mode.\n\nThe diagnostic output has no event-time progress and participates in\nthe same aligned checkpoint epochs as the normal output.",
                 "properties": {
                   "kind": {
                     "const": "side_output",
@@ -4763,7 +4763,7 @@
               },
               {
                 "additionalProperties": false,
-                "description": "Route late rows to a diagnostic table in stream mode.\n\nThe configuration contract is available; execution remains disabled\nuntil the dual-output runtime and recovery contract is complete.",
+                "description": "Route late rows to a diagnostic table in stream mode.\n\nThe diagnostic output has no event-time progress and participates in\nthe same aligned checkpoint epochs as the normal output.",
                 "properties": {
                   "kind": {
                     "const": "side_output",

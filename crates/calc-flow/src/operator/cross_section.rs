@@ -556,6 +556,12 @@ struct CrossSectionSnapshotMetadata {
     ended: bool,
     metrics: LateMetricDelta,
     segment_inventory: Vec<SegmentDescriptor>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "super::late_output::deserialize_snapshot"
+    )]
+    late_output: Option<super::late_output::LateOutputSnapshot>,
 }
 
 #[derive(Default)]
@@ -756,6 +762,10 @@ impl StreamOperator for CrossSectionOperator {
             ended: self.state.ended,
             metrics: self.state.metrics,
             segment_inventory: inventory.segments().to_vec(),
+            late_output: super::late_output::LateOutputSnapshot::new(
+                self.spec.late_policy,
+                self.state.next_late_output_sequence,
+            ),
         };
         let Value::Object(inline_metadata) =
             serde_json::to_value(metadata).map_err(|error| format_error(&error))?
@@ -779,13 +789,17 @@ impl StreamOperator for CrossSectionOperator {
         }
         let metadata = parse_snapshot_metadata(snapshot)?;
         validate_snapshot_metadata(&metadata, &self.compiled, snapshot)?;
+        let next_late_output_sequence = super::late_output::LateOutputSnapshot::restore_sequence(
+            self.spec.late_policy,
+            metadata.late_output.as_ref(),
+        )?;
         let (groups, identity_groups) = self.decode_state(&metadata, snapshot)?;
         self.state = CrossSectionStreamState {
             groups,
             identity_groups,
             last_input_watermark: metadata.last_input_watermark,
             next_output_sequence: metadata.next_output_sequence,
-            next_late_output_sequence: 0,
+            next_late_output_sequence,
             late_output_failed: false,
             ended: metadata.ended,
             metrics: metadata.metrics,
@@ -804,7 +818,6 @@ impl StreamOperator for CrossSectionOperator {
 
 impl CrossSectionOperator {
     fn observe_context(&self, context: &StreamOperatorContext<'_>) -> Result<()> {
-        super::late_output::ensure_execution_enabled(self.spec.late_policy, context.operator_id())?;
         super::late_output::ensure_can_continue(
             self.state.late_output_failed,
             context.operator_id(),
@@ -3179,7 +3192,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_side_output_direct_execution_stays_disabled() {
+    async fn test_side_output_direct_execution_completes_both_ports() {
         let mut spec = valid_spec();
         spec.late_policy = LatePolicySpec::SideOutput {
             metrics_version: 1,
@@ -3201,28 +3214,22 @@ mod tests {
         );
         let context = StreamOperatorContext::new(&job, "features", None);
         let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
-        for error in [
-            operator
-                .process_data("input", batch, &context, &mut output)
-                .await
-                .unwrap_err(),
-            operator
-                .on_watermark(EventTime::from_micros(1), &context, &mut output)
-                .await
-                .unwrap_err(),
-            operator.on_end(&context, &mut output).await.unwrap_err(),
-        ] {
-            assert!(
-                error
-                    .to_string()
-                    .contains("late side output execution is not enabled"),
-                "{error}"
-            );
-        }
+        operator
+            .process_data("input", batch, &context, &mut output)
+            .await
+            .unwrap();
+        operator
+            .on_watermark(EventTime::from_micros(1), &context, &mut output)
+            .await
+            .unwrap();
+        operator.on_end(&context, &mut output).await.unwrap();
         assert!(output.drain("output").is_empty());
         assert!(output.drain("late").is_empty());
-        assert!(!operator.state.ended);
-        assert!(operator.state.last_input_watermark.is_none());
+        assert!(operator.state.ended);
+        assert_eq!(
+            operator.state.last_input_watermark,
+            Some(EventTime::from_micros(1))
+        );
     }
 
     #[test]
@@ -3806,6 +3813,7 @@ mod tests {
         descriptors: Vec<SegmentDescriptor>,
     ) -> CrossSectionSnapshotMetadata {
         CrossSectionSnapshotMetadata {
+            late_output: None,
             state_layout_version: CROSS_SECTION_STATE_LAYOUT_VERSION,
             configuration_hash: compiled.configuration_hash.clone(),
             state_schema_fingerprint: compiled.state_schema_fingerprint.clone(),
