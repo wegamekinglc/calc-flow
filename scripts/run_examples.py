@@ -47,6 +47,16 @@ def _commands(surface: str, *, include_services: bool = False) -> tuple[list[str
             ["cargo", "run", "-p", "calc-flow", "--example", name]
             for name in RUST_EXAMPLES
         )
+        commands.append(
+            [
+                "cargo",
+                "run",
+                "-p",
+                "calc-flow-connectors",
+                "--example",
+                "late_output_recovery",
+            ]
+        )
     return tuple(commands)
 
 

@@ -9,6 +9,30 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-13: Connect Python `with_late_output`/`LateOutputs` and Studio
+  to native rolling/cross-section side output. One Program iterator drains
+  paired TableExpr outputs sharing one state owner; local lateness/policy,
+  full stage-input diagnostics, explicit consumption, and single-stage
+  validation are preserved by lowering. Studio edits and preserves both
+  ports, schemas, routes, and Sink bindings, probes actual runtime support,
+  and rejects invalid projects before workers start. Normal computation
+  matches Drop; late rows retain occurrence order without Watermark/Idle,
+  while both routes join checkpoint epochs. Delivery is proved independently
+  for each output, with no cross-Sink transaction or temporary-iterator
+  restart guarantee.
+  **Rust 5.0.0 migration:** downstream exhaustive matches on `LatePolicySpec`
+  must handle `SideOutput { metrics_version, schema_version }`.
+  `OperatorMetadata` now requires `Any`, so implementations must use
+  `'static` types rather than borrowing non-static data. This is a breaking
+  source change from Rust 4.x. All workspace crates, Python core, Studio,
+  and frontend are 5.0.0; native internal crate dependencies are pinned
+  to `=5.0.0`, Studio requires `calc-flow-python>=5.0.0,<6`, and
+  `Cargo.lock`/`web-ui/package-lock.json` carry the aligned versions.
+  Project format 3, manifest v3, REST `/api/v3`, and old Error/Drop
+  serialization/checkpoint contracts remain unchanged. Enabling side output
+  requires a new lineage and an explicit source activation/replay boundary;
+  old checkpoints cannot restore historically discarded rows.
+
 - 2026-09-13: Enable native rolling/cross-section late-output execution and
   durable recovery. Diagnostic branches and their supported expression/SQL
   derivatives carry data, barriers, and end-of-input without watermark or idle

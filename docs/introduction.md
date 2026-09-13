@@ -25,6 +25,9 @@ local browser interface.
 - Iterate Arrow results from async sources with native state across batches:
   [streaming guide](streaming-guide.md#first-python-continuous-job). Use explicit
   sources, sinks, and managed checkpoints for durable recovery.
+- Route rolling/cross-section late input rows to a separate diagnostic table
+  with [`LateOutputs`](streaming-guide.md#route-late-rows), consuming both
+  branches through one Program.
 - Persist strict JSON/YAML projects and use registered file, Kafka, PostgreSQL,
   MySQL, ClickHouse, HTTP, or WebSocket connectors:
   [projects](projects-guide.md) and [connectors](connectors/README.md).

@@ -110,7 +110,12 @@ merge.
   unit tests and the Python suite under `python/tests/`. Run `uv sync --extra
   dev`, then use `uv run python scripts/run_rust_tests.py` to test the core
   targets normally and the compiled PyO3 test executable serially with its
-  runtime-only timeout. Enforce the 90% line floor with
+  runtime-only timeout. Pass `--no-run` to precompile the selected native
+  targets without executing tests, then run the normal command with the same
+  build settings and target directory. The normal command retains doctests
+  and tests that compile fixtures. Linux CI gives precompilation and normal
+  execution separate 30-minute steps; the three serial PyO3 runs retain their
+  five-minute limit per run. Enforce the 90% line floor with
   `scripts/run_rust_coverage.py` while the documented connector containers are
   available; it combines the ordinary workspace and real connector paths in
   one llvm-cov profile set.
@@ -194,6 +199,15 @@ type. SQL uses native schema planning and shares the expression graph; execution
 stays in Rust/DataFusion. SQL output has no inherited temporal ordering, and
 stream SQL accepts one alias with per-batch semantics.
 
+`with_late_output` declares immutable normal/late references to one native
+rolling/cross-section state owner; a Program consumes both through one iterator.
+The marker owns local policy/lateness and requires a single current stateful
+stage with existing-column operands and no upstream stateful stage.
+Late-derived paths permit only built-in single-input expression/SQL before
+sinks, carry no Watermark/Idle, and retain first-in, first-out (FIFO)
+Barrier/EOF ordering, aligned recovery, and per-output delivery.
+See [late-row routing](docs/streaming-guide.md#route-late-rows).
+
 Convenience `compute`/`collect` returns Arrow tables by logical names and creates
 a fresh batch plan per call. `TableExpr.stream` and `Program.stream` own a single
 native job with `async with` and `async for`, yielding tables or named
@@ -244,6 +258,8 @@ operational controls. Follow
   `StreamAsofJoinOperator` are stream-only.
   External operators resolve through lifecycle-specific factories in
   `ProviderRegistry`.
+  `OperatorMetadata: Send + Sync + Any` requires concrete operator types
+  to be `'static`.
 - `PipelineBuilder` consumes immutable graph-building steps. `compile_batch()`
   and `compile_stream()` validate endpoints, kinds, schemas, one-writer inputs,
   UDFs, cycles, deterministic topology, inputs/outputs, and fingerprint.

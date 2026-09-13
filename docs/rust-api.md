@@ -108,7 +108,10 @@ operators that implement both `BatchOperator` and `StreamOperator`;
 `NodeOperator` conversion from a boxed built-in, custom batch operator, or
 custom stream operator.
 
-Every operator implements `OperatorMetadata`. Custom finite operators implement
+Every operator implements `OperatorMetadata: Send + Sync + Any`, so concrete
+operator types must satisfy `'static`; they cannot borrow non-static data.
+The bound does not require an operator instance to live forever.
+Custom finite operators implement
 `BatchOperator`, whose `BatchOperatorContext` carries the run-scoped context;
 custom continuous operators implement `StreamOperator`, whose
 `StreamOperatorContext` carries the stream-job context, operator identity,
@@ -481,9 +484,15 @@ observe replay duplicates. The [file connector](connectors/file.md) describes
 transactional Parquet recovery. Project and manifest formats remain 3, with
 rolling writer layout 3 and cross-section state layout 1.
 
-Python expression compilation accepts only `late_policy="error"` or `"drop"`;
-use native specifications or a stream project for side output. ASOF and
-event-window lateness retain their separate operator contracts.
+Python declares paired outputs through
+[`with_late_output`](python-api.md#lateoutputs-and-local-late-policy).
+The global compilation argument still accepts only `late_policy="error"`
+or `"drop"`; the paired declaration selects SideOutput locally.
+ASOF and event-window lateness retain their separate operator contracts.
+The [streaming guide](streaming-guide.md#route-late-rows) gives the exact
+diagnostic schema, closing-coordinate rules, physical binding names, and
+resource/recovery boundaries. See the [5.0.0 changelog](../CHANGELOG.md#2026-09)
+for Rust source migration requirements.
 
 ## Bounded backward ASOF Join
 

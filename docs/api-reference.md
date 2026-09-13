@@ -291,8 +291,9 @@ diagnostic port has no watermark/idle progress, but participates in aligned
 checkpoints and recovery alongside normal output. Batch mode rejects this
 policy. The `error` object requires `scope: "envelope"`. See the
 [late-row policy contract](rust-api.md#late-row-policy-contract) for native
-ports, routing, recovery, and the Python expression interface, which still
-accepts only error/drop.
+ports, routing, and recovery. Python selects this policy locally through
+[`with_late_output`](python-api.md#lateoutputs-and-local-late-policy);
+the global compilation argument continues to accept only error/drop.
 
 Project v3 carries an explicit batch or stream runtime. Stream documents bind
 graph endpoints to exact connector and format identities, refer to named
@@ -357,6 +358,7 @@ caller-owned sequences and mappings.
 | `FeatureSet(features=())` / `.with_feature(name, value)`                              | Ordered uniquely named column expressions                                                                        |
 | `TableExpr.with_columns(features=None, /, **named)`                                   | Append a mapping, named expressions, or a feature set                                                            |
 | `Program(name, /, *, inputs=None, outputs=())`                                        | Declared inputs and outputs with the runtime-independent v1 fingerprint                                          |
+| `with_late_output(value, /, *, allowed_lateness_micros=0)`                            | Frozen `LateOutputs(output, late)`; both TableExpr references share one stream state owner and must be consumed  |
 | `Program.analyze(runtime=None, /, *, mode="batch")` / `.explain(...)`                 | Static analysis plus deterministic optimization, state, copy-boundary, and provider-cost fact rendering          |
 | `Program.compile_batch(runtime=None, /)` / `.compile_stream(runtime=None, /, *, ...)` | Optimize and cache supported row-local, stateful, matrix, and relational-DAG strict project-v3 plans             |
 | `AnalysisIssue` / `AnalysisResult`                                                    | Immutable findings with stable output/input-rooted paths                                                         |
@@ -519,6 +521,9 @@ manifest publication uses `CheckpointPublicationUnknownError`.
 The Rust crate, Python binding, Studio package, and frontend are versioned
 `5.0.0` in this checkout. Project format version `3` and checkpoint-manifest version `3` are
 separate protocol values from the package version.
+
+Rust source migration requirements and exact package dependencies are recorded
+in the [5.0.0 changelog](../CHANGELOG.md#2026-09).
 
 Projects accept strict format `3`; Studio serves `/api/v3`. See
 [projects and persistence](projects-guide.md) for validation and storage.

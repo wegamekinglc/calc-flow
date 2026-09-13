@@ -172,6 +172,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--cargo", default="cargo", help=argparse.SUPPRESS)
     parser.add_argument(
+        "--no-run",
+        action="store_true",
+        help="compile the Rust test matrix without executing tests",
+    )
+    parser.add_argument(
         "--python-timeout-seconds",
         type=_positive_float,
         default=DEFAULT_PYTHON_TIMEOUT_SECONDS,
@@ -186,12 +191,10 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(arguments: Sequence[str] | None = None) -> int:
-    options = _parser().parse_args(arguments)
-    core_status = _run(
+def _run_cargo_tests(cargo: str, *, no_run: bool) -> int:
+    compile_arguments = ["--no-run"] if no_run else []
+    commands = (
         [
-            options.cargo,
-            "test",
             "-p",
             "calc-flow",
             "--lib",
@@ -199,42 +202,40 @@ def main(arguments: Sequence[str] | None = None) -> int:
             "--tests",
             "--examples",
             "--all-features",
-        ]
-    )
-    if core_status != 0:
-        return core_status
-
-    connectors_status = _run(
+        ],
         [
-            options.cargo,
-            "test",
             "--locked",
             "-p",
             "calc-flow-connectors",
             "--all-features",
         ],
-    )
-    if connectors_status != 0:
-        return connectors_status
-
-    benchmark_status = _run(
         [
-            options.cargo,
-            "test",
             "--locked",
             "-p",
             "calc-flow",
             "--bench",
             "core",
             "--all-features",
-        ]
+        ],
     )
-    if benchmark_status != 0:
-        return benchmark_status
+    for command in commands:
+        status = _run([cargo, "test", *command, *compile_arguments])
+        if status != 0:
+            return status
+    return 0
+
+
+def main(arguments: Sequence[str] | None = None) -> int:
+    options = _parser().parse_args(arguments)
+    cargo_status = _run_cargo_tests(options.cargo, no_run=options.no_run)
+    if cargo_status != 0:
+        return cargo_status
 
     compile_status, python_executable = _compile_python_test(options.cargo)
     if compile_status != 0:
         return compile_status
+    if options.no_run:
+        return 0
     assert python_executable is not None
 
     python_command = [

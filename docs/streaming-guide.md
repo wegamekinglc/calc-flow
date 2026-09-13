@@ -18,6 +18,7 @@ On this page:
 - [Choose batch or stream](#choose-batch-or-stream)
 - [First Python continuous job](#first-python-continuous-job)
 - [Named streaming outputs](#named-streaming-outputs)
+- [Route late rows](#route-late-rows)
 - [Stream ownership and SQL boundaries](#stream-ownership-and-sql-boundaries)
 - [Explicit connectors and recovery](#explicit-connectors-and-recovery)
 - [Source contract](#source-contract)
@@ -171,6 +172,265 @@ The stream preserves each output's order without promising a total order
 between independent outputs or synchronized dictionaries across branches.
 The example accumulates values for verification; that is not required by the
 stream interface.
+
+## Route late rows
+
+`cf.with_late_output(value, /, *, allowed_lateness_micros=0)` returns an
+immutable `LateOutputs` pair. Its `output` and `late` are two `TableExpr`
+references to one native rolling or cross-section state node. Name both in a
+`Program`, and drain its single iterator. Each branch applies backpressure;
+consuming only the normal branch is rejected before the source opens.
+
+This complete example runs with the current Python package. Save it as
+`late_demo.py`, then run `python late_demo.py` or `python -O late_demo.py`:
+
+```python
+import asyncio
+from datetime import UTC, datetime, timedelta
+import pyarrow as pa
+import calc_flow as cf
+
+base = datetime(2026, 1, 1, tzinfo=UTC)
+schema = pa.schema([
+    pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
+    pa.field("symbol", pa.string(), nullable=False),
+    pa.field("seq", pa.uint64(), nullable=False),
+    pa.field("x", pa.float64()),
+])
+events = cf.table_input("events", schema=schema,
+                       entity_by=["symbol"], event_time="ts", sequence_by=["seq"])
+calculation = events.with_columns(avg=cf.ts.mean(events["x"], window=cf.rows(2)))
+routed = cf.with_late_output(calculation)
+program = cf.Program("late-demo", outputs={"normal": routed.output, "late": routed.late})
+
+async def batches():
+    yield cf.Watermark(base + timedelta(microseconds=1))
+    yield pa.table({"ts": [base, base + timedelta(microseconds=2)],
+                    "symbol": ["a", "a"], "seq": [0, 1], "x": [10.0, 20.0]},
+                   schema=schema)
+    yield cf.Watermark(base + timedelta(microseconds=2))
+
+async def main():
+    values = {"normal": [], "late": []}
+    async with program.stream({"events": batches()},
+                              watermarks=cf.SourceProvidedWatermarks()) as results:
+        async for event in results:
+            values[event.name].extend(event.table["x"].to_pylist())
+    if values != {"normal": [20.0], "late": [10.0]}:
+        raise RuntimeError(values)
+
+asyncio.run(main())
+```
+
+The example uses `SourceProvidedWatermarks` and this trace, with times relative
+to its UTC base: `W=1µs → [t=0,x=10; t=2,x=20] → W=2µs`.
+With zero allowed lateness, it checks `late=[10.0]` and `normal=[20.0]`.
+The explicit `RuntimeError` check remains active under Python optimization.
+The async context owns the job and removes temporary state after cleanup.
+This iterable example demonstrates routing; durable restart requires the
+explicit bindings described below.
+The formatted, standalone [26_late_side_output.py](../examples/26_late_side_output.py)
+includes the same checks and a 30-second deadline. Run it with
+`uv run --no-sync python examples/26_late_side_output.py`, or add `-O` after
+`python` to verify optimized execution.
+
+The selected stage must be one current rolling or cross-section
+`with_columns` or `filter` stage, with stateful operands referencing existing
+columns of that stage's input. Row-local precomputation can create those
+columns. Nested stateful operands, mixed rolling/cross-section families,
+incompatible cross-section grouping, or an already-stateful input are rejected
+with `ambiguous_late_stage`. Batch collection/compilation is unsupported.
+The [Python reference](python-api.md#lateoutputs-and-local-late-policy) defines
+the declaration and local-policy precedence.
+
+### Closing coordinates and normal output
+
+Let `t` be event time, `L` allowed lateness, and `W` the operator's current
+input watermark. The closing coordinate `C` is `t + L` for rolling and
+exact-time cross-section groups, or `bucket_end + L` for fixed-bucket
+cross-section groups. A row arriving with `C <= W` is late; equality is late.
+Without a watermark there is no watermark-based late classification.
+Overflow and invalid time/identity values remain errors.
+
+Normal output has the same calculation, schema, finality, and ordering as
+`Drop` with the same settings. Late rows are excluded from normal state.
+Side output does not retract results, reopen groups, or automatically feed
+rows back into a calculation. It applies only to rolling/cross-section streams;
+ASOF, fixed-window assignment dropping, session windows, null/duplicate
+quarantine, and array/provider execution do not acquire a late side output.
+
+### Diagnostic rows and control messages
+
+The late table preserves every input field at the selected operator boundary,
+including fields computed upstream, followed by the nine non-null fields below.
+It contains the operator's input rows, rather than the original source schema
+or the normal calculation's added output columns. The caller's `Batch` remains
+unchanged. Input field names beginning with `_cf_late_` are reserved whenever
+side output is enabled.
+
+| Field                          | Arrow type | Meaning                                                     |
+|--------------------------------|------------|-------------------------------------------------------------|
+| `_cf_late_node`                | `string`   | Native state node ID                                        |
+| `_cf_late_input_port`          | `string`   | `input`                                                     |
+| `_cf_late_event_time_micros`   | `int64`    | Row event time in UTC microseconds                          |
+| `_cf_late_closing_time_micros` | `int64`    | Closing coordinate `C`                                      |
+| `_cf_late_watermark_micros`    | `int64`    | Watermark `W` used for classification                       |
+| `_cf_late_reason`              | `string`   | `late_row`                                                  |
+| `_cf_late_source`              | `string`   | Input envelope's metadata source                            |
+| `_cf_late_sequence`            | `uint64`   | Input envelope's metadata sequence                          |
+| `_cf_late_row_index`           | `uint64`   | Zero-based row offset across that envelope's record batches |
+
+These fields describe an input occurrence at an operator boundary. They are
+neither a global deduplication key nor a replay cursor. The late output
+`Batch` has its own sequence, persisted independently in checkpoints;
+`_cf_late_sequence` remains the input metadata sequence.
+
+At source admission, `StreamingRunner` replaces the source-provided metadata
+source and sequence with the physical source binding ID and the runtime's
+per-source sequence. Diagnostics copy the metadata that reaches the selected
+operator, so a directly connected source uses those runtime-assigned values.
+The source's original `Batch` remains unchanged.
+
+Raw late rows retain input occurrence order, including repeated late
+occurrences. They are not sorted by event time. Neither `Watermark` nor
+`Idle` propagates down this branch. FIFO `Barrier` and EOF still propagate,
+and a branch with no late rows still participates in each checkpoint epoch.
+There is no total arrival order across normal and late outputs.
+
+A late branch can end at a Sink or pass through built-in single-input table
+expressions or per-batch SQL before a Sink. Temporal successors, Union,
+multi-input merges, external operators, and array paths are rejected, including
+after an allowed transform. Per-batch SQL results follow the SQL contract:
+`COUNT(*)`, for example, depends on chunk boundaries and does not inherit
+the raw late port's row-level equivalence across different chunk sizes.
+`late_rows` counts rows excluded from normal computation; observe Sink/edge
+metrics for delivered rows.
+
+### Logical names and physical bindings
+
+| Surface                                          | Normal output   | Late output   |
+|--------------------------------------------------|-----------------|---------------|
+| Example Program and `StreamOutput.name`          | `normal`        | `late`        |
+| That Program's compiled Sink bindings            | `normal.output` | `late.output` |
+| Single native state node with both ports exposed | `output`        | `late`        |
+
+The Program lowers to one state owner plus named expression exits. The
+unconnected ports of those exits determine the qualified physical names.
+A single native state node instead exposes two uniquely named ports.
+Inspect the actual plan's `source_binding_ids` and `sink_binding_ids`;
+additional topology can change qualification. Python logical aliases are
+translated by `Program.stream` and are not serialized into exported projects.
+
+For a graph-only plan, supply the physical bindings and a stable
+`ManagedCheckpointRuntime` to `StreamingRunner`. For a connector-backed
+project, complete its `sources`, `sinks`, and state configuration, compile
+with `compile_stream_project`, and launch `StreamingRunner(plan)`.
+That plan already owns its bindings; duplicate external Source/Sink,
+checkpoint, or config arguments are rejected.
+
+### Failure and resource boundaries
+
+Input validation covers the whole envelope before emitting any late chunk
+or installing accepted state, metrics, or sequence changes. A later invalid
+row, accepted duplicate identity, oversized diagnostic row, or scratch-budget
+failure rejects the envelope without leaking an earlier valid late row.
+
+A send that fails or is cancelled after some chunks were delivered terminates
+the job. Live callback retry is forbidden; recover from the last compatible
+durable cut. Already delivered output cannot be rolled back by the operator,
+and two sinks are not guaranteed to become visible simultaneously.
+
+Each edge has logical row/envelope and byte budgets. Late planning also checks
+its scratch row/byte budget and preflights every diagnostic row, including
+appended fields, before sending. It materializes bounded chunks as it emits.
+A batch that fits the source edge can still exceed the diagnostic or scratch
+limit. These budgets do not cap all retained operator state, application-held
+results, or process RSS.
+
+Callback completion releases its owned input/plan references. Arrow backing
+allocations can remain alive through queued outputs, downstream callbacks, or
+sinks until the last shared reference is released. Falling charged-byte
+counters therefore do not prove physical memory was reclaimed. Side output
+adds classification, diagnostics, and delivery work; no throughput improvement
+is implied.
+
+### Durable recovery of both branches
+
+Enabling a new policy or changing ports, schema, node identity, or topology
+requires a new lineage. Choose and record the source position where the new
+policy begins and a new stable state root. Keep historical replays in isolated
+outputs, or explicitly choose and validate Sink deduplication. Never copy or
+rename old `Drop`/`Error` checkpoints to impersonate compatible state;
+previously discarded rows can only be obtained from retained source history.
+
+Use a lossless replayable Source with real pause/report/seek evidence and
+reproducible data, control, and watermark traces. Keep plan, source, Sink, and
+state identities stable for every restart. A generated iterable counter cannot
+stand in for this replay contract.
+
+Bind an independent existing [file Sink](connectors/file.md) to each physical
+output. Each has its own output directory and stable identity. Both participate
+in aligned epochs, even when the late epoch is empty. A successful
+`trigger_checkpoint_async()` identifies the durable cut from which a fresh
+compatible plan and runner can resume. Terminal recovery completes without
+reopening ended sources or repeating final output.
+
+Verify the two output directories independently across the durable cut,
+an empty late epoch, and terminal restart. Ordinary sinks can repeat writes
+after recovery. Stronger delivery requires a proof for each output's complete
+Source/operator/Sink route; inspect each requested/effective guarantee.
+Transactional file sinks provide their own epoch protocol, not a distributed
+transaction across two destinations. The temporary state of `Program.stream`
+does not provide persistent restart or exactly-once application delivery.
+
+### Run the file recovery example
+
+The complete native
+[late_output_recovery.rs](../crates/calc-flow-connectors/examples/late_output_recovery.rs)
+uses the public Rust `StreamSource` and existing `TransactionalParquetSink`.
+Python's built-in file sinks are bound as part of a complete connector project;
+that plan cannot accept a separate Python Source binding. This native example
+supplies the replayable source and both file sinks explicitly, with no new API.
+Its single rolling node exposes source `input` and sinks `output` and `late`.
+
+From the repository root, these commands run three separate processes:
+
+```bash
+cargo run -p calc-flow-connectors --example late_output_recovery -- cut target/late-files-v1
+cargo run -p calc-flow-connectors --example late_output_recovery -- resume target/late-files-v1
+cargo run -p calc-flow-connectors --example late_output_recovery -- verify target/late-files-v1
+```
+
+Use a previously absent root; `cut` refuses an existing directory. It writes
+the immutable `trace-v1.json` and starts this new SideOutput lineage at source
+offset zero. That trace is `W=10 → [t=20] → W=30 → [t=6,t=40] → W=50`, in UTC
+microseconds, with `x=t` and zero allowed lateness. The source pauses after the
+first data envelope and reports next offset 2 in its cursor. A completed
+checkpoint commits epoch 1 in both `outputs/normal` and `outputs/late`;
+both manifests have zero rows because `t=20` is still buffered. The job is
+then cancelled and its tasks and queue credits settle.
+
+`resume` constructs fresh source, plan, sinks, and managed state at that same
+root. It checks that the source opens at offset 2. Separate Parquet reads check
+normal `(ts,seq)=[(20,0),(40,11)]` and late `[(6,10)]`. The normal lag of `x`
+is null at 20 and 20 at 40, proving the pre-cut state survives; the late row's
+diagnostics contain source `input`, sequence 1, and row index 0. Although the
+source constructs batches with metadata source `trace-v1`, runtime admission
+replaces it with the physical binding ID `input` before the rolling node sees
+the envelope.
+`verify` starts another runner against the terminal checkpoint, checks
+`Source.open=0` and the unchanged terminal epoch, and compares committed file
+names and bytes in each output directory before and after restart. Each route's
+requested and effective delivery is checked separately as exactly once.
+
+Keep the trace, plan and policy, state root, and both output identities stable
+between commands. A changed trace is rejected; a changed policy needs a new
+root and an explicit activation position. These commands retain their dedicated
+root for inspection. Once finished, remove only that demo directory with
+`rm -r target/late-files-v1` in Bash or
+`Remove-Item -Recurse target/late-files-v1` in PowerShell. Running the example
+without arguments performs all three phases in a temporary root and removes
+it on exit; only the explicit-root commands demonstrate process restarts.
 
 ## Stream ownership and SQL boundaries
 
@@ -338,9 +598,10 @@ Bounded out-of-orderness names the event-time column, maximum delay, emission
 interval, and optional idle timeout. Durations must be positive. An explicit
 `BoundedOutOfOrderness` permits disorder without the default monotonic-arrival
 validation and publishes the native inclusive cutoff `max_seen - delay`.
-Convenience rolling/cross-section compilation keeps zero allowed lateness and
+Unmarked convenience rolling/cross-section stages use zero allowed lateness and
 the error policy: rows whose native closing coordinate is at or before the
-published watermark fail rather than being silently dropped. Window and join operators retain
+published watermark fail. A stage declared with `with_late_output` uses its
+local side-output policy and allowed lateness. Window and join operators retain
 their separately documented late-data rules.
 
 With `watermarks=SourceProvidedWatermarks()`, an iterable may yield existing

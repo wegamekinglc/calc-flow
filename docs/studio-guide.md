@@ -58,6 +58,39 @@ controls correspond to the lifecycle demonstrated by
 [08_streaming_recovery.py](../examples/08_streaming_recovery.py); their in-memory
 Python connector objects are not serialized into Studio projects.
 
+## Configure late side outputs
+
+Import a complete stream project or select a rolling/cross-section node and
+choose **Side output** under **Late row policy**. The runtime must confirm
+support for that operator. Studio obtains this through validation probes and
+exposes it in `GET /api/v3/capabilities` as
+`runtime.lateOutput.operators`, with `schemaVersion` and `metricsVersion`
+equal to 1; a package version alone is not proof of support.
+
+The node shows separate `output` and `late` ports. Connect and bind both
+external routes in the stream configuration, using the physical names from the
+[project guide](projects-guide.md#late-side-output-projects). Validate, save,
+and export the project; its policy, exact schemas, edges, Sink bindings, and
+per-output delivery settings remain data in the project document.
+
+Changing policy is disabled while the late route is connected or bound;
+disconnect it and remove its Sink binding explicitly first. Switching to
+batch mode is disabled while side output is enabled. These controls preserve
+the configured late route. The inspector shows its local closing boundary and
+explains that late output has no event-time ordering or Watermark/Idle.
+Barrier/EOF still pass, including empty late epochs. Normal-node progress
+does not represent event-time progress on the late branch.
+
+The standard `POST /api/v3/jobs` body still supplies only `project_id`.
+Invalid projects fail before a worker starts. Project create/import/update
+errors retain the `422` validation envelope; validation issues carry
+`path`, `code`, and `message`. See
+[project diagnostics](projects-guide.md#late-side-output-projects).
+There is no raw late-row JSON preview: 64-bit diagnostic times and sequences
+remain in Arrow. `late_rows` counts excluded normal rows; Sink/edge metrics
+measure delivery. Two Sinks need independent delivery proofs and do not
+provide simultaneous cross-system visibility.
+
 ## Service limits
 
 Studio binds to loopback and is a local single-user application. Jobs run in

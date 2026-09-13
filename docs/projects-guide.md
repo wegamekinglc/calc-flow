@@ -105,6 +105,54 @@ reference. See [Python API](python-api.md#projects-and-persistence) for method
 usage and [architecture](design.md#project-and-registry-design) for storage
 and registry ownership.
 
+## Late side-output projects
+
+Rolling and cross-section stream nodes select
+`late_policy = {"kind": "side_output", "metrics_version": 1, "schema_version": 1}`
+inside `operator.spec`. Both versions must be exactly 1.
+Their derived ports are required Table `output` and `late`, each with an
+exact schema. Omitted/empty output-port declarations are derived; explicit
+declarations must match both names, required flags, and schemas. The late
+schema is the operator input plus the
+[nine diagnostic fields](streaming-guide.md#diagnostic-rows-and-control-messages).
+Input names beginning with `_cf_late_` are rejected for this policy.
+
+Export `LateOutputs` Programs with `to_project(mode="stream")`.
+For the [iterator example](streaming-guide.md#route-late-rows), logical
+`normal`/`late` outputs become named expression exits with physical bindings
+`normal.output`/`late.output`. The state's own ports remain `output`/`late`.
+A raw single-state-node graph with both ports exposed instead uses bare
+`output`/`late` bindings. Always inspect the plan or exported graph.
+
+Every external output needs a Sink binding, including late output with no data.
+Use independent directories and stable output identities for two
+[file Sinks](connectors/file.md). Configure `delivery` on each binding and
+check its effective guarantee; an ordinary late Sink does not inherit a
+normal branch's exactly-once guarantee.
+
+Connector-backed compilation owns these Source/Sink bindings and state
+settings, so launch with `StreamingRunner(plan)`. Supplying the same bindings
+again as runner arguments is rejected. Graph-only `Program.compile_stream`
+instead requires application-owned bindings and managed checkpoints.
+
+Native validation applies to raw imported projects as well as Python exports.
+Late-derived edges may reach only built-in single-input expression/SQL nodes
+and Sinks. Temporal operators, Union, multi-input merges, external operators,
+and array paths fail with `temporal_output_unavailable`. The restriction
+follows the edge through allowed transforms; column names cannot override it.
+Batch mode fails with `unsupported_mode`. Invalid policy versions, reserved
+fields, and mismatched explicit schemas report `unsupported_version`,
+`reserved_field`, and `schema_mismatch`. Studio reports missing physical
+Sink coverage as `missing_binding`, with a path into the actual project.
+
+Keep a new stable lineage for each policy/topology change and explicitly
+record the source activation position and historical replay destination or
+deduplication choice. Old Error/Drop project serialization and checkpoint
+bytes retain their contract, but their checkpoints cannot initialize the new
+policy. See [two-branch recovery](streaming-guide.md#durable-recovery-of-both-branches).
+Project format 3, manifest version 3, and Studio REST `/api/v3` are independent
+of package version 5.0.0.
+
 ## Union and event-time windows
 
 Project v3 represents the built-in same-schema union directly:

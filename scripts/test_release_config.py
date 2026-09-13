@@ -450,6 +450,18 @@ class ReleaseConfigTests(unittest.TestCase):
         )[0]
         self.assertIn("timeout-minutes: 30", rust_test_step)
         self.assertIn(f"run: {rust_test_command}", rust_test_step)
+        self.assertIn("      - name: Compile Rust tests\n", rust_core)
+        compile_step = rust_core.split("      - name: Compile Rust tests\n", 1)[
+            1
+        ].split("      - name:", 1)[0]
+        self.assertIn("timeout-minutes: 30", compile_step)
+        self.assertIn(
+            "run: python3.13 scripts/run_rust_tests.py --no-run", compile_step
+        )
+        self.assertLess(
+            rust_core.index("      - name: Compile Rust tests\n"),
+            rust_core.index("      - name: Run Rust tests\n"),
+        )
 
     def test_rust_tests_and_coverage_run_in_parallel_jobs(self) -> None:
         workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
