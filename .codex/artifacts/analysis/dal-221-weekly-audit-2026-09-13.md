@@ -1,10 +1,10 @@
 # DAL-221 全仓 Markdown 与 agent 文本审计（2026-09-13）
 
-文档审计、SQL 修正和 late-output 主线适配已在提交 `b3cc07c8` 获得
-独立 Approve；该结论不覆盖后续测试及文案修订。现有 PR 为 #274，分支
+文档审计、版本合同测试与 CLAUDE 触发条件已在提交 `f23791e` 获得
+独立 Approve；该结论不覆盖后续 lint 和文档修订。现有 PR 为 #274，分支
 `docs/DAL-221-weekly-audit-2026-09-13`，目标 main。本轮从测试专员提交
-`5a1c8a37a4869f09b5dc1fa7ce63523801bd17ae` 继续，明确 CLAUDE 文档收口
-触发条件并更新证据，交回协调器安排最终 head 的统一复核。
+`ca36523c97734b3882644a52e6476e9e22fc431b` 继续，收口 Copilot 两条文档
+意见并更新证据，交回协调器安排最终 head 的统一复核及授权合并。
 agent 文本同步集合仍为空；本轮只改文档和证据，不修改测试、运行时、
 canonical agent 定义或 CI/Codacy 配置。新提交与快照随 issue 交接提供。
 
@@ -60,11 +60,11 @@ rebase 到该 main，保留 SQL 修正和无归因 trailer 的提交正文。
 134 份，最终逐文件清单、统计及新源文件哈希见 JSON。清单更新不代表
 重复执行整套语义、外链或示例审计。
 
-### PR 与 CI 收口的提交边界
+### 已审 PR 与 Codacy 收口（f23791e）
 
 独立评审评论 `01a0995f-ba46-766c-9fd9-20710797de6f` 于
 2026-09-13 06:06:22 UTC 对 `b3cc07c8b4cc206127cbd792f775a48361a50c7d`
-给出“Approve，阻断项清零”。本轮 fetch 后 main 仍为 `7b5c3e9`，PR head
+给出“Approve，阻断项清零”。该轮 fetch 后 main 仍为 `7b5c3e9`，PR head
 已前进到 `5a1c8a3`；工作树仅快进接收该测试提交，没有改写他人提交。
 
 测试专员在诊断评论 `01a0996d-c215-79f5-9fae-691b554a6460` 确认：
@@ -126,7 +126,7 @@ side output，Python symbolic lowerer 仍只接受 error/drop。
 为历史，并由新的启用/恢复条目承接。历史 spec/API note 中的旧阶段约束
 继续按首次审计已认可的工程记录边界保留，不改写为现行使用承诺。
 文档专员没有设计新示例、编辑示例程序、产品源码、测试或生成契约；
-测试文件的后续变化由上述 `5a1c8a3` 单独记录。
+测试文件的后续变化由 `5a1c8a3` 及下述 `ca36523` 单独记录。
 
 ### CHANGELOG 判定
 
@@ -138,7 +138,7 @@ side output，Python symbolic lowerer 仍只接受 error/drop。
 SQL 措辞与提交元数据修正不构成基本能力变更。主线增量收口为 `7b5c3e9` 已合入的
 执行、检查点元数据和恢复能力新增一条同日记录；项目/manifest 格式仍为
 3，rolling writer layout 仍为 3、cross-section state layout 仍为 1。
-本轮版本合同测试修复与 CLAUDE 触发条件澄清不构成基本能力变化，
+版本合同测试/lint 修复、CLAUDE 触发条件与本轮审计/SQL 澄清均不构成基本能力变化，
 不新增 CHANGELOG 条目。
 
 ### 已审的 P2 与提交归因修正（b3cc07c8）
@@ -221,8 +221,11 @@ MCP、名称、ID 及 squad 均没有写入。没有读取明文环境秘密。
   这是 schema 静态检查，不是 native 执行或恢复验收。
 - `python3 scripts/verify_python_release.py --version-only`：输出 `5.0.0`。
   `python3 scripts/run_examples.py --help`：入口正常，包含 surface/services 参数。
-- 所有变更文档内 Python/Rust/JSON/YAML 示例代码块与基线相同；只删除 Rust
-  参考页旧的 registry 安装命令，没有重写应用示例。
+- `facts.unchanged_example_blocks` 仅比较 Python/Rust/JSON/YAML 应用示例，
+  这些代码块与基线相同，不代表所有 fenced block 均未变。安装/构建命令的
+  唯一变化是 `docs/rust-api.md` 的 `Build and document` Bash 块删除
+  `cargo add calc-flow@4.0.0`；另有 CLAUDE 的 `text` 架构图补入 connector。
+  未重写应用示例，也未验证被删除的 registry 安装命令。
 - `git diff --check` 通过；生成 schema、OpenAPI、TypeScript contract 无 diff。
   变更文件表格已对齐，无尾随空白，均有末尾换行。基线其余 18 份历史工程/
   测量记录的 73 个表格存在排版遗留，已逐项记录，不为本轮重排历史。
@@ -256,9 +259,9 @@ MCP、名称、ID 及 squad 均没有写入。没有读取明文环境秘密。
 - 未重试两个 403，未重复整套审计，未运行产品测试、构建或性能门禁。
   推送后最多一次非阻塞 CI 快照，结果随交接提供，不等待或轮询。
 
-## 本轮 Codacy 文案与证据检查
+## 已审 Codacy 文案与证据检查（f23791e，本轮复用）
 
-最新汇总为 **134 份 Markdown、52,279 行**，837 处本地链接、63 处外链，
+该提交汇总为 **134 份 Markdown、52,279 行**，837 处本地链接、63 处外链，
 51 份源文件证据。本轮重新核验 19 处本地出站链接/锚点，入站引用为 0。
 
 - 仅核验 CLAUDE 与本报告的链接/锚点、入站引用、表格、尾随空白和末尾
@@ -271,15 +274,53 @@ MCP、名称、ID 及 squad 均没有写入。没有读取明文环境秘密。
 - 更新现有 PR #274 的描述，补记版本合同测试修复、定向验证和评审边界。
   推送后最多获取一次非阻塞 CI 快照，不等待、轮询或重跑 CI。
 
+## 本轮 Copilot 意见与 lint 证据收口
+
+本轮 fetch/ls-remote 确认 main 仍为 `7b5c3e912f3df11bccbafcddff546dc278abee4e`，
+PR head 为 `ca36523c97734b3882644a52e6476e9e22fc431b`，工作树干净后仅快进接收。
+Copilot review `5189811036` 针对 `b3cc07c8` 的两条 suppressed 文档意见均已处理：
+
+- 代码块表述：上述应用示例比较本身有效，但不能推广到 Bash 和 `text`。
+  对照本 PR 受改 Markdown 的实际 fenced-block diff，列明 Rust 安装行删除
+  和 CLAUDE 架构图两项例外；“所有代码块不变”及“所有 fenced block 只有
+  一个例外”均不适用。JSON 增补语言范围和例外的前后内容哈希。
+- AVG-only 边界：意见有效。`CalcFlowQueryPlanner::create_physical_plan`
+  在任意逻辑 fallback 或没有 candidate 时直接返回 DataFusion plan；
+  只有通过逻辑资格后才进入 `transform_up`。逻辑层拒绝的 filter、distinct、
+  cast 等不能保留局部改写。逻辑合格后物理 shape 未覆盖全部 candidate 时，
+  COUNT 路径返回 `original` 并清零，AVG-only 才可保留 `transformed.data`。
+  Rust 参考页已补足该前提，与详细边界一致；源码和数值语义未改。
+
+测试专员在评论 `01a09998-9d58-7f00-b146-dc8a31b35484` 确认，后续 CI 的
+Ruff E501 是 `5a1c8a3` 新增断言字符串长 89 列、超过 88 列的测试 lint 问题；
+job 停在 `ruff check .`，后续测试未运行。`ca36523` 仅将字符串拆为两个相邻
+字面量，1 个文件、2 行新增/1 行删除；不是生产缺陷，也没有放宽断言或门禁。
+复用该提交实际结果，以下命令均退出 0：
+
+- `UV_CACHE_DIR=target/uv-cache uv tool run --from ruff==0.16.0 ruff check scripts/test_release_config.py`：All checks passed!
+- `UV_CACHE_DIR=target/uv-cache uv tool run --from ruff==0.16.0 ruff format --check scripts/test_release_config.py`：1 file already formatted。
+- `python3.13 -m unittest scripts.test_release_config.ReleaseConfigTests.test_normative_docs_use_final_package_and_project_versions`：1 项、0.002 秒、OK。
+- `git diff --check`：通过；测试专员另以 `ast.dump(ast.parse(...))` 比较修订前后
+  整个测试文件，AST 完全相同。以上检查本轮不重跑；本轮只改文档叙述与证据，
+  被测版本/安装文本、示例和测试逻辑保持原值。
+
+本轮仅核验 Rust 参考页和本报告的链接/锚点、入站引用、表格、空白及末尾换行，
+更新这两份 Markdown 和继承的测试文件 SHA-256，核对 JSON 与实际字节一致。
+其余 132 份 Markdown、原 50 项源证据、agent 字段和有效静态检查按未变范围复用。
+最新清单汇总为 **134 份 Markdown、52,323 行**，837 处本地链接、63 处外链、
+51 份源文件证据；聚合既有清单，不重复全仓审计。提交/diff/trailer 及推送后的
+唯一非阻塞 CI 快照随交接提供；不等待、轮询或触发重跑。
+
 ## 评审与剩余事项
 
-`b3cc07c8` 的 SQL、归因和主线适配已有独立 Approve；`5a1c8a3` 的测试
-修复及本轮文档/证据修订尚待最终 head 的统一复核，不沿用旧 Approve
-宣称新 head 已审。本轮开始时协调器报告平台快照仍有 Codacy 失败，合并
-阻断保留；定向 unittest 通过不等于 wheel 构建、安装或 CI 全部通过。
+独立评审评论 `01a09984-ea96-7057-9269-5fd754cad6bf` 已对 `f23791e55abe407b59e2de39b1c53f46f823d810`
+给出 Approve、评审阻断项 0；该结论不覆盖后续 `ca36523` 和本轮文档修订。
+定向 unittest 与 lint 通过不等于 wheel 构建、安装或 CI 全部通过。
 Coveralls 和 crate registry 的 403 是外部
 核验限制，保留原始状态，未声明通过。例子语法检查不替代运行结果，静态
 审计不证明产品行为、覆盖率、发布安装或性能门禁通过。
 
-交回协调器安排 `cf-reviewer` 统一复核现有 PR #274 的最终 head。本 issue
-保持 `in_progress`；没有创建新 PR、合并或触发其他成员。
+用户评论 `01a09992-05dd-7604-b353-f38208c0e758` 已授权修复全部问题并合并，
+覆盖先前禁止合并的交付限制。交回协调器安排 `cf-reviewer` 复核最终 head、
+关闭已修复的版本测试讨论，并在最终评审与门禁通过后安排合并。本阶段没有
+创建 PR、合并或触发其他成员，issue 保持 `in_progress`。

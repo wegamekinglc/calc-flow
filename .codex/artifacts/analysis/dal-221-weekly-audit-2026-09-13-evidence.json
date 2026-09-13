@@ -3,7 +3,7 @@
   "baseline": "7b5c3e912f3df11bccbafcddff546dc278abee4e",
   "branch": "docs/DAL-221-weekly-audit-2026-09-13",
   "recorded_at": "2026-09-13T05:18:08.186295+00:00",
-  "scope": "Approved b3cc07c8 audit retained; inherited 5a1c8a3 version-contract test fix recorded; only two Markdown files and evidence refreshed for explicit CLAUDE documentation triggers",
+  "scope": "Copilot documentation clarification on ca36523: distinguish application examples from changed Bash/text fences, qualify logically eligible AVG-only physical fallback, and refresh the inherited test lint hash and targeted results",
   "baseline_scan": {
     "inventory": [
       {
@@ -7123,8 +7123,8 @@
       },
       {
         "path": ".codex/artifacts/analysis/dal-221-weekly-audit-2026-09-13.md",
-        "sha256": "504330549afa54cc3bc62dd8977a2a9823fe987a833f0ce32501d28dd238c798",
-        "lines": 285
+        "sha256": "5e8cc264314559cef44a50438c5890bbbed3f03b25958c726a970d780eb7a70c",
+        "lines": 326
       },
       {
         "path": ".codex/artifacts/analysis/dal-5-5-2-acceptance-audit.md",
@@ -7638,8 +7638,8 @@
       },
       {
         "path": "docs/rust-api.md",
-        "sha256": "ce1c1232931866d3524f12e876121d0970d42c5fc62da0357d498bfc2d2155c4",
-        "lines": 708
+        "sha256": "22a9291a743c436510175090bee0a0568a84faed83021b76333d64840dfbdf9e",
+        "lines": 711
       },
       {
         "path": "docs/sql-datafusion-performance.md",
@@ -12152,77 +12152,77 @@
       },
       {
         "source": "docs/rust-api.md",
-        "line": 326,
+        "line": 329,
         "target": "#late-row-policy-contract",
         "resolved": "docs/rust-api.md",
         "result": "ok"
       },
       {
         "source": "docs/rust-api.md",
-        "line": 326,
+        "line": 329,
         "target": "symbolic-design.md#native-rolling-state",
         "resolved": "docs/symbolic-design.md",
         "result": "ok"
       },
       {
         "source": "docs/rust-api.md",
-        "line": 447,
+        "line": 450,
         "target": "../schemas/project-v3.schema.json",
         "resolved": "schemas/project-v3.schema.json",
         "result": "ok"
       },
       {
         "source": "docs/rust-api.md",
-        "line": 474,
+        "line": 477,
         "target": "connectors/file.md",
         "resolved": "docs/connectors/file.md",
         "result": "ok"
       },
       {
         "source": "docs/rust-api.md",
-        "line": 494,
+        "line": 497,
         "target": "asof-join-guide.md",
         "resolved": "docs/asof-join-guide.md",
         "result": "ok"
       },
       {
         "source": "docs/rust-api.md",
-        "line": 494,
+        "line": 497,
         "target": "design.md#bounded-backward-asof-join",
         "resolved": "docs/design.md",
         "result": "ok"
       },
       {
         "source": "docs/rust-api.md",
-        "line": 521,
+        "line": 524,
         "target": "streaming-guide.md#static-inputs",
         "resolved": "docs/streaming-guide.md",
         "result": "ok"
       },
       {
         "source": "docs/rust-api.md",
-        "line": 541,
+        "line": 544,
         "target": "../crates/calc-flow/examples/windowed_streaming.rs",
         "resolved": "crates/calc-flow/examples/windowed_streaming.rs",
         "result": "ok"
       },
       {
         "source": "docs/rust-api.md",
-        "line": 640,
+        "line": 643,
         "target": "../crates/calc-flow/examples/continuous_runtime.rs",
         "resolved": "crates/calc-flow/examples/continuous_runtime.rs",
         "result": "ok"
       },
       {
         "source": "docs/rust-api.md",
-        "line": 673,
+        "line": 676,
         "target": "streaming-guide.md",
         "resolved": "docs/streaming-guide.md",
         "result": "ok"
       },
       {
         "source": "docs/rust-api.md",
-        "line": 683,
+        "line": 686,
         "target": "../crates/calc-flow/examples/export_schema.rs",
         "resolved": "crates/calc-flow/examples/export_schema.rs",
         "result": "ok"
@@ -15102,7 +15102,38 @@
         "identical": true,
         "count": 0
       }
-    ]
+    ],
+    "unchanged_example_blocks_scope": {
+      "languages": [
+        "python",
+        "rust",
+        "json",
+        "yaml"
+      ],
+      "meaning": "Existing equality results apply to these application-example languages only; not all fenced blocks. No application examples redesigned or executed.",
+      "baseline": "7b5c3e912f3df11bccbafcddff546dc278abee4e",
+      "exceptions_outside_scope": [
+        {
+          "path": "CLAUDE.md",
+          "fence_index_zero_based": 2,
+          "language": "text",
+          "before_sha256": "07cec7371a410e050dbaf62262655b37400d19f67156ff7b5a61a71435ed573e",
+          "after_sha256": "d77581e897e124eb5d1d0d28ce61dc3a4dd61acfe25893df032d0371bd8bf0f3",
+          "before": "crates/calc-flow  (Rust core: Batch, graph compiler, DataFusion, runners, stores)\n  └─ crates/calc-flow-python  (PyO3 _native binding)\n       └─ python/calc_flow  (Python expressions, Arrow execution + integrations)\n            └─ web-ui/backend  (calc-flow-studio FastAPI, /api/v3, loopback only)\n                  └─ web-ui/src  (React + TypeScript + Vite + React Flow studio, via REST)\n",
+          "after": "crates/calc-flow  (Rust core: Batch, graph compiler, DataFusion, runners, stores)\n  ├─ crates/calc-flow-connectors  (trusted transport implementations)\n  └─ crates/calc-flow-python  (PyO3 _native binding)\n       └─ python/calc_flow  (Python expressions, Arrow execution + integrations)\n            └─ web-ui/backend  (calc-flow-studio FastAPI, /api/v3, loopback only)\n                  └─ web-ui/src  (React + TypeScript + Vite + React Flow studio, via REST)\n"
+        },
+        {
+          "path": "docs/rust-api.md",
+          "fence_index_zero_based": 0,
+          "language": "bash",
+          "before_sha256": "f8a87752dd0ddf008819bb99b79ce0b9969c2b82ff52777700a9a12dc3812e79",
+          "after_sha256": "745b8ef5522b189b5500085f08c6342c4f44740c54a517d54551978639061bb5",
+          "before": "cargo add calc-flow@4.0.0\ncargo test -p calc-flow --all-targets\nRUSTDOCFLAGS=\"-D warnings\" cargo doc -p calc-flow --no-deps\n",
+          "after": "cargo test -p calc-flow --all-targets\nRUSTDOCFLAGS=\"-D warnings\" cargo doc -p calc-flow --no-deps\n"
+        }
+      ],
+      "diff_basis": "Only Markdown already changed by this PR was compared for fenced-block differences; no whole-repository audit. The sole installation/build command change is deletion of the old cargo add line; the text architecture diagram is a separate non-command exception."
+    }
   },
   "late_policy_schema": [
     {
@@ -15665,7 +15696,7 @@
     },
     {
       "path": "scripts/test_release_config.py",
-      "sha256": "eeca82a6f08c513882c6661980224577b5d55095e7da44db644c830142aa4d0e"
+      "sha256": "501ae35d975c732c08c0343522d7dcfee3c77b0adcf2d4d00389eb4476ca8335"
     }
   ],
   "scope_notes": [
@@ -15674,7 +15705,7 @@
     "Missing literal tumbling-window.md paths in two Claude guides are explicit invocation examples; not broken Markdown links.",
     "18 historical files / 73 tables retain pre-existing pipe alignment differences.",
     "Coveralls project page and crates.io API respond 403; neither counted as verified accessible.",
-    "Independent Approve applies only to b3cc07c8. Existing PR #274 now includes the later test fix and documentation closeout, awaiting coordinator-arranged final-head review. No agent writes; CI/Codacy gates retained.",
+    "Independent Approve now covers f23791e only. Later ca36523 lint fix and current documentation increment require final-head review. User authorized merge after review and gates; this stage returns to coordinator without merging or agent writes.",
     "AST parsing is syntax/import surface evidence only, not runtime example execution."
   ],
   "checks": {
@@ -15686,7 +15717,7 @@
     "git_diff_check": "passed"
   },
   "initial_baseline": "f9b608559714cde474f883344835427778f584e3",
-  "updated_at": "2026-09-13T06:37:42.868488+00:00",
+  "updated_at": "2026-09-13T07:15:07.755509+00:00",
   "prior_review_revision": {
     "recorded_at": "2026-09-13T05:39:07.976452+00:00",
     "trigger_comment": "01a0993f-e005-70a2-bbb0-ee01b2b92e2b",
@@ -17900,5 +17931,508 @@
       "agent reads or writes"
     ],
     "delivery_proof": "New commit, artifact SHA-256, actual trailer check, diff check and the one post-push nonblocking CI snapshot are supplied in the issue handoff/proof attachment; no self-referential commit or JSON hash"
+  },
+  "codacy_closeout_revision_scope": {
+    "snapshot_commit": "f23791e55abe407b59e2de39b1c53f46f823d810",
+    "approval_comment": "01a09984-ea96-7057-9269-5fd754cad6bf",
+    "meaning": "Historical f23791e observations, hashes, counts and then-pending review state; the independent Approve now covers f23791e. Current inventory/source hashes are final_scan/source_evidence and current counts are copilot_closeout_revision.statistics."
+  },
+  "copilot_closeout_revision": {
+    "recorded_at": "2026-09-13T07:15:07.755509+00:00",
+    "trigger_comment": "01a09999-db2c-7674-a69d-f690bf4e6b8c",
+    "starting_head": "ca36523c97734b3882644a52e6476e9e22fc431b",
+    "confirmed_main": "7b5c3e912f3df11bccbafcddff546dc278abee4e",
+    "branch_update": "Fast-forward only; preserve tester commits",
+    "pr_url": "https://github.com/wegamekinglc/calc-flow/pull/274",
+    "reviewed_head": "f23791e55abe407b59e2de39b1c53f46f823d810",
+    "approval_comment": "01a09984-ea96-7057-9269-5fd754cad6bf",
+    "approval_boundary": "Approve covers f23791e only; later lint fix and this revision require final-head review",
+    "copilot_review": {
+      "id": 5189811036,
+      "commit": "b3cc07c8b4cc206127cbd792f775a48361a50c7d",
+      "source": "gh api repos/wegamekinglc/calc-flow/pulls/274/reviews; two suppressed comments in summary"
+    },
+    "resolutions": {
+      "fenced_blocks": "Clarified valid scope: Python/Rust/JSON/YAML examples unchanged. Bash installation block deletes cargo add calc-flow@4.0.0; CLAUDE text diagram adds connector. A claim that every fenced block is unchanged, or that only one fenced block changed, is not applicable to the actual diff.",
+      "avg_only": "Accepted: logical eligibility fallback returns the original DataFusion plan before transformation for all queries. Only logically eligible AVG-only queries can retain successful partial physical rewrites on physical-shape misses; COUNT restores original and clears the count on incomplete physical rewriting.",
+      "sql_basis": [
+        {
+          "path": "crates/calc-flow/src/datafusion_rolling.rs",
+          "sha256": "b5bd04a42f25470873b31395ef76c181765a6977e4a408f7ca2372eaad410bbb",
+          "unchanged_from_main": true
+        },
+        {
+          "path": "docs/sql-datafusion-performance.md",
+          "sha256": "b71e31ec71e486884cb0e12c4848e6856cf48dcb0501ad885a137b99e25363f2",
+          "unchanged_from_main": true
+        }
+      ]
+    },
+    "inherited_lint_fix": {
+      "owner": "cf-tester",
+      "commit": "ca36523c97734b3882644a52e6476e9e22fc431b",
+      "parent": "f23791e55abe407b59e2de39b1c53f46f823d810",
+      "path": "scripts/test_release_config.py",
+      "before_sha256": "eeca82a6f08c513882c6661980224577b5d55095e7da44db644c830142aa4d0e",
+      "sha256": "501ae35d975c732c08c0343522d7dcfee3c77b0adcf2d4d00389eb4476ca8335",
+      "results_comment": "01a09998-9d58-7f00-b146-dc8a31b35484",
+      "classification": "E501 89 > 88 in a newly added assertion; CI stopped at Ruff before subsequent tests, not a demonstrated product defect",
+      "change": "Split one assertion string into two adjacent literals; 2 insertions / 1 deletion, no assertion or gate removal",
+      "reused_results_not_rerun": [
+        {
+          "command": "UV_CACHE_DIR=target/uv-cache uv tool run --from ruff==0.16.0 ruff check scripts/test_release_config.py",
+          "exit_code": 0,
+          "result": "All checks passed!"
+        },
+        {
+          "command": "UV_CACHE_DIR=target/uv-cache uv tool run --from ruff==0.16.0 ruff format --check scripts/test_release_config.py",
+          "exit_code": 0,
+          "result": "1 file already formatted"
+        },
+        {
+          "command": "python3.13 -m unittest scripts.test_release_config.ReleaseConfigTests.test_normative_docs_use_final_package_and_project_versions",
+          "exit_code": 0,
+          "result": "Ran 1 test in 0.002s; OK"
+        },
+        {
+          "command": "git diff --check",
+          "exit_code": 0,
+          "result": "passed"
+        }
+      ],
+      "reused_ast_evidence": "Tester compared ast.dump(ast.parse(...)) for the entire file before/after the lint fix and reported equality; not rerun here",
+      "reuse_basis": "Test file and manifests unchanged since ca36523; Rust guide changes only SQL explanatory prose, preserving version/install assertions and code blocks. Audit files are not test inputs."
+    },
+    "changed_markdown": [
+      {
+        "path": "docs/rust-api.md",
+        "before": {
+          "path": "docs/rust-api.md",
+          "sha256": "ce1c1232931866d3524f12e876121d0970d42c5fc62da0357d498bfc2d2155c4",
+          "lines": 708
+        },
+        "after": {
+          "path": "docs/rust-api.md",
+          "sha256": "22a9291a743c436510175090bee0a0568a84faed83021b76333d64840dfbdf9e",
+          "lines": 711
+        }
+      },
+      {
+        "path": ".codex/artifacts/analysis/dal-221-weekly-audit-2026-09-13.md",
+        "before": {
+          "path": ".codex/artifacts/analysis/dal-221-weekly-audit-2026-09-13.md",
+          "sha256": "504330549afa54cc3bc62dd8977a2a9823fe987a833f0ce32501d28dd238c798",
+          "lines": 285
+        },
+        "after": {
+          "path": ".codex/artifacts/analysis/dal-221-weekly-audit-2026-09-13.md",
+          "sha256": "5e8cc264314559cef44a50438c5890bbbed3f03b25958c726a970d780eb7a70c",
+          "lines": 326
+        }
+      }
+    ],
+    "focused_links": {
+      "outbound": [
+        {
+          "source": "docs/rust-api.md",
+          "line": 3,
+          "target": "README.md",
+          "resolved": "docs/README.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/rust-api.md",
+          "line": 5,
+          "target": "python-api.md",
+          "resolved": "docs/python-api.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/rust-api.md",
+          "line": 13,
+          "target": "#build-and-document",
+          "resolved": "docs/rust-api.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/rust-api.md",
+          "line": 14,
+          "target": "#expression-pipeline",
+          "resolved": "docs/rust-api.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/rust-api.md",
+          "line": 15,
+          "target": "#sql-operators",
+          "resolved": "docs/rust-api.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/rust-api.md",
+          "line": 16,
+          "target": "#rolling-windows",
+          "resolved": "docs/rust-api.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/rust-api.md",
+          "line": 17,
+          "target": "#cross-section-statistics",
+          "resolved": "docs/rust-api.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/rust-api.md",
+          "line": 18,
+          "target": "#late-row-policy-contract",
+          "resolved": "docs/rust-api.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/rust-api.md",
+          "line": 19,
+          "target": "#bounded-backward-asof-join",
+          "resolved": "docs/rust-api.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/rust-api.md",
+          "line": 20,
+          "target": "#stream-compilation-and-continuous-runtime",
+          "resolved": "docs/rust-api.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/rust-api.md",
+          "line": 21,
+          "target": "#batches",
+          "resolved": "docs/rust-api.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/rust-api.md",
+          "line": 22,
+          "target": "#udfs-and-external-providers",
+          "resolved": "docs/rust-api.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/rust-api.md",
+          "line": 23,
+          "target": "#continuous-execution-and-recovery",
+          "resolved": "docs/rust-api.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/rust-api.md",
+          "line": 24,
+          "target": "#projects-and-stores",
+          "resolved": "docs/rust-api.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/rust-api.md",
+          "line": 25,
+          "target": "#errors-and-cancellation",
+          "resolved": "docs/rust-api.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/rust-api.md",
+          "line": 29,
+          "target": "../AGENTS.md#verification",
+          "resolved": "AGENTS.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/rust-api.md",
+          "line": 40,
+          "target": "../crates/calc-flow/examples/expression_pipeline.rs",
+          "resolved": "crates/calc-flow/examples/expression_pipeline.rs",
+          "result": "ok"
+        },
+        {
+          "source": "docs/rust-api.md",
+          "line": 119,
+          "target": "sql-datafusion-performance.md",
+          "resolved": "docs/sql-datafusion-performance.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/rust-api.md",
+          "line": 132,
+          "target": "../crates/calc-flow/examples/sql_join.rs",
+          "resolved": "crates/calc-flow/examples/sql_join.rs",
+          "result": "ok"
+        },
+        {
+          "source": "docs/rust-api.md",
+          "line": 140,
+          "target": "sql-datafusion-performance.md#rolling-rewrite-boundary",
+          "resolved": "docs/sql-datafusion-performance.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/rust-api.md",
+          "line": 329,
+          "target": "#late-row-policy-contract",
+          "resolved": "docs/rust-api.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/rust-api.md",
+          "line": 329,
+          "target": "symbolic-design.md#native-rolling-state",
+          "resolved": "docs/symbolic-design.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/rust-api.md",
+          "line": 450,
+          "target": "../schemas/project-v3.schema.json",
+          "resolved": "schemas/project-v3.schema.json",
+          "result": "ok"
+        },
+        {
+          "source": "docs/rust-api.md",
+          "line": 477,
+          "target": "connectors/file.md",
+          "resolved": "docs/connectors/file.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/rust-api.md",
+          "line": 497,
+          "target": "asof-join-guide.md",
+          "resolved": "docs/asof-join-guide.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/rust-api.md",
+          "line": 497,
+          "target": "design.md#bounded-backward-asof-join",
+          "resolved": "docs/design.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/rust-api.md",
+          "line": 524,
+          "target": "streaming-guide.md#static-inputs",
+          "resolved": "docs/streaming-guide.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/rust-api.md",
+          "line": 544,
+          "target": "../crates/calc-flow/examples/windowed_streaming.rs",
+          "resolved": "crates/calc-flow/examples/windowed_streaming.rs",
+          "result": "ok"
+        },
+        {
+          "source": "docs/rust-api.md",
+          "line": 643,
+          "target": "../crates/calc-flow/examples/continuous_runtime.rs",
+          "resolved": "crates/calc-flow/examples/continuous_runtime.rs",
+          "result": "ok"
+        },
+        {
+          "source": "docs/rust-api.md",
+          "line": 676,
+          "target": "streaming-guide.md",
+          "resolved": "docs/streaming-guide.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/rust-api.md",
+          "line": 686,
+          "target": "../crates/calc-flow/examples/export_schema.rs",
+          "resolved": "crates/calc-flow/examples/export_schema.rs",
+          "result": "ok"
+        },
+        {
+          "source": ".codex/artifacts/analysis/dal-221-weekly-audit-2026-09-13.md",
+          "line": 43,
+          "target": "dal-221-weekly-audit-2026-09-13-evidence.json",
+          "resolved": ".codex/artifacts/analysis/dal-221-weekly-audit-2026-09-13-evidence.json",
+          "result": "ok"
+        }
+      ],
+      "inbound": [
+        {
+          "source": "README.md",
+          "line": 73,
+          "target": "docs/rust-api.md",
+          "resolved": "docs/rust-api.md",
+          "result": "ok"
+        },
+        {
+          "source": "README.md",
+          "line": 258,
+          "target": "docs/rust-api.md",
+          "resolved": "docs/rust-api.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/README.md",
+          "line": 46,
+          "target": "rust-api.md",
+          "resolved": "docs/rust-api.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/api-reference.md",
+          "line": 18,
+          "target": "rust-api.md",
+          "resolved": "docs/rust-api.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/api-reference.md",
+          "line": 288,
+          "target": "rust-api.md#late-row-policy-contract",
+          "resolved": "docs/rust-api.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/connectors/file.md",
+          "line": 93,
+          "target": "../rust-api.md#late-row-policy-contract",
+          "resolved": "docs/rust-api.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/design.md",
+          "line": 223,
+          "target": "rust-api.md#rolling-windows",
+          "resolved": "docs/rust-api.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/design.md",
+          "line": 241,
+          "target": "rust-api.md#late-row-policy-contract",
+          "resolved": "docs/rust-api.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/design.md",
+          "line": 383,
+          "target": "rust-api.md",
+          "resolved": "docs/rust-api.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/getting-started.md",
+          "line": 107,
+          "target": "rust-api.md",
+          "resolved": "docs/rust-api.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/getting-started.md",
+          "line": 309,
+          "target": "rust-api.md",
+          "resolved": "docs/rust-api.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/getting-started.md",
+          "line": 357,
+          "target": "rust-api.md",
+          "resolved": "docs/rust-api.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/introduction.md",
+          "line": 112,
+          "target": "rust-api.md",
+          "resolved": "docs/rust-api.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/streaming-guide.md",
+          "line": 381,
+          "target": "rust-api.md",
+          "resolved": "docs/rust-api.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/symbolic-api.md",
+          "line": 514,
+          "target": "rust-api.md",
+          "resolved": "docs/rust-api.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/symbolic-api.md",
+          "line": 581,
+          "target": "rust-api.md",
+          "resolved": "docs/rust-api.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/symbolic-api.md",
+          "line": 641,
+          "target": "rust-api.md",
+          "resolved": "docs/rust-api.md",
+          "result": "ok"
+        },
+        {
+          "source": "docs/symbolic-design.md",
+          "line": 178,
+          "target": "rust-api.md#rolling-windows",
+          "resolved": "docs/rust-api.md",
+          "result": "ok"
+        }
+      ]
+    },
+    "focused_link_counts": {
+      "local_outbound": 32,
+      "external_not_requested": 0,
+      "inbound": 18
+    },
+    "style": "Both affected Markdown files have aligned pipe tables, no trailing whitespace and final newline; passed",
+    "rust_guide_fences_unchanged_this_increment": true,
+    "statistics": {
+      "markdown_files": 134,
+      "markdown_lines": 52323,
+      "by_root": {
+        ".agents": 1,
+        ".claude": 14,
+        ".codex": 68,
+        "benchmarks": 6,
+        "crates": 2,
+        "design": 2,
+        "docs": 33,
+        "examples": 1,
+        "root": 4,
+        "tests": 1,
+        "web-ui": 2
+      },
+      "local_links": 837,
+      "external_link_occurrences": 63,
+      "source_evidence_files": 51,
+      "unchanged_markdown_reused": 132
+    },
+    "reused_sections": [
+      "baseline_scan",
+      "external_links",
+      "package_lookup",
+      "late_policy_schema",
+      "agent_sync_plan",
+      "checks"
+    ],
+    "reuse_basis": "Git delta f23791e..ca36523 contains only the test lint fix. This increment changes only the Rust guide, report and JSON; 132 other Markdown inventory entries, 50 other source hashes and agent fields retained. Earlier checks retain observation times and scope.",
+    "not_rerun": [
+      "whole Markdown audit",
+      "external link requests including both 403 responses",
+      "tester Ruff/unittest/AST checks",
+      "product tests and builds",
+      "performance gates",
+      "agent reads or writes"
+    ],
+    "handoff": "Coordinator arranges final-head review, resolution of the fixed version-test discussion and authorized merge after gates. This stage does not merge or dispatch members; issue in_progress.",
+    "delivery_proof": "Actual commit, empty trailers, diff checks, artifact SHA-256 and sole post-push nonblocking CI snapshot are supplied in issue handoff/proof attachment to avoid self-reference"
   }
 }

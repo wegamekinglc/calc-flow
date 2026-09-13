@@ -142,10 +142,13 @@ windows and compatible same-column, same-frame `COUNT` guards through the
 crate-private `CalcFlowRollingExec`. AVG-only queries use the shared Native
 numerical profile; queries admitted by COUNT use SQL sum/count transitions
 throughout. The optimizer requires proven partition/order keys and sorted
-physical input. If physical rewriting cannot cover every candidate window in
+physical input. Any logical eligibility fallback keeps the original DataFusion
+plan for the whole query, including AVG-only queries. If physical rewriting
+cannot cover every candidate window in
 a query containing COUNT, the planner restores the original DataFusion plan
-and reports zero rewritten windows. AVG-only queries can retain successful
-partial physical rewrites while unsupported windows use DataFusion. See the
+and reports zero rewritten windows. Only logically eligible AVG-only queries
+can retain successful partial physical rewrites when other windows miss the
+supported physical shape and remain on DataFusion. See the
 [rolling rewrite boundary](sql-datafusion-performance.md#rolling-rewrite-boundary)
 for exact eligibility and numerical semantics. `DataFusionQueryMetric`
 reports the candidate/rewrite counts, stable fallback reasons, configured and
