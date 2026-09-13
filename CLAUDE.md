@@ -110,7 +110,12 @@ merge.
   unit tests and the Python suite under `python/tests/`. Run `uv sync --extra
   dev`, then use `uv run python scripts/run_rust_tests.py` to test the core
   targets normally and the compiled PyO3 test executable serially with its
-  runtime-only timeout. Enforce the 90% line floor with
+  runtime-only timeout. Pass `--no-run` to precompile the selected native
+  targets without executing tests, then run the normal command with the same
+  build settings and target directory. The normal command retains doctests
+  and tests that compile fixtures. Linux CI gives precompilation and normal
+  execution separate 30-minute steps; the three serial PyO3 runs retain their
+  five-minute limit per run. Enforce the 90% line floor with
   `scripts/run_rust_coverage.py` while the documented connector containers are
   available; it combines the ordinary workspace and real connector paths in
   one llvm-cov profile set.

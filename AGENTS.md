@@ -83,6 +83,13 @@ interpreter's library directory to the test process's loader path. Pass
 PyO3 build is configured with `PYO3_PYTHON`, invoke the harness through that
 same interpreter so its NumPy, PyArrow, and shared-library paths stay aligned.
 
+Pass `--no-run` to precompile the selected core, connector, benchmark, and
+PyO3 targets without executing tests. Run the normal command afterward with
+the same build settings and target directory; it retains doctests and tests
+that compile fixtures. Linux CI gives precompilation and normal execution
+separate 30-minute steps, retaining three serial PyO3 runs and the five-minute
+limit for each run.
+
 Run informational benchmarks with:
 
 ```bash
