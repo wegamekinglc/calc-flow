@@ -422,9 +422,10 @@ class Program:
     ) -> StreamExecutionPlan:
         """Lower this program to a strict project-v3 continuous plan.
 
-        The lateness arguments are validated and serialized into every lowered
-        rolling or cross-section stage. Row-local-only programs accept the same
-        compile signature but have no stateful late-row surface.
+        The lateness arguments configure unmarked rolling/cross-section stages;
+        with_late_output declarations retain their local policy and lateness.
+        Row-local-only programs accept the same compile signature but have no
+        stateful late-row surface.
         """
 
         from calc_flow.symbolic.lower import compile_program_stream

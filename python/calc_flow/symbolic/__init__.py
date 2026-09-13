@@ -17,6 +17,7 @@ from calc_flow.symbolic.expr import (
     parameter,
     table_input,
 )
+from calc_flow.symbolic.late_output import LateOutputs, with_late_output
 from calc_flow.symbolic.ops import cs, linalg, row, table, ts, window
 from calc_flow.symbolic.program import FeatureSet, Program
 from calc_flow.symbolic.sql import sql
@@ -44,6 +45,7 @@ __all__ = [
     "Expr",
     "FeatureSet",
     "Field",
+    "LateOutputs",
     "Parameter",
     "Program",
     "RowFrame",
@@ -63,4 +65,5 @@ __all__ = [
     "table_input",
     "ts",
     "window",
+    "with_late_output",
 ]

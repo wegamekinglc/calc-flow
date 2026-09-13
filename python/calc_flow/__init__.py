@@ -97,6 +97,7 @@ from calc_flow.symbolic import (
     Expr,
     FeatureSet,
     Field,
+    LateOutputs,
     Parameter,
     Program,
     RowFrame,
@@ -116,6 +117,7 @@ from calc_flow.symbolic import (
     table_input,
     ts,
     window,
+    with_late_output,
 )
 
 __version__ = "5.0.0"
@@ -137,6 +139,8 @@ __all__ = [
     "ColumnExpr",
     "TableExpr",
     "ArrayExpr",
+    "LateOutputs",
+    "with_late_output",
     "Parameter",
     "Field",
     "FeatureSet",

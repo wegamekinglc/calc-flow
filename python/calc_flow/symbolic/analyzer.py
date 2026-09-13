@@ -200,7 +200,12 @@ class _SQLRowOrigin:
     digest: str
 
 
-type _RowOrigin = str | _WindowRowOrigin | _SQLRowOrigin
+@dataclass(frozen=True, slots=True)
+class _LateRowOrigin:
+    digest: str
+
+
+type _RowOrigin = str | _WindowRowOrigin | _SQLRowOrigin | _LateRowOrigin
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,7 +306,7 @@ def _resolves_to_input_column(node: Node, /) -> bool:
 
 def _table_field_resolves_to_input(table: Node, field_name: str, /) -> bool:
     operation = table.op.name
-    if operation in ("table_input", "stream_join", "stream_asof_join"):
+    if operation in ("table_input", "stream_join", "stream_asof_join", "late_output"):
         return True
     if operation in ("project", "filter"):
         return _table_field_resolves_to_input(table.args[0], field_name)
@@ -334,7 +339,7 @@ def _stateful_operand_is_stageable(node: Node, /) -> bool:
 
 def _table_field_is_stageable(table: Node, field_name: str, /) -> bool:
     operation = table.op.name
-    if operation in ("table_input", "stream_join", "stream_asof_join"):
+    if operation in ("table_input", "stream_join", "stream_asof_join", "late_output"):
         return True
     if operation in ("project", "filter"):
         return _table_field_is_stageable(table.args[0], field_name)
@@ -592,6 +597,8 @@ class _Analyzer:
                 "window_tumbling",
                 "window_hopping",
                 "sql",
+                "late_output",
+                "late_rows",
                 "attach_columns",
                 "stream_join",
                 "stream_asof_join",
@@ -603,6 +610,10 @@ class _Analyzer:
 
     def _analyze_table(self, node: Node, path: str, /) -> TableFacts:
         name = node.op.name
+        if name in {"late_output", "late_rows"}:
+            from calc_flow.symbolic.late_output import analyze_late_table
+
+            return analyze_late_table(self, node, path)
         handler = {
             "table_input": self._table_declaration,
             "parameter": self._table_declaration,
@@ -2568,6 +2579,13 @@ def _run(
         root = _declaration_root(node)
         name = _cstr(node.attr("name")) or ""
         analyzer.check_input_declaration(node, root, name)
+    from calc_flow.symbolic.late_output import check_consumption, check_late_successors
+
+    before_late_checks = len(analyzer._issues)
+    if check_consumption(program, analyzer):
+        check_late_successors(program, analyzer)
+    if len(analyzer._issues) != before_late_checks:
+        return analyzer, capabilities
     _analyze_outputs(program, analyzer)
     if mode == "stream":
         _check_stream_ordering_for_inputs(program, analyzer)
