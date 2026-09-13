@@ -8,7 +8,7 @@ import { NodeInspector } from './NodeInspector';
 
 vi.mock('./SchemaEditor', () => ({
   SchemaEditor: ({ onChange }: { onChange: Dispatch<ArrowFieldConfig[]> }) =>
-    <button onClick={() => onChange(fields.output)}>Apply complete schema</button>,
+    <button onClick={() => { onChange(fields.output); }}>Apply complete schema</button>,
 }));
 
 const operator = (kind: 'rolling' | 'cross_section'): NodeConfig['operator'] => {

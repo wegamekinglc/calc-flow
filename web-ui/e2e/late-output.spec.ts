@@ -2,6 +2,12 @@ import { expect, test } from '@playwright/test';
 
 const projectsUrl = 'http://127.0.0.1:8765/api/v3/projects';
 
+test.use({
+  launchOptions: {
+    args: ['--disable-gpu', '--disable-software-rasterizer'],
+  },
+});
+
 test('imports, binds and validates both late-output ports without losing delivery', async ({ page, request }) => {
   const id = `late_output_${process.pid}`;
   const fields = [
@@ -57,7 +63,10 @@ test('imports, binds and validates both late-output ports without losing deliver
     await expect(outputs).toHaveCount(2);
     await expect(outputs.nth(0)).toHaveValue('output');
     await expect(outputs.nth(1)).toHaveValue('late');
-    await page.getByLabel('Delivery', { exact: true }).nth(1).selectOption('best_effort');
+    const deliveries = page.getByRole('combobox', { name: 'Delivery', exact: true });
+    await expect(deliveries).toHaveCount(2);
+    await deliveries.nth(1).selectOption('best_effort');
+    await expect(deliveries.nth(1)).toHaveValue('best_effort');
     await page.getByRole('button', { name: 'Stream', exact: true }).click();
     await expect(outputs.nth(1)).toHaveValue('late');
     await page.getByRole('button', { name: 'Validate', exact: true }).click();

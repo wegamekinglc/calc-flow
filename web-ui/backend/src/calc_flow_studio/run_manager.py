@@ -42,6 +42,7 @@ from calc_flow_studio.models import (
     CapabilitiesResponse,
     JobResponse,
     JSONValue,
+    LateOutputCapabilityResponse,
     LazyBuiltinWorkerRegistration,
     PreviewCapabilitiesResponse,
     PreviewLimit,
@@ -237,12 +238,10 @@ def _capabilities_response(
     snapshot: RuntimeCapabilities,
     registrations: tuple[RegistrationRecord, ...],
     lazy_builtins: tuple[LazyBuiltinIdentity, ...],
-    late_operators: tuple[str, ...] = (),
 ) -> CapabilitiesResponse:
     runtime_document = asdict(snapshot)
     runtime_document.pop("schema_version")
     runtime_document["scope"]["kind"] = "runtimeSession"
-    runtime_document["late_output"] = {"operators": late_operators}
     parent_identities = {
         (
             (
@@ -1295,7 +1294,16 @@ class RunManager:
                 snapshot,
                 registrations,
                 self._lazy_builtins,
-                supported_late_operators(self._runtime),
+            )
+            late_output = LateOutputCapabilityResponse(
+                operators=supported_late_operators(self._runtime)
+            )
+            response = response.model_copy(
+                update={
+                    "runtime": response.runtime.model_copy(
+                        update={"late_output": late_output}
+                    )
+                }
             )
 
             with self._lock:
