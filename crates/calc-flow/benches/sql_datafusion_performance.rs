@@ -1495,7 +1495,7 @@ fn write_report(path: &Path, report: &Report) -> BenchResult<()> {
 
 #[cfg(test)]
 fn run_output_anchor_tests() -> BenchResult<()> {
-    let absolute = std::env::temp_dir().join("evidence.json");
+    let absolute = workspace_root()?.join("evidence.json");
     assert_eq!(resolve_output_path(&absolute)?, absolute);
 
     let anchored = resolve_output_path(Path::new("benchmark-results/sql.json"))?;
@@ -1521,7 +1521,9 @@ async fn main() -> BenchResult<()> {
     // remain one top-level evidence lifecycle.
     // #lizard forgives
     #[cfg(test)]
-    if std::env::args_os().len() == 1 {
+    let self_test = std::env::args_os().len() == 1; // nosemgrep
+    #[cfg(test)]
+    if self_test {
         if let Err(error) = run_output_anchor_tests() {
             eprintln!("sql_datafusion_performance output-anchor tests: {error}");
             std::process::exit(1);
