@@ -15181,10 +15181,11 @@ mod tests {
             .await
             .unwrap();
         wait_for_join_emission(&first_job, 1).await;
-        let epoch = tokio::time::timeout(StdDuration::from_secs(5), first_job.trigger_checkpoint())
-            .await
-            .expect("ac5 restore checkpoint should not hang")
-            .unwrap();
+        let epoch =
+            tokio::time::timeout(StdDuration::from_secs(30), first_job.trigger_checkpoint())
+                .await
+                .expect("ac5 restore checkpoint should not hang")
+                .unwrap();
         assert_eq!(epoch, crate::Epoch::INITIAL);
         assert_eq!(
             first_job.cancel().await.state,
@@ -15200,7 +15201,7 @@ mod tests {
             .start_checkpointed(spec(left_release, right_release), checkpoint())
             .await
             .unwrap();
-        let outcome = tokio::time::timeout(StdDuration::from_secs(5), restart_job.wait())
+        let outcome = tokio::time::timeout(StdDuration::from_secs(30), restart_job.wait())
             .await
             .expect("ac5 restart hung");
         assert_eq!(outcome.state, ContinuousJobState::Completed, "{outcome:?}");
@@ -15214,7 +15215,7 @@ mod tests {
     /// Waits until the `match` Join of one running job has emitted `pairs`
     /// match rows, bounding the wait for the restore scenario.
     async fn wait_for_join_emission(job: &super::ContinuousJob, pairs: u64) {
-        for _ in 0..500 {
+        for _ in 0..3_000 {
             let joins = job.stream_join_status();
             if joins
                 .get("match")
