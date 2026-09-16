@@ -1143,7 +1143,7 @@ async fn batch_infinities_stay_numeric_and_undefined_results_are_nan() {
         .unwrap();
     // Both infinity signs: the mean is the undefined inf - inf (NaN), so
     // demean is NaN everywhere on valid rows; the standard deviation is NaN,
-    // not null (SCE-00 D3.2).
+    // not null (SCE-00 D3, contract section 5.2).
     let demean = float_column(&output, "momentum_demean");
     for value in demean {
         assert!(value.is_some_and(f64::is_nan));

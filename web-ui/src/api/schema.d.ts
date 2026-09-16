@@ -911,7 +911,10 @@ export interface components {
                     /** @description Frozen null/NaN value policy. */
                     value_policy: components["schemas"]["ProjectCreateRequest"]["$defs"]["CrossSectionValuePolicy"];
                 };
-                /** @description Frozen null/NaN policy for cross-section values (SCE-00 D3.2/D6). */
+                /**
+                 * @description Frozen null/NaN policy for cross-section values (SCE-00 D3, contract
+                 *     section 5.2; D6).
+                 */
                 CrossSectionValuePolicy: "nan_exclude_preserve_v1";
                 DataFusionConfig: {
                     /**
@@ -2109,7 +2112,10 @@ export interface components {
                     /** @description Frozen null/NaN value policy. */
                     value_policy: components["schemas"]["ProjectDocument"]["$defs"]["CrossSectionValuePolicy"];
                 };
-                /** @description Frozen null/NaN policy for cross-section values (SCE-00 D3.2/D6). */
+                /**
+                 * @description Frozen null/NaN policy for cross-section values (SCE-00 D3, contract
+                 *     section 5.2; D6).
+                 */
                 CrossSectionValuePolicy: "nan_exclude_preserve_v1";
                 DataFusionConfig: {
                     /**

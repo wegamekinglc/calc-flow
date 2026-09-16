@@ -89,7 +89,8 @@ pub enum NullPlacement {
     Last,
 }
 
-/// Frozen null/NaN policy for cross-section values (SCE-00 D3.2/D6).
+/// Frozen null/NaN policy for cross-section values (SCE-00 D3, contract
+/// section 5.2; D6).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CrossSectionValuePolicy {
@@ -2404,8 +2405,8 @@ fn mean_fill_column(prepared: &PreparedCrossSectionColumn, min_samples: u64) -> 
 }
 
 /// Applies the min-samples gate and the percentile transform to one rank
-/// (SCE-00 D3.2/D6): an unmet sample count nulls the whole statistic, and a
-/// single ordered value is exactly one half.
+/// (SCE-00 D3, contract section 5.2; D6): an unmet sample count nulls the
+/// whole statistic, and a single ordered value is exactly one half.
 #[allow(clippy::cast_precision_loss, reason = "percentiles are float64")]
 fn apply_statistic(
     rank: Option<f64>,
@@ -2461,7 +2462,7 @@ impl StatisticAccumulator {
 
     /// Classifies the sample mean from the infinity counts: both signs is
     /// the undefined `inf - inf` (NaN), one sign is that infinity, and no
-    /// infinity keeps the West readout (SCE-00 D3.2).
+    /// infinity keeps the West readout (SCE-00 D3, contract section 5.2).
     fn classified_mean(&self) -> f64 {
         match (self.pos_inf > 0, self.neg_inf > 0) {
             (true, true) => f64::NAN,
@@ -2473,7 +2474,7 @@ impl StatisticAccumulator {
 
     /// Classifies the sum of squared deviations: any infinity makes every
     /// deviation an `inf - inf` form, so the variance is NaN, never a
-    /// silent zero (SCE-00 D3.2).
+    /// silent zero (SCE-00 D3, contract section 5.2).
     fn classified_m2(&self) -> f64 {
         if self.pos_inf > 0 || self.neg_inf > 0 {
             f64::NAN

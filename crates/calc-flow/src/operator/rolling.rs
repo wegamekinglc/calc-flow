@@ -522,7 +522,8 @@ pub enum RollingOutputSpec {
         #[schemars(range(min = 1))]
         min_periods: u64,
     },
-    /// Valid (non-null, non-NaN) sample count over the frame (SCE-00 D3.2).
+    /// Valid (non-null, non-NaN) sample count over the frame (SCE-00 D3,
+    /// contract section 5.2).
     Count {
         /// Primitive version; must equal `1`.
         primitive_version: u32,
@@ -536,7 +537,8 @@ pub enum RollingOutputSpec {
         #[schemars(range(min = 1))]
         min_periods: u64,
     },
-    /// Checked sum over the frame; integer results stay exact (SCE-00 D3.2).
+    /// Checked sum over the frame; integer results stay exact (SCE-00 D3,
+    /// contract section 5.2).
     Sum {
         /// Primitive version; must equal `1`.
         primitive_version: u32,
@@ -629,7 +631,7 @@ pub enum RollingOutputSpec {
         min_periods: u64,
     },
     /// Float64 covariance of two columns over the frame, counting only
-    /// pairwise-valid positions (SCE-00 D3.2/D5).
+    /// pairwise-valid positions (SCE-00 D3, contract section 5.2; D5).
     Covariance {
         /// Primitive version; must equal `1`.
         primitive_version: u32,
@@ -649,7 +651,7 @@ pub enum RollingOutputSpec {
         ddof: u8,
     },
     /// Float64 Pearson correlation of two columns over the frame; null when
-    /// either side has zero variance (SCE-00 D3.2).
+    /// either side has zero variance (SCE-00 D3, contract section 5.2).
     Correlation {
         /// Primitive version; must equal `1`.
         primitive_version: u32,
@@ -3292,7 +3294,7 @@ impl CompiledFrame {
 }
 
 /// Integer sums stay exact in their frozen 64-bit class; floating sums and
-/// every mean/variance accumulate in `f64` (SCE-00 D3.2).
+/// every mean/variance accumulate in `f64` (SCE-00 D3, contract section 5.2).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SumClass {
     Signed,
@@ -4006,8 +4008,8 @@ impl PairAccumulator {
     }
 }
 
-/// A rolling sample is valid when it is neither null nor NaN (SCE-00 D3.2);
-/// infinities stay numeric.
+/// A rolling sample is valid when it is neither null nor NaN (SCE-00 D3,
+/// contract section 5.2); infinities stay numeric.
 fn is_valid_sample(value: &ScalarValue) -> bool {
     if value.is_null() {
         return false;
@@ -4968,13 +4970,14 @@ fn evaluate_ewma(
 }
 
 /// Reads one aggregate output from its shared window accumulator: the
-/// minimum-period gate uses the valid sample count (SCE-00 D3.2), and the
-/// variance divisor is `valid_count - ddof` with a non-positive divisor
-/// producing null (SCE-00 D5). Windows holding ±inf samples classify from
-/// the reversible infinity counts — both signs is the undefined ∞ − ∞ (NaN),
-/// one sign is that infinity, and no infinity keeps the frozen finite-path
-/// West readout (SCE-07 defect 1 ruling); variance/stddev over a window with
-/// any infinity is NaN because every deviation involves ∞ − ∞.
+/// minimum-period gate uses the valid sample count (SCE-00 D3, contract
+/// section 5.2), and the variance divisor is `valid_count - ddof` with a
+/// non-positive divisor producing null (SCE-00 D5). Windows holding ±inf
+/// samples classify from the reversible infinity counts — both signs is the
+/// undefined ∞ − ∞ (NaN), one sign is that infinity, and no infinity keeps
+/// the frozen finite-path West readout (SCE-07 defect 1 ruling);
+/// variance/stddev over a window with any infinity is NaN because every
+/// deviation involves ∞ − ∞.
 #[allow(
     clippy::cast_precision_loss,
     reason = "the frozen aggregate output type is Float64"
@@ -5062,11 +5065,12 @@ fn evaluate_aggregate(
 }
 
 /// Reads one covariance/correlation output from its shared pair
-/// accumulator (SCE-00 D3.2/D5): null below the pairwise minimum count or a
-/// non-positive divisor, null for correlation with zero variance on either
-/// side, NaN when the window holds any infinity, and the West-style
-/// co-moment readout otherwise. The ddof divisor cancels in the correlation
-/// ratio; it only participates in the divisor gate.
+/// accumulator (SCE-00 D3, contract section 5.2; D5): null below the
+/// pairwise minimum count or a non-positive divisor, null for correlation
+/// with zero variance on either side, NaN when the window holds any
+/// infinity, and the West-style co-moment readout otherwise. The ddof
+/// divisor cancels in the correlation ratio; it only participates in the
+/// divisor gate.
 #[allow(
     clippy::cast_precision_loss,
     reason = "the frozen pair output type is Float64"
@@ -5571,7 +5575,8 @@ fn compile_output(
                 _ => DataType::Float64,
             },
             Statistic::Mean | Statistic::Variance | Statistic::Stddev => DataType::Float64,
-            // Min/max preserve the input type (SCE-00 D3.2).
+            // Min/max preserve the input type (SCE-00 D3, contract
+            // section 5.2).
             Statistic::Min | Statistic::Max => input_type.clone(),
         },
     };
@@ -6740,7 +6745,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Aggregate declarations (SCE-07, SCE-00 D3.2/D5)
+    // Aggregate declarations (SCE-07; SCE-00 D3, contract section 5.2; D5)
     // ------------------------------------------------------------------
 
     fn aggregate_spec_json(outputs: Value) -> Value {
