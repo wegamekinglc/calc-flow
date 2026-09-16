@@ -37,7 +37,7 @@ jobs:
                 --profile "$profile" \
                 --samples 20 \
                 --warmups 1 \
-                --output "benchmark-results/sql-datafusion/${profile}-${repeat}.json"
+                --output "${{ github.workspace }}/benchmark-results/sql-datafusion/${profile}-${repeat}.json"
             done
           done
       - name: Validate comparability, stability, and P1 targets

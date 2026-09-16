@@ -20,6 +20,21 @@ class BenchmarkWorkflowTests(unittest.TestCase):
         self.assertIn(f"--no-emit-package {project} ", lock)
         self.assertFalse(any(line.startswith("-e ") for line in lock.splitlines()))
 
+    def test_nightly_paired_outputs_anchor_at_workspace_root(self):
+        workflow = (ROOT / ".github/workflows/benchmarks.yml").read_text(
+            encoding="utf-8"
+        )
+        nightly = workflow.split("  sql-datafusion-nightly:\n", 1)[1].split(
+            "  sql-datafusion-weekly-matrix:\n", 1
+        )[0]
+        # `cargo bench -p calc-flow` runs the harness from the package root, so
+        # a relative --output escapes the workspace-root report directory.
+        self.assertNotIn('--output "benchmark-results/', nightly)
+        self.assertIn(
+            '--output "${{ github.workspace }}/benchmark-results/sql-datafusion/',
+            nightly,
+        )
+
     def test_regular_ci_and_schedule_call_the_same_complete_suite(self):
         for name in ("ci-linux.yml", "benchmarks.yml"):
             workflow = (ROOT / ".github/workflows" / name).read_text(encoding="utf-8")
