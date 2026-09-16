@@ -1866,9 +1866,9 @@ impl BufferedRow {
     }
 }
 
-/// One measured value's classification for the transform kernels (SCE-00
-/// D3.2/D6): null and NaN are excluded from samples but stay observable at
-/// their own rows.
+/// One measured value's classification for the transform kernels (SCE-00 D3,
+/// contract section 5.2; D6): null and NaN are excluded from samples but
+/// stay observable at their own rows.
 #[derive(Clone, Copy, Debug)]
 enum Sample {
     Valid(f64),
