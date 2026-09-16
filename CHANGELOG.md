@@ -9,6 +9,20 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-13: Add executable late-output examples.
+  `examples/26_late_side_output.py` drains paired normal and late outputs
+  through one owned Program iterator with explicit result checks, including
+  under `python -O`. `crates/calc-flow-connectors/examples/late_output_recovery.rs`
+  replays a persisted source trace into two independent transactional Parquet
+  sinks across separate cut, resume, and verify processes, proving per-output
+  recovery without a cross-Sink transaction.
+
+- 2026-09-13: Expose Studio late-output support in the capability contract.
+  `GET /api/v3/capabilities` gains `runtime.lateOutput` with const-1
+  `schemaVersion`/`metricsVersion` and the validated operator list, carried
+  through the regenerated `openapi.json` and `schema.d.ts`; the browser
+  `decoders.ts` rejects a late-output capability whose versions are not 1.
+
 - 2026-09-13: Connect Python `with_late_output`/`LateOutputs` and Studio
   to native rolling/cross-section side output. One Program iterator drains
   paired TableExpr outputs sharing one state owner; local lateness/policy,
