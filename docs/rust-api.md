@@ -474,8 +474,9 @@ Side-output checkpoints include a strict `late_output` inline object with
 `version: 1`, `schema_version: 1`, and a `uint64` `next_sequence`, including
 when no late row has been emitted. Restore validates this object before
 installing state and restores the independent late sequence. Missing, null,
-malformed, unknown-field, or incompatible objects are rejected; error/drop
-checkpoints omit the object and reject one supplied for those policies.
+malformed, unknown-field, or incompatible objects are rejected with
+`CalcFlowError::CheckpointMismatch`; error/drop checkpoints omit the object
+and likewise reject one supplied for those policies.
 
 Managed recovery covers both outputs, including empty late epochs and terminal
 restart. Delivery remains a per-output contract: exactly-once requires the

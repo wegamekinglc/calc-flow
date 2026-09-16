@@ -87,7 +87,7 @@ pgwire-replication = { version = "=0.4.0", default-features = false, features = 
     "scram",
     "tls-rustls",
 ], optional = true }
-rustls = { version = "=0.23.43", default-features = false, features = [
+rustls = { version = "=0.23.45", default-features = false, features = [
     "ring",
     "std",
 ], optional = true }

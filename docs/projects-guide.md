@@ -144,6 +144,10 @@ Batch mode fails with `unsupported_mode`. Invalid policy versions, reserved
 fields, and mismatched explicit schemas report `unsupported_version`,
 `reserved_field`, and `schema_mismatch`. Studio reports missing physical
 Sink coverage as `missing_binding`, with a path into the actual project.
+Native stream compilation failures reach Studio as single `stream_compile`
+issues whose message embeds the project path and native code; Studio surfaces
+both, rewriting `sink_output_mismatch` to `missing_binding` and taking the
+referenced `graph.edges[N]` path from `temporal_output_unavailable` messages.
 
 Keep a new stable lineage for each policy/topology change and explicitly
 record the source activation position and historical replay destination or

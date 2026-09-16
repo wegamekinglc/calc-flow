@@ -344,7 +344,10 @@ Each edge has logical row/envelope and byte budgets. Late planning also checks
 its scratch row/byte budget and preflights every diagnostic row, including
 appended fields, before sending. It materializes bounded chunks as it emits.
 A batch that fits the source edge can still exceed the diagnostic or scratch
-limit. These budgets do not cap all retained operator state, application-held
+limit. One oversized diagnostic row fails with an `output_row_too_large`
+operator error naming the row index, its required bytes, and `max_bytes`;
+a scratch overrun reports the required `rows=`/`bytes=` against the configured
+limits. These budgets do not cap all retained operator state, application-held
 results, or process RSS.
 
 Callback completion releases its owned input/plan references. Arrow backing
@@ -373,7 +376,11 @@ output. Each has its own output directory and stable identity. Both participate
 in aligned epochs, even when the late epoch is empty. A successful
 `trigger_checkpoint_async()` identifies the durable cut from which a fresh
 compatible plan and runner can resume. Terminal recovery completes without
-reopening ended sources or repeating final output.
+reopening ended sources or repeating final output. Restore is fail-closed
+about the independent late sequence: a checkpoint missing a compatible
+`late_output` version-1 object, or carrying one for a policy without side
+output, fails with `CheckpointMismatch` (Python `CheckpointError`) instead of
+inventing a sequence.
 
 Verify the two output directories independently across the durable cut,
 an empty late epoch, and terminal restart. Ordinary sinks can repeat writes
