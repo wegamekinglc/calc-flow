@@ -41,7 +41,9 @@ use super::checkpoint::{checkpoint_mismatch, compile_error, internal_error, stat
 use super::{
     BatchOperator, BatchOperatorContext, LateMetricDelta, LatePolicySpec, OperatorMetadata,
     StreamCollector, StreamOperator, StreamOperatorContext, accumulate_late_metrics,
-    expression::required_input, validate_operator_name,
+    expression::required_input,
+    late_output::{LateRowTally, record_late_row, reject_batch_mode},
+    validate_operator_name,
 };
 
 mod late;
@@ -504,14 +506,7 @@ impl BatchOperator for CrossSectionOperator {
         inputs: &BTreeMap<String, Batch>,
         context: &BatchOperatorContext<'_>,
     ) -> Result<BTreeMap<String, Batch>> {
-        if matches!(self.spec.late_policy, LatePolicySpec::SideOutput { .. }) {
-            return Err(CalcFlowError::Compile {
-                message: format!(
-                    "node {:?}: unsupported_mode: late side output requires stream mode",
-                    self.name
-                ),
-            });
-        }
+        reject_batch_mode(self.spec.late_policy, &self.name)?;
         let groups = self.batch_groups(inputs, context)?;
         let batch = self.grouped_batch(&groups)?;
         Ok(BTreeMap::from([("output".into(), batch)]))
@@ -562,23 +557,6 @@ struct CrossSectionSnapshotMetadata {
         deserialize_with = "super::late_output::deserialize_snapshot"
     )]
     late_output: Option<super::late_output::LateOutputSnapshot>,
-}
-
-#[derive(Default)]
-struct PreparedLateMetrics {
-    late_rows: u64,
-    max_lateness_micros: Option<u64>,
-}
-
-impl PreparedLateMetrics {
-    fn into_delta(self) -> LateMetricDelta {
-        LateMetricDelta {
-            late_rows: self.late_rows,
-            affected_batches: u64::from(self.late_rows > 0),
-            max_lateness_micros: self.max_lateness_micros,
-            ..LateMetricDelta::default()
-        }
-    }
 }
 
 impl CrossSectionOperator {
@@ -892,7 +870,7 @@ impl CrossSectionOperator {
         node_id: &str,
     ) -> Result<(AcceptedRows, LateMetricDelta)> {
         let mut accepted: AcceptedRows = Vec::with_capacity(rows.len());
-        let mut metrics = PreparedLateMetrics::default();
+        let mut metrics = LateRowTally::default();
         // Staged identities are unique per logical input (SCE-00 D4): a
         // duplicate is rejected across partition groups, not only within one.
         let mut staged: BTreeSet<RowIdentity> = BTreeSet::new();
@@ -1433,29 +1411,6 @@ where
     T: Deserialize<'de>,
 {
     Option::<T>::deserialize(deserializer)
-}
-
-fn record_late_row(
-    metrics: &mut PreparedLateMetrics,
-    watermark: Option<EventTime>,
-    event_time: i64,
-    node_id: &str,
-) -> Result<()> {
-    let Some(watermark) = watermark else {
-        return Ok(());
-    };
-    metrics.late_rows = metrics
-        .late_rows
-        .checked_add(1)
-        .ok_or_else(|| operator_error(node_id, "late row counter overflowed"))?;
-    let lateness = u64::try_from(i128::from(watermark.as_micros()) - i128::from(event_time))
-        .map_err(|_| operator_error(node_id, "late row distance overflowed"))?;
-    metrics.max_lateness_micros = Some(
-        metrics
-            .max_lateness_micros
-            .map_or(lateness, |maximum| maximum.max(lateness)),
-    );
-    Ok(())
 }
 
 // Budget chunking intentionally checks per-row cost, cumulative budget, and
@@ -3941,7 +3896,7 @@ mod tests {
 
     #[test]
     fn late_metrics_and_chunking_cover_failure_boundaries() {
-        let mut metrics = PreparedLateMetrics::default();
+        let mut metrics = LateRowTally::default();
         record_late_row(&mut metrics, None, 10, "cross_section").unwrap();
         record_late_row(
             &mut metrics,
@@ -3962,7 +3917,7 @@ mod tests {
             )
             .is_err()
         );
-        let mut metrics = PreparedLateMetrics::default();
+        let mut metrics = LateRowTally::default();
         assert!(
             record_late_row(
                 &mut metrics,

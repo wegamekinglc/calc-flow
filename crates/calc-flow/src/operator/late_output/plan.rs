@@ -8,6 +8,8 @@ use datafusion::arrow::{
 
 use crate::{Batch, BatchMetadata, CalcFlowError, EdgeBudget, Result, StreamCollector};
 
+use super::error;
+
 struct LateRow {
     record: usize,
     row: usize,
@@ -17,6 +19,10 @@ struct LateRow {
     bytes: usize,
 }
 
+/// Stages one input envelope's late rows and bounded diagnostic chunks ahead
+/// of any emission: state, metrics, and output sequences advance only after
+/// `PreparedLateOutput::emit` succeeds, so a failed envelope leaves no
+/// partial late output. See docs/rust-api.md "Late-row policy contract".
 pub(crate) struct LateOutputPlan<'a> {
     input: &'a Batch,
     schema: SchemaRef,
@@ -27,6 +33,8 @@ pub(crate) struct LateOutputPlan<'a> {
     rows: Vec<LateRow>,
 }
 
+/// A fully validated plan at the commit point: `emit` publishes the staged
+/// chunks in sequence order and returns the next late sequence.
 pub(crate) struct PreparedLateOutput<'a>(LateOutputPlan<'a>, u64);
 
 impl<'a> LateOutputPlan<'a> {
@@ -246,12 +254,5 @@ impl PreparedLateOutput<'_> {
             sequence += 1;
         }
         Ok(next)
-    }
-}
-
-fn error(node: &str, message: &str) -> CalcFlowError {
-    CalcFlowError::Operator {
-        node_id: node.into(),
-        message: message.into(),
     }
 }

@@ -1,16 +1,18 @@
 use super::{
-    AcceptedRows, Arc, BTreeSet, Batch, BufferedRow, CrossSectionOperator, EventTime, GroupKey,
-    LateMetricDelta, PreparedLateMetrics, RecordBatch, Result, RowIdentity, StreamCollector,
-    StreamOperatorContext, accumulate_late_metrics, operator_error, read_row, record_late_row,
+    AcceptedRows, BTreeSet, Batch, BufferedRow, CrossSectionOperator, EventTime, GroupKey,
+    LateMetricDelta, RecordBatch, Result, RowIdentity, StreamCollector, StreamOperatorContext,
+    operator_error, read_row,
 };
+use crate::operator::PreparedLateMetrics;
 use crate::operator::late_output::{
-    LateOutputPlan, PreparedLateOutput,
-    identity::{InputRow, input_rows},
+    self, LateOutputPlan, LateRowTally, PreparedLateOutput,
+    identity::{InputRow, event_time, input_rows, validate_keys},
+    record_late_row,
 };
 
 struct PreparedInput<'a> {
     accepted: AcceptedRows,
-    metrics: PreparedLateMetrics,
+    metrics: LateRowTally,
     late: LateOutputPlan<'a>,
     identities: BTreeSet<RowIdentity>,
 }
@@ -18,7 +20,7 @@ struct PreparedInput<'a> {
 type PendingInput<'a> = (
     AcceptedRows,
     LateMetricDelta,
-    crate::operator::PreparedLateMetrics,
+    PreparedLateMetrics,
     PreparedLateOutput<'a>,
 );
 
@@ -30,9 +32,17 @@ impl CrossSectionOperator {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
-        self.validate_late_data(batch, context)?;
+        late_output::validate_late_data(
+            self.state.late_output_failed,
+            &self.input_ports[0],
+            batch,
+            context,
+        )?;
         let (accepted, next_metrics, metrics, prepared) =
             self.prepare_late_callback(batch, watermark, context)?;
+        // Poison before emit: only the commit below clears the flag, so a
+        // failed or cancelled emission forbids live retry; a durable cut
+        // is the only recovery.
         self.state.late_output_failed = true;
         let next_sequence = prepared.emit(output).await?;
         self.install_accepted_rows(accepted);
@@ -44,15 +54,6 @@ impl CrossSectionOperator {
         Ok(())
     }
 
-    fn validate_late_data(&self, batch: &Batch, context: &StreamOperatorContext<'_>) -> Result<()> {
-        crate::operator::late_output::ensure_can_continue(
-            self.state.late_output_failed,
-            context.operator_id(),
-        )?;
-        context.check_cancelled()?;
-        self.input_ports[0].validate(batch, context.operator_id())
-    }
-
     fn prepare_late_callback<'a>(
         &self,
         batch: &'a Batch,
@@ -60,11 +61,13 @@ impl CrossSectionOperator {
         context: &'a StreamOperatorContext<'_>,
     ) -> Result<PendingInput<'a>> {
         let input = self.prepare_late_input(batch, watermark, context)?;
-        let delta = input.metrics.into_delta();
-        let next_metrics = accumulate_late_metrics(self.state.metrics, delta)?;
-        let metrics = context.prepare_window_metrics(delta)?;
-        let output = input.late.prepare()?;
-        Ok((input.accepted, next_metrics, metrics, output))
+        late_output::prepare_late_callback(
+            input.accepted,
+            input.metrics,
+            input.late,
+            self.state.metrics,
+            context,
+        )
     }
 
     fn prepare_late_input<'a>(
@@ -74,21 +77,16 @@ impl CrossSectionOperator {
         context: &'a StreamOperatorContext<'_>,
     ) -> Result<PreparedInput<'a>> {
         let node = context.operator_id();
-        let late = LateOutputPlan::new(
+        let late = late_output::new_plan(
             batch,
-            node,
-            watermark.map_or(0, EventTime::as_micros),
-            context.output_budget(),
             self.state.next_late_output_sequence,
-            Arc::clone(
-                self.output_ports[1]
-                    .schema()
-                    .expect("late schema is compiled"),
-            ),
+            &self.output_ports[1],
+            watermark,
+            context,
         )?;
         let mut prepared = PreparedInput {
             accepted: Vec::new(),
-            metrics: PreparedLateMetrics::default(),
+            metrics: LateRowTally::default(),
             late,
             identities: BTreeSet::new(),
         };
@@ -160,7 +158,6 @@ impl CrossSectionOperator {
         row: usize,
         node: &str,
     ) -> Result<i64> {
-        use crate::operator::late_output::identity::{event_time, validate_keys};
         let time = event_time(
             record,
             row,

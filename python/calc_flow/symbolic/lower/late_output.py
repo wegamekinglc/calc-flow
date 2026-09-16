@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from calc_flow.symbolic.errors import AMBIGUOUS_LATE_STAGE, raise_compile
 from calc_flow.symbolic.expr import TableExpr, table_input
 from calc_flow.symbolic.late_output import late_schema
 from calc_flow.symbolic.lower.bindings import _BatchBindings
@@ -18,6 +19,12 @@ if TYPE_CHECKING:
 
 
 def append_late_outputs(graph: _SQLGraph, node: Node) -> str:
+    """Splice one validated paired declaration into the native document.
+
+    The fragment is lowered with ``late_policy="drop"`` so the shared state
+    stage plans as usual; its single state node is then flipped to
+    ``side_output`` and wired to the appended ``late`` port and exit node.
+    """
     from calc_flow.symbolic.lower.program import lower_program_document
     from calc_flow.symbolic.lower.sql import _pin_fragment_schemas
 
@@ -60,6 +67,13 @@ def append_late_outputs(graph: _SQLGraph, node: Node) -> str:
         for item in document["graph"]["nodes"]
         if item["operator"]["kind"] in {"rolling", "cross_section"}
     ]
+    if len(states) != 1:
+        raise_compile(
+            "late_output",
+            AMBIGUOUS_LATE_STAGE,
+            "late lowering requires exactly one rolling or cross-section stage;"
+            f" found {len(states)}",
+        )
     (state,) = states
     state["operator"]["spec"]["late_policy"] = {
         "kind": "side_output",
