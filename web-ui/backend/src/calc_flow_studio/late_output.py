@@ -35,6 +35,9 @@ def project_late_issues(project: dict, report: dict) -> dict:
 
 
 def _late_issue(project: dict, issue: dict) -> dict:
+    # Both regexes parse native stream_compile error text; a native wording
+    # change silently degrades Studio paths/codes, so keep them in sync with
+    # the calc-flow compile diagnostics.
     if issue["code"] != "stream_compile":
         return issue
     message = issue["message"]

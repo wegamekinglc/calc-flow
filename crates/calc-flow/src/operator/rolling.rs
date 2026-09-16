@@ -40,7 +40,9 @@ use crate::{
 use super::rolling_metrics::{RollingMetricsRecorder, RollingStage, RollingWork};
 use super::{
     BatchOperator, BatchOperatorContext, LateMetricDelta, OperatorMetadata, StreamCollector,
-    StreamOperator, StreamOperatorContext, accumulate_late_metrics, expression::required_input,
+    StreamOperator, StreamOperatorContext, accumulate_late_metrics,
+    expression::required_input,
+    late_output::{LateRowTally, record_late_row, reject_batch_mode},
     validate_operator_name,
 };
 
@@ -1050,14 +1052,7 @@ impl BatchOperator for RollingOperator {
         inputs: &BTreeMap<String, Batch>,
         context: &BatchOperatorContext<'_>,
     ) -> Result<BTreeMap<String, Batch>> {
-        if matches!(self.spec.late_policy, LatePolicySpec::SideOutput { .. }) {
-            return Err(CalcFlowError::Compile {
-                message: format!(
-                    "node {:?}: unsupported_mode: late side output requires stream mode",
-                    self.name
-                ),
-            });
-        }
+        reject_batch_mode(self.spec.late_policy, &self.name)?;
         let input = required_input(inputs, "input", &self.name, None)?;
         self.input_ports[0].validate(input, &format!("{}.input", self.name))?;
         context.run.check_cancelled()?;
@@ -1134,23 +1129,6 @@ struct RollingSnapshotMetadata {
         deserialize_with = "super::late_output::deserialize_snapshot"
     )]
     late_output: Option<super::late_output::LateOutputSnapshot>,
-}
-
-#[derive(Default)]
-struct PreparedLateMetrics {
-    late_rows: u64,
-    max_lateness_micros: Option<u64>,
-}
-
-impl PreparedLateMetrics {
-    fn into_delta(self) -> LateMetricDelta {
-        LateMetricDelta {
-            late_rows: self.late_rows,
-            affected_batches: u64::from(self.late_rows > 0),
-            max_lateness_micros: self.max_lateness_micros,
-            ..LateMetricDelta::default()
-        }
-    }
 }
 
 #[async_trait]
@@ -1450,7 +1428,7 @@ impl RollingOperator {
     ) -> Result<(BTreeMap<RowIdentity, BufferedRow>, LateMetricDelta)> {
         let _validation = observer.map(|recorder| recorder.stage(RollingStage::InputValidation));
         let mut accepted = BTreeMap::new();
-        let mut metrics = PreparedLateMetrics::default();
+        let mut metrics = LateRowTally::default();
         for (row_index, row) in rows.into_iter().enumerate() {
             if self.is_late(row.identity.event_time, watermark, row_index, node_id)? {
                 record_late_row(&mut metrics, watermark, row.identity.event_time, node_id)?;
@@ -2678,29 +2656,6 @@ fn closing_coordinate(event_time: i64, allowed_lateness_micros: u64, node_id: &s
             "finality coordinate overflowed the event-time range",
         )
     })
-}
-
-fn record_late_row(
-    metrics: &mut PreparedLateMetrics,
-    watermark: Option<EventTime>,
-    event_time: i64,
-    node_id: &str,
-) -> Result<()> {
-    let Some(watermark) = watermark else {
-        return Ok(());
-    };
-    metrics.late_rows = metrics
-        .late_rows
-        .checked_add(1)
-        .ok_or_else(|| operator_error(node_id, "late row counter overflowed"))?;
-    let lateness = u64::try_from(i128::from(watermark.as_micros()) - i128::from(event_time))
-        .map_err(|_| operator_error(node_id, "late row distance overflowed"))?;
-    metrics.max_lateness_micros = Some(
-        metrics
-            .max_lateness_micros
-            .map_or(lateness, |maximum| maximum.max(lateness)),
-    );
-    Ok(())
 }
 
 // Budget chunking intentionally checks per-row cost, cumulative budget, and

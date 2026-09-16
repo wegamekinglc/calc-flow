@@ -414,6 +414,9 @@ pub(crate) struct LateMetricDelta {
 pub(crate) trait LateMetricSink: Send + Sync {
     fn record(&self, delta: LateMetricDelta) -> Result<()>;
 
+    /// Stages `delta` without publishing it; the returned value's `commit`
+    /// applies it after the late emit succeeds. The default hard-fails so a
+    /// sink without staging support cannot silently drop a staged update.
     fn prepare(self: Arc<Self>, _delta: LateMetricDelta) -> Result<PreparedLateMetrics> {
         Err(CalcFlowError::Internal {
             message: "late metric sink does not support staged updates".into(),
@@ -421,6 +424,8 @@ pub(crate) trait LateMetricSink: Send + Sync {
     }
 }
 
+/// A staged late-metric update; the delta stays invisible to snapshots and
+/// checkpoints until `commit` runs after successful late-output emission.
 pub(crate) struct PreparedLateMetrics(Box<dyn FnOnce() + Send>);
 
 impl PreparedLateMetrics {

@@ -132,6 +132,37 @@ def test_paired_lowering_shares_state_and_preserves_stage_input(kind: str) -> No
     assert set(plan.sink_binding_ids) == {"normal.output", "diagnostics.output"}
 
 
+def test_fragment_lowering_rejects_ambiguous_state_stage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from calc_flow.symbolic.lower import program as lower_program
+
+    pair = cf.with_late_output(rolling(quotes()), allowed_lateness_micros=3)
+    program = cf.Program("paired", outputs={"normal": pair.output, "late": pair.late})
+    original = lower_program.lower_program_document
+
+    def duplicate_fragment_state(*args, **kwargs):
+        document = original(*args, **kwargs)
+        is_late_fragment = kwargs.get("late_policy") == "drop" and any(
+            str(name).startswith("cf_late_output_") for name, _ in args[0].outputs
+        )
+        if is_late_fragment:
+            nodes = document["graph"]["nodes"]
+            states = [
+                node
+                for node in nodes
+                if node["operator"]["kind"] in {"rolling", "cross_section"}
+            ]
+            nodes.extend(states)
+        return document
+
+    monkeypatch.setattr(
+        lower_program, "lower_program_document", duplicate_fragment_state
+    )
+    with pytest.raises(cf.CompileError, match=r"ambiguous_late_stage"):
+        program.compile_stream(cf.Runtime())
+
+
 @pytest.mark.parametrize(
     "variant", ["none", "nested", "mixed", "operand", "different_groups", "after_stage"]
 )

@@ -632,17 +632,20 @@ def _late_policy_lines(nodes: list[dict[str, object]]) -> tuple[str, ...]:
         for node in states
     ):
         return ()
-    return tuple(
-        f"    late policy {node['id']}"
-        f" kind={node['operator']['spec']['late_policy']['kind']}"
-        " allowed_lateness_micros="
-        f"{node['operator']['spec']['allowed_lateness_micros']}"
-        + (
-            " schema_version=1 outputs=output,late"
-            if node["operator"]["spec"]["late_policy"]["kind"] == "side_output"
-            else " outputs=output"
-        )
-        for node in states
+    return tuple(_late_policy_line(node) for node in states)
+
+
+def _late_policy_line(node: dict[str, object]) -> str:
+    spec = node["operator"]["spec"]
+    policy = spec["late_policy"]
+    suffix = (
+        " schema_version=1 outputs=output,late"
+        if policy["kind"] == "side_output"
+        else " outputs=output"
+    )
+    return (
+        f"    late policy {node['id']} kind={policy['kind']}"
+        f" allowed_lateness_micros={spec['allowed_lateness_micros']}{suffix}"
     )
 
 
