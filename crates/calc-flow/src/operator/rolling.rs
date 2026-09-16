@@ -285,7 +285,7 @@ pub enum LatePolicySpec {
         /// The only supported transaction scope.
         scope: LateErrorScope,
     },
-    /// Drop each late row and record the three D7 metrics.
+    /// Drop each late row and record the three SCE-00 D7 metrics.
     Drop {
         /// Metric transaction version; must equal `1`.
         metrics_version: u32,
@@ -304,7 +304,8 @@ pub enum LatePolicySpec {
     },
 }
 
-/// Frozen null/NaN policy for rolling values (SCE-00 D3.2).
+/// Frozen null/NaN policy for rolling values (SCE-00 D3, contract
+/// section 5.2).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RollingValuePolicy {
