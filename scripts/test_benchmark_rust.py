@@ -4,8 +4,8 @@ import unittest
 
 from scripts.benchmark_suite.legacy import combine_blocks
 from scripts.benchmark_suite.rust import (
+    _stamp_fingerprints,
     _with_fingerprints,
-    _workload_fingerprints,
     allocation_rows,
 )
 
@@ -67,8 +67,14 @@ class BenchmarkRustTests(unittest.TestCase):
             allocation_rows(inputs)
 
     def test_rows_carry_their_own_targets_workload_fingerprint(self):
-        identity = provenance_side({"core": "a" * 64, "join": "b" * 64})
-        rows = _with_fingerprints({"core/one": {"metadata": {}}}, identity, "a" * 64)
+        provenance = {
+            "baseline": provenance_side({"core": "a" * 64, "join": "b" * 64}),
+            "candidate": provenance_side({"core": "a" * 64, "join": "b" * 64}),
+        }
+        stamps = _stamp_fingerprints(provenance, {})
+        rows = _with_fingerprints(
+            {"core/one": {"metadata": {}}}, stamps["baseline"]["core"]
+        )
         metadata = rows["core/one"]["metadata"]
         self.assertEqual(metadata["workload_fingerprint"], "a" * 64)
         self.assertEqual(metadata["dependency_fingerprint"], "compiled-dependency")
@@ -76,9 +82,13 @@ class BenchmarkRustTests(unittest.TestCase):
         self.assertNotIn("workload_migration", metadata)
 
     def test_declared_migration_marks_rows_with_their_reference(self):
-        identity = provenance_side({"core": "a" * 64})
+        provenance = {
+            "baseline": provenance_side({"core": "a" * 64}),
+            "candidate": provenance_side({"core": "c" * 64}),
+        }
+        stamps = _stamp_fingerprints(provenance, {"core": {"reference": "DAL-258"}})
         rows = _with_fingerprints(
-            {"core/one": {"metadata": {}}}, identity, "c" * 64, "DAL-258"
+            {"core/one": {"metadata": {}}}, stamps["baseline"]["core"]
         )
         metadata = rows["core/one"]["metadata"]
         self.assertEqual(metadata["workload_fingerprint"], "c" * 64)
@@ -90,11 +100,12 @@ class BenchmarkRustTests(unittest.TestCase):
             "candidate": provenance_side({"core": "c" * 64, "join": "b" * 64}),
         }
         applied = {"core": {"reference": "DAL-258"}}
-        plan = _workload_fingerprints(provenance, applied)
-        self.assertEqual(plan["baseline"]["core"], "c" * 64)
-        self.assertEqual(plan["candidate"]["core"], "c" * 64)
-        self.assertEqual(plan["baseline"]["join"], "b" * 64)
-        self.assertEqual(plan["candidate"]["join"], "b" * 64)
+        stamps = _stamp_fingerprints(provenance, applied)
+        for side in ("baseline", "candidate"):
+            self.assertEqual(stamps[side]["core"]["workload_fingerprint"], "c" * 64)
+            self.assertEqual(stamps[side]["core"]["workload_migration"], "DAL-258")
+            self.assertEqual(stamps[side]["join"]["workload_fingerprint"], "b" * 64)
+            self.assertNotIn("workload_migration", stamps[side]["join"])
 
     def test_one_changed_bench_source_only_invalidates_its_own_cases(self):
         shard = {"id": "rust", "family": "rust"}

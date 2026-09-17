@@ -238,15 +238,13 @@ async def measure_rust(shard: dict, releases: dict, roots: dict, output: Path) -
     blocks = {side: [] for side in roots}
     errors = []
     applied = declared_migrations(provenance, load_migrations(ROOT))
-    workload_fingerprints = _workload_fingerprints(provenance, applied)
+    stamps = _stamp_fingerprints(provenance, applied)
     for index, side in enumerate(("baseline", "candidate", "candidate", "baseline")):
         block, failures = await _rust_block(
             binaries[side],
             roots[side],
             output / f"block-{index}-{side}",
-            provenance[side],
-            workload_fingerprints[side],
-            applied,
+            stamps[side],
         )
         errors.extend(f"{side}/{error}" for error in failures)
         blocks[side].append(block)
@@ -294,47 +292,44 @@ def _binary_hashes(binaries: dict) -> dict:
     }
 
 
-def _with_fingerprints(
-    measured: dict,
-    identity: dict,
-    workload_fingerprint: str,
-    migration: str | None = None,
-) -> dict:
-    fingerprints = {
-        "machine_fingerprint": identity["machine_fingerprint"],
-        "dependency_fingerprint": identity["compiled_dependency_fingerprint"],
-        "workload_fingerprint": workload_fingerprint,
-    }
-    if migration is not None:
-        fingerprints["workload_migration"] = migration
+def _with_fingerprints(measured: dict, fingerprints: dict) -> dict:
     return {
         name: {**row, "metadata": {**row["metadata"], **fingerprints}}
         for name, row in measured.items()
     }
 
 
-def _workload_fingerprints(provenance: dict, applied: dict) -> dict:
+def _migration_marker(declared: dict | None) -> dict:
+    """Mark rows accepted through one declared migration with its reference."""
+    return {} if declared is None else {"workload_migration": declared["reference"]}
+
+
+def _stamp_fingerprints(provenance: dict, applied: dict) -> dict:
+    """Per-side, per-target fingerprint metadata for row stamping.
+
+    Each target's rows carry its own scoped workload fingerprint, so a changed
+    bench source invalidates only that target; a declared migration re-baselines
+    the stamp to the candidate identity and records its reference instead.
+    """
     candidate_scoped = provenance["candidate"]["scoped_workload_fingerprints"]
     return {
         side: {
-            target: (
-                candidate_scoped[target]
-                if target in applied
-                else identity["scoped_workload_fingerprints"][target]
-            )
-            for target in identity["scoped_workload_fingerprints"]
+            target: {
+                "machine_fingerprint": identity["machine_fingerprint"],
+                "dependency_fingerprint": identity["compiled_dependency_fingerprint"],
+                "workload_fingerprint": (
+                    candidate_scoped[target] if target in applied else scoped
+                ),
+                **_migration_marker(applied.get(target)),
+            }
+            for target, scoped in identity["scoped_workload_fingerprints"].items()
         }
         for side, identity in provenance.items()
     }
 
 
 async def _rust_block(
-    binaries: dict,
-    source: Path,
-    output: Path,
-    identity: dict,
-    workload_fingerprints: dict,
-    applied: dict,
+    binaries: dict, source: Path, output: Path, stamps: dict
 ) -> tuple[dict, list[str]]:
     block, errors = {}, []
     for target, binary in binaries.items():
@@ -342,14 +337,7 @@ async def _rust_block(
             continue
         try:
             measured = await run_binary(target, binary, source, output / target)
-            block.update(
-                _with_fingerprints(
-                    measured,
-                    identity,
-                    workload_fingerprints[target],
-                    applied.get(target, {}).get("reference"),
-                )
-            )
+            block.update(_with_fingerprints(measured, stamps[target]))
         except Exception as error:
             errors.append(f"{target}: {error}")
     return block, errors
