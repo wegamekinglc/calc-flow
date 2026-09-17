@@ -75,6 +75,9 @@ python scripts/verify_sql_datafusion_performance.py \
   --minimum-samples 20 --require-stable --require-p1
 ```
 
+A relative `--output` is anchored at the workspace root, so the report lands at
+the same path no matter which directory the harness runs from.
+
 The verifier fails closed on configuration, batch-boundary, plan, correctness,
 sample, stability, CV, RSS, or P1 threshold mismatches. It suppresses a speedup
 conclusion whenever the two physical plans are not comparable.

@@ -161,7 +161,7 @@ impl Args {
         }
         Ok(Self {
             profile,
-            output: output.ok_or("--output is required")?,
+            output: resolve_output_path(&output.ok_or("--output is required")?)?,
             rows,
             entities,
             batch_size: batch_size.unwrap_or(DEFAULT_BATCH_SIZE),
@@ -1415,10 +1415,7 @@ fn environment(args: &Args, cases: &[CaseEvidence]) -> BenchResult<Environment> 
     .is_empty();
     let machine_fingerprint =
         sha256(format!("{os}|{arch}|{cpu_model}|{available_parallelism}").as_bytes());
-    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .ok_or("calc-flow manifest has no workspace root")?;
+    let workspace_root = workspace_root()?;
     let cargo_lock = fs::read(workspace_root.join("Cargo.lock"))?;
     let dependency_fingerprint = sha256(
         [
@@ -1463,6 +1460,29 @@ fn environment(args: &Args, cases: &[CaseEvidence]) -> BenchResult<Environment> 
     })
 }
 
+fn workspace_root() -> BenchResult<&'static Path> {
+    Ok(Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .ok_or("calc-flow manifest has no workspace root")?)
+}
+
+// `cargo bench` runs this harness with the package root as the working
+// directory, so a relative `--output` must not be resolved against the current
+// directory: anchor it at the workspace root to keep the report location
+// independent of the caller's working directory.
+fn resolve_output_path(output: &Path) -> BenchResult<PathBuf> {
+    if output.is_absolute() {
+        return Ok(output.to_path_buf());
+    }
+    let anchored = workspace_root()?.join(output);
+    eprintln!(
+        "sql_datafusion_performance: relative --output anchored at workspace root: {}",
+        anchored.display()
+    );
+    Ok(anchored)
+}
+
 fn write_report(path: &Path, report: &Report) -> BenchResult<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -1473,11 +1493,44 @@ fn write_report(path: &Path, report: &Report) -> BenchResult<()> {
     Ok(())
 }
 
+#[cfg(test)]
+fn run_output_anchor_tests() -> BenchResult<()> {
+    let absolute = workspace_root()?.join("evidence.json");
+    assert_eq!(resolve_output_path(&absolute)?, absolute);
+
+    let anchored = resolve_output_path(Path::new("benchmark-results/sql.json"))?;
+    assert_eq!(
+        anchored,
+        workspace_root()?.join("benchmark-results/sql.json")
+    );
+
+    // The documented example uses a workspace-relative path; it must resolve
+    // at the workspace root even though `cargo bench` runs from the package
+    // root.
+    let documented = resolve_output_path(Path::new("target/sql-datafusion/matched-first.json"))?;
+    assert_eq!(
+        documented,
+        workspace_root()?.join("target/sql-datafusion/matched-first.json")
+    );
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> BenchResult<()> {
     // Benchmark setup, both workload cases, provenance, and atomic publication
     // remain one top-level evidence lifecycle.
     // #lizard forgives
+    #[cfg(test)]
+    let self_test = std::env::args_os().len() == 1; // nosemgrep
+    #[cfg(test)]
+    if self_test {
+        if let Err(error) = run_output_anchor_tests() {
+            eprintln!("sql_datafusion_performance output-anchor tests: {error}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
     let args = Args::parse()?;
     let records = input_batches(args.rows, args.entities, args.batch_size)?;
     let batch = benchmark_batch(records, args.entities)?;
