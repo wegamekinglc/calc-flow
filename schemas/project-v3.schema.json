@@ -1892,7 +1892,7 @@
         },
         {
           "additionalProperties": false,
-          "description": "Valid (non-null, non-NaN) sample count over the frame (SCE-00 D3.2).",
+          "description": "Valid (non-null, non-NaN) sample count over the frame (SCE-00 D3,\ncontract section 5.2).",
           "properties": {
             "frame": {
               "$ref": "#/$defs/RollingFrameSpec",
@@ -1935,7 +1935,7 @@
         },
         {
           "additionalProperties": false,
-          "description": "Checked sum over the frame; integer results stay exact (SCE-00 D3.2).",
+          "description": "Checked sum over the frame; integer results stay exact (SCE-00 D3,\ncontract section 5.2).",
           "properties": {
             "frame": {
               "$ref": "#/$defs/RollingFrameSpec",
@@ -2209,7 +2209,7 @@
         },
         {
           "additionalProperties": false,
-          "description": "Float64 covariance of two columns over the frame, counting only\npairwise-valid positions (SCE-00 D3.2/D5).",
+          "description": "Float64 covariance of two columns over the frame, counting only\npairwise-valid positions (SCE-00 D3, contract section 5.2; D5).",
           "properties": {
             "ddof": {
               "description": "Degrees-of-freedom adjustment; must be `0` or `1`.",
@@ -2265,7 +2265,7 @@
         },
         {
           "additionalProperties": false,
-          "description": "Float64 Pearson correlation of two columns over the frame; null when\neither side has zero variance (SCE-00 D3.2).",
+          "description": "Float64 Pearson correlation of two columns over the frame; null when\neither side has zero variance (SCE-00 D3, contract section 5.2).",
           "properties": {
             "ddof": {
               "description": "Degrees-of-freedom adjustment; must be `0` or `1`.",
