@@ -9,6 +9,17 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-17: Scope Rust benchmark workload fingerprints per bench target and
+  add an explicit declared-migration path for harness-pipeline bench source
+  changes. Editing one `crates/calc-flow/benches/*.rs` file now removes timing
+  classification from only that target's cases instead of the whole Rust
+  shard. Bench source changes that do not alter measured workload semantics
+  can be declared in `benchmarks/rust-workload-migrations.json`, which pins
+  the exact baseline and candidate source SHA-256 values, a reason, and a
+  reference, and is applied only on an exact byte match; undeclared or
+  mismatched changes still fail closed with accepted rows marked
+  `workload_migration` in the retained artifacts.
+
 - 2026-09-13: Add executable late-output examples.
   `examples/26_late_side_output.py` drains paired normal and late outputs
   through one owned Program iterator with explicit result checks, including

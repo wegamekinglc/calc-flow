@@ -81,7 +81,10 @@ class CompiledDependencyTests(unittest.TestCase):
             self.assertEqual(
                 result["dependency_identity"], identity["dependency_identity"]
             )
-            rows = _with_fingerprints({"one": {"metadata": {}}}, result)
+            rows = _with_fingerprints(
+                {"one": {"metadata": {}}},
+                {"dependency_fingerprint": result["compiled_dependency_fingerprint"]},
+            )
             self.assertEqual(
                 rows["one"]["metadata"]["dependency_fingerprint"],
                 result["compiled_dependency_fingerprint"],

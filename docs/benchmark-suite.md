@@ -157,6 +157,20 @@ invalidating a core-only comparison. Changes to compiled dependencies still
 fail closed, as do incomplete build logs or unsupported dependency sources.
 The core package's source revision remains bound to the release identity.
 
+Rust workload fingerprints are scoped per bench target: each case's
+`workload_fingerprint` covers only its own `crates/calc-flow/benches/<target>.rs`
+bytes, so editing one bench source removes timing classification from that
+target's cases alone. A bench source change that only affects the harness
+pipeline — not the measured workload — has one explicit, auditable path to a
+green comparison: declare it in `benchmarks/rust-workload-migrations.json`
+with the target name, the exact baseline and candidate source SHA-256 values,
+a reason, and a reviewing reference. A declaration applies only when both
+sides' observed source bytes match it exactly; the accepted cases then carry a
+`workload_migration` marker naming the reference, both revisions' provenance
+documents keep their real differing workload identities, and the applied
+migrations are listed in the shard's JSON artifact. Undeclared or mismatched
+workload changes still fail closed, now scoped to the changed target.
+
 ## Reports and failure behavior
 
 The final always-run job publishes all result rows, with dimensions, timing

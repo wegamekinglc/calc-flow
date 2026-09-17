@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import unittest
 
-from scripts.benchmark_suite.rust import allocation_rows
+from scripts.benchmark_suite.legacy import combine_blocks
+from scripts.benchmark_suite.rust import (
+    _stamp_fingerprints,
+    _with_fingerprints,
+    allocation_rows,
+)
 
 
 def reports():
@@ -16,6 +21,30 @@ def reports():
     return {
         side: {"role": side, "valid": True, "cases": [case]}
         for side in ("baseline", "candidate")
+    }
+
+
+def provenance_side(scoped: dict[str, str]) -> dict:
+    return {
+        "machine_fingerprint": "machine",
+        "compiled_dependency_fingerprint": "compiled-dependency",
+        "scoped_workload_fingerprints": scoped,
+    }
+
+
+def suite_block(workload_fingerprint: str, migration: str | None = None) -> dict:
+    metadata = {
+        "machine_fingerprint": "machine",
+        "dependency_fingerprint": "dependency",
+        "workload_fingerprint": workload_fingerprint,
+    }
+    if migration is not None:
+        metadata["workload_migration"] = migration
+    return {
+        "rows": 10,
+        "scope": "native-sql-paired-boundary",
+        "metadata": metadata,
+        "samples": [1.0],
     }
 
 
@@ -36,6 +65,75 @@ class BenchmarkRustTests(unittest.TestCase):
         inputs["candidate"]["cases"] *= 2
         with self.assertRaises(ValueError):
             allocation_rows(inputs)
+
+    def test_rows_carry_their_own_targets_workload_fingerprint(self):
+        provenance = {
+            "baseline": provenance_side({"core": "a" * 64, "join": "b" * 64}),
+            "candidate": provenance_side({"core": "a" * 64, "join": "b" * 64}),
+        }
+        stamps = _stamp_fingerprints(provenance, {})
+        rows = _with_fingerprints(
+            {"core/one": {"metadata": {}}}, stamps["baseline"]["core"]
+        )
+        metadata = rows["core/one"]["metadata"]
+        self.assertEqual(metadata["workload_fingerprint"], "a" * 64)
+        self.assertEqual(metadata["dependency_fingerprint"], "compiled-dependency")
+        self.assertEqual(metadata["machine_fingerprint"], "machine")
+        self.assertNotIn("workload_migration", metadata)
+
+    def test_declared_migration_marks_rows_with_their_reference(self):
+        provenance = {
+            "baseline": provenance_side({"core": "a" * 64}),
+            "candidate": provenance_side({"core": "c" * 64}),
+        }
+        stamps = _stamp_fingerprints(provenance, {"core": {"reference": "DAL-258"}})
+        rows = _with_fingerprints(
+            {"core/one": {"metadata": {}}}, stamps["baseline"]["core"]
+        )
+        metadata = rows["core/one"]["metadata"]
+        self.assertEqual(metadata["workload_fingerprint"], "c" * 64)
+        self.assertEqual(metadata["workload_migration"], "DAL-258")
+
+    def test_declared_migrations_rebaseline_only_their_declared_target(self):
+        provenance = {
+            "baseline": provenance_side({"core": "a" * 64, "join": "b" * 64}),
+            "candidate": provenance_side({"core": "c" * 64, "join": "b" * 64}),
+        }
+        applied = {"core": {"reference": "DAL-258"}}
+        stamps = _stamp_fingerprints(provenance, applied)
+        for side in ("baseline", "candidate"):
+            self.assertEqual(stamps[side]["core"]["workload_fingerprint"], "c" * 64)
+            self.assertEqual(stamps[side]["core"]["workload_migration"], "DAL-258")
+            self.assertEqual(stamps[side]["join"]["workload_fingerprint"], "b" * 64)
+            self.assertNotIn("workload_migration", stamps[side]["join"])
+
+    def test_one_changed_bench_source_only_invalidates_its_own_cases(self):
+        shard = {"id": "rust", "family": "rust"}
+        blocks = {"baseline": [], "candidate": []}
+        for side in ("baseline", "candidate", "candidate", "baseline"):
+            core_fingerprint = "a" * 64 if side == "baseline" else "c" * 64
+            blocks[side].append(
+                {
+                    "core/case": suite_block(core_fingerprint),
+                    "join/case": suite_block("b" * 64),
+                }
+            )
+        cases = {case["scenario"]: case for case in combine_blocks(shard, blocks)}
+        self.assertEqual(cases["core/case"]["status"], "error")
+        self.assertIn("workload_fingerprint changed", cases["core/case"]["error"])
+        self.assertEqual(cases["join/case"]["status"], "ok")
+
+    def test_declared_migration_rows_remain_comparable(self):
+        shard = {"id": "rust", "family": "rust"}
+        blocks = {"baseline": [], "candidate": []}
+        for side in ("baseline", "candidate", "candidate", "baseline"):
+            blocks[side].append(
+                {
+                    "core/case": suite_block("c" * 64, migration="DAL-258"),
+                }
+            )
+        cases = {case["scenario"]: case for case in combine_blocks(shard, blocks)}
+        self.assertEqual(cases["core/case"]["status"], "ok")
 
 
 if __name__ == "__main__":
