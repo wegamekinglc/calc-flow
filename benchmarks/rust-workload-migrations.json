@@ -1,4 +1,12 @@
 {
   "schema": "calc-flow.rust-workload-migrations.v1",
-  "migrations": []
+  "migrations": [
+    {
+      "target": "sql_datafusion_performance",
+      "baseline_sha256": "f1a5b299e9af7d8b8af6717e9bd76638bdb4de89bb08e4e7372259d6876d4ae0",
+      "candidate_sha256": "05bdd01473ee3dcbf773368402eee46998b34ba2a0f971aa0ba78538b74620ce",
+      "reason": "harness pipeline only: anchor relative --output at the workspace root with output-anchor self-tests; measured workloads unchanged",
+      "reference": "DAL-258 / PR #283"
+    }
+  ]
 }
