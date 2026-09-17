@@ -10,6 +10,7 @@ from pathlib import Path
 
 from scripts.benchmark_suite.catalog import CONTRACT
 from scripts.benchmark_suite.legacy import combine_blocks
+from scripts.benchmark_suite.migrations import declared_migrations, load_migrations
 from scripts.benchmark_suite.normalize import criterion_rows, read_json
 from scripts.benchmark_suite.process import ROOT, child_environment, command
 from scripts.benchmark_suite.provenance import harness_sha256
@@ -236,12 +237,16 @@ async def measure_rust(shard: dict, releases: dict, roots: dict, output: Path) -
         )
     blocks = {side: [] for side in roots}
     errors = []
+    applied = declared_migrations(provenance, load_migrations(ROOT))
+    workload_fingerprints = _workload_fingerprints(provenance, applied)
     for index, side in enumerate(("baseline", "candidate", "candidate", "baseline")):
         block, failures = await _rust_block(
             binaries[side],
             roots[side],
             output / f"block-{index}-{side}",
             provenance[side],
+            workload_fingerprints[side],
+            applied,
         )
         errors.extend(f"{side}/{error}" for error in failures)
         blocks[side].append(block)
@@ -264,6 +269,9 @@ async def measure_rust(shard: dict, releases: dict, roots: dict, output: Path) -
         "cases": cases,
         "errors": errors,
         "expected_case_ids": [case["id"] for case in cases],
+        "workload_migrations": sorted(
+            applied.values(), key=lambda entry: entry["target"]
+        ),
     }
 
 
@@ -286,20 +294,47 @@ def _binary_hashes(binaries: dict) -> dict:
     }
 
 
-def _with_fingerprints(measured: dict, identity: dict) -> dict:
+def _with_fingerprints(
+    measured: dict,
+    identity: dict,
+    workload_fingerprint: str,
+    migration: str | None = None,
+) -> dict:
     fingerprints = {
         "machine_fingerprint": identity["machine_fingerprint"],
         "dependency_fingerprint": identity["compiled_dependency_fingerprint"],
-        "workload_fingerprint": identity["workload_fingerprint"],
+        "workload_fingerprint": workload_fingerprint,
     }
+    if migration is not None:
+        fingerprints["workload_migration"] = migration
     return {
         name: {**row, "metadata": {**row["metadata"], **fingerprints}}
         for name, row in measured.items()
     }
 
 
+def _workload_fingerprints(provenance: dict, applied: dict) -> dict:
+    candidate_scoped = provenance["candidate"]["scoped_workload_fingerprints"]
+    return {
+        side: {
+            target: (
+                candidate_scoped[target]
+                if target in applied
+                else identity["scoped_workload_fingerprints"][target]
+            )
+            for target in identity["scoped_workload_fingerprints"]
+        }
+        for side, identity in provenance.items()
+    }
+
+
 async def _rust_block(
-    binaries: dict, source: Path, output: Path, identity: dict
+    binaries: dict,
+    source: Path,
+    output: Path,
+    identity: dict,
+    workload_fingerprints: dict,
+    applied: dict,
 ) -> tuple[dict, list[str]]:
     block, errors = {}, []
     for target, binary in binaries.items():
@@ -307,7 +342,14 @@ async def _rust_block(
             continue
         try:
             measured = await run_binary(target, binary, source, output / target)
-            block.update(_with_fingerprints(measured, identity))
+            block.update(
+                _with_fingerprints(
+                    measured,
+                    identity,
+                    workload_fingerprints[target],
+                    applied.get(target, {}).get("reference"),
+                )
+            )
         except Exception as error:
             errors.append(f"{target}: {error}")
     return block, errors
