@@ -1551,7 +1551,7 @@
             "type": "object"
           },
           "CrossSectionValuePolicy": {
-            "description": "Frozen null/NaN policy for cross-section values (SCE-00 D3.2/D6).",
+            "description": "Frozen null/NaN policy for cross-section values (SCE-00 D3, contract\nsection 5.2; D6).",
             "oneOf": [
               {
                 "const": "nan_exclude_preserve_v1",
@@ -1790,7 +1790,7 @@
               },
               {
                 "additionalProperties": false,
-                "description": "Drop each late row and record the three D7 metrics.",
+                "description": "Drop each late row and record the three SCE-00 D7 metrics.",
                 "properties": {
                   "kind": {
                     "const": "drop",
@@ -2760,7 +2760,7 @@
               },
               {
                 "additionalProperties": false,
-                "description": "Valid (non-null, non-NaN) sample count over the frame (SCE-00 D3.2).",
+                "description": "Valid (non-null, non-NaN) sample count over the frame (SCE-00 D3,\ncontract section 5.2).",
                 "properties": {
                   "frame": {
                     "$ref": "#/components/schemas/ProjectCreateRequest/$defs/RollingFrameSpec",
@@ -2803,7 +2803,7 @@
               },
               {
                 "additionalProperties": false,
-                "description": "Checked sum over the frame; integer results stay exact (SCE-00 D3.2).",
+                "description": "Checked sum over the frame; integer results stay exact (SCE-00 D3,\ncontract section 5.2).",
                 "properties": {
                   "frame": {
                     "$ref": "#/components/schemas/ProjectCreateRequest/$defs/RollingFrameSpec",
@@ -2991,7 +2991,7 @@
               },
               {
                 "additionalProperties": false,
-                "description": "Minimum valid sample over the frame; preserves the input type (SCE-00\nD3.2).",
+                "description": "Minimum valid sample over the frame; preserves the input type (SCE-00\nD3, contract section 5.2).",
                 "properties": {
                   "frame": {
                     "$ref": "#/components/schemas/ProjectCreateRequest/$defs/RollingFrameSpec",
@@ -3034,7 +3034,7 @@
               },
               {
                 "additionalProperties": false,
-                "description": "Maximum valid sample over the frame; preserves the input type (SCE-00\nD3.2).",
+                "description": "Maximum valid sample over the frame; preserves the input type (SCE-00\nD3, contract section 5.2).",
                 "properties": {
                   "frame": {
                     "$ref": "#/components/schemas/ProjectCreateRequest/$defs/RollingFrameSpec",
@@ -3077,7 +3077,7 @@
               },
               {
                 "additionalProperties": false,
-                "description": "Float64 covariance of two columns over the frame, counting only\npairwise-valid positions (SCE-00 D3.2/D5).",
+                "description": "Float64 covariance of two columns over the frame, counting only\npairwise-valid positions (SCE-00 D3, contract section 5.2; D5).",
                 "properties": {
                   "ddof": {
                     "description": "Degrees-of-freedom adjustment; must be `0` or `1`.",
@@ -3133,7 +3133,7 @@
               },
               {
                 "additionalProperties": false,
-                "description": "Float64 Pearson correlation of two columns over the frame; null when\neither side has zero variance (SCE-00 D3.2).",
+                "description": "Float64 Pearson correlation of two columns over the frame; null when\neither side has zero variance (SCE-00 D3, contract section 5.2).",
                 "properties": {
                   "ddof": {
                     "description": "Degrees-of-freedom adjustment; must be `0` or `1`.",
@@ -3299,7 +3299,7 @@
             "type": "object"
           },
           "RollingValuePolicy": {
-            "description": "Frozen null/NaN policy for rolling values (SCE-00 D3.2).",
+            "description": "Frozen null/NaN policy for rolling values (SCE-00 D3, contract\nsection 5.2).",
             "oneOf": [
               {
                 "const": "stateful_numeric_v1",
@@ -4540,7 +4540,7 @@
             "type": "object"
           },
           "CrossSectionValuePolicy": {
-            "description": "Frozen null/NaN policy for cross-section values (SCE-00 D3.2/D6).",
+            "description": "Frozen null/NaN policy for cross-section values (SCE-00 D3, contract\nsection 5.2; D6).",
             "oneOf": [
               {
                 "const": "nan_exclude_preserve_v1",
@@ -4779,7 +4779,7 @@
               },
               {
                 "additionalProperties": false,
-                "description": "Drop each late row and record the three D7 metrics.",
+                "description": "Drop each late row and record the three SCE-00 D7 metrics.",
                 "properties": {
                   "kind": {
                     "const": "drop",
@@ -5749,7 +5749,7 @@
               },
               {
                 "additionalProperties": false,
-                "description": "Valid (non-null, non-NaN) sample count over the frame (SCE-00 D3.2).",
+                "description": "Valid (non-null, non-NaN) sample count over the frame (SCE-00 D3,\ncontract section 5.2).",
                 "properties": {
                   "frame": {
                     "$ref": "#/components/schemas/ProjectDocument/$defs/RollingFrameSpec",
@@ -5792,7 +5792,7 @@
               },
               {
                 "additionalProperties": false,
-                "description": "Checked sum over the frame; integer results stay exact (SCE-00 D3.2).",
+                "description": "Checked sum over the frame; integer results stay exact (SCE-00 D3,\ncontract section 5.2).",
                 "properties": {
                   "frame": {
                     "$ref": "#/components/schemas/ProjectDocument/$defs/RollingFrameSpec",
@@ -5980,7 +5980,7 @@
               },
               {
                 "additionalProperties": false,
-                "description": "Minimum valid sample over the frame; preserves the input type (SCE-00\nD3.2).",
+                "description": "Minimum valid sample over the frame; preserves the input type (SCE-00\nD3, contract section 5.2).",
                 "properties": {
                   "frame": {
                     "$ref": "#/components/schemas/ProjectDocument/$defs/RollingFrameSpec",
@@ -6023,7 +6023,7 @@
               },
               {
                 "additionalProperties": false,
-                "description": "Maximum valid sample over the frame; preserves the input type (SCE-00\nD3.2).",
+                "description": "Maximum valid sample over the frame; preserves the input type (SCE-00\nD3, contract section 5.2).",
                 "properties": {
                   "frame": {
                     "$ref": "#/components/schemas/ProjectDocument/$defs/RollingFrameSpec",
@@ -6066,7 +6066,7 @@
               },
               {
                 "additionalProperties": false,
-                "description": "Float64 covariance of two columns over the frame, counting only\npairwise-valid positions (SCE-00 D3.2/D5).",
+                "description": "Float64 covariance of two columns over the frame, counting only\npairwise-valid positions (SCE-00 D3, contract section 5.2; D5).",
                 "properties": {
                   "ddof": {
                     "description": "Degrees-of-freedom adjustment; must be `0` or `1`.",
@@ -6122,7 +6122,7 @@
               },
               {
                 "additionalProperties": false,
-                "description": "Float64 Pearson correlation of two columns over the frame; null when\neither side has zero variance (SCE-00 D3.2).",
+                "description": "Float64 Pearson correlation of two columns over the frame; null when\neither side has zero variance (SCE-00 D3, contract section 5.2).",
                 "properties": {
                   "ddof": {
                     "description": "Degrees-of-freedom adjustment; must be `0` or `1`.",
@@ -6288,7 +6288,7 @@
             "type": "object"
           },
           "RollingValuePolicy": {
-            "description": "Frozen null/NaN policy for rolling values (SCE-00 D3.2).",
+            "description": "Frozen null/NaN policy for rolling values (SCE-00 D3, contract\nsection 5.2).",
             "oneOf": [
               {
                 "const": "stateful_numeric_v1",

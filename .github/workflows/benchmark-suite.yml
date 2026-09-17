@@ -53,6 +53,7 @@ jobs:
           scripts.test_benchmark_refs
           scripts.test_benchmark_rust
           scripts.test_benchmark_rust_provenance
+          scripts.test_benchmark_rust_migrations
           scripts.test_benchmark_worker
           scripts.test_benchmark_frontend
 

@@ -133,6 +133,10 @@ def build_provenance(root: Path, sources: list[Path]) -> dict[str, Any]:
     """Build provenance bound to exact benchmark source bytes."""
     repository = root.resolve()
     resolved_sources = _resolve_sources(repository, sources)
+    if len({Path(path).stem for path, _source in resolved_sources}) != len(
+        resolved_sources
+    ):
+        raise ValueError("duplicate benchmark source stems in provenance")
     cargo_lock = repository / "Cargo.lock"
     if not cargo_lock.is_file():
         raise ValueError("Cargo.lock is missing")
@@ -140,6 +144,10 @@ def build_provenance(root: Path, sources: list[Path]) -> dict[str, Any]:
     dependency_identity = _dependency_identity(cargo_lock)
     workload_identity = {
         path: _file_hash(source) for path, source in sorted(resolved_sources)
+    }
+    scoped_workload_fingerprints = {
+        Path(path).stem: _fingerprint({path: digest})
+        for path, digest in workload_identity.items()
     }
     machine_identity = _machine_identity()
     return {
@@ -150,6 +158,7 @@ def build_provenance(root: Path, sources: list[Path]) -> dict[str, Any]:
         "machine_identity": machine_identity,
         "dependency_identity": dependency_identity,
         "workload_identity": workload_identity,
+        "scoped_workload_fingerprints": scoped_workload_fingerprints,
         "machine_fingerprint": _fingerprint(machine_identity),
         "dependency_fingerprint": _fingerprint(dependency_identity),
         "workload_fingerprint": _fingerprint(workload_identity),
