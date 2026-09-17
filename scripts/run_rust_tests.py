@@ -29,6 +29,12 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+def _non_empty_str(value: str) -> str:
+    if not value:
+        raise argparse.ArgumentTypeError("must not be empty")
+    return value
+
+
 def _popen_group_options() -> dict[str, object]:
     if os.name == "nt":
         return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
@@ -188,11 +194,23 @@ def _parser() -> argparse.ArgumentParser:
         default=1,
         help="number of isolated serial calc_flow_python lib test runs",
     )
+    parser.add_argument(
+        "--lib-skip",
+        type=_non_empty_str,
+        default=None,
+        help="skip calc-flow tests whose full names contain this substring",
+    )
     return parser
 
 
-def _run_cargo_tests(cargo: str, *, no_run: bool) -> int:
+def _run_cargo_tests(
+    cargo: str,
+    *,
+    no_run: bool,
+    lib_skip: str | None,
+) -> int:
     compile_arguments = ["--no-run"] if no_run else []
+    skip_arguments = ["--", "--skip", lib_skip] if lib_skip and not no_run else []
     commands = (
         [
             "-p",
@@ -202,6 +220,7 @@ def _run_cargo_tests(cargo: str, *, no_run: bool) -> int:
             "--tests",
             "--examples",
             "--all-features",
+            *skip_arguments,
         ],
         [
             "--locked",
@@ -227,7 +246,11 @@ def _run_cargo_tests(cargo: str, *, no_run: bool) -> int:
 
 def main(arguments: Sequence[str] | None = None) -> int:
     options = _parser().parse_args(arguments)
-    cargo_status = _run_cargo_tests(options.cargo, no_run=options.no_run)
+    cargo_status = _run_cargo_tests(
+        options.cargo,
+        no_run=options.no_run,
+        lib_skip=options.lib_skip,
+    )
     if cargo_status != 0:
         return cargo_status
 
