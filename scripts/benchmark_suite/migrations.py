@@ -20,6 +20,17 @@ def load_migrations(root: Path) -> list[dict]:
     path = root / REGISTRY
     if not path.is_file():
         raise ValueError(f"missing workload migration registry: {REGISTRY}")
+    migrations = [_validated(entry) for entry in _registry_entries(path)]
+    identities = [
+        (item["target"], item["baseline_sha256"], item["candidate_sha256"])
+        for item in migrations
+    ]
+    if len(identities) != len(set(identities)):
+        raise ValueError("duplicate workload migration declarations")
+    return migrations
+
+
+def _registry_entries(path: Path) -> list[object]:
     document = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(document, dict) or set(document) != {"schema", "migrations"}:
         raise ValueError(
@@ -31,14 +42,7 @@ def load_migrations(root: Path) -> list[dict]:
         )
     if not isinstance(document["migrations"], list):
         raise ValueError("workload migration entries must be a list")
-    migrations = [_validated(entry) for entry in document["migrations"]]
-    identities = [
-        (item["target"], item["baseline_sha256"], item["candidate_sha256"])
-        for item in migrations
-    ]
-    if len(identities) != len(set(identities)):
-        raise ValueError("duplicate workload migration declarations")
-    return migrations
+    return document["migrations"]
 
 
 def _validated(declared: object) -> dict:
@@ -46,9 +50,18 @@ def _validated(declared: object) -> dict:
         raise ValueError(
             f"workload migration entries must declare exactly {sorted(ENTRY_KEYS)}"
         )
+    _validated_text_fields(declared)
+    _validated_digest_fields(declared)
+    return dict(declared)
+
+
+def _validated_text_fields(declared: dict) -> None:
     for key in ("target", "reason", "reference"):
         if not isinstance(declared[key], str) or not declared[key].strip():
             raise ValueError(f"workload migration {key} must be a non-empty string")
+
+
+def _validated_digest_fields(declared: dict) -> None:
     for key in ("baseline_sha256", "candidate_sha256"):
         if (
             not isinstance(declared[key], str)
@@ -57,7 +70,6 @@ def _validated(declared: object) -> dict:
             raise ValueError(
                 f"workload migration {key} must be a lowercase SHA-256 digest"
             )
-    return dict(declared)
 
 
 def match_migration(
