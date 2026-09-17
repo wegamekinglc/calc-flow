@@ -16,6 +16,9 @@ from scripts import run_rust_tests
 
 ROOT = Path(__file__).resolve().parents[1]
 HARNESS = ROOT / "scripts/run_rust_tests.py"
+WINDOWS_WORKFLOW = ROOT / ".github/workflows/ci-windows.yml"
+LINUX_WORKFLOW = ROOT / ".github/workflows/ci-linux.yml"
+SOAK_SMOKE_FILTER = "checkpoint_restart_soak_smoke"
 
 
 def _write_python_command(directory: Path, name: str, source: str) -> Path:
@@ -219,6 +222,137 @@ if arguments[:3] == ["test", "-p", "calc-flow-python"]:
                 test_calls,
                 [["--test-threads=1"], ["--test-threads=1"]],
             )
+
+    def test_lib_skip_appends_a_skip_filter_to_the_calc_flow_leg_only(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            cargo, cargo_log, _ = self._fake_cargo(Path(raw_directory))
+
+            result = self._run_harness(
+                cargo,
+                cargo_log,
+                "--lib-skip",
+                "checkpoint_restart_soak_smoke",
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            calls = [
+                json.loads(line)
+                for line in cargo_log.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(
+                calls,
+                [
+                    [
+                        "test",
+                        "-p",
+                        "calc-flow",
+                        "--lib",
+                        "--bins",
+                        "--tests",
+                        "--examples",
+                        "--all-features",
+                        "--",
+                        "--skip",
+                        "checkpoint_restart_soak_smoke",
+                    ],
+                    [
+                        "test",
+                        "--locked",
+                        "-p",
+                        "calc-flow-connectors",
+                        "--all-features",
+                    ],
+                    [
+                        "test",
+                        "--locked",
+                        "-p",
+                        "calc-flow",
+                        "--bench",
+                        "core",
+                        "--all-features",
+                    ],
+                    [
+                        "test",
+                        "-p",
+                        "calc-flow-python",
+                        "--lib",
+                        "--all-features",
+                        "--no-run",
+                        "--message-format=json",
+                    ],
+                ],
+            )
+
+    def test_lib_skip_is_ignored_by_compile_only_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            cargo, cargo_log, test_log = self._fake_cargo(Path(raw_directory))
+
+            result = self._run_harness(
+                cargo,
+                cargo_log,
+                "--no-run",
+                "--lib-skip",
+                "checkpoint_restart_soak_smoke",
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            calls = [
+                json.loads(line)
+                for line in cargo_log.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(
+                calls,
+                [
+                    [
+                        "test",
+                        "-p",
+                        "calc-flow",
+                        "--lib",
+                        "--bins",
+                        "--tests",
+                        "--examples",
+                        "--all-features",
+                        "--no-run",
+                    ],
+                    [
+                        "test",
+                        "--locked",
+                        "-p",
+                        "calc-flow-connectors",
+                        "--all-features",
+                        "--no-run",
+                    ],
+                    [
+                        "test",
+                        "--locked",
+                        "-p",
+                        "calc-flow",
+                        "--bench",
+                        "core",
+                        "--all-features",
+                        "--no-run",
+                    ],
+                    [
+                        "test",
+                        "-p",
+                        "calc-flow-python",
+                        "--lib",
+                        "--all-features",
+                        "--no-run",
+                        "--message-format=json",
+                    ],
+                ],
+            )
+            self.assertFalse(test_log.exists())
+
+    def test_lib_skip_rejects_an_empty_filter(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            cargo, cargo_log, _ = self._fake_cargo(Path(raw_directory))
+
+            result = self._run_harness(cargo, cargo_log, "--lib-skip", "")
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("argument --lib-skip: must not be empty", result.stderr)
 
     def test_no_run_compiles_the_same_matrix_without_executing_tests(self) -> None:
         with (
@@ -515,6 +649,40 @@ if arguments[:3] == ["test", "-p", "calc-flow-python"]:
                     process.stdout.close()
                 if process.stderr is not None:
                     process.stderr.close()
+
+
+class WindowsSoakSmokeIsolationTests(unittest.TestCase):
+    # The soak smoke tests fork generation child processes; on the 4 vCPU
+    # Windows runner those forks amplify contention for every time-sensitive
+    # guardrail (DAL-255/DAL-261), so the workflow must keep them isolated
+    # from the parallel lib suite instead of relaxing the guardrails.
+    def _rust_tests_job(self) -> str:
+        workflow = WINDOWS_WORKFLOW.read_text(encoding="utf-8")
+        return workflow.split("  rust-tests:\n", 1)[1].split("  python-tests:\n", 1)[0]
+
+    def test_windows_main_lib_suite_skips_the_soak_smoke_tests(self) -> None:
+        self.assertIn(f"--lib-skip {SOAK_SMOKE_FILTER}", self._rust_tests_job())
+
+    def test_windows_runs_the_soak_smoke_tests_serially_in_a_dedicated_step(
+        self,
+    ) -> None:
+        soak_step = self._rust_tests_job().split(
+            "name: Run soak smoke tests serially\n", 1
+        )[1]
+        for fragment in (
+            "cargo test -p calc-flow",
+            "--lib",
+            "--all-features",
+            SOAK_SMOKE_FILTER,
+            "--test-threads=1",
+        ):
+            self.assertIn(fragment, soak_step)
+
+    def test_linux_ci_keeps_the_full_suite_without_soak_smoke_isolation(
+        self,
+    ) -> None:
+        workflow = LINUX_WORKFLOW.read_text(encoding="utf-8")
+        self.assertNotIn("--lib-skip", workflow)
 
 
 if __name__ == "__main__":

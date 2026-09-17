@@ -81,9 +81,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+      # The soak smoke tests fork generation child processes; on the 4 vCPU
+      # runner each CreateProcess triggers a Defender scan of the large debug
+      # test binary and amplifies contention for every time-sensitive
+      # guardrail (DAL-255). Keep them out of the parallel lib suite and run
+      # exactly those two tests serially after it (DAL-261) instead of
+      # relaxing the guardrails.
       - name: Run Rust tests
         timeout-minutes: 50
-        run: python scripts/run_rust_tests.py --python-stress-runs 1
+        run: >-
+          python scripts/run_rust_tests.py --python-stress-runs 1
+          --lib-skip checkpoint_restart_soak_smoke
+      - name: Run soak smoke tests serially
+        timeout-minutes: 10
+        run: >-
+          cargo test -p calc-flow --lib --all-features
+          checkpoint_restart_soak_smoke -- --test-threads=1
   python-tests:
     name: Python tests
     needs: changes
