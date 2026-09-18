@@ -393,16 +393,18 @@ fn status_field_kilobytes(prefix: &str) -> Option<usize> {
         })
 }
 
-fn current_rss_bytes() -> usize {
-    status_field_kilobytes("VmRSS:")
+fn status_field_bytes(prefix: &str) -> usize {
+    status_field_kilobytes(prefix)
         .and_then(|kilobytes| kilobytes.checked_mul(1_024))
         .unwrap_or(1)
 }
 
+fn current_rss_bytes() -> usize {
+    status_field_bytes("VmRSS:")
+}
+
 fn peak_rss_bytes() -> usize {
-    status_field_kilobytes("VmHWM:")
-        .and_then(|kilobytes| kilobytes.checked_mul(1_024))
-        .unwrap_or(1)
+    status_field_bytes("VmHWM:")
 }
 
 // Writing `5` to `clear_refs` re-anchors `VmHWM` at the current footprint so
@@ -1534,7 +1536,11 @@ fn run_output_anchor_tests() -> BenchResult<()> {
     Ok(())
 }
 
-#[cfg(test)]
+// The kernel peak counter and its `clear_refs` reset are Linux contracts;
+// `scripts/run_rust_tests.py` also drives this self-test there. Other hosts
+// (including the Windows CI leg) skip it instead of failing on absent
+// `/proc` entries, while the sampler itself keeps its cross-platform floor.
+#[cfg(all(test, target_os = "linux"))]
 fn run_rss_window_tests() -> BenchResult<()> {
     // The kernel peak counter must never trail the current footprint.
     let rss = current_rss_bytes();
@@ -1627,6 +1633,7 @@ async fn main() -> BenchResult<()> {
             eprintln!("sql_datafusion_performance output-anchor tests: {error}");
             std::process::exit(1);
         }
+        #[cfg(target_os = "linux")]
         if let Err(error) = run_rss_window_tests() {
             eprintln!("sql_datafusion_performance rss-window tests: {error}");
             std::process::exit(1);
