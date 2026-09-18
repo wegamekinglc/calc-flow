@@ -1582,39 +1582,61 @@ fn run_rss_window_tests() -> BenchResult<()> {
 }
 
 #[cfg(test)]
-async fn run_sample_retention_tests() -> BenchResult<()> {
-    // One tiny paired case must still prove output equivalence from its
-    // warm-up pair while timed samples retain no output batches at all.
-    let args = Args {
+fn retention_case_args(root: &Path) -> Args {
+    Args {
         profile: Profile::SerialControl,
-        output: workspace_root()?.join("target/sql-datafusion/retention-test.json"),
+        output: root.join("target/sql-datafusion/retention-test.json"),
         rows: 4_096,
         entities: 4,
         batch_size: 1_024,
         partitions: 1,
         samples: 2,
         warmups: 1,
-    };
-    let records = input_batches(args.rows, args.entities, args.batch_size)?;
-    let batch = benchmark_batch(records, args.entities)?;
-    let workload = &workloads()[0];
-    let plan = build_plan(config(&args), workload)?;
-    let (sample, retained) = calc_flow_sample(&plan, &batch, false).await?;
+    }
+}
+
+#[cfg(test)]
+fn correctness_is_complete(correctness: &Correctness) -> bool {
+    [
+        correctness.schema,
+        correctness.rows,
+        correctness.keys,
+        correctness.order,
+        correctness.null_nan_mask,
+        correctness.values,
+    ]
+    .into_iter()
+    .all(|flag| flag)
+}
+
+#[cfg(test)]
+async fn timed_sample_drops_output(
+    args: &Args,
+    batch: &Batch,
+    workload: &Workload,
+) -> BenchResult<()> {
+    let plan = build_plan(config(args), workload)?;
+    let (sample, retained) = calc_flow_sample(&plan, batch, false).await?;
     if retained.is_some() {
         return Err("timed Calc Flow sample retained its output batch".into());
     }
     if sample.elapsed_ms <= 0.0 {
         return Err("timed Calc Flow sample recorded no elapsed time".into());
     }
+    Ok(())
+}
+
+#[cfg(test)]
+async fn run_sample_retention_tests() -> BenchResult<()> {
+    // One tiny paired case must still prove output equivalence from its
+    // warm-up pair while timed samples retain no output batches at all.
+    let args = retention_case_args(workspace_root()?);
+    let records = input_batches(args.rows, args.entities, args.batch_size)?;
+    let batch = benchmark_batch(records, args.entities)?;
+    let workload = &workloads()[0];
+    timed_sample_drops_output(&args, &batch, workload).await?;
     let case = benchmark_case(&args, workload, &batch).await?;
-    let correctness = case.correctness;
-    if !(correctness.schema
-        && correctness.rows
-        && correctness.keys
-        && correctness.order
-        && correctness.null_nan_mask
-        && correctness.values)
-    {
+    if !correctness_is_complete(&case.correctness) {
         return Err("retention restructure lost the warm-up correctness pair".into());
     }
     Ok(())
