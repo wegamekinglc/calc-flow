@@ -35,6 +35,26 @@ class BenchmarkWorkflowTests(unittest.TestCase):
             nightly,
         )
 
+    def test_nightly_sql_datafusion_reports_upload_even_after_failure(self):
+        workflow = (ROOT / ".github/workflows/benchmarks.yml").read_text(
+            encoding="utf-8"
+        )
+        nightly = workflow.split("  sql-datafusion-nightly:\n", 1)[1].split(
+            "  sql-datafusion-weekly-matrix:\n", 1
+        )[0]
+        upload = nightly.split("- name: Upload SQL/DataFusion reports\n", 1)[1]
+        # P1 gate failures must still leave the measured JSON evidence behind.
+        self.assertIn("if: always()", upload)
+
+    def test_nightly_sql_datafusion_paired_runs_use_two_warmups(self):
+        workflow = (ROOT / ".github/workflows/benchmarks.yml").read_text(
+            encoding="utf-8"
+        )
+        nightly = workflow.split("  sql-datafusion-nightly:\n", 1)[1].split(
+            "  sql-datafusion-weekly-matrix:\n", 1
+        )[0]
+        self.assertIn("--warmups 2", nightly)
+
     def test_regular_ci_and_schedule_call_the_same_complete_suite(self):
         for name in ("ci-linux.yml", "benchmarks.yml"):
             workflow = (ROOT / ".github/workflows" / name).read_text(encoding="utf-8")
