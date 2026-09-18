@@ -9,6 +9,27 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-18: Keep SQL/DataFusion stability evidence observable and confirm
+  the P1 machine tiering with hosted-runner measurements. The weekly
+  adaptive-tuning matrix job now uploads its screening and candidate reports
+  with `if: always()`, matching the nightly job, so stability-gate failures
+  still leave the measured JSON behind for tolerance recalibration; the
+  within-run CV, independent-median, and independent peak-RSS verifier
+  failures now name the measured value against the threshold, for example
+  `cases[0].raw_datafusion CV 12.4% exceeds 10%` and `independent median
+  ratio 1.18x (30.1 ms vs 35.5 ms) exceeds 1.10x for (...) raw_datafusion`.
+  Runner-measured evidence from the same date (4-vCPU hosted runner:
+  matched-adaptive p16 medians 218.2 ms `sma_20` and 307.5 ms
+  `dual_sma_spread` against the 90/110 ms calibration budgets; paired
+  ratios 0.99–1.03x; p16 peak RSS within 1.02–1.11x of the p1 control;
+  measured p16/p1 latency factors 0.45–0.49 versus 0.22 on the 32-core
+  calibration host)
+  confirms the absolute budgets stay calibration-spec-only and the
+  paired-ratio and RSS budgets remain the hosted-runner gates. The matrix
+  stability tolerances (CV 10%, independent median 1.10x, RSS 1.15x) are
+  unchanged pending measured 100k-row noise from the now-uploaded weekly
+  evidence.
+
 - 2026-09-18: Make the SQL/DataFusion P1 evidence gate machine-aware. The
   absolute latency budgets (90 ms `sma_20`, 110 ms `dual_sma_spread`) now bind
   only at or above the 16-logical-core calibration specification

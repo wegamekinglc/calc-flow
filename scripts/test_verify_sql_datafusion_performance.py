@@ -244,6 +244,56 @@ class TestSqlDataFusionEvidence(unittest.TestCase):
                 repeat=second,
             )
 
+    def test_stability_failure_messages_report_measured_and_threshold_values(
+        self,
+    ) -> None:
+        with self.subTest(gate="within-run CV"):
+            noisy = _report()
+            noisy["cases"][0]["calc_flow"]["samples_ms"] = [50.0, 150.0] * 10
+            noisy["cases"][0]["calc_flow"].update(
+                {
+                    "median_ms": 100.0,
+                    "p25_ms": 50.0,
+                    "p75_ms": 150.0,
+                    "mad_ms": 50.0,
+                    "cv": 0.5,
+                }
+            )
+            with self.assertRaises(ValueError) as raised:
+                verify_report(noisy, minimum_samples=20, require_stable=True)
+            for pattern in ("50.0%", "10%"):
+                self.assertIn(pattern, str(raised.exception))
+
+        with self.subTest(gate="independent median"):
+            first = _report()
+            second = copy.deepcopy(first)
+            second["cases"][0]["calc_flow"]["samples_ms"] = [100.0] * 20
+            for field in ("median_ms", "p25_ms", "p75_ms"):
+                second["cases"][0]["calc_flow"][field] = 100.0
+            ratio = 100.0 / 70.0
+            second["cases"][0]["paired_ratios"] = [ratio] * 20
+            second["cases"][0]["paired_ratio_median"] = ratio
+            second["cases"][0]["paired_ratio_ci_low"] = ratio
+            second["cases"][0]["paired_ratio_ci_high"] = ratio
+            with self.assertRaises(ValueError) as raised:
+                verify_report(
+                    first,
+                    minimum_samples=20,
+                    require_stable=True,
+                    repeat=second,
+                )
+            for pattern in ("1.19x", "84.0 ms", "100.0 ms", "1.10x"):
+                self.assertIn(pattern, str(raised.exception))
+
+        with self.subTest(gate="independent peak RSS"):
+            first = _report()
+            second = copy.deepcopy(first)
+            first["cases"][0]["calc_flow"]["peak_rss_bytes"] = 160_000_000
+            with self.assertRaises(ValueError) as raised:
+                verify_report(first, minimum_samples=20, repeat=second)
+            for pattern in ("1.60x", "160000000", "100000000", "1.15x"):
+                self.assertIn(pattern, str(raised.exception))
+
     def test_repeat_report_must_share_exact_git_sha(self) -> None:
         first = _report()
         second = copy.deepcopy(first)
