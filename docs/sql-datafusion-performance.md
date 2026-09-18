@@ -117,7 +117,11 @@ python scripts/analyze_sql_datafusion_attribution.py \
 Weekly CI runs the complete P3 grid for 100k, 1m, and 2.1m rows; 1, 4, 16, and
 64 active entities; p1 through p32; batch sizes 4096 through 32768; and both
 SMA workloads. Five-pair screening retains the latency/RSS Pareto frontier,
-then candidates receive two independent 20-pair runs.
+then candidates receive two independent 20-pair runs. Both the nightly and
+weekly jobs upload their measured reports with `if: always()`, so a failed
+stability or P1 verification still leaves its evidence behind; stability
+failures name the measured value against the threshold, for example
+`cases[0].raw_datafusion CV 12.4% exceeds 10%`.
 
 ## UInt64 filter predicates
 

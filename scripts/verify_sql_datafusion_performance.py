@@ -232,7 +232,7 @@ def _verify_engine(
         if not math.isclose(reported, expected, rel_tol=1e-12, abs_tol=1e-12):
             raise ValueError(f"{label}.{field} is inconsistent")
     if require_stable and summary["cv"] > 0.10:
-        raise ValueError(f"{label} CV exceeds 10%")
+        raise ValueError(f"{label} CV {summary['cv'] * 100:.1f}% exceeds 10%")
     _finite(engine["cpu_time_ms"], f"{label}.cpu_time_ms")
     if engine["cpu_time_ms"] < 0:
         raise ValueError(f"{label}.cpu_time_ms must be non-negative")
@@ -533,13 +533,18 @@ def _verify_repeat(report: dict[str, Any], repeat: dict[str, Any]) -> None:
             )
             if median_ratio > 1.10:
                 raise ValueError(
-                    f"independent median differs by more than 10% for {key} {engine}"
+                    f"independent median ratio {median_ratio:.2f}x "
+                    f"({first_median:.1f} ms vs {second_median:.1f} ms) exceeds "
+                    f"1.10x for {key} {engine}"
                 )
             first_rss = first[engine]["peak_rss_bytes"]
             second_rss = second[engine]["peak_rss_bytes"]
-            if max(first_rss, second_rss) / min(first_rss, second_rss) > 1.15:
+            rss_ratio = max(first_rss, second_rss) / min(first_rss, second_rss)
+            if rss_ratio > 1.15:
                 raise ValueError(
-                    f"independent peak RSS differs by more than 15% for {key} {engine}"
+                    f"independent peak RSS ratio {rss_ratio:.2f}x "
+                    f"({first_rss} vs {second_rss} bytes) exceeds 1.15x "
+                    f"for {key} {engine}"
                 )
 
 

@@ -46,6 +46,18 @@ class BenchmarkWorkflowTests(unittest.TestCase):
         # P1 gate failures must still leave the measured JSON evidence behind.
         self.assertIn("if: always()", upload)
 
+    def test_matrix_sql_datafusion_reports_upload_even_after_failure(self):
+        workflow = (ROOT / ".github/workflows/benchmarks.yml").read_text(
+            encoding="utf-8"
+        )
+        matrix = workflow.split("  sql-datafusion-weekly-matrix:\n", 1)[1].split(
+            "  benchmark:\n", 1
+        )[0]
+        upload = matrix.split("- name: Upload SQL/DataFusion matrix reports\n", 1)[1]
+        # Stability-gate failures must still leave the measured screening and
+        # candidate JSON behind for tolerance recalibration.
+        self.assertIn("if: always()", upload)
+
     def test_nightly_sql_datafusion_paired_runs_use_two_warmups(self):
         workflow = (ROOT / ".github/workflows/benchmarks.yml").read_text(
             encoding="utf-8"
