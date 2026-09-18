@@ -13,10 +13,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-    },
+    sync::Arc,
     thread,
     time::{Duration, Instant},
 };
@@ -321,7 +318,6 @@ struct Workload {
 struct Sample {
     elapsed_ms: f64,
     phases: PhaseMedians,
-    output: Batch,
     plan_text: String,
     configured_partitions: usize,
     requested_partitions: usize,
@@ -363,56 +359,60 @@ struct PlanStatistics {
     coalesce_operator_count: usize,
 }
 
+// The sampler reads the kernel-maintained peak-RSS high-water mark instead of
+// polling `VmRSS` from a helper thread: a polling thread competes with the
+// measured execution and can miss transient peaks between polls, while the
+// kernel counter is exact and costs nothing inside the timed window.
 struct RssSampler {
-    running: Arc<AtomicBool>,
-    peak: Arc<AtomicUsize>,
-    thread: Option<thread::JoinHandle<()>>,
+    start_rss_bytes: usize,
 }
 
 impl RssSampler {
     fn start() -> Self {
-        let running = Arc::new(AtomicBool::new(true));
-        let peak = Arc::new(AtomicUsize::new(current_rss_bytes().max(1)));
-        let thread_running = Arc::clone(&running);
-        let thread_peak = Arc::clone(&peak);
-        let thread = thread::spawn(move || {
-            while thread_running.load(Ordering::Acquire) {
-                thread_peak.fetch_max(current_rss_bytes(), Ordering::AcqRel);
-                thread::sleep(Duration::from_millis(1));
-            }
-            thread_peak.fetch_max(current_rss_bytes(), Ordering::AcqRel);
-        });
+        reset_peak_rss_window();
         Self {
-            running,
-            peak,
-            thread: Some(thread),
+            start_rss_bytes: current_rss_bytes(),
         }
     }
 
-    fn finish(mut self) -> usize {
-        self.running.store(false, Ordering::Release);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-        self.peak.load(Ordering::Acquire).max(1)
+    fn finish(self) -> usize {
+        peak_rss_bytes().max(self.start_rss_bytes).max(1)
     }
 }
 
-fn current_rss_bytes() -> usize {
-    let Ok(status) = fs::read_to_string("/proc/self/status") else {
-        return 1;
-    };
-    status
+fn status_field_kilobytes(prefix: &str) -> Option<usize> {
+    fs::read_to_string("/proc/self/status")
+        .ok()?
         .lines()
         .find_map(|line| {
-            line.strip_prefix("VmRSS:")?
+            line.strip_prefix(prefix)?
                 .split_whitespace()
                 .next()?
                 .parse::<usize>()
                 .ok()
         })
+}
+
+fn status_field_bytes(prefix: &str) -> usize {
+    status_field_kilobytes(prefix)
         .and_then(|kilobytes| kilobytes.checked_mul(1_024))
         .unwrap_or(1)
+}
+
+fn current_rss_bytes() -> usize {
+    status_field_bytes("VmRSS:")
+}
+
+fn peak_rss_bytes() -> usize {
+    status_field_bytes("VmHWM:")
+}
+
+// Writing `5` to `clear_refs` re-anchors `VmHWM` at the current footprint so
+// each sample reports its own peak. A failed reset (for example on a hardened
+// host) only makes later windows cumulative; the reported maximum stays a
+// valid process peak.
+fn reset_peak_rss_window() {
+    let _ = fs::write("/proc/self/clear_refs", b"5");
 }
 
 fn workloads() -> [Workload; 2] {
@@ -537,10 +537,14 @@ fn build_plan(
         .compile_batch(&UdfRegistry::new().snapshot())?)
 }
 
+// `retain_output` selects whether the sample keeps its output batch for the
+// warm-up correctness pair; timed samples drop theirs so a long run does not
+// accumulate one output per sample. The timed envelope is identical either way.
 async fn calc_flow_sample(
     plan: &calc_flow::BatchExecutionPlan,
     batch: &Batch,
-) -> BenchResult<Sample> {
+    retain_output: bool,
+) -> BenchResult<(Sample, Option<Batch>)> {
     let rss = RssSampler::start();
     let started = Instant::now();
     let result = plan
@@ -558,8 +562,12 @@ async fn calc_flow_sample(
     let output = result
         .outputs
         .get("output")
-        .ok_or("Calc Flow sample produced no output")?
-        .clone();
+        .ok_or("Calc Flow sample produced no output")?;
+    let output = if retain_output {
+        Some(output.clone())
+    } else {
+        None
+    };
     let mut phases = PhaseMedians {
         runtime_acquire: ns_ms(metric.runtime_acquire_ns),
         session_state_create: ns_ms(metric.session_state_create_ns),
@@ -580,44 +588,46 @@ async fn calc_flow_sample(
         run_session_envelope: 0.0,
     };
     phases.run_session_envelope = (elapsed_ms - exclusive_phase_total(&phases)).max(0.0);
-    Ok(Sample {
-        elapsed_ms,
-        phases,
-        output,
-        plan_text: metric.physical_plan.clone(),
-        configured_partitions: metric.configured_target_partitions,
-        requested_partitions: metric.requested_target_partitions,
-        effective_partitions: metric.effective_target_partitions,
-        parallelism_mode: match metric.parallelism_mode {
-            DataFusionParallelismMode::Fixed => "fixed",
-            DataFusionParallelismMode::Auto => "auto",
-        }
-        .to_owned(),
-        available_parallelism: metric.available_parallelism,
-        max_partitions: metric.max_partitions,
-        min_rows_per_partition: metric.min_rows_per_partition,
-        small_rows_threshold: metric.small_rows_threshold,
-        parallelism_decision_reused: metric.parallelism_decision_reused,
-        decision_input_rows: metric.decision_input_rows,
-        decision_active_entities: metric.decision_active_entities,
-        decision_active_entities_source: metric.decision_active_entities_source.clone(),
-        partition_limit_reason: metric.partition_limit_reason.clone(),
-        batch_size: metric.configured_batch_size,
-        partition_rows: if metric.window_partition_rows.is_empty() {
-            metric.output_partition_rows.clone()
-        } else {
-            metric.window_partition_rows.clone()
+    Ok((
+        Sample {
+            elapsed_ms,
+            phases,
+            plan_text: metric.physical_plan.clone(),
+            configured_partitions: metric.configured_target_partitions,
+            requested_partitions: metric.requested_target_partitions,
+            effective_partitions: metric.effective_target_partitions,
+            parallelism_mode: match metric.parallelism_mode {
+                DataFusionParallelismMode::Fixed => "fixed",
+                DataFusionParallelismMode::Auto => "auto",
+            }
+            .to_owned(),
+            available_parallelism: metric.available_parallelism,
+            max_partitions: metric.max_partitions,
+            min_rows_per_partition: metric.min_rows_per_partition,
+            small_rows_threshold: metric.small_rows_threshold,
+            parallelism_decision_reused: metric.parallelism_decision_reused,
+            decision_input_rows: metric.decision_input_rows,
+            decision_active_entities: metric.decision_active_entities,
+            decision_active_entities_source: metric.decision_active_entities_source.clone(),
+            partition_limit_reason: metric.partition_limit_reason.clone(),
+            batch_size: metric.configured_batch_size,
+            partition_rows: if metric.window_partition_rows.is_empty() {
+                metric.output_partition_rows.clone()
+            } else {
+                metric.window_partition_rows.clone()
+            },
+            spill_bytes: metric.spill_bytes,
+            elapsed_compute_ns: metric.elapsed_compute_ns,
+            window_compute_ns: metric.window_compute_ns,
+            repartition_sort_compute_ns: metric.repartition_sort_compute_ns,
+            window_operator_count: metric.window_operator_count,
+            repartition_operator_count: metric.repartition_operator_count,
+            sort_operator_count: metric.sort_operator_count,
+            coalesce_operator_count: metric.coalesce_operator_count,
+            peak_rss_bytes,
         },
-        spill_bytes: metric.spill_bytes,
-        elapsed_compute_ns: metric.elapsed_compute_ns,
-        window_compute_ns: metric.window_compute_ns,
-        repartition_sort_compute_ns: metric.repartition_sort_compute_ns,
-        window_operator_count: metric.window_operator_count,
-        repartition_operator_count: metric.repartition_operator_count,
-        sort_operator_count: metric.sort_operator_count,
-        coalesce_operator_count: metric.coalesce_operator_count,
-        peak_rss_bytes,
-    })
+        output,
+    ))
 }
 
 #[allow(
@@ -630,7 +640,8 @@ async fn raw_datafusion_sample(
     configured_partitions: usize,
     effective_partitions: usize,
     batch_size: usize,
-) -> BenchResult<Sample> {
+    retain_output: bool,
+) -> BenchResult<(Sample, Option<Batch>)> {
     // All raw-engine phase boundaries stay adjacent so the attribution report
     // cannot mix timings from different execution envelopes.
     // #lizard forgives
@@ -718,45 +729,47 @@ async fn raw_datafusion_sample(
         run_session_envelope: 0.0,
     };
     phases.run_session_envelope = (elapsed_ms - exclusive_phase_total(&phases)).max(0.0);
-    Ok(Sample {
-        elapsed_ms,
-        phases,
-        output,
-        plan_text,
-        configured_partitions,
-        requested_partitions: configured_partitions,
-        effective_partitions,
-        parallelism_mode: "fixed".to_owned(),
-        available_parallelism,
-        max_partitions: 32,
-        min_rows_per_partition: MIN_ROWS_PER_PARTITION,
-        small_rows_threshold: SMALL_ROWS_THRESHOLD,
-        parallelism_decision_reused: false,
-        decision_input_rows: batch.num_rows(),
-        decision_active_entities,
-        decision_active_entities_source: "batch_metadata".to_owned(),
-        partition_limit_reason: if effective_partitions < configured_partitions {
-            "minimum_rows_per_partition"
-        } else {
-            "configured_target_partitions"
-        }
-        .to_owned(),
-        batch_size,
-        partition_rows: if plan_statistics.window_partition_rows.is_empty() {
-            plan_statistics.partition_rows
-        } else {
-            plan_statistics.window_partition_rows
+    Ok((
+        Sample {
+            elapsed_ms,
+            phases,
+            plan_text,
+            configured_partitions,
+            requested_partitions: configured_partitions,
+            effective_partitions,
+            parallelism_mode: "fixed".to_owned(),
+            available_parallelism,
+            max_partitions: 32,
+            min_rows_per_partition: MIN_ROWS_PER_PARTITION,
+            small_rows_threshold: SMALL_ROWS_THRESHOLD,
+            parallelism_decision_reused: false,
+            decision_input_rows: batch.num_rows(),
+            decision_active_entities,
+            decision_active_entities_source: "batch_metadata".to_owned(),
+            partition_limit_reason: if effective_partitions < configured_partitions {
+                "minimum_rows_per_partition"
+            } else {
+                "configured_target_partitions"
+            }
+            .to_owned(),
+            batch_size,
+            partition_rows: if plan_statistics.window_partition_rows.is_empty() {
+                plan_statistics.partition_rows
+            } else {
+                plan_statistics.window_partition_rows
+            },
+            spill_bytes: plan_statistics.spill_bytes,
+            elapsed_compute_ns: plan_statistics.elapsed_compute_ns,
+            window_compute_ns: plan_statistics.window_compute_ns,
+            repartition_sort_compute_ns: plan_statistics.repartition_sort_compute_ns,
+            window_operator_count: plan_statistics.window_operator_count,
+            repartition_operator_count: plan_statistics.repartition_operator_count,
+            sort_operator_count: plan_statistics.sort_operator_count,
+            coalesce_operator_count: plan_statistics.coalesce_operator_count,
+            peak_rss_bytes,
         },
-        spill_bytes: plan_statistics.spill_bytes,
-        elapsed_compute_ns: plan_statistics.elapsed_compute_ns,
-        window_compute_ns: plan_statistics.window_compute_ns,
-        repartition_sort_compute_ns: plan_statistics.repartition_sort_compute_ns,
-        window_operator_count: plan_statistics.window_operator_count,
-        repartition_operator_count: plan_statistics.repartition_operator_count,
-        sort_operator_count: plan_statistics.sort_operator_count,
-        coalesce_operator_count: plan_statistics.coalesce_operator_count,
-        peak_rss_bytes,
-    })
+        if retain_output { Some(output) } else { None },
+    ))
 }
 
 fn plan_statistics(plan: &dyn ExecutionPlan, output_rows: usize) -> PlanStatistics {
@@ -859,32 +872,36 @@ async fn benchmark_case(
     let config = config(args);
     let effective_partitions = effective_partitions(args);
     let plan = build_plan(config, workload)?;
-    let mut calc_warm = None;
-    let mut raw_warm = None;
+    let mut calc_warm_output = None;
+    let mut raw_warm_output = None;
     for _ in 0..args.warmups {
-        calc_warm = Some(calc_flow_sample(&plan, batch).await?);
-        raw_warm = Some(
-            raw_datafusion_sample(
-                batch,
-                workload,
-                args.partitions,
-                effective_partitions,
-                args.batch_size,
-            )
-            .await?,
-        );
+        let (_calc_warm, calc_output) = calc_flow_sample(&plan, batch, true).await?;
+        calc_warm_output = calc_output;
+        let (_raw_warm, raw_output) = raw_datafusion_sample(
+            batch,
+            workload,
+            args.partitions,
+            effective_partitions,
+            args.batch_size,
+            true,
+        )
+        .await?;
+        raw_warm_output = raw_output;
     }
     let correctness = compare_outputs(
-        &calc_warm
+        calc_warm_output
             .as_ref()
-            .ok_or("missing Calc Flow warm-up")?
-            .output,
-        &raw_warm
+            .ok_or("missing Calc Flow warm-up")?,
+        raw_warm_output
             .as_ref()
-            .ok_or("missing raw DataFusion warm-up")?
-            .output,
+            .ok_or("missing raw DataFusion warm-up")?,
         workload.output_column,
     )?;
+    // The warm-up outputs have proved equivalence; dropping them before the
+    // sampling loop keeps the run's retained memory flat instead of growing
+    // by one output batch per sample.
+    drop(calc_warm_output);
+    drop(raw_warm_output);
 
     let mut calc_samples = Vec::with_capacity(args.samples);
     let mut raw_samples = Vec::with_capacity(args.samples);
@@ -892,7 +909,7 @@ async fn benchmark_case(
     for sample in 0..args.samples {
         if sample % 2 == 0 {
             sample_order.push("ab".to_owned());
-            calc_samples.push(calc_flow_sample(&plan, batch).await?);
+            calc_samples.push(calc_flow_sample(&plan, batch, false).await?.0);
             raw_samples.push(
                 raw_datafusion_sample(
                     batch,
@@ -900,8 +917,10 @@ async fn benchmark_case(
                     args.partitions,
                     effective_partitions,
                     args.batch_size,
+                    false,
                 )
-                .await?,
+                .await?
+                .0,
             );
         } else {
             sample_order.push("ba".to_owned());
@@ -912,10 +931,12 @@ async fn benchmark_case(
                     args.partitions,
                     effective_partitions,
                     args.batch_size,
+                    false,
                 )
-                .await?,
+                .await?
+                .0,
             );
-            calc_samples.push(calc_flow_sample(&plan, batch).await?);
+            calc_samples.push(calc_flow_sample(&plan, batch, false).await?.0);
         }
     }
     let input_batch_rows = batch
@@ -1515,6 +1536,112 @@ fn run_output_anchor_tests() -> BenchResult<()> {
     Ok(())
 }
 
+// The kernel peak counter and its `clear_refs` reset are Linux contracts;
+// `scripts/run_rust_tests.py` also drives this self-test there. Other hosts
+// (including the Windows CI leg) skip it instead of failing on absent
+// `/proc` entries, while the sampler itself keeps its cross-platform floor.
+#[cfg(all(test, target_os = "linux"))]
+fn run_rss_window_tests() -> BenchResult<()> {
+    // The kernel peak counter must never trail the current footprint.
+    let rss = current_rss_bytes();
+    let peak = peak_rss_bytes();
+    if peak < rss {
+        return Err(format!("kernel peak RSS {peak} is below current RSS {rss}").into());
+    }
+
+    // Resetting the window must re-anchor the peak to the current footprint,
+    // not to the process-wide maximum (allocator churn gets bounded slack).
+    reset_peak_rss_window();
+    let reset_peak = peak_rss_bytes();
+    let reset_slack = 16 * 1024 * 1024;
+    if reset_peak > current_rss_bytes().saturating_add(reset_slack) {
+        return Err(format!("reset peak RSS {reset_peak} stayed above the current window").into());
+    }
+
+    // A transient allocation inside one sample window must be captured
+    // exactly, including after its buffers are dropped. Writing through each
+    // page pins physical memory; a zero-only allocation would map the shared
+    // zero page and allocate nothing.
+    let sampler = RssSampler::start();
+    let baseline = current_rss_bytes();
+    let mut transient = vec![0_u8; 64 * 1024 * 1024];
+    for page in transient.chunks_mut(4_096) {
+        page[0] = 1;
+    }
+    std::hint::black_box(&transient);
+    drop(transient);
+    let observed = sampler.finish();
+    let expected_growth = 32 * 1024 * 1024;
+    if observed < baseline.saturating_add(expected_growth) {
+        return Err(format!(
+            "sample peak RSS {observed} missed a {expected_growth}-byte transient window"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn retention_case_args(root: &Path) -> Args {
+    Args {
+        profile: Profile::SerialControl,
+        output: root.join("target/sql-datafusion/retention-test.json"),
+        rows: 4_096,
+        entities: 4,
+        batch_size: 1_024,
+        partitions: 1,
+        samples: 2,
+        warmups: 1,
+    }
+}
+
+#[cfg(test)]
+fn correctness_is_complete(correctness: &Correctness) -> bool {
+    [
+        correctness.schema,
+        correctness.rows,
+        correctness.keys,
+        correctness.order,
+        correctness.null_nan_mask,
+        correctness.values,
+    ]
+    .into_iter()
+    .all(|flag| flag)
+}
+
+#[cfg(test)]
+async fn timed_sample_drops_output(
+    args: &Args,
+    batch: &Batch,
+    workload: &Workload,
+) -> BenchResult<()> {
+    let plan = build_plan(config(args), workload)?;
+    let (sample, retained) = calc_flow_sample(&plan, batch, false).await?;
+    if retained.is_some() {
+        return Err("timed Calc Flow sample retained its output batch".into());
+    }
+    if sample.elapsed_ms <= 0.0 {
+        return Err("timed Calc Flow sample recorded no elapsed time".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+async fn run_sample_retention_tests() -> BenchResult<()> {
+    // One tiny paired case must still prove output equivalence from its
+    // warm-up pair while timed samples retain no output batches at all.
+    let args = retention_case_args(workspace_root()?);
+    let records = input_batches(args.rows, args.entities, args.batch_size)?;
+    let batch = benchmark_batch(records, args.entities)?;
+    let workload = &workloads()[0];
+    timed_sample_drops_output(&args, &batch, workload).await?;
+    let case = benchmark_case(&args, workload, &batch).await?;
+    if !correctness_is_complete(&case.correctness) {
+        return Err("retention restructure lost the warm-up correctness pair".into());
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> BenchResult<()> {
     // Benchmark setup, both workload cases, provenance, and atomic publication
@@ -1526,6 +1653,15 @@ async fn main() -> BenchResult<()> {
     if self_test {
         if let Err(error) = run_output_anchor_tests() {
             eprintln!("sql_datafusion_performance output-anchor tests: {error}");
+            std::process::exit(1);
+        }
+        #[cfg(target_os = "linux")]
+        if let Err(error) = run_rss_window_tests() {
+            eprintln!("sql_datafusion_performance rss-window tests: {error}");
+            std::process::exit(1);
+        }
+        if let Err(error) = run_sample_retention_tests().await {
+            eprintln!("sql_datafusion_performance sample-retention tests: {error}");
             std::process::exit(1);
         }
         return Ok(());
