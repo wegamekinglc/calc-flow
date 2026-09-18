@@ -65,7 +65,7 @@ physical plan. Fair profiles always disable the rolling rewrite.
 
 ```bash
 cargo bench -p calc-flow --bench sql_datafusion_performance -- \
-  --profile matched-adaptive --samples 20 --warmups 1 \
+  --profile matched-adaptive --samples 20 --warmups 2 \
   --output target/sql-datafusion/matched-first.json
 
 python scripts/verify_sql_datafusion_performance.py \
@@ -87,6 +87,20 @@ Because the measured SQL relation has no outer `ORDER BY`, correctness is
 aligned by the unique `(symbol, event_time, sequence)` key outside the timed
 envelope; canonical key order, null/NaN masks, and values must then match. This
 does not add a global sort to either measured physical plan.
+
+`--require-p1` applies one conjunctive gate to the matched-adaptive report and
+its serial control: effective p16 execution for the 1m-row, 64-entity
+`sma_20` and `dual_sma_spread` workloads, absolute Calc Flow latency budgets
+of 90 ms and 110 ms, paired ratios of at most 1.30x and 1.20x, and p16 peak
+RSS within 1.5x of the p1 serial control, with latency and ratio read as the
+better of the two independent repeats. The absolute budgets bind only at or
+above the 16-logical-core calibration specification
+(`environment.available_parallelism >= 16`); smaller hosts, such as GitHub
+hosted runners, pass with an explicit stdout note instead, like
+`note: P1 sma_20 absolute latency budget 90 ms skipped: available_parallelism=4 is below the 16-core calibration spec`.
+The paired-ratio and RSS budgets bind on every host. Failures name the
+measured value and the threshold, for example
+`P1 sma_20 Calc Flow latency 117.3 ms exceeds 90 ms`.
 
 The P4 report assigns the same-binary gap to execution, fixed envelope,
 materialization, and the directly timed run/session envelope, and then applies

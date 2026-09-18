@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import copy
+import io
 import json
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
-from scripts.verify_sql_datafusion_performance import verify_p1, verify_report
+from scripts.verify_sql_datafusion_performance import main, verify_p1, verify_report
 
 
 def _engine(samples: list[float]) -> dict[str, object]:
@@ -136,6 +139,22 @@ def _report() -> dict[str, object]:
             }
         ],
     }
+
+
+def _p1_reports(parallelism: int = 32) -> tuple[dict[str, object], dict[str, object]]:
+    matched = _report()
+    matched["environment"]["available_parallelism"] = parallelism
+    matched["cases"].append(copy.deepcopy(matched["cases"][0]))
+    matched["cases"][1]["name"] = "dual_sma_spread"
+    serial = copy.deepcopy(matched)
+    serial["profile"] = "serial-control"
+    for case in serial["cases"]:
+        engine = case["calc_flow"]
+        engine["configured_partitions"] = 1
+        engine["requested_partitions"] = 1
+        engine["effective_partitions"] = 1
+        engine["partition_rows"] = [1_000_000]
+    return matched, serial
 
 
 class TestSqlDataFusionEvidence(unittest.TestCase):
@@ -286,6 +305,158 @@ class TestSqlDataFusionEvidence(unittest.TestCase):
                     matched["cases"][0]["calc_flow"][field] = value
                 with self.assertRaisesRegex(ValueError, message):
                     verify_p1(matched, serial)
+
+    def test_p1_skips_absolute_latency_budget_below_calibration_spec(self) -> None:
+        matched, serial = _p1_reports(parallelism=4)
+        matched["cases"][0]["calc_flow"]["median_ms"] = 91.0
+
+        notes = verify_p1(matched, serial)
+
+        self.assertEqual(len(notes), 2)
+        for note, name in zip(notes, ("sma_20", "dual_sma_spread"), strict=True):
+            with self.subTest(name=name):
+                self.assertIn(name, note)
+                self.assertIn("available_parallelism=4", note)
+                self.assertIn("16", note)
+
+    def test_p1_enforces_absolute_latency_at_calibration_spec(self) -> None:
+        matched, serial = _p1_reports(parallelism=16)
+        matched["cases"][0]["calc_flow"]["median_ms"] = 91.0
+
+        with self.assertRaisesRegex(ValueError, "latency"):
+            verify_p1(matched, serial)
+
+    def test_p1_applies_ratio_and_memory_gates_below_calibration_spec(self) -> None:
+        for field, value, message in (
+            ("paired_ratio_median", 1.31, "ratio"),
+            ("peak_rss_bytes", 160_000_000, "RSS"),
+        ):
+            with self.subTest(field=field):
+                matched, serial = _p1_reports(parallelism=4)
+                if field == "paired_ratio_median":
+                    matched["cases"][0][field] = value
+                else:
+                    matched["cases"][0]["calc_flow"][field] = value
+                with self.assertRaisesRegex(ValueError, message):
+                    verify_p1(matched, serial)
+
+    def test_p1_reports_skip_notes_on_passing_below_calibration_spec(self) -> None:
+        matched, serial = _p1_reports(parallelism=4)
+
+        notes = verify_p1(matched, serial)
+
+        self.assertEqual(
+            [note.split()[1] for note in notes], ["sma_20", "dual_sma_spread"]
+        )
+
+    def test_p1_failure_messages_report_measured_and_threshold_values(self) -> None:
+        for field, value, patterns in (
+            (
+                "median_ms",
+                91.0,
+                ("91.0 ms", "90 ms"),
+            ),
+            (
+                "paired_ratio_median",
+                1.31,
+                ("1.31x", "1.30x"),
+            ),
+            (
+                "peak_rss_bytes",
+                160_000_000,
+                ("160000000", "150000000"),
+            ),
+        ):
+            with self.subTest(field=field):
+                matched, serial = _p1_reports()
+                if field == "paired_ratio_median":
+                    matched["cases"][0][field] = value
+                else:
+                    matched["cases"][0]["calc_flow"][field] = value
+                with (
+                    self.assertRaises(ValueError) as raised,
+                ):
+                    verify_p1(matched, serial)
+                for pattern in patterns:
+                    self.assertIn(pattern, str(raised.exception))
+
+    def test_p1_uses_the_faster_repeat_for_latency_and_ratio(self) -> None:
+        matched, serial = _p1_reports()
+        matched["cases"][0]["calc_flow"]["median_ms"] = 91.0
+        matched["cases"][0]["paired_ratio_median"] = 1.31
+        second = copy.deepcopy(matched)
+        second["cases"][0]["calc_flow"]["median_ms"] = 70.0
+        second["cases"][0]["paired_ratio_median"] = 1.20
+
+        with self.assertRaises(ValueError):
+            verify_p1(matched, serial)
+        notes = verify_p1(matched, serial, repeat=second)
+        self.assertEqual(notes, [])
+
+    def _run_cli(
+        self, report: dict[str, object], repeat: dict[str, object]
+    ) -> tuple[int, str, str]:
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "matched.json").write_text(json.dumps(report), encoding="utf-8")
+            (root / "repeat.json").write_text(json.dumps(repeat), encoding="utf-8")
+            serial = copy.deepcopy(report)
+            serial["profile"] = "serial-control"
+            for case in serial["cases"]:
+                for engine_name in ("calc_flow", "raw_datafusion"):
+                    engine = case[engine_name]
+                    engine["configured_partitions"] = 1
+                    engine["requested_partitions"] = 1
+                    engine["effective_partitions"] = 1
+                    engine["partition_rows"] = [case["rows"]]
+            (root / "serial.json").write_text(json.dumps(serial), encoding="utf-8")
+            argv = [
+                "verify_sql_datafusion_performance.py",
+                str(root / "matched.json"),
+                "--repeat",
+                str(root / "repeat.json"),
+                "--serial-control",
+                str(root / "serial.json"),
+                "--minimum-samples",
+                "20",
+                "--require-stable",
+                "--require-p1",
+            ]
+            with (
+                patch("sys.argv", argv),
+                redirect_stdout(io.StringIO()) as stdout,
+                redirect_stderr(io.StringIO()) as stderr,
+            ):
+                exit_code = main()
+        return exit_code, stdout.getvalue(), stderr.getvalue()
+
+    def test_cli_prints_p1_skip_notes_on_sub_calibration_hosts(self) -> None:
+        matched, _ = _p1_reports(parallelism=4)
+        second = copy.deepcopy(matched)
+
+        exit_code, stdout, _ = self._run_cli(matched, second)
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("skipped", stdout)
+        self.assertIn("available_parallelism=4", stdout)
+
+    def test_cli_still_fails_over_budget_on_calibration_spec_hosts(self) -> None:
+        matched, _ = _p1_reports(parallelism=32)
+        case = matched["cases"][0]
+        case["calc_flow"]["samples_ms"] = [91.0] * 20
+        case["calc_flow"].update({"median_ms": 91.0, "p25_ms": 91.0, "p75_ms": 91.0})
+        ratio = 91.0 / 70.0
+        case["paired_ratios"] = [ratio] * 20
+        case["paired_ratio_median"] = ratio
+        case["paired_ratio_ci_low"] = ratio
+        case["paired_ratio_ci_high"] = ratio
+        second = copy.deepcopy(matched)
+
+        exit_code, _, stderr = self._run_cli(matched, second)
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("91.0 ms", stderr)
+        self.assertIn("exceeds 90 ms", stderr)
 
     def test_schema_artifact_exists_and_parses(self) -> None:
         schema = Path("schemas/sql-datafusion-performance-v1.schema.json")
