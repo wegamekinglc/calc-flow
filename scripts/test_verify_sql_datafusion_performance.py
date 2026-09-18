@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import copy
 import json
+import sys
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
-from scripts.verify_sql_datafusion_performance import verify_p1, verify_report
+from scripts.verify_sql_datafusion_performance import main, verify_p1, verify_report
 
 
 def _engine(samples: list[float]) -> dict[str, object]:
@@ -138,6 +142,88 @@ def _report() -> dict[str, object]:
     }
 
 
+def _scaled_engine(raw: dict[str, object], factor: float) -> dict[str, object]:
+    """Return a deep copy with every consistency-checked ms field scaled."""
+    engine = copy.deepcopy(raw)
+    engine["samples_ms"] = [value * factor for value in engine["samples_ms"]]
+    for field in ("median_ms", "p25_ms", "p75_ms", "mad_ms"):
+        engine[field] = engine[field] * factor
+    engine["phase_medians_ms"] = {
+        name: value * factor for name, value in engine["phase_medians_ms"].items()
+    }
+    engine["phase_samples_ms"] = {
+        name: [value * factor for value in values]
+        for name, values in engine["phase_samples_ms"].items()
+    }
+    return engine
+
+
+def _p1_pair(
+    *, cores: int = 32, serial_factor: float = 5.0
+) -> tuple[dict[str, object], dict[str, object]]:
+    """A matched-adaptive two-workload report plus a slower serial control."""
+    matched = _report()
+    matched["cases"].append(copy.deepcopy(matched["cases"][0]))
+    matched["cases"][1]["name"] = "dual_sma_spread"
+    matched["environment"]["available_parallelism"] = cores
+    serial = copy.deepcopy(matched)
+    serial["profile"] = "serial-control"
+    for case in serial["cases"]:
+        for engine_name in ("calc_flow", "raw_datafusion"):
+            engine = _scaled_engine(case[engine_name], serial_factor)
+            engine["configured_partitions"] = 1
+            engine["requested_partitions"] = 1
+            engine["effective_partitions"] = 1
+            engine["partition_rows"] = [1_000_000]
+            case[engine_name] = engine
+    return matched, serial
+
+
+def _scaled_report(raw: dict[str, object], factor: float) -> dict[str, object]:
+    """Return a deep copy with every case engine scaled by ``factor``."""
+    report = copy.deepcopy(raw)
+    for case in report["cases"]:
+        for engine_name in ("calc_flow", "raw_datafusion"):
+            case[engine_name] = _scaled_engine(case[engine_name], factor)
+    return report
+
+
+def _run_p1_gate(
+    first: dict[str, object],
+    second: dict[str, object],
+    serial: dict[str, object],
+) -> tuple[int, str, str]:
+    """Invoke the CLI gate over three report files; return code and streams."""
+    with TemporaryDirectory() as raw:
+        root = Path(raw)
+        paths = {}
+        for name, report in (
+            ("first", first),
+            ("second", second),
+            ("serial", serial),
+        ):
+            paths[name] = root / f"{name}.json"
+            paths[name].write_text(json.dumps(report), encoding="utf-8")
+        argv = [
+            "verify",
+            str(paths["first"]),
+            "--repeat",
+            str(paths["second"]),
+            "--serial-control",
+            str(paths["serial"]),
+            "--minimum-samples",
+            "20",
+            "--require-p1",
+        ]
+        with (
+            mock.patch.object(sys, "argv", argv),
+            redirect_stdout(StringIO()) as out,
+            redirect_stderr(StringIO()) as errors,
+        ):
+            code = main()
+    return code, out.getvalue(), errors.getvalue()
+
+
 class TestSqlDataFusionEvidence(unittest.TestCase):
     def test_accepts_complete_comparable_twenty_pair_report(self) -> None:
         verify_report(_report(), minimum_samples=20, require_stable=True)
@@ -248,19 +334,9 @@ class TestSqlDataFusionEvidence(unittest.TestCase):
             verify_report(first, minimum_samples=20, repeat=second)
 
     def test_p1_accepts_both_workloads_and_serial_memory_control(self) -> None:
-        matched = _report()
-        matched["cases"].append(copy.deepcopy(matched["cases"][0]))
-        matched["cases"][1]["name"] = "dual_sma_spread"
-        serial = copy.deepcopy(matched)
-        serial["profile"] = "serial-control"
-        for case in serial["cases"]:
-            engine = case["calc_flow"]
-            engine["configured_partitions"] = 1
-            engine["requested_partitions"] = 1
-            engine["effective_partitions"] = 1
-            engine["partition_rows"] = [1_000_000]
+        matched, serial = _p1_pair()
 
-        verify_p1(matched, serial)
+        self.assertEqual(verify_p1(matched, serial), [])
 
     def test_p1_rejects_latency_ratio_or_memory_failure(self) -> None:
         for field, value, message in (
@@ -269,23 +345,75 @@ class TestSqlDataFusionEvidence(unittest.TestCase):
             ("peak_rss_bytes", 160_000_000, "RSS"),
         ):
             with self.subTest(field=field):
-                matched = _report()
-                matched["cases"].append(copy.deepcopy(matched["cases"][0]))
-                matched["cases"][1]["name"] = "dual_sma_spread"
-                serial = copy.deepcopy(matched)
-                serial["profile"] = "serial-control"
-                for case in serial["cases"]:
-                    engine = case["calc_flow"]
-                    engine["configured_partitions"] = 1
-                    engine["requested_partitions"] = 1
-                    engine["effective_partitions"] = 1
-                    engine["partition_rows"] = [1_000_000]
+                matched, serial = _p1_pair()
                 if field == "ratio":
                     matched["cases"][0]["paired_ratio_median"] = value
                 else:
                     matched["cases"][0]["calc_flow"][field] = value
                 with self.assertRaisesRegex(ValueError, message):
                     verify_p1(matched, serial)
+
+    def test_p1_skips_absolute_budget_below_calibration_cores(self) -> None:
+        matched, serial = _p1_pair(cores=4)
+        matched["cases"][0]["calc_flow"]["median_ms"] = 120.0
+
+        notes = verify_p1(matched, serial)
+
+        self.assertEqual(len(notes), 1)
+        for fragment in ("sma_20", "120.0 ms", "90 ms", "4 logical cores"):
+            self.assertIn(fragment, notes[0])
+
+    def test_p1_failures_report_measured_values_and_thresholds(self) -> None:
+        for field, value, pattern in (
+            ("median_ms", 91.0, r"91\.0 ms.*90 ms"),
+            ("ratio", 1.31, r"1\.31x.*1\.30x"),
+            ("peak_rss_bytes", 160_000_000, r"160000000.*1\.5x.*100000000"),
+        ):
+            with self.subTest(field=field):
+                matched, serial = _p1_pair()
+                if field == "ratio":
+                    matched["cases"][0]["paired_ratio_median"] = value
+                else:
+                    matched["cases"][0]["calc_flow"][field] = value
+                with self.assertRaisesRegex(ValueError, pattern):
+                    verify_p1(matched, serial)
+
+    def test_p1_enforces_parallel_efficiency_on_every_machine(self) -> None:
+        for cores in (4, 32):
+            with self.subTest(cores=cores):
+                matched, serial = _p1_pair(cores=cores)
+                matched["cases"][0]["calc_flow"]["median_ms"] = 85.0
+                serial["cases"][0]["calc_flow"]["median_ms"] = 90.0
+
+                with self.assertRaisesRegex(
+                    ValueError, r"85\.0 ms.*0\.94x.*90\.0 ms.*0\.90x"
+                ):
+                    verify_p1(matched, serial)
+
+    def test_p1_gate_prints_skip_notes_below_calibration_cores(self) -> None:
+        matched, serial = _p1_pair(cores=4)
+
+        code, output, _ = _run_p1_gate(
+            _scaled_report(matched, 1.5), _scaled_report(matched, 1.6), serial
+        )
+
+        self.assertEqual(code, 0)
+        for fragment in (
+            "absolute latency budget skipped",
+            "4 logical cores",
+            "126.0 ms",
+            "134.4 ms",
+        ):
+            self.assertIn(fragment, output)
+
+    def test_p1_gate_validates_both_independent_repeats(self) -> None:
+        matched, serial = _p1_pair()
+
+        code, _, errors = _run_p1_gate(matched, _scaled_report(matched, 1.08), serial)
+
+        self.assertEqual(code, 1)
+        for fragment in ("90.7 ms", "exceeds 90 ms"):
+            self.assertIn(fragment, errors)
 
     def test_schema_artifact_exists_and_parses(self) -> None:
         schema = Path("schemas/sql-datafusion-performance-v1.schema.json")

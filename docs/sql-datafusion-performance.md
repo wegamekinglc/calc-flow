@@ -65,7 +65,7 @@ physical plan. Fair profiles always disable the rolling rewrite.
 
 ```bash
 cargo bench -p calc-flow --bench sql_datafusion_performance -- \
-  --profile matched-adaptive --samples 20 --warmups 1 \
+  --profile matched-adaptive --samples 20 --warmups 2 \
   --output target/sql-datafusion/matched-first.json
 
 python scripts/verify_sql_datafusion_performance.py \

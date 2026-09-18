@@ -36,7 +36,7 @@ jobs:
               cargo bench --locked -p calc-flow --bench sql_datafusion_performance -- \
                 --profile "$profile" \
                 --samples 20 \
-                --warmups 1 \
+                --warmups 2 \
                 --output "${{ github.workspace }}/benchmark-results/sql-datafusion/${profile}-${repeat}.json"
             done
           done
@@ -60,6 +60,7 @@ jobs:
             benchmark-results/sql-datafusion/attribution-first.json \
             --output benchmark-results/sql-datafusion/attribution-analysis.json
       - name: Upload SQL/DataFusion reports
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: benchmark-sql-datafusion-${{ github.run_id }}
