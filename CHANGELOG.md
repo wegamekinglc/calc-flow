@@ -9,6 +9,17 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-18: Make the SQL/DataFusion P1 evidence gate machine-aware. The
+  absolute latency budgets (90 ms `sma_20`, 110 ms `dual_sma_spread`) now bind
+  only at or above the 16-logical-core calibration specification
+  (`environment.available_parallelism >= 16`); smaller hosts, including GitHub
+  hosted runners, pass with an explicit skip note instead of a failure, while
+  the paired-ratio and p16-vs-p1 peak-RSS budgets keep binding on every host
+  and latency and ratio read the better of the two independent repeats. P1
+  failures now name the measured value against the threshold, and the nightly
+  benchmark workflow uploads the measured reports with `if: always()` and
+  runs each profile with `--warmups 2`.
+
 - 2026-09-17: Scope Rust benchmark workload fingerprints per bench target and
   add an explicit declared-migration path for harness-pipeline bench source
   changes. Editing one `crates/calc-flow/benches/*.rs` file now removes timing
