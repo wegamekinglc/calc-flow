@@ -127,6 +127,14 @@ workspace = true
 name = "late_output_recovery"
 required-features = ["file"]
 
+[[example]]
+name = "kafka_protobuf_source"
+required-features = ["kafka"]
+
+[[example]]
+name = "kafka_custom_decoder"
+required-features = ["kafka"]
+
 [package.metadata.release]
 # Packaging and publication follow the M7-04 release decision.
 release = false

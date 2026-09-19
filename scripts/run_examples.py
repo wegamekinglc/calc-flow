@@ -25,6 +25,8 @@ SERVICE_PYTHON_EXAMPLES = (
     "examples/23_postgresql_sink.py",
     "examples/24_mysql_sink.py",
     "examples/25_clickhouse_sink.py",
+    "examples/27_kafka_protobuf_source.py",
+    "examples/28_kafka_custom_decoder.py",
 )
 RUST_EXAMPLES = (
     "expression_pipeline",
