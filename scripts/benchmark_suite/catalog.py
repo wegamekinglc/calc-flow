@@ -188,15 +188,11 @@ def _powers_of_ten_tuple(node: ast.expr) -> tuple[str, ...] | None:
     generator = _generator_argument(node)
     if generator is None:
         return None
-    power = generator.elt
-    if not isinstance(power, ast.BinOp) or not isinstance(power.op, ast.Pow):
-        return None
-    if not isinstance(power.left, ast.Constant) or power.left.value != 10:
-        return None
-    if not isinstance(power.right, ast.Name):
+    power = _ten_to_name_power(generator.elt)
+    if power is None:
         return None
     comprehension = generator.generators[0]
-    if power.right.id != comprehension.target.id:
+    if power.id != comprehension.target.id:
         return None
     bounds = _constant_range_bounds(comprehension.iter)
     if bounds is None:
@@ -205,17 +201,39 @@ def _powers_of_ten_tuple(node: ast.expr) -> tuple[str, ...] | None:
     return tuple(str(10**exponent) for exponent in range(start, stop))
 
 
-def _generator_argument(node: ast.expr) -> ast.GeneratorExp | None:
-    """Return the sole generator argument of a ``tuple(...)`` call."""
+def _ten_to_name_power(node: ast.expr) -> ast.Name | None:
+    """Match ``10 ** name`` and return the exponent variable."""
+
+    if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Pow):
+        return None
+    if not isinstance(node.left, ast.Constant) or node.left.value != 10:
+        return None
+    if not isinstance(node.right, ast.Name):
+        return None
+    return node.right
+
+
+def _named_call(node: ast.expr, name: str, arity: int) -> ast.Call | None:
+    """Match a bare ``name`` call with exactly ``arity`` positional arguments."""
 
     if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
         return None
-    if node.func.id != "tuple" or len(node.args) != 1 or node.keywords:
+    if node.func.id != name or node.keywords or len(node.args) != arity:
         return None
-    generator = node.args[0]
+    return node
+
+
+def _generator_argument(node: ast.expr) -> ast.GeneratorExp | None:
+    """Return the sole generator argument of a ``tuple(...)`` call."""
+
+    call = _named_call(node, "tuple", 1)
+    if call is None:
+        return None
+    generator = call.args[0]
     if not isinstance(generator, ast.GeneratorExp) or len(generator.generators) != 1:
         return None
-    if generator.generators[0].ifs or generator.generators[0].is_async:
+    comprehension = generator.generators[0]
+    if comprehension.ifs or comprehension.is_async:
         return None
     return generator
 
@@ -223,12 +241,12 @@ def _generator_argument(node: ast.expr) -> ast.GeneratorExp | None:
 def _constant_range_bounds(node: ast.expr) -> tuple[int, int] | None:
     """Match ``range(constant, constant)`` exactly."""
 
-    if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
-        return None
-    if node.func.id != "range" or node.keywords or len(node.args) != 2:
+    call = _named_call(node, "range", 2)
+    if call is None:
         return None
     try:
-        start, stop = (ast.literal_eval(argument) for argument in node.args)
+        start = ast.literal_eval(call.args[0])
+        stop = ast.literal_eval(call.args[1])
     except ValueError:
         return None
     if isinstance(start, int) and isinstance(stop, int):

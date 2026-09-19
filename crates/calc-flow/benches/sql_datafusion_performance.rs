@@ -2132,8 +2132,9 @@ async fn main() -> BenchResult<()> {
     // Benchmark setup, both workload cases, provenance, and atomic publication
     // remain one top-level evidence lifecycle.
     #[cfg(test)]
-    if std::env::args_os().len() == 1 {
-        // nosemgrep
+    let self_test = std::env::args_os().len() == 1; // nosemgrep
+    #[cfg(test)]
+    if self_test {
         return run_bench_self_tests().await;
     }
 
