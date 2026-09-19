@@ -465,6 +465,44 @@ class Runtime:
             )
             self._invalidate_symbolic_compile_cache()
 
+    def register_kafka_decoder(
+        self,
+        *,
+        name: str,
+        version: str,
+        function: Any,
+    ) -> None:
+        """Register a trusted Kafka payload decoder for custom sources.
+
+        The callable receives one payload as ``bytes`` and returns a
+        ``pyarrow.RecordBatch`` or ``pyarrow.Table``. A custom Kafka source
+        selects the decoder through its ``decoder`` option identity; the
+        decoder must be registered before the streaming job opens.
+        """
+        if not isinstance(name, str) or not name:
+            raise ValueError("name must be a non-empty string")
+        if not isinstance(version, str) or not version:
+            raise ValueError("version must be a non-empty string")
+        if not callable(function):
+            raise TypeError("function must be callable")
+        native = getattr(self._inner, "register_kafka_decoder", None)
+        if native is None:
+            raise RuntimeError(
+                "Kafka decoders require a wheel built with connector-kafka; "
+                "see docs/connectors/kafka.md."
+            )
+        with self._registration_lock:
+            native(name=name, version=version, function=function)
+            self._registrations.append(
+                {
+                    "kind": "kafka_decoder",
+                    "name": name,
+                    "version": version,
+                    "function": function,
+                }
+            )
+            self._invalidate_symbolic_compile_cache()
+
     def _copied_registrations(self) -> tuple[dict[str, Any], ...]:
         return tuple(
             {

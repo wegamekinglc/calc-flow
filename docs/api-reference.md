@@ -233,6 +233,10 @@ exposes an immutable runtime-session capability snapshot through
 `capabilities()`.
 `register_scalar_udf` requires provider/name/version, exact input type names,
 return type, volatility, and a vectorized callable.
+`register_kafka_decoder` requires a name/version identity and a callable that
+takes one Kafka payload as `bytes` and returns a `pyarrow.RecordBatch` or
+`pyarrow.Table`; custom Kafka sources select the decoder through the
+`decoder` option identity.
 
 `register_provider` and `_register_mapping_provider` accept keyword-only
 `accepts_context=False`. A single provider registered with `register_provider`

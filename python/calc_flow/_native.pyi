@@ -194,6 +194,13 @@ class Runtime:
         volatility: str,
         function: Callable[..., object],
     ) -> None: ...
+    def register_kafka_decoder(
+        self,
+        *,
+        name: str,
+        version: str,
+        function: Callable[[bytes], object],
+    ) -> None: ...
     def catalog(self) -> list[dict[str, object]]: ...
     def _infer_sql_schema(
         self, query: str, schemas: Mapping[str, pa.Schema]

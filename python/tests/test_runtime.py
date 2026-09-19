@@ -25,6 +25,39 @@ def _plan(name: str = "stream"):
     )
 
 
+def test_kafka_decoder_registration_validates_inputs() -> None:
+    runtime = Runtime()
+    with pytest.raises(TypeError, match="callable"):
+        runtime.register_kafka_decoder(name="pipe", version="1", function=42)
+    with pytest.raises(ValueError, match="name"):
+        runtime.register_kafka_decoder(name="", version="1", function=lambda p: p)
+    with pytest.raises(ValueError, match="version"):
+        runtime.register_kafka_decoder(name="pipe", version="", function=lambda p: p)
+
+
+def test_kafka_decoder_registration_follows_the_compiled_connectors() -> None:
+    runtime = Runtime()
+    available = {item.name for item in runtime.capabilities().connectors}
+
+    def decode(payload: bytes) -> object:
+        return payload
+
+    if "kafka" not in available:
+        with pytest.raises(RuntimeError, match="connector-kafka"):
+            runtime.register_kafka_decoder(
+                name="pipe-orders", version="1", function=decode
+            )
+        return
+    runtime.register_kafka_decoder(name="pipe-orders", version="1", function=decode)
+    with pytest.raises(ConfigError):
+        runtime.register_kafka_decoder(name="pipe-orders", version="1", function=decode)
+    assert any(
+        registration["kind"] == "kafka_decoder"
+        and registration["name"] == "pipe-orders"
+        for registration in runtime._registration_snapshot()
+    )
+
+
 def test_registration_snapshot_is_success_only_and_defensive() -> None:
     runtime = Runtime()
 

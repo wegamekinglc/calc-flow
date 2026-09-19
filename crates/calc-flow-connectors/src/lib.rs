@@ -28,7 +28,7 @@
 //!         .iter()
 //!         .map(|identity| identity.name.to_string())
 //!         .collect::<Vec<String>>(),
-//!     vec!["csv", "json"]
+//!     vec!["csv", "custom", "json"]
 //! );
 //! ```
 
@@ -81,7 +81,8 @@ pub use clickhouse::{
 pub use http::{HttpSourceFactory, register_http_connectors};
 #[cfg(feature = "kafka")]
 pub use kafka::{
-    KAFKA_CONNECTOR_VERSION, KafkaSinkFactory, KafkaSourceFactory, register_kafka_connectors,
+    KAFKA_CONNECTOR_VERSION, KafkaDecoderRegistry, KafkaSinkFactory, KafkaSourceFactory,
+    register_kafka_connectors, register_kafka_connectors_with_decoders,
 };
 #[cfg(feature = "postgresql")]
 pub use postgresql::{PostgresSinkFactory, PostgresSourceFactory, register_postgresql_connectors};
@@ -110,6 +111,18 @@ use calc_flow::{ConnectorRegistry, FormatDescriptor, FormatIdentity, Result};
 /// The connector identity of the built-in file transport (feature
 /// `file`).
 pub const FILE_CONNECTOR_VERSION: &str = "2.0.0";
+
+/// The custom payload format identity name.
+///
+/// A custom payload is decoded by a trusted decoder registered out of
+/// band (for example the Kafka connector's decoder registry); data-only
+/// documents name the decoder through the transport's `decoder` option.
+/// The identity registers once here so every transport can list it
+/// without conflict.
+pub const CUSTOM_FORMAT_IDENTITY: &str = "custom";
+
+/// The custom payload format version.
+pub const CUSTOM_FORMAT_VERSION: &str = "1";
 
 #[cfg(feature = "file")]
 fn file_connector_identity() -> ConnectorIdentity {
@@ -310,6 +323,9 @@ pub fn register_format_codecs(registry: &mut ConnectorRegistry) -> Result<()> {
     })?;
     registry.register_format(FormatDescriptor {
         identity: FormatIdentity::new(json_lines::IDENTITY, json_lines::IDENTITY_VERSION)?,
+    })?;
+    registry.register_format(FormatDescriptor {
+        identity: FormatIdentity::new(CUSTOM_FORMAT_IDENTITY, CUSTOM_FORMAT_VERSION)?,
     })?;
     Ok(())
 }

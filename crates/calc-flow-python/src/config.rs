@@ -101,6 +101,8 @@ struct RuntimeState {
     providers: Arc<calc_flow::ProviderRegistry>,
     connectors: calc_flow::ConnectorRegistrySnapshot,
     udfs: Arc<RwLock<calc_flow::UdfRegistry>>,
+    #[cfg(feature = "connector-kafka")]
+    kafka_decoders: calc_flow_connectors::KafkaDecoderRegistry,
     tokio: Arc<tokio::runtime::Runtime>,
     roots: Vec<Arc<PythonRoot>>,
     udf_catalog: BTreeMap<(String, String, String), UdfCatalogMetadata>,
@@ -131,13 +133,21 @@ pub(crate) struct PyRuntime {
 impl PyRuntime {
     fn from_tokio(tokio: Arc<tokio::runtime::Runtime>) -> Self {
         let mut connector_registry = calc_flow::ConnectorRegistry::new();
-        crate::connector::register_builtin_connectors(&mut connector_registry)
-            .expect("built-in connector registration is internally consistent");
+        #[cfg(feature = "connector-kafka")]
+        let kafka_decoders = calc_flow_connectors::KafkaDecoderRegistry::default();
+        crate::connector::register_builtin_connectors(
+            &mut connector_registry,
+            #[cfg(feature = "connector-kafka")]
+            &kafka_decoders,
+        )
+        .expect("built-in connector registration is internally consistent");
         Self {
             state: RwLock::new(Some(RuntimeState {
                 providers: Arc::new(calc_flow::ProviderRegistry::default()),
                 connectors: connector_registry.snapshot(),
                 udfs: Arc::new(RwLock::new(calc_flow::UdfRegistry::new())),
+                #[cfg(feature = "connector-kafka")]
+                kafka_decoders,
                 tokio,
                 roots: Vec::new(),
                 udf_catalog: BTreeMap::new(),
@@ -518,6 +528,42 @@ impl PyRuntime {
             prepared.root,
         )?;
         self.record_udf_metadata(prepared.metadata)
+    }
+
+    /// Registers one trusted Python payload decoder for custom Kafka
+    /// sources, selected by the `decoder` option identity.
+    #[cfg(feature = "connector-kafka")]
+    #[pyo3(signature = (*, name, version, function))]
+    fn register_kafka_decoder(
+        &self,
+        py: Python<'_>,
+        name: &str,
+        version: &str,
+        function: Py<PyAny>,
+    ) -> PyResult<()> {
+        let (decoder, root) = crate::decoder::PythonKafkaDecoder::new(py, name, version, function)?;
+        let decoders = {
+            let state = self.state.read();
+            let state = state
+                .as_ref()
+                .ok_or_else(|| PyRuntimeError::new_err(CLEARED_RUNTIME_MESSAGE))?;
+            state.kafka_decoders.clone()
+        };
+        decoders
+            .register(Arc::new(decoder))
+            .map_err(crate::error::to_py_err)?;
+        let mut state = self.state.write();
+        let state = state
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err(CLEARED_RUNTIME_MESSAGE))?;
+        if !state
+            .roots
+            .iter()
+            .any(|existing| Arc::ptr_eq(existing, &root))
+        {
+            state.roots.push(root);
+        }
+        Ok(())
     }
 
     fn catalog<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {

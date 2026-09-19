@@ -108,6 +108,49 @@ fn protobuf_config_validates_its_companions_offline() {
 }
 
 #[test]
+fn custom_format_validates_its_decoder_offline() {
+    let mut source = source_options();
+    source.insert("format".to_string(), json!("custom"));
+    source.insert(
+        "schema".to_string(),
+        json!([{"name": "id", "data_type": "int64", "nullable": false}]),
+    );
+    let error = KafkaSourceConfig::from_options(&source)
+        .expect_err("custom without a decoder identity fails");
+    assert!(error.to_string().contains("decoder"), "{error}");
+
+    source.insert(
+        "decoder".to_string(),
+        json!({"name": "orders-json", "version": "1"}),
+    );
+    let config = KafkaSourceConfig::from_options(&source).expect("custom source parses");
+    assert!(matches!(config.format, KafkaFormat::Custom));
+    let decoder = config.decoder.expect("decoder identity parsed");
+    assert_eq!(decoder.name.as_ref(), "orders-json");
+    assert_eq!(decoder.version.as_ref(), "1");
+
+    let mut misplaced = source.clone();
+    misplaced.insert("descriptor_set".to_string(), json!("orders.pb"));
+    let error = KafkaSourceConfig::from_options(&misplaced)
+        .expect_err("protobuf companions are format-scoped");
+    assert!(error.to_string().contains("protobuf"), "{error}");
+
+    let mut json_with_decoder = source_options();
+    json_with_decoder.insert(
+        "decoder".to_string(),
+        json!({"name": "orders-json", "version": "1"}),
+    );
+    let error = KafkaSourceConfig::from_options(&json_with_decoder)
+        .expect_err("the decoder option is custom-only");
+    assert!(error.to_string().contains("custom"), "{error}");
+
+    let mut sink = sink_options();
+    sink.insert("format".to_string(), json!("custom"));
+    let error = KafkaSinkConfig::from_options(&sink).expect_err("sinks cannot encode custom");
+    assert!(error.to_string().contains("format"), "{error}");
+}
+
+#[test]
 fn sink_config_derives_transactional_identity() {
     let config = KafkaSinkConfig::from_options(&sink_options()).expect("parses");
     assert_eq!(
@@ -421,6 +464,11 @@ async fn factories_register_and_resolve_offline() {
     assert!(
         source.descriptor().formats.contains(&protobuf),
         "the kafka descriptor advertises protobuf"
+    );
+    let custom = calc_flow::FormatIdentity::new("custom", "1").expect("custom identity");
+    assert!(
+        source.descriptor().formats.contains(&custom),
+        "the kafka descriptor advertises custom decoders"
     );
 
     // Duplicate registration conflicts atomically.
