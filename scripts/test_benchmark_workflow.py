@@ -103,6 +103,29 @@ class BenchmarkWorkflowTests(unittest.TestCase):
         self.assertIn("--require-hashes benchmarks/requirements.lock", suite)
         self.assertNotIn("--benchmark-disable", suite)
 
+    def test_rust_shard_prints_the_informational_decode_benchmark(self):
+        suite = (ROOT / ".github/workflows/benchmark-suite.yml").read_text(
+            encoding="utf-8"
+        )
+        headers = suite.split(
+            "- name: Ensure libcurl headers for vendored librdkafka\n", 1
+        )[1]
+        self.assertIn("if: always() && matrix.id == 'rust'", headers)
+        step = suite.split(
+            "- name: Run informational connector decode throughput benchmark\n", 1
+        )[1]
+        # The protobuf/JSON decode comparison prints its ns/op table in the
+        # rust shard log even when the gating measurement finds a regression,
+        # and the log uploads with the shard's measured results.
+        self.assertIn("if: always() && matrix.id == 'rust'", step)
+        self.assertIn("CARGO_TARGET_DIR: target/benchmark-rust-build", step)
+        self.assertIn(
+            "cargo test -p calc-flow-connectors --features kafka --lib perf::",
+            step,
+        )
+        self.assertIn("--release -- --ignored --nocapture", step)
+        self.assertIn("tee target/benchmark-results/decode-throughput/run.log", step)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -41,6 +41,13 @@ discovered cases. Warm cases use one entity to support one-row appends.
 Compare measurements only when entity count, history depth, append size,
 and timing boundaries match.
 
+The rust shard also runs the informational connector decode comparison
+(`cargo test -p calc-flow-connectors --features kafka --lib perf:: --release
+-- --ignored --nocapture`), which prints the protobuf and JSON-lines decode
+throughput side by side in the step log and uploads
+`decode-throughput/run.log` with the shard's measured results. It carries
+no regression verdict.
+
 | Backend          | Projection  | Filter      | Group by    | Join        | SMA(20) | Dual SMA |
 |------------------|-------------|-------------|-------------|-------------|---------|----------|
 | Calc Flow SQL    | Yes         | Yes         | Yes         | Yes         | Yes     | Yes      |
