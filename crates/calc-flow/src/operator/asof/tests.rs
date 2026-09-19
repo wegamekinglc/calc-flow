@@ -1,7 +1,7 @@
 use super::*;
 use crate::{BatchMetadata, CancellationToken, EdgeBudget, EdgeCollector, Epoch, StreamJobContext};
 use datafusion::arrow::{
-    array::{Int64Array, StringArray, TimestampMicrosecondArray},
+    array::{Float64Array, Int64Array, StringArray, TimestampMicrosecondArray, UInt64Array},
     datatypes::{DataType, Field, Schema, TimeUnit},
     record_batch::RecordBatch,
 };
@@ -101,6 +101,75 @@ async fn one_row_output_byte_limit_preserves_pending_state_and_releases_workspac
     assert_eq!(op.runtime.pool.reserved(), 0);
     op.reset().unwrap();
     assert_eq!(op.runtime.pool.reserved(), 0);
+}
+
+#[tokio::test]
+async fn ten_thousand_row_admission_fits_the_recommended_workspace_limits() {
+    // DAL-287 repro shape: four-column facts admitted under the limits
+    // docs/asof-join-guide.md recommends. Admission must charge close to the
+    // actual encoded bytes, not a per-row schema tax.
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            "event_time",
+            DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+            false,
+        ),
+        Field::new("sequence", DataType::UInt64, false),
+        Field::new("symbol", DataType::Utf8, false),
+        Field::new("price", DataType::Float64, false),
+    ]));
+    let side = |prefix: &str| {
+        AsofJoinSide::new(
+            vec!["symbol".into()],
+            "event_time".into(),
+            vec!["sequence".into()],
+            prefix.into(),
+        )
+        .unwrap()
+    };
+    let spec = StreamAsofJoinSpec::new(
+        side("left"),
+        side("right"),
+        Duration::from_secs(10_000_000),
+        AsofStateLimits::new(100_000, 64 * 1024 * 1024).unwrap(),
+    )
+    .unwrap();
+    let mut operator =
+        StreamAsofJoinOperator::new("asof", schema.clone(), schema.clone(), spec).unwrap();
+    let rows = 10_000_u64;
+    let indexes = 0..i32::try_from(rows).unwrap();
+    let record = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(
+                TimestampMicrosecondArray::from_iter_values(
+                    indexes.clone().map(|row| 1_000_000 + i64::from(row)),
+                )
+                .with_timezone("UTC"),
+            ),
+            Arc::new(UInt64Array::from_iter_values(0..rows)),
+            Arc::new(StringArray::from_iter_values(
+                indexes.clone().map(|row| format!("S{:03}", row % 64)),
+            )),
+            Arc::new(Float64Array::from_iter_values(
+                indexes.map(|row| 100.0 + f64::from(row % 257)),
+            )),
+        ],
+    )
+    .unwrap();
+    let batch = Batch::table(vec![record], BatchMetadata::default()).unwrap();
+    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+    let cx = StreamOperatorContext::new(&job, "asof", None);
+    let mut output = EdgeCollector::new(operator.output_ports().to_vec());
+
+    operator
+        .process_data("left", batch, &cx, &mut output)
+        .await
+        .unwrap();
+
+    assert_eq!(operator.status.left.accepted_rows, rows);
+    assert_eq!(operator.status.pending_left_rows, rows);
+    assert_eq!(operator.runtime.pool.reserved(), 0);
 }
 
 #[tokio::test]

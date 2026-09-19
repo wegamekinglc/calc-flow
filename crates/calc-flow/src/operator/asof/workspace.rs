@@ -5,6 +5,31 @@ use datafusion::{
     execution::memory_pool::{MemoryConsumer, MemoryReservation},
 };
 
+/// Headroom for one identity row: the two owned encodings, the ordered-map
+/// node that will hold them, and row-converter scratch.
+const IDENTITY_ROW_BYTES: u64 = 384;
+/// Fixed schema-message headroom: stream envelope, version, flags, padding.
+const SCHEMA_ENVELOPE_BYTES: u64 = 256;
+/// Per-field headroom over `Field::size()`: the field table, type union,
+/// nullability, and alignment inside the schema flatbuffer.
+const SCHEMA_FIELD_BYTES: u64 = 192;
+/// Per-entry headroom for schema custom metadata inside the flatbuffer.
+const SCHEMA_METADATA_ENTRY_BYTES: u64 = 64;
+/// Field-node and buffer-directory entries for one column in the per-row
+/// record message, plus IPC alignment slack on top of the slice bytes.
+const COLUMN_FRAMING_BYTES: u64 = 48;
+/// Per-row record-message envelope: continuation, metadata length, message
+/// flatbuffer padding, and the end-of-stream marker.
+const ROW_FRAMING_BYTES: u64 = 96;
+
+/// Allocation-free per-record charge shared by every admitted row: an
+/// arithmetic upper bound on the schema message each per-row IPC encoding
+/// repeats, so an unfittable schema is rejected before any flatbuffer is
+/// materialized.
+pub(super) struct PayloadCharge {
+    schema_bytes: u64,
+}
+
 impl StreamAsofJoinOperator {
     pub(super) fn reserve_workspace(&self, bytes: u64) -> Result<MemoryReservation> {
         let bytes = usize::try_from(bytes).map_err(|_| {
@@ -30,8 +55,8 @@ impl StreamAsofJoinOperator {
         batch: &Batch,
         input: super::admission::ValidatedInput,
     ) -> Result<MemoryReservation> {
-        self.reserve_input_rows(batch, input, |record, row| {
-            row_workspace(record, row, &self.name)
+        self.reserve_input_rows(batch, input, |record, payload, row| {
+            row_workspace(payload, record, row, &self.name)
         })
     }
 
@@ -40,7 +65,7 @@ impl StreamAsofJoinOperator {
         batch: &Batch,
         input: super::admission::ValidatedInput,
     ) -> Result<MemoryReservation> {
-        self.reserve_input_rows(batch, input, |record, row| {
+        self.reserve_input_rows(batch, input, |record, _payload, row| {
             identity_row_workspace(record, row, input.side(&self.spec), &self.name)
         })
     }
@@ -49,16 +74,17 @@ impl StreamAsofJoinOperator {
         &self,
         batch: &Batch,
         input: super::admission::ValidatedInput,
-        charge: impl Fn(&RecordBatch, usize) -> Result<u64>,
+        charge: impl Fn(&RecordBatch, &PayloadCharge, usize) -> Result<u64>,
     ) -> Result<MemoryReservation> {
         let side = input.side(&self.spec);
         let mut bytes = 0;
         for record in batch.table_payload()?.batches() {
+            let payload = payload_charge(record.schema().as_ref(), &self.name)?;
             for row in 0..record.num_rows() {
                 if input.is_late(super::admission::times(record, side).value(row)) {
                     continue;
                 }
-                bytes = checked(&self.name, bytes, charge(record, row)?)?;
+                bytes = checked(&self.name, bytes, charge(record, &payload, row)?)?;
             }
         }
         self.reserve_workspace(bytes)
@@ -80,53 +106,56 @@ impl StreamAsofJoinOperator {
     }
 }
 
+fn payload_charge(schema: &Schema, name: &str) -> Result<PayloadCharge> {
+    let mut bytes = SCHEMA_ENVELOPE_BYTES;
+    for (key, value) in schema.metadata() {
+        bytes = checked(name, bytes, key.len() as u64 + value.len() as u64)?;
+        bytes = checked(name, bytes, SCHEMA_METADATA_ENTRY_BYTES)?;
+    }
+    for field in schema.fields() {
+        bytes = checked(name, bytes, field.size() as u64)?;
+        bytes = checked(name, bytes, SCHEMA_FIELD_BYTES)?;
+    }
+    Ok(PayloadCharge {
+        schema_bytes: bytes,
+    })
+}
+
+/// Allocation-free upper bound on one admitted row's bounded IPC encoding:
+/// the repeated schema-message bound plus the row's slice bytes with IPC
+/// framing and alignment headroom. Charged per row because every retained
+/// row carries its own schema message.
+fn row_workspace(
+    payload: &PayloadCharge,
+    record: &RecordBatch,
+    row: usize,
+    name: &str,
+) -> Result<u64> {
+    let mut bytes = payload.schema_bytes;
+    for column in record.columns() {
+        bytes = checked(name, bytes, aligned(column_workspace(column, row)?))?;
+        bytes = checked(name, bytes, COLUMN_FRAMING_BYTES)?;
+    }
+    checked(name, bytes, ROW_FRAMING_BYTES)
+}
+
 fn identity_row_workspace(
     record: &RecordBatch,
     row: usize,
     side: &super::AsofJoinSide,
     name: &str,
 ) -> Result<u64> {
-    let mut bytes = 2048;
+    let mut bytes = IDENTITY_ROW_BYTES;
     for field in side.keys().iter().chain(side.sequence_by()) {
         let column = record.column(record.schema().index_of(field).expect("validated schema"));
-        let logical = column_workspace(column, row)?;
-        let charge = logical.checked_mul(4).ok_or_else(|| {
-            reason(
-                name,
-                StreamingFailureReason::AsofCounterOverflow,
-                "ASOF identity workspace arithmetic overflowed",
-            )
-        })?;
-        bytes = checked(name, bytes, charge)?;
+        bytes = checked(name, bytes, aligned(column_workspace(column, row)?) + 16)?;
     }
     Ok(bytes)
 }
 
-fn row_workspace(batch: &RecordBatch, row: usize, name: &str) -> Result<u64> {
-    let mut bytes = schema_workspace(&batch.schema(), name)?;
-    for column in batch.columns() {
-        bytes = checked(name, bytes, column_workspace(column, row)?)?;
-        bytes = checked(name, bytes, 256)?;
-    }
-    bytes.checked_mul(8).ok_or_else(|| {
-        reason(
-            name,
-            StreamingFailureReason::AsofCounterOverflow,
-            "ASOF workspace arithmetic overflowed",
-        )
-    })
-}
-
-fn schema_workspace(schema: &Schema, name: &str) -> Result<u64> {
-    let mut bytes = 4096;
-    for (key, value) in schema.metadata() {
-        bytes = checked(name, bytes, key.len() as u64)?;
-        bytes = checked(name, bytes, value.len() as u64 + 256)?;
-    }
-    for field in schema.fields() {
-        bytes = checked(name, bytes, field.size() as u64 + 256)?;
-    }
-    Ok(bytes)
+/// Aligns a buffer length to the IPC writer's alignment boundary.
+fn aligned(bytes: u64) -> u64 {
+    bytes.checked_add(63).map_or(bytes, |aligned| aligned & !63)
 }
 
 fn column_workspace(column: &ArrayRef, row: usize) -> Result<u64> {
@@ -136,4 +165,184 @@ fn column_workspace(column: &ArrayRef, row: usize) -> Result<u64> {
         .get_slice_memory_size()
         .map(|bytes| bytes as u64)
         .map_err(|error| super::arrow_error(&error))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::AsofJoinSide;
+    use datafusion::arrow::{
+        array::{Float64Array, StringArray, TimestampMicrosecondArray, UInt64Array},
+        datatypes::{DataType, Field, Schema, TimeUnit},
+    };
+    use std::sync::Arc;
+
+    use super::super::{codec, state};
+
+    fn repro_record(rows: u64) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "event_time",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                false,
+            ),
+            Field::new("sequence", DataType::UInt64, false),
+            Field::new("symbol", DataType::Utf8, false),
+            Field::new("price", DataType::Float64, false),
+        ]));
+        let indexes = 0..i32::try_from(rows).unwrap();
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(
+                    TimestampMicrosecondArray::from_iter_values(
+                        indexes.clone().map(|row| 1_000_000 + i64::from(row)),
+                    )
+                    .with_timezone("UTC"),
+                ),
+                Arc::new(UInt64Array::from_iter_values(0..rows)),
+                Arc::new(StringArray::from_iter_values(
+                    indexes.clone().map(|row| format!("S{row:03}")),
+                )),
+                Arc::new(Float64Array::from_iter_values(
+                    indexes.map(|row| 100.0 + f64::from(row % 257)),
+                )),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn repro_side() -> AsofJoinSide {
+        AsofJoinSide::new(
+            vec!["symbol".into()],
+            "event_time".into(),
+            vec!["sequence".into()],
+            "left".into(),
+        )
+        .unwrap()
+    }
+
+    fn metadata_record() -> RecordBatch {
+        let mut fields = repro_record(1)
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.as_ref().clone())
+            .collect::<Vec<_>>();
+        fields[3] = Field::new("value", DataType::Utf8, false);
+        let schema = Arc::new(Schema::new_with_metadata(
+            fields,
+            std::collections::HashMap::from([("note".to_string(), "m".repeat(4_096))]),
+        ));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(
+                    TimestampMicrosecondArray::from_iter_values(std::iter::once(1_000_000))
+                        .with_timezone("UTC"),
+                ),
+                Arc::new(UInt64Array::from_iter_values(std::iter::once(0))),
+                Arc::new(StringArray::from_iter_values(std::iter::once("S000"))),
+                Arc::new(StringArray::from_iter_values(std::iter::once(
+                    "m".repeat(4_096),
+                ))),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn wide_string_record() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "event_time",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                false,
+            ),
+            Field::new("sequence", DataType::UInt64, false),
+            Field::new("symbol", DataType::Utf8, false),
+            Field::new("value", DataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(
+                    TimestampMicrosecondArray::from_iter_values(std::iter::once(1_000_000))
+                        .with_timezone("UTC"),
+                ),
+                Arc::new(UInt64Array::from_iter_values(std::iter::once(0))),
+                Arc::new(StringArray::from_iter_values(std::iter::once("S000"))),
+                Arc::new(StringArray::from_iter_values(std::iter::once(
+                    "x".repeat(48_000),
+                ))),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn row_workspace_bounds_the_actual_encoded_row_bytes() {
+        for record in [repro_record(8), wide_string_record(), metadata_record()] {
+            let payload = payload_charge(record.schema().as_ref(), "asof").unwrap();
+            for row in 0..record.num_rows() {
+                let charge = row_workspace(&payload, &record, row, "asof").unwrap();
+                let actual = codec::encode_batch(&record.slice(row, 1), usize::MAX)
+                    .unwrap()
+                    .len() as u64;
+                assert!(
+                    charge >= actual,
+                    "row {row}: charge {charge} < actual {actual}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn schema_metadata_charge_covers_the_declared_metadata_bytes() {
+        let plain = payload_charge(repro_record(1).schema().as_ref(), "asof").unwrap();
+        let metadata = payload_charge(metadata_record().schema().as_ref(), "asof").unwrap();
+        assert!(
+            metadata.schema_bytes >= plain.schema_bytes + 4_096,
+            "metadata charge {} does not cover the declared bytes over {}",
+            metadata.schema_bytes,
+            plain.schema_bytes
+        );
+    }
+
+    #[test]
+    fn identity_row_workspace_bounds_the_actual_identity_encodings() {
+        let record = repro_record(8);
+        let side = repro_side();
+        for row in 0..record.num_rows() {
+            let charge = identity_row_workspace(&record, row, &side, "asof").unwrap();
+            let actual = state::encoded_columns(&record, row, side.keys())
+                .unwrap()
+                .len() as u64
+                + state::encoded_columns(&record, row, side.sequence_by())
+                    .unwrap()
+                    .len() as u64;
+            assert!(
+                charge >= actual + 64,
+                "row {row}: charge {charge} < actual {actual} plus allocations"
+            );
+        }
+    }
+
+    #[test]
+    fn repro_shaped_admissions_charge_close_to_actual_state_bytes() {
+        let rows = 10_000_u64;
+        let record = repro_record(rows);
+        let payload = payload_charge(record.schema().as_ref(), "asof").unwrap();
+        let charge = (0..record.num_rows())
+            .map(|row| row_workspace(&payload, &record, row, "asof").unwrap())
+            .sum::<u64>();
+        let actual = codec::encode_batch(&record.slice(0, 1), usize::MAX)
+            .unwrap()
+            .len() as u64
+            * rows;
+        assert!(charge < 64 * 1024 * 1024, "charge {charge} exceeds 64 MiB");
+        assert!(
+            charge < actual.saturating_mul(2),
+            "charge {charge} is more than twice the actual {actual}"
+        );
+    }
 }

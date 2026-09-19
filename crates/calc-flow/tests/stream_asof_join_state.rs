@@ -218,6 +218,8 @@ async fn wide_admission_reserves_workspace_before_committing_state() {
     )
     .unwrap();
     let mut op = StreamAsofJoinOperator::new("asof", schema.clone(), schema.clone(), spec).unwrap();
+    // The row must genuinely exceed the 40 KB workspace limit under the
+    // allocation-free charge, which tracks the actual encoded bytes.
     let input = Batch::table(
         vec![
             RecordBatch::try_new(
@@ -226,7 +228,7 @@ async fn wide_admission_reserves_workspace_before_committing_state() {
                     Arc::new(StringArray::from(vec!["A"])),
                     Arc::new(TimestampMicrosecondArray::from(vec![100]).with_timezone("UTC")),
                     Arc::new(Int64Array::from(vec![1])),
-                    Arc::new(StringArray::from(vec!["x".repeat(10_000)])),
+                    Arc::new(StringArray::from(vec!["x".repeat(48_000)])),
                 ],
             )
             .unwrap(),
