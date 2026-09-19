@@ -796,7 +796,10 @@ struct WrappedOutput {
     envelope_ms: f64,
 }
 
-fn wrap_output_batch(first: Option<RecordBatch>, remaining: Vec<RecordBatch>) -> WrappedOutput {
+fn wrap_output_batch(
+    first: Option<RecordBatch>,
+    remaining: Vec<RecordBatch>,
+) -> BenchResult<WrappedOutput> {
     let output_wrap_start = Instant::now();
     let mut batches = Vec::with_capacity(remaining.len() + usize::from(first.is_some()));
     batches.extend(first);
@@ -806,12 +809,12 @@ fn wrap_output_batch(first: Option<RecordBatch>, remaining: Vec<RecordBatch>) ->
     }
     let arrow_wrap_ms = milliseconds(output_wrap_start.elapsed());
     let envelope_start = Instant::now();
-    let batch = Batch::table(batches, BatchMetadata::default()).expect("output batch envelope");
-    WrappedOutput {
+    let batch = Batch::table(batches, BatchMetadata::default())?;
+    Ok(WrappedOutput {
         batch,
         arrow_wrap_ms,
         envelope_ms: milliseconds(envelope_start.elapsed()),
-    }
+    })
 }
 
 async fn create_physical_plan(
@@ -888,7 +891,7 @@ async fn raw_datafusion_sample(
     let execution_to_first_batch = collected.first_batch_ms;
     let execution_remaining = collected.remaining_ms;
     let collect_or_coalesce = collected.total_ms;
-    let output = wrap_output_batch(collected.first, collected.remaining);
+    let output = wrap_output_batch(collected.first, collected.remaining)?;
     let output_arrow_wrap = output.arrow_wrap_ms;
     let batch_envelope = output.envelope_ms;
     let output = output.batch;

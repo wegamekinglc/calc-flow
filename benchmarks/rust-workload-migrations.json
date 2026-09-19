@@ -18,7 +18,7 @@
     {
       "target": "sql_datafusion_performance",
       "baseline_sha256": "44ad304f5ab43fed6248baac7824ef925d82c42436a852fd9f27e66e74b5ad83",
-      "candidate_sha256": "12d3715335ad180c409cafb963205b3ff077113c762cafcbd0966f370c2afd37",
+      "candidate_sha256": "518cace85d7f93aa555faca6b9bf6374fccf1efd1128e10b310c957dbfaf5db9",
       "reason": "workload extension: add projection/filter/group_by/join operator scenarios with per-case output_rows evidence and the join dimension side input; existing rolling workloads unchanged",
       "reference": "DAL-277"
     }
