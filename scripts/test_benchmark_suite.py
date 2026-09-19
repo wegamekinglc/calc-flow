@@ -7,9 +7,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from scripts.benchmark_suite import catalog
-from scripts.benchmark_suite.catalog import engine_cases, shards
+from scripts.benchmark_suite.catalog import baseline_case_ids, engine_cases, shards
 from scripts.benchmark_suite.legacy import combine_blocks
-from scripts.benchmark_suite.measure import baseline_case_ids
 from scripts.benchmark_suite.report import comparison, render_report, validate_shards
 
 
