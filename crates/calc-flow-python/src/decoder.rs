@@ -149,20 +149,9 @@ fn python_output_to_batches(
     output: &Bound<'_, PyAny>,
 ) -> std::result::Result<Vec<RecordBatch>, String> {
     let py = output.py();
-    let pyarrow = py.import("pyarrow").map_err(|error| error.to_string())?;
-    let batch_type = pyarrow
-        .getattr("RecordBatch")
-        .map_err(|error| error.to_string())?;
-    let table_type = pyarrow
-        .getattr("Table")
-        .map_err(|error| error.to_string())?;
-    let is_batch = output
-        .is_instance(&batch_type)
-        .map_err(|error| error.to_string())?;
-    let is_table = output
-        .is_instance(&table_type)
-        .map_err(|error| error.to_string())?;
-    if !is_batch && !is_table {
+    let batch_type = pyarrow_type(py, "RecordBatch")?;
+    let table_type = pyarrow_type(py, "Table")?;
+    if !is_instance_of(output, &batch_type)? && !is_instance_of(output, &table_type)? {
         return Err("decoder output must be a pyarrow.RecordBatch or pyarrow.Table".into());
     }
     let (batches, _schema) = output
@@ -170,6 +159,22 @@ fn python_output_to_batches(
         .map_err(|error| error.to_string())?
         .into_inner();
     Ok(batches)
+}
+
+fn pyarrow_type<'py>(
+    py: Python<'py>,
+    name: &str,
+) -> std::result::Result<Bound<'py, PyAny>, String> {
+    py.import("pyarrow")
+        .and_then(|module| module.getattr(name))
+        .map_err(|error| error.to_string())
+}
+
+fn is_instance_of(
+    output: &Bound<'_, PyAny>,
+    ty: &Bound<'_, PyAny>,
+) -> std::result::Result<bool, String> {
+    output.is_instance(ty).map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

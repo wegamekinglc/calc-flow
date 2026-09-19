@@ -792,14 +792,8 @@ fn parse_protobuf_companions(
     schema: &[ArrowFieldSpec],
 ) -> Result<(Option<String>, Option<String>)> {
     if !matches!(format, KafkaFormat::Protobuf) {
-        for key in ["descriptor_set", "message"] {
-            if options.contains_key(key) {
-                return Err(CalcFlowError::InvalidArgument {
-                    field: key.into(),
-                    message: "option applies to the protobuf payload format only".into(),
-                });
-            }
-        }
+        reject_misplaced_option(options, "descriptor_set", "protobuf")?;
+        reject_misplaced_option(options, "message", "protobuf")?;
         return Ok((None, None));
     }
     if schema.is_empty() {
@@ -819,12 +813,7 @@ fn parse_custom_companion(
     format: KafkaFormat,
 ) -> Result<Option<FormatIdentity>> {
     if !matches!(format, KafkaFormat::Custom) {
-        if options.contains_key("decoder") {
-            return Err(CalcFlowError::InvalidArgument {
-                field: "decoder".into(),
-                message: "option applies to the custom payload format only".into(),
-            });
-        }
+        reject_misplaced_option(options, "decoder", "custom")?;
         return Ok(None);
     }
     let decoder = options
@@ -833,20 +822,29 @@ fn parse_custom_companion(
             field: "decoder".into(),
             message: "custom payloads require a decoder identity".into(),
         })?;
-    let name = decoder.get("name").and_then(Value::as_str).ok_or_else(|| {
-        CalcFlowError::InvalidArgument {
-            field: "decoder".into(),
-            message: "decoder identity requires a name string".into(),
-        }
-    })?;
-    let version = decoder
-        .get("version")
+    let name = required_decoder_field(decoder, "name")?;
+    let version = required_decoder_field(decoder, "version")?;
+    Ok(Some(FormatIdentity::new(name, version)?))
+}
+
+fn reject_misplaced_option(options: &JsonMap, key: &str, format: &str) -> Result<()> {
+    if options.contains_key(key) {
+        return Err(CalcFlowError::InvalidArgument {
+            field: key.into(),
+            message: format!("option applies to the {format} payload format only"),
+        });
+    }
+    Ok(())
+}
+
+fn required_decoder_field<'a>(decoder: &'a Value, key: &str) -> Result<&'a str> {
+    decoder
+        .get(key)
         .and_then(Value::as_str)
         .ok_or_else(|| CalcFlowError::InvalidArgument {
             field: "decoder".into(),
-            message: "decoder identity requires a version string".into(),
-        })?;
-    Ok(Some(FormatIdentity::new(name, version)?))
+            message: format!("decoder identity requires a {key} string"),
+        })
 }
 
 /// The transactional Kafka sink.

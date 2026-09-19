@@ -48,26 +48,7 @@ impl FormatDecoder for PipeOrdersDecoder {
         bounds: &DecodeBounds,
         schema: &[ArrowFieldSpec],
     ) -> calc_flow::Result<Batch> {
-        let text = std::str::from_utf8(bytes)
-            .map_err(|error| invalid(format!("payload is not UTF-8: {error}")))?;
-        let fields: Vec<&str> = text.trim_end().split('|').collect();
-        let [id, quantity, price] = fields.as_slice() else {
-            return Err(invalid(format!(
-                "expected id|quantity|price, found {} fields",
-                fields.len()
-            )));
-        };
-        let values: [(&str, ArrayRef); 3] = [
-            ("id", Arc::new(Int64Array::from(vec![parse::<i64>(id)?]))),
-            (
-                "quantity",
-                Arc::new(Int64Array::from(vec![parse::<i64>(quantity)?])),
-            ),
-            (
-                "price",
-                Arc::new(Float64Array::from(vec![parse::<f64>(price)?])),
-            ),
-        ];
+        let values = parse_fields(bytes)?;
         let columns = schema
             .iter()
             .map(|field| {
@@ -86,6 +67,29 @@ impl FormatDecoder for PipeOrdersDecoder {
             BatchMetadata::new(IDENTITY, 0, BTreeMap::new())?,
         )
     }
+}
+
+fn parse_fields(bytes: &[u8]) -> calc_flow::Result<[(&'static str, ArrayRef); 3]> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|error| invalid(format!("payload is not UTF-8: {error}")))?;
+    let fields: Vec<&str> = text.trim_end().split('|').collect();
+    let [id, quantity, price] = fields.as_slice() else {
+        return Err(invalid(format!(
+            "expected id|quantity|price, found {} fields",
+            fields.len()
+        )));
+    };
+    Ok([
+        ("id", Arc::new(Int64Array::from(vec![parse::<i64>(id)?]))),
+        (
+            "quantity",
+            Arc::new(Int64Array::from(vec![parse::<i64>(quantity)?])),
+        ),
+        (
+            "price",
+            Arc::new(Float64Array::from(vec![parse::<f64>(price)?])),
+        ),
+    ])
 }
 
 fn parse<T: std::str::FromStr>(value: &str) -> calc_flow::Result<T> {
@@ -162,11 +166,7 @@ async fn consume_topic(
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
-    let decoders = KafkaDecoderRegistry::default();
-    decoders.register(Arc::new(PipeOrdersDecoder))?;
-
+fn offline_demo(decoders: &KafkaDecoderRegistry) -> Result<(), Box<dyn Error>> {
     let batch = decoders.resolve(&PipeOrdersDecoder::identity())?.decode(
         b"1|2|10.0",
         &DecodeBounds::new(1024, 1 << 20)?,
@@ -181,7 +181,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut connectors = ConnectorRegistry::new();
     register_kafka_connectors_with_decoders(&mut connectors, decoders.clone())?;
     println!("registered pipe-orders/1 with the kafka connector");
+    Ok(())
+}
 
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    let decoders = KafkaDecoderRegistry::default();
+    decoders.register(Arc::new(PipeOrdersDecoder))?;
+    offline_demo(&decoders)?;
     if let Ok(bootstrap) = std::env::var("CALC_FLOW_KAFKA_BOOTSTRAP") {
         consume_topic(&bootstrap, &decoders).await?;
     } else {
