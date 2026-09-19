@@ -221,10 +221,13 @@ class EngineCase:
         self.count += 1
         # Each single-use plan starts with empty rolling state. Compilation and
         # runner startup both precede the adapter's ready-to-Arrow timer.
-        plan = stream_plan(self.case["scenario"])
+        plan = stream_plan(self.case["scenario"], self.data.table)
         return self.loop.run_until_complete(
             run_stream(
-                plan, self.events, self.root / f"sample-{self.count}", self.case["rows"]
+                plan,
+                self.events,
+                self.root / f"sample-{self.count}",
+                self.expected.num_rows,
             )
         )
 

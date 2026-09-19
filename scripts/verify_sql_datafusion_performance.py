@@ -94,6 +94,7 @@ CASE_FIELDS = {
     "rows",
     "active_entities",
     "window",
+    "output_rows",
     "warmups",
     "rolling_rewrite_enabled",
     "sample_order",
@@ -173,6 +174,7 @@ def _verify_engine(
     *,
     label: str,
     rows: int,
+    expected_output_rows: int,
     minimum_samples: int,
     require_stable: bool,
 ) -> tuple[dict[str, Any], list[float]]:
@@ -268,11 +270,13 @@ def _verify_engine(
         raise ValueError(f"{label}.partition_rows must contain non-negative integers")
     if len(partition_rows) != engine["effective_partitions"]:
         raise ValueError(f"{label}.partition_rows must cover every effective partition")
-    if sum(partition_rows) != rows:
-        raise ValueError(f"{label}.partition_rows must sum to rows")
+    if sum(partition_rows) != expected_output_rows:
+        raise ValueError(
+            f"{label}.partition_rows must sum to output_rows {expected_output_rows}"
+        )
     if sum(value == 0 for value in partition_rows) != engine["empty_partitions"]:
         raise ValueError(f"{label}.empty_partitions is inconsistent")
-    average_rows = rows / len(partition_rows)
+    average_rows = expected_output_rows / len(partition_rows)
     expected_skew = max(partition_rows) / average_rows
     partition_skew = _finite(engine["partition_skew"], f"{label}.partition_skew")
     if not math.isclose(partition_skew, expected_skew, rel_tol=1e-12, abs_tol=1e-12):
@@ -399,7 +403,10 @@ def _verify_case(
         raise ValueError(f"{label}.name must be non-empty")
     rows = _positive_int(case["rows"], f"{label}.rows")
     _positive_int(case["active_entities"], f"{label}.active_entities")
-    _positive_int(case["window"], f"{label}.window")
+    # `window` records the rolling frame size; the operator scenarios carry
+    # window 0 because their SQL has no window frame.
+    _nonnegative_int(case["window"], f"{label}.window")
+    output_rows = _positive_int(case["output_rows"], f"{label}.output_rows")
     _positive_int(case["warmups"], f"{label}.warmups")
     if case["rolling_rewrite_enabled"] is not False:
         raise ValueError(
@@ -409,6 +416,7 @@ def _verify_case(
         case["calc_flow"],
         label=f"{label}.calc_flow",
         rows=rows,
+        expected_output_rows=output_rows,
         minimum_samples=minimum_samples,
         require_stable=require_stable,
     )
@@ -416,6 +424,7 @@ def _verify_case(
         case["raw_datafusion"],
         label=f"{label}.raw_datafusion",
         rows=rows,
+        expected_output_rows=output_rows,
         minimum_samples=minimum_samples,
         require_stable=require_stable,
     )

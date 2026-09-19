@@ -6,11 +6,16 @@ ROW_SCALES = tuple(10**power for power in range(1, 8))
 LEGACY_SCALES = ("overhead", "small", "standard")
 SQL_CASES = ("projection", "filter", "group_by", "join", "sma20", "dual_sma")
 ROLLING_CASES = SQL_CASES[-2:]
+# The native streaming column covers every SQL scenario except `join`: the
+# bounded inner stream join emits one output stream message per matched row,
+# so the 10,000,000-row engine scale cannot complete inside the suite budget.
+# Revisit after the join operator gains batched output emission.
+STREAM_CASES = ("projection", "filter", "group_by", "sma20", "dual_sma")
 CAPABILITIES = {
     "calc-flow-sql": SQL_CASES,
     "datafusion": SQL_CASES,
     "polars": SQL_CASES,
-    "calc-flow-stream": ROLLING_CASES,
+    "calc-flow-stream": STREAM_CASES,
     "ta-lib": ROLLING_CASES,
 }
 THREADS = 32

@@ -209,6 +209,10 @@ struct CaseEvidence {
     rows: usize,
     active_entities: usize,
     window: usize,
+    /// The workload's true output cardinality: equal to `rows` only for
+    /// row-preserving queries; `filter` shrinks it and `group_by` collapses it
+    /// to one row per entity.
+    output_rows: usize,
     warmups: usize,
     rolling_rewrite_enabled: bool,
     sample_order: Vec<String>,
@@ -308,10 +312,22 @@ struct Comparability {
     mismatches: Vec<String>,
 }
 
+/// Selects the canonical output row identity used for correctness alignment.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RowIdentity {
+    /// The unique `(symbol, event_time, sequence)` input key is preserved.
+    Row,
+    /// One output row per grouping key, keyed by `symbol` alone.
+    Group,
+}
+
 struct Workload {
     name: &'static str,
     window: usize,
     output_column: &'static str,
+    identity: RowIdentity,
+    /// The SQL joins the `dimension` side input beside `input`.
+    dimension: bool,
     sql: String,
 }
 
@@ -415,7 +431,7 @@ fn reset_peak_rss_window() {
     let _ = fs::write("/proc/self/clear_refs", b"5");
 }
 
-fn workloads() -> [Workload; 2] {
+fn workloads() -> [Workload; 6] {
     let average = |window: usize| {
         format!(
             "avg(price) OVER (PARTITION BY symbol ORDER BY event_time, sequence ROWS BETWEEN {} PRECEDING AND CURRENT ROW)",
@@ -427,6 +443,8 @@ fn workloads() -> [Workload; 2] {
             name: "sma_20",
             window: 20,
             output_column: "sma_20",
+            identity: RowIdentity::Row,
+            dimension: false,
             sql: format!(
                 "SELECT event_time, sequence, symbol, price, {} AS sma_20 FROM input",
                 average(20)
@@ -436,11 +454,53 @@ fn workloads() -> [Workload; 2] {
             name: "dual_sma_spread",
             window: 20,
             output_column: "sma_spread",
+            identity: RowIdentity::Row,
+            dimension: false,
             sql: format!(
                 "SELECT event_time, sequence, symbol, price, ({}) - ({}) AS sma_spread FROM input",
                 average(5),
                 average(20)
             ),
+        },
+        // The operator scenarios keep the paired engines on identical physical
+        // plans: `filter` uses a float predicate because the Calc Flow-only
+        // UInt64 modulo specialization would diverge the normalized plan hash.
+        Workload {
+            name: "projection",
+            window: 0,
+            output_column: "value",
+            identity: RowIdentity::Row,
+            dimension: false,
+            sql: "SELECT event_time, sequence, symbol, price * 2 + 1 AS value FROM input"
+                .to_owned(),
+        },
+        Workload {
+            name: "filter",
+            window: 0,
+            output_column: "value",
+            identity: RowIdentity::Row,
+            dimension: false,
+            sql: "SELECT event_time, sequence, symbol, price AS value FROM input \
+                  WHERE price > 105.0"
+                .to_owned(),
+        },
+        Workload {
+            name: "group_by",
+            window: 0,
+            output_column: "value",
+            identity: RowIdentity::Group,
+            dimension: false,
+            sql: "SELECT symbol, SUM(price) AS value FROM input GROUP BY symbol".to_owned(),
+        },
+        Workload {
+            name: "join",
+            window: 0,
+            output_column: "value",
+            identity: RowIdentity::Row,
+            dimension: true,
+            sql: "SELECT event_time, sequence, symbol, price * factor AS value \
+                  FROM input JOIN dimension USING (symbol)"
+                .to_owned(),
         },
     ]
 }
@@ -504,6 +564,32 @@ fn benchmark_batch(batches: Vec<RecordBatch>, entities: usize) -> BenchResult<Ba
     Ok(Batch::table(batches, metadata)?)
 }
 
+/// Builds the per-symbol `dimension` side input for the join workload with
+/// the same `S###` symbols and `entity + 1` factors as the Python suite.
+fn dimension_record_batch(entities: usize) -> BenchResult<RecordBatch> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("symbol", DataType::Utf8, false),
+        Field::new("factor", DataType::Float64, false),
+    ]));
+    let mut symbol = StringBuilder::with_capacity(entities, entities.saturating_mul(4));
+    let mut factor = Float64Builder::with_capacity(entities);
+    for entity in 0..entities {
+        symbol.append_value(format!("S{entity:03}"));
+        factor.append_value(f64::from(u32::try_from(entity)?) + 1.0);
+    }
+    Ok(RecordBatch::try_new(
+        schema,
+        vec![Arc::new(symbol.finish()), Arc::new(factor.finish())],
+    )?)
+}
+
+fn benchmark_dimension_batch(entities: usize) -> BenchResult<Batch> {
+    Ok(Batch::table(
+        vec![dimension_record_batch(entities)?],
+        BatchMetadata::default(),
+    )?)
+}
+
 fn config(args: &Args) -> DataFusionConfig {
     DataFusionConfig {
         batch_size: args.batch_size,
@@ -516,21 +602,25 @@ fn config(args: &Args) -> DataFusionConfig {
     }
 }
 
-fn effective_partitions(args: &Args) -> usize {
-    args.partitions
-        .min(args.rows.div_ceil(MIN_ROWS_PER_PARTITION).max(1))
+fn effective_partitions(args: &Args, dimension_rows: usize) -> usize {
+    // The engine derives its fixed-mode work cap from every input table's
+    // rows combined, so the raw mirror must include the dimension side.
+    args.partitions.min(
+        (args.rows + dimension_rows)
+            .div_ceil(MIN_ROWS_PER_PARTITION)
+            .max(1),
+    )
 }
 
 fn build_plan(
     config: DataFusionConfig,
     workload: &Workload,
 ) -> BenchResult<calc_flow::BatchExecutionPlan> {
-    let operator = SqlOperator::new(
-        workload.name,
-        &workload.sql,
-        vec!["input".to_owned()],
-        Vec::new(),
-    )?;
+    let mut aliases = vec!["input".to_owned()];
+    if workload.dimension {
+        aliases.push("dimension".to_owned());
+    }
+    let operator = SqlOperator::new(workload.name, &workload.sql, aliases, Vec::new())?;
     Ok(PipelineBuilder::new(workload.name)?
         .with_datafusion_config(config)
         .add_node("sql", Box::new(operator))?
@@ -543,16 +633,16 @@ fn build_plan(
 async fn calc_flow_sample(
     plan: &calc_flow::BatchExecutionPlan,
     batch: &Batch,
+    dimension: Option<&Batch>,
     retain_output: bool,
 ) -> BenchResult<(Sample, Option<Batch>)> {
     let rss = RssSampler::start();
     let started = Instant::now();
-    let result = plan
-        .execute(
-            BTreeMap::from([("input".to_owned(), batch.clone())]),
-            ExecutionOptions::default(),
-        )
-        .await?;
+    let mut inputs = BTreeMap::from([("input".to_owned(), batch.clone())]);
+    if let Some(dimension) = dimension {
+        inputs.insert("dimension".to_owned(), dimension.clone());
+    }
+    let result = plan.execute(inputs, ExecutionOptions::default()).await?;
     let elapsed_ms = milliseconds(started.elapsed());
     let peak_rss_bytes = rss.finish();
     let metric = result
@@ -636,6 +726,7 @@ async fn calc_flow_sample(
 )]
 async fn raw_datafusion_sample(
     batch: &Batch,
+    dimension: Option<&Batch>,
     workload: &Workload,
     configured_partitions: usize,
     effective_partitions: usize,
@@ -658,9 +749,22 @@ async fn raw_datafusion_sample(
     let input_start = Instant::now();
     let table = batch.table_payload()?;
     let provider = MemTable::try_new(Arc::clone(table.schema()), vec![table.batches().to_vec()])?;
+    let dimension_provider = match dimension {
+        Some(value) => {
+            let records = value.table_payload()?;
+            Some(MemTable::try_new(
+                Arc::clone(records.schema()),
+                vec![records.batches().to_vec()],
+            )?)
+        }
+        None => None,
+    };
     let input_adapter = milliseconds(input_start.elapsed());
     let register_start = Instant::now();
     context.register_table("input", Arc::new(provider))?;
+    if let Some(provider) = dimension_provider {
+        context.register_table("dimension", Arc::new(provider))?;
+    }
     let table_register = milliseconds(register_start.elapsed());
     let parse_start = Instant::now();
     let _statements = DFParser::parse_sql(&workload.sql)?;
@@ -703,12 +807,27 @@ async fn raw_datafusion_sample(
     let available_parallelism = thread::available_parallelism()
         .map(std::num::NonZero::get)
         .unwrap_or(1);
-    let decision_active_entities = batch
-        .metadata()
-        .attributes()
-        .get(DATAFUSION_ACTIVE_ENTITIES_METADATA_KEY)
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|value| usize::try_from(value).ok());
+    // The engine's parallelism decision reads every registered input at once:
+    // with a dimension side it reports combined rows and no single-input
+    // entity fact, and the raw mirror reports the identical decision fields.
+    let decision_input_rows = batch
+        .num_rows()
+        .saturating_add(dimension.map_or(0, Batch::num_rows));
+    let decision_active_entities = if dimension.is_some() {
+        None
+    } else {
+        batch
+            .metadata()
+            .attributes()
+            .get(DATAFUSION_ACTIVE_ENTITIES_METADATA_KEY)
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+    };
+    let decision_active_entities_source = if dimension.is_some() {
+        "multiple_inputs"
+    } else {
+        "batch_metadata"
+    };
     let mut phases = PhaseMedians {
         runtime_acquire,
         session_state_create,
@@ -743,9 +862,9 @@ async fn raw_datafusion_sample(
             min_rows_per_partition: MIN_ROWS_PER_PARTITION,
             small_rows_threshold: SMALL_ROWS_THRESHOLD,
             parallelism_decision_reused: false,
-            decision_input_rows: batch.num_rows(),
+            decision_input_rows,
             decision_active_entities,
-            decision_active_entities_source: "batch_metadata".to_owned(),
+            decision_active_entities_source: decision_active_entities_source.to_owned(),
             partition_limit_reason: if effective_partitions < configured_partitions {
                 "minimum_rows_per_partition"
             } else {
@@ -865,20 +984,23 @@ async fn benchmark_case(
     args: &Args,
     workload: &Workload,
     batch: &Batch,
+    dimension: Option<&Batch>,
 ) -> BenchResult<CaseEvidence> {
     // Warm-up, alternating AB/BA sampling, correctness, and evidence assembly
     // intentionally form one auditable paired-measurement boundary.
     // #lizard forgives
     let config = config(args);
-    let effective_partitions = effective_partitions(args);
+    let dimension_rows = dimension.map_or(0, Batch::num_rows);
+    let effective_partitions = effective_partitions(args, dimension_rows);
     let plan = build_plan(config, workload)?;
     let mut calc_warm_output = None;
     let mut raw_warm_output = None;
     for _ in 0..args.warmups {
-        let (_calc_warm, calc_output) = calc_flow_sample(&plan, batch, true).await?;
+        let (_calc_warm, calc_output) = calc_flow_sample(&plan, batch, dimension, true).await?;
         calc_warm_output = calc_output;
         let (_raw_warm, raw_output) = raw_datafusion_sample(
             batch,
+            dimension,
             workload,
             args.partitions,
             effective_partitions,
@@ -888,15 +1010,14 @@ async fn benchmark_case(
         .await?;
         raw_warm_output = raw_output;
     }
-    let correctness = compare_outputs(
-        calc_warm_output
-            .as_ref()
-            .ok_or("missing Calc Flow warm-up")?,
-        raw_warm_output
-            .as_ref()
-            .ok_or("missing raw DataFusion warm-up")?,
-        workload.output_column,
-    )?;
+    let calc_warm = calc_warm_output
+        .as_ref()
+        .ok_or("missing Calc Flow warm-up")?;
+    let raw_warm = raw_warm_output
+        .as_ref()
+        .ok_or("missing raw DataFusion warm-up")?;
+    let correctness = compare_outputs(calc_warm, raw_warm, workload)?;
+    let output_rows = calc_warm.num_rows();
     // The warm-up outputs have proved equivalence; dropping them before the
     // sampling loop keeps the run's retained memory flat instead of growing
     // by one output batch per sample.
@@ -909,10 +1030,11 @@ async fn benchmark_case(
     for sample in 0..args.samples {
         if sample % 2 == 0 {
             sample_order.push("ab".to_owned());
-            calc_samples.push(calc_flow_sample(&plan, batch, false).await?.0);
+            calc_samples.push(calc_flow_sample(&plan, batch, dimension, false).await?.0);
             raw_samples.push(
                 raw_datafusion_sample(
                     batch,
+                    dimension,
                     workload,
                     args.partitions,
                     effective_partitions,
@@ -927,6 +1049,7 @@ async fn benchmark_case(
             raw_samples.push(
                 raw_datafusion_sample(
                     batch,
+                    dimension,
                     workload,
                     args.partitions,
                     effective_partitions,
@@ -936,7 +1059,7 @@ async fn benchmark_case(
                 .await?
                 .0,
             );
-            calc_samples.push(calc_flow_sample(&plan, batch, false).await?.0);
+            calc_samples.push(calc_flow_sample(&plan, batch, dimension, false).await?.0);
         }
     }
     let input_batch_rows = batch
@@ -945,8 +1068,8 @@ async fn benchmark_case(
         .iter()
         .map(RecordBatch::num_rows)
         .collect::<Vec<_>>();
-    let calc_evidence = engine_evidence(args, &calc_samples, &input_batch_rows)?;
-    let raw_evidence = engine_evidence(args, &raw_samples, &input_batch_rows)?;
+    let calc_evidence = engine_evidence(&calc_samples, &input_batch_rows, output_rows)?;
+    let raw_evidence = engine_evidence(&raw_samples, &input_batch_rows, output_rows)?;
     let mismatches = comparability_mismatches(&calc_evidence, &raw_evidence);
     let comparable = mismatches.is_empty();
     let ratios = calc_evidence
@@ -962,6 +1085,7 @@ async fn benchmark_case(
         rows: args.rows,
         active_entities: args.entities,
         window: workload.window,
+        output_rows,
         warmups: args.warmups,
         rolling_rewrite_enabled: false,
         sample_order,
@@ -986,9 +1110,9 @@ async fn benchmark_case(
     reason = "strict benchmark evidence is assembled in one auditable boundary"
 )]
 fn engine_evidence(
-    args: &Args,
     samples: &[Sample],
     input_batch_rows: &[usize],
+    output_rows: usize,
 ) -> BenchResult<EngineEvidence> {
     // This function first proves every sample used identical configuration and
     // then emits the complete fail-closed engine evidence record.
@@ -1023,7 +1147,9 @@ fn engine_evidence(
         .ok_or("benchmark produced no final sample")?
         .partition_rows
         .clone();
-    let average_partition_rows = args.rows as f64 / partition_rows.len() as f64;
+    // Partition skew averages the engine's output rows, not the query input
+    // rows: `filter` and `group_by` change the output cardinality.
+    let average_partition_rows = output_rows as f64 / partition_rows.len() as f64;
     let partition_skew =
         partition_rows.iter().copied().max().unwrap_or(0) as f64 / average_partition_rows;
     Ok(EngineEvidence {
@@ -1242,7 +1368,7 @@ fn comparability_mismatches(calc: &EngineEvidence, raw: &EngineEvidence) -> Vec<
     mismatches
 }
 
-fn compare_outputs(calc: &Batch, raw: &Batch, output_column: &str) -> BenchResult<Correctness> {
+fn compare_outputs(calc: &Batch, raw: &Batch, workload: &Workload) -> BenchResult<Correctness> {
     // Schema, keys, null/NaN masks, and numeric values are one conjunctive
     // correctness result for each measured pair.
     // #lizard forgives
@@ -1252,8 +1378,8 @@ fn compare_outputs(calc: &Batch, raw: &Batch, output_column: &str) -> BenchResul
     let rows = calc.num_rows() == raw.num_rows();
     let calc_batch = concat_batches(calc_table.schema(), calc_table.batches())?;
     let raw_batch = concat_batches(raw_table.schema(), raw_table.batches())?;
-    let calc_rows = canonical_rows(&calc_batch)?;
-    let raw_rows = canonical_rows(&raw_batch)?;
+    let calc_rows = canonical_rows(&calc_batch, workload.identity)?;
+    let raw_rows = canonical_rows(&raw_batch, workload.identity)?;
     let keys = calc_rows
         .iter()
         .map(|(key, _)| key)
@@ -1262,8 +1388,8 @@ fn compare_outputs(calc: &Batch, raw: &Batch, output_column: &str) -> BenchResul
     // unique-key order outside the timed envelope so partition scheduling
     // cannot masquerade as a correctness failure.
     let order = keys;
-    let calc_values = float_column(&calc_batch, output_column)?;
-    let raw_values = float_column(&raw_batch, output_column)?;
+    let calc_values = float_column(&calc_batch, workload.output_column)?;
+    let raw_values = float_column(&raw_batch, workload.output_column)?;
     let mut aligned_indices = calc_rows
         .iter()
         .map(|(_, index)| *index)
@@ -1295,15 +1421,37 @@ fn compare_outputs(calc: &Batch, raw: &Batch, output_column: &str) -> BenchResul
     })
 }
 
-type RowKey = (String, i64, u64);
+/// The canonical output row key for one workload identity kind.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum RowKey {
+    Row(String, i64, u64),
+    Group(String),
+}
 
-fn canonical_rows(batch: &RecordBatch) -> BenchResult<Vec<(RowKey, usize)>> {
+fn canonical_rows(batch: &RecordBatch, identity: RowIdentity) -> BenchResult<Vec<(RowKey, usize)>> {
     let symbols = batch
         .column_by_name("symbol")
         .ok_or("symbol column is missing")?
         .as_any()
         .downcast_ref::<StringArray>()
         .ok_or("symbol column is not Utf8")?;
+    let mut rows = match identity {
+        RowIdentity::Group => (0..batch.num_rows())
+            .map(|index| (RowKey::Group(symbols.value(index).to_owned()), index))
+            .collect::<Vec<_>>(),
+        RowIdentity::Row => row_identity_keys(batch, symbols)?,
+    };
+    rows.sort_by(|left, right| left.0.cmp(&right.0));
+    if rows.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err("benchmark row identity is not unique".into());
+    }
+    Ok(rows)
+}
+
+fn row_identity_keys(
+    batch: &RecordBatch,
+    symbols: &StringArray,
+) -> BenchResult<Vec<(RowKey, usize)>> {
     let event_times = batch
         .column_by_name("event_time")
         .ok_or("event_time column is missing")?
@@ -1316,10 +1464,10 @@ fn canonical_rows(batch: &RecordBatch) -> BenchResult<Vec<(RowKey, usize)>> {
         .as_any()
         .downcast_ref::<UInt64Array>()
         .ok_or("sequence column is not UInt64")?;
-    let mut rows = (0..batch.num_rows())
+    Ok((0..batch.num_rows())
         .map(|index| {
             (
-                (
+                RowKey::Row(
                     symbols.value(index).to_owned(),
                     event_times.value(index),
                     sequences.value(index),
@@ -1327,12 +1475,7 @@ fn canonical_rows(batch: &RecordBatch) -> BenchResult<Vec<(RowKey, usize)>> {
                 index,
             )
         })
-        .collect::<Vec<_>>();
-    rows.sort_by(|left, right| left.0.cmp(&right.0));
-    if rows.windows(2).any(|pair| pair[0].0 == pair[1].0) {
-        return Err("benchmark row identity is not unique".into());
-    }
-    Ok(rows)
+        .collect::<Vec<_>>())
 }
 
 fn float_column<'a>(batch: &'a RecordBatch, name: &str) -> BenchResult<&'a Float64Array> {
@@ -1616,7 +1759,7 @@ async fn timed_sample_drops_output(
     workload: &Workload,
 ) -> BenchResult<()> {
     let plan = build_plan(config(args), workload)?;
-    let (sample, retained) = calc_flow_sample(&plan, batch, false).await?;
+    let (sample, retained) = calc_flow_sample(&plan, batch, None, false).await?;
     if retained.is_some() {
         return Err("timed Calc Flow sample retained its output batch".into());
     }
@@ -1635,9 +1778,55 @@ async fn run_sample_retention_tests() -> BenchResult<()> {
     let batch = benchmark_batch(records, args.entities)?;
     let workload = &workloads()[0];
     timed_sample_drops_output(&args, &batch, workload).await?;
-    let case = benchmark_case(&args, workload, &batch).await?;
+    let case = benchmark_case(&args, workload, &batch, None).await?;
     if !correctness_is_complete(&case.correctness) {
         return Err("retention restructure lost the warm-up correctness pair".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+async fn run_operator_workload_tests() -> BenchResult<()> {
+    // The operator scenarios extend the rolling pair with row-local,
+    // cardinality-changing, and two-input SQL shapes; each must stay correct,
+    // comparable, and record its true output cardinality.
+    // #lizard forgives
+    let names = workloads().map(|workload| workload.name);
+    for expected in ["projection", "filter", "group_by", "join"] {
+        if !names.contains(&expected) {
+            return Err(format!("operator workload {expected:?} is missing").into());
+        }
+    }
+    let args = retention_case_args(workspace_root()?);
+    let records = input_batches(args.rows, args.entities, args.batch_size)?;
+    let batch = benchmark_batch(records, args.entities)?;
+    let dimension = benchmark_dimension_batch(args.entities)?;
+    for workload in workloads().iter().filter(|workload| workload.window == 0) {
+        let case_dimension = workload.dimension.then_some(&dimension);
+        let case = benchmark_case(&args, workload, &batch, case_dimension).await?;
+        if !correctness_is_complete(&case.correctness) {
+            return Err(format!("operator workload {:?} lost correctness", workload.name).into());
+        }
+        if !case.comparability.comparable {
+            return Err(format!(
+                "operator workload {:?} is not comparable: {:?}",
+                workload.name, case.comparability.mismatches
+            )
+            .into());
+        }
+        let cardinality_ok = match workload.name {
+            "projection" | "join" => case.output_rows == args.rows,
+            "group_by" => case.output_rows == args.entities,
+            "filter" => case.output_rows > 0 && case.output_rows < args.rows,
+            other => return Err(format!("unexpected operator workload {other:?}").into()),
+        };
+        if !cardinality_ok {
+            return Err(format!(
+                "operator workload {:?} recorded unexpected output rows {}",
+                workload.name, case.output_rows
+            )
+            .into());
+        }
     }
     Ok(())
 }
@@ -1664,15 +1853,21 @@ async fn main() -> BenchResult<()> {
             eprintln!("sql_datafusion_performance sample-retention tests: {error}");
             std::process::exit(1);
         }
+        if let Err(error) = run_operator_workload_tests().await {
+            eprintln!("sql_datafusion_performance operator-workload tests: {error}");
+            std::process::exit(1);
+        }
         return Ok(());
     }
 
     let args = Args::parse()?;
     let records = input_batches(args.rows, args.entities, args.batch_size)?;
     let batch = benchmark_batch(records, args.entities)?;
+    let dimension = benchmark_dimension_batch(args.entities)?;
     let mut cases = Vec::new();
     for workload in workloads() {
-        cases.push(benchmark_case(&args, &workload, &batch).await?);
+        let case_dimension = workload.dimension.then_some(&dimension);
+        cases.push(benchmark_case(&args, &workload, &batch, case_dimension).await?);
     }
     let report = Report {
         schema_version: 1,

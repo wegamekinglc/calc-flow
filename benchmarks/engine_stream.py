@@ -24,11 +24,20 @@ from calc_flow import (
     StreamRuntimeConfig,
     Watermark,
 )
-from calc_flow.symbolic import FeatureSet, Field, Program, rows, table_input, ts
+from calc_flow.symbolic import (
+    FeatureSet,
+    Field,
+    Program,
+    lit,
+    rows,
+    table_input,
+    ts,
+    window,
+)
 from scripts.benchmark_suite.catalog import BATCH_ROWS
 
 
-def stream_plan(scenario: str):
+def stream_plan(scenario: str, table: pa.Table | None = None):
     quotes = table_input(
         "quotes",
         schema=(
@@ -41,13 +50,41 @@ def stream_plan(scenario: str):
         event_time="event_time",
         sequence_by=("sequence",),
     )
-    slow = ts.mean(quotes["price"], window=rows(20), min_periods=20)
-    value = (
-        slow
-        if scenario == "sma20"
-        else ts.mean(quotes["price"], window=rows(5), min_periods=5) - slow
-    )
-    output = quotes.with_columns(FeatureSet((("value", value),)))
+    if scenario in ("sma20", "dual_sma"):
+        slow = ts.mean(quotes["price"], window=rows(20), min_periods=20)
+        value = (
+            slow
+            if scenario == "sma20"
+            else ts.mean(quotes["price"], window=rows(5), min_periods=5) - slow
+        )
+        output = quotes.with_columns(FeatureSet((("value", value),)))
+    elif scenario == "projection":
+        output = quotes.with_columns(
+            FeatureSet((("value", quotes["price"] * lit(2.0) + lit(1.0)),))
+        ).select("sequence", "value")
+    elif scenario == "filter":
+        # The row-local expression language has no modulo primitive, so the
+        # filter scenario runs through the native stream SQL stage; the
+        # predicate is row-local, making per-batch execution equivalent to the
+        # suite's shared `filter` query in engine_comparison.sql_query.
+        output = quotes.sql(
+            "SELECT sequence, price AS value FROM input WHERE sequence % 4 = 0"
+        )
+    elif scenario == "group_by":
+        if table is None:
+            raise ValueError("group_by stream plans require the workload table")
+        output = window.tumbling(
+            quotes,
+            event_time="event_time",
+            # One epoch-anchored window ending exactly at the final watermark
+            # holds every row, so the emitted per-symbol sums equal the whole
+            # input GROUP BY aggregate.
+            size_micros=int(table["event_time"][-1].value) + 1,
+            group_by=("symbol",),
+            aggregates=(window.sum("price", output="value"),),
+        ).select("symbol", "value")
+    else:
+        raise ValueError("unsupported stream benchmark scenario")
     return Program(
         "suite-stream", inputs=(quotes,), outputs=(("result", output),)
     ).compile_stream(Runtime())
