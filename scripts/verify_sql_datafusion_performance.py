@@ -186,31 +186,24 @@ class EngineCheck:
     require_stable: bool
 
 
-def _verify_engine(
-    raw: object, check: EngineCheck
-) -> tuple[dict[str, Any], list[float], list[str]]:
-    label = check.label
-    rows = check.rows
-    expected_output_rows = check.output_rows
-    minimum_samples = check.minimum_samples
-    require_stable = check.require_stable
-    notes: list[str] = []
-    # The evidence contract deliberately checks every field in one fail-closed
-    # engine boundary and reports the precise malformed path.
-    # #lizard forgives
-    engine = _exact_fields(raw, ENGINE_FIELDS, label)
-    for field in (
-        "configured_partitions",
-        "requested_partitions",
-        "effective_partitions",
-        "available_parallelism",
-        "max_partitions",
-        "min_rows_per_partition",
-        "small_rows_threshold",
-        "batch_size",
-        "input_logical_partitions",
-        "peak_rss_bytes",
-    ):
+ENGINE_POSITIVE_FIELDS = (
+    "configured_partitions",
+    "requested_partitions",
+    "effective_partitions",
+    "available_parallelism",
+    "max_partitions",
+    "min_rows_per_partition",
+    "small_rows_threshold",
+    "batch_size",
+    "input_logical_partitions",
+    "peak_rss_bytes",
+)
+
+
+def _verify_engine_configuration(engine: dict, label: str) -> None:
+    """Validate the parallelism decision, plan hash, and envelope fields."""
+
+    for field in ENGINE_POSITIVE_FIELDS:
         _positive_int(engine[field], f"{label}.{field}")
     if engine["parallelism_mode"] not in {"fixed", "auto"}:
         raise ValueError(f"{label}.parallelism_mode must be fixed or auto")
@@ -220,16 +213,35 @@ def _verify_engine(
     decision_entities = engine["decision_active_entities"]
     if decision_entities is not None:
         _positive_int(decision_entities, f"{label}.decision_active_entities")
-    if (
-        not isinstance(engine["decision_active_entities_source"], str)
-        or not engine["decision_active_entities_source"]
-    ):
-        raise ValueError(f"{label}.decision_active_entities_source must be non-empty")
+    _require_nonempty_str(
+        engine["decision_active_entities_source"],
+        f"{label}.decision_active_entities_source",
+    )
     _nonnegative_int(engine["spill_bytes"], f"{label}.spill_bytes")
     _nonnegative_int(engine["empty_partitions"], f"{label}.empty_partitions")
     plan_hash = engine["normalized_plan_hash"]
     if not isinstance(plan_hash, str) or FINGERPRINT.fullmatch(plan_hash) is None:
         raise ValueError(f"{label}.normalized_plan_hash must be a SHA-256 digest")
+    _require_nonempty_str(
+        engine["partition_limit_reason"], f"{label}.partition_limit_reason"
+    )
+
+
+def _engine_summary(samples: list[float]) -> dict[str, float]:
+    return {
+        "median_ms": _median(samples),
+        "p25_ms": _percentile(samples, 0.25),
+        "p75_ms": _percentile(samples, 0.75),
+        "mad_ms": _median([abs(value - _median(samples)) for value in samples]),
+        "cv": _cv(samples),
+    }
+
+
+def _verify_engine_samples(
+    engine: dict, label: str, minimum_samples: int, require_stable: bool
+) -> tuple[list[float], list[str]]:
+    """Validate the sample inventory, summaries, and stability verdict."""
+
     raw_samples = engine["samples_ms"]
     if not isinstance(raw_samples, list) or len(raw_samples) < minimum_samples:
         raise ValueError(
@@ -239,41 +251,29 @@ def _verify_engine(
         _finite(value, f"{label}.samples_ms[{index}]", positive=True)
         for index, value in enumerate(raw_samples)
     ]
-    summary = {
-        "median_ms": _median(samples),
-        "p25_ms": _percentile(samples, 0.25),
-        "p75_ms": _percentile(samples, 0.75),
-        "mad_ms": _median([abs(value - _median(samples)) for value in samples]),
-        "cv": _cv(samples),
-    }
+    summary = _engine_summary(samples)
     for field, expected in summary.items():
         reported = _finite(engine[field], f"{label}.{field}")
         if not math.isclose(reported, expected, rel_tol=1e-12, abs_tol=1e-12):
             raise ValueError(f"{label}.{field} is inconsistent")
     if require_stable and summary["cv"] > 0.10:
         if summary["median_ms"] < STABILITY_MIN_MEDIAN_MS:
-            notes.append(
+            note = (
                 f"{label} CV {summary['cv'] * 100:.1f}% skipped: median "
                 f"{summary['median_ms']:.2f} ms is below the "
                 f"{STABILITY_MIN_MEDIAN_MS:g} ms stability floor"
             )
-        else:
-            raise ValueError(f"{label} CV {summary['cv'] * 100:.1f}% exceeds 10%")
+            return samples, [note]
+        raise ValueError(f"{label} CV {summary['cv'] * 100:.1f}% exceeds 10%")
+    return samples, []
+
+
+def _verify_engine_execution_counters(engine: dict, label: str) -> None:
+    """Validate the execution, window, and repartition counter fields."""
+
     _finite(engine["cpu_time_ms"], f"{label}.cpu_time_ms")
     if engine["cpu_time_ms"] < 0:
         raise ValueError(f"{label}.cpu_time_ms must be non-negative")
-    if (
-        not isinstance(engine["partition_limit_reason"], str)
-        or not engine["partition_limit_reason"]
-    ):
-        raise ValueError(f"{label}.partition_limit_reason must be non-empty")
-    input_batch_rows = engine["input_batch_rows"]
-    if not isinstance(input_batch_rows, list) or any(
-        type(value) is not int or value <= 0 for value in input_batch_rows
-    ):
-        raise ValueError(f"{label}.input_batch_rows must contain positive integers")
-    if sum(input_batch_rows) != rows:
-        raise ValueError(f"{label}.input_batch_rows must sum to rows")
     _nonnegative_int(
         engine["bounded_window_agg_count"], f"{label}.bounded_window_agg_count"
     )
@@ -287,6 +287,19 @@ def _verify_engine(
     for field in ("window_compute_ms", "repartition_sort_compute_ms"):
         if _finite(engine[field], f"{label}.{field}") < 0:
             raise ValueError(f"{label}.{field} must be non-negative")
+
+
+def _verify_input_batch_rows(engine: dict, label: str, rows: int) -> None:
+    input_batch_rows = engine["input_batch_rows"]
+    if not isinstance(input_batch_rows, list) or any(
+        type(value) is not int or value <= 0 for value in input_batch_rows
+    ):
+        raise ValueError(f"{label}.input_batch_rows must contain positive integers")
+    if sum(input_batch_rows) != rows:
+        raise ValueError(f"{label}.input_batch_rows must sum to rows")
+
+
+def _verified_partition_rows(engine: dict, label: str) -> list[int]:
     partition_rows = engine["partition_rows"]
     if not isinstance(partition_rows, list) or any(
         type(value) is not int or value < 0 for value in partition_rows
@@ -294,6 +307,16 @@ def _verify_engine(
         raise ValueError(f"{label}.partition_rows must contain non-negative integers")
     if len(partition_rows) != engine["effective_partitions"]:
         raise ValueError(f"{label}.partition_rows must cover every effective partition")
+    return partition_rows
+
+
+def _verify_engine_partitions(
+    engine: dict, label: str, rows: int, expected_output_rows: int
+) -> None:
+    """Validate input batch rows and output partition accounting."""
+
+    _verify_input_batch_rows(engine, label, rows)
+    partition_rows = _verified_partition_rows(engine, label)
     if sum(partition_rows) != expected_output_rows:
         raise ValueError(
             f"{label}.partition_rows must sum to output_rows {expected_output_rows}"
@@ -305,6 +328,11 @@ def _verify_engine(
     partition_skew = _finite(engine["partition_skew"], f"{label}.partition_skew")
     if not math.isclose(partition_skew, expected_skew, rel_tol=1e-12, abs_tol=1e-12):
         raise ValueError(f"{label}.partition_skew is inconsistent")
+
+
+def _verify_engine_phases(engine: dict, label: str, samples: list[float]) -> None:
+    """Validate per-phase medians and their per-sample inventories."""
+
     phases = _exact_fields(
         engine["phase_medians_ms"], PHASES, f"{label}.phase_medians_ms"
     )
@@ -315,20 +343,40 @@ def _verify_engine(
         engine["phase_samples_ms"], PHASES, f"{label}.phase_samples_ms"
     )
     for phase, raw_values in phase_samples.items():
-        if not isinstance(raw_values, list) or len(raw_values) != len(samples):
-            raise ValueError(
-                f"{label}.phase_samples_ms.{phase} must cover every sample"
-            )
-        values = [
-            _finite(value, f"{label}.phase_samples_ms.{phase}[{index}]")
-            for index, value in enumerate(raw_values)
-        ]
+        values = _phase_sample_values(raw_values, phase, label, len(samples))
         if any(value < 0 for value in values):
             raise ValueError(f"{label}.phase_samples_ms.{phase} must be non-negative")
         if not math.isclose(
             float(phases[phase]), _median(values), rel_tol=1e-12, abs_tol=1e-12
         ):
             raise ValueError(f"{label}.phase_medians_ms.{phase} is inconsistent")
+
+
+def _phase_sample_values(
+    raw_values: object, phase: str, label: str, expected: int
+) -> list[float]:
+    if not isinstance(raw_values, list) or len(raw_values) != expected:
+        raise ValueError(f"{label}.phase_samples_ms.{phase} must cover every sample")
+    return [
+        _finite(value, f"{label}.phase_samples_ms.{phase}[{index}]")
+        for index, value in enumerate(raw_values)
+    ]
+
+
+def _verify_engine(
+    raw: object, check: EngineCheck
+) -> tuple[dict[str, Any], list[float], list[str]]:
+    # The evidence contract checks every field in one fail-closed engine
+    # boundary; the helpers keep each rejection family auditable.
+    label = check.label
+    engine = _exact_fields(raw, ENGINE_FIELDS, label)
+    _verify_engine_configuration(engine, label)
+    samples, notes = _verify_engine_samples(
+        engine, label, check.minimum_samples, check.require_stable
+    )
+    _verify_engine_execution_counters(engine, label)
+    _verify_engine_partitions(engine, label, check.rows, check.output_rows)
+    _verify_engine_phases(engine, label, samples)
     return engine, samples, notes
 
 
@@ -411,18 +459,9 @@ def _actual_mismatches(calc_flow: dict[str, Any], raw: dict[str, Any]) -> list[s
     return [field for field, (left, right) in pairs.items() if left != right]
 
 
-def _verify_case(
-    raw: object,
-    *,
-    index: int,
-    minimum_samples: int,
-    require_stable: bool,
-) -> list[str]:
-    # Paired ordering, correctness, comparability, and conclusions are one
-    # atomic evidence contract; keep all rejection paths together.
-    # #lizard forgives
-    label = f"cases[{index}]"
-    case = _exact_fields(raw, CASE_FIELDS, label)
+def _verify_case_fields(case: dict, label: str) -> tuple[int, int]:
+    """Validate the case envelope and return its input and output rows."""
+
     if not isinstance(case["name"], str) or not case["name"]:
         raise ValueError(f"{label}.name must be non-empty")
     rows = _positive_int(case["rows"], f"{label}.rows")
@@ -436,35 +475,44 @@ def _verify_case(
         raise ValueError(
             f"{label} rolling rewrite must be disabled for fair comparison"
         )
-    calc_flow, calc_samples, calc_notes = _verify_engine(
-        case["calc_flow"],
-        EngineCheck(
-            label=f"{label}.calc_flow",
-            rows=rows,
-            output_rows=output_rows,
-            minimum_samples=minimum_samples,
-            require_stable=require_stable,
-        ),
-    )
-    raw_datafusion, raw_samples, raw_notes = _verify_engine(
-        case["raw_datafusion"],
-        EngineCheck(
-            label=f"{label}.raw_datafusion",
-            rows=rows,
-            output_rows=output_rows,
-            minimum_samples=minimum_samples,
-            require_stable=require_stable,
-        ),
-    )
-    if case["name"] == "dual_sma_spread":
-        for engine_name, engine in (
-            ("calc_flow", calc_flow),
-            ("raw_datafusion", raw_datafusion),
-        ):
-            if engine["bounded_window_agg_count"] != 1:
-                raise ValueError(
-                    f"{label}.{engine_name} must contain one BoundedWindowAggExec"
-                )
+    return rows, output_rows
+
+
+def _verify_dual_sma_window_operators(case: dict, engines: dict, label: str) -> None:
+    if case["name"] != "dual_sma_spread":
+        return
+    for engine_name, engine in engines.items():
+        if engine["bounded_window_agg_count"] != 1:
+            raise ValueError(
+                f"{label}.{engine_name} must contain one BoundedWindowAggExec"
+            )
+
+
+def _verified_paired_ratio_values(
+    ratios: object,
+    calc_samples: list[float],
+    raw_samples: list[float],
+    label: str,
+) -> list[float]:
+    if not isinstance(ratios, list) or len(ratios) != len(calc_samples):
+        raise ValueError(f"{label}.paired_ratios must cover every sample pair")
+    verified = []
+    for sample, (reported, calc, datafusion) in enumerate(
+        zip(ratios, calc_samples, raw_samples, strict=True)
+    ):
+        ratio = _finite(reported, f"{label}.paired_ratios[{sample}]", positive=True)
+        expected = calc / datafusion
+        if not math.isclose(ratio, expected, rel_tol=1e-12, abs_tol=1e-12):
+            raise ValueError(f"{label}.paired_ratios[{sample}] is inconsistent")
+        verified.append(ratio)
+    return verified
+
+
+def _verify_paired_ratios(
+    case: dict, calc_samples: list[float], raw_samples: list[float], label: str
+) -> float:
+    """Validate one case's paired ordering, ratios, and interval."""
+
     if len(calc_samples) != len(raw_samples):
         raise ValueError(f"{label} paired engines have different sample counts")
     order = case["sample_order"]
@@ -473,18 +521,9 @@ def _verify_case(
     ]
     if order != expected_order:
         raise ValueError(f"{label}.sample_order must alternate AB/BA")
-    ratios = case["paired_ratios"]
-    if not isinstance(ratios, list) or len(ratios) != len(calc_samples):
-        raise ValueError(f"{label}.paired_ratios must cover every sample pair")
-    verified_ratios = []
-    for sample, (reported, calc, datafusion) in enumerate(
-        zip(ratios, calc_samples, raw_samples, strict=True)
-    ):
-        ratio = _finite(reported, f"{label}.paired_ratios[{sample}]", positive=True)
-        expected = calc / datafusion
-        if not math.isclose(ratio, expected, rel_tol=1e-12, abs_tol=1e-12):
-            raise ValueError(f"{label}.paired_ratios[{sample}] is inconsistent")
-        verified_ratios.append(ratio)
+    verified_ratios = _verified_paired_ratio_values(
+        case["paired_ratios"], calc_samples, raw_samples, label
+    )
     ratio_median = _finite(
         case["paired_ratio_median"], f"{label}.paired_ratio_median", positive=True
     )
@@ -500,8 +539,10 @@ def _verify_case(
     )
     if not interval_low <= ratio_median <= interval_high:
         raise ValueError(f"{label} paired ratio interval is inconsistent")
-    _verify_correctness(case["correctness"], label)
-    actual_mismatches = _actual_mismatches(calc_flow, raw_datafusion)
+    return ratio_median
+
+
+def _verify_conclusion(case: dict, actual_mismatches: list[str], label: str) -> None:
     comparability = _exact_fields(
         case["comparability"], {"comparable", "mismatches"}, f"{label}.comparability"
     )
@@ -518,7 +559,44 @@ def _verify_case(
             )
     elif not isinstance(conclusion, str) or not conclusion:
         raise ValueError(f"{label}.speedup_conclusion is required when comparable")
-    return [*calc_notes, *raw_notes]
+
+
+def _verify_case(
+    raw: object,
+    *,
+    index: int,
+    minimum_samples: int,
+    require_stable: bool,
+) -> list[str]:
+    # Paired ordering, correctness, comparability, and conclusions are one
+    # atomic evidence contract; the helpers keep every rejection path here.
+    label = f"cases[{index}]"
+    case = _exact_fields(raw, CASE_FIELDS, label)
+    rows, output_rows = _verify_case_fields(case, label)
+    engines = {}
+    samples = {}
+    notes: list[str] = []
+    for engine_name in ("calc_flow", "raw_datafusion"):
+        engine, engine_samples, engine_notes = _verify_engine(
+            case[engine_name],
+            EngineCheck(
+                label=f"{label}.{engine_name}",
+                rows=rows,
+                output_rows=output_rows,
+                minimum_samples=minimum_samples,
+                require_stable=require_stable,
+            ),
+        )
+        engines[engine_name] = engine
+        samples[engine_name] = engine_samples
+        notes = [*notes, *engine_notes]
+    _verify_dual_sma_window_operators(case, engines, label)
+    _verify_paired_ratios(case, samples["calc_flow"], samples["raw_datafusion"], label)
+    _verify_correctness(case["correctness"], label)
+    _verify_conclusion(
+        case, _actual_mismatches(engines["calc_flow"], engines["raw_datafusion"]), label
+    )
+    return notes
 
 
 def _case_key(case: dict[str, Any]) -> tuple[object, ...]:
@@ -685,6 +763,58 @@ def verify_p1(
     return notes
 
 
+def _verify_report_header(raw: object) -> dict[str, Any]:
+    report = _exact_fields(
+        raw,
+        {"schema_version", "git_sha", "profile", "environment", "cases"},
+        "report",
+    )
+    if report["schema_version"] != 1:
+        raise ValueError("report.schema_version must be 1")
+    git_sha = report["git_sha"]
+    if not isinstance(git_sha, str) or GIT_SHA.fullmatch(git_sha) is None:
+        raise ValueError("report.git_sha must be a lowercase full git SHA")
+    if report["profile"] not in PROFILES:
+        raise ValueError("report.profile is unsupported")
+    return report
+
+
+def _verify_environment_identity(environment: dict) -> None:
+    for field in (
+        "machine_fingerprint",
+        "dependency_fingerprint",
+        "workload_fingerprint",
+    ):
+        value = environment[field]
+        if not isinstance(value, str) or FINGERPRINT.fullmatch(value) is None:
+            raise ValueError(f"environment.{field} must be a SHA-256 digest")
+    if environment["datafusion_version"] != "54.0.0":
+        raise ValueError("environment.datafusion_version must be 54.0.0")
+
+
+def _require_nonempty_str(value: object, label: str) -> None:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{label} must be non-empty")
+
+
+def _verify_environment(raw: object, require_stable: bool) -> None:
+    environment = _exact_fields(raw, ENVIRONMENT_FIELDS, "environment")
+    _verify_environment_identity(environment)
+    for field in ("arrow_version", "build_profile", "allocator"):
+        _require_nonempty_str(environment[field], f"environment.{field}")
+    for field in ("os", "arch", "cpu_model", "rust_version"):
+        _require_nonempty_str(environment[field], f"environment.{field}")
+    _positive_int(
+        environment["available_parallelism"], "environment.available_parallelism"
+    )
+    if type(environment["git_dirty"]) is not bool:
+        raise ValueError("environment.git_dirty must be a bool")
+    if require_stable and environment["build_profile"] != "release":
+        raise ValueError("stable evidence requires release build profile")
+    if require_stable and environment["git_dirty"]:
+        raise ValueError("stable evidence requires a clean Git worktree")
+
+
 def verify_report(
     raw: object,
     *,
@@ -698,47 +828,8 @@ def verify_report(
     """
     # Top-level provenance, environment, cases, and repeat validation form one
     # fail-closed admission boundary for a report.
-    # #lizard forgives
-    report = _exact_fields(
-        raw,
-        {"schema_version", "git_sha", "profile", "environment", "cases"},
-        "report",
-    )
-    if report["schema_version"] != 1:
-        raise ValueError("report.schema_version must be 1")
-    git_sha = report["git_sha"]
-    if not isinstance(git_sha, str) or GIT_SHA.fullmatch(git_sha) is None:
-        raise ValueError("report.git_sha must be a lowercase full git SHA")
-    if report["profile"] not in PROFILES:
-        raise ValueError("report.profile is unsupported")
-    environment = _exact_fields(
-        report["environment"], ENVIRONMENT_FIELDS, "environment"
-    )
-    for field in (
-        "machine_fingerprint",
-        "dependency_fingerprint",
-        "workload_fingerprint",
-    ):
-        value = environment[field]
-        if not isinstance(value, str) or FINGERPRINT.fullmatch(value) is None:
-            raise ValueError(f"environment.{field} must be a SHA-256 digest")
-    if environment["datafusion_version"] != "54.0.0":
-        raise ValueError("environment.datafusion_version must be 54.0.0")
-    for field in ("arrow_version", "build_profile", "allocator"):
-        if not isinstance(environment[field], str) or not environment[field]:
-            raise ValueError(f"environment.{field} must be non-empty")
-    for field in ("os", "arch", "cpu_model", "rust_version"):
-        if not isinstance(environment[field], str) or not environment[field]:
-            raise ValueError(f"environment.{field} must be non-empty")
-    _positive_int(
-        environment["available_parallelism"], "environment.available_parallelism"
-    )
-    if type(environment["git_dirty"]) is not bool:
-        raise ValueError("environment.git_dirty must be a bool")
-    if require_stable and environment["build_profile"] != "release":
-        raise ValueError("stable evidence requires release build profile")
-    if require_stable and environment["git_dirty"]:
-        raise ValueError("stable evidence requires a clean Git worktree")
+    report = _verify_report_header(raw)
+    _verify_environment(report["environment"], require_stable)
     cases = report["cases"]
     if not isinstance(cases, list) or not cases:
         raise ValueError("report.cases must not be empty")

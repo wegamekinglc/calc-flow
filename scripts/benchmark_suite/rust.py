@@ -78,6 +78,19 @@ async def build_binaries(source: Path, output: Path, shared: Path) -> dict:
 SQL_MINIMUM_SAMPLES = 20
 
 
+def _require_baseline_samples(
+    case_name: object, engine_name: str, samples: object
+) -> list[float]:
+    if not isinstance(samples, list):
+        raise ValueError(f"baseline {case_name}/{engine_name} samples are incomplete")
+    if len(samples) < SQL_MINIMUM_SAMPLES or any(
+        isinstance(value, bool) or not isinstance(value, int | float) or value <= 0
+        for value in samples
+    ):
+        raise ValueError(f"baseline {case_name}/{engine_name} samples are incomplete")
+    return samples
+
+
 def _baseline_report_rows(report: dict) -> dict:
     """Read one frozen baseline report under its own legacy field contract.
 
@@ -92,20 +105,9 @@ def _baseline_report_rows(report: dict) -> dict:
     rows = {}
     for case in report["cases"]:
         for engine in ("calc_flow", "raw_datafusion"):
-            samples = case.get(engine, {}).get("samples_ms")
-            if (
-                not isinstance(samples, list)
-                or len(samples) < SQL_MINIMUM_SAMPLES
-                or any(
-                    isinstance(value, bool)
-                    or not isinstance(value, int | float)
-                    or value <= 0
-                    for value in samples
-                )
-            ):
-                raise ValueError(
-                    f"baseline {case.get('name')}/{engine} samples are incomplete"
-                )
+            samples = _require_baseline_samples(
+                case.get("name"), engine, case.get(engine, {}).get("samples_ms")
+            )
             rows[f"sql_datafusion_performance/{case['name']}/{engine}"] = {
                 "samples": [value / 1000 for value in samples],
                 "rows": case["rows"],
@@ -385,9 +387,7 @@ async def _rust_block(
         if target == "allocation_regression":
             continue
         try:
-            measured = await run_binary(
-                target, binary, source, output / target, side
-            )
+            measured = await run_binary(target, binary, source, output / target, side)
             block.update(_with_fingerprints(measured, stamps[target]))
         except Exception as error:
             errors.append(f"{target}: {error}")
