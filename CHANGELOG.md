@@ -50,7 +50,7 @@ measurements. Use the current guides for supported behavior.
   inside every timed sample, and timed samples no longer retain their output
   batch: the warm-up pair keeps proving completion equivalence. Outputs,
   phase boundaries, and the evidence schema are unchanged; on the nightly
-  matched-adaptive profile the change removes 9–18% of measured median
+  matched-adaptive profile the change removes 7–18% of measured median
   latency and 30–69% of peak RSS while tightening sample CV. The bench's
   self-tests now run through `scripts/run_rust_tests.py`, with the
   RSS-window test compiled only on Linux, so the new memory-window and
