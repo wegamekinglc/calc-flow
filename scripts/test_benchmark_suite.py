@@ -320,6 +320,23 @@ class BenchmarkSuiteTests(unittest.TestCase):
         row = measured_case(backend="ta-lib", baseline=[], comparison="external")
         self.assertEqual(comparison(row)["verdict"], "external-reference")
 
+    def test_cases_absent_from_the_baseline_catalog_are_new_coverage(self):
+        row = measured_case(
+            id="engines/10000/calc-flow-stream/group_by", comparison="new", baseline=[]
+        )
+        self.assertEqual(comparison(row)["verdict"], "new-coverage")
+
+    def test_comparison_kind_follows_the_baseline_catalog_membership(self):
+        from scripts.benchmark_suite.catalog import comparison_kind
+
+        case = measured_case(id="engines/10000/calc-flow-stream/group_by")
+        known = frozenset({"engines/10000/calc-flow-stream/group_by"})
+        self.assertEqual(comparison_kind(case, known), "interleaved")
+        self.assertEqual(comparison_kind(case, frozenset()), "new")
+        self.assertEqual(comparison_kind(case, None), "interleaved")
+        external = measured_case(backend="ta-lib")
+        self.assertEqual(comparison_kind(external, known), "external")
+
     def test_exact_threshold_is_not_a_roundoff_regression(self):
         result = comparison(measured_case(candidate=[[1.05] * 10] * 2))
         self.assertEqual(result["verdict"], "no-confirmed-regression")

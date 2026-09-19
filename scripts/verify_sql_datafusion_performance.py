@@ -8,6 +8,7 @@ import math
 import re
 import statistics
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -174,16 +175,25 @@ def _cv(values: list[float]) -> float:
     return statistics.pstdev(values) / mean
 
 
+@dataclass(frozen=True, slots=True)
+class EngineCheck:
+    """One case-side engine boundary under verification."""
+
+    label: str
+    rows: int
+    output_rows: int
+    minimum_samples: int
+    require_stable: bool
+
+
 def _verify_engine(
-    raw: object,
-    *,
-    label: str,
-    rows: int,
-    expected_output_rows: int,
-    minimum_samples: int,
-    require_stable: bool,
-    notes: list[str],
+    raw: object, check: EngineCheck, notes: list[str]
 ) -> tuple[dict[str, Any], list[float]]:
+    label = check.label
+    rows = check.rows
+    expected_output_rows = check.output_rows
+    minimum_samples = check.minimum_samples
+    require_stable = check.require_stable
     # The evidence contract deliberately checks every field in one fail-closed
     # engine boundary and reports the precise malformed path.
     # #lizard forgives
@@ -428,21 +438,25 @@ def _verify_case(
         )
     calc_flow, calc_samples = _verify_engine(
         case["calc_flow"],
-        label=f"{label}.calc_flow",
-        rows=rows,
-        expected_output_rows=output_rows,
-        minimum_samples=minimum_samples,
-        require_stable=require_stable,
-        notes=notes,
+        EngineCheck(
+            label=f"{label}.calc_flow",
+            rows=rows,
+            output_rows=output_rows,
+            minimum_samples=minimum_samples,
+            require_stable=require_stable,
+        ),
+        notes,
     )
     raw_datafusion, raw_samples = _verify_engine(
         case["raw_datafusion"],
-        label=f"{label}.raw_datafusion",
-        rows=rows,
-        expected_output_rows=output_rows,
-        minimum_samples=minimum_samples,
-        require_stable=require_stable,
-        notes=notes,
+        EngineCheck(
+            label=f"{label}.raw_datafusion",
+            rows=rows,
+            output_rows=output_rows,
+            minimum_samples=minimum_samples,
+            require_stable=require_stable,
+        ),
+        notes,
     )
     if case["name"] == "dual_sma_spread":
         for engine_name, engine in (

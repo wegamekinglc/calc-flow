@@ -24,6 +24,22 @@ CONTRACT = "calc-flow-benchmark-suite-v3"
 STREAM_SCOPE = "ready-enqueue-to-arrow"
 
 
+def comparison_kind(case: dict, baseline_ids: frozenset[str] | None) -> str:
+    """Classify one measured case against the baseline catalog membership.
+
+    A case the baseline catalog never declared has no paired reference: the
+    baseline wheel is functionally the candidate's engine for it, so gating
+    the pair only measures same-runner noise. ``None`` means the baseline
+    source is unavailable and every paired case keeps the interleaved gate.
+    """
+
+    if not case["backend"].startswith("calc-flow"):
+        return "external"
+    if baseline_ids is None:
+        return "interleaved"
+    return "interleaved" if case["id"] in baseline_ids else "new"
+
+
 def engine_cases(rows: int | None = None) -> list[dict]:
     sizes = ROW_SCALES if rows is None else (rows,)
     return [

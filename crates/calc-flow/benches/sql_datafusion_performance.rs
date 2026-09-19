@@ -1786,11 +1786,47 @@ async fn run_sample_retention_tests() -> BenchResult<()> {
 }
 
 #[cfg(test)]
+fn operator_output_rows_are_expected(name: &str, output_rows: usize, args: &Args) -> bool {
+    match name {
+        "projection" | "join" => output_rows == args.rows,
+        "group_by" => output_rows == args.entities,
+        "filter" => output_rows > 0 && output_rows < args.rows,
+        _ => false,
+    }
+}
+
+async fn operator_workload_case_is_valid(
+    args: &Args,
+    workload: &Workload,
+    batch: &Batch,
+    dimension: &Batch,
+) -> BenchResult<()> {
+    let case_dimension = workload.dimension.then_some(dimension);
+    let case = benchmark_case(args, workload, batch, case_dimension).await?;
+    if !correctness_is_complete(&case.correctness) {
+        return Err(format!("operator workload {:?} lost correctness", workload.name).into());
+    }
+    if !case.comparability.comparable {
+        return Err(format!(
+            "operator workload {:?} is not comparable: {:?}",
+            workload.name, case.comparability.mismatches
+        )
+        .into());
+    }
+    if !operator_output_rows_are_expected(workload.name, case.output_rows, args) {
+        return Err(format!(
+            "operator workload {:?} recorded unexpected output rows {}",
+            workload.name, case.output_rows
+        )
+        .into());
+    }
+    Ok(())
+}
+
 async fn run_operator_workload_tests() -> BenchResult<()> {
     // The operator scenarios extend the rolling pair with row-local,
     // cardinality-changing, and two-input SQL shapes; each must stay correct,
     // comparable, and record its true output cardinality.
-    // #lizard forgives
     let names = workloads().map(|workload| workload.name);
     for expected in ["projection", "filter", "group_by", "join"] {
         if !names.contains(&expected) {
@@ -1802,31 +1838,7 @@ async fn run_operator_workload_tests() -> BenchResult<()> {
     let batch = benchmark_batch(records, args.entities)?;
     let dimension = benchmark_dimension_batch(args.entities)?;
     for workload in workloads().iter().filter(|workload| workload.window == 0) {
-        let case_dimension = workload.dimension.then_some(&dimension);
-        let case = benchmark_case(&args, workload, &batch, case_dimension).await?;
-        if !correctness_is_complete(&case.correctness) {
-            return Err(format!("operator workload {:?} lost correctness", workload.name).into());
-        }
-        if !case.comparability.comparable {
-            return Err(format!(
-                "operator workload {:?} is not comparable: {:?}",
-                workload.name, case.comparability.mismatches
-            )
-            .into());
-        }
-        let cardinality_ok = match workload.name {
-            "projection" | "join" => case.output_rows == args.rows,
-            "group_by" => case.output_rows == args.entities,
-            "filter" => case.output_rows > 0 && case.output_rows < args.rows,
-            other => return Err(format!("unexpected operator workload {other:?}").into()),
-        };
-        if !cardinality_ok {
-            return Err(format!(
-                "operator workload {:?} recorded unexpected output rows {}",
-                workload.name, case.output_rows
-            )
-            .into());
-        }
+        operator_workload_case_is_valid(&args, workload, &batch, &dimension).await?;
     }
     Ok(())
 }
