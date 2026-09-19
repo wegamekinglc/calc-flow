@@ -196,6 +196,46 @@ class TestSqlDataFusionEvidence(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, pattern):
             verify_report(report, minimum_samples=20)
 
+    def test_stability_skips_sub_floor_medians_with_explicit_note(self) -> None:
+        report = _operator_report()
+        noisy = [1.0] * 10 + [2.0] * 10
+        for engine_name in ("calc_flow", "raw_datafusion"):
+            engine = report["cases"][0][engine_name]
+            engine["samples_ms"] = noisy
+            engine["median_ms"] = 1.5
+            engine["p25_ms"] = 1.0
+            engine["p75_ms"] = 2.0
+            engine["mad_ms"] = 0.5
+            engine["cv"] = 1.0 / 3.0
+        case = report["cases"][0]
+        case["paired_ratios"] = [1.0] * 20
+        case["paired_ratio_median"] = 1.0
+        case["paired_ratio_ci_low"] = 0.99
+        case["paired_ratio_ci_high"] = 1.01
+        case["speedup_conclusion"] = "calc_flow_over_raw=1.000000x"
+        notes = verify_report(report, minimum_samples=20, require_stable=True)
+        self.assertEqual(2, len(notes))
+        self.assertIn("below the 20 ms stability floor", " ".join(notes))
+
+    def test_stability_still_binds_above_the_median_floor(self) -> None:
+        report = _report()
+        noisy = [70.0] * 10 + [90.0] * 10
+        for engine_name in ("calc_flow", "raw_datafusion"):
+            engine = report["cases"][0][engine_name]
+            engine["samples_ms"] = noisy
+            engine["median_ms"] = 80.0
+            engine["p25_ms"] = 70.0
+            engine["p75_ms"] = 90.0
+            engine["mad_ms"] = 10.0
+            engine["cv"] = 0.125
+        case = report["cases"][0]
+        case["paired_ratios"] = [1.0] * 20
+        case["paired_ratio_median"] = 1.0
+        case["paired_ratio_ci_low"] = 0.99
+        case["paired_ratio_ci_high"] = 1.01
+        with self.assertRaisesRegex(ValueError, "CV 12.5% exceeds 10%"):
+            verify_report(report, minimum_samples=20, require_stable=True)
+
     def test_stable_evidence_rejects_a_dirty_worktree(self) -> None:
         report = _report()
         report["environment"]["git_dirty"] = True
