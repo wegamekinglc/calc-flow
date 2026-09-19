@@ -747,16 +747,9 @@ async fn raw_datafusion_sample(
     let context = SessionContext::new_with_config(session_config);
     let session_state_create = milliseconds(session_start.elapsed());
     let input_start = Instant::now();
-    let table = batch.table_payload()?;
-    let provider = MemTable::try_new(Arc::clone(table.schema()), vec![table.batches().to_vec()])?;
+    let provider = input_mem_table(batch)?;
     let dimension_provider = match dimension {
-        Some(value) => {
-            let records = value.table_payload()?;
-            Some(MemTable::try_new(
-                Arc::clone(records.schema()),
-                vec![records.batches().to_vec()],
-            )?)
-        }
+        Some(value) => Some(input_mem_table(value)?),
         None => None,
     };
     let input_adapter = milliseconds(input_start.elapsed());
@@ -810,24 +803,9 @@ async fn raw_datafusion_sample(
     // The engine's parallelism decision reads every registered input at once:
     // with a dimension side it reports combined rows and no single-input
     // entity fact, and the raw mirror reports the identical decision fields.
-    let decision_input_rows = batch
-        .num_rows()
-        .saturating_add(dimension.map_or(0, Batch::num_rows));
-    let decision_active_entities = if dimension.is_some() {
-        None
-    } else {
-        batch
-            .metadata()
-            .attributes()
-            .get(DATAFUSION_ACTIVE_ENTITIES_METADATA_KEY)
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|value| usize::try_from(value).ok())
-    };
-    let decision_active_entities_source = if dimension.is_some() {
-        "multiple_inputs"
-    } else {
-        "batch_metadata"
-    };
+    let decision_input_rows = raw_decision_input_rows(batch, dimension);
+    let (decision_active_entities, decision_active_entities_source) =
+        raw_decision_entities(batch, dimension);
     let mut phases = PhaseMedians {
         runtime_acquire,
         session_state_create,
@@ -980,23 +958,18 @@ fn plan_statistics(plan: &dyn ExecutionPlan, output_rows: usize) -> PlanStatisti
     clippy::too_many_lines,
     reason = "the AB/BA ordering and paired evidence assembly remain adjacent for auditability"
 )]
-async fn benchmark_case(
+async fn warmup_outputs(
     args: &Args,
-    workload: &Workload,
+    plan: &calc_flow::BatchExecutionPlan,
     batch: &Batch,
     dimension: Option<&Batch>,
-) -> BenchResult<CaseEvidence> {
-    // Warm-up, alternating AB/BA sampling, correctness, and evidence assembly
-    // intentionally form one auditable paired-measurement boundary.
-    // #lizard forgives
-    let config = config(args);
-    let dimension_rows = dimension.map_or(0, Batch::num_rows);
-    let effective_partitions = effective_partitions(args, dimension_rows);
-    let plan = build_plan(config, workload)?;
+    workload: &Workload,
+    effective_partitions: usize,
+) -> BenchResult<(Option<Batch>, Option<Batch>)> {
     let mut calc_warm_output = None;
     let mut raw_warm_output = None;
     for _ in 0..args.warmups {
-        let (_calc_warm, calc_output) = calc_flow_sample(&plan, batch, dimension, true).await?;
+        let (_calc_warm, calc_output) = calc_flow_sample(plan, batch, dimension, true).await?;
         calc_warm_output = calc_output;
         let (_raw_warm, raw_output) = raw_datafusion_sample(
             batch,
@@ -1010,6 +983,71 @@ async fn benchmark_case(
         .await?;
         raw_warm_output = raw_output;
     }
+    Ok((calc_warm_output, raw_warm_output))
+}
+
+async fn timed_samples(
+    args: &Args,
+    plan: &calc_flow::BatchExecutionPlan,
+    batch: &Batch,
+    dimension: Option<&Batch>,
+    workload: &Workload,
+    effective_partitions: usize,
+) -> BenchResult<(Vec<Sample>, Vec<Sample>, Vec<String>)> {
+    let mut calc_samples = Vec::with_capacity(args.samples);
+    let mut raw_samples = Vec::with_capacity(args.samples);
+    let mut sample_order = Vec::with_capacity(args.samples);
+    for sample in 0..args.samples {
+        let calc_first = sample % 2 == 0;
+        sample_order.push(if calc_first { "ab" } else { "ba" }.to_owned());
+        let mut engines = [(&mut calc_samples, true), (&mut raw_samples, false)];
+        if !calc_first {
+            engines.reverse();
+        }
+        for (samples, is_calc) in engines {
+            if is_calc {
+                samples.push(calc_flow_sample(plan, batch, dimension, false).await?.0);
+            } else {
+                samples.push(
+                    raw_datafusion_sample(
+                        batch,
+                        dimension,
+                        workload,
+                        args.partitions,
+                        effective_partitions,
+                        args.batch_size,
+                        false,
+                    )
+                    .await?
+                    .0,
+                );
+            }
+        }
+    }
+    Ok((calc_samples, raw_samples, sample_order))
+}
+
+async fn benchmark_case(
+    args: &Args,
+    workload: &Workload,
+    batch: &Batch,
+    dimension: Option<&Batch>,
+) -> BenchResult<CaseEvidence> {
+    // Warm-up, alternating AB/BA sampling, correctness, and evidence assembly
+    // intentionally form one auditable paired-measurement boundary.
+    let config = config(args);
+    let dimension_rows = dimension.map_or(0, Batch::num_rows);
+    let effective_partitions = effective_partitions(args, dimension_rows);
+    let plan = build_plan(config, workload)?;
+    let (calc_warm_output, raw_warm_output) = warmup_outputs(
+        args,
+        &plan,
+        batch,
+        dimension,
+        workload,
+        effective_partitions,
+    )
+    .await?;
     let calc_warm = calc_warm_output
         .as_ref()
         .ok_or("missing Calc Flow warm-up")?;
@@ -1023,45 +1061,15 @@ async fn benchmark_case(
     // by one output batch per sample.
     drop(calc_warm_output);
     drop(raw_warm_output);
-
-    let mut calc_samples = Vec::with_capacity(args.samples);
-    let mut raw_samples = Vec::with_capacity(args.samples);
-    let mut sample_order = Vec::with_capacity(args.samples);
-    for sample in 0..args.samples {
-        if sample % 2 == 0 {
-            sample_order.push("ab".to_owned());
-            calc_samples.push(calc_flow_sample(&plan, batch, dimension, false).await?.0);
-            raw_samples.push(
-                raw_datafusion_sample(
-                    batch,
-                    dimension,
-                    workload,
-                    args.partitions,
-                    effective_partitions,
-                    args.batch_size,
-                    false,
-                )
-                .await?
-                .0,
-            );
-        } else {
-            sample_order.push("ba".to_owned());
-            raw_samples.push(
-                raw_datafusion_sample(
-                    batch,
-                    dimension,
-                    workload,
-                    args.partitions,
-                    effective_partitions,
-                    args.batch_size,
-                    false,
-                )
-                .await?
-                .0,
-            );
-            calc_samples.push(calc_flow_sample(&plan, batch, dimension, false).await?.0);
-        }
-    }
+    let (calc_samples, raw_samples, sample_order) = timed_samples(
+        args,
+        &plan,
+        batch,
+        dimension,
+        workload,
+        effective_partitions,
+    )
+    .await?;
     let input_batch_rows = batch
         .table_payload()?
         .batches()
@@ -1109,6 +1117,41 @@ async fn benchmark_case(
     clippy::too_many_lines,
     reason = "strict benchmark evidence is assembled in one auditable boundary"
 )]
+/// Compares the partitioning and session configuration fields of one pair.
+fn partitioning_matches(sample: &Sample, first: &Sample) -> bool {
+    sample.configured_partitions == first.configured_partitions
+        && sample.requested_partitions == first.requested_partitions
+        && sample.effective_partitions == first.effective_partitions
+        && sample.partition_limit_reason == first.partition_limit_reason
+        && sample.batch_size == first.batch_size
+        && sample.parallelism_mode == first.parallelism_mode
+        && sample.available_parallelism == first.available_parallelism
+        && sample.max_partitions == first.max_partitions
+        && sample.min_rows_per_partition == first.min_rows_per_partition
+        && sample.small_rows_threshold == first.small_rows_threshold
+}
+
+/// Compares the parallelism-decision and physical-plan fields of one pair.
+fn decision_matches(sample: &Sample, first: &Sample) -> bool {
+    sample.parallelism_decision_reused == first.parallelism_decision_reused
+        && sample.decision_input_rows == first.decision_input_rows
+        && sample.decision_active_entities == first.decision_active_entities
+        && sample.decision_active_entities_source == first.decision_active_entities_source
+        && sample.plan_text == first.plan_text
+}
+
+/// Proves every sample used one identical configuration and physical plan.
+fn samples_share_configuration(samples: &[Sample]) -> BenchResult<()> {
+    let first = samples.first().ok_or("benchmark produced no samples")?;
+    if samples
+        .iter()
+        .any(|sample| !partitioning_matches(sample, first) || !decision_matches(sample, first))
+    {
+        return Err("engine configuration or physical plan changed between samples".into());
+    }
+    Ok(())
+}
+
 fn engine_evidence(
     samples: &[Sample],
     input_batch_rows: &[usize],
@@ -1116,27 +1159,8 @@ fn engine_evidence(
 ) -> BenchResult<EngineEvidence> {
     // This function first proves every sample used identical configuration and
     // then emits the complete fail-closed engine evidence record.
-    // #lizard forgives
+    samples_share_configuration(samples)?;
     let first = samples.first().ok_or("benchmark produced no samples")?;
-    if samples.iter().any(|sample| {
-        sample.configured_partitions != first.configured_partitions
-            || sample.requested_partitions != first.requested_partitions
-            || sample.effective_partitions != first.effective_partitions
-            || sample.partition_limit_reason != first.partition_limit_reason
-            || sample.batch_size != first.batch_size
-            || sample.parallelism_mode != first.parallelism_mode
-            || sample.available_parallelism != first.available_parallelism
-            || sample.max_partitions != first.max_partitions
-            || sample.min_rows_per_partition != first.min_rows_per_partition
-            || sample.small_rows_threshold != first.small_rows_threshold
-            || sample.parallelism_decision_reused != first.parallelism_decision_reused
-            || sample.decision_input_rows != first.decision_input_rows
-            || sample.decision_active_entities != first.decision_active_entities
-            || sample.decision_active_entities_source != first.decision_active_entities_source
-            || sample.plan_text != first.plan_text
-    }) {
-        return Err("engine configuration or physical plan changed between samples".into());
-    }
     let sample_ms = samples
         .iter()
         .map(|sample| sample.elapsed_ms)
@@ -1368,6 +1392,63 @@ fn comparability_mismatches(calc: &EngineEvidence, raw: &EngineEvidence) -> Vec<
     mismatches
 }
 
+fn raw_decision_input_rows(batch: &Batch, dimension: Option<&Batch>) -> usize {
+    batch
+        .num_rows()
+        .saturating_add(dimension.map_or(0, Batch::num_rows))
+}
+
+fn raw_decision_entities(
+    batch: &Batch,
+    dimension: Option<&Batch>,
+) -> (Option<usize>, &'static str) {
+    if dimension.is_some() {
+        return (None, "multiple_inputs");
+    }
+    let entities = batch
+        .metadata()
+        .attributes()
+        .get(DATAFUSION_ACTIVE_ENTITIES_METADATA_KEY)
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok());
+    (entities, "batch_metadata")
+}
+
+fn input_mem_table(batch: &Batch) -> BenchResult<MemTable> {
+    let records = batch.table_payload()?;
+    Ok(MemTable::try_new(
+        Arc::clone(records.schema()),
+        vec![records.batches().to_vec()],
+    )?)
+}
+
+fn masks_match(
+    calc: &Float64Array,
+    raw: &Float64Array,
+    calc_index: usize,
+    raw_index: usize,
+) -> bool {
+    calc.is_null(calc_index) == raw.is_null(raw_index)
+        && (calc.is_null(calc_index)
+            || calc.value(calc_index).is_nan() == raw.value(raw_index).is_nan())
+}
+
+fn values_match(
+    calc: &Float64Array,
+    raw: &Float64Array,
+    calc_index: usize,
+    raw_index: usize,
+) -> bool {
+    if calc.is_null(calc_index) || raw.is_null(raw_index) {
+        return calc.is_null(calc_index) == raw.is_null(raw_index);
+    }
+    let left = calc.value(calc_index);
+    let right = raw.value(raw_index);
+    (left.is_nan() && right.is_nan())
+        || left.to_bits() == right.to_bits()
+        || (left - right).abs() <= ATOL + RTOL * right.abs()
+}
+
 fn compare_outputs(calc: &Batch, raw: &Batch, workload: &Workload) -> BenchResult<Correctness> {
     // Schema, keys, null/NaN masks, and numeric values are one conjunctive
     // correctness result for each measured pair.
@@ -1394,20 +1475,11 @@ fn compare_outputs(calc: &Batch, raw: &Batch, workload: &Workload) -> BenchResul
         .iter()
         .map(|(_, index)| *index)
         .zip(raw_rows.iter().map(|(_, index)| *index));
-    let null_nan_mask = aligned_indices.clone().all(|(calc_index, raw_index)| {
-        calc_values.is_null(calc_index) == raw_values.is_null(raw_index)
-            && (calc_values.is_null(calc_index)
-                || calc_values.value(calc_index).is_nan() == raw_values.value(raw_index).is_nan())
-    });
+    let null_nan_mask = aligned_indices
+        .clone()
+        .all(|(calc_index, raw_index)| masks_match(calc_values, raw_values, calc_index, raw_index));
     let values = aligned_indices.all(|(calc_index, raw_index)| {
-        if calc_values.is_null(calc_index) || raw_values.is_null(raw_index) {
-            return calc_values.is_null(calc_index) == raw_values.is_null(raw_index);
-        }
-        let left = calc_values.value(calc_index);
-        let right = raw_values.value(raw_index);
-        (left.is_nan() && right.is_nan())
-            || left.to_bits() == right.to_bits()
-            || (left - right).abs() <= ATOL + RTOL * right.abs()
+        values_match(calc_values, raw_values, calc_index, raw_index)
     });
     Ok(Correctness {
         schema,
