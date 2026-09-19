@@ -9,6 +9,55 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-19: Extend benchmark native-stream and SQL operator coverage. The
+  engine matrix adds `projection`, `filter`, and `group_by` to the native
+  streaming column, for 25 supported engine/scenario combinations and 175
+  engine cases; `join` stays unsupported because the bounded inner stream
+  join emits one output stream message per matched row and cannot carry the
+  10M-row scale. Every `sql_datafusion_performance` profile now measures
+  `projection`, `filter`, `group_by`, and `join` workloads alongside the two
+  rolling workloads, so serial-control, matched-adaptive, p32-saturation,
+  and attribution evidence covers them. Non-windowed cases record
+  `window: 0` and their true output cardinality in the evidence contract's
+  new `output_rows` field; partition rows, skew, and verification follow
+  that cardinality. `--require-stable` skips the CV check for per-sample
+  medians under a 20 ms floor with an explicit note, mirroring the P1
+  calibration-spec skip. Cases absent from the baseline catalog are measured
+  as new coverage without the paired gate, the baseline catalog is parsed
+  declaratively instead of executed, and the Rust comparison clears stale
+  rust-cache bench executables per side so a colliding unit hash can no
+  longer measure the baseline's bench as candidate evidence.
+
+- 2026-09-19: Collect the engine-comparison Polars column through Polars'
+  streaming engine. The engine-matrix adapter now uses
+  `collect(engine="streaming")`, so the Polars column measures the streaming
+  execution path by default and `docs/benchmark-suite.md` names the
+  streaming collection in its timing-boundary table. Historical in-memory
+  Polars timings are not directly comparable with the new streaming numbers;
+  treat cross-engine engine-matrix comparisons as restarted from this
+  change. Oracle equivalence holds on all six scenarios at 100k and 1M rows
+  (`rtol=atol=1e-10`, `equal_nan`); at 1M rows streaming measures 1.4–2.1x
+  faster than in-memory on join, group_by, filter, and projection and 1.4x
+  slower on sma20. The hash-pinned Polars wheels move from 1.44.1 to 1.44.2
+  within the existing `polars>=1.32,<2` range; the DataFusion pins stay at
+  54.0.0, the latest `datafusion-python` release, matching the core's
+  DataFusion major.
+
+- 2026-09-19: Remove harness-owned costs from the paired SQL/DataFusion
+  benchmark's timed windows. Peak memory now reads the kernel-maintained
+  `VmHWM` high-water mark, re-anchored per sample through `clear_refs`,
+  instead of a helper thread polling `/proc/self/status` every millisecond
+  inside every timed sample, and timed samples no longer retain their output
+  batch: the warm-up pair keeps proving completion equivalence. Outputs,
+  phase boundaries, and the evidence schema are unchanged; on the nightly
+  matched-adaptive profile the change removes 9–18% of measured median
+  latency and 30–69% of peak RSS while tightening sample CV. The bench's
+  self-tests now run through `scripts/run_rust_tests.py`, with the
+  RSS-window test compiled only on Linux, so the new memory-window and
+  retention contracts bind in CI; the harness change is declared in
+  `benchmarks/rust-workload-migrations.json` as a measurement-only
+  migration.
+
 - 2026-09-18: Keep SQL/DataFusion stability evidence observable and confirm
   the P1 machine tiering with hosted-runner measurements. The weekly
   adaptive-tuning matrix job now uploads its screening and candidate reports

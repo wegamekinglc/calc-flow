@@ -157,6 +157,13 @@ blocks. Their deltas remain informational because those blocks are not
 per-call paired observations. Allocation counters have a separate unit-correct
 table and are not mislabeled as milliseconds.
 
+Cases the baseline catalog never declared — a newly added engine/warm case or
+suite-block benchmark — are measured on the candidate build alone and
+reported with the `new-coverage` verdict instead of the paired gate; cases
+the baseline declared keep the full interleaved gate. The baseline's case ids
+are resolved from the baseline source's declarative catalog forms, and a
+baseline file outside those forms fails closed to full gating.
+
 The Rust suite retains the full `Cargo.lock` hash for provenance, while its
 comparison fingerprint covers the registry packages actually compiled for
 each benchmark, their lockfile checksums, enabled features, target kinds,
