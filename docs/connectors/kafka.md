@@ -68,6 +68,67 @@ demo topic. The graph and JSON codec share an explicit `id`, `quantity`,
 `price` schema; the calculation casts quantity to `float64` before multiplying.
 The transactional write example below uses separate target and ledger topics.
 
+## Protobuf payloads
+
+Set `"format": "protobuf"` to decode one protobuf message per record value.
+The format is source-only; sinks encode JSON and CSV. Three options travel
+together:
+
+- `descriptor_set`: path to a serialized `google.protobuf.FileDescriptorSet`,
+  for example from `protoc --descriptor_set_out=orders.pb orders.proto`.
+- `message`: the fully-qualified message name, such as `events.Order`.
+- `schema`: the explicit field list every payload projects. Protobuf bytes
+  carry no field names, so the schema is required for this format.
+
+The binding format identity is `{"name": "protobuf", "version": "1"}`. Each
+schema field names a scalar message field and must use the Arrow type the
+protobuf kind decodes to:
+
+| protobuf kind                 | Arrow `data_type`     |
+|-------------------------------|-----------------------|
+| `double`                      | `float64`             |
+| `float`                       | `float32`             |
+| `int32`, `sint32`, `sfixed32` | `int32`               |
+| `int64`, `sint64`, `sfixed64` | `int64`               |
+| `uint32`, `fixed32`           | `uint32`              |
+| `uint64`, `fixed64`           | `uint64`              |
+| `bool`                        | `bool`                |
+| `string`                      | `string`              |
+| enum                          | `string` (value name) |
+
+Unset proto3 implicit-presence fields decode their declared default.
+Explicit-presence fields (proto2, `optional`, `oneof`) decode null when the
+column is nullable and fail the decode otherwise. Repeated, map, `bytes`,
+and nested message fields have no flat Arrow representation and fail closed,
+as do enum values unknown to the descriptor. Unknown fields on the wire stay
+ignored, so a newer producer keeps decoding against an older descriptor set.
+
+```json
+{
+  "sources": [{
+    "binding": "input",
+    "connector": {
+      "provider": "calc-flow-connectors",
+      "name": "kafka",
+      "version": "2.0.0"
+    },
+    "format": {"name": "protobuf", "version": "1"},
+    "options": {
+      "bootstrap_servers": "127.0.0.1:9092",
+      "topic": "orders",
+      "partitions": [0],
+      "format": "protobuf",
+      "descriptor_set": "schemas/orders.pb",
+      "message": "events.Order",
+      "schema": [
+        {"name": "id", "data_type": "int64", "nullable": false},
+        {"name": "label", "data_type": "string", "nullable": false}
+      ]
+    }
+  }]
+}
+```
+
 ## Python sink example
 
 Run [22_kafka_sink.py](../../examples/22_kafka_sink.py) after starting the

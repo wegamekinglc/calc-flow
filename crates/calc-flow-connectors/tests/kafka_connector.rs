@@ -74,6 +74,40 @@ fn source_config_parses_and_normalizes_partitions() {
 }
 
 #[test]
+fn protobuf_config_validates_its_companions_offline() {
+    let mut source = source_options();
+    source.insert("format".to_string(), json!("protobuf"));
+    source.insert(
+        "schema".to_string(),
+        json!([{"name": "id", "data_type": "int64", "nullable": false}]),
+    );
+    let error = KafkaSourceConfig::from_options(&source)
+        .expect_err("protobuf without a descriptor set fails");
+    assert!(error.to_string().contains("descriptor_set"), "{error}");
+
+    source.insert("descriptor_set".to_string(), json!("orders.pb"));
+    let error = KafkaSourceConfig::from_options(&source)
+        .expect_err("protobuf without a message name fails");
+    assert!(error.to_string().contains("message"), "{error}");
+
+    source.insert("message".to_string(), json!("events.Order"));
+    let config = KafkaSourceConfig::from_options(&source).expect("protobuf source parses");
+    assert!(matches!(config.format, KafkaFormat::Protobuf));
+    assert_eq!(config.descriptor_set.as_deref(), Some("orders.pb"));
+    assert_eq!(config.message.as_deref(), Some("events.Order"));
+
+    source.remove("schema");
+    let error = KafkaSourceConfig::from_options(&source)
+        .expect_err("protobuf without an explicit schema fails");
+    assert!(error.to_string().contains("schema"), "{error}");
+
+    let mut sink = sink_options();
+    sink.insert("format".to_string(), json!("protobuf"));
+    let error = KafkaSinkConfig::from_options(&sink).expect_err("sinks cannot encode protobuf");
+    assert!(error.to_string().contains("format"), "{error}");
+}
+
+#[test]
 fn sink_config_derives_transactional_identity() {
     let config = KafkaSinkConfig::from_options(&sink_options()).expect("parses");
     assert_eq!(
@@ -378,6 +412,15 @@ async fn factories_register_and_resolve_offline() {
     assert_eq!(
         sink.descriptor().capabilities.transaction,
         calc_flow::TransactionSupport::LedgerIdempotent
+    );
+    let protobuf = calc_flow::FormatIdentity::new("protobuf", "1").expect("protobuf identity");
+    assert!(
+        snapshot.format_identities().contains(&protobuf),
+        "the protobuf codec registers globally"
+    );
+    assert!(
+        source.descriptor().formats.contains(&protobuf),
+        "the kafka descriptor advertises protobuf"
     );
 
     // Duplicate registration conflicts atomically.

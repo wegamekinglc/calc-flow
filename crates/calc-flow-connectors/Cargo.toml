@@ -13,7 +13,15 @@ repository.workspace = true
 default = ["file"]
 mysql = ["dep:mysql_async", "dep:chrono", "dep:hex", "dep:sha2", "dep:rustls", "arrow/ipc"]
 file = ["dep:parquet"]
-kafka = ["dep:hex", "dep:rdkafka", "dep:serde", "dep:sha2"]
+kafka = [
+    "dep:hex",
+    "dep:prost",
+    "dep:prost-reflect",
+    "dep:prost-types",
+    "dep:rdkafka",
+    "dep:serde",
+    "dep:sha2",
+]
 clickhouse = ["dep:hex", "dep:reqwest", "dep:serde", "dep:sha2"]
 http = [
     "dep:reqwest",
@@ -87,6 +95,9 @@ pgwire-replication = { version = "=0.4.0", default-features = false, features = 
     "scram",
     "tls-rustls",
 ], optional = true }
+prost = { version = "=0.14.4", optional = true }
+prost-reflect = { version = "=0.16.5", default-features = false, optional = true }
+prost-types = { version = "=0.14.4", optional = true }
 rustls = { version = "=0.23.45", default-features = false, features = [
     "ring",
     "std",

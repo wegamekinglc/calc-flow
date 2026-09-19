@@ -8,9 +8,10 @@
 //! process-local code.
 //!
 //! Feature gates follow the frozen M6 decision: lightweight pure-Rust
-//! format codecs (CSV, newline JSON) always compile, while the Parquet
-//! codec and the file transport compile behind the default `file`
-//! feature.
+//! format codecs (CSV, newline JSON) always compile, the Parquet codec
+//! and the file transport compile behind the default `file` feature,
+//! and the protobuf codec compiles behind the `kafka` feature whose
+//! transport consumes it.
 //!
 //! # Example
 //!
@@ -67,6 +68,8 @@ pub mod kafka;
 pub mod postgresql;
 #[cfg(feature = "postgresql")]
 mod postgresql_cdc;
+#[cfg(feature = "kafka")]
+pub mod protobuf;
 #[cfg(feature = "websocket")]
 pub mod websocket;
 

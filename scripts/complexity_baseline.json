@@ -22,6 +22,7 @@
     "crates/calc-flow-connectors/src/kafka.rs": 4,
     "crates/calc-flow-connectors/src/postgresql.rs": 2,
     "crates/calc-flow-connectors/src/postgresql_cdc.rs": 8,
+    "crates/calc-flow-connectors/src/protobuf.rs": 1,
     "crates/calc-flow-connectors/src/websocket.rs": 1,
     "crates/calc-flow/benches/sql_datafusion_performance.rs": 8,
     "crates/calc-flow/src/config.rs": 8,

@@ -8,6 +8,7 @@
 //! derived from the pipeline and sink identity, never from secrets.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -30,6 +31,7 @@ use crate::arrow_schema::schema_from_spec;
 use crate::csv::CsvCodec;
 use crate::json_lines::JsonLinesCodec;
 use crate::options::{required_string, u64_option};
+use crate::protobuf::{self, ProtobufCodec};
 
 /// The connector implementation version.
 pub const IDENTITY_VERSION: &str = "2.0.0";
@@ -57,6 +59,9 @@ pub enum KafkaFormat {
     Json,
     /// CSV payloads.
     Csv,
+    /// One protobuf message per record value, decoded through a
+    /// runtime-loaded descriptor set.
+    Protobuf,
 }
 
 impl KafkaFormat {
@@ -69,6 +74,7 @@ impl KafkaFormat {
         match value {
             "json" => Ok(Self::Json),
             "csv" => Ok(Self::Csv),
+            "protobuf" => Ok(Self::Protobuf),
             other => Err(CalcFlowError::InvalidArgument {
                 field: "format".into(),
                 message: format!("unsupported kafka payload format {other:?}"),
@@ -90,6 +96,11 @@ pub struct KafkaSourceConfig {
     pub auto_offset_reset: KafkaOffsetReset,
     /// Payload wire format.
     pub format: KafkaFormat,
+    /// Protobuf descriptor-set path (required for the protobuf format).
+    pub descriptor_set: Option<String>,
+    /// Fully-qualified protobuf message name (required for the protobuf
+    /// format).
+    pub message: Option<String>,
     /// Optional explicit Arrow schema every payload must match.
     pub schema: Vec<ArrowFieldSpec>,
     /// Row bound of one decoded batch.
@@ -126,29 +137,78 @@ impl KafkaSourceConfig {
     pub fn from_options(options: &JsonMap) -> Result<Self> {
         let (bootstrap_servers, topic, format) = parse_kafka_endpoint(options)?;
         let (max_batch_rows, max_batch_bytes) = parse_kafka_bounds(options)?;
+        let schema = parse_kafka_schema(options)?;
+        let (descriptor_set, message) = parse_protobuf_options(options, format, &schema)?;
         Ok(Self {
             bootstrap_servers,
             topic,
             partitions: parse_partitions(options)?,
             auto_offset_reset: parse_offset_reset(options)?,
             format,
-            schema: parse_kafka_schema(options)?,
+            descriptor_set,
+            message,
+            schema,
             max_batch_rows,
             max_batch_bytes,
         })
     }
 
-    fn decode(&self, payload: &[u8]) -> Result<Batch> {
-        let bounds = DecodeBounds::new(self.max_batch_rows, self.max_batch_bytes)?;
+    fn decoder(&self) -> Result<KafkaDecoder> {
         match self.format {
-            KafkaFormat::Json => JsonLinesCodec::new(json_lines::IDENTITY_VERSION)?.decode(
-                payload,
-                &bounds,
-                &self.schema,
-            ),
-            KafkaFormat::Csv => {
-                CsvCodec::new(csv::IDENTITY_VERSION, true)?.decode(payload, &bounds, &self.schema)
-            }
+            KafkaFormat::Json => Ok(KafkaDecoder::Json(JsonLinesCodec::new(
+                json_lines::IDENTITY_VERSION,
+            )?)),
+            KafkaFormat::Csv => Ok(KafkaDecoder::Csv(CsvCodec::new(
+                csv::IDENTITY_VERSION,
+                true,
+            )?)),
+            KafkaFormat::Protobuf => self.protobuf_decoder(),
+        }
+    }
+
+    fn protobuf_decoder(&self) -> Result<KafkaDecoder> {
+        let descriptor_set =
+            self.descriptor_set
+                .as_deref()
+                .ok_or_else(|| CalcFlowError::InvalidArgument {
+                    field: "descriptor_set".into(),
+                    message: "protobuf payloads require a descriptor set path".into(),
+                })?;
+        let message = self
+            .message
+            .as_deref()
+            .ok_or_else(|| CalcFlowError::InvalidArgument {
+                field: "message".into(),
+                message: "protobuf payloads require a message name".into(),
+            })?;
+        Ok(KafkaDecoder::Protobuf(ProtobufCodec::new(
+            protobuf::IDENTITY_VERSION,
+            Path::new(descriptor_set),
+            message,
+        )?))
+    }
+
+    #[cfg(test)]
+    fn decode(&self, payload: &[u8]) -> Result<Batch> {
+        self.decoder()?.decode(payload, self)
+    }
+}
+
+/// The prepared payload decoders, built once when a source opens so the
+/// protobuf descriptor pool loads exactly once per job.
+enum KafkaDecoder {
+    Json(JsonLinesCodec),
+    Csv(CsvCodec),
+    Protobuf(ProtobufCodec),
+}
+
+impl KafkaDecoder {
+    fn decode(&self, payload: &[u8], config: &KafkaSourceConfig) -> Result<Batch> {
+        let bounds = DecodeBounds::new(config.max_batch_rows, config.max_batch_bytes)?;
+        match self {
+            Self::Json(codec) => codec.decode(payload, &bounds, &config.schema),
+            Self::Csv(codec) => codec.decode(payload, &bounds, &config.schema),
+            Self::Protobuf(codec) => codec.decode(payload, &bounds, &config.schema),
         }
     }
 }
@@ -157,6 +217,7 @@ impl KafkaSourceConfig {
 pub struct KafkaSource {
     capabilities: SourceCapabilities,
     config: KafkaSourceConfig,
+    decoder: KafkaDecoder,
     consumer: StreamConsumer,
     offsets: BTreeMap<i32, i64>,
     sequence: u64,
@@ -167,8 +228,9 @@ impl KafkaSource {
     ///
     /// # Errors
     ///
-    /// Returns the configuration error for invalid bounds or schema, or
-    /// the Kafka error when the consumer cannot be created.
+    /// Returns the configuration error for invalid bounds, schema, or
+    /// protobuf descriptors, or the Kafka error when the consumer cannot
+    /// be created.
     pub fn new(config: KafkaSourceConfig) -> Result<Self> {
         let schema = if config.schema.is_empty() {
             SourceSchema::DynamicOrUnknown
@@ -176,6 +238,7 @@ impl KafkaSource {
             SourceSchema::Exact(schema_from_spec(&config.schema)?)
         };
         let bounds = DecodeBounds::new(config.max_batch_rows, config.max_batch_bytes)?;
+        let decoder = config.decoder()?;
         let mut client = rdkafka::config::ClientConfig::new();
         client.set("bootstrap.servers", &config.bootstrap_servers);
         client.set("group.id", "calc-flow-kafka-source");
@@ -191,6 +254,7 @@ impl KafkaSource {
         let source = Self {
             capabilities: source_capabilities(schema, bounds),
             config,
+            decoder,
             consumer,
             offsets: BTreeMap::new(),
             sequence: 0,
@@ -364,7 +428,7 @@ impl StreamSource for KafkaSource {
         let partition = message.partition();
         let offset = message.offset();
         let payload = message.payload().unwrap_or_default();
-        let batch = self.config.decode(payload)?;
+        let batch = self.decoder.decode(payload, &self.config)?;
         let next_offset = offset
             .checked_add(1)
             .ok_or_else(|| fail("poll", "Kafka offset exhausted i64"))?;
@@ -469,11 +533,23 @@ impl KafkaSinkConfig {
             topic: required_string(options, "topic")?,
             ledger_topic: required_string(options, "ledger_topic")?,
             transactional_id: transactional_id(&pipeline, &output),
-            format: KafkaFormat::parse(&required_string(options, "format")?)?,
+            format: parse_sink_format(options)?,
             max_epoch_rows: positive_kafka_option(options, "max_epoch_rows", 1_000_000)?,
             max_epoch_bytes: positive_kafka_option(options, "max_epoch_bytes", 256 * 1024 * 1024)?,
         })
     }
+}
+
+/// Parses the sink payload format, rejecting the source-only protobuf codec.
+fn parse_sink_format(options: &JsonMap) -> Result<KafkaFormat> {
+    let format = KafkaFormat::parse(&required_string(options, "format")?)?;
+    if matches!(format, KafkaFormat::Protobuf) {
+        return Err(CalcFlowError::InvalidArgument {
+            field: "format".into(),
+            message: "protobuf payloads decode from Kafka only; sinks encode json and csv".into(),
+        });
+    }
+    Ok(format)
 }
 
 fn positive_kafka_option(options: &JsonMap, key: &str, default: u64) -> Result<u64> {
@@ -565,6 +641,27 @@ fn parse_kafka_schema(options: &JsonMap) -> Result<Vec<ArrowFieldSpec>> {
     }
 }
 
+/// Validates the protobuf companion options against the parsed format.
+fn parse_protobuf_options(
+    options: &JsonMap,
+    format: KafkaFormat,
+    schema: &[ArrowFieldSpec],
+) -> Result<(Option<String>, Option<String>)> {
+    if !matches!(format, KafkaFormat::Protobuf) {
+        return Ok((None, None));
+    }
+    if schema.is_empty() {
+        return Err(CalcFlowError::InvalidArgument {
+            field: "schema".into(),
+            message: "protobuf payloads require an explicit schema".into(),
+        });
+    }
+    Ok((
+        Some(required_string(options, "descriptor_set")?),
+        Some(required_string(options, "message")?),
+    ))
+}
+
 /// The transactional Kafka sink.
 pub struct TransactionalKafkaSink {
     config: KafkaSinkConfig,
@@ -612,6 +709,10 @@ impl TransactionalKafkaSink {
         match self.config.format {
             KafkaFormat::Json => JsonLinesCodec::new(json_lines::IDENTITY_VERSION)?.encode(batch),
             KafkaFormat::Csv => CsvCodec::new(csv::IDENTITY_VERSION, true)?.encode(batch),
+            KafkaFormat::Protobuf => Err(fail(
+                "encode",
+                "protobuf payloads decode from Kafka only; sinks encode json and csv",
+            )),
         }
     }
 
@@ -1072,6 +1173,12 @@ impl StreamSink for OrdinaryKafkaSink {
                 JsonLinesCodec::new(json_lines::IDENTITY_VERSION)?.encode(batch)?
             }
             KafkaFormat::Csv => CsvCodec::new(csv::IDENTITY_VERSION, true)?.encode(batch)?,
+            KafkaFormat::Protobuf => {
+                return Err(fail(
+                    "encode",
+                    "protobuf payloads decode from Kafka only; sinks encode json and csv",
+                ));
+            }
         };
         self.sequence += 1;
         let record = FutureRecord::<Vec<u8>, Vec<u8>>::to(&self.config.topic).payload(&payload);
@@ -1096,7 +1203,7 @@ use std::sync::Arc;
 use calc_flow::{
     ConnectorCapabilities, ConnectorDescriptor, ConnectorFactories, ConnectorKind,
     ConnectorRegistry, ConnectorSinkFactory, ConnectorSourceFactory, DeliveryCapability,
-    FormatIdentity, SecretResolver, TransactionSupport, WatermarkSupport,
+    FormatDescriptor, FormatIdentity, SecretResolver, TransactionSupport, WatermarkSupport,
 };
 
 use crate::{csv, json_lines};
@@ -1213,6 +1320,8 @@ fn kafka_connector_descriptor() -> ConnectorDescriptor {
             FormatIdentity::new(json_lines::IDENTITY, json_lines::IDENTITY_VERSION)
                 .expect("json identity"),
             FormatIdentity::new(csv::IDENTITY, csv::IDENTITY_VERSION).expect("csv identity"),
+            FormatIdentity::new(protobuf::IDENTITY, protobuf::IDENTITY_VERSION)
+                .expect("protobuf identity"),
         ],
         config_schema: JsonMap::from([
             ("bootstrap_servers".to_string(), serde_json::json!("string")),
@@ -1220,6 +1329,8 @@ fn kafka_connector_descriptor() -> ConnectorDescriptor {
             ("partitions".to_string(), serde_json::json!("array")),
             ("auto_offset_reset".to_string(), serde_json::json!("string")),
             ("format".to_string(), serde_json::json!("string")),
+            ("descriptor_set".to_string(), serde_json::json!("string")),
+            ("message".to_string(), serde_json::json!("string")),
             ("schema".to_string(), serde_json::json!("array")),
             ("max_batch_rows".to_string(), serde_json::json!("u64")),
             ("max_batch_bytes".to_string(), serde_json::json!("u64")),
@@ -1234,14 +1345,17 @@ fn kafka_connector_descriptor() -> ConnectorDescriptor {
     }
 }
 
-/// Registers the Kafka connectors into one trusted registry (feature
-/// `kafka`).
+/// Registers the Kafka connectors and their protobuf format codec into
+/// one trusted registry (feature `kafka`).
 ///
 /// # Errors
 ///
 /// Returns the registry conflict error when a connector slot or format
 /// identity is already occupied.
 pub fn register_kafka_connectors(registry: &mut ConnectorRegistry) -> Result<()> {
+    registry.register_format(FormatDescriptor {
+        identity: FormatIdentity::new(protobuf::IDENTITY, protobuf::IDENTITY_VERSION)?,
+    })?;
     registry.register_connector(
         kafka_connector_descriptor(),
         ConnectorFactories::both(
@@ -1346,6 +1460,81 @@ mod tests {
         )
         .unwrap();
         assert!(source.state_from_cursor(&wrong_partitions).is_err());
+    }
+
+    #[test]
+    fn protobuf_source_options_validate_their_required_companions() {
+        assert!(matches!(
+            KafkaFormat::parse("protobuf").expect("protobuf is a known payload format"),
+            KafkaFormat::Protobuf
+        ));
+
+        let mut missing_descriptor = source_options("protobuf");
+        missing_descriptor.insert("message".into(), Value::String("events.Order".into()));
+        let error = KafkaSourceConfig::from_options(&missing_descriptor)
+            .expect_err("protobuf without a descriptor set fails closed");
+        assert!(error.to_string().contains("descriptor_set"), "{error}");
+
+        let mut missing_message = source_options("protobuf");
+        missing_message.insert("descriptor_set".into(), Value::String("orders.pb".into()));
+        let error = KafkaSourceConfig::from_options(&missing_message)
+            .expect_err("protobuf without a message name fails closed");
+        assert!(error.to_string().contains("message"), "{error}");
+
+        let mut missing_schema = source_options("protobuf");
+        missing_schema.insert("descriptor_set".into(), Value::String("orders.pb".into()));
+        missing_schema.insert("message".into(), Value::String("events.Order".into()));
+        missing_schema.remove("schema");
+        let error = KafkaSourceConfig::from_options(&missing_schema)
+            .expect_err("protobuf without an explicit schema fails closed");
+        assert!(error.to_string().contains("schema"), "{error}");
+    }
+
+    #[test]
+    fn protobuf_payloads_decode_through_the_source_config() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = protobuf::fixtures::write_descriptor_set(directory.path());
+        let mut options = source_options("protobuf");
+        options.insert(
+            "descriptor_set".into(),
+            Value::String(path.to_string_lossy().into_owned()),
+        );
+        options.insert(
+            "message".into(),
+            Value::String(protobuf::fixtures::ORDER_MESSAGE.into()),
+        );
+        let config = KafkaSourceConfig::from_options(&options).expect("protobuf config parses");
+        let payload = protobuf::fixtures::order_payload(&[
+            ("id", prost_reflect::Value::I64(3)),
+            ("label", prost_reflect::Value::String("three".to_string())),
+        ]);
+        let batch = config.decode(&payload).expect("protobuf payload decodes");
+        assert_eq!(batch.num_rows(), 1);
+
+        let mut stale = config.clone();
+        stale.message = Some("events.Missing".into());
+        assert!(
+            stale.decode(&payload).is_err(),
+            "an unknown message name fails at decoder construction"
+        );
+    }
+
+    #[test]
+    fn sinks_reject_the_source_only_protobuf_format() {
+        let options = BTreeMap::from([
+            (
+                "bootstrap_servers".into(),
+                Value::String("127.0.0.1:1".into()),
+            ),
+            ("topic".into(), Value::String("events".into())),
+            ("ledger_topic".into(), Value::String("events-ledger".into())),
+            ("pipeline".into(), Value::String("orders".into())),
+            ("output".into(), Value::String("events".into())),
+            ("format".into(), Value::String("protobuf".into())),
+        ]);
+        let error = KafkaSinkConfig::from_options(&options)
+            .expect_err("sinks cannot encode protobuf payloads");
+        assert!(error.to_string().contains("format"), "{error}");
     }
 
     #[test]
