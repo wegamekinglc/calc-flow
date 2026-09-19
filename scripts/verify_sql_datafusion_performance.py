@@ -187,13 +187,14 @@ class EngineCheck:
 
 
 def _verify_engine(
-    raw: object, check: EngineCheck, notes: list[str]
-) -> tuple[dict[str, Any], list[float]]:
+    raw: object, check: EngineCheck
+) -> tuple[dict[str, Any], list[float], list[str]]:
     label = check.label
     rows = check.rows
     expected_output_rows = check.output_rows
     minimum_samples = check.minimum_samples
     require_stable = check.require_stable
+    notes: list[str] = []
     # The evidence contract deliberately checks every field in one fail-closed
     # engine boundary and reports the precise malformed path.
     # #lizard forgives
@@ -328,7 +329,7 @@ def _verify_engine(
             float(phases[phase]), _median(values), rel_tol=1e-12, abs_tol=1e-12
         ):
             raise ValueError(f"{label}.phase_medians_ms.{phase} is inconsistent")
-    return engine, samples
+    return engine, samples, notes
 
 
 def _percentile(values: list[float], fraction: float) -> float:
@@ -416,8 +417,7 @@ def _verify_case(
     index: int,
     minimum_samples: int,
     require_stable: bool,
-    notes: list[str],
-) -> None:
+) -> list[str]:
     # Paired ordering, correctness, comparability, and conclusions are one
     # atomic evidence contract; keep all rejection paths together.
     # #lizard forgives
@@ -436,7 +436,7 @@ def _verify_case(
         raise ValueError(
             f"{label} rolling rewrite must be disabled for fair comparison"
         )
-    calc_flow, calc_samples = _verify_engine(
+    calc_flow, calc_samples, calc_notes = _verify_engine(
         case["calc_flow"],
         EngineCheck(
             label=f"{label}.calc_flow",
@@ -445,9 +445,8 @@ def _verify_case(
             minimum_samples=minimum_samples,
             require_stable=require_stable,
         ),
-        notes,
     )
-    raw_datafusion, raw_samples = _verify_engine(
+    raw_datafusion, raw_samples, raw_notes = _verify_engine(
         case["raw_datafusion"],
         EngineCheck(
             label=f"{label}.raw_datafusion",
@@ -456,7 +455,6 @@ def _verify_case(
             minimum_samples=minimum_samples,
             require_stable=require_stable,
         ),
-        notes,
     )
     if case["name"] == "dual_sma_spread":
         for engine_name, engine in (
@@ -520,6 +518,7 @@ def _verify_case(
             )
     elif not isinstance(conclusion, str) or not conclusion:
         raise ValueError(f"{label}.speedup_conclusion is required when comparable")
+    return [*calc_notes, *raw_notes]
 
 
 def _case_key(case: dict[str, Any]) -> tuple[object, ...]:
@@ -745,13 +744,15 @@ def verify_report(
         raise ValueError("report.cases must not be empty")
     notes: list[str] = []
     for index, case in enumerate(cases):
-        _verify_case(
-            case,
-            index=index,
-            minimum_samples=minimum_samples,
-            require_stable=require_stable,
-            notes=notes,
-        )
+        notes = [
+            *notes,
+            *_verify_case(
+                case,
+                index=index,
+                minimum_samples=minimum_samples,
+                require_stable=require_stable,
+            ),
+        ]
     if repeat is not None:
         notes.extend(
             verify_report(
