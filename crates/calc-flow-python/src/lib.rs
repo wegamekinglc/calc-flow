@@ -4,6 +4,8 @@ mod batch;
 mod config;
 mod connector;
 mod continuous;
+#[cfg(feature = "connector-kafka")]
+mod decoder;
 mod error;
 mod execution_options;
 mod pipeline;

@@ -41,7 +41,7 @@ native installation.
 Examples 04 and 08–12 use application-owned connectors, finite synthetic data,
 and temporary checkpoint roots. Example 15 uses the native file connector;
 these programs require no external service. The SQL/streaming pipeline examples
-listed below also need no service. The ten connector read/write examples in
+listed below also need no service. The twelve connector read/write examples in
 [the connector inventory](#connector-readwrite-examples) require prepared
 services and opt-in native connector features; the runner skips them unless
 passed `--include-services`. The default wheel includes only the file connector.
@@ -130,32 +130,37 @@ try {
     Guide: [project persistence](../docs/projects-guide.md).
 ### Connector read/write examples
 
-All eleven scripts use `cf.table_input`, a reusable `order_totals` function
+All thirteen scripts use `cf.table_input`, a reusable `order_totals` function
 with `pipe`, overloaded arithmetic/comparisons, and
 `with_columns` → `filter` → `select`. They export with
 `Program.to_project(mode="stream")`, then supply the native connector and
 managed-job settings. Each connector page below has feature flags, service
 preparation, environment variables, complete run commands, and delivery limits.
 
-| Connector and setup                            | Read example                                       | Write example                                  |
-|------------------------------------------------|----------------------------------------------------|------------------------------------------------|
-| [File](../docs/connectors/file.md)             | [15_file_source.py](15_file_source.py)             | Same script: Parquet sink                      |
-| [Kafka](../docs/connectors/kafka.md)           | [16_kafka_source.py](16_kafka_source.py)           | [22_kafka_sink.py](22_kafka_sink.py)           |
-| [PostgreSQL](../docs/connectors/postgresql.md) | [17_postgresql_source.py](17_postgresql_source.py) | [23_postgresql_sink.py](23_postgresql_sink.py) |
-| [MySQL](../docs/connectors/mysql.md)           | [18_mysql_source.py](18_mysql_source.py)           | [24_mysql_sink.py](24_mysql_sink.py)           |
-| [ClickHouse](../docs/connectors/clickhouse.md) | [19_clickhouse_source.py](19_clickhouse_source.py) | [25_clickhouse_sink.py](25_clickhouse_sink.py) |
-| [HTTP](../docs/connectors/http.md)             | [20_http_source.py](20_http_source.py)             | Source-only connector                          |
-| [WebSocket](../docs/connectors/websocket.md)   | [21_websocket_source.py](21_websocket_source.py)   | Source-only connector                          |
+| Connector and setup                                   | Read example                                               | Write example                                  |
+|-------------------------------------------------------|------------------------------------------------------------|------------------------------------------------|
+| [File](../docs/connectors/file.md)                    | [15_file_source.py](15_file_source.py)                     | Same script: Parquet sink                      |
+| [Kafka](../docs/connectors/kafka.md)                  | [16_kafka_source.py](16_kafka_source.py)                   | [22_kafka_sink.py](22_kafka_sink.py)           |
+| [Kafka](../docs/connectors/kafka.md) (protobuf)       | [27_kafka_protobuf_source.py](27_kafka_protobuf_source.py) | Source-only format                             |
+| [Kafka](../docs/connectors/kafka.md) (custom decoder) | [28_kafka_custom_decoder.py](28_kafka_custom_decoder.py)   | Source-only format                             |
+| [PostgreSQL](../docs/connectors/postgresql.md)        | [17_postgresql_source.py](17_postgresql_source.py)         | [23_postgresql_sink.py](23_postgresql_sink.py) |
+| [MySQL](../docs/connectors/mysql.md)                  | [18_mysql_source.py](18_mysql_source.py)                   | [24_mysql_sink.py](24_mysql_sink.py)           |
+| [ClickHouse](../docs/connectors/clickhouse.md)        | [19_clickhouse_source.py](19_clickhouse_source.py)         | [25_clickhouse_sink.py](25_clickhouse_sink.py) |
+| [HTTP](../docs/connectors/http.md)                    | [20_http_source.py](20_http_source.py)                     | Source-only connector                          |
+| [WebSocket](../docs/connectors/websocket.md)          | [21_websocket_source.py](21_websocket_source.py)           | Source-only connector                          |
 
 `15_file_source.py` creates CSV, JSON Lines, and Parquet inputs and checks
 Parquet totals `[20.0, 60.0]` with exactly-once delivery for each format. It
 requires no external service and removes its sample files and checkpoints.
 
-The six other `*_source.py` scripts read two prepared orders and check the
-same Parquet totals, sorted by ID. Kafka consumes an assigned partition;
-PostgreSQL and MySQL read bounded transaction snapshots; ClickHouse uses a
-frozen schema and composite cursor; HTTP polls with conditional requests;
-WebSocket uses blocking backpressure. Each prints its effective delivery status.
+The eight other `*_source.py` scripts read two prepared orders and check the
+same Parquet totals, sorted by ID. Kafka consumes an assigned partition, once
+per JSON payload, once per protobuf payload decoded through
+`examples/data/orders.proto`'s descriptor set, and once per pipe-delimited
+payload decoded by a Python-registered decoder; PostgreSQL and MySQL read
+bounded transaction snapshots; ClickHouse uses a frozen schema and composite
+cursor; HTTP polls with conditional requests; WebSocket uses blocking
+backpressure. Each prints its effective delivery status.
 
 The four `*_sink.py` scripts generate three temporary Parquet input rows,
 filter a zero-quantity order, and deliver `(id, total) = (1, 20.0), (2, 60.0)`.

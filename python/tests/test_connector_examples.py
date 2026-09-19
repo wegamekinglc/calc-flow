@@ -27,6 +27,8 @@ EXAMPLES = (
     ("19_clickhouse_source.py", "clickhouse"),
     ("20_http_source.py", "http"),
     ("21_websocket_source.py", "websocket"),
+    ("27_kafka_protobuf_source.py", "kafka"),
+    ("28_kafka_custom_decoder.py", "kafka"),
 )
 
 
@@ -97,7 +99,14 @@ def test_kafka_entry_point_uses_default_or_configured_broker(
 
 
 @pytest.mark.parametrize(
-    "filename", ("16_kafka_source.py", "20_http_source.py", "21_websocket_source.py")
+    "filename",
+    (
+        "16_kafka_source.py",
+        "20_http_source.py",
+        "21_websocket_source.py",
+        "27_kafka_protobuf_source.py",
+        "28_kafka_custom_decoder.py",
+    ),
 )
 def test_live_source_example_cancels_an_idle_job_on_timeout(
     filename: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -129,6 +138,25 @@ def test_connector_calculation_composes_totals_and_filters(
     )
     result = cf.compute(data, example.order_totals)
     assert result.to_pydict() == {"id": [1, 2], "total": [20.0, 60.0]}
+
+
+def test_protobuf_example_encoder_matches_the_protoc_wire_bytes() -> None:
+    example = load_example("27_kafka_protobuf_source.py")
+    # Ground truth: protoc --encode=calcflow.examples.Order examples/data/orders.proto
+    assert example.encode_order((1, 2, 10.0)).hex() == "08011002190000000000002440"
+    assert example.encode_order((2, 3, 20.0)).hex() == "08021003190000000000003440"
+
+
+def test_protobuf_example_produce_mode_is_flag_gated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    example = load_example("27_kafka_protobuf_source.py")
+    produce = Mock()
+    monkeypatch.setattr(example, "produce_orders", produce)
+    example.main(["--produce"])
+    produce.assert_called_once_with()
+    with pytest.raises(SystemExit):
+        example.main(["--bogus"])
 
 
 def test_http_source_example_checks_native_results(

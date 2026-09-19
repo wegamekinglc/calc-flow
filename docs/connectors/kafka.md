@@ -68,6 +68,164 @@ demo topic. The graph and JSON codec share an explicit `id`, `quantity`,
 `price` schema; the calculation casts quantity to `float64` before multiplying.
 The transactional write example below uses separate target and ledger topics.
 
+## Protobuf payloads
+
+Set `"format": "protobuf"` to decode one protobuf message per record value.
+The format is source-only; sinks encode JSON and CSV. Three options travel
+together:
+
+- `descriptor_set`: path to a serialized `google.protobuf.FileDescriptorSet`,
+  for example from `protoc --descriptor_set_out=orders.pb orders.proto`.
+- `message`: the fully-qualified message name, such as `events.Order`.
+- `schema`: the explicit field list every payload projects. Protobuf bytes
+  carry no field names, so the schema is required for this format.
+
+The binding format identity is `{"name": "protobuf", "version": "1"}`. Each
+schema field names a scalar message field and must use the Arrow type the
+protobuf kind decodes to:
+
+| protobuf kind                 | Arrow `data_type`     |
+|-------------------------------|-----------------------|
+| `double`                      | `float64`             |
+| `float`                       | `float32`             |
+| `int32`, `sint32`, `sfixed32` | `int32`               |
+| `int64`, `sint64`, `sfixed64` | `int64`               |
+| `uint32`, `fixed32`           | `uint32`              |
+| `uint64`, `fixed64`           | `uint64`              |
+| `bool`                        | `bool`                |
+| `string`                      | `string`              |
+| enum                          | `string` (value name) |
+
+Unset proto3 implicit-presence fields decode their declared default.
+Explicit-presence fields (proto2, `optional`, `oneof`) decode null when the
+column is nullable and fail the decode otherwise. Repeated, map, `bytes`,
+and nested message fields have no flat Arrow representation and fail closed,
+as do enum values unknown to the descriptor. Unknown fields on the wire stay
+ignored, so a newer producer keeps decoding against an older descriptor set.
+The `descriptor_set` and `message` options are rejected for the other
+payload formats.
+
+```json
+{
+  "sources": [{
+    "binding": "input",
+    "connector": {
+      "provider": "calc-flow-connectors",
+      "name": "kafka",
+      "version": "2.0.0"
+    },
+    "format": {"name": "protobuf", "version": "1"},
+    "options": {
+      "bootstrap_servers": "127.0.0.1:9092",
+      "topic": "orders",
+      "partitions": [0],
+      "format": "protobuf",
+      "descriptor_set": "schemas/orders.pb",
+      "message": "events.Order",
+      "schema": [
+        {"name": "id", "data_type": "int64", "nullable": false},
+        {"name": "label", "data_type": "string", "nullable": false}
+      ]
+    }
+  }]
+}
+```
+
+Run [27_kafka_protobuf_source.py](../../examples/27_kafka_protobuf_source.py)
+for the same two-orders flow over protobuf payloads, or the connector
+crate's `kafka_protobuf_source` example
+(`cargo run -p calc-flow-connectors --example kafka_protobuf_source --features kafka`)
+for the Rust API. Create the demo topic and produce the sample orders with
+the example's `--produce` flag, which requires the confluent-kafka package:
+
+```bash
+docker exec calc-flow-example-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --topic calc-flow-example-orders-proto --partitions 1 --replication-factor 1
+export CALC_FLOW_KAFKA_BOOTSTRAP=127.0.0.1:9092
+uv run --no-sync --with confluent-kafka python examples/27_kafka_protobuf_source.py --produce
+uv run --no-sync python examples/27_kafka_protobuf_source.py
+```
+
+The example encodes the sample orders with a small demo encoder; production
+producers should use generated protobuf classes. Regenerate the descriptor
+set after changing `examples/data/orders.proto` with the command in that
+file's header comment.
+
+## Custom payload decoders
+
+Set `"format": "custom"` to decode payloads with a trusted decoder
+registered out of band; sinks encode JSON and CSV. The data-only `decoder`
+option names the decoder's `{"name": "...", "version": "..."}` identity, and
+the binding format identity is `{"name": "custom", "version": "1"}`. The
+`decoder` option is rejected for the other payload formats. Option
+validation stays data-only: an unregistered decoder identity fails the
+source at open time, so register decoders before starting the job.
+
+```json
+{
+  "sources": [{
+    "binding": "input",
+    "connector": {
+      "provider": "calc-flow-connectors",
+      "name": "kafka",
+      "version": "2.0.0"
+    },
+    "format": {"name": "custom", "version": "1"},
+    "options": {
+      "bootstrap_servers": "127.0.0.1:9092",
+      "topic": "orders",
+      "partitions": [0],
+      "format": "custom",
+      "decoder": {"name": "pipe-orders", "version": "1"},
+      "schema": [
+        {"name": "id", "data_type": "int64", "nullable": false},
+        {"name": "label", "data_type": "string", "nullable": false}
+      ]
+    }
+  }]
+}
+```
+
+Rust transports implement `calc_flow::FormatDecoder` and register through
+`KafkaDecoderRegistry`, either shared into the trusted registry or added to
+the source factory with `KafkaSourceFactory::with_decoder`:
+
+```rust
+use std::sync::Arc;
+use calc_flow::ConnectorRegistry;
+use calc_flow_connectors::{
+    KafkaDecoderRegistry, register_kafka_connectors_with_decoders,
+};
+
+let decoders = KafkaDecoderRegistry::default();
+decoders.register(Arc::new(MyDecoder))?;
+let mut registry = ConnectorRegistry::new();
+register_kafka_connectors_with_decoders(&mut registry, decoders)?;
+```
+
+The connector crate's `kafka_custom_decoder` example
+(`cargo run -p calc-flow-connectors --example kafka_custom_decoder --features kafka`)
+registers a pipe-delimited decoder and consumes a prepared topic.
+
+Python applications register a callable taking the payload `bytes` and
+returning a `pyarrow.RecordBatch` or `pyarrow.Table`; the wrapper enforces
+the explicit schema and the decode bounds:
+
+```python
+runtime.register_kafka_decoder(
+    name="pipe-orders", version="1", function=decode_pipe_orders
+)
+```
+
+Run [28_kafka_custom_decoder.py](../../examples/28_kafka_custom_decoder.py)
+after producing the text sample with the console producer:
+
+```bash
+docker exec calc-flow-example-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --topic calc-flow-example-orders-pipe --partitions 1 --replication-factor 1
+printf '1|2|10.0\n2|3|20.0\n' | docker exec -i calc-flow-example-kafka /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic calc-flow-example-orders-pipe
+export CALC_FLOW_KAFKA_BOOTSTRAP=127.0.0.1:9092
+uv run --no-sync python examples/28_kafka_custom_decoder.py
+```
+
 ## Python sink example
 
 Run [22_kafka_sink.py](../../examples/22_kafka_sink.py) after starting the

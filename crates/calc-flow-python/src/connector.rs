@@ -14,7 +14,14 @@ use crate::error::to_py_err;
 #[pyfunction]
 fn registered_connectors(py: Python<'_>) -> PyResult<Vec<Bound<'_, PyDict>>> {
     let mut registry = calc_flow::ConnectorRegistry::new();
-    register_builtin_connectors(&mut registry).map_err(to_py_err)?;
+    #[cfg(feature = "connector-kafka")]
+    let kafka_decoders = calc_flow_connectors::KafkaDecoderRegistry::default();
+    register_builtin_connectors(
+        &mut registry,
+        #[cfg(feature = "connector-kafka")]
+        &kafka_decoders,
+    )
+    .map_err(to_py_err)?;
     let snapshot = registry.snapshot();
     let mut result = Vec::new();
     for identity in snapshot.identities() {
@@ -101,6 +108,7 @@ fn set_axis_fields(
 
 pub(crate) fn register_builtin_connectors(
     registry: &mut calc_flow::ConnectorRegistry,
+    #[cfg(feature = "connector-kafka")] kafka_decoders: &calc_flow_connectors::KafkaDecoderRegistry,
 ) -> calc_flow::Result<()> {
     let _ = &registry;
     #[cfg(feature = "connector-file")]
@@ -119,7 +127,10 @@ pub(crate) fn register_builtin_connectors(
     calc_flow_connectors::register_format_codecs(registry)?;
 
     #[cfg(feature = "connector-kafka")]
-    calc_flow_connectors::register_kafka_connectors(registry)?;
+    calc_flow_connectors::register_kafka_connectors_with_decoders(
+        registry,
+        kafka_decoders.clone(),
+    )?;
     #[cfg(feature = "connector-clickhouse")]
     calc_flow_connectors::register_clickhouse_connectors(registry)?;
     #[cfg(feature = "connector-http")]
@@ -170,7 +181,14 @@ mod mysql_tests {
     #[test]
     fn builtin_registry_resolves_mysql_and_shared_formats() {
         let mut registry = calc_flow::ConnectorRegistry::new();
-        super::register_builtin_connectors(&mut registry).unwrap();
+        #[cfg(feature = "connector-kafka")]
+        let kafka_decoders = calc_flow_connectors::KafkaDecoderRegistry::default();
+        super::register_builtin_connectors(
+            &mut registry,
+            #[cfg(feature = "connector-kafka")]
+            &kafka_decoders,
+        )
+        .unwrap();
         let snapshot = registry.snapshot();
         let identity =
             calc_flow::ConnectorIdentity::new("calc-flow-connectors", "mysql", "1.0.0").unwrap();

@@ -79,10 +79,12 @@ needed; the default wheel includes the file connector.
 
 Choose a transport from the
 [complete read/write inventory](connectors/README.md). Kafka, PostgreSQL,
-MySQL, ClickHouse, HTTP, and WebSocket each have a source example; every
-transport supporting writes also has a sink example. HTTP and WebSocket are
-source-only. The connector guides include optional native build features,
-service/data preparation, environment variables, and commands for each script.
+MySQL, ClickHouse, HTTP, and WebSocket each have a source example, and Kafka
+adds protobuf and custom-decoder source examples; every transport supporting
+writes also has a sink example. HTTP, WebSocket, and the protobuf and custom
+Kafka payload formats are source-only. The connector guides include optional
+native build features, service/data preparation, environment variables, and
+commands for each script.
 
 Source examples verify Parquet totals `[20.0, 60.0]`. Run
 [22_kafka_sink.py](../examples/22_kafka_sink.py),

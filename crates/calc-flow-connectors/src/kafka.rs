@@ -8,6 +8,7 @@
 //! derived from the pipeline and sink identity, never from secrets.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -30,6 +31,7 @@ use crate::arrow_schema::schema_from_spec;
 use crate::csv::CsvCodec;
 use crate::json_lines::JsonLinesCodec;
 use crate::options::{required_string, u64_option};
+use crate::protobuf::{self, ProtobufCodec};
 
 /// The connector implementation version.
 pub const IDENTITY_VERSION: &str = "2.0.0";
@@ -57,6 +59,12 @@ pub enum KafkaFormat {
     Json,
     /// CSV payloads.
     Csv,
+    /// One protobuf message per record value, decoded through a
+    /// runtime-loaded descriptor set.
+    Protobuf,
+    /// A trusted decoder registered out-of-band, selected by the
+    /// `decoder` option identity.
+    Custom,
 }
 
 impl KafkaFormat {
@@ -69,6 +77,8 @@ impl KafkaFormat {
         match value {
             "json" => Ok(Self::Json),
             "csv" => Ok(Self::Csv),
+            "protobuf" => Ok(Self::Protobuf),
+            "custom" => Ok(Self::Custom),
             other => Err(CalcFlowError::InvalidArgument {
                 field: "format".into(),
                 message: format!("unsupported kafka payload format {other:?}"),
@@ -90,6 +100,13 @@ pub struct KafkaSourceConfig {
     pub auto_offset_reset: KafkaOffsetReset,
     /// Payload wire format.
     pub format: KafkaFormat,
+    /// Protobuf descriptor-set path (required for the protobuf format).
+    pub descriptor_set: Option<String>,
+    /// Fully-qualified protobuf message name (required for the protobuf
+    /// format).
+    pub message: Option<String>,
+    /// Registered decoder identity (required for the custom format).
+    pub decoder: Option<FormatIdentity>,
     /// Optional explicit Arrow schema every payload must match.
     pub schema: Vec<ArrowFieldSpec>,
     /// Row bound of one decoded batch.
@@ -126,30 +143,187 @@ impl KafkaSourceConfig {
     pub fn from_options(options: &JsonMap) -> Result<Self> {
         let (bootstrap_servers, topic, format) = parse_kafka_endpoint(options)?;
         let (max_batch_rows, max_batch_bytes) = parse_kafka_bounds(options)?;
+        let schema = parse_kafka_schema(options)?;
+        let (descriptor_set, message, decoder) = parse_format_companions(options, format, &schema)?;
         Ok(Self {
             bootstrap_servers,
             topic,
             partitions: parse_partitions(options)?,
             auto_offset_reset: parse_offset_reset(options)?,
             format,
-            schema: parse_kafka_schema(options)?,
+            descriptor_set,
+            message,
+            decoder,
+            schema,
             max_batch_rows,
             max_batch_bytes,
         })
     }
 
-    fn decode(&self, payload: &[u8]) -> Result<Batch> {
-        let bounds = DecodeBounds::new(self.max_batch_rows, self.max_batch_bytes)?;
+    fn decoder(&self, decoders: &KafkaDecoderRegistry) -> Result<KafkaDecoder> {
         match self.format {
-            KafkaFormat::Json => JsonLinesCodec::new(json_lines::IDENTITY_VERSION)?.decode(
-                payload,
-                &bounds,
-                &self.schema,
-            ),
-            KafkaFormat::Csv => {
-                CsvCodec::new(csv::IDENTITY_VERSION, true)?.decode(payload, &bounds, &self.schema)
+            KafkaFormat::Json => Ok(KafkaDecoder::Json(JsonLinesCodec::new(
+                json_lines::IDENTITY_VERSION,
+            )?)),
+            KafkaFormat::Csv => Ok(KafkaDecoder::Csv(CsvCodec::new(
+                csv::IDENTITY_VERSION,
+                true,
+            )?)),
+            KafkaFormat::Protobuf => self.protobuf_decoder(),
+            KafkaFormat::Custom => {
+                let identity =
+                    self.decoder
+                        .as_ref()
+                        .ok_or_else(|| CalcFlowError::InvalidArgument {
+                            field: "decoder".into(),
+                            message: "custom payloads require a decoder identity".into(),
+                        })?;
+                Ok(KafkaDecoder::Custom(decoders.resolve(identity)?))
             }
         }
+    }
+
+    fn protobuf_decoder(&self) -> Result<KafkaDecoder> {
+        let descriptor_set =
+            self.descriptor_set
+                .as_deref()
+                .ok_or_else(|| CalcFlowError::InvalidArgument {
+                    field: "descriptor_set".into(),
+                    message: "protobuf payloads require a descriptor set path".into(),
+                })?;
+        let message = self
+            .message
+            .as_deref()
+            .ok_or_else(|| CalcFlowError::InvalidArgument {
+                field: "message".into(),
+                message: "protobuf payloads require a message name".into(),
+            })?;
+        Ok(KafkaDecoder::Protobuf(ProtobufCodec::new(
+            protobuf::IDENTITY_VERSION,
+            Path::new(descriptor_set),
+            message,
+        )?))
+    }
+
+    #[cfg(test)]
+    fn decode(&self, payload: &[u8], decoders: &KafkaDecoderRegistry) -> Result<Batch> {
+        self.decoder(decoders)?.decode(payload, self)
+    }
+}
+
+/// The prepared payload decoders, built once when a source opens so the
+/// protobuf descriptor pool loads exactly once per job.
+enum KafkaDecoder {
+    Json(JsonLinesCodec),
+    Csv(CsvCodec),
+    Protobuf(ProtobufCodec),
+    Custom(Arc<dyn FormatDecoder>),
+}
+
+impl KafkaDecoder {
+    fn decode(&self, payload: &[u8], config: &KafkaSourceConfig) -> Result<Batch> {
+        let bounds = DecodeBounds::new(config.max_batch_rows, config.max_batch_bytes)?;
+        match self {
+            Self::Json(codec) => codec.decode(payload, &bounds, &config.schema),
+            Self::Csv(codec) => codec.decode(payload, &bounds, &config.schema),
+            Self::Protobuf(codec) => codec.decode(payload, &bounds, &config.schema),
+            Self::Custom(decoder) => decoder.decode(payload, &bounds, &config.schema),
+        }
+    }
+}
+
+/// Shared registry of trusted payload decoders for the custom Kafka format.
+///
+/// Decoders register under their [`FormatDecoder::identity`]; data-only
+/// project options then name the identity to select one. The registry is
+/// cheap to clone and registrations stay visible through every clone, so
+/// a factory snapshotted into a plan still observes decoders registered
+/// before the job opens. The built-in `json`, `csv`, and `protobuf`
+/// format names are reserved and cannot be shadowed.
+#[derive(Clone, Default)]
+pub struct KafkaDecoderRegistry {
+    decoders: Arc<std::sync::RwLock<BTreeMap<FormatIdentity, Arc<dyn FormatDecoder>>>>,
+}
+
+impl std::fmt::Debug for KafkaDecoderRegistry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let decoders = self
+            .decoders
+            .read()
+            .expect("the decoder registry lock is never poisoned by debugging");
+        formatter
+            .debug_struct("KafkaDecoderRegistry")
+            .field("identities", &decoders.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+impl KafkaDecoderRegistry {
+    /// Registers one decoder under its identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalcFlowError::InvalidArgument`] when the identity shadows
+    /// a built-in format name, or [`CalcFlowError::Conflict`] when the
+    /// identity is already registered.
+    ///
+    /// # Panics
+    ///
+    /// Never in practice; the `expect` documents that the registry lock can
+    /// only be poisoned by a panic while held, which registration itself
+    /// never triggers.
+    pub fn register(&self, decoder: Arc<dyn FormatDecoder>) -> Result<()> {
+        let identity = decoder.identity();
+        if matches!(
+            identity.name.as_ref(),
+            "json" | "csv" | "protobuf" | "custom"
+        ) {
+            return Err(CalcFlowError::InvalidArgument {
+                field: "decoder".into(),
+                message: format!(
+                    "decoder name {:?} shadows a built-in kafka payload format",
+                    identity.name
+                ),
+            });
+        }
+        let mut decoders = self
+            .decoders
+            .write()
+            .expect("the decoder registry lock is never poisoned by registration");
+        if decoders.insert(identity.clone(), decoder).is_some() {
+            return Err(CalcFlowError::Conflict {
+                resource: "kafka decoder".into(),
+                key: format!("{}/{}", identity.name, identity.version),
+            });
+        }
+        Ok(())
+    }
+
+    /// Resolves one registered decoder by identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalcFlowError::InvalidArgument`] naming the identity when
+    /// no decoder is registered for it.
+    ///
+    /// # Panics
+    ///
+    /// Never in practice; the `expect` documents that the registry lock can
+    /// only be poisoned by a panic while held, which resolution itself
+    /// never triggers.
+    pub fn resolve(&self, identity: &FormatIdentity) -> Result<Arc<dyn FormatDecoder>> {
+        self.decoders
+            .read()
+            .expect("the decoder registry lock is never poisoned by resolution")
+            .get(identity)
+            .cloned()
+            .ok_or_else(|| CalcFlowError::InvalidArgument {
+                field: "decoder".into(),
+                message: format!(
+                    "no kafka decoder registered for {}/{}",
+                    identity.name, identity.version
+                ),
+            })
     }
 }
 
@@ -157,25 +331,46 @@ impl KafkaSourceConfig {
 pub struct KafkaSource {
     capabilities: SourceCapabilities,
     config: KafkaSourceConfig,
+    decoder: KafkaDecoder,
     consumer: StreamConsumer,
     offsets: BTreeMap<i32, i64>,
     sequence: u64,
 }
 
 impl KafkaSource {
-    /// Builds the source and freezes its capabilities.
+    /// Builds the source with no custom decoders and freezes its
+    /// capabilities.
     ///
     /// # Errors
     ///
-    /// Returns the configuration error for invalid bounds or schema, or
-    /// the Kafka error when the consumer cannot be created.
+    /// Returns the configuration error for invalid bounds, schema, or
+    /// protobuf descriptors, or the Kafka error when the consumer cannot
+    /// be created. The custom payload format requires
+    /// [`KafkaSource::with_decoders`].
     pub fn new(config: KafkaSourceConfig) -> Result<Self> {
+        Self::with_decoders(config, &KafkaDecoderRegistry::default())
+    }
+
+    /// Builds the source over one shared custom decoder registry and
+    /// freezes its capabilities.
+    ///
+    /// # Errors
+    ///
+    /// Returns the configuration error for invalid bounds, schema, or
+    /// protobuf descriptors, the resolution error when the custom format
+    /// names an unregistered decoder, or the Kafka error when the consumer
+    /// cannot be created.
+    pub fn with_decoders(
+        config: KafkaSourceConfig,
+        decoders: &KafkaDecoderRegistry,
+    ) -> Result<Self> {
         let schema = if config.schema.is_empty() {
             SourceSchema::DynamicOrUnknown
         } else {
             SourceSchema::Exact(schema_from_spec(&config.schema)?)
         };
         let bounds = DecodeBounds::new(config.max_batch_rows, config.max_batch_bytes)?;
+        let decoder = config.decoder(decoders)?;
         let mut client = rdkafka::config::ClientConfig::new();
         client.set("bootstrap.servers", &config.bootstrap_servers);
         client.set("group.id", "calc-flow-kafka-source");
@@ -191,6 +386,7 @@ impl KafkaSource {
         let source = Self {
             capabilities: source_capabilities(schema, bounds),
             config,
+            decoder,
             consumer,
             offsets: BTreeMap::new(),
             sequence: 0,
@@ -364,7 +560,7 @@ impl StreamSource for KafkaSource {
         let partition = message.partition();
         let offset = message.offset();
         let payload = message.payload().unwrap_or_default();
-        let batch = self.config.decode(payload)?;
+        let batch = self.decoder.decode(payload, &self.config)?;
         let next_offset = offset
             .checked_add(1)
             .ok_or_else(|| fail("poll", "Kafka offset exhausted i64"))?;
@@ -469,11 +665,25 @@ impl KafkaSinkConfig {
             topic: required_string(options, "topic")?,
             ledger_topic: required_string(options, "ledger_topic")?,
             transactional_id: transactional_id(&pipeline, &output),
-            format: KafkaFormat::parse(&required_string(options, "format")?)?,
+            format: parse_sink_format(options)?,
             max_epoch_rows: positive_kafka_option(options, "max_epoch_rows", 1_000_000)?,
             max_epoch_bytes: positive_kafka_option(options, "max_epoch_bytes", 256 * 1024 * 1024)?,
         })
     }
+}
+
+/// Parses the sink payload format, rejecting the source-only codecs.
+fn parse_sink_format(options: &JsonMap) -> Result<KafkaFormat> {
+    let format = KafkaFormat::parse(&required_string(options, "format")?)?;
+    if matches!(format, KafkaFormat::Protobuf | KafkaFormat::Custom) {
+        return Err(CalcFlowError::InvalidArgument {
+            field: "format".into(),
+            message:
+                "protobuf and custom payloads decode from Kafka only; sinks encode json and csv"
+                    .into(),
+        });
+    }
+    Ok(format)
 }
 
 fn positive_kafka_option(options: &JsonMap, key: &str, default: u64) -> Result<u64> {
@@ -565,6 +775,78 @@ fn parse_kafka_schema(options: &JsonMap) -> Result<Vec<ArrowFieldSpec>> {
     }
 }
 
+/// Validates the format companion options against the parsed format.
+fn parse_format_companions(
+    options: &JsonMap,
+    format: KafkaFormat,
+    schema: &[ArrowFieldSpec],
+) -> Result<(Option<String>, Option<String>, Option<FormatIdentity>)> {
+    let (descriptor_set, message) = parse_protobuf_companions(options, format, schema)?;
+    let decoder = parse_custom_companion(options, format)?;
+    Ok((descriptor_set, message, decoder))
+}
+
+fn parse_protobuf_companions(
+    options: &JsonMap,
+    format: KafkaFormat,
+    schema: &[ArrowFieldSpec],
+) -> Result<(Option<String>, Option<String>)> {
+    if !matches!(format, KafkaFormat::Protobuf) {
+        reject_misplaced_option(options, "descriptor_set", "protobuf")?;
+        reject_misplaced_option(options, "message", "protobuf")?;
+        return Ok((None, None));
+    }
+    if schema.is_empty() {
+        return Err(CalcFlowError::InvalidArgument {
+            field: "schema".into(),
+            message: "protobuf payloads require an explicit schema".into(),
+        });
+    }
+    Ok((
+        Some(required_string(options, "descriptor_set")?),
+        Some(required_string(options, "message")?),
+    ))
+}
+
+fn parse_custom_companion(
+    options: &JsonMap,
+    format: KafkaFormat,
+) -> Result<Option<FormatIdentity>> {
+    if !matches!(format, KafkaFormat::Custom) {
+        reject_misplaced_option(options, "decoder", "custom")?;
+        return Ok(None);
+    }
+    let decoder = options
+        .get("decoder")
+        .ok_or_else(|| CalcFlowError::InvalidArgument {
+            field: "decoder".into(),
+            message: "custom payloads require a decoder identity".into(),
+        })?;
+    let name = required_decoder_field(decoder, "name")?;
+    let version = required_decoder_field(decoder, "version")?;
+    Ok(Some(FormatIdentity::new(name, version)?))
+}
+
+fn reject_misplaced_option(options: &JsonMap, key: &str, format: &str) -> Result<()> {
+    if options.contains_key(key) {
+        return Err(CalcFlowError::InvalidArgument {
+            field: key.into(),
+            message: format!("option applies to the {format} payload format only"),
+        });
+    }
+    Ok(())
+}
+
+fn required_decoder_field<'a>(decoder: &'a Value, key: &str) -> Result<&'a str> {
+    decoder
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| CalcFlowError::InvalidArgument {
+            field: "decoder".into(),
+            message: format!("decoder identity requires a {key} string"),
+        })
+}
+
 /// The transactional Kafka sink.
 pub struct TransactionalKafkaSink {
     config: KafkaSinkConfig,
@@ -612,6 +894,10 @@ impl TransactionalKafkaSink {
         match self.config.format {
             KafkaFormat::Json => JsonLinesCodec::new(json_lines::IDENTITY_VERSION)?.encode(batch),
             KafkaFormat::Csv => CsvCodec::new(csv::IDENTITY_VERSION, true)?.encode(batch),
+            KafkaFormat::Protobuf | KafkaFormat::Custom => Err(fail(
+                "encode",
+                "protobuf and custom payloads decode from Kafka only; sinks encode json and csv",
+            )),
         }
     }
 
@@ -1072,6 +1358,12 @@ impl StreamSink for OrdinaryKafkaSink {
                 JsonLinesCodec::new(json_lines::IDENTITY_VERSION)?.encode(batch)?
             }
             KafkaFormat::Csv => CsvCodec::new(csv::IDENTITY_VERSION, true)?.encode(batch)?,
+            KafkaFormat::Protobuf | KafkaFormat::Custom => {
+                return Err(fail(
+                    "encode",
+                    "protobuf and custom payloads decode from Kafka only; sinks encode json and csv",
+                ));
+            }
         };
         self.sequence += 1;
         let record = FutureRecord::<Vec<u8>, Vec<u8>>::to(&self.config.topic).payload(&payload);
@@ -1096,7 +1388,7 @@ use std::sync::Arc;
 use calc_flow::{
     ConnectorCapabilities, ConnectorDescriptor, ConnectorFactories, ConnectorKind,
     ConnectorRegistry, ConnectorSinkFactory, ConnectorSourceFactory, DeliveryCapability,
-    FormatIdentity, SecretResolver, TransactionSupport, WatermarkSupport,
+    FormatDescriptor, FormatIdentity, SecretResolver, TransactionSupport, WatermarkSupport,
 };
 
 use crate::{csv, json_lines};
@@ -1108,14 +1400,39 @@ pub const KAFKA_CONNECTOR_VERSION: &str = IDENTITY_VERSION;
 /// Trusted source factory for the Kafka transport (feature `kafka`).
 pub struct KafkaSourceFactory {
     descriptor: ConnectorDescriptor,
+    decoders: KafkaDecoderRegistry,
 }
 
 impl KafkaSourceFactory {
-    /// Creates the factory.
+    /// Creates the factory with no custom decoders.
     pub fn new() -> Self {
         Self {
             descriptor: kafka_connector_descriptor(),
+            decoders: KafkaDecoderRegistry::default(),
         }
+    }
+
+    /// Registers one trusted custom payload decoder.
+    ///
+    /// # Errors
+    ///
+    /// Returns the registry error when the decoder identity shadows a
+    /// built-in format name or is already registered.
+    pub fn with_decoder(self, decoder: Arc<dyn FormatDecoder>) -> Result<Self> {
+        self.decoders.register(decoder)?;
+        Ok(self)
+    }
+
+    /// Shares one custom decoder registry with the factory; registrations
+    /// stay visible through the shared handle.
+    #[must_use]
+    pub fn with_decoders(self, decoders: KafkaDecoderRegistry) -> Self {
+        Self { decoders, ..self }
+    }
+
+    /// The shared custom decoder registry of this factory.
+    pub fn decoders(&self) -> &KafkaDecoderRegistry {
+        &self.decoders
     }
 }
 
@@ -1141,7 +1458,10 @@ impl ConnectorSourceFactory for KafkaSourceFactory {
         _secrets: &dyn SecretResolver,
     ) -> Result<Box<dyn StreamSource>> {
         let config = KafkaSourceConfig::from_options(options)?;
-        Ok(Box::new(KafkaSource::new(config)?))
+        Ok(Box::new(KafkaSource::with_decoders(
+            config,
+            &self.decoders,
+        )?))
     }
 }
 
@@ -1213,6 +1533,10 @@ fn kafka_connector_descriptor() -> ConnectorDescriptor {
             FormatIdentity::new(json_lines::IDENTITY, json_lines::IDENTITY_VERSION)
                 .expect("json identity"),
             FormatIdentity::new(csv::IDENTITY, csv::IDENTITY_VERSION).expect("csv identity"),
+            FormatIdentity::new(protobuf::IDENTITY, protobuf::IDENTITY_VERSION)
+                .expect("protobuf identity"),
+            FormatIdentity::new(crate::CUSTOM_FORMAT_IDENTITY, crate::CUSTOM_FORMAT_VERSION)
+                .expect("custom identity"),
         ],
         config_schema: JsonMap::from([
             ("bootstrap_servers".to_string(), serde_json::json!("string")),
@@ -1220,6 +1544,9 @@ fn kafka_connector_descriptor() -> ConnectorDescriptor {
             ("partitions".to_string(), serde_json::json!("array")),
             ("auto_offset_reset".to_string(), serde_json::json!("string")),
             ("format".to_string(), serde_json::json!("string")),
+            ("descriptor_set".to_string(), serde_json::json!("string")),
+            ("message".to_string(), serde_json::json!("string")),
+            ("decoder".to_string(), serde_json::json!("object")),
             ("schema".to_string(), serde_json::json!("array")),
             ("max_batch_rows".to_string(), serde_json::json!("u64")),
             ("max_batch_bytes".to_string(), serde_json::json!("u64")),
@@ -1234,18 +1561,39 @@ fn kafka_connector_descriptor() -> ConnectorDescriptor {
     }
 }
 
-/// Registers the Kafka connectors into one trusted registry (feature
-/// `kafka`).
+/// Registers the Kafka connectors and their protobuf format codec into
+/// one trusted registry (feature `kafka`).
 ///
 /// # Errors
 ///
 /// Returns the registry conflict error when a connector slot or format
 /// identity is already occupied.
 pub fn register_kafka_connectors(registry: &mut ConnectorRegistry) -> Result<()> {
+    register_kafka_connectors_with_decoders(registry, KafkaDecoderRegistry::default())
+}
+
+/// Registers the Kafka connectors over one shared custom decoder registry
+/// (feature `kafka`).
+///
+/// Registrations into the shared registry stay visible through the
+/// snapshot taken from `registry`, so decoders may register until the job
+/// opens.
+///
+/// # Errors
+///
+/// Returns the registry conflict error when a connector slot or format
+/// identity is already occupied.
+pub fn register_kafka_connectors_with_decoders(
+    registry: &mut ConnectorRegistry,
+    decoders: KafkaDecoderRegistry,
+) -> Result<()> {
+    registry.register_format(FormatDescriptor {
+        identity: FormatIdentity::new(protobuf::IDENTITY, protobuf::IDENTITY_VERSION)?,
+    })?;
     registry.register_connector(
         kafka_connector_descriptor(),
         ConnectorFactories::both(
-            Arc::new(KafkaSourceFactory::new()),
+            Arc::new(KafkaSourceFactory::new().with_decoders(decoders)),
             Arc::new(KafkaSinkFactory::new()),
         ),
     )
@@ -1275,14 +1623,20 @@ mod tests {
 
     #[test]
     fn json_and_csv_payloads_decode_against_the_frozen_schema() {
+        let decoders = KafkaDecoderRegistry::default();
         let json = KafkaSourceConfig::from_options(&source_options("json")).unwrap();
-        let batch = json.decode(b"{\"id\":1,\"label\":\"one\"}\n").unwrap();
+        let batch = json
+            .decode(b"{\"id\":1,\"label\":\"one\"}\n", &decoders)
+            .unwrap();
         assert_eq!(batch.num_rows(), 1);
 
         let csv = KafkaSourceConfig::from_options(&source_options("csv")).unwrap();
-        let batch = csv.decode(b"id,label\n2,two\n").unwrap();
+        let batch = csv.decode(b"id,label\n2,two\n", &decoders).unwrap();
         assert_eq!(batch.num_rows(), 1);
-        assert!(csv.decode(b"id,label\nnot-an-int,two\n").is_err());
+        assert!(
+            csv.decode(b"id,label\nnot-an-int,two\n", &decoders)
+                .is_err()
+        );
     }
 
     #[test]
@@ -1346,6 +1700,214 @@ mod tests {
         )
         .unwrap();
         assert!(source.state_from_cursor(&wrong_partitions).is_err());
+    }
+
+    #[test]
+    fn protobuf_source_options_validate_their_required_companions() {
+        assert!(matches!(
+            KafkaFormat::parse("protobuf").expect("protobuf is a known payload format"),
+            KafkaFormat::Protobuf
+        ));
+
+        let mut missing_descriptor = source_options("protobuf");
+        missing_descriptor.insert("message".into(), Value::String("events.Order".into()));
+        let error = KafkaSourceConfig::from_options(&missing_descriptor)
+            .expect_err("protobuf without a descriptor set fails closed");
+        assert!(error.to_string().contains("descriptor_set"), "{error}");
+
+        let mut missing_message = source_options("protobuf");
+        missing_message.insert("descriptor_set".into(), Value::String("orders.pb".into()));
+        let error = KafkaSourceConfig::from_options(&missing_message)
+            .expect_err("protobuf without a message name fails closed");
+        assert!(error.to_string().contains("message"), "{error}");
+
+        let mut missing_schema = source_options("protobuf");
+        missing_schema.insert("descriptor_set".into(), Value::String("orders.pb".into()));
+        missing_schema.insert("message".into(), Value::String("events.Order".into()));
+        missing_schema.remove("schema");
+        let error = KafkaSourceConfig::from_options(&missing_schema)
+            .expect_err("protobuf without an explicit schema fails closed");
+        assert!(error.to_string().contains("schema"), "{error}");
+    }
+
+    #[test]
+    fn protobuf_payloads_decode_through_the_source_config() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = protobuf::fixtures::write_descriptor_set(directory.path());
+        let mut options = source_options("protobuf");
+        options.insert(
+            "descriptor_set".into(),
+            Value::String(path.to_string_lossy().into_owned()),
+        );
+        options.insert(
+            "message".into(),
+            Value::String(protobuf::fixtures::ORDER_MESSAGE.into()),
+        );
+        let config = KafkaSourceConfig::from_options(&options).expect("protobuf config parses");
+        let payload = protobuf::fixtures::order_payload(&[
+            ("id", prost_reflect::Value::I64(3)),
+            ("label", prost_reflect::Value::String("three".to_string())),
+        ]);
+        let decoders = KafkaDecoderRegistry::default();
+        let batch = config
+            .decode(&payload, &decoders)
+            .expect("protobuf payload decodes");
+        assert_eq!(batch.num_rows(), 1);
+
+        let mut stale = config.clone();
+        stale.message = Some("events.Missing".into());
+        assert!(
+            stale.decode(&payload, &decoders).is_err(),
+            "an unknown message name fails at decoder construction"
+        );
+    }
+
+    struct RenamedJsonDecoder;
+
+    impl FormatDecoder for RenamedJsonDecoder {
+        fn identity(&self) -> FormatIdentity {
+            FormatIdentity::new("orders-json", "1").expect("decoder identity")
+        }
+
+        fn decode(
+            &self,
+            bytes: &[u8],
+            bounds: &DecodeBounds,
+            schema: &[ArrowFieldSpec],
+        ) -> Result<Batch> {
+            JsonLinesCodec::new(json_lines::IDENTITY_VERSION)?.decode(bytes, bounds, schema)
+        }
+    }
+
+    struct JsonShadowDecoder;
+
+    impl FormatDecoder for JsonShadowDecoder {
+        fn identity(&self) -> FormatIdentity {
+            FormatIdentity::new("json", "9").expect("decoder identity")
+        }
+
+        fn decode(
+            &self,
+            bytes: &[u8],
+            bounds: &DecodeBounds,
+            schema: &[ArrowFieldSpec],
+        ) -> Result<Batch> {
+            JsonLinesCodec::new(json_lines::IDENTITY_VERSION)?.decode(bytes, bounds, schema)
+        }
+    }
+
+    fn custom_source_options() -> JsonMap {
+        let mut options = source_options("custom");
+        options.insert(
+            "decoder".into(),
+            serde_json::json!({"name": "orders-json", "version": "1"}),
+        );
+        options
+    }
+
+    #[test]
+    fn custom_format_validates_its_decoder_companion() {
+        let mut missing = source_options("custom");
+        let error = KafkaSourceConfig::from_options(&missing)
+            .expect_err("custom without a decoder identity fails closed");
+        assert!(error.to_string().contains("decoder"), "{error}");
+
+        missing.insert("decoder".into(), serde_json::json!({"name": "orders-json"}));
+        let error = KafkaSourceConfig::from_options(&missing)
+            .expect_err("a decoder identity without a version fails closed");
+        assert!(error.to_string().contains("version"), "{error}");
+
+        let mut wrong_format = source_options("json");
+        wrong_format.insert(
+            "decoder".into(),
+            serde_json::json!({"name": "orders-json", "version": "1"}),
+        );
+        let error = KafkaSourceConfig::from_options(&wrong_format)
+            .expect_err("the decoder option applies to the custom format only");
+        assert!(error.to_string().contains("custom"), "{error}");
+
+        for key in ["descriptor_set", "message"] {
+            let mut misplaced = source_options("custom");
+            misplaced.insert(
+                "decoder".into(),
+                serde_json::json!({"name": "orders-json", "version": "1"}),
+            );
+            misplaced.insert(key.into(), Value::String("value".into()));
+            let error = KafkaSourceConfig::from_options(&misplaced)
+                .expect_err("protobuf companions apply to the protobuf format only");
+            assert!(error.to_string().contains("protobuf"), "{key}: {error}");
+        }
+    }
+
+    #[test]
+    fn custom_decoders_register_resolve_and_decode() {
+        let registry = KafkaDecoderRegistry::default();
+        registry
+            .register(Arc::new(RenamedJsonDecoder))
+            .expect("decoder registers");
+        let error = registry
+            .register(Arc::new(RenamedJsonDecoder))
+            .expect_err("duplicate identities conflict");
+        assert!(matches!(error, CalcFlowError::Conflict { .. }), "{error}");
+        let error = registry
+            .register(Arc::new(JsonShadowDecoder))
+            .expect_err("built-in format names are reserved");
+        assert!(error.to_string().contains("shadows"), "{error}");
+        let missing = FormatIdentity::new("missing", "1").expect("identity");
+        assert!(
+            registry.resolve(&missing).is_err(),
+            "unknown identities fail"
+        );
+
+        let config =
+            KafkaSourceConfig::from_options(&custom_source_options()).expect("custom parses");
+        let batch = config
+            .decode(b"{\"id\":1,\"label\":\"one\"}\n", &registry)
+            .expect("the registered decoder decodes");
+        assert_eq!(batch.num_rows(), 1);
+
+        let factory = KafkaSourceFactory::new()
+            .with_decoder(Arc::new(RenamedJsonDecoder))
+            .expect("factory accepts the decoder");
+        factory
+            .validate(&custom_source_options())
+            .expect("option shape validates without opening");
+
+        let mut unknown = custom_source_options();
+        unknown.insert(
+            "decoder".into(),
+            serde_json::json!({"name": "missing", "version": "1"}),
+        );
+        factory
+            .validate(&unknown)
+            .expect("validation stays data-only; resolution happens at open");
+        let error = KafkaSource::with_decoders(
+            KafkaSourceConfig::from_options(&unknown).expect("options parse"),
+            &KafkaDecoderRegistry::default(),
+        )
+        .err()
+        .expect("an unregistered decoder identity fails at open");
+        assert!(error.to_string().contains("missing/1"), "{error}");
+    }
+
+    #[test]
+    fn sinks_reject_the_source_only_protobuf_format() {
+        for format in ["protobuf", "custom"] {
+            let options = BTreeMap::from([
+                (
+                    "bootstrap_servers".into(),
+                    Value::String("127.0.0.1:1".into()),
+                ),
+                ("topic".into(), Value::String("events".into())),
+                ("ledger_topic".into(), Value::String("events-ledger".into())),
+                ("pipeline".into(), Value::String("orders".into())),
+                ("output".into(), Value::String("events".into())),
+                ("format".into(), Value::String(format.into())),
+            ]);
+            let error = KafkaSinkConfig::from_options(&options)
+                .expect_err("sinks cannot encode source-only payloads");
+            assert!(error.to_string().contains("format"), "{format}: {error}");
+        }
     }
 
     #[test]
