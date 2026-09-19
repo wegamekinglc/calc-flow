@@ -138,6 +138,16 @@ def _latest_descriptor(name: str, available: list[dict]) -> dict:
     return next(block[name] for block in reversed(available) if name in block)
 
 
+def _is_new_coverage(name: str, blocks: dict) -> bool:
+    """A benchmark the candidate added has no baseline to pair against."""
+
+    candidate_blocks = blocks["candidate"]
+    baseline_blocks = blocks["baseline"]
+    return all(name in block for block in candidate_blocks) and not any(
+        name in block for block in baseline_blocks
+    )
+
+
 def _block_row(shard: dict, name: str, descriptor: dict, blocks: dict) -> dict:
     row = {
         "id": f"{shard['id']}/{name}",
@@ -148,6 +158,26 @@ def _block_row(shard: dict, name: str, descriptor: dict, blocks: dict) -> dict:
         "scope": descriptor["scope"],
         "metadata": descriptor["metadata"],
     }
+    if _is_new_coverage(name, blocks):
+        candidate = [block[name]["samples"] for block in blocks["candidate"]]
+        return {
+            **row,
+            "status": "ok",
+            "correctness": True,
+            "comparison": "new",
+            "baseline": [],
+            "candidate": candidate,
+            "result": comparison(
+                {
+                    **row,
+                    "status": "ok",
+                    "correctness": True,
+                    "comparison": "new",
+                    "baseline": [],
+                    "candidate": candidate,
+                }
+            ),
+        }
     problem = block_problem(name, blocks)
     if problem:
         return {**row, "status": "error", "error": problem}
