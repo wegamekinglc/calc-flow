@@ -75,9 +75,55 @@ async def build_binaries(source: Path, output: Path, shared: Path) -> dict:
     return binaries
 
 
-def sql_rows(path: Path) -> dict:
+SQL_MINIMUM_SAMPLES = 20
+
+
+def _baseline_report_rows(report: dict) -> dict:
+    """Read one frozen baseline report under its own legacy field contract.
+
+    The baseline evidence was verified under its contemporary contract when
+    that revision was the candidate; this comparison consumes only per-case
+    samples, so an older field set (for example before ``output_rows``)
+    stays readable without weakening the candidate verifier.
+    """
+
+    if not isinstance(report.get("cases"), list) or not report["cases"]:
+        raise ValueError("baseline sql report has no cases")
+    rows = {}
+    for case in report["cases"]:
+        for engine in ("calc_flow", "raw_datafusion"):
+            samples = case.get(engine, {}).get("samples_ms")
+            if (
+                not isinstance(samples, list)
+                or len(samples) < SQL_MINIMUM_SAMPLES
+                or any(
+                    isinstance(value, bool)
+                    or not isinstance(value, int | float)
+                    or value <= 0
+                    for value in samples
+                )
+            ):
+                raise ValueError(
+                    f"baseline {case.get('name')}/{engine} samples are incomplete"
+                )
+            rows[f"sql_datafusion_performance/{case['name']}/{engine}"] = {
+                "samples": [value / 1000 for value in samples],
+                "rows": case["rows"],
+                "scope": "native-sql-paired-boundary",
+                "metadata": {
+                    "environment": report["environment"],
+                    "correctness": case["correctness"],
+                    "engine": case[engine],
+                },
+            }
+    return rows
+
+
+def sql_rows(path: Path, *, side: str) -> dict:
     report = read_json(path)
-    verify_report(report, minimum_samples=20, require_stable=False)
+    if side == "baseline":
+        return _baseline_report_rows(report)
+    verify_report(report, minimum_samples=SQL_MINIMUM_SAMPLES, require_stable=False)
     return {
         f"sql_datafusion_performance/{case['name']}/{engine}": {
             "samples": [value / 1000 for value in case[engine]["samples_ms"]],
@@ -94,7 +140,9 @@ def sql_rows(path: Path) -> dict:
     }
 
 
-async def run_binary(target: str, binary: Path, source: Path, output: Path) -> dict:
+async def run_binary(
+    target: str, binary: Path, source: Path, output: Path, side: str
+) -> dict:
     environment = {**child_environment(), "CRITERION_HOME": str(output / "criterion")}
     if target == "sql_datafusion_performance":
         path = output / "sql.json"
@@ -114,7 +162,7 @@ async def run_binary(target: str, binary: Path, source: Path, output: Path) -> d
             log=output / "run.log",
             env=environment,
         )
-        return sql_rows(path)
+        return sql_rows(path, side=side)
     await command(
         [str(binary), "--bench"], cwd=source, log=output / "run.log", env=environment
     )
@@ -245,6 +293,7 @@ async def measure_rust(shard: dict, releases: dict, roots: dict, output: Path) -
             roots[side],
             output / f"block-{index}-{side}",
             stamps[side],
+            side,
         )
         errors.extend(f"{side}/{error}" for error in failures)
         blocks[side].append(block)
@@ -329,14 +378,16 @@ def _stamp_fingerprints(provenance: dict, applied: dict) -> dict:
 
 
 async def _rust_block(
-    binaries: dict, source: Path, output: Path, stamps: dict
+    binaries: dict, source: Path, output: Path, stamps: dict, side: str
 ) -> tuple[dict, list[str]]:
     block, errors = {}, []
     for target, binary in binaries.items():
         if target == "allocation_regression":
             continue
         try:
-            measured = await run_binary(target, binary, source, output / target)
+            measured = await run_binary(
+                target, binary, source, output / target, side
+            )
             block.update(_with_fingerprints(measured, stamps[target]))
         except Exception as error:
             errors.append(f"{target}: {error}")
