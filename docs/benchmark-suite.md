@@ -80,7 +80,7 @@ on both sides. Warm cases retain the existing decimal input fixture.
 |------------------------|--------------------------------------------------------------------------------------------|-------------------------------------------------------------|
 | Calc Flow SQL          | Plan execution, run session, registration, SQL planning/execution, output `to_pyarrow`     | Input construction, graph compilation, warm-up, validation  |
 | Raw DataFusion         | Python `SessionContext`, table registration, SQL planning/collection, Arrow table          | Input construction, query text, warm-up, validation         |
-| Polars                 | Lazy-plan collection and Arrow output                                                      | Arrow input conversion, lazy expression construction        |
+| Polars                 | Streaming-engine lazy-plan collection and Arrow output                                     | Arrow input conversion, lazy expression construction        |
 | TA-Lib                 | Per-entity contiguous copies, SMA calls, composition, Arrow output                         | Input construction and validation                           |
 | Ready native streaming | Input enqueue, sources/tasks/channels, rolling, watermarks, sink and combined Arrow output | Plans, input events, runner startup/readiness, EOF/shutdown |
 | Warm native streaming  | Preconstructed data enqueue, live source/task/channel, rolling/finalization, sink to Arrow | Compilation, runner start, historical preload, validation   |

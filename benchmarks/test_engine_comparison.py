@@ -6,6 +6,7 @@ import numpy as np
 import pyarrow as pa
 import pytest
 
+from benchmarks import engine_comparison
 from benchmarks.engine_comparison import (
     EngineCase,
     expected_output,
@@ -18,6 +19,26 @@ from scripts.benchmark_suite.catalog import engine_cases
 def test_sql_queries_reject_unknown_scenario_names():
     with pytest.raises(ValueError, match="unsupported SQL benchmark scenario"):
         sql_query("sma20; DROP TABLE input")
+
+
+def test_polars_samples_collect_through_the_streaming_engine(monkeypatch):
+    recorded: dict[str, object] = {}
+
+    class RecordingResult:
+        def to_arrow(self):
+            return pa.table({"value": [1.0]})
+
+    class RecordingPlan:
+        def collect(self, **kwargs):
+            recorded.update(kwargs)
+            return RecordingResult()
+
+    monkeypatch.setattr(
+        engine_comparison, "_polars_plan", lambda data, scenario: RecordingPlan()
+    )
+    result = engine_comparison._polars(workload(101), "projection")()
+    assert recorded == {"engine": "streaming"}
+    assert result == pa.table({"value": [1.0]})
 
 
 @pytest.mark.parametrize("scenario", ["sma20", "dual_sma"])
