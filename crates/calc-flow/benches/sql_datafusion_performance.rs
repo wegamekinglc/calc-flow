@@ -799,13 +799,14 @@ struct WrappedOutput {
 fn wrap_output_batch(
     first: Option<RecordBatch>,
     remaining: Vec<RecordBatch>,
+    result_schema: datafusion::arrow::datatypes::SchemaRef,
 ) -> BenchResult<WrappedOutput> {
     let output_wrap_start = Instant::now();
     let mut batches = Vec::with_capacity(remaining.len() + usize::from(first.is_some()));
     batches.extend(first);
     batches.extend(remaining);
     if batches.is_empty() {
-        batches.push(RecordBatch::new_empty(Arc::new(Schema::empty())));
+        batches.push(RecordBatch::new_empty(result_schema));
     }
     let arrow_wrap_ms = milliseconds(output_wrap_start.elapsed());
     let envelope_start = Instant::now();
@@ -880,6 +881,7 @@ async fn raw_datafusion_sample(
     let plan = raw_plan_sql(&context, workload).await?;
     let dataframe = plan.dataframe;
     let physical_plan = plan.physical_plan;
+    let result_schema = physical_plan.schema();
     let plan_string_start = Instant::now();
     let plan_text = displayable(physical_plan.as_ref()).indent(true).to_string();
     let physical_plan_string = milliseconds(plan_string_start.elapsed());
@@ -891,7 +893,7 @@ async fn raw_datafusion_sample(
     let execution_to_first_batch = collected.first_batch_ms;
     let execution_remaining = collected.remaining_ms;
     let collect_or_coalesce = collected.total_ms;
-    let output = wrap_output_batch(collected.first, collected.remaining)?;
+    let output = wrap_output_batch(collected.first, collected.remaining, result_schema)?;
     let output_arrow_wrap = output.arrow_wrap_ms;
     let batch_envelope = output.envelope_ms;
     let output = output.batch;
