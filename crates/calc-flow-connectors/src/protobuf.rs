@@ -40,10 +40,32 @@ pub fn identity(version: &str) -> Result<FormatIdentity> {
 }
 
 /// The single-message protobuf codec over a runtime-loaded descriptor set.
-#[derive(Clone, Debug)]
+///
+/// Field resolution, type validation, and the Arrow schema depend only on
+/// the descriptor and the explicit schema, so they are computed once per
+/// schema and cached; the per-message path decodes the wire bytes and
+/// builds columns without re-validating the schema.
+#[derive(Debug)]
 pub struct ProtobufCodec {
     identity: FormatIdentity,
     message: MessageDescriptor,
+    plan: std::sync::Mutex<Option<(Vec<ArrowFieldSpec>, Arc<SchemaPlan>)>>,
+}
+
+#[derive(Debug)]
+struct SchemaPlan {
+    schema: arrow::datatypes::SchemaRef,
+    fields: Vec<FieldDescriptor>,
+}
+
+impl Clone for ProtobufCodec {
+    fn clone(&self) -> Self {
+        Self {
+            identity: self.identity.clone(),
+            message: self.message.clone(),
+            plan: std::sync::Mutex::new(None),
+        }
+    }
 }
 
 impl ProtobufCodec {
@@ -95,10 +117,47 @@ impl ProtobufCodec {
                 &format!("message {message:?} is not in the descriptor set"),
             )
         })?;
-        Ok(Self { identity, message })
+        Ok(Self {
+            identity,
+            message,
+            plan: std::sync::Mutex::new(None),
+        })
     }
 
-    fn decode_column(&self, message: &DynamicMessage, spec: &ArrowFieldSpec) -> Result<ArrayRef> {
+    fn ensure_plan(&self, spec: &[ArrowFieldSpec]) -> Result<Arc<SchemaPlan>> {
+        let mut cached = self
+            .plan
+            .lock()
+            .expect("the plan cache lock is never poisoned by planning");
+        if let Some((cached_spec, plan)) = &*cached {
+            if cached_spec.as_slice() == spec {
+                return Ok(Arc::clone(plan));
+            }
+        }
+        let plan = Arc::new(self.build_plan(spec)?);
+        *cached = Some((spec.to_vec(), Arc::clone(&plan)));
+        Ok(plan)
+    }
+
+    fn build_plan(&self, spec: &[ArrowFieldSpec]) -> Result<SchemaPlan> {
+        if spec.is_empty() {
+            return Err(codec_error(
+                &self.identity,
+                "decode",
+                "protobuf payloads require an explicit schema",
+            ));
+        }
+        let fields = spec
+            .iter()
+            .map(|field| self.plan_field(field))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(SchemaPlan {
+            schema: schema_from_spec(spec)?,
+            fields,
+        })
+    }
+
+    fn plan_field(&self, spec: &ArrowFieldSpec) -> Result<FieldDescriptor> {
         let field = self.message.get_field_by_name(&spec.name).ok_or_else(|| {
             codec_error(
                 &self.identity,
@@ -120,12 +179,48 @@ impl ProtobufCodec {
                 ),
             ));
         }
-        let value = if field.supports_presence() && !message.has_field(&field) {
-            None
-        } else {
-            Some(message.get_field(&field).into_owned())
+        let Some(expected) = expected_data_type(&field.kind()) else {
+            return Err(codec_error(
+                &self.identity,
+                "decode",
+                &format!(
+                    "field {:?} of kind {:?} has no flat Arrow representation",
+                    spec.name,
+                    field.kind()
+                ),
+            ));
         };
-        column_from_value(&self.identity, &field, value, spec)
+        if expected != spec.data_type {
+            return Err(codec_error(
+                &self.identity,
+                "decode",
+                &format!(
+                    "field {:?} decodes to Arrow type {expected:?}, not {:?}",
+                    spec.name, spec.data_type
+                ),
+            ));
+        }
+        Ok(field)
+    }
+
+    fn decode_column(
+        &self,
+        message: &DynamicMessage,
+        field: &FieldDescriptor,
+        spec: &ArrowFieldSpec,
+    ) -> Result<ArrayRef> {
+        if field.supports_presence() && !message.has_field(field) {
+            if spec.nullable {
+                return Ok(null_column(&spec.data_type));
+            }
+            return Err(codec_error(
+                &self.identity,
+                "decode",
+                &format!("message omitted the non-nullable field {:?}", spec.name),
+            ));
+        }
+        let value = message.get_field(field);
+        scalar_column(&self.identity, field, &value)
     }
 }
 
@@ -140,20 +235,16 @@ impl FormatDecoder for ProtobufCodec {
         bounds: &DecodeBounds,
         schema: &[ArrowFieldSpec],
     ) -> Result<Batch> {
-        if schema.is_empty() {
-            return Err(codec_error(
-                &self.identity,
-                "decode",
-                "protobuf payloads require an explicit schema",
-            ));
-        }
+        let plan = self.ensure_plan(schema)?;
         let message = DynamicMessage::decode(self.message.clone(), bytes)
             .map_err(|error| codec_error(&self.identity, "decode", &error.to_string()))?;
-        let columns = schema
+        let columns = plan
+            .fields
             .iter()
-            .map(|field| self.decode_column(&message, field))
+            .zip(schema)
+            .map(|(field, spec)| self.decode_column(&message, field, spec))
             .collect::<Result<Vec<_>>>()?;
-        let batch = RecordBatch::try_new(schema_from_spec(schema)?, columns)
+        let batch = RecordBatch::try_new(plan.schema.clone(), columns)
             .map_err(|error| codec_error(&self.identity, "decode", &error.to_string()))?;
         bounded_table_batch(&self.identity, vec![batch], bounds, IDENTITY, 0)
     }
@@ -172,46 +263,6 @@ fn expected_data_type(kind: &Kind) -> Option<&'static str> {
         Kind::String | Kind::Enum(_) => "string",
         Kind::Bytes | Kind::Message(_) => return None,
     })
-}
-
-fn column_from_value(
-    identity: &FormatIdentity,
-    field: &FieldDescriptor,
-    value: Option<prost_reflect::Value>,
-    spec: &ArrowFieldSpec,
-) -> Result<ArrayRef> {
-    let Some(expected) = expected_data_type(&field.kind()) else {
-        return Err(codec_error(
-            identity,
-            "decode",
-            &format!(
-                "field {:?} of kind {:?} has no flat Arrow representation",
-                spec.name,
-                field.kind()
-            ),
-        ));
-    };
-    if expected != spec.data_type {
-        return Err(codec_error(
-            identity,
-            "decode",
-            &format!(
-                "field {:?} decodes to Arrow type {expected:?}, not {:?}",
-                spec.name, spec.data_type
-            ),
-        ));
-    }
-    let Some(value) = value else {
-        if spec.nullable {
-            return Ok(null_column(expected));
-        }
-        return Err(codec_error(
-            identity,
-            "decode",
-            &format!("message omitted the non-nullable field {:?}", spec.name),
-        ));
-    };
-    scalar_column(identity, field, &value)
 }
 
 fn null_column(data_type: &str) -> ArrayRef {
@@ -288,17 +339,14 @@ fn scalar_column(
             let number = value
                 .as_enum_number()
                 .ok_or_else(|| mismatched_value(identity, name))?;
-            let value_name = descriptor
-                .get_value(number)
-                .map(|entry| entry.name().to_owned())
-                .ok_or_else(|| {
-                    codec_error(
-                        identity,
-                        "decode",
-                        &format!("field {name:?} carries the unknown enum value {number}"),
-                    )
-                })?;
-            Arc::new(StringArray::from(vec![value_name]))
+            let entry = descriptor.get_value(number).ok_or_else(|| {
+                codec_error(
+                    identity,
+                    "decode",
+                    &format!("field {name:?} carries the unknown enum value {number}"),
+                )
+            })?;
+            Arc::new(StringArray::from(vec![entry.name()]))
         }
         Kind::Bytes | Kind::Message(_) => {
             return Err(codec_error(
@@ -553,6 +601,29 @@ mod tests {
     }
 
     #[test]
+    fn schema_changes_replan_without_stale_fields() {
+        let payload = fixtures::order_payload(&[("id", prost_reflect::Value::I64(7))]);
+        let codec = codec();
+        let first = vec![spec("id", "int64", false)];
+        assert_eq!(
+            codec
+                .decode(&payload, &bounds(), &first)
+                .expect("the first schema decodes")
+                .num_rows(),
+            1
+        );
+        let mismatched = vec![spec("id", "string", false)];
+        let error = codec
+            .decode(&payload, &bounds(), &mismatched)
+            .expect_err("a changed schema replans and still fails closed");
+        assert!(error.to_string().contains("int64"), "{error}");
+        assert!(
+            codec.decode(&payload, &bounds(), &first).is_ok(),
+            "returning to the cached schema decodes again"
+        );
+    }
+
+    #[test]
     fn unknown_mismatched_and_unsupported_schema_fields_fail() {
         let payload = fixtures::order_payload(&[]);
         let cases: [(Vec<ArrowFieldSpec>, &str); 5] = [
@@ -626,5 +697,92 @@ mod tests {
         )
         .expect_err("an unknown message name fails");
         assert!(unknown.to_string().contains("events.Missing"), "{unknown}");
+    }
+}
+
+#[cfg(test)]
+mod perf {
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    use super::*;
+
+    const ITERATIONS: u32 = 100_000;
+
+    fn bench_schema() -> Vec<ArrowFieldSpec> {
+        vec![
+            ArrowFieldSpec {
+                name: "id".into(),
+                data_type: "int64".into(),
+                nullable: false,
+            },
+            ArrowFieldSpec {
+                name: "label".into(),
+                data_type: "string".into(),
+                nullable: false,
+            },
+            ArrowFieldSpec {
+                name: "price".into(),
+                data_type: "float64".into(),
+                nullable: false,
+            },
+        ]
+    }
+
+    #[test]
+    #[ignore = "informational decode throughput comparison; run explicitly with --ignored"]
+    fn protobuf_and_json_decode_throughput() {
+        let bounds = DecodeBounds::new(1024, 1 << 20).expect("bounds");
+        let schema = bench_schema();
+
+        let protobuf = ProtobufCodec::from_descriptor_bytes(
+            identity(IDENTITY_VERSION).expect("identity"),
+            &fixtures::order_descriptor_set(),
+            fixtures::ORDER_MESSAGE,
+        )
+        .expect("codec");
+        let protobuf_payload = fixtures::order_payload(&[
+            ("id", prost_reflect::Value::I64(7)),
+            (
+                "label",
+                prost_reflect::Value::String("benchmark-order".to_string()),
+            ),
+            ("price", prost_reflect::Value::F64(2.5)),
+        ]);
+
+        let json = crate::json_lines::JsonLinesCodec::new(crate::json_lines::IDENTITY_VERSION)
+            .expect("json codec");
+        let json_payload = b"{\"id\":7,\"label\":\"benchmark-order\",\"price\":2.5}\n";
+
+        let start = Instant::now();
+        for _ in 0..ITERATIONS {
+            black_box(
+                protobuf
+                    .decode(black_box(protobuf_payload.as_slice()), &bounds, &schema)
+                    .expect("decodes"),
+            );
+        }
+        let protobuf_elapsed = start.elapsed();
+
+        let start = Instant::now();
+        for _ in 0..ITERATIONS {
+            black_box(
+                json.decode(black_box(json_payload.as_ref()), &bounds, &schema)
+                    .expect("decodes"),
+            );
+        }
+        let json_elapsed = start.elapsed();
+
+        let protobuf_ns = protobuf_elapsed.as_secs_f64() * 1e9 / f64::from(ITERATIONS);
+        let json_ns = json_elapsed.as_secs_f64() * 1e9 / f64::from(ITERATIONS);
+        println!(
+            "protobuf decode: {protobuf_ns:.0} ns/op ({:.0} ops/s)",
+            1e9 / protobuf_ns
+        );
+        println!(
+            "json decode:     {json_ns:.0} ns/op ({:.0} ops/s)",
+            1e9 / json_ns
+        );
+        println!("protobuf/json ratio: {:.2}", protobuf_ns / json_ns);
     }
 }
