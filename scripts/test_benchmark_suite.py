@@ -4,9 +4,12 @@ import math
 import unittest
 from copy import deepcopy
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
+from scripts.benchmark_suite import catalog
 from scripts.benchmark_suite.catalog import engine_cases, shards
 from scripts.benchmark_suite.legacy import combine_blocks
+from scripts.benchmark_suite.measure import baseline_case_ids
 from scripts.benchmark_suite.report import comparison, render_report, validate_shards
 
 
@@ -74,6 +77,30 @@ class BenchmarkSuiteTests(unittest.TestCase):
     def test_native_stream_matrix_excludes_runner_startup(self):
         cases = [c for c in engine_cases() if c["backend"] == "calc-flow-stream"]
         self.assertEqual({c["scope"] for c in cases}, {"ready-enqueue-to-arrow"})
+
+    def test_baseline_case_ids_match_the_real_catalog(self):
+        root = Path(__file__).resolve().parents[1]
+        self.assertEqual(
+            baseline_case_ids(root, {"family": "engines"}),
+            frozenset(case["id"] for case in engine_cases()),
+        )
+        self.assertEqual(
+            baseline_case_ids(root, {"family": "warm"}),
+            frozenset(
+                case["id"]
+                for history in catalog.ROW_SCALES
+                for case in catalog.warm_cases(history)
+            ),
+        )
+
+    def test_baseline_case_ids_fail_closed_without_declarative_constants(self):
+        with TemporaryDirectory() as directory:
+            base = Path(directory)
+            catalog_path = base / "scripts/benchmark_suite/catalog.py"
+            catalog_path.parent.mkdir(parents=True)
+            catalog_path.write_text("ROW_SCALES = computed_at_runtime()\n")
+            self.assertIsNone(baseline_case_ids(base, {"family": "engines"}))
+            self.assertIsNone(baseline_case_ids(None, {"family": "engines"}))
 
     def test_new_candidate_benchmarks_are_new_coverage_not_errors(self):
         def block(names):
