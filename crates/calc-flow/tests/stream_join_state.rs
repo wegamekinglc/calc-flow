@@ -615,5 +615,10 @@ async fn compaction_survives_restore_checkpoint_restore_cycles() {
         .unwrap();
     // Retained left rows at 101..104 seconds are all inside the interval of
     // the 100-second right row; the 500-second row is outside.
-    assert_eq!(matcher_collector.drain("output").len(), 4);
+    let matched_rows = matcher_collector
+        .drain("output")
+        .iter()
+        .map(|message| message.as_data().unwrap().num_rows())
+        .sum::<usize>();
+    assert_eq!(matched_rows, 4);
 }

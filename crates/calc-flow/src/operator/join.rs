@@ -257,19 +257,265 @@ mod tests {
             .unwrap();
 
         let outputs = collector.drain("output");
-        assert_eq!(outputs.len(), 4);
+        assert_eq!(outputs.len(), 1);
         assert!(
             outputs
                 .iter()
                 .all(|message| message.kind() == StreamMessageKind::Data)
+        );
+        let data = outputs[0].as_data().unwrap();
+        assert_eq!(data.metadata().sequence(), 0);
+        assert_eq!(data.num_rows(), 4);
+        assert_eq!(
+            paid_times(data),
+            [-299_999_900, -299_999_900, 60_000_100, 60_000_100]
+        );
+    }
+
+    fn paid_times(data: &Batch) -> Vec<i64> {
+        data.table_payload()
+            .unwrap()
+            .batches()
+            .iter()
+            .flat_map(|record| {
+                let times = record
+                    .column_by_name("payment__paid_at")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<TimestampMicrosecondArray>()
+                    .unwrap();
+                (0..record.num_rows()).map(move |index| times.value(index))
+            })
+            .collect()
+    }
+
+    fn keyed_left_batch(keys: &[i64], times: &[i64]) -> Batch {
+        Batch::table(
+            vec![
+                RecordBatch::try_new(
+                    left_schema(),
+                    vec![
+                        Arc::new(Int64Array::from(keys.to_vec())),
+                        Arc::new(
+                            TimestampMicrosecondArray::from(times.to_vec()).with_timezone("UTC"),
+                        ),
+                        Arc::new(Int64Array::from(vec![42; keys.len()])),
+                    ],
+                )
+                .unwrap(),
+            ],
+            BatchMetadata::default(),
+        )
+        .unwrap()
+    }
+
+    fn keyed_right_batch(keys: &[i64], times: &[i64]) -> Batch {
+        Batch::table(
+            vec![
+                RecordBatch::try_new(
+                    right_schema(),
+                    vec![
+                        Arc::new(Int64Array::from(keys.to_vec())),
+                        Arc::new(
+                            TimestampMicrosecondArray::from(times.to_vec()).with_timezone("UTC"),
+                        ),
+                        Arc::new(StringArray::from(vec!["paid"; keys.len()])),
+                    ],
+                )
+                .unwrap(),
+            ],
+            BatchMetadata::default(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn matched_rows_accumulate_into_one_batched_message() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let job = StreamJobContext::new(
+            1,
+            "fingerprint",
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        );
+        let context = StreamOperatorContext::new(&job, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+
+        operator
+            .process_data(
+                "left",
+                keyed_left_batch(&[1, 2, 3], &[100, 100, 100]),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        operator
+            .process_data(
+                "right",
+                keyed_right_batch(&[3, 1, 2], &[100, 100, 100]),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+
+        let outputs = collector.drain("output");
+        assert_eq!(
+            outputs.len(),
+            1,
+            "one input batch's matched rows must leave as one message"
+        );
+        let data = outputs[0].as_data().unwrap();
+        assert_eq!(data.metadata().sequence(), 0);
+        assert_eq!(data.num_rows(), 3);
+        // Rows keep the matched-pair order (probe position, then event time
+        // and row id), so the right batch's key order drives the output.
+        let keys = |name: &str| {
+            data.table_payload()
+                .unwrap()
+                .batches()
+                .iter()
+                .flat_map(|record| {
+                    let column = record
+                        .column_by_name(name)
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
+                        .unwrap();
+                    (0..record.num_rows()).map(move |index| column.value(index))
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(keys("payment__account_id"), [3, 1, 2]);
+        assert_eq!(keys("authorization__account_id"), [3, 1, 2]);
+        assert_eq!(operator.status().emitted_match_rows, 3);
+    }
+
+    #[tokio::test]
+    async fn batched_output_splits_into_edge_budget_chunks_in_order() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let job = StreamJobContext::new(
+            1,
+            "fingerprint",
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        );
+        let context = StreamOperatorContext::new(&job, "match", None)
+            .with_test_output_budget(EdgeBudget::new(2, 8 << 20).unwrap());
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+
+        operator
+            .process_data(
+                "left",
+                keyed_left_batch(&[1, 2, 3, 4], &[100, 100, 100, 100]),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        operator
+            .process_data(
+                "right",
+                keyed_right_batch(&[1, 2, 3, 4], &[100, 100, 100, 100]),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+
+        let outputs = collector.drain("output");
+        assert_eq!(
+            outputs.len(),
+            2,
+            "max_rows=2 splits four rows into two chunks"
         );
         assert_eq!(
             outputs
                 .iter()
                 .map(|message| message.as_data().unwrap().metadata().sequence())
                 .collect::<Vec<_>>(),
-            [0, 1, 2, 3]
+            [0, 1]
         );
+        let rows = outputs
+            .iter()
+            .flat_map(|message| {
+                let data = message.as_data().unwrap();
+                data.table_payload()
+                    .unwrap()
+                    .batches()
+                    .iter()
+                    .flat_map(|record| {
+                        let column = record
+                            .column_by_name("authorization__account_id")
+                            .unwrap()
+                            .as_any()
+                            .downcast_ref::<Int64Array>()
+                            .unwrap();
+                        (0..record.num_rows()).map(move |index| column.value(index))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(rows, [1, 2, 3, 4], "chunking preserves matched order");
+    }
+
+    #[tokio::test]
+    async fn oversized_row_fails_loudly_before_any_emission() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let job = StreamJobContext::new(
+            1,
+            "fingerprint",
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        );
+        let context = StreamOperatorContext::new(&job, "match", None)
+            .with_test_output_budget(EdgeBudget::new(10_000, 64).unwrap());
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+
+        operator
+            .process_data("left", left_batch(vec![100, 100]), &context, &mut collector)
+            .await
+            .unwrap();
+        let wide = Batch::table(
+            vec![
+                RecordBatch::try_new(
+                    right_schema(),
+                    vec![
+                        Arc::new(Int64Array::from(vec![7, 7])),
+                        Arc::new(
+                            TimestampMicrosecondArray::from(vec![100, 100]).with_timezone("UTC"),
+                        ),
+                        Arc::new(StringArray::from(vec!["paid".to_owned(), "p".repeat(512)])),
+                    ],
+                )
+                .unwrap(),
+            ],
+            BatchMetadata::default(),
+        )
+        .unwrap();
+        let failure = operator
+            .process_data("right", wide, &context, &mut collector)
+            .await
+            .unwrap_err();
+        assert!(
+            failure
+                .to_string()
+                .contains("one stream Join output row exceeds the effective edge byte budget"),
+            "{failure}"
+        );
+        assert!(
+            collector.drain("output").is_empty(),
+            "an over-budget row must fail before any message leaves the operator"
+        );
+        assert_eq!(operator.status().emitted_match_rows, 0);
+        assert_eq!(operator.status().right.retained_rows, 0);
     }
 
     fn job() -> StreamJobContext {
@@ -1149,9 +1395,9 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::Value;
 
 use crate::{
-    Batch, BatchKind, BatchMetadata, CalcFlowError, DataFusionConfig, DataFusionRuntime, Epoch,
-    EventTime, IngressProgress, JsonMap, OperatorStateSnapshot, Port, Result, StateSegment,
-    StreamCollector, StreamOperator, StreamOperatorContext, UdfRegistrySnapshot,
+    Batch, BatchKind, BatchMetadata, CalcFlowError, DataFusionConfig, DataFusionRuntime,
+    EdgeBudget, Epoch, EventTime, IngressProgress, JsonMap, OperatorStateSnapshot, Port, Result,
+    StateSegment, StreamCollector, StreamOperator, StreamOperatorContext, UdfRegistrySnapshot,
 };
 
 use super::{OperatorMetadata, StreamRuntimeState, is_portable_identifier, validate_operator_name};
@@ -1724,7 +1970,7 @@ struct JoinCheckpointMetadata {
 }
 
 struct PreparedJoinBatch {
-    outputs: Vec<RecordBatch>,
+    output: RecordBatch,
     retained: Vec<StoredRow>,
     next_row_id: u64,
     metrics: SideMetrics,
@@ -1861,12 +2107,12 @@ impl StreamJoinOperator {
         &mut self,
         plan: &SidePlan,
         bundle: AdmissionBundle,
-        outputs: Vec<RecordBatch>,
+        output: RecordBatch,
     ) -> Result<PreparedJoinBatch> {
         let retained = retained_rows(&bundle.admitted, &plan.key_indices, &self.name)?;
         self.validate_state_admission(plan.incoming_is_left, &retained)?;
         Ok(PreparedJoinBatch {
-            outputs,
+            output,
             retained,
             next_row_id: bundle.next_row_id,
             metrics: bundle.metrics,
@@ -1989,7 +2235,8 @@ impl StreamJoinOperator {
         }
     }
 
-    /// Runs the batched key-equality probe and emits one output row per pair.
+    /// Runs the batched key-equality probe and materializes one multi-row
+    /// output record carrying every matched pair.
     ///
     /// Key equality executes as one `DataFusion` join over scratch tables per
     /// input batch; the time bound stays in checked `i128` Rust arithmetic.
@@ -1997,15 +2244,18 @@ impl StreamJoinOperator {
         &mut self,
         plan: &SidePlan,
         admitted: &[AdmittedRow],
-    ) -> Result<Vec<RecordBatch>> {
+    ) -> Result<RecordBatch> {
         let runtime = self.runtime.runtime()?;
+        let output_schema = self.output_ports[0]
+            .schema()
+            .expect("stream Join output always has an exact schema");
         let opposite = if plan.incoming_is_left {
             self.state.right.as_slice()
         } else {
             self.state.left.as_slice()
         };
         if admitted.is_empty() || opposite.is_empty() {
-            return Ok(Vec::new());
+            return Ok(RecordBatch::new_empty(Arc::clone(output_schema)));
         }
         let matched = matched_pairs(
             runtime,
@@ -2023,10 +2273,7 @@ impl StreamJoinOperator {
             self.spec.limits.max_matches_per_input_batch,
             &self.name,
         )?;
-        let output_schema = self.output_ports[0]
-            .schema()
-            .expect("stream Join output always has an exact schema");
-        materialize_outputs(
+        materialize_output_record(
             output_schema,
             admitted,
             opposite,
@@ -2097,15 +2344,23 @@ impl StreamJoinOperator {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
-        let sequence_count = u64::try_from(prepared.outputs.len())
+        if prepared.output.num_rows() == 0 {
+            return Ok(());
+        }
+        let messages = chunk_output_record(
+            &prepared.output,
+            &self.name,
+            self.state.next_output_sequence,
+            context.output_budget(),
+        )?;
+        let sequence_count = u64::try_from(messages.len())
             .map_err(|_| counter_overflow(&self.name, "output sequence"))?;
         self.state
             .next_output_sequence
             .checked_add(sequence_count)
             .ok_or_else(|| counter_overflow(&self.name, "output sequence"))?;
-        for record in &prepared.outputs {
-            let sequence = self.state.next_output_sequence;
-            emit_output_row(record, sequence, context, output).await?;
+        for message in messages {
+            output.emit("output", message).await?;
             self.state.next_output_sequence += 1;
         }
         Ok(())
@@ -2237,7 +2492,7 @@ impl StreamOperator for StreamJoinOperator {
         }
         let prepared = self.prepare_batch(ingress, &batch, context).await?;
         self.emit_prepared(&prepared, context, output).await?;
-        let emitted = u64::try_from(prepared.outputs.len())
+        let emitted = u64::try_from(prepared.output.num_rows())
             .map_err(|_| counter_overflow(&self.name, "emitted rows"))?;
         self.state.metrics.emitted_match_rows = checked_metric(
             self.state.metrics.emitted_match_rows,
@@ -2579,22 +2834,154 @@ fn state_row_count(rows: &[StoredRow], operator_id: &str) -> Result<u64> {
     u64::try_from(rows.len()).map_err(|_| counter_overflow(operator_id, "state rows"))
 }
 
-/// Emits one prepared output row under the effective edge byte budget.
-async fn emit_output_row(
+/// Splits one batched Join output record into edge-budget-sized messages.
+///
+/// Every chunk carries its own sequence and its own exact budget check, so
+/// the whole record is validated before the first message leaves the
+/// operator; a row that alone exceeds the byte budget fails loudly.
+fn chunk_output_record(
     record: &RecordBatch,
-    sequence: u64,
-    context: &StreamOperatorContext<'_>,
-    output: &mut dyn StreamCollector,
-) -> Result<()> {
-    let metadata = BatchMetadata::new(context.operator_id(), sequence, BTreeMap::new())?;
-    let batch = Batch::table(vec![record.clone()], metadata)?;
-    if batch.estimated_bytes()? > context.output_budget().max_bytes {
+    operator_id: &str,
+    first_sequence: u64,
+    budget: EdgeBudget,
+) -> Result<Vec<Batch>> {
+    // A record that already fits one message skips the per-row charge scan.
+    if record.num_rows() <= budget.max_rows {
+        let metadata = BatchMetadata::new(operator_id, first_sequence, BTreeMap::new())?;
+        let batch = Batch::table(vec![record.clone()], metadata)?;
+        if batch.estimated_bytes()? <= budget.max_bytes {
+            return Ok(vec![batch]);
+        }
+    }
+    let row_costs = output_row_costs(record, budget, operator_id)?;
+    let ranges = output_chunk_ranges(&row_costs, record.num_rows(), budget, operator_id)?;
+    validate_output_sequence_range(operator_id, first_sequence, ranges.len())?;
+    build_output_batches(record, operator_id, first_sequence, budget, ranges)
+}
+
+/// Per-row visible slice charge of one output record, using the same
+/// estimator as [`Batch::estimated_bytes`] without building a message per row.
+fn output_row_costs(
+    record: &RecordBatch,
+    budget: EdgeBudget,
+    operator_id: &str,
+) -> Result<Vec<usize>> {
+    let mut costs = vec![0_usize; record.num_rows()];
+    for column in record.columns() {
+        let data = column.to_data();
+        for (row, cost) in costs.iter_mut().enumerate() {
+            let bytes = data
+                .slice(row, 1)
+                .get_slice_memory_size()
+                .map_err(|error| CalcFlowError::InvalidArgument {
+                    field: "batch".into(),
+                    message: format!("Arrow slice memory could not be measured: {error}"),
+                })?;
+            *cost = cost
+                .checked_add(bytes)
+                .ok_or_else(|| counter_overflow(operator_id, "output row bytes"))?;
+        }
+    }
+    if costs.iter().any(|&cost| cost > budget.max_bytes) {
         return Err(CalcFlowError::InvalidArgument {
             field: "message.bytes".into(),
             message: "one stream Join output row exceeds the effective edge byte budget".into(),
         });
     }
-    output.emit("output", batch).await
+    Ok(costs)
+}
+
+fn output_chunk_ranges(
+    row_costs: &[usize],
+    row_count: usize,
+    budget: EdgeBudget,
+    operator_id: &str,
+) -> Result<Vec<(usize, usize)>> {
+    let mut ranges = Vec::<(usize, usize)>::new();
+    let mut start = 0;
+    while start < row_count {
+        let end = next_output_chunk_end(row_costs, start, row_count, budget);
+        if end == start {
+            return Err(operator_error(
+                operator_id,
+                "validated output row did not fit the effective edge budget",
+            ));
+        }
+        ranges.push((start, end));
+        start = end;
+    }
+    Ok(ranges)
+}
+
+fn next_output_chunk_end(
+    row_costs: &[usize],
+    start: usize,
+    row_count: usize,
+    budget: EdgeBudget,
+) -> usize {
+    let mut end = start;
+    let mut bytes = 0_usize;
+    while end < row_count && end - start < budget.max_rows {
+        let Some(candidate_bytes) = bytes.checked_add(row_costs[end]) else {
+            break;
+        };
+        if candidate_bytes > budget.max_bytes {
+            break;
+        }
+        bytes = candidate_bytes;
+        end += 1;
+    }
+    end
+}
+
+fn validate_output_sequence_range(
+    operator_id: &str,
+    first_sequence: u64,
+    range_count: usize,
+) -> Result<()> {
+    let chunk_count = u64::try_from(range_count).map_err(|_| {
+        operator_error(
+            operator_id,
+            "output chunk count does not fit the sequence range",
+        )
+    })?;
+    if first_sequence.checked_add(chunk_count).is_none() {
+        return Err(operator_error(
+            operator_id,
+            "output sequence overflowed before emission",
+        ));
+    }
+    Ok(())
+}
+
+fn build_output_batches(
+    record: &RecordBatch,
+    operator_id: &str,
+    first_sequence: u64,
+    budget: EdgeBudget,
+    ranges: Vec<(usize, usize)>,
+) -> Result<Vec<Batch>> {
+    ranges
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, (start, end))| {
+            let ordinal = u64::try_from(ordinal).map_err(|_| {
+                operator_error(operator_id, "output chunk ordinal does not fit u64")
+            })?;
+            let sequence = first_sequence
+                .checked_add(ordinal)
+                .expect("complete sequence range validated above");
+            let metadata = BatchMetadata::new(operator_id, sequence, BTreeMap::new())?;
+            let batch = Batch::table(vec![record.slice(start, end - start)], metadata)?;
+            if batch.estimated_bytes()? > budget.max_bytes {
+                return Err(operator_error(
+                    operator_id,
+                    "conservative row charges underreported a stream Join output chunk",
+                ));
+            }
+            Ok(batch)
+        })
+        .collect()
 }
 
 fn late_lateness(
@@ -2833,41 +3220,49 @@ fn index_by_row_id(opposite: &[StoredRow]) -> BTreeMap<u64, usize> {
         .collect()
 }
 
-fn materialize_outputs(
+/// Materializes every matched pair into one multi-row output record.
+///
+/// Each output column concatenates the per-pair single-row column slices in
+/// matched-pair order, so row order is exactly the emission order the
+/// per-row path produced.
+fn materialize_output_record(
     output_schema: &SchemaRef,
     admitted: &[AdmittedRow],
     opposite: &[StoredRow],
     matched: &[MatchedPair],
     incoming_is_left: bool,
     operator_id: &str,
-) -> Result<Vec<RecordBatch>> {
-    matched
-        .iter()
-        .map(|pair| {
-            let incoming = &admitted[pair.pos];
-            let candidate = &opposite[pair.opposite_index];
-            let (left, right) = if incoming_is_left {
-                (&incoming.record, &candidate.record)
-            } else {
-                (&candidate.record, &incoming.record)
-            };
-            output_record(output_schema, left, right, operator_id)
-        })
-        .collect()
-}
-
-fn output_record(
-    output_schema: &SchemaRef,
-    left: &RecordBatch,
-    right: &RecordBatch,
-    operator_id: &str,
 ) -> Result<RecordBatch> {
-    let columns = left
-        .columns()
-        .iter()
-        .chain(right.columns())
-        .cloned()
-        .collect::<Vec<_>>();
+    if matched.is_empty() {
+        return Ok(RecordBatch::new_empty(Arc::clone(output_schema)));
+    }
+    let pair_records = |pair: &MatchedPair| {
+        let incoming = &admitted[pair.pos];
+        let candidate = &opposite[pair.opposite_index];
+        if incoming_is_left {
+            (&incoming.record, &candidate.record)
+        } else {
+            (&candidate.record, &incoming.record)
+        }
+    };
+    let (first_left, first_right) = pair_records(&matched[0]);
+    let left_width = first_left.num_columns();
+    let right_width = first_right.num_columns();
+    let mut columns = Vec::with_capacity(left_width + right_width);
+    for column_index in 0..left_width + right_width {
+        let slices = matched
+            .iter()
+            .map(|pair| {
+                let (left, right) = pair_records(pair);
+                if column_index < left_width {
+                    left.column(column_index).as_ref()
+                } else {
+                    right.column(column_index - left_width).as_ref()
+                }
+            })
+            .collect::<Vec<_>>();
+        columns.push(concat_key_column(&slices)?);
+    }
     RecordBatch::try_new(Arc::clone(output_schema), columns)
         .map_err(|error| operator_error(operator_id, &format!("output projection failed: {error}")))
 }
