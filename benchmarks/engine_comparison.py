@@ -181,7 +181,7 @@ def _polars_plan(data: Workload, scenario: str):
 
 def _polars(data: Workload, scenario: str):
     plan = _polars_plan(data, scenario)
-    return lambda: plan.collect().to_arrow()
+    return lambda: plan.collect(engine="streaming").to_arrow()
 
 
 def _ta_lib(data: Workload, scenario: str):
