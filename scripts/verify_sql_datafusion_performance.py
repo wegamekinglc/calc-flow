@@ -610,10 +610,7 @@ def _case_key(case: dict[str, Any]) -> tuple[object, ...]:
     )
 
 
-def _verify_repeat(report: dict[str, Any], repeat: dict[str, Any]) -> None:
-    # Independent-repeat validation accumulates the complete comparable case
-    # identity before accepting latency or memory stability.
-    # #lizard forgives
+def _verify_repeat_provenance(report: dict[str, Any], repeat: dict[str, Any]) -> None:
     if report["git_sha"] != repeat["git_sha"]:
         raise ValueError("repeat report git_sha does not match")
     for field in (
@@ -623,45 +620,151 @@ def _verify_repeat(report: dict[str, Any], repeat: dict[str, Any]) -> None:
     ):
         if report["environment"][field] != repeat["environment"][field]:
             raise ValueError(f"repeat report {field} does not match")
+
+
+def _verify_repeat_engine(key: tuple[object, ...], first: dict, second: dict) -> None:
+    for engine in ("calc_flow", "raw_datafusion"):
+        if (
+            first[engine]["normalized_plan_hash"]
+            != second[engine]["normalized_plan_hash"]
+        ):
+            raise ValueError(
+                f"repeat report normalized_plan_hash does not match for {key} {engine}"
+            )
+        _verify_repeat_engine_stability(key, engine, first[engine], second[engine])
+
+
+def _verify_repeat_engine_stability(
+    key: tuple[object, ...], engine: str, first: dict, second: dict
+) -> None:
+    first_median = _median([float(value) for value in first["samples_ms"]])
+    second_median = _median([float(value) for value in second["samples_ms"]])
+    median_ratio = max(first_median, second_median) / min(first_median, second_median)
+    if median_ratio > 1.10:
+        raise ValueError(
+            f"independent median ratio {median_ratio:.2f}x "
+            f"({first_median:.1f} ms vs {second_median:.1f} ms) exceeds "
+            f"1.10x for {key} {engine}"
+        )
+    first_rss = first["peak_rss_bytes"]
+    second_rss = second["peak_rss_bytes"]
+    rss_ratio = max(first_rss, second_rss) / min(first_rss, second_rss)
+    if rss_ratio > 1.15:
+        raise ValueError(
+            f"independent peak RSS ratio {rss_ratio:.2f}x "
+            f"({first_rss} vs {second_rss} bytes) exceeds 1.15x "
+            f"for {key} {engine}"
+        )
+
+
+def _verify_repeat(report: dict[str, Any], repeat: dict[str, Any]) -> None:
+    # Independent-repeat validation accumulates the complete comparable case
+    # identity before accepting latency or memory stability.
+    _verify_repeat_provenance(report, repeat)
     first_cases = {_case_key(case): case for case in report["cases"]}
     second_cases = {_case_key(case): case for case in repeat["cases"]}
     if first_cases.keys() != second_cases.keys():
         raise ValueError("repeat report cases do not match")
     for key, first in first_cases.items():
-        second = second_cases[key]
-        for engine in ("calc_flow", "raw_datafusion"):
-            if (
-                first[engine]["normalized_plan_hash"]
-                != second[engine]["normalized_plan_hash"]
-            ):
-                raise ValueError(
-                    "repeat report normalized_plan_hash does not match for "
-                    f"{key} {engine}"
-                )
-            first_median = _median(
-                [float(value) for value in first[engine]["samples_ms"]]
-            )
-            second_median = _median(
-                [float(value) for value in second[engine]["samples_ms"]]
-            )
-            median_ratio = max(first_median, second_median) / min(
-                first_median, second_median
-            )
-            if median_ratio > 1.10:
-                raise ValueError(
-                    f"independent median ratio {median_ratio:.2f}x "
-                    f"({first_median:.1f} ms vs {second_median:.1f} ms) exceeds "
-                    f"1.10x for {key} {engine}"
-                )
-            first_rss = first[engine]["peak_rss_bytes"]
-            second_rss = second[engine]["peak_rss_bytes"]
-            rss_ratio = max(first_rss, second_rss) / min(first_rss, second_rss)
-            if rss_ratio > 1.15:
-                raise ValueError(
-                    f"independent peak RSS ratio {rss_ratio:.2f}x "
-                    f"({first_rss} vs {second_rss} bytes) exceeds 1.15x "
-                    f"for {key} {engine}"
-                )
+        _verify_repeat_engine(key, first, second_cases[key])
+
+
+P1_LIMITS = {
+    "sma_20": (90.0, 1.30),
+    "dual_sma_spread": (110.0, 1.20),
+}
+
+
+def _verify_p1_provenance(report: dict, serial_control: dict) -> None:
+    if report.get("profile") != "matched-adaptive":
+        raise ValueError("P1 report must use matched-adaptive profile")
+    if serial_control.get("profile") != "serial-control":
+        raise ValueError("P1 memory comparison requires serial-control profile")
+    if report["git_sha"] != serial_control["git_sha"]:
+        raise ValueError("P1 reports must share one git_sha")
+    for field in ("machine_fingerprint", "dependency_fingerprint"):
+        if report["environment"][field] != serial_control["environment"][field]:
+            raise ValueError(f"P1 reports must share {field}")
+
+
+def _p1_case_identity(case: dict) -> tuple[object, ...] | None:
+    """Return the P1 workload identity when this case carries one."""
+
+    if (
+        case["name"] not in P1_LIMITS
+        or case["rows"] != 1_000_000
+        or case["active_entities"] != 64
+    ):
+        return None
+    return (case["name"], case["rows"], case["active_entities"])
+
+
+def _best_p1_measurements(case: dict, repeat_case: dict | None) -> tuple[float, float]:
+    latency_ms = case["calc_flow"]["median_ms"]
+    ratio = case["paired_ratio_median"]
+    if repeat_case is not None:
+        latency_ms = min(latency_ms, repeat_case["calc_flow"]["median_ms"])
+        ratio = min(ratio, repeat_case["paired_ratio_median"])
+    return latency_ms, ratio
+
+
+def _verify_p1_latency(
+    name: str, latency_ms: float, latency_limit: float, gate: P1Gate, notes: list[str]
+) -> None:
+    if not gate.enforce_latency:
+        notes.append(
+            f"P1 {name} absolute latency budget {latency_limit:g} ms skipped: "
+            f"available_parallelism={gate.parallelism} is below the "
+            f"{P1_CALIBRATION_MIN_PARALLELISM}-core calibration spec"
+        )
+    elif latency_ms > latency_limit:
+        raise ValueError(
+            f"P1 {name} Calc Flow latency {latency_ms:.1f} ms exceeds "
+            f"{latency_limit:g} ms"
+        )
+
+
+def _verify_p1_memory(name: str, case: dict, serial: dict) -> None:
+    if serial["calc_flow"]["effective_partitions"] != 1:
+        raise ValueError(f"P1 {name} serial control must use p1")
+    p16_rss = case["calc_flow"]["peak_rss_bytes"]
+    p1_rss = serial["calc_flow"]["peak_rss_bytes"]
+    rss_limit = p1_rss * 1.5
+    if p16_rss > rss_limit:
+        raise ValueError(
+            f"P1 {name} p16 peak RSS {p16_rss} bytes exceeds 1.5x p1 "
+            f"serial-control limit {rss_limit:.0f} bytes (p1 {p1_rss} bytes)"
+        )
+
+
+def _verify_p1_case(case: dict, gate: P1Gate) -> list[str]:
+    name = case["name"]
+    if case["calc_flow"]["effective_partitions"] != 16:
+        raise ValueError(f"P1 {name} requires effective p16")
+    latency_limit, ratio_limit = P1_LIMITS[name]
+    key = (name, case["rows"], case["active_entities"])
+    latency_ms, ratio = _best_p1_measurements(case, gate.repeat_cases.get(key))
+    notes: list[str] = []
+    _verify_p1_latency(name, latency_ms, latency_limit, gate, notes)
+    if ratio > ratio_limit:
+        raise ValueError(
+            f"P1 {name} paired ratio {ratio:.2f}x exceeds {ratio_limit:.2f}x"
+        )
+    serial = gate.serial_cases.get(key)
+    if serial is None:
+        raise ValueError(f"P1 {name} is missing serial-control evidence")
+    _verify_p1_memory(name, case, serial)
+    return notes
+
+
+@dataclass(frozen=True, slots=True)
+class P1Gate:
+    """The shared P1 comparison context for one report."""
+
+    repeat_cases: dict
+    serial_cases: dict
+    enforce_latency: bool
+    parallelism: int
 
 
 def verify_p1(
@@ -677,19 +780,9 @@ def verify_p1(
     """
     # P1 is a single conjunctive gate across provenance, both workloads,
     # latency, paired ratio, and peak memory.
-    # #lizard forgives
-    if not isinstance(report, dict) or report.get("profile") != "matched-adaptive":
-        raise ValueError("P1 report must use matched-adaptive profile")
-    if (
-        not isinstance(serial_control, dict)
-        or serial_control.get("profile") != "serial-control"
-    ):
-        raise ValueError("P1 memory comparison requires serial-control profile")
-    if report["git_sha"] != serial_control["git_sha"]:
-        raise ValueError("P1 reports must share one git_sha")
-    for field in ("machine_fingerprint", "dependency_fingerprint"):
-        if report["environment"][field] != serial_control["environment"][field]:
-            raise ValueError(f"P1 reports must share {field}")
+    if not isinstance(report, dict) or not isinstance(serial_control, dict):
+        raise TypeError("P1 verification requires report objects")
+    _verify_p1_provenance(report, serial_control)
     repeat_cases = (
         {
             (case["name"], case["rows"], case["active_entities"]): case
@@ -703,61 +796,20 @@ def verify_p1(
         for case in serial_control["cases"]
     }
     parallelism = report["environment"]["available_parallelism"]
-    enforce_latency = parallelism >= P1_CALIBRATION_MIN_PARALLELISM
-    limits = {
-        "sma_20": (90.0, 1.30),
-        "dual_sma_spread": (110.0, 1.20),
-    }
+    gate = P1Gate(
+        repeat_cases=repeat_cases,
+        serial_cases=serial_cases,
+        enforce_latency=parallelism >= P1_CALIBRATION_MIN_PARALLELISM,
+        parallelism=parallelism,
+    )
     observed = set()
     notes: list[str] = []
     for case in report["cases"]:
-        name = case["name"]
-        if (
-            name not in limits
-            or case["rows"] != 1_000_000
-            or case["active_entities"] != 64
-        ):
+        if _p1_case_identity(case) is None:
             continue
-        observed.add(name)
-        if case["calc_flow"]["effective_partitions"] != 16:
-            raise ValueError(f"P1 {name} requires effective p16")
-        latency_limit, ratio_limit = limits[name]
-        key = (name, case["rows"], case["active_entities"])
-        latency_ms = case["calc_flow"]["median_ms"]
-        ratio = case["paired_ratio_median"]
-        repeat_case = repeat_cases.get(key)
-        if repeat_case is not None:
-            latency_ms = min(latency_ms, repeat_case["calc_flow"]["median_ms"])
-            ratio = min(ratio, repeat_case["paired_ratio_median"])
-        if not enforce_latency:
-            notes.append(
-                f"P1 {name} absolute latency budget {latency_limit:g} ms skipped: "
-                f"available_parallelism={parallelism} is below the "
-                f"{P1_CALIBRATION_MIN_PARALLELISM}-core calibration spec"
-            )
-        elif latency_ms > latency_limit:
-            raise ValueError(
-                f"P1 {name} Calc Flow latency {latency_ms:.1f} ms exceeds "
-                f"{latency_limit:g} ms"
-            )
-        if ratio > ratio_limit:
-            raise ValueError(
-                f"P1 {name} paired ratio {ratio:.2f}x exceeds {ratio_limit:.2f}x"
-            )
-        serial = serial_cases.get(key)
-        if serial is None:
-            raise ValueError(f"P1 {name} is missing serial-control evidence")
-        if serial["calc_flow"]["effective_partitions"] != 1:
-            raise ValueError(f"P1 {name} serial control must use p1")
-        p16_rss = case["calc_flow"]["peak_rss_bytes"]
-        p1_rss = serial["calc_flow"]["peak_rss_bytes"]
-        rss_limit = p1_rss * 1.5
-        if p16_rss > rss_limit:
-            raise ValueError(
-                f"P1 {name} p16 peak RSS {p16_rss} bytes exceeds 1.5x p1 "
-                f"serial-control limit {rss_limit:.0f} bytes (p1 {p1_rss} bytes)"
-            )
-    missing = sorted(set(limits) - observed)
+        observed.add(case["name"])
+        notes.extend(_verify_p1_case(case, gate))
+    missing = sorted(set(P1_LIMITS) - observed)
     if missing:
         raise ValueError(f"P1 report is missing workloads: {', '.join(missing)}")
     return notes
