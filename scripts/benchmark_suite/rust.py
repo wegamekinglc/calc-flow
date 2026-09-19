@@ -19,6 +19,19 @@ from scripts.verify_sql_datafusion_performance import verify_report
 from scripts.write_criterion_provenance import build_provenance
 
 
+def clear_stale_bench_binary(shared: Path, target: str) -> None:
+    """Remove restored bench executables so each side links its own source.
+
+    The shared target directory is cached across runs and hosts builds from
+    both source trees. A restored executable whose unit hash collides with
+    this side's can otherwise be re-selected as fresh, silently measuring the
+    other revision's benchmark.
+    """
+
+    for stale in shared.glob(f"release/deps/{target}-*"):
+        stale.unlink()
+
+
 def bench_targets(source: Path) -> list[str]:
     manifest = tomllib.loads(
         (source / "crates/calc-flow/Cargo.toml").read_text(encoding="utf-8")
@@ -40,6 +53,7 @@ async def build_binaries(source: Path, output: Path, shared: Path) -> dict:
     binaries = {}
     for target in targets:
         log = output / f"build-{target}.jsonl"
+        clear_stale_bench_binary(shared, target)
         await command(
             [
                 "cargo",

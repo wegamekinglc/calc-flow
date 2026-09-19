@@ -10,6 +10,7 @@ from scripts.benchmark_suite.rust import (
     _stamp_fingerprints,
     _with_fingerprints,
     allocation_rows,
+    clear_stale_bench_binary,
     sql_rows,
 )
 
@@ -74,6 +75,18 @@ def suite_block(workload_fingerprint: str, migration: str | None = None) -> dict
 
 
 class BenchmarkRustTests(unittest.TestCase):
+    def test_stale_bench_binaries_are_removed_before_each_build(self):
+        with TemporaryDirectory() as directory:
+            shared = Path(directory) / "release/deps"
+            shared.mkdir(parents=True)
+            stale = shared / "sql_datafusion_performance-deadbeef"
+            stale.write_bytes(b"stale")
+            keep = shared / "core-other"
+            keep.write_bytes(b"keep")
+            clear_stale_bench_binary(shared.parent.parent, "sql_datafusion_performance")
+            self.assertFalse(stale.exists())
+            self.assertTrue(keep.exists())
+
     def test_baseline_sql_rows_read_the_frozen_legacy_contract(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "sql.json"

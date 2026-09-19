@@ -237,6 +237,28 @@ def _engine_summary(samples: list[float]) -> dict[str, float]:
     }
 
 
+def _verify_summary_consistency(
+    engine: dict, summary: dict[str, float], label: str
+) -> None:
+    for field, expected in summary.items():
+        reported = _finite(engine[field], f"{label}.{field}")
+        if not math.isclose(reported, expected, rel_tol=1e-12, abs_tol=1e-12):
+            raise ValueError(f"{label}.{field} is inconsistent")
+
+
+def _stability_verdict(
+    summary: dict[str, float], label: str, samples: list[float]
+) -> tuple[list[float], list[str]]:
+    if summary["median_ms"] < STABILITY_MIN_MEDIAN_MS:
+        note = (
+            f"{label} CV {summary['cv'] * 100:.1f}% skipped: median "
+            f"{summary['median_ms']:.2f} ms is below the "
+            f"{STABILITY_MIN_MEDIAN_MS:g} ms stability floor"
+        )
+        return samples, [note]
+    raise ValueError(f"{label} CV {summary['cv'] * 100:.1f}% exceeds 10%")
+
+
 def _verify_engine_samples(
     engine: dict, label: str, minimum_samples: int, require_stable: bool
 ) -> tuple[list[float], list[str]]:
@@ -252,19 +274,9 @@ def _verify_engine_samples(
         for index, value in enumerate(raw_samples)
     ]
     summary = _engine_summary(samples)
-    for field, expected in summary.items():
-        reported = _finite(engine[field], f"{label}.{field}")
-        if not math.isclose(reported, expected, rel_tol=1e-12, abs_tol=1e-12):
-            raise ValueError(f"{label}.{field} is inconsistent")
+    _verify_summary_consistency(engine, summary, label)
     if require_stable and summary["cv"] > 0.10:
-        if summary["median_ms"] < STABILITY_MIN_MEDIAN_MS:
-            note = (
-                f"{label} CV {summary['cv'] * 100:.1f}% skipped: median "
-                f"{summary['median_ms']:.2f} ms is below the "
-                f"{STABILITY_MIN_MEDIAN_MS:g} ms stability floor"
-            )
-            return samples, [note]
-        raise ValueError(f"{label} CV {summary['cv'] * 100:.1f}% exceeds 10%")
+        return _stability_verdict(summary, label, samples)
     return samples, []
 
 
@@ -767,6 +779,12 @@ class P1Gate:
     parallelism: int
 
 
+def _require_p1_workload_coverage(observed: set[str]) -> None:
+    missing = sorted(set(P1_LIMITS) - observed)
+    if missing:
+        raise ValueError(f"P1 report is missing workloads: {', '.join(missing)}")
+
+
 def verify_p1(
     report: object, serial_control: object, *, repeat: object | None = None
 ) -> list[str]:
@@ -809,9 +827,7 @@ def verify_p1(
             continue
         observed.add(case["name"])
         notes.extend(_verify_p1_case(case, gate))
-    missing = sorted(set(P1_LIMITS) - observed)
-    if missing:
-        raise ValueError(f"P1 report is missing workloads: {', '.join(missing)}")
+    _require_p1_workload_coverage(observed)
     return notes
 
 
