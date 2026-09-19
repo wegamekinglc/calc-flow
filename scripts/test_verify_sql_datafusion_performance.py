@@ -107,6 +107,7 @@ def _report() -> dict[str, object]:
                 "rows": 1_000_000,
                 "active_entities": 64,
                 "window": 20,
+                "output_rows": 1_000_000,
                 "warmups": 1,
                 "rolling_rewrite_enabled": False,
                 "sample_order": [
@@ -157,9 +158,83 @@ def _p1_reports(parallelism: int = 32) -> tuple[dict[str, object], dict[str, obj
     return matched, serial
 
 
+def _operator_report() -> dict[str, object]:
+    report = _report()
+    case = report["cases"][0]
+    case["name"] = "filter"
+    case["window"] = 0
+    case["output_rows"] = 500_000
+    for engine_name in ("calc_flow", "raw_datafusion"):
+        engine = case[engine_name]
+        engine["partition_rows"] = [31_250] * 16
+        engine["partition_skew"] = 1.0
+        engine["bounded_window_agg_count"] = 0
+        engine["window_operator_count"] = 0
+        engine["window_compute_ms"] = 0.0
+    return report
+
+
 class TestSqlDataFusionEvidence(unittest.TestCase):
     def test_accepts_complete_comparable_twenty_pair_report(self) -> None:
         verify_report(_report(), minimum_samples=20, require_stable=True)
+
+    def test_accepts_zero_window_operator_case_with_reduced_output_rows(self) -> None:
+        verify_report(_operator_report(), minimum_samples=20, require_stable=True)
+
+    def test_rejects_operator_case_missing_output_rows(self) -> None:
+        report = _operator_report()
+        del report["cases"][0]["output_rows"]
+        with self.assertRaisesRegex(ValueError, "output_rows"):
+            verify_report(report, minimum_samples=20)
+
+    def test_rejects_partition_rows_not_matching_output_rows(self) -> None:
+        report = _operator_report()
+        for engine_name in ("calc_flow", "raw_datafusion"):
+            engine = report["cases"][0][engine_name]
+            engine["partition_rows"] = [62_500] * 16
+        pattern = "partition_rows must sum to output_rows"
+        with self.assertRaisesRegex(ValueError, pattern):
+            verify_report(report, minimum_samples=20)
+
+    def test_stability_skips_sub_floor_medians_with_explicit_note(self) -> None:
+        report = _operator_report()
+        noisy = [1.0] * 10 + [2.0] * 10
+        for engine_name in ("calc_flow", "raw_datafusion"):
+            engine = report["cases"][0][engine_name]
+            engine["samples_ms"] = noisy
+            engine["median_ms"] = 1.5
+            engine["p25_ms"] = 1.0
+            engine["p75_ms"] = 2.0
+            engine["mad_ms"] = 0.5
+            engine["cv"] = 1.0 / 3.0
+        case = report["cases"][0]
+        case["paired_ratios"] = [1.0] * 20
+        case["paired_ratio_median"] = 1.0
+        case["paired_ratio_ci_low"] = 0.99
+        case["paired_ratio_ci_high"] = 1.01
+        case["speedup_conclusion"] = "calc_flow_over_raw=1.000000x"
+        notes = verify_report(report, minimum_samples=20, require_stable=True)
+        self.assertEqual(2, len(notes))
+        self.assertIn("below the 20 ms stability floor", " ".join(notes))
+
+    def test_stability_still_binds_above_the_median_floor(self) -> None:
+        report = _report()
+        noisy = [70.0] * 10 + [90.0] * 10
+        for engine_name in ("calc_flow", "raw_datafusion"):
+            engine = report["cases"][0][engine_name]
+            engine["samples_ms"] = noisy
+            engine["median_ms"] = 80.0
+            engine["p25_ms"] = 70.0
+            engine["p75_ms"] = 90.0
+            engine["mad_ms"] = 10.0
+            engine["cv"] = 0.125
+        case = report["cases"][0]
+        case["paired_ratios"] = [1.0] * 20
+        case["paired_ratio_median"] = 1.0
+        case["paired_ratio_ci_low"] = 0.99
+        case["paired_ratio_ci_high"] = 1.01
+        with self.assertRaisesRegex(ValueError, "CV 12.5% exceeds 10%"):
+            verify_report(report, minimum_samples=20, require_stable=True)
 
     def test_stable_evidence_rejects_a_dirty_worktree(self) -> None:
         report = _report()

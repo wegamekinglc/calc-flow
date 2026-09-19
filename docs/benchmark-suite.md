@@ -29,14 +29,14 @@ inventories preserve benchmark cases without a second hand-written case list.
 | Family          | Dimensions                                          | Cases per dimension                                   |
 |-----------------|-----------------------------------------------------|-------------------------------------------------------|
 | Python          | overhead 1k, small 10k, standard 100k               | All collected non-lifecycle pytest benchmarks         |
-| Engines         | 10, 100, 1k, 10k, 100k, 1M, 10M rows                | 22 supported engine/scenario combinations             |
+| Engines         | 10, 100, 1k, 10k, 100k, 1M, 10M rows                | 25 supported engine/scenario combinations             |
 | Warm streaming  | 10, 100, 1k, 10k, 100k, 1M, 10M history; append 64  | SMA(20), SMA(5) minus SMA(20)                         |
 | Warm append     | History 1M; append 1, 4, 16, 64, 640, 6,400, 64,000 | Both indicators; append 64 shared with history matrix |
 | Rust            | Every `[[bench]]` target in the core crate          | Core, allocation, state/window, join, SQL/DataFusion  |
 | Studio/frontend | Python HTTP benchmarks and Vitest benchmark files   | All collected benchmark cases                         |
 | Lifecycle       | Isolated checkpoint/recovery benchmark              | Existing minimum-20-round evidence validation         |
 
-There are 154 engine cases and 26 warm cases, in addition to dynamically
+There are 175 engine cases and 26 warm cases, in addition to dynamically
 discovered cases. Warm cases use one entity to support one-row appends.
 Compare measurements only when entity count, history depth, append size,
 and timing boundaries match.
@@ -46,11 +46,14 @@ and timing boundaries match.
 | Calc Flow SQL    | Yes         | Yes         | Yes         | Yes         | Yes     | Yes      |
 | Raw DataFusion   | Yes         | Yes         | Yes         | Yes         | Yes     | Yes      |
 | Polars           | Yes         | Yes         | Yes         | Yes         | Yes     | Yes      |
-| Native streaming | Unsupported | Unsupported | Unsupported | Unsupported | Yes     | Yes      |
+| Native streaming | Yes         | Yes         | Yes         | Unsupported | Yes     | Yes      |
 | TA-Lib           | Unsupported | Unsupported | Unsupported | Unsupported | Yes     | Yes      |
 
 Unsupported operations are explicit cells, not silent dependency skips.
-Missing DataFusion, Polars or TA-Lib fails its shard. DataFusion Python 54
+Native streaming keeps `join` unsupported because the bounded inner stream
+join emits one output stream message per matched row, which cannot carry the
+10M-row engine scale inside the suite budget. Missing DataFusion, Polars or
+TA-Lib fails its shard. DataFusion Python 54
 matches the core's DataFusion major; the shared requirements file pins all
 Python build/benchmark/Studio dependencies with hashes.
 

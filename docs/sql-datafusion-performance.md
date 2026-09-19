@@ -78,6 +78,22 @@ python scripts/verify_sql_datafusion_performance.py \
 A relative `--output` is anchored at the workspace root, so the report lands at
 the same path no matter which directory the harness runs from.
 
+Besides the two rolling workloads, every profile also measures four operator
+scenarios: `projection`, `filter` (a float predicate; the Calc Flow-only
+UInt64 modulo specialization would diverge the normalized plan hash),
+`group_by` (one output row per symbol), and `join` against a per-symbol
+`dimension` side input. These cases record `window: 0` and their true output
+cardinality in `output_rows`, because `filter` and `group_by` change the
+output row count; partition rows, skew, and their evidence checks follow
+`output_rows`. P1 budgets continue to bind only the two rolling workloads.
+
+The operator scenarios complete in single-digit milliseconds per sample at
+the profile scales, below the structural resolution of the 10% CV stability
+gate on shared hosts. `--require-stable` therefore skips the CV check for
+per-sample medians under a 20 ms floor and prints an explicit skip note, the
+same pattern as the P1 below-calibration-spec skip; medians at or above the
+floor remain gated.
+
 The verifier fails closed on configuration, batch-boundary, plan, correctness,
 sample, stability, CV, RSS, or P1 threshold mismatches. It suppresses a speedup
 conclusion whenever the two physical plans are not comparable.

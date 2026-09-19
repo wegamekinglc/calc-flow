@@ -506,6 +506,7 @@
         "rows",
         "active_entities",
         "window",
+        "output_rows",
         "warmups",
         "rolling_rewrite_enabled",
         "sample_order",
@@ -531,6 +532,10 @@
           "$ref": "#/$defs/positiveInteger"
         },
         "window": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "output_rows": {
           "$ref": "#/$defs/positiveInteger"
         },
         "warmups": {

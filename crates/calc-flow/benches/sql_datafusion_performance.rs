@@ -209,6 +209,10 @@ struct CaseEvidence {
     rows: usize,
     active_entities: usize,
     window: usize,
+    /// The workload's true output cardinality: equal to `rows` only for
+    /// row-preserving queries; `filter` shrinks it and `group_by` collapses it
+    /// to one row per entity.
+    output_rows: usize,
     warmups: usize,
     rolling_rewrite_enabled: bool,
     sample_order: Vec<String>,
@@ -308,10 +312,22 @@ struct Comparability {
     mismatches: Vec<String>,
 }
 
+/// Selects the canonical output row identity used for correctness alignment.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RowIdentity {
+    /// The unique `(symbol, event_time, sequence)` input key is preserved.
+    Row,
+    /// One output row per grouping key, keyed by `symbol` alone.
+    Group,
+}
+
 struct Workload {
     name: &'static str,
     window: usize,
     output_column: &'static str,
+    identity: RowIdentity,
+    /// The SQL joins the `dimension` side input beside `input`.
+    dimension: bool,
     sql: String,
 }
 
@@ -415,7 +431,7 @@ fn reset_peak_rss_window() {
     let _ = fs::write("/proc/self/clear_refs", b"5");
 }
 
-fn workloads() -> [Workload; 2] {
+fn workloads() -> [Workload; 6] {
     let average = |window: usize| {
         format!(
             "avg(price) OVER (PARTITION BY symbol ORDER BY event_time, sequence ROWS BETWEEN {} PRECEDING AND CURRENT ROW)",
@@ -427,6 +443,8 @@ fn workloads() -> [Workload; 2] {
             name: "sma_20",
             window: 20,
             output_column: "sma_20",
+            identity: RowIdentity::Row,
+            dimension: false,
             sql: format!(
                 "SELECT event_time, sequence, symbol, price, {} AS sma_20 FROM input",
                 average(20)
@@ -436,11 +454,53 @@ fn workloads() -> [Workload; 2] {
             name: "dual_sma_spread",
             window: 20,
             output_column: "sma_spread",
+            identity: RowIdentity::Row,
+            dimension: false,
             sql: format!(
                 "SELECT event_time, sequence, symbol, price, ({}) - ({}) AS sma_spread FROM input",
                 average(5),
                 average(20)
             ),
+        },
+        // The operator scenarios keep the paired engines on identical physical
+        // plans: `filter` uses a float predicate because the Calc Flow-only
+        // UInt64 modulo specialization would diverge the normalized plan hash.
+        Workload {
+            name: "projection",
+            window: 0,
+            output_column: "value",
+            identity: RowIdentity::Row,
+            dimension: false,
+            sql: "SELECT event_time, sequence, symbol, price * 2 + 1 AS value FROM input"
+                .to_owned(),
+        },
+        Workload {
+            name: "filter",
+            window: 0,
+            output_column: "value",
+            identity: RowIdentity::Row,
+            dimension: false,
+            sql: "SELECT event_time, sequence, symbol, price AS value FROM input \
+                  WHERE price > 105.0"
+                .to_owned(),
+        },
+        Workload {
+            name: "group_by",
+            window: 0,
+            output_column: "value",
+            identity: RowIdentity::Group,
+            dimension: false,
+            sql: "SELECT symbol, SUM(price) AS value FROM input GROUP BY symbol".to_owned(),
+        },
+        Workload {
+            name: "join",
+            window: 0,
+            output_column: "value",
+            identity: RowIdentity::Row,
+            dimension: true,
+            sql: "SELECT event_time, sequence, symbol, price * factor AS value \
+                  FROM input JOIN dimension USING (symbol)"
+                .to_owned(),
         },
     ]
 }
@@ -504,6 +564,32 @@ fn benchmark_batch(batches: Vec<RecordBatch>, entities: usize) -> BenchResult<Ba
     Ok(Batch::table(batches, metadata)?)
 }
 
+/// Builds the per-symbol `dimension` side input for the join workload with
+/// the same `S###` symbols and `entity + 1` factors as the Python suite.
+fn dimension_record_batch(entities: usize) -> BenchResult<RecordBatch> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("symbol", DataType::Utf8, false),
+        Field::new("factor", DataType::Float64, false),
+    ]));
+    let mut symbol = StringBuilder::with_capacity(entities, entities.saturating_mul(4));
+    let mut factor = Float64Builder::with_capacity(entities);
+    for entity in 0..entities {
+        symbol.append_value(format!("S{entity:03}"));
+        factor.append_value(f64::from(u32::try_from(entity)?) + 1.0);
+    }
+    Ok(RecordBatch::try_new(
+        schema,
+        vec![Arc::new(symbol.finish()), Arc::new(factor.finish())],
+    )?)
+}
+
+fn benchmark_dimension_batch(entities: usize) -> BenchResult<Batch> {
+    Ok(Batch::table(
+        vec![dimension_record_batch(entities)?],
+        BatchMetadata::default(),
+    )?)
+}
+
 fn config(args: &Args) -> DataFusionConfig {
     DataFusionConfig {
         batch_size: args.batch_size,
@@ -516,21 +602,25 @@ fn config(args: &Args) -> DataFusionConfig {
     }
 }
 
-fn effective_partitions(args: &Args) -> usize {
-    args.partitions
-        .min(args.rows.div_ceil(MIN_ROWS_PER_PARTITION).max(1))
+fn effective_partitions(args: &Args, dimension_rows: usize) -> usize {
+    // The engine derives its fixed-mode work cap from every input table's
+    // rows combined, so the raw mirror must include the dimension side.
+    args.partitions.min(
+        (args.rows + dimension_rows)
+            .div_ceil(MIN_ROWS_PER_PARTITION)
+            .max(1),
+    )
 }
 
 fn build_plan(
     config: DataFusionConfig,
     workload: &Workload,
 ) -> BenchResult<calc_flow::BatchExecutionPlan> {
-    let operator = SqlOperator::new(
-        workload.name,
-        &workload.sql,
-        vec!["input".to_owned()],
-        Vec::new(),
-    )?;
+    let mut aliases = vec!["input".to_owned()];
+    if workload.dimension {
+        aliases.push("dimension".to_owned());
+    }
+    let operator = SqlOperator::new(workload.name, &workload.sql, aliases, Vec::new())?;
     Ok(PipelineBuilder::new(workload.name)?
         .with_datafusion_config(config)
         .add_node("sql", Box::new(operator))?
@@ -543,16 +633,16 @@ fn build_plan(
 async fn calc_flow_sample(
     plan: &calc_flow::BatchExecutionPlan,
     batch: &Batch,
+    dimension: Option<&Batch>,
     retain_output: bool,
 ) -> BenchResult<(Sample, Option<Batch>)> {
     let rss = RssSampler::start();
     let started = Instant::now();
-    let result = plan
-        .execute(
-            BTreeMap::from([("input".to_owned(), batch.clone())]),
-            ExecutionOptions::default(),
-        )
-        .await?;
+    let mut inputs = BTreeMap::from([("input".to_owned(), batch.clone())]);
+    if let Some(dimension) = dimension {
+        inputs.insert("dimension".to_owned(), dimension.clone());
+    }
+    let result = plan.execute(inputs, ExecutionOptions::default()).await?;
     let elapsed_ms = milliseconds(started.elapsed());
     let peak_rss_bytes = rss.finish();
     let metric = result
@@ -634,8 +724,147 @@ async fn calc_flow_sample(
     clippy::too_many_lines,
     reason = "all raw DataFusion phase boundaries stay adjacent for attribution"
 )]
+async fn collect_first_batch(
+    stream: &mut datafusion::physical_plan::SendableRecordBatchStream,
+) -> BenchResult<(Option<RecordBatch>, f64)> {
+    let execution_start = Instant::now();
+    let first = stream.next().await.transpose()?;
+    Ok((first, milliseconds(execution_start.elapsed())))
+}
+
+async fn collect_remaining_batches(
+    stream: &mut datafusion::physical_plan::SendableRecordBatchStream,
+) -> BenchResult<(Vec<RecordBatch>, f64)> {
+    let remaining_start = Instant::now();
+    let remaining = stream.try_collect::<Vec<_>>().await?;
+    Ok((remaining, milliseconds(remaining_start.elapsed())))
+}
+
+struct RawPlan {
+    dataframe: datafusion::dataframe::DataFrame,
+    sql_parse_ms: f64,
+    logical_optimize_ms: f64,
+    physical_plan_ms: f64,
+    physical_plan: Arc<dyn ExecutionPlan>,
+}
+
+async fn raw_plan_sql(context: &SessionContext, workload: &Workload) -> BenchResult<RawPlan> {
+    let parse_start = Instant::now();
+    let _statements = DFParser::parse_sql(&workload.sql)?;
+    let sql_parse_ms = milliseconds(parse_start.elapsed());
+    let logical_start = Instant::now();
+    let dataframe = context.sql(&workload.sql).await?;
+    let logical_optimize_ms = milliseconds(logical_start.elapsed());
+    let (physical_plan, physical_plan_ms) = create_physical_plan(&dataframe).await?;
+    Ok(RawPlan {
+        dataframe,
+        sql_parse_ms,
+        logical_optimize_ms,
+        physical_plan_ms,
+        physical_plan,
+    })
+}
+
+struct RawCollected {
+    first: Option<RecordBatch>,
+    remaining: Vec<RecordBatch>,
+    first_batch_ms: f64,
+    remaining_ms: f64,
+    total_ms: f64,
+}
+
+async fn raw_execute(
+    physical_plan: &Arc<dyn ExecutionPlan>,
+    dataframe: &datafusion::dataframe::DataFrame,
+) -> BenchResult<RawCollected> {
+    let execution_start = Instant::now();
+    let mut stream = execute_stream(Arc::clone(physical_plan), Arc::new(dataframe.task_ctx()))?;
+    let (first, first_batch_ms) = collect_first_batch(&mut stream).await?;
+    let (remaining, remaining_ms) = collect_remaining_batches(&mut stream).await?;
+    Ok(RawCollected {
+        first,
+        remaining,
+        first_batch_ms,
+        remaining_ms,
+        total_ms: milliseconds(execution_start.elapsed()),
+    })
+}
+
+struct WrappedOutput {
+    batch: Batch,
+    arrow_wrap_ms: f64,
+    envelope_ms: f64,
+}
+
+fn wrap_output_batch(
+    first: Option<RecordBatch>,
+    remaining: Vec<RecordBatch>,
+    result_schema: datafusion::arrow::datatypes::SchemaRef,
+) -> BenchResult<WrappedOutput> {
+    let output_wrap_start = Instant::now();
+    let mut batches = Vec::with_capacity(remaining.len() + usize::from(first.is_some()));
+    batches.extend(first);
+    batches.extend(remaining);
+    if batches.is_empty() {
+        batches.push(RecordBatch::new_empty(result_schema));
+    }
+    let arrow_wrap_ms = milliseconds(output_wrap_start.elapsed());
+    let envelope_start = Instant::now();
+    let batch = Batch::table(batches, BatchMetadata::default())?;
+    Ok(WrappedOutput {
+        batch,
+        arrow_wrap_ms,
+        envelope_ms: milliseconds(envelope_start.elapsed()),
+    })
+}
+
+async fn create_physical_plan(
+    dataframe: &datafusion::dataframe::DataFrame,
+) -> BenchResult<(Arc<dyn ExecutionPlan>, f64)> {
+    let physical_start = Instant::now();
+    let physical_plan = dataframe.create_physical_plan().await?;
+    Ok((physical_plan, milliseconds(physical_start.elapsed())))
+}
+
+fn raw_session(
+    batch: &Batch,
+    dimension: Option<&Batch>,
+    batch_size: usize,
+    effective_partitions: usize,
+) -> BenchResult<(SessionContext, f64, f64, f64, f64)> {
+    let runtime_start = Instant::now();
+    let session_config = SessionConfig::new()
+        .with_batch_size(batch_size)
+        .with_target_partitions(effective_partitions);
+    let runtime_acquire = milliseconds(runtime_start.elapsed());
+    let session_start = Instant::now();
+    let context = SessionContext::new_with_config(session_config);
+    let session_state_create = milliseconds(session_start.elapsed());
+    let input_start = Instant::now();
+    let provider = input_mem_table(batch)?;
+    let dimension_provider = match dimension {
+        Some(value) => Some(input_mem_table(value)?),
+        None => None,
+    };
+    let input_adapter = milliseconds(input_start.elapsed());
+    let register_start = Instant::now();
+    context.register_table("input", Arc::new(provider))?;
+    if let Some(provider) = dimension_provider {
+        context.register_table("dimension", Arc::new(provider))?;
+    }
+    let table_register = milliseconds(register_start.elapsed());
+    Ok((
+        context,
+        runtime_acquire,
+        session_state_create,
+        input_adapter,
+        table_register,
+    ))
+}
+
 async fn raw_datafusion_sample(
     batch: &Batch,
+    dimension: Option<&Batch>,
     workload: &Workload,
     configured_partitions: usize,
     effective_partitions: usize,
@@ -647,54 +876,27 @@ async fn raw_datafusion_sample(
     // #lizard forgives
     let rss = RssSampler::start();
     let total_start = Instant::now();
-    let runtime_start = Instant::now();
-    let session_config = SessionConfig::new()
-        .with_batch_size(batch_size)
-        .with_target_partitions(effective_partitions);
-    let runtime_acquire = milliseconds(runtime_start.elapsed());
-    let session_start = Instant::now();
-    let context = SessionContext::new_with_config(session_config);
-    let session_state_create = milliseconds(session_start.elapsed());
-    let input_start = Instant::now();
-    let table = batch.table_payload()?;
-    let provider = MemTable::try_new(Arc::clone(table.schema()), vec![table.batches().to_vec()])?;
-    let input_adapter = milliseconds(input_start.elapsed());
-    let register_start = Instant::now();
-    context.register_table("input", Arc::new(provider))?;
-    let table_register = milliseconds(register_start.elapsed());
-    let parse_start = Instant::now();
-    let _statements = DFParser::parse_sql(&workload.sql)?;
-    let sql_parse = milliseconds(parse_start.elapsed());
-    let logical_start = Instant::now();
-    let dataframe = context.sql(&workload.sql).await?;
-    let logical_optimize = milliseconds(logical_start.elapsed());
-    let physical_start = Instant::now();
-    let physical_plan = dataframe.create_physical_plan().await?;
-    let physical_plan_ms = milliseconds(physical_start.elapsed());
+    let (context, runtime_acquire, session_state_create, input_adapter, table_register) =
+        raw_session(batch, dimension, batch_size, effective_partitions)?;
+    let plan = raw_plan_sql(&context, workload).await?;
+    let dataframe = plan.dataframe;
+    let physical_plan = plan.physical_plan;
+    let result_schema = physical_plan.schema();
     let plan_string_start = Instant::now();
     let plan_text = displayable(physical_plan.as_ref()).indent(true).to_string();
     let physical_plan_string = milliseconds(plan_string_start.elapsed());
-    let execution_start = Instant::now();
-    let result_schema = physical_plan.schema();
     let metrics_plan = Arc::clone(&physical_plan);
-    let mut stream = execute_stream(physical_plan, Arc::new(dataframe.task_ctx()))?;
-    let first = stream.next().await.transpose()?;
-    let execution_to_first_batch = milliseconds(execution_start.elapsed());
-    let remaining_start = Instant::now();
-    let remaining = stream.try_collect::<Vec<_>>().await?;
-    let execution_remaining = milliseconds(remaining_start.elapsed());
-    let collect_or_coalesce = milliseconds(execution_start.elapsed());
-    let mut batches = Vec::with_capacity(remaining.len() + usize::from(first.is_some()));
-    batches.extend(first);
-    batches.extend(remaining);
-    let output_wrap_start = Instant::now();
-    if batches.is_empty() {
-        batches.push(RecordBatch::new_empty(result_schema));
-    }
-    let output_arrow_wrap = milliseconds(output_wrap_start.elapsed());
-    let envelope_start = Instant::now();
-    let output = Batch::table(batches, BatchMetadata::default())?;
-    let batch_envelope = milliseconds(envelope_start.elapsed());
+    let collected = raw_execute(&physical_plan, &dataframe).await?;
+    let sql_parse = plan.sql_parse_ms;
+    let logical_optimize = plan.logical_optimize_ms;
+    let physical_plan_ms = plan.physical_plan_ms;
+    let execution_to_first_batch = collected.first_batch_ms;
+    let execution_remaining = collected.remaining_ms;
+    let collect_or_coalesce = collected.total_ms;
+    let output = wrap_output_batch(collected.first, collected.remaining, result_schema)?;
+    let output_arrow_wrap = output.arrow_wrap_ms;
+    let batch_envelope = output.envelope_ms;
+    let output = output.batch;
     let metrics_start = Instant::now();
     let plan_statistics = plan_statistics(metrics_plan.as_ref(), output.num_rows());
     let metrics_traversal = milliseconds(metrics_start.elapsed());
@@ -703,12 +905,12 @@ async fn raw_datafusion_sample(
     let available_parallelism = thread::available_parallelism()
         .map(std::num::NonZero::get)
         .unwrap_or(1);
-    let decision_active_entities = batch
-        .metadata()
-        .attributes()
-        .get(DATAFUSION_ACTIVE_ENTITIES_METADATA_KEY)
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|value| usize::try_from(value).ok());
+    // The engine's parallelism decision reads every registered input at once:
+    // with a dimension side it reports combined rows and no single-input
+    // entity fact, and the raw mirror reports the identical decision fields.
+    let decision_input_rows = raw_decision_input_rows(batch, dimension);
+    let (decision_active_entities, decision_active_entities_source) =
+        raw_decision_entities(batch, dimension);
     let mut phases = PhaseMedians {
         runtime_acquire,
         session_state_create,
@@ -743,21 +945,12 @@ async fn raw_datafusion_sample(
             min_rows_per_partition: MIN_ROWS_PER_PARTITION,
             small_rows_threshold: SMALL_ROWS_THRESHOLD,
             parallelism_decision_reused: false,
-            decision_input_rows: batch.num_rows(),
+            decision_input_rows,
             decision_active_entities,
-            decision_active_entities_source: "batch_metadata".to_owned(),
-            partition_limit_reason: if effective_partitions < configured_partitions {
-                "minimum_rows_per_partition"
-            } else {
-                "configured_target_partitions"
-            }
-            .to_owned(),
+            decision_active_entities_source: decision_active_entities_source.to_owned(),
+            partition_limit_reason: raw_limit_reason(effective_partitions, configured_partitions),
             batch_size,
-            partition_rows: if plan_statistics.window_partition_rows.is_empty() {
-                plan_statistics.partition_rows
-            } else {
-                plan_statistics.window_partition_rows
-            },
+            partition_rows: raw_partition_rows(&plan_statistics),
             spill_bytes: plan_statistics.spill_bytes,
             elapsed_compute_ns: plan_statistics.elapsed_compute_ns,
             window_compute_ns: plan_statistics.window_compute_ns,
@@ -861,24 +1054,22 @@ fn plan_statistics(plan: &dyn ExecutionPlan, output_rows: usize) -> PlanStatisti
     clippy::too_many_lines,
     reason = "the AB/BA ordering and paired evidence assembly remain adjacent for auditability"
 )]
-async fn benchmark_case(
+async fn warmup_outputs(
     args: &Args,
-    workload: &Workload,
+    plan: &calc_flow::BatchExecutionPlan,
     batch: &Batch,
-) -> BenchResult<CaseEvidence> {
-    // Warm-up, alternating AB/BA sampling, correctness, and evidence assembly
-    // intentionally form one auditable paired-measurement boundary.
-    // #lizard forgives
-    let config = config(args);
-    let effective_partitions = effective_partitions(args);
-    let plan = build_plan(config, workload)?;
+    dimension: Option<&Batch>,
+    workload: &Workload,
+    effective_partitions: usize,
+) -> BenchResult<(Option<Batch>, Option<Batch>)> {
     let mut calc_warm_output = None;
     let mut raw_warm_output = None;
     for _ in 0..args.warmups {
-        let (_calc_warm, calc_output) = calc_flow_sample(&plan, batch, true).await?;
+        let (_calc_warm, calc_output) = calc_flow_sample(plan, batch, dimension, true).await?;
         calc_warm_output = calc_output;
         let (_raw_warm, raw_output) = raw_datafusion_sample(
             batch,
+            dimension,
             workload,
             args.partitions,
             effective_partitions,
@@ -888,31 +1079,28 @@ async fn benchmark_case(
         .await?;
         raw_warm_output = raw_output;
     }
-    let correctness = compare_outputs(
-        calc_warm_output
-            .as_ref()
-            .ok_or("missing Calc Flow warm-up")?,
-        raw_warm_output
-            .as_ref()
-            .ok_or("missing raw DataFusion warm-up")?,
-        workload.output_column,
-    )?;
-    // The warm-up outputs have proved equivalence; dropping them before the
-    // sampling loop keeps the run's retained memory flat instead of growing
-    // by one output batch per sample.
-    drop(calc_warm_output);
-    drop(raw_warm_output);
+    Ok((calc_warm_output, raw_warm_output))
+}
 
+async fn timed_samples(
+    args: &Args,
+    plan: &calc_flow::BatchExecutionPlan,
+    batch: &Batch,
+    dimension: Option<&Batch>,
+    workload: &Workload,
+    effective_partitions: usize,
+) -> BenchResult<TimedPair> {
     let mut calc_samples = Vec::with_capacity(args.samples);
     let mut raw_samples = Vec::with_capacity(args.samples);
     let mut sample_order = Vec::with_capacity(args.samples);
     for sample in 0..args.samples {
         if sample % 2 == 0 {
             sample_order.push("ab".to_owned());
-            calc_samples.push(calc_flow_sample(&plan, batch, false).await?.0);
+            calc_samples.push(calc_flow_sample(plan, batch, dimension, false).await?.0);
             raw_samples.push(
                 raw_datafusion_sample(
                     batch,
+                    dimension,
                     workload,
                     args.partitions,
                     effective_partitions,
@@ -927,6 +1115,7 @@ async fn benchmark_case(
             raw_samples.push(
                 raw_datafusion_sample(
                     batch,
+                    dimension,
                     workload,
                     args.partitions,
                     effective_partitions,
@@ -936,83 +1125,118 @@ async fn benchmark_case(
                 .await?
                 .0,
             );
-            calc_samples.push(calc_flow_sample(&plan, batch, false).await?.0);
+            calc_samples.push(calc_flow_sample(plan, batch, dimension, false).await?.0);
         }
     }
-    let input_batch_rows = batch
-        .table_payload()?
-        .batches()
-        .iter()
-        .map(RecordBatch::num_rows)
-        .collect::<Vec<_>>();
-    let calc_evidence = engine_evidence(args, &calc_samples, &input_batch_rows)?;
-    let raw_evidence = engine_evidence(args, &raw_samples, &input_batch_rows)?;
-    let mismatches = comparability_mismatches(&calc_evidence, &raw_evidence);
-    let comparable = mismatches.is_empty();
-    let ratios = calc_evidence
-        .samples_ms
-        .iter()
-        .zip(&raw_evidence.samples_ms)
-        .map(|(calc, raw)| calc / raw)
-        .collect::<Vec<_>>();
-    let (paired_ratio_ci_low, paired_ratio_ci_high) = bootstrap_median_interval(&ratios);
-    let paired_ratio_median = median(&ratios);
-    Ok(CaseEvidence {
-        name: workload.name.to_owned(),
-        rows: args.rows,
-        active_entities: args.entities,
-        window: workload.window,
-        warmups: args.warmups,
-        rolling_rewrite_enabled: false,
-        sample_order,
-        calc_flow: calc_evidence,
-        raw_datafusion: raw_evidence,
-        paired_ratios: ratios,
-        paired_ratio_median,
-        paired_ratio_ci_low,
-        paired_ratio_ci_high,
-        correctness,
-        comparability: Comparability {
-            comparable,
-            mismatches,
-        },
-        speedup_conclusion: comparable
-            .then(|| format!("calc_flow_over_raw={paired_ratio_median:.6}x")),
+    Ok(TimedPair {
+        calc: calc_samples,
+        raw: raw_samples,
+        order: sample_order,
     })
+}
+
+async fn benchmark_case(
+    args: &Args,
+    workload: &Workload,
+    batch: &Batch,
+    dimension: Option<&Batch>,
+) -> BenchResult<CaseEvidence> {
+    // Warm-up, alternating AB/BA sampling, correctness, and evidence assembly
+    // intentionally form one auditable paired-measurement boundary.
+    let config = config(args);
+    let dimension_rows = dimension.map_or(0, Batch::num_rows);
+    let effective_partitions = effective_partitions(args, dimension_rows);
+    let plan = build_plan(config, workload)?;
+    let (calc_warm_output, raw_warm_output) = warmup_outputs(
+        args,
+        &plan,
+        batch,
+        dimension,
+        workload,
+        effective_partitions,
+    )
+    .await?;
+    let calc_warm = calc_warm_output
+        .as_ref()
+        .ok_or("missing Calc Flow warm-up")?;
+    let raw_warm = raw_warm_output
+        .as_ref()
+        .ok_or("missing raw DataFusion warm-up")?;
+    let correctness = compare_outputs(calc_warm, raw_warm, workload)?;
+    let output_rows = calc_warm.num_rows();
+    // The warm-up outputs have proved equivalence; dropping them before the
+    // sampling loop keeps the run's retained memory flat instead of growing
+    // by one output batch per sample.
+    drop(calc_warm_output);
+    drop(raw_warm_output);
+    let samples = timed_samples(
+        args,
+        &plan,
+        batch,
+        dimension,
+        workload,
+        effective_partitions,
+    )
+    .await?;
+    assemble_case_evidence(args, workload, correctness, output_rows, batch, samples)
 }
 
 #[allow(
     clippy::too_many_lines,
     reason = "strict benchmark evidence is assembled in one auditable boundary"
 )]
+/// The session and partitioning fields that must stay fixed across samples.
+fn partitioning_of(
+    sample: &Sample,
+) -> (&str, &str, usize, usize, usize, usize, usize, usize, usize) {
+    (
+        &sample.parallelism_mode,
+        &sample.partition_limit_reason,
+        sample.configured_partitions,
+        sample.requested_partitions,
+        sample.effective_partitions,
+        sample.available_parallelism,
+        sample.max_partitions,
+        sample.min_rows_per_partition,
+        sample.small_rows_threshold,
+    )
+}
+
+/// The decision and physical-plan fields that must stay fixed across samples.
+fn decision_of(sample: &Sample) -> (bool, usize, Option<usize>, &str, &str) {
+    (
+        sample.parallelism_decision_reused,
+        sample.decision_input_rows,
+        sample.decision_active_entities,
+        &sample.decision_active_entities_source,
+        &sample.plan_text,
+    )
+}
+
+/// Proves every sample used one identical configuration and physical plan.
+fn samples_share_configuration(samples: &[Sample]) -> BenchResult<()> {
+    let first = samples.first().ok_or("benchmark produced no samples")?;
+    let shared = samples.iter().all(|sample| {
+        partitioning_of(sample) == partitioning_of(first)
+            && decision_of(sample) == decision_of(first)
+            && sample.batch_size == first.batch_size
+    });
+    if shared {
+        Ok(())
+    } else {
+        Err("engine configuration or physical plan changed between samples".into())
+    }
+}
+
 fn engine_evidence(
-    args: &Args,
     samples: &[Sample],
     input_batch_rows: &[usize],
+    output_rows: usize,
 ) -> BenchResult<EngineEvidence> {
     // This function first proves every sample used identical configuration and
     // then emits the complete fail-closed engine evidence record.
-    // #lizard forgives
+    samples_share_configuration(samples)?;
     let first = samples.first().ok_or("benchmark produced no samples")?;
-    if samples.iter().any(|sample| {
-        sample.configured_partitions != first.configured_partitions
-            || sample.requested_partitions != first.requested_partitions
-            || sample.effective_partitions != first.effective_partitions
-            || sample.partition_limit_reason != first.partition_limit_reason
-            || sample.batch_size != first.batch_size
-            || sample.parallelism_mode != first.parallelism_mode
-            || sample.available_parallelism != first.available_parallelism
-            || sample.max_partitions != first.max_partitions
-            || sample.min_rows_per_partition != first.min_rows_per_partition
-            || sample.small_rows_threshold != first.small_rows_threshold
-            || sample.parallelism_decision_reused != first.parallelism_decision_reused
-            || sample.decision_input_rows != first.decision_input_rows
-            || sample.decision_active_entities != first.decision_active_entities
-            || sample.decision_active_entities_source != first.decision_active_entities_source
-            || sample.plan_text != first.plan_text
-    }) {
-        return Err("engine configuration or physical plan changed between samples".into());
-    }
     let sample_ms = samples
         .iter()
         .map(|sample| sample.elapsed_ms)
@@ -1023,7 +1247,9 @@ fn engine_evidence(
         .ok_or("benchmark produced no final sample")?
         .partition_rows
         .clone();
-    let average_partition_rows = args.rows as f64 / partition_rows.len() as f64;
+    // Partition skew averages the engine's output rows, not the query input
+    // rows: `filter` and `group_by` change the output cardinality.
+    let average_partition_rows = output_rows as f64 / partition_rows.len() as f64;
     let partition_skew =
         partition_rows.iter().copied().max().unwrap_or(0) as f64 / average_partition_rows;
     Ok(EngineEvidence {
@@ -1242,7 +1468,161 @@ fn comparability_mismatches(calc: &EngineEvidence, raw: &EngineEvidence) -> Vec<
     mismatches
 }
 
-fn compare_outputs(calc: &Batch, raw: &Batch, output_column: &str) -> BenchResult<Correctness> {
+fn raw_decision_input_rows(batch: &Batch, dimension: Option<&Batch>) -> usize {
+    batch
+        .num_rows()
+        .saturating_add(dimension.map_or(0, Batch::num_rows))
+}
+
+fn raw_decision_entities(
+    batch: &Batch,
+    dimension: Option<&Batch>,
+) -> (Option<usize>, &'static str) {
+    if dimension.is_some() {
+        return (None, "multiple_inputs");
+    }
+    let entities = batch
+        .metadata()
+        .attributes()
+        .get(DATAFUSION_ACTIVE_ENTITIES_METADATA_KEY)
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok());
+    (entities, "batch_metadata")
+}
+
+fn raw_limit_reason(effective_partitions: usize, configured_partitions: usize) -> String {
+    if effective_partitions < configured_partitions {
+        "minimum_rows_per_partition"
+    } else {
+        "configured_target_partitions"
+    }
+    .to_owned()
+}
+
+fn raw_partition_rows(statistics: &PlanStatistics) -> Vec<usize> {
+    if statistics.window_partition_rows.is_empty() {
+        statistics.partition_rows.clone()
+    } else {
+        statistics.window_partition_rows.clone()
+    }
+}
+
+fn input_mem_table(batch: &Batch) -> BenchResult<MemTable> {
+    let records = batch.table_payload()?;
+    Ok(MemTable::try_new(
+        Arc::clone(records.schema()),
+        vec![records.batches().to_vec()],
+    )?)
+}
+
+fn masks_match(
+    calc: &Float64Array,
+    raw: &Float64Array,
+    calc_index: usize,
+    raw_index: usize,
+) -> bool {
+    calc.is_null(calc_index) == raw.is_null(raw_index)
+        && (calc.is_null(calc_index)
+            || calc.value(calc_index).is_nan() == raw.value(raw_index).is_nan())
+}
+
+fn values_match(
+    calc: &Float64Array,
+    raw: &Float64Array,
+    calc_index: usize,
+    raw_index: usize,
+) -> bool {
+    if calc.is_null(calc_index) || raw.is_null(raw_index) {
+        return calc.is_null(calc_index) == raw.is_null(raw_index);
+    }
+    let left = calc.value(calc_index);
+    let right = raw.value(raw_index);
+    (left.is_nan() && right.is_nan())
+        || left.to_bits() == right.to_bits()
+        || (left - right).abs() <= ATOL + RTOL * right.abs()
+}
+
+struct TimedPair {
+    calc: Vec<Sample>,
+    raw: Vec<Sample>,
+    order: Vec<String>,
+}
+
+fn assemble_case_evidence(
+    args: &Args,
+    workload: &Workload,
+    correctness: Correctness,
+    output_rows: usize,
+    batch: &Batch,
+    samples: TimedPair,
+) -> BenchResult<CaseEvidence> {
+    let input_batch_rows = batch
+        .table_payload()?
+        .batches()
+        .iter()
+        .map(RecordBatch::num_rows)
+        .collect::<Vec<_>>();
+    let calc_evidence = engine_evidence(&samples.calc, &input_batch_rows, output_rows)?;
+    let raw_evidence = engine_evidence(&samples.raw, &input_batch_rows, output_rows)?;
+    let mismatches = comparability_mismatches(&calc_evidence, &raw_evidence);
+    let comparable = mismatches.is_empty();
+    let ratios = calc_evidence
+        .samples_ms
+        .iter()
+        .zip(&raw_evidence.samples_ms)
+        .map(|(calc, raw)| calc / raw)
+        .collect::<Vec<_>>();
+    let (paired_ratio_ci_low, paired_ratio_ci_high) = bootstrap_median_interval(&ratios);
+    let paired_ratio_median = median(&ratios);
+    Ok(CaseEvidence {
+        name: workload.name.to_owned(),
+        rows: args.rows,
+        active_entities: args.entities,
+        window: workload.window,
+        output_rows,
+        warmups: args.warmups,
+        rolling_rewrite_enabled: false,
+        sample_order: samples.order,
+        calc_flow: calc_evidence,
+        raw_datafusion: raw_evidence,
+        paired_ratios: ratios,
+        paired_ratio_median,
+        paired_ratio_ci_low,
+        paired_ratio_ci_high,
+        correctness,
+        comparability: Comparability {
+            comparable,
+            mismatches,
+        },
+        speedup_conclusion: comparable
+            .then(|| format!("calc_flow_over_raw={paired_ratio_median:.6}x")),
+    })
+}
+
+fn concat_pair(
+    calc_table: &calc_flow::TableBatch,
+    raw_table: &calc_flow::TableBatch,
+) -> BenchResult<(RecordBatch, RecordBatch)> {
+    Ok((
+        concat_batches(calc_table.schema(), calc_table.batches())?,
+        concat_batches(raw_table.schema(), raw_table.batches())?,
+    ))
+}
+
+type CanonicalPair = (Vec<(RowKey, usize)>, Vec<(RowKey, usize)>);
+
+fn canonical_pair(
+    calc_batch: &RecordBatch,
+    raw_batch: &RecordBatch,
+    identity: RowIdentity,
+) -> BenchResult<CanonicalPair> {
+    Ok((
+        canonical_rows(calc_batch, identity)?,
+        canonical_rows(raw_batch, identity)?,
+    ))
+}
+
+fn compare_outputs(calc: &Batch, raw: &Batch, workload: &Workload) -> BenchResult<Correctness> {
     // Schema, keys, null/NaN masks, and numeric values are one conjunctive
     // correctness result for each measured pair.
     // #lizard forgives
@@ -1250,10 +1630,8 @@ fn compare_outputs(calc: &Batch, raw: &Batch, output_column: &str) -> BenchResul
     let raw_table = raw.table_payload()?;
     let schema = calc_table.schema() == raw_table.schema();
     let rows = calc.num_rows() == raw.num_rows();
-    let calc_batch = concat_batches(calc_table.schema(), calc_table.batches())?;
-    let raw_batch = concat_batches(raw_table.schema(), raw_table.batches())?;
-    let calc_rows = canonical_rows(&calc_batch)?;
-    let raw_rows = canonical_rows(&raw_batch)?;
+    let (calc_batch, raw_batch) = concat_pair(calc_table, raw_table)?;
+    let (calc_rows, raw_rows) = canonical_pair(&calc_batch, &raw_batch, workload.identity)?;
     let keys = calc_rows
         .iter()
         .map(|(key, _)| key)
@@ -1262,26 +1640,17 @@ fn compare_outputs(calc: &Batch, raw: &Batch, output_column: &str) -> BenchResul
     // unique-key order outside the timed envelope so partition scheduling
     // cannot masquerade as a correctness failure.
     let order = keys;
-    let calc_values = float_column(&calc_batch, output_column)?;
-    let raw_values = float_column(&raw_batch, output_column)?;
+    let calc_values = float_column(&calc_batch, workload.output_column)?;
+    let raw_values = float_column(&raw_batch, workload.output_column)?;
     let mut aligned_indices = calc_rows
         .iter()
         .map(|(_, index)| *index)
         .zip(raw_rows.iter().map(|(_, index)| *index));
-    let null_nan_mask = aligned_indices.clone().all(|(calc_index, raw_index)| {
-        calc_values.is_null(calc_index) == raw_values.is_null(raw_index)
-            && (calc_values.is_null(calc_index)
-                || calc_values.value(calc_index).is_nan() == raw_values.value(raw_index).is_nan())
-    });
+    let null_nan_mask = aligned_indices
+        .clone()
+        .all(|(calc_index, raw_index)| masks_match(calc_values, raw_values, calc_index, raw_index));
     let values = aligned_indices.all(|(calc_index, raw_index)| {
-        if calc_values.is_null(calc_index) || raw_values.is_null(raw_index) {
-            return calc_values.is_null(calc_index) == raw_values.is_null(raw_index);
-        }
-        let left = calc_values.value(calc_index);
-        let right = raw_values.value(raw_index);
-        (left.is_nan() && right.is_nan())
-            || left.to_bits() == right.to_bits()
-            || (left - right).abs() <= ATOL + RTOL * right.abs()
+        values_match(calc_values, raw_values, calc_index, raw_index)
     });
     Ok(Correctness {
         schema,
@@ -1295,15 +1664,37 @@ fn compare_outputs(calc: &Batch, raw: &Batch, output_column: &str) -> BenchResul
     })
 }
 
-type RowKey = (String, i64, u64);
+/// The canonical output row key for one workload identity kind.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum RowKey {
+    Row(String, i64, u64),
+    Group(String),
+}
 
-fn canonical_rows(batch: &RecordBatch) -> BenchResult<Vec<(RowKey, usize)>> {
+fn canonical_rows(batch: &RecordBatch, identity: RowIdentity) -> BenchResult<Vec<(RowKey, usize)>> {
     let symbols = batch
         .column_by_name("symbol")
         .ok_or("symbol column is missing")?
         .as_any()
         .downcast_ref::<StringArray>()
         .ok_or("symbol column is not Utf8")?;
+    let mut rows = match identity {
+        RowIdentity::Group => (0..batch.num_rows())
+            .map(|index| (RowKey::Group(symbols.value(index).to_owned()), index))
+            .collect::<Vec<_>>(),
+        RowIdentity::Row => row_identity_keys(batch, symbols)?,
+    };
+    rows.sort_by(|left, right| left.0.cmp(&right.0));
+    if rows.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err("benchmark row identity is not unique".into());
+    }
+    Ok(rows)
+}
+
+fn row_identity_keys(
+    batch: &RecordBatch,
+    symbols: &StringArray,
+) -> BenchResult<Vec<(RowKey, usize)>> {
     let event_times = batch
         .column_by_name("event_time")
         .ok_or("event_time column is missing")?
@@ -1316,10 +1707,10 @@ fn canonical_rows(batch: &RecordBatch) -> BenchResult<Vec<(RowKey, usize)>> {
         .as_any()
         .downcast_ref::<UInt64Array>()
         .ok_or("sequence column is not UInt64")?;
-    let mut rows = (0..batch.num_rows())
+    Ok((0..batch.num_rows())
         .map(|index| {
             (
-                (
+                RowKey::Row(
                     symbols.value(index).to_owned(),
                     event_times.value(index),
                     sequences.value(index),
@@ -1327,12 +1718,7 @@ fn canonical_rows(batch: &RecordBatch) -> BenchResult<Vec<(RowKey, usize)>> {
                 index,
             )
         })
-        .collect::<Vec<_>>();
-    rows.sort_by(|left, right| left.0.cmp(&right.0));
-    if rows.windows(2).any(|pair| pair[0].0 == pair[1].0) {
-        return Err("benchmark row identity is not unique".into());
-    }
-    Ok(rows)
+        .collect::<Vec<_>>())
 }
 
 fn float_column<'a>(batch: &'a RecordBatch, name: &str) -> BenchResult<&'a Float64Array> {
@@ -1616,7 +2002,7 @@ async fn timed_sample_drops_output(
     workload: &Workload,
 ) -> BenchResult<()> {
     let plan = build_plan(config(args), workload)?;
-    let (sample, retained) = calc_flow_sample(&plan, batch, false).await?;
+    let (sample, retained) = calc_flow_sample(&plan, batch, None, false).await?;
     if retained.is_some() {
         return Err("timed Calc Flow sample retained its output batch".into());
     }
@@ -1635,45 +2021,125 @@ async fn run_sample_retention_tests() -> BenchResult<()> {
     let batch = benchmark_batch(records, args.entities)?;
     let workload = &workloads()[0];
     timed_sample_drops_output(&args, &batch, workload).await?;
-    let case = benchmark_case(&args, workload, &batch).await?;
+    let case = benchmark_case(&args, workload, &batch, None).await?;
     if !correctness_is_complete(&case.correctness) {
         return Err("retention restructure lost the warm-up correctness pair".into());
     }
     Ok(())
 }
 
+#[cfg(test)]
+fn operator_output_rows_are_expected(name: &str, output_rows: usize, args: &Args) -> bool {
+    match name {
+        "projection" | "join" => output_rows == args.rows,
+        "group_by" => output_rows == args.entities,
+        "filter" => output_rows > 0 && output_rows < args.rows,
+        _ => false,
+    }
+}
+
+async fn operator_workload_case_is_valid(
+    args: &Args,
+    workload: &Workload,
+    batch: &Batch,
+    dimension: &Batch,
+) -> BenchResult<()> {
+    let case_dimension = workload.dimension.then_some(dimension);
+    let case = benchmark_case(args, workload, batch, case_dimension).await?;
+    if !correctness_is_complete(&case.correctness) {
+        return Err(format!("operator workload {:?} lost correctness", workload.name).into());
+    }
+    if !case.comparability.comparable {
+        return Err(format!(
+            "operator workload {:?} is not comparable: {:?}",
+            workload.name, case.comparability.mismatches
+        )
+        .into());
+    }
+    if !operator_output_rows_are_expected(workload.name, case.output_rows, args) {
+        return Err(format!(
+            "operator workload {:?} recorded unexpected output rows {}",
+            workload.name, case.output_rows
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn require_operator_workloads() -> BenchResult<()> {
+    let names = workloads().map(|workload| workload.name);
+    let missing = ["projection", "filter", "group_by", "join"]
+        .into_iter()
+        .filter(|expected| !names.contains(expected))
+        .collect::<Vec<_>>();
+    match missing.as_slice() {
+        [] => Ok(()),
+        [first, ..] => Err(format!("operator workload {first:?} is missing").into()),
+    }
+}
+
+async fn run_operator_workload_tests() -> BenchResult<()> {
+    // The operator scenarios extend the rolling pair with row-local,
+    // cardinality-changing, and two-input SQL shapes; each must stay correct,
+    // comparable, and record its true output cardinality.
+    require_operator_workloads()?;
+    let args = retention_case_args(workspace_root()?);
+    let records = input_batches(args.rows, args.entities, args.batch_size)?;
+    let batch = benchmark_batch(records, args.entities)?;
+    let dimension = benchmark_dimension_batch(args.entities)?;
+    for workload in workloads().iter().filter(|workload| workload.window == 0) {
+        operator_workload_case_is_valid(&args, workload, &batch, &dimension).await?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+async fn run_bench_self_tests() -> BenchResult<()> {
+    if let Err(error) = run_output_anchor_tests() {
+        eprintln!("sql_datafusion_performance output-anchor tests: {error}");
+        std::process::exit(1);
+    }
+    #[cfg(target_os = "linux")]
+    if let Err(error) = run_rss_window_tests() {
+        eprintln!("sql_datafusion_performance rss-window tests: {error}");
+        std::process::exit(1);
+    }
+    if let Err(error) = run_sample_retention_tests().await {
+        eprintln!("sql_datafusion_performance sample-retention tests: {error}");
+        std::process::exit(1);
+    }
+    if let Err(error) = run_operator_workload_tests().await {
+        eprintln!("sql_datafusion_performance operator-workload tests: {error}");
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+async fn run_all_workloads(args: &Args) -> BenchResult<Vec<CaseEvidence>> {
+    let records = input_batches(args.rows, args.entities, args.batch_size)?;
+    let batch = benchmark_batch(records, args.entities)?;
+    let dimension = benchmark_dimension_batch(args.entities)?;
+    let mut cases = Vec::new();
+    for workload in workloads() {
+        let case_dimension = workload.dimension.then_some(&dimension);
+        cases.push(benchmark_case(args, &workload, &batch, case_dimension).await?);
+    }
+    Ok(cases)
+}
+
 #[tokio::main]
 async fn main() -> BenchResult<()> {
     // Benchmark setup, both workload cases, provenance, and atomic publication
     // remain one top-level evidence lifecycle.
-    // #lizard forgives
     #[cfg(test)]
     let self_test = std::env::args_os().len() == 1; // nosemgrep
     #[cfg(test)]
     if self_test {
-        if let Err(error) = run_output_anchor_tests() {
-            eprintln!("sql_datafusion_performance output-anchor tests: {error}");
-            std::process::exit(1);
-        }
-        #[cfg(target_os = "linux")]
-        if let Err(error) = run_rss_window_tests() {
-            eprintln!("sql_datafusion_performance rss-window tests: {error}");
-            std::process::exit(1);
-        }
-        if let Err(error) = run_sample_retention_tests().await {
-            eprintln!("sql_datafusion_performance sample-retention tests: {error}");
-            std::process::exit(1);
-        }
-        return Ok(());
+        return run_bench_self_tests().await;
     }
 
     let args = Args::parse()?;
-    let records = input_batches(args.rows, args.entities, args.batch_size)?;
-    let batch = benchmark_batch(records, args.entities)?;
-    let mut cases = Vec::new();
-    for workload in workloads() {
-        cases.push(benchmark_case(&args, &workload, &batch).await?);
-    }
+    let cases = run_all_workloads(&args).await?;
     let report = Report {
         schema_version: 1,
         git_sha: command_output("git", &["rev-parse", "HEAD^{commit}"])?,

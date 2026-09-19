@@ -14,6 +14,13 @@
       "candidate_sha256": "44ad304f5ab43fed6248baac7824ef925d82c42436a852fd9f27e66e74b5ad83",
       "reason": "harness measurement only: kernel VmHWM peak-RSS window replaces the polling sampler and timed samples no longer retain output batches; measured workloads unchanged",
       "reference": "DAL-276 / PR #293"
+    },
+    {
+      "target": "sql_datafusion_performance",
+      "baseline_sha256": "44ad304f5ab43fed6248baac7824ef925d82c42436a852fd9f27e66e74b5ad83",
+      "candidate_sha256": "857973f8cccd66996cbddae7617c8d7bef9a58676684580d17e2c437f71f35a6",
+      "reason": "workload extension: add projection/filter/group_by/join operator scenarios with per-case output_rows evidence and the join dimension side input; existing rolling workloads unchanged. Candidate updated for the follow-up self-test restructuring in the same PR",
+      "reference": "DAL-277"
     }
   ]
 }

@@ -60,7 +60,7 @@ async def run_shard(args: argparse.Namespace) -> int:
         }
         report["releases"] = releases
         if shard["family"] in ("engines", "warm"):
-            report = await measure_shard(shard, releases, output)
+            report = await measure_shard(shard, releases, output, args.baseline_source)
         else:
             from scripts.benchmark_suite.legacy import measure_legacy
 

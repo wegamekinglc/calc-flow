@@ -7,7 +7,13 @@ from pathlib import Path
 
 import numpy as np
 
-from scripts.benchmark_suite.catalog import CONTRACT, THREADS, shard_cases
+from scripts.benchmark_suite.catalog import (
+    CONTRACT,
+    THREADS,
+    baseline_case_ids,
+    comparison_kind,
+    shard_cases,
+)
 from scripts.benchmark_suite.process import Worker, install
 from scripts.benchmark_suite.provenance import harness_sha256
 from scripts.benchmark_suite.report import ROUNDS, SAMPLES, comparison
@@ -101,9 +107,10 @@ async def _round(case: dict, sites: dict, releases: dict, root: Path) -> dict:
             await worker.close()
 
 
-async def measure_case(case: dict, sites: dict, releases: dict, root: Path) -> dict:
-    external = not case["backend"].startswith("calc-flow")
-    selected = {"candidate": sites["candidate"]} if external else sites
+async def measure_case(
+    case: dict, kind: str, sites: dict, releases: dict, root: Path
+) -> dict:
+    selected = sites if kind == "interleaved" else {"candidate": sites["candidate"]}
     evidence = []
     try:
         for index in range(ROUNDS):
@@ -112,7 +119,7 @@ async def measure_case(case: dict, sites: dict, releases: dict, root: Path) -> d
             )
         if evidence[0]["environment"] != evidence[1]["environment"]:
             raise ValueError("confirmation-round environment changed")
-        row = _measured_row(case, evidence, external)
+        row = _measured_row(case, evidence, kind)
         return {**row, "result": comparison(row)}
     except Exception as error:
         return {
@@ -129,29 +136,35 @@ def _sample_seconds(evidence: list[dict], side: str) -> list[list[float]]:
     ]
 
 
-def _measured_row(case: dict, evidence: list[dict], external: bool) -> dict:
+def _measured_row(case: dict, evidence: list[dict], kind: str) -> dict:
     return {
         **case,
         "status": "ok",
         "correctness": True,
-        "comparison": "external" if external else "interleaved",
-        "baseline": [] if external else _sample_seconds(evidence, "baseline"),
+        "comparison": kind,
+        "baseline": (
+            _sample_seconds(evidence, "baseline") if kind == "interleaved" else []
+        ),
         "candidate": _sample_seconds(evidence, "candidate"),
         "evidence": evidence,
     }
 
 
-async def measure_shard(shard: dict, releases: dict, root: Path) -> dict:
+async def measure_shard(
+    shard: dict, releases: dict, root: Path, baseline_source: Path | None
+) -> dict:
     root.mkdir(parents=True, exist_ok=True)
     sites = {
         side: await install(release, root / side) for side, release in releases.items()
     }
+    baseline_ids = baseline_case_ids(baseline_source, shard)
     cases = shard_cases(shard)
     report = {
         "contract": CONTRACT,
         "harness_sha256": harness_sha256(),
         "shard": shard,
         "releases": releases,
+        "baseline_case_ids": None if baseline_ids is None else sorted(baseline_ids),
         "cases": [],
         "errors": [],
     }
@@ -159,7 +172,8 @@ async def measure_shard(shard: dict, releases: dict, root: Path) -> dict:
     for index in order:
         case = cases[int(index)]
         print(f"Measuring {case['id']}", flush=True)
-        row = await measure_case(case, sites, releases, root / f"case-{index}")
+        kind = comparison_kind(case, baseline_ids)
+        row = await measure_case(case, kind, sites, releases, root / f"case-{index}")
         report["cases"].append(row)
         (root / "results.json").write_text(
             json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8"

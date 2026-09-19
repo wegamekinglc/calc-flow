@@ -1,13 +1,39 @@
 from __future__ import annotations
 
+import json
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from scripts.benchmark_suite.legacy import combine_blocks
 from scripts.benchmark_suite.rust import (
     _stamp_fingerprints,
     _with_fingerprints,
     allocation_rows,
+    clear_stale_bench_binary,
+    sql_rows,
 )
+
+
+def legacy_sql_report() -> dict:
+    """A baseline report shape from before the output_rows contract."""
+
+    samples = [70.0] * 20
+    engine = {"samples_ms": samples}
+    return {
+        "schema_version": 1,
+        "cases": [
+            {
+                "name": "sma_20",
+                "rows": 1_000_000,
+                "window": 20,
+                "correctness": {"values": True},
+                "calc_flow": engine,
+                "raw_datafusion": engine,
+            }
+        ],
+        "environment": {"machine_fingerprint": "machine"},
+    }
 
 
 def reports():
@@ -49,6 +75,51 @@ def suite_block(workload_fingerprint: str, migration: str | None = None) -> dict
 
 
 class BenchmarkRustTests(unittest.TestCase):
+    def test_stale_bench_binaries_are_removed_before_each_build(self):
+        with TemporaryDirectory() as directory:
+            shared = Path(directory) / "release/deps"
+            shared.mkdir(parents=True)
+            stale = shared / "sql_datafusion_performance-deadbeef"
+            stale.write_bytes(b"stale")
+            keep = shared / "core-other"
+            keep.write_bytes(b"keep")
+            clear_stale_bench_binary(shared.parent.parent, "sql_datafusion_performance")
+            self.assertFalse(stale.exists())
+            self.assertTrue(keep.exists())
+
+    def test_baseline_sql_rows_read_the_frozen_legacy_contract(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "sql.json"
+            path.write_text(json.dumps(legacy_sql_report()), encoding="utf-8")
+            rows = sql_rows(path, side="baseline")
+        self.assertEqual(
+            sorted(rows),
+            [
+                "sql_datafusion_performance/sma_20/calc_flow",
+                "sql_datafusion_performance/sma_20/raw_datafusion",
+            ],
+        )
+        row = rows["sql_datafusion_performance/sma_20/calc_flow"]
+        self.assertEqual(row["rows"], 1_000_000)
+        self.assertEqual(len(row["samples"]), 20)
+
+    def test_candidate_sql_rows_keep_the_strict_verifier_contract(self):
+        report = legacy_sql_report()
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "sql.json"
+            path.write_text(json.dumps(report), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                sql_rows(path, side="candidate")
+
+    def test_baseline_sql_rows_reject_incomplete_samples(self):
+        report = legacy_sql_report()
+        report["cases"][0]["calc_flow"]["samples_ms"] = [70.0] * 19
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "sql.json"
+            path.write_text(json.dumps(report), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "incomplete"):
+                sql_rows(path, side="baseline")
+
     def test_zero_allocation_counts_remain_valid_metric_rows(self):
         rows = allocation_rows(reports())
         self.assertEqual(len(rows), 2)

@@ -13,7 +13,7 @@ from benchmarks.engine_comparison import (
     sql_query,
     workload,
 )
-from scripts.benchmark_suite.catalog import engine_cases
+from scripts.benchmark_suite.catalog import STREAM_CASES, engine_cases
 
 
 def test_sql_queries_reject_unknown_scenario_names():
@@ -41,7 +41,7 @@ def test_polars_samples_collect_through_the_streaming_engine(monkeypatch):
     assert result == pa.table({"value": [1.0]})
 
 
-@pytest.mark.parametrize("scenario", ["sma20", "dual_sma"])
+@pytest.mark.parametrize("scenario", STREAM_CASES)
 def test_ready_stream_repeated_samples_use_fresh_execution_plans(scenario, tmp_path):
     case = next(
         case
@@ -57,7 +57,7 @@ def test_ready_stream_repeated_samples_use_fresh_execution_plans(scenario, tmp_p
 
 
 @pytest.mark.parametrize("count", [64_001, 128_000])
-@pytest.mark.parametrize("scenario", ["sma20", "dual_sma"])
+@pytest.mark.parametrize("scenario", STREAM_CASES)
 def test_ready_stream_finalizes_every_chunk_before_eof(count, scenario, tmp_path):
     case = next(
         case
@@ -69,7 +69,10 @@ def test_ready_stream_finalizes_every_chunk_before_eof(count, scenario, tmp_path
         for _ in range(2):
             sample = runner.sample()
             assert sample["seconds"] > 0
-            assert sample["correctness"]["rows"] == count
+            # The stream output cardinality matches the scenario oracle: one
+            # row per input for row-local scenarios, one row per group for
+            # group_by, and the filtered count for filter.
+            assert sample["correctness"]["rows"] == runner.expected.num_rows
             assert sample["correctness"]["finite_rows"] > 0
     finally:
         runner.close()

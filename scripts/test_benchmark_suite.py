@@ -4,8 +4,11 @@ import math
 import unittest
 from copy import deepcopy
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
-from scripts.benchmark_suite.catalog import engine_cases, shards
+from scripts.benchmark_suite import catalog
+from scripts.benchmark_suite.catalog import baseline_case_ids, engine_cases, shards
+from scripts.benchmark_suite.legacy import combine_blocks
 from scripts.benchmark_suite.report import comparison, render_report, validate_shards
 
 
@@ -73,6 +76,78 @@ class BenchmarkSuiteTests(unittest.TestCase):
     def test_native_stream_matrix_excludes_runner_startup(self):
         cases = [c for c in engine_cases() if c["backend"] == "calc-flow-stream"]
         self.assertEqual({c["scope"] for c in cases}, {"ready-enqueue-to-arrow"})
+
+    def test_baseline_case_ids_match_the_real_catalog(self):
+        root = Path(__file__).resolve().parents[1]
+        self.assertEqual(
+            baseline_case_ids(root, {"family": "engines"}),
+            frozenset(case["id"] for case in engine_cases()),
+        )
+        self.assertEqual(
+            baseline_case_ids(root, {"family": "warm"}),
+            frozenset(
+                case["id"]
+                for history in catalog.ROW_SCALES
+                for case in catalog.warm_cases(history)
+            ),
+        )
+
+    def test_baseline_case_ids_fail_closed_without_declarative_constants(self):
+        with TemporaryDirectory() as directory:
+            base = Path(directory)
+            catalog_path = base / "scripts/benchmark_suite/catalog.py"
+            catalog_path.parent.mkdir(parents=True)
+            catalog_path.write_text("ROW_SCALES = computed_at_runtime()\n")
+            self.assertIsNone(baseline_case_ids(base, {"family": "engines"}))
+            self.assertIsNone(baseline_case_ids(None, {"family": "engines"}))
+
+    def test_new_candidate_benchmarks_are_new_coverage_not_errors(self):
+        def block(names):
+            return {
+                name: {
+                    "samples": [1.0],
+                    "rows": 10,
+                    "scope": "native-sql-paired-boundary",
+                    "metadata": {"workload_fingerprint": "f"},
+                }
+                for name in names
+            }
+
+        shared = "sql_datafusion_performance/sma_20/calc_flow"
+        added = "sql_datafusion_performance/filter/calc_flow"
+        blocks = {
+            "baseline": [block([shared]), block([shared])],
+            "candidate": [block([shared, added]), block([shared, added])],
+        }
+        rows = combine_blocks({"id": "rust", "family": "rust"}, blocks)
+        by_scenario = {row["scenario"]: row for row in rows}
+        self.assertEqual(by_scenario[added]["status"], "ok")
+        self.assertEqual(by_scenario[added]["result"]["verdict"], "new-coverage")
+        self.assertEqual(by_scenario[added]["baseline"], [])
+        self.assertEqual(by_scenario[shared]["status"], "ok")
+        self.assertNotEqual(by_scenario[shared]["result"]["verdict"], "new-coverage")
+
+    def test_removed_benchmarks_still_fail_the_confirmation_blocks(self):
+        def block(names):
+            return {
+                name: {
+                    "samples": [1.0],
+                    "rows": 10,
+                    "scope": "native-sql-paired-boundary",
+                    "metadata": {"workload_fingerprint": "f"},
+                }
+                for name in names
+            }
+
+        shared = "sql_datafusion_performance/sma_20/calc_flow"
+        removed = "sql_datafusion_performance/old_workload/calc_flow"
+        blocks = {
+            "baseline": [block([shared, removed]), block([shared, removed])],
+            "candidate": [block([shared]), block([shared])],
+        }
+        rows = combine_blocks({"id": "rust", "family": "rust"}, blocks)
+        removed_row = next(row for row in rows if row["scenario"] == removed)
+        self.assertEqual(removed_row["status"], "error")
 
     def test_regression_requires_both_confirmation_rounds(self):
         failed = comparison(measured_case(candidate=[[1.1] * 10] * 2))
@@ -319,6 +394,23 @@ class BenchmarkSuiteTests(unittest.TestCase):
     def test_external_comparison_is_not_a_version_regression(self):
         row = measured_case(backend="ta-lib", baseline=[], comparison="external")
         self.assertEqual(comparison(row)["verdict"], "external-reference")
+
+    def test_cases_absent_from_the_baseline_catalog_are_new_coverage(self):
+        row = measured_case(
+            id="engines/10000/calc-flow-stream/group_by", comparison="new", baseline=[]
+        )
+        self.assertEqual(comparison(row)["verdict"], "new-coverage")
+
+    def test_comparison_kind_follows_the_baseline_catalog_membership(self):
+        from scripts.benchmark_suite.catalog import comparison_kind
+
+        case = measured_case(id="engines/10000/calc-flow-stream/group_by")
+        known = frozenset({"engines/10000/calc-flow-stream/group_by"})
+        self.assertEqual(comparison_kind(case, known), "interleaved")
+        self.assertEqual(comparison_kind(case, frozenset()), "new")
+        self.assertEqual(comparison_kind(case, None), "interleaved")
+        external = measured_case(backend="ta-lib")
+        self.assertEqual(comparison_kind(external, known), "external")
 
     def test_exact_threshold_is_not_a_roundoff_regression(self):
         result = comparison(measured_case(candidate=[[1.05] * 10] * 2))

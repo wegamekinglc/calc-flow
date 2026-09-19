@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import re
 
-from scripts.benchmark_suite.catalog import CONTRACT, THREADS, get_shard, shard_cases
+from scripts.benchmark_suite.catalog import (
+    CONTRACT,
+    THREADS,
+    comparison_kind,
+    get_shard,
+    shard_cases,
+)
 from scripts.benchmark_suite.provenance import harness_sha256
 from scripts.benchmark_suite.report import SAMPLES, comparison, validate_shards
 
@@ -49,7 +55,9 @@ def validate_releases(releases: dict, base: str, head: str) -> None:
 
 def _validate_round(case: dict, evidence: dict, releases: dict) -> None:
     sides = (
-        {"candidate"} if case["comparison"] == "external" else {"baseline", "candidate"}
+        {"candidate"}
+        if case["comparison"] in ("external", "new")
+        else {"baseline", "candidate"}
     )
     if set(evidence["samples"]) != sides:
         raise ValueError("measured worker roles differ from the comparison contract")
@@ -106,7 +114,7 @@ def _validate_evidence(case: dict, releases: dict) -> None:
 
 
 def _evidence_seconds(case: dict, side: str) -> list[list[float]]:
-    if side == "baseline" and case["comparison"] == "external":
+    if side == "baseline" and case["comparison"] in ("external", "new"):
         return []
     return [
         [sample["seconds"] for sample in evidence["samples"].get(side, [])]
@@ -121,9 +129,12 @@ def _validate_catalog_cases(report: dict, shard: dict) -> None:
             raise ValueError(f"{case['id']}: workload dimensions changed")
         if case["status"] != "ok":
             continue
-        kind = "interleaved" if case["backend"].startswith("calc-flow") else "external"
+        baseline_ids = report.get("baseline_case_ids")
+        kind = comparison_kind(
+            case, None if baseline_ids is None else frozenset(baseline_ids)
+        )
         if case["comparison"] != kind:
-            raise ValueError("comparison kind differs from the backend contract")
+            raise ValueError("comparison kind differs from the baseline catalog")
         _validate_evidence(case, report["releases"])
 
 
