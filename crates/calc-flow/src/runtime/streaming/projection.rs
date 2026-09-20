@@ -654,12 +654,41 @@ fn operator_failure_fields(
     Option<ComponentKind>,
     Option<String>,
 ) {
+    let message = if let Some(detail) = operator_reason_detail(error) {
+        format!("{fallback}: {detail}")
+    } else {
+        static_input_null_message(error).unwrap_or(fallback)
+    };
     (
         StreamingErrorCategory::Operator,
-        static_input_null_message(error).unwrap_or(fallback),
+        message,
         Some(ComponentKind::Operator),
         Some(node_id.into()),
     )
+}
+
+/// Engine-authored operator detail appended to the node-prefixed failure
+/// message so `OperatorReason` causes stay diagnosable on every surface.
+fn operator_reason_detail(error: &CalcFlowError) -> Option<String> {
+    let CalcFlowError::OperatorReason {
+        reason_code,
+        message,
+        ..
+    } = error
+    else {
+        return None;
+    };
+    Some(format!(
+        "{message} (reason: {})",
+        reason_code_text(*reason_code)
+    ))
+}
+
+fn reason_code_text(reason: StreamingFailureReason) -> String {
+    match serde_json::to_value(reason) {
+        Ok(serde_json::Value::String(code)) => code,
+        _ => "unknown".into(),
+    }
 }
 
 fn static_input_null_message(error: &CalcFlowError) -> Option<String> {
@@ -684,11 +713,10 @@ fn preflight_failure_fields(
         return invalid_argument_failure_fields(field, message);
     }
     if let CalcFlowError::OperatorReason { node_id, .. } = error {
-        return (
-            StreamingErrorCategory::Operator,
+        return operator_failure_fields(
+            node_id,
+            error,
             format!("operator {node_id:?} execution failed"),
-            Some(ComponentKind::Operator),
-            Some(node_id.clone()),
         );
     }
     let category = match error {
@@ -1863,6 +1891,54 @@ mod tests {
                 .unwrap()
                 .contains("\"reason_code\":\"join_state_limit_exceeded\"")
         );
+    }
+
+    #[test]
+    fn operator_reason_failures_surface_message_and_reason_code_on_every_origin() {
+        let reason = |origin| {
+            Arc::new(RuntimeFailure {
+                origin,
+                error: CalcFlowError::OperatorReason {
+                    node_id: "asof".into(),
+                    reason_code: StreamingFailureReason::AsofWorkspaceLimitExceeded,
+                    message: "ASOF aggregate workspace exceeds max_state_bytes".into(),
+                },
+            })
+        };
+        let failures = vec![
+            reason(FailureOrigin::OperatorEntry {
+                node_id: "asof".into(),
+            }),
+            reason(FailureOrigin::Task {
+                task_id: TaskId::new(5),
+                task_name: "operator:asof".into(),
+            }),
+            reason(FailureOrigin::Preflight),
+        ];
+
+        let projected = project_runtime_failures(17, failures, None);
+        let detail = ": ASOF aggregate workspace exceeds max_state_bytes (reason: asof_workspace_limit_exceeded)";
+        assert_eq!(
+            projected[0].message(),
+            format!("operator \"asof\" entry failed{detail}")
+        );
+        assert_eq!(
+            projected[1].message(),
+            format!("operator \"asof\" execution failed{detail}")
+        );
+        assert_eq!(
+            projected[2].message(),
+            format!("operator \"asof\" execution failed{detail}")
+        );
+        for error in &projected {
+            assert_eq!(error.category(), StreamingErrorCategory::Operator);
+            assert_eq!(
+                error.reason_code(),
+                Some(StreamingFailureReason::AsofWorkspaceLimitExceeded)
+            );
+            assert_eq!(error.component_kind(), Some(ComponentKind::Operator));
+            assert_eq!(error.component_id(), Some("asof"));
+        }
     }
 
     #[test]
