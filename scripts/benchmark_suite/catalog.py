@@ -10,9 +10,9 @@ LEGACY_SCALES = ("overhead", "small", "standard")
 SQL_CASES = ("projection", "filter", "group_by", "join", "sma20", "dual_sma")
 ROLLING_CASES = SQL_CASES[-2:]
 # The native streaming column covers every SQL scenario except `join`: the
-# bounded inner stream join emits one output stream message per matched row,
-# so the 10,000,000-row engine scale cannot complete inside the suite budget.
-# Revisit after the join operator gains batched output emission.
+# bounded inner stream join emits batched output, so the exclusion is a suite
+# coverage boundary rather than an engine limit; whether to add the scenario
+# is the suite owner's decision.
 STREAM_CASES = ("projection", "filter", "group_by", "sma20", "dual_sma")
 CAPABILITIES = {
     "calc-flow-sql": SQL_CASES,
