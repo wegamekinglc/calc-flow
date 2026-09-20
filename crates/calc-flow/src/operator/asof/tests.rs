@@ -1,11 +1,14 @@
 use super::*;
-use crate::{BatchMetadata, CancellationToken, EdgeBudget, EdgeCollector, Epoch, StreamJobContext};
+use crate::{
+    BatchMetadata, CancellationToken, EdgeBudget, EdgeCollector, Epoch, IngressProgress,
+    IngressState, StreamJobContext,
+};
 use datafusion::arrow::{
     array::{Float64Array, Int64Array, StringArray, TimestampMicrosecondArray, UInt64Array},
     datatypes::{DataType, Field, Schema, TimeUnit},
     record_batch::RecordBatch,
 };
-use std::{sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 struct LateMetrics;
 impl crate::operator::stream::LateMetricSink for LateMetrics {
@@ -170,6 +173,103 @@ async fn ten_thousand_row_admission_fits_the_recommended_workspace_limits() {
     assert_eq!(operator.status.left.accepted_rows, rows);
     assert_eq!(operator.status.pending_left_rows, rows);
     assert_eq!(operator.runtime.pool.reserved(), 0);
+}
+
+#[tokio::test]
+async fn watermark_tick_without_eviction_reuses_the_prepared_segment() {
+    // A watermark tick that neither admits, removes nor evicts anything must
+    // not re-encode state: the previously installed segment stays installed.
+    let (mut op, _) = fixture();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("key", DataType::Utf8, false),
+        Field::new(
+            "time",
+            DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+            false,
+        ),
+        Field::new("seq", DataType::Int64, false),
+    ]));
+    let right = Batch::table(
+        vec![
+            RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(StringArray::from(vec!["A", "A"])),
+                    Arc::new(TimestampMicrosecondArray::from(vec![100, 200]).with_timezone("UTC")),
+                    Arc::new(Int64Array::from(vec![1, 2])),
+                ],
+            )
+            .unwrap(),
+        ],
+        BatchMetadata::default(),
+    )
+    .unwrap();
+    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+    let mut output = EdgeCollector::new(op.output_ports().to_vec());
+    let progress = |watermark: i64| {
+        IngressProgressSnapshot::new(BTreeMap::from([
+            (
+                "left".into(),
+                IngressProgress::new(
+                    IngressState::Active,
+                    Some(EventTime::from_micros(watermark)),
+                ),
+            ),
+            (
+                "right".into(),
+                IngressProgress::new(
+                    IngressState::Active,
+                    Some(EventTime::from_micros(watermark)),
+                ),
+            ),
+        ]))
+    };
+    let idle = StreamOperatorContext::new(&job, "asof", None);
+    op.process_data("right", right, &idle, &mut output)
+        .await
+        .unwrap();
+    let admitted = op.capture(Epoch::INITIAL).unwrap();
+
+    // The first sweep at 150 evicts the row at 100: state changes and is
+    // re-encoded into a fresh segment allocation.
+    let cx = StreamOperatorContext::with_ingress_progress(&job, "asof", None, progress(150));
+    op.on_watermark(EventTime::from_micros(150), &cx, &mut output)
+        .await
+        .unwrap();
+    let swept = op.capture(Epoch::INITIAL).unwrap();
+    assert_eq!(op.status().evicted_right_rows, 1);
+    assert!(!Arc::ptr_eq(
+        &admitted.segments["asof-state-v1"].bytes_arc(),
+        &swept.segments["asof-state-v1"].bytes_arc()
+    ));
+
+    // An identical tick changes nothing: status is untouched and the prepared
+    // segment allocation is reused instead of re-encoded.
+    let status = op.status();
+    op.on_watermark(EventTime::from_micros(150), &cx, &mut output)
+        .await
+        .unwrap();
+    let repeated = op.capture(Epoch::INITIAL).unwrap();
+    assert_eq!(op.status(), status);
+    assert!(Arc::ptr_eq(
+        &swept.segments["asof-state-v1"].bytes_arc(),
+        &repeated.segments["asof-state-v1"].bytes_arc()
+    ));
+
+    // Watermark progress below the next evictable row also reuses it.
+    let cx = StreamOperatorContext::with_ingress_progress(&job, "asof", None, progress(199));
+    op.on_watermark(EventTime::from_micros(199), &cx, &mut output)
+        .await
+        .unwrap();
+    let advanced = op.capture(Epoch::INITIAL).unwrap();
+    assert!(Arc::ptr_eq(
+        &swept.segments["asof-state-v1"].bytes_arc(),
+        &advanced.segments["asof-state-v1"].bytes_arc()
+    ));
+    assert_eq!(
+        op.status().output_watermark_micros,
+        Some(EventTime::from_micros(198))
+    );
 }
 
 #[tokio::test]

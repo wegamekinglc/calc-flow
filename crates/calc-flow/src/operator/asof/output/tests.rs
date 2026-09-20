@@ -43,7 +43,7 @@ fn fixture() -> (StreamAsofJoinSpec, [SchemaRef; 3], StateSegment) {
         ],
     )
     .unwrap();
-    let bytes = StateSegment::new(codec::encode_batch(&row, 1_048_576).unwrap());
+    let bytes = StateSegment::new(codec::encode_batch(&row, 1_048_576, &mut Vec::new()).unwrap());
     (spec, [schema.clone(), schema, output], bytes)
 }
 

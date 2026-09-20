@@ -13,24 +13,25 @@ pub(super) async fn encode_state(
     limit: usize,
     context: &StreamOperatorContext<'_>,
 ) -> Result<StateSegment> {
-    let mut writer = BoundedWriter::with_capacity(
-        usize::try_from(length).expect("reserved address domain"),
-        limit,
-    );
-    write_header(&mut writer, state)?;
-    write_left(&mut writer, state, context).await?;
-    write_right(&mut writer, state, context).await?;
-    Ok(StateSegment::new(writer.bytes))
+    let capacity = usize::try_from(length).expect("reserved address domain");
+    let mut bytes = Vec::with_capacity(capacity);
+    {
+        let mut writer = BoundedWriter::with_capacity(&mut bytes, capacity, limit);
+        write_header(&mut writer, state)?;
+        write_left(&mut writer, state, context).await?;
+        write_right(&mut writer, state, context).await?;
+    }
+    Ok(StateSegment::new(bytes))
 }
 
-fn write_header(writer: &mut BoundedWriter, state: &State) -> Result<()> {
+fn write_header(writer: &mut BoundedWriter<'_>, state: &State) -> Result<()> {
     write_bytes(writer, MAGIC)?;
     write_u64(writer, state.left.len() as u64)?;
     write_u64(writer, state.right.len() as u64)
 }
 
 async fn write_left(
-    writer: &mut BoundedWriter,
+    writer: &mut BoundedWriter<'_>,
     state: &State,
     context: &StreamOperatorContext<'_>,
 ) -> Result<()> {
@@ -43,7 +44,7 @@ async fn write_left(
 }
 
 fn write_left_row(
-    writer: &mut BoundedWriter,
+    writer: &mut BoundedWriter<'_>,
     (time, key, sequence): &LeftOrder,
     payload: &StateSegment,
 ) -> Result<()> {
@@ -54,7 +55,7 @@ fn write_left_row(
 }
 
 async fn write_right(
-    writer: &mut BoundedWriter,
+    writer: &mut BoundedWriter<'_>,
     state: &State,
     context: &StreamOperatorContext<'_>,
 ) -> Result<()> {
@@ -67,7 +68,7 @@ async fn write_right(
 }
 
 async fn write_bucket(
-    writer: &mut BoundedWriter,
+    writer: &mut BoundedWriter<'_>,
     bucket: &BTreeMap<RightOrder, Option<StateSegment>>,
     context: &StreamOperatorContext<'_>,
 ) -> Result<()> {
@@ -80,7 +81,7 @@ async fn write_bucket(
 }
 
 fn write_right_row(
-    writer: &mut BoundedWriter,
+    writer: &mut BoundedWriter<'_>,
     (time, sequence): &RightOrder,
     payload: Option<&StateSegment>,
 ) -> Result<()> {
@@ -89,17 +90,17 @@ fn write_right_row(
     write_blob(writer, payload.map_or(&[], StateSegment::bytes))
 }
 
-fn write_bytes(writer: &mut BoundedWriter, bytes: &[u8]) -> Result<()> {
+fn write_bytes(writer: &mut BoundedWriter<'_>, bytes: &[u8]) -> Result<()> {
     writer
         .write_all(bytes)
         .map_err(|error| mismatch(&error.to_string()))
 }
 
-fn write_u64(writer: &mut BoundedWriter, value: u64) -> Result<()> {
+fn write_u64(writer: &mut BoundedWriter<'_>, value: u64) -> Result<()> {
     write_bytes(writer, &value.to_le_bytes())
 }
 
-fn write_blob(writer: &mut BoundedWriter, value: &[u8]) -> Result<()> {
+fn write_blob(writer: &mut BoundedWriter<'_>, value: &[u8]) -> Result<()> {
     write_u64(writer, value.len() as u64)?;
     write_bytes(writer, value)
 }

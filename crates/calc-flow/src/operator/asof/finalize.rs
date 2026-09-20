@@ -1,6 +1,6 @@
 use super::{
-    StreamAsofJoinOperator, StreamAsofJoinStatus, checked, reason,
-    state::{LeftOrder, State},
+    StreamAsofJoinOperator, StreamAsofJoinStatus, SweepStamp, checked, reason,
+    state::{self, LeftOrder, State},
 };
 use crate::{
     Batch, BatchMetadata, CalcFlowError, EventTime, JsonMap, Result, StateSegment, StreamCollector,
@@ -24,12 +24,14 @@ impl StreamAsofJoinOperator {
     ) -> Result<()> {
         loop {
             context.check_cancelled()?;
-            let state_workspace = self.state_workspace(&self.state)?;
-            let headroom = self.checkpoint_workspace()?;
             let mut keys = self.finalizable_keys(frontier, ended, context);
             if keys.is_empty() {
                 break;
             }
+            // Clone and checkpoint headroom are reserved only once a
+            // finalizable chunk exists, so empty progress ticks stay free.
+            let state_workspace = self.state_workspace()?;
+            let headroom = self.checkpoint_workspace()?;
             let prepared_output = self.prepare_output(&mut keys, context).await?;
             self.commit_output(&keys, prepared_output, headroom, context, output)
                 .await?;
@@ -66,12 +68,12 @@ impl StreamAsofJoinOperator {
         collector: &mut dyn StreamCollector,
     ) -> Result<()> {
         let next_sequence = checked(&self.name, self.next_output_sequence, keys.len() as u64)?;
-        let (next, mut status) = self.output_state(keys, output.matched)?;
+        let (next, mut status, delta) = self.output_state(keys, output.matched)?;
         drop(headroom);
         let prepared = self.prepare_checkpoint(&next, context).await?;
-        self.checked_inventory(&next, prepared.segment.as_ref(), &mut status)?;
+        self.checked_inventory(&next, delta, prepared.segment.as_ref(), &mut status)?;
         emit_output(output.batch, context, collector).await?;
-        self.install(next, status, prepared);
+        self.install(next, status, prepared, true);
         self.next_output_sequence = next_sequence;
         drop(output.workspace);
         Ok(())
@@ -81,10 +83,13 @@ impl StreamAsofJoinOperator {
         &self,
         keys: &[LeftOrder],
         matched: u64,
-    ) -> Result<(State, StreamAsofJoinStatus)> {
+    ) -> Result<(State, StreamAsofJoinStatus, state::InventoryDelta)> {
         let mut next = self.state.clone();
+        let mut delta = state::InventoryDelta::default();
         for key in keys {
-            next.left.remove(key);
+            if let Some(payload) = next.left.remove(key) {
+                delta.remove_left(&key.1, &key.2, &payload);
+            }
         }
         let mut status = self.status.clone();
         status.emitted_left_rows =
@@ -95,9 +100,10 @@ impl StreamAsofJoinOperator {
             status.unmatched_rows,
             keys.len() as u64 - matched,
         )?;
-        let evicted = next.evict(&status, self.spec.tolerance_micros());
+        let (evicted, eviction) = next.evict(&status, self.spec.tolerance_micros());
+        delta.merge(eviction);
         status.evicted_right_rows = checked(&self.name, status.evicted_right_rows, evicted)?;
-        Ok((next, status))
+        Ok((next, status, delta))
     }
 
     async fn finish_progress(
@@ -106,18 +112,33 @@ impl StreamAsofJoinOperator {
         ended: bool,
         context: &StreamOperatorContext<'_>,
     ) -> Result<()> {
-        let workspace = self.state_workspace(&self.state)?;
+        let stamp = SweepStamp::current(&self.status);
+        if self.swept == Some(stamp)
+            || !state::eviction_pending(&self.state, &self.status, self.spec.tolerance_micros())
+        {
+            // Nothing was admitted, removed or evicted since the committed
+            // state's last sweep, so re-encoding would reproduce the installed
+            // segment byte for byte; only progress metadata moves.
+            self.status.output_watermark_micros = frontier
+                .and_then(|time| time.checked_sub(1))
+                .map(EventTime::from_micros)
+                .or(self.status.output_watermark_micros);
+            self.terminal = ended;
+            self.swept = Some(stamp);
+            return Ok(());
+        }
+        let workspace = self.state_workspace()?;
         let mut next = self.state.clone();
         let mut status = self.status.clone();
-        let evicted = next.evict(&status, self.spec.tolerance_micros());
+        let (evicted, delta) = next.evict(&status, self.spec.tolerance_micros());
         status.evicted_right_rows = checked(&self.name, status.evicted_right_rows, evicted)?;
         let prepared = self.prepare_checkpoint(&next, context).await?;
-        self.checked_inventory(&next, prepared.segment.as_ref(), &mut status)?;
+        self.checked_inventory(&next, delta, prepared.segment.as_ref(), &mut status)?;
         status.output_watermark_micros = frontier
             .and_then(|time| time.checked_sub(1))
             .map(EventTime::from_micros)
             .or(status.output_watermark_micros);
-        self.install(next, status, prepared);
+        self.install(next, status, prepared, true);
         self.terminal = ended;
         drop(workspace);
         Ok(())
@@ -200,6 +221,12 @@ fn retryable(error: &CalcFlowError) -> bool {
     )
 }
 
+/// Conservative per-row workspace for output materialization: the encoded
+/// left and matched right payload bytes plus 4096 bytes of decode and framing
+/// headroom, inflated eightfold. The decoded candidate `RecordBatch`es, the
+/// `DataFusion` join build/probe intermediates, and the concatenated output
+/// batch each hold their own copy of the row bytes, so a fixed multiple of
+/// the encoded size bounds the transient decoded copies.
 fn output_workspace(rows: &[(&StateSegment, Option<&StateSegment>)], name: &str) -> Result<u64> {
     rows.iter().try_fold(0, |total, (left, right)| {
         let row = checked(
