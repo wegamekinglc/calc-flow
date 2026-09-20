@@ -22,13 +22,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from calc_flow.capabilities import ProviderPort, RuntimeCapabilities
 from calc_flow.errors import CompileError, ConfigError, ExecutionError
 from calc_flow.pipeline import Runtime
 from calc_flow.symbolic.domains import type_name
 from calc_flow.symbolic.nodes import (
+    _EVENT_WINDOW_OPS,
     CBool,
     CDType,
     CEnum,
@@ -42,6 +43,9 @@ from calc_flow.symbolic.nodes import (
     Node,
 )
 from calc_flow.symbolic.types import CompileMode, Field
+
+if TYPE_CHECKING:
+    from calc_flow.symbolic.lower.bindings import _BatchBindings
 
 _MODES: Final[tuple[str, ...]] = ("batch", "stream")
 _EVENT_TIME_TYPE: Final = "timestamp[us, UTC]"
@@ -241,7 +245,7 @@ class ArrayFacts:
     state: frozenset[str]
 
 
-def _cstr(value: CValue, /) -> str | None:
+def _cstr_or_none(value: CValue, /) -> str | None:
     return value.value if isinstance(value, CStr) else None
 
 
@@ -300,7 +304,7 @@ def _resolves_to_input_column(node: Node, /) -> bool:
         return False
     return _table_field_resolves_to_input(
         node.args[0],
-        _cstr(node.attr("name")) or "",
+        _cstr_or_none(node.attr("name")) or "",
     )
 
 
@@ -328,7 +332,7 @@ def _stateful_operand_is_stageable(node: Node, /) -> bool:
             return True
         return _table_field_is_stageable(
             node.args[0],
-            _cstr(node.attr("name")) or "",
+            _cstr_or_none(node.attr("name")) or "",
         )
     if operation == "literal":
         return True
@@ -353,9 +357,17 @@ def _table_field_is_stageable(table: Node, field_name: str, /) -> bool:
 
 
 def _contains_stateful_primitive(node: Node, /) -> bool:
-    if node.op.name in _ROLLING_PRIMITIVES or node.op.name in _CROSS_SECTION:
-        return True
-    return any(_contains_stateful_primitive(argument) for argument in node.args)
+    pending = [node]
+    visited: set[str] = set()
+    while pending:
+        current = pending.pop()
+        if current.digest in visited:
+            continue
+        visited.add(current.digest)
+        if current.op.name in _ROLLING_PRIMITIVES or current.op.name in _CROSS_SECTION:
+            return True
+        pending.extend(current.args)
+    return False
 
 
 def _contains_event_window(node: Node, /) -> bool:
@@ -366,17 +378,21 @@ def _contains_event_window(node: Node, /) -> bool:
         if current.digest in visited:
             continue
         visited.add(current.digest)
-        if (
-            current.op.name in ("window_tumbling", "window_hopping")
-            and current.op.version == 2
-        ):
+        if current.op.name in _EVENT_WINDOW_OPS and current.op.version == 2:
             return True
         pending.extend(current.args)
     return False
 
 
 class _Analyzer:
-    """One analysis pass over one program, mode, and capability snapshot."""
+    """One analysis pass over one program, mode, and capability snapshot.
+
+    ``_runtime`` defaults to ``None`` and is assigned by ``_run`` immediately
+    after construction; native row-schema checks fall back to declared schemas
+    while it is absent. ``_bindings`` is attached by the program lowerer for
+    the duration of one lowering so boundary-aware strategies can record
+    logical input/output endpoints; analysis itself never reads it.
+    """
 
     def __init__(
         self,
@@ -392,6 +408,7 @@ class _Analyzer:
         self._supports_array_kind = supports_array_kind
         self._capabilities = capabilities
         self._runtime: Runtime | None = None
+        self._bindings: _BatchBindings | None = None
         self._window_input_schemas: dict[str, tuple[Field, ...]] = {}
         self._native_row_schemas: dict[str, tuple[Field, ...]] = {}
         self._issues: list[AnalysisIssue] = []
@@ -455,7 +472,7 @@ class _Analyzer:
     def _ordering_event_time(
         self, node: Node, schema: dict[str, Field], base: str, /
     ) -> None:
-        event_time = _cstr(node.attr("event_time"))
+        event_time = _cstr_or_none(node.attr("event_time"))
         field = None if event_time is None else schema.get(event_time)
         if field is None or field.data_type != _EVENT_TIME_TYPE or field.nullable:
             message = (
@@ -594,8 +611,7 @@ class _Analyzer:
             if current.op.name == "table_input":
                 boundaries[current.digest] = _schema_fields(current.attr("schema"))
             elif current.op.name in {
-                "window_tumbling",
-                "window_hopping",
+                *_EVENT_WINDOW_OPS,
                 "sql",
                 "late_output",
                 "late_rows",
@@ -678,11 +694,13 @@ class _Analyzer:
             )
         }
         return _fields(
-            self._runtime._infer_symbolic_sql_schema(_cstr(node.attr("query")), schemas)
+            self._runtime._infer_symbolic_sql_schema(
+                _cstr_or_none(node.attr("query")), schemas
+            )
         )
 
     def _table_declaration(self, node: Node, path: str, /) -> TableFacts:
-        name = _cstr(node.attr("name"))
+        name = _cstr_or_none(node.attr("name"))
         is_parameter = node.op.name == "parameter"
         root = "static_inputs" if is_parameter else "inputs"
         if (
@@ -701,7 +719,7 @@ class _Analyzer:
             schema=_schema_fields(node.attr("schema")),
             lineage=name,
             state=frozenset({"static"}) if is_parameter else frozenset(),
-            event_time=_cstr(node.attr("event_time")),
+            event_time=_cstr_or_none(node.attr("event_time")),
             entity_by=_cstr_seq(node.attr("entity_by")),
             sequence_by=_cstr_seq(node.attr("sequence_by")),
         )
@@ -849,34 +867,34 @@ class _Analyzer:
             left,
             "left",
             role,
-            _cstr(node.attr("left_event_time")),
+            _cstr_or_none(node.attr("left_event_time")),
         )
         self._stream_join_side(
             right,
             "right",
             role,
-            _cstr(node.attr("right_event_time")),
+            _cstr_or_none(node.attr("right_event_time")),
         )
         self._stream_join_event_time(
             left,
-            _cstr(node.attr("left_event_time")),
+            _cstr_or_none(node.attr("left_event_time")),
             f"{role}.left_event_time",
         )
         self._stream_join_event_time(
             right,
-            _cstr(node.attr("right_event_time")),
+            _cstr_or_none(node.attr("right_event_time")),
             f"{role}.right_event_time",
         )
         self._stream_join_keys(node, left, right, role)
-        left_prefix = _cstr(node.attr("left_prefix")) or "left"
-        right_prefix = _cstr(node.attr("right_prefix")) or "right"
+        left_prefix = _cstr_or_none(node.attr("left_prefix")) or "left"
+        right_prefix = _cstr_or_none(node.attr("right_prefix")) or "right"
         output_schema = self._stream_join_schema(
             left,
             right,
             left_prefix,
             right_prefix,
         )
-        output_event_time = _cstr(node.attr("output_event_time"))
+        output_event_time = _cstr_or_none(node.attr("output_event_time"))
         output_entity_by = _cstr_seq(node.attr("output_entity_by"))
         output_sequence_by = _cstr_seq(node.attr("output_sequence_by"))
         if node.op.version >= 2 or any(
@@ -954,8 +972,8 @@ class _Analyzer:
         /,
     ) -> None:
         fields = {field.name: field for field in schema}
-        left_prefix = _cstr(node.attr("left_prefix")) or "left"
-        right_prefix = _cstr(node.attr("right_prefix")) or "right"
+        left_prefix = _cstr_or_none(node.attr("left_prefix")) or "left"
+        right_prefix = _cstr_or_none(node.attr("right_prefix")) or "right"
         self._check_join_output_event_time(
             node,
             fields,
@@ -992,8 +1010,8 @@ class _Analyzer:
         /,
     ) -> None:
         allowed_event_times = {
-            f"{left_prefix}__{_cstr(node.attr('left_event_time'))}",
-            f"{right_prefix}__{_cstr(node.attr('right_event_time'))}",
+            f"{left_prefix}__{_cstr_or_none(node.attr('left_event_time'))}",
+            f"{right_prefix}__{_cstr_or_none(node.attr('right_event_time'))}",
         }
         event_field = None if event_time is None else fields.get(event_time)
         if (
@@ -1249,7 +1267,7 @@ class _Analyzer:
         if child.lineage is not None:
             self._temporal_lineages.add(child.lineage)
         by_name = {field.name: field for field in child.schema}
-        event_time = _cstr(node.attr("event_time"))
+        event_time = _cstr_or_none(node.attr("event_time"))
         if event_time is not None and event_time not in by_name:
             self.issue(
                 f"{path}.{node.op.name}.event_time",
@@ -1309,7 +1327,7 @@ class _Analyzer:
     def _window_event_time_field(
         self, node: Node, by_name: dict[str, Field], role: str, /
     ) -> None:
-        event_time = _cstr(node.attr("event_time"))
+        event_time = _cstr_or_none(node.attr("event_time"))
         time_field = self._window_field(
             by_name,
             event_time,
@@ -1466,7 +1484,7 @@ class _Analyzer:
     ) -> Field | None:
         if not isinstance(aggregate, CMap):
             return None
-        function = _cstr(aggregate.get("function"))
+        function = _cstr_or_none(aggregate.get("function"))
         supported = (
             self._portable_types
             if function == "count"
@@ -1475,7 +1493,7 @@ class _Analyzer:
             else _WINDOW_ORDERED_TYPES
         )
         field = self._window_field(
-            fields, _cstr(aggregate.get("column")), f"{path}.column", supported
+            fields, _cstr_or_none(aggregate.get("column")), f"{path}.column", supported
         )
         if field is None:
             return None
@@ -1489,7 +1507,9 @@ class _Analyzer:
             else field.data_type
         )
         return Field(
-            _cstr(aggregate.get("output")), output_type, nullable=function != "count"
+            _cstr_or_none(aggregate.get("output")),
+            output_type,
+            nullable=function != "count",
         )
 
     # -- column analysis -----------------------------------------------------
@@ -1521,7 +1541,7 @@ class _Analyzer:
 
     def _column_ref(self, node: Node, path: str, /) -> ColumnFacts:
         table = self.table(node.args[0], f"{path}.column_ref.value")
-        field_name = _cstr(node.attr("name"))
+        field_name = _cstr_or_none(node.attr("name"))
         for field in table.schema:
             if field.name == field_name:
                 return ColumnFacts(
@@ -2041,7 +2061,7 @@ class _Analyzer:
         return handler(self, node, path)
 
     def _array_parameter(self, node: Node, path: str, /) -> ArrayFacts:
-        name = _cstr(node.attr("name"))
+        name = _cstr_or_none(node.attr("name"))
         if (
             name is not None
             and node.digest not in self._declared
@@ -2062,7 +2082,7 @@ class _Analyzer:
             if isinstance(dimension, CInt)
         )
         return ArrayFacts(
-            _cstr(node.attr("backend")),
+            _cstr_or_none(node.attr("backend")),
             _ctype_str(node.attr("dtype")),
             shape,
             None,
@@ -2083,7 +2103,7 @@ class _Analyzer:
         data_type = self._from_columns_dtype(columns, table.schema, role)
         rows: int | str = table.lineage if table.lineage is not None else "rows"
         return ArrayFacts(
-            _cstr(node.attr("backend")),
+            _cstr_or_none(node.attr("backend")),
             data_type,
             (rows, len(columns)),
             table.lineage,
@@ -2577,7 +2597,7 @@ def _run(
     for value in program.inputs:
         node = value._node
         root = _declaration_root(node)
-        name = _cstr(node.attr("name")) or ""
+        name = _cstr_or_none(node.attr("name")) or ""
         analyzer.check_input_declaration(node, root, name)
     from calc_flow.symbolic.late_output import check_consumption, check_late_successors
 
@@ -2612,7 +2632,7 @@ def _declaration_root(node: Node, /) -> str:
 def _check_stream_ordering_for_inputs(program: object, analyzer: _Analyzer, /) -> None:
     for value in program.inputs:
         node = value._node
-        name = _cstr(node.attr("name")) or ""
+        name = _cstr_or_none(node.attr("name")) or ""
         if name in analyzer.temporal_lineages:
             analyzer.check_stream_ordering(node, _declaration_root(node), name)
 
@@ -2695,11 +2715,11 @@ def _explain_output(
 
 def _explain_input(value: object, /) -> str:
     node = value._node
-    name = _cstr(node.attr("name")) or ""
+    name = _cstr_or_none(node.attr("name")) or ""
     if node.op.name != "parameter":
         return (
             f"    input {name} event_time"
-            f" {_cstr(node.attr('event_time')) or 'none'} entity_by"
+            f" {_cstr_or_none(node.attr('event_time')) or 'none'} entity_by"
             f" {_render_names(_cstr_seq(node.attr('entity_by')))} sequence_by"
             f" {_render_names(_cstr_seq(node.attr('sequence_by')))}"
         )
@@ -2707,7 +2727,7 @@ def _explain_input(value: object, /) -> str:
     if isinstance(kind, CEnum) and kind.variant == "array":
         return (
             f"    static_input {name} array backend"
-            f" {_cstr(node.attr('backend'))} dtype"
+            f" {_cstr_or_none(node.attr('backend'))} dtype"
             f" {_ctype_str(node.attr('dtype'))} shape"
             f" {_render_shape(_parameter_shape(node))}"
         )

@@ -73,6 +73,28 @@ from calc_flow.symbolic.optimizer import expression_refs, extract_common
 from calc_flow.symbolic.program import Program
 
 
+def _edge(source_node: str, target_node: str, /) -> dict[str, object]:
+    return {
+        "source_node": source_node,
+        "source_port": "output",
+        "target_node": target_node,
+        "target_port": "input",
+    }
+
+
+def _wire_upstream(
+    edges: list[dict[str, object]],
+    upstream_id: str | None,
+    fanout_id: str | None,
+    target_node: str,
+    /,
+) -> None:
+    if upstream_id is not None:
+        edges.append(_edge(upstream_id, target_node))
+    elif fanout_id is not None:
+        edges.append(_edge(fanout_id, target_node))
+
+
 # The lowerer keeps per-output segment staging in one deterministic pass:
 # stage order, edge wiring, and id assignment are semantic, so the rolling,
 # prefilter, and CSE stages stay in one place.
@@ -216,6 +238,7 @@ def _lower_program(
             field.name for field in _schema_fields(segment.input_node.attr("schema"))
         ]
         upstream_id: str | None = None
+        fanout_id = fanout_ids.get(segment.input_node.digest)
         final_predicate = segment.predicate
         if (rolling is not None or cross is not None) and segment.predicate is not None:
             state_plan = _required_segment_state_plan(rolling, cross)
@@ -234,15 +257,7 @@ def _lower_program(
                     input_fields,
                 )
             )
-            if fanout:
-                edges.append(
-                    {
-                        "source_node": fanout_ids[segment.input_node.digest],
-                        "source_port": "output",
-                        "target_node": prefilter_id,
-                        "target_port": "input",
-                    }
-                )
+            _wire_upstream(edges, upstream_id, fanout_id, prefilter_id)
             upstream_id = prefilter_id
         if rolling is not None:
             for stage in rolling.stages:
@@ -251,44 +266,10 @@ def _lower_program(
                     materialization_id = stage.materialization_node_id
                     if materialization_id is None:
                         raise RuntimeError("rolling materialization node has no id")
-                    if upstream_id is not None:
-                        edges.append(
-                            {
-                                "source_node": upstream_id,
-                                "source_port": "output",
-                                "target_node": materialization_id,
-                                "target_port": "input",
-                            }
-                        )
-                    elif fanout:
-                        edges.append(
-                            {
-                                "source_node": fanout_ids[segment.input_node.digest],
-                                "source_port": "output",
-                                "target_node": materialization_id,
-                                "target_port": "input",
-                            }
-                        )
+                    _wire_upstream(edges, upstream_id, fanout_id, materialization_id)
                     upstream_id = materialization_id
                 nodes.append(stage.node)
-                if upstream_id is not None:
-                    edges.append(
-                        {
-                            "source_node": upstream_id,
-                            "source_port": "output",
-                            "target_node": stage.node_id,
-                            "target_port": "input",
-                        }
-                    )
-                elif fanout:
-                    edges.append(
-                        {
-                            "source_node": fanout_ids[segment.input_node.digest],
-                            "source_port": "output",
-                            "target_node": stage.node_id,
-                            "target_port": "input",
-                        }
-                    )
+                _wire_upstream(edges, upstream_id, fanout_id, stage.node_id)
                 upstream_id = stage.node_id
             env = dict(rolling.env)
             input_field_names = list(rolling.input_field_names)
@@ -299,44 +280,10 @@ def _lower_program(
                 materialization_id = cross.materialization_node_id
                 if materialization_id is None:
                     raise RuntimeError("cross-section materialization node has no id")
-                if upstream_id is not None:
-                    edges.append(
-                        {
-                            "source_node": upstream_id,
-                            "source_port": "output",
-                            "target_node": materialization_id,
-                            "target_port": "input",
-                        }
-                    )
-                elif fanout:
-                    edges.append(
-                        {
-                            "source_node": fanout_ids[segment.input_node.digest],
-                            "source_port": "output",
-                            "target_node": materialization_id,
-                            "target_port": "input",
-                        }
-                    )
+                _wire_upstream(edges, upstream_id, fanout_id, materialization_id)
                 upstream_id = materialization_id
             nodes.append(cross.node)
-            if upstream_id is not None:
-                edges.append(
-                    {
-                        "source_node": upstream_id,
-                        "source_port": "output",
-                        "target_node": cross.node_id,
-                        "target_port": "input",
-                    }
-                )
-            elif fanout:
-                edges.append(
-                    {
-                        "source_node": fanout_ids[segment.input_node.digest],
-                        "source_port": "output",
-                        "target_node": cross.node_id,
-                        "target_port": "input",
-                    }
-                )
+            _wire_upstream(edges, upstream_id, fanout_id, cross.node_id)
             upstream_id = cross.node_id
             env = dict(cross.env)
             input_field_names = list(cross.input_field_names)
@@ -395,14 +342,7 @@ def _lower_program(
                 filter_sql = _sql(fused.predicate)
             if position == 0:
                 if upstream_id is not None:
-                    edges.append(
-                        {
-                            "source_node": upstream_id,
-                            "source_port": "output",
-                            "target_node": node_id,
-                            "target_port": "input",
-                        }
-                    )
+                    edges.append(_edge(upstream_id, node_id))
                     input_schema = (
                         cross.output_fields
                         if cross is not None
@@ -410,15 +350,8 @@ def _lower_program(
                         if rolling is not None
                         else None
                     )
-                elif fanout:
-                    edges.append(
-                        {
-                            "source_node": fanout_ids[segment.input_node.digest],
-                            "source_port": "output",
-                            "target_node": node_id,
-                            "target_port": "input",
-                        }
-                    )
+                elif fanout_id is not None:
+                    edges.append(_edge(fanout_id, node_id))
                     input_schema = (
                         _schema_fields(segment.input_node.attr("schema"))
                         if segment.input_node.digest
@@ -428,14 +361,7 @@ def _lower_program(
                 else:
                     input_schema = _schema_fields(segment.input_node.attr("schema"))
             else:
-                edges.append(
-                    {
-                        "source_node": stage_ids[position - 1],
-                        "source_port": "output",
-                        "target_node": node_id,
-                        "target_port": "input",
-                    }
-                )
+                edges.append(_edge(stage_ids[position - 1], node_id))
                 input_schema = None
             nodes.append(_expression_node(node_id, select, filter_sql, input_schema))
     nodes, edges = _deduplicate_node_ids(nodes, edges)
@@ -680,17 +606,19 @@ def _check_stateful_lowering(
     allowed_lateness_micros: int,
     late_policy: str,
 ) -> None:
+    needs_rolling = _program_needs_rolling(program)
+    needs_cross_section = _program_needs_cross_section(program)
     if _program_needs_stream_join(program):
         _check_stream_join_capability(program, capabilities, mode_value)
-    if _program_needs_rolling(program) or _program_needs_cross_section(program):
+    if needs_rolling or needs_cross_section:
         _validate_lateness(allowed_lateness_micros, late_policy)
-        if _program_needs_rolling(program):
+        if needs_rolling:
             _check_rolling_capability(program, capabilities, mode_value)
-        if _program_needs_cross_section(program):
+        if needs_cross_section:
             _check_cross_section_capability(program, capabilities, mode_value)
     _check_window_lateness_options(
         program,
-        _program_needs_rolling(program) or _program_needs_cross_section(program),
+        needs_rolling or needs_cross_section,
         allowed_lateness_micros,
         late_policy,
     )

@@ -8,11 +8,7 @@ from typing import TYPE_CHECKING, Any
 from calc_flow.symbolic.analyzer import _Analyzer
 from calc_flow.symbolic.expr import TableExpr, table_input
 from calc_flow.symbolic.lower.bindings import _BatchBindings
-from calc_flow.symbolic.lower.event_windows import (
-    _rewrite_nodes,
-    _table_port,
-    _WindowGraph,
-)
+from calc_flow.symbolic.lower.event_windows import _rewrite_nodes, _WindowGraph
 from calc_flow.symbolic.lower.schema import (
     _arrow_schema,
     _fields,
@@ -22,10 +18,12 @@ from calc_flow.symbolic.lower.segments import (
     _cstr,
     _cstr_seq,
     _expression_node,
+    _port,
     _quote_identifier,
+    _table_port,
 )
 from calc_flow.symbolic.lower.strategies import _project_document
-from calc_flow.symbolic.nodes import Node
+from calc_flow.symbolic.nodes import _EVENT_WINDOW_OPS, Node
 from calc_flow.symbolic.program import Program
 from calc_flow.symbolic.types import Field
 
@@ -66,13 +64,12 @@ def _shared_tables(program: Program, analyzer: _Analyzer) -> frozenset[str]:
 
 _TABLE_BOUNDARIES = frozenset(
     {
+        *_EVENT_WINDOW_OPS,
         "sql",
         "late_output",
         "late_rows",
         "attach_columns",
         "stream_join",
-        "window_tumbling",
-        "window_hopping",
     }
 )
 
@@ -137,7 +134,7 @@ def _pin_input_port(
     node: dict[str, Any], name: str, schema: list[dict[str, Any]]
 ) -> None:
     ports = {port["name"]: dict(port) for port in node.get("input_ports", [])}
-    port = ports.setdefault(name, {"name": name, "kind": "table", "required": True})
+    port = ports.setdefault(name, _port("table", name))
     if port.get("schema") is None:
         port["schema"] = [dict(field) for field in schema]
     node["input_ports"] = list(ports.values())
@@ -410,7 +407,7 @@ def lower_sql_program(
         return None
     graph = _SQLGraph(program, analyzer, allowed_lateness_micros, late_policy)
     graph.outputs()
-    bindings = getattr(analyzer, "_bindings", None)
+    bindings = analyzer._bindings
     if bindings is not None:
         bindings.inputs.update(graph.graph.bindings.inputs)
         bindings.outputs.update(graph.graph.bindings.outputs)

@@ -423,3 +423,13 @@ def test_collect_rejects_unconsumed_explicit_input():
     program = cf.Program("p", inputs=(t, unused), outputs={"answer": t})
     with pytest.raises(cf.CompileError, match=r"inputs.unused.*unconsumed"):
         program.collect({"q": data, "unused": data})
+
+
+def test_sync_collect_rejects_non_execution_options():
+    data = pa.table({"x": [1]})
+    t = cf.table_input("q", schema=data.schema)
+    program = cf.Program("p", inputs=(t,), outputs={"answer": t})
+    with pytest.raises(TypeError, match="options must be a calc_flow.ExecutionOptions"):
+        program.collect({"q": data}, options=object())
+    with pytest.raises(TypeError, match="options must be a calc_flow.ExecutionOptions"):
+        cf.compute(data, lambda table: table, options=object())

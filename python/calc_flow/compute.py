@@ -63,6 +63,24 @@ def _table_batch(data: TableData, path: str) -> Batch:
     return data if isinstance(data, Batch) else Batch.from_pyarrow(table)
 
 
+def _input_kind(value: TableExpr | Parameter[object]) -> str:
+    return "static parameter" if isinstance(value, Parameter) else "table input"
+
+
+def _check_input_names(
+    provided: Mapping[str, object],
+    expected: Mapping[str, TableExpr | Parameter[object]],
+    root: str,
+    describe: Callable[[TableExpr | Parameter[object]], str],
+) -> None:
+    for name, value in expected.items():
+        if name not in provided:
+            raise ValueError(f"{root}.{name}: missing {describe(value)}")
+    for name in provided:
+        if name not in expected:
+            raise ValueError(f"{root}.{name}: unexpected input name")
+
+
 def _validated_inputs(
     inputs: Mapping[str, TableData],
     expected: Mapping[str, TableExpr | Parameter[object]],
@@ -70,13 +88,7 @@ def _validated_inputs(
     if not isinstance(inputs, Mapping):
         raise TypeError("collect.inputs: expected a mapping by declared input name")
     copied = dict(inputs)
-    for name, value in expected.items():
-        if name not in copied:
-            kind = "static parameter" if isinstance(value, Parameter) else "table input"
-            raise ValueError(f"inputs.{name}: missing {kind}")
-    for name in copied:
-        if name not in expected:
-            raise ValueError(f"inputs.{name}: unexpected input name")
+    _check_input_names(copied, expected, "inputs", _input_kind)
     return copied
 
 
@@ -142,19 +154,28 @@ def _collect(
 ) -> dict[str, pa.Table]:
     _require_blocking("collect")
     plan, bound, outputs = _prepare_collect(program, inputs, runtime)
+    _validate_options(options)
     return _tables(plan.execute(bound, options=options), outputs)
+
+
+def _as_input_mapping[T](
+    program: Program, inputs: T | Mapping[str, T], error: str
+) -> Mapping[str, T]:
+    if isinstance(inputs, Mapping):
+        return dict(inputs)
+    if len(program.inputs) != 1 or not isinstance(program.inputs[0], TableExpr):
+        raise ValueError(error)
+    return {_node_name(program.inputs[0]._node): inputs}
 
 
 def _table_inputs(
     program: Program, inputs: TableData | Mapping[str, TableData]
 ) -> Mapping[str, TableData]:
-    if isinstance(inputs, Mapping):
-        return dict(inputs)
-    if len(program.inputs) != 1 or not isinstance(program.inputs[0], TableExpr):
-        raise ValueError(
-            "collect: multiple inputs require a mapping by declared input name"
-        )
-    return {_node_name(program.inputs[0]._node): inputs}
+    return _as_input_mapping(
+        program,
+        inputs,
+        "collect: multiple inputs require a mapping by declared input name",
+    )
 
 
 def compute(

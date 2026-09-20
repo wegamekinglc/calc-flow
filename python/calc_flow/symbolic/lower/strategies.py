@@ -36,10 +36,11 @@ from calc_flow.symbolic.lower.segments import (
     _cstr,
     _cstr_seq,
     _expression_node,
-    _field_json,
+    _port,
     _quote_identifier,
     _reject_primitive,
     _RollingPipeline,
+    _table_port,
 )
 from calc_flow.symbolic.nodes import (
     CBool,
@@ -345,8 +346,8 @@ def _matrix_external_node(
     return {
         "id": output_name,
         "input_ports": [
-            {"kind": "table", "name": "input", "required": True},
-            {"kind": "array", "name": "weights", "required": True},
+            _port("table", "input"),
+            _port("array", "weights"),
         ],
         "operator": {
             "kind": "external",
@@ -359,7 +360,7 @@ def _matrix_external_node(
             "provider": matrix.backend,
             "version": "1",
         },
-        "output_ports": [{"kind": "table", "name": "output", "required": True}],
+        "output_ports": [_port("table", "output")],
     }
 
 
@@ -536,18 +537,8 @@ def _stream_join_node(
     return {
         "id": node_id,
         "input_ports": [
-            {
-                "kind": "table",
-                "name": "left",
-                "required": True,
-                "schema": [_field_json(field) for field in left_schema],
-            },
-            {
-                "kind": "table",
-                "name": "right",
-                "required": True,
-                "schema": [_field_json(field) for field in right_schema],
-            },
+            _table_port(left_schema, "left"),
+            _table_port(right_schema, "right"),
         ],
         "operator": {
             "kind": "stream_join",
@@ -649,14 +640,7 @@ def _pin_table_output(
 ) -> None:
     for node in nodes:
         if isinstance(node, dict) and node.get("id") == node_id:
-            node["output_ports"] = [
-                {
-                    "kind": "table",
-                    "name": "output",
-                    "required": True,
-                    "schema": [_field_json(field) for field in schema],
-                }
-            ]
+            node["output_ports"] = [_table_port(schema, "output")]
             return
     _raise_lowering_invariant(f"missing stream join input stage {node_id!r}")
 
@@ -868,7 +852,7 @@ def _lower_stream_join_program(
         return None
     if (
         asofs
-        or getattr(analyzer, "_bindings", None) is not None
+        or analyzer._bindings is not None
         or _requires_relational_dag_lowering(program, joins)
     ):
         return _lower_relational_dag_program(
@@ -1260,14 +1244,7 @@ def _append_relational_joins(
             plan.sides[0].schema,
             plan.sides[1].schema,
         )
-        native["output_ports"] = [
-            {
-                "kind": "table",
-                "name": "output",
-                "required": True,
-                "schema": [_field_json(field) for field in plan.output_schema],
-            }
-        ]
+        native["output_ports"] = [_table_port(plan.output_schema, "output")]
         nodes.append(native)
         for side in plan.sides:
             _wire_relational_join_side(
@@ -1356,7 +1333,7 @@ def _lower_relational_dag_program(
     typed_nodes = [_graph_node(node) for node in nodes]
     typed_edges = [_graph_node(edge) for edge in edges]
     typed_nodes, typed_edges = _deduplicate_node_ids(typed_nodes, typed_edges)
-    bindings = getattr(analyzer, "_bindings", None)
+    bindings = analyzer._bindings
     if bindings is not None:
         for value in program.inputs:
             source = sources.get(value.digest)
@@ -1379,8 +1356,12 @@ def _required_segment_state_plan(
 
 def _walk_nodes(root: Node, /) -> tuple[Node, ...]:
     nodes: list[Node] = []
+    visited: set[str] = set()
 
     def visit(node: Node) -> None:
+        if node.digest in visited:
+            return
+        visited.add(node.digest)
         nodes.append(node)
         for child in node.args:
             visit(child)

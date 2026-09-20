@@ -471,24 +471,18 @@ def _expression_node(
         },
     }
     if input_schema is not None:
-        node["input_ports"] = [
-            {
-                "name": "input",
-                "kind": "table",
-                "required": True,
-                "schema": [_field_json(field) for field in input_schema],
-            }
-        ]
+        node["input_ports"] = [_table_port(input_schema, "input")]
     if output_schema is not None:
-        node["output_ports"] = [
-            {
-                "name": "output",
-                "kind": "table",
-                "required": True,
-                "schema": [_field_json(field) for field in output_schema],
-            }
-        ]
+        node["output_ports"] = [_table_port(output_schema, "output")]
     return node
+
+
+def _port(kind: str, name: str, /) -> dict[str, object]:
+    return {"name": name, "kind": kind, "required": True}
+
+
+def _table_port(schema: tuple[Field, ...], name: str, /) -> dict[str, object]:
+    return {**_port("table", name), "schema": [_field_json(field) for field in schema]}
 
 
 def _field_json(field: Field, /) -> dict[str, object]:
