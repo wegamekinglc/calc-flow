@@ -13,6 +13,7 @@ from scripts.benchmark_suite.catalog import (
     STREAM_SCOPE,
 )
 from scripts.benchmark_suite.statistics import paired_round
+from scripts.toolkit import linear_percentile
 
 THRESHOLD_PERCENT = 5.0
 ROUNDS = 2
@@ -45,14 +46,6 @@ def _validate_observations(samples: list[float]) -> None:
         raise ValueError("benchmark samples must be finite and positive")
 
 
-def _percentile(values: list[float], quantile: float) -> float:
-    ordered = sorted(values)
-    position = (len(ordered) - 1) * quantile
-    lower = int(position)
-    upper = min(lower + 1, len(ordered) - 1)
-    return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
-
-
 def _paired_verdict(intervals: list[dict]) -> str:
     # Protect the exact +5% endpoint from ratio/subtraction roundoff.
     threshold = THRESHOLD_PERCENT + 1e-12
@@ -69,7 +62,7 @@ def _head_statistics(case: dict, head: list[float]) -> dict:
     median = statistics.median(head)
     return {
         "head_p50": median,
-        "head_p95": _percentile(head, 0.95),
+        "head_p95": linear_percentile(head, 0.95),
         "head_min": min(head),
         "head_max": max(head),
         "rows_per_second": case["rows"] / median if case.get("rows") else None,

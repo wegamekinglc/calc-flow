@@ -20,6 +20,7 @@ if any(importlib.util.find_spec(name) is None for name in ("numpy", "psutil")):
 import psutil  # noqa: E402
 
 from scripts import profile_warm_stream as profile  # noqa: E402
+from scripts import toolkit  # noqa: E402
 from scripts.profile_warm_stream import matrix_points, paired_summary  # noqa: E402
 
 
@@ -170,7 +171,7 @@ class WarmProfileTests(unittest.TestCase):
         for error in (psutil.AccessDenied(pid=1), NotImplementedError()):
             process = Mock(cpu_affinity=Mock(side_effect=error))
             with patch.object(psutil, "Process", return_value=process):
-                self.assertIsNone(profile._cpu_affinity())
+                self.assertIsNone(toolkit._cpu_affinity())
 
     def test_matrix_covers_history_and_increment_scales_without_duplicates(
         self,

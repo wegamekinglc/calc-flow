@@ -202,6 +202,67 @@ class PerformancePlanFailureEvidenceTests(unittest.IsolatedAsyncioTestCase):
                     )
 
 
+class PerformancePlanJournalTests(unittest.IsolatedAsyncioTestCase):
+    async def run_round(self, root):
+        case = {"id": "journal-fixture"}
+        sample = {"seconds": 1.0, "correctness": {"passed": True}}
+        workers = {}
+        for side in ("baseline", "candidate"):
+            worker = AsyncMock()
+            worker.request.side_effect = [
+                {"native_sha256": side, "tokio_worker_threads": "32"},
+                {"case": case, "warmup": sample},
+                sample,
+                {"state": "completed"},
+            ]
+            workers[side] = worker
+        with (
+            patch(
+                "scripts.measure_performance_plan.Worker.start",
+                side_effect=[workers["baseline"], workers["candidate"]],
+            ),
+            patch(
+                "scripts.measure_performance_plan._compare_latest",
+                return_value={"passed": True},
+            ),
+        ):
+            await measure_round(
+                case,
+                controller.ReleasePair(
+                    {side: root / side for side in workers},
+                    {side: {"native_sha256": side} for side in workers},
+                ),
+                root,
+                1,
+            )
+
+    async def test_journal_keeps_one_exclusively_created_handle_per_round(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            opened = []
+            original_open = Path.open
+
+            def counting_open(self, *args, **kwargs):
+                if self.name == "raw.jsonl":
+                    opened.append(kwargs.get("mode", args[0] if args else "r"))
+                return original_open(self, *args, **kwargs)
+
+            with patch.object(Path, "open", counting_open):
+                await self.run_round(root)
+            records = read_records(root)
+
+            self.assertEqual(opened, ["x"])
+            self.assertEqual(records[0]["operation"], "begin")
+            self.assertEqual(records[-1]["operation"], "finish")
+
+    async def test_journal_refuses_to_overwrite_an_existing_log(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "raw.jsonl").write_text("", encoding="utf-8")
+            with self.assertRaises(FileExistsError):
+                await self.run_round(root)
+
+
 class NativeDiagnosticFinalityTests(unittest.TestCase):
     def test_warm_eof_cannot_hide_an_extra_output(self):
         queue = asyncio.Queue()

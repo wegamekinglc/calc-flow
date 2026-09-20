@@ -9,10 +9,13 @@ import subprocess  # nosec B404 -- SHA-validated, fixed git argv only
 from pathlib import Path
 
 from scripts.benchmark_suite.provenance import ROOT
+from scripts.toolkit import FULL_SHA
 
 
 def git_revision(revision: str) -> str:
-    if revision != "HEAD^" and not re.fullmatch(r"[0-9a-f]{40}\^\{commit\}", revision):
+    if revision != "HEAD^" and not re.fullmatch(
+        FULL_SHA.pattern + r"\^\{commit\}", revision
+    ):
         raise ValueError("unsupported benchmark revision")
     executable = shutil.which("git")
     if executable is None:
@@ -36,11 +39,11 @@ def git_revision(revision: str) -> str:
 def resolve_refs() -> tuple[str, str]:
     head = os.environ.get("BENCHMARK_HEAD_SHA", "")
     base = os.environ.get("BENCHMARK_BASE_SHA", "")
-    if not re.fullmatch(r"[0-9a-f]{40}", head):
+    if not FULL_SHA.fullmatch(head):
         raise ValueError("BENCHMARK_HEAD_SHA must be a full commit SHA")
     if not base or base == "0" * 40:
         base = git_revision("HEAD^")
-    if not re.fullmatch(r"[0-9a-f]{40}", base):
+    if not FULL_SHA.fullmatch(base):
         raise ValueError("BENCHMARK_BASE_SHA must be a full commit SHA")
     for value in (base, head):
         actual = git_revision(value + "^{commit}")

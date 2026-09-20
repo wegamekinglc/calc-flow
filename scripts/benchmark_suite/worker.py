@@ -11,16 +11,16 @@ from pathlib import Path
 
 
 def environment(scope: str = "all") -> dict:
-    from scripts.profile_warm_stream import _worker_environment
+    from scripts.toolkit import worker_environment
 
     if scope == "core":
-        return _worker_environment()
+        return worker_environment()
     if scope != "all":
         raise ValueError("unsupported benchmark dependency scope")
     import polars as pl
 
     return {
-        **_worker_environment(),
+        **worker_environment(),
         "packages": {
             name: version(name)
             for name in ("datafusion", "polars", "TA-Lib", "jax", "jaxlib")

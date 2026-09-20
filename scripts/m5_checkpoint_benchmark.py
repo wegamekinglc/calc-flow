@@ -15,6 +15,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+try:
+    from scripts.toolkit import sha256_file
+except ImportError:  # direct execution puts only scripts/ on sys.path
+    from toolkit import sha256_file
+
 COMMON_CASE = "m5/common/stream_channel_data_roundtrip"
 COMMON_SAMPLE_COUNT = 30
 PRIVATE_SAMPLE_COUNT = 10
@@ -232,10 +237,6 @@ def materialize_common_harness(destination: Path) -> Path:
         )
     shutil.copytree(COMMON_HARNESS_ROOT, destination)
     return destination
-
-
-def sha256_file(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def write_hashed_json(path: Path, payload: dict[str, object]) -> None:

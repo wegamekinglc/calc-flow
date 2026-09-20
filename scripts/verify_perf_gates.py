@@ -27,11 +27,15 @@ import sys
 from pathlib import Path
 from typing import TypedDict
 
+try:
+    from scripts.toolkit import FULL_SHA
+except ImportError:  # direct execution puts only scripts/ on sys.path
+    from toolkit import FULL_SHA
+
 REGRESSION_THRESHOLD = 0.05
 CONFIDENCE_Z = 1.96
 PROVENANCE_FILE = "provenance.json"
 CRITERION_PROVENANCE_FILE = "criterion-provenance.json"
-GIT_SHA = re.compile(r"[0-9a-f]{40}")
 FINGERPRINT = re.compile(r"[0-9a-f]{64}")
 
 
@@ -75,7 +79,7 @@ def load_provenance(path: Path, role: str) -> BenchmarkProvenance:
     if raw["role"] != role:
         raise ValueError(f"{role} provenance has role {raw['role']!r}")
     git_sha = raw["git_sha"]
-    if not isinstance(git_sha, str) or GIT_SHA.fullmatch(git_sha) is None:
+    if not isinstance(git_sha, str) or FULL_SHA.fullmatch(git_sha) is None:
         raise ValueError(f"{role} provenance requires a lowercase full git SHA")
     return BenchmarkProvenance(role=role, git_sha=git_sha)
 
@@ -93,7 +97,7 @@ def load_criterion_provenance(
     if not isinstance(raw, dict) or set(raw) != expected:
         raise ValueError("Criterion provenance must name exactly both baselines")
     shas = tuple(raw[name] for name in (baseline, candidate))
-    if any(not isinstance(sha, str) or GIT_SHA.fullmatch(sha) is None for sha in shas):
+    if any(not isinstance(sha, str) or FULL_SHA.fullmatch(sha) is None for sha in shas):
         raise ValueError("Criterion provenance requires lowercase full git SHAs")
     return shas
 

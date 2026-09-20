@@ -5,43 +5,29 @@ from __future__ import annotations
 
 import argparse
 import re
-
-# Fixed Git commands with separate ref arguments; never invoke a shell.
-import subprocess  # nosec B404
 import sys
 from pathlib import Path
 
+try:
+    from scripts.toolkit import FULL_SHA, git_output
+except ImportError:  # direct execution puts only scripts/ on sys.path
+    from toolkit import FULL_SHA, git_output
+
 ROOT = Path(__file__).resolve().parents[1]
-_SHA_RE = re.compile(r"[0-9a-f]{40}")
 _RELEASE_TAG_RE = re.compile(
     r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
 )
-
-
-def _git(root: Path, *arguments: str) -> str:
-    # Ref arguments are namespaced or validated full SHAs.
-    result = subprocess.run(  # nosec B603
-        ("git", *arguments),
-        cwd=root,
-        shell=False,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode:
-        raise ValueError(f"git {arguments[0]} failed: {result.stderr.strip()}")
-    return result.stdout.strip()
 
 
 def _tag_baseline(
     root: Path, tag: str, candidate: str, initial: str | None
 ) -> str | None:
     ref = f"refs/tags/{tag}"
-    if _git(root, "cat-file", "-t", ref) != "tag":
+    if git_output(root, "cat-file", "-t", ref) != "tag":
         raise ValueError("release tag must be annotated")
-    if _git(root, "rev-parse", f"{ref}^{{commit}}") != candidate:
+    if git_output(root, "rev-parse", f"{ref}^{{commit}}") != candidate:
         raise ValueError("release tag must point at the candidate HEAD")
-    message = _git(root, "for-each-ref", "--format=%(contents)", ref)
+    message = git_output(root, "for-each-ref", "--format=%(contents)", ref)
     return _annotation_baseline(message, initial)
 
 
@@ -61,30 +47,30 @@ def _annotation_baseline(message: str, initial: str | None) -> str | None:
 
 
 def _previous_release(root: Path, candidate: str) -> str | None:
-    tags = _git(root, "tag", "--merged", "HEAD", "--list", "v[0-9]*").splitlines()
+    tags = git_output(root, "tag", "--merged", "HEAD", "--list", "v[0-9]*").splitlines()
     previous_tags = [
         name
         for name in tags
         if _RELEASE_TAG_RE.fullmatch(name) is not None
-        and _git(root, "rev-parse", f"refs/tags/{name}^{{commit}}") != candidate
+        and git_output(root, "rev-parse", f"refs/tags/{name}^{{commit}}") != candidate
     ]
     if not previous_tags:
         return None
     arguments = tuple(value for name in previous_tags for value in ("--match", name))
-    previous = _git(root, "describe", "--tags", "--abbrev=0", *arguments, "HEAD")
-    return _git(root, "rev-parse", f"refs/tags/{previous}^{{commit}}")
+    previous = git_output(root, "describe", "--tags", "--abbrev=0", *arguments, "HEAD")
+    return git_output(root, "rev-parse", f"refs/tags/{previous}^{{commit}}")
 
 
 def _initial_baseline(root: Path, initial: str | None, candidate: str) -> str:
     if initial is None:
         raise ValueError("first release requires an explicit initial baseline SHA")
-    if _SHA_RE.fullmatch(initial) is None:
+    if FULL_SHA.fullmatch(initial) is None:
         raise ValueError("initial baseline must be a full lowercase 40-character SHA")
-    baseline = _git(root, "rev-parse", "--verify", f"{initial}^{{commit}}")
+    baseline = git_output(root, "rev-parse", "--verify", f"{initial}^{{commit}}")
     if baseline == candidate:
         raise ValueError("initial baseline must be a strict ancestor of candidate HEAD")
     try:
-        _git(root, "merge-base", "--is-ancestor", baseline, candidate)
+        git_output(root, "merge-base", "--is-ancestor", baseline, candidate)
     except ValueError as error:
         raise ValueError(
             "initial baseline must be an ancestor of candidate HEAD"
@@ -98,7 +84,7 @@ def resolve_release_baseline(
     initial: str | None = None,
     tag: str | None = None,
 ) -> str:
-    candidate = _git(root, "rev-parse", "HEAD^{commit}")
+    candidate = git_output(root, "rev-parse", "HEAD^{commit}")
     if tag is not None:
         initial = _tag_baseline(root, tag, candidate, initial)
     previous = _previous_release(root, candidate)

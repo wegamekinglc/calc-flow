@@ -5,10 +5,14 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import shutil
 import subprocess  # nosec B404 - fixed gh GET command and validated identifiers
 import urllib.request
 from pathlib import Path
+
+try:
+    from scripts.toolkit import FULL_SHA, require_executable, write_json
+except ImportError:  # direct execution puts only scripts/ on sys.path
+    from toolkit import FULL_SHA, require_executable, write_json
 
 FLAGS = frozenset(("rust", "python", "studio"))
 AGGREGATES = frozenset(("coverage/coveralls", "coverage/coveralls (push)"))
@@ -32,21 +36,11 @@ COVERAGE = {
 }
 
 
-def _gh_executable() -> str:
-    located = shutil.which("gh")
-    if located is None:
-        raise RuntimeError("gh executable is missing from PATH")
-    path = Path(located)
-    if not path.is_absolute() or not path.is_file():
-        raise RuntimeError("gh executable must be an absolute regular file")
-    return str(path)
-
-
 def _github_pages(endpoint: str) -> list:
     # Absolute gh, fixed read-only GET argv and validated repository/commit IDs.
     completed = subprocess.run(  # noqa: S603  # nosec B603  # nosemgrep
         [
-            _gh_executable(),
+            require_executable("gh"),
             "api",
             "--hostname",
             "github.com",
@@ -193,13 +187,13 @@ def _require_successful_statuses(statuses: dict) -> None:
 
 
 def _tree(repository: str, sha: str) -> str:
-    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+    if not FULL_SHA.fullmatch(sha):
         raise ValueError("measurement or head SHA is not a full commit SHA")
     commit = _github_object(f"repos/{repository}/git/commits/{sha}")
     if commit["sha"] != sha:
         raise ValueError("GitHub commit identity differs")
     tree = commit["tree"]["sha"]
-    if not re.fullmatch(r"[0-9a-f]{40}", tree):
+    if not FULL_SHA.fullmatch(tree):
         raise ValueError("GitHub full tree identity is missing")
     return tree
 
@@ -349,7 +343,7 @@ def _equivalent_candidate(repository: str, base_sha: str, tree: str) -> dict:
 def _validate_request(repository: str, base_sha: str) -> None:
     if not re.fullmatch(r"[\w.-]+/[\w.-]+", repository, flags=re.ASCII):
         raise ValueError("repository must be owner/repo")
-    if not re.fullmatch(r"[0-9a-f]{40}", base_sha):
+    if not FULL_SHA.fullmatch(base_sha):
         raise ValueError("base SHA must be a full hexadecimal commit SHA")
 
 
@@ -388,12 +382,6 @@ def resolve(repository: str, base_sha: str) -> dict:
     }
 
 
-def _write_provenance(path: Path, record: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("x") as stream:
-        stream.write(json.dumps(record, indent=2, sort_keys=True) + "\n")
-
-
 def _record_failure(args, error: Exception) -> None:
     record = {
         "repository": args.repository,
@@ -403,7 +391,7 @@ def _record_failure(args, error: Exception) -> None:
         "request_url": getattr(error, "url", None),
     }
     try:
-        _write_provenance(args.provenance, record)
+        write_json(args.provenance, record, exclusive=True)
     except OSError as save_error:
         error.add_note(f"Could not save failure provenance: {save_error}")
 
@@ -420,7 +408,7 @@ def main(argv: list[str] | None = None) -> None:
     except Exception as error:
         _record_failure(args, error)
         raise
-    _write_provenance(args.provenance, result)
+    write_json(args.provenance, result, exclusive=True)
     with args.github_output.open("a") as stream:
         stream.write(f"compare_sha={result['compare_sha']}\n")
     print(

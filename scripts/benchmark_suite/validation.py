@@ -13,6 +13,7 @@ from scripts.benchmark_suite.catalog import (
 )
 from scripts.benchmark_suite.provenance import harness_sha256
 from scripts.benchmark_suite.report import SAMPLES, comparison, validate_shards
+from scripts.toolkit import FULL_SHA
 
 
 def validate_shape(report: dict) -> dict:
@@ -44,7 +45,7 @@ def validate_releases(releases: dict, base: str, head: str) -> None:
     for side, expected in (("baseline", base), ("candidate", head)):
         release = releases[side]
         if (
-            not re.fullmatch("[0-9a-f]{40}", expected)
+            not FULL_SHA.fullmatch(expected)
             or release["git_sha"] != expected
             or release["git_clean"] is not True
             or release["build_profile"] != "release"

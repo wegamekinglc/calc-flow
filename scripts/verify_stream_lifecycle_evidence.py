@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import math
 import sys
 from pathlib import Path
 from typing import Any
+
+try:
+    from scripts.toolkit import fingerprint_json
+except ImportError:  # direct execution puts only scripts/ on sys.path
+    from toolkit import fingerprint_json
 
 SCENARIO = "symbolic_stream_window_checkpoint"
 PHASE_FIELDS = (
@@ -20,16 +24,6 @@ PHASE_FIELDS = (
     "shutdown_duration_seconds",
 )
 IDENTITY_FIELDS = ("machine", "dependency", "workload")
-
-
-def _fingerprint(value: dict[str, object]) -> str:
-    encoded = json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    ).encode()
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def _object(value: object, field: str) -> dict[str, Any]:
@@ -162,7 +156,9 @@ def _validate_identities(extra: dict[str, Any]) -> None:
         fingerprint_field = f"{prefix}_fingerprint"
         identity = _object(extra.get(identity_field), identity_field)
         fingerprint = extra.get(fingerprint_field)
-        if not isinstance(fingerprint, str) or fingerprint != _fingerprint(identity):
+        if not isinstance(fingerprint, str) or fingerprint != fingerprint_json(
+            identity
+        ):
             raise ValueError(f"{fingerprint_field} does not match {identity_field}")
 
 
