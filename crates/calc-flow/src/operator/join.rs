@@ -2575,6 +2575,12 @@ impl StreamJoinOperator {
         Ok(())
     }
 
+    /// Emits the prepared output as sequential chunk messages.
+    ///
+    /// If `output.emit` fails after k of n chunks, those k chunks have escaped
+    /// while `commit_prepared` never runs. The failure aborts the operator task
+    /// and job convergence discards the run's state, so no resumption observes
+    /// the emitted-but-uncommitted gap.
     async fn emit_prepared(
         &mut self,
         prepared: &PreparedJoinBatch,

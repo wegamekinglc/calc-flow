@@ -14,9 +14,10 @@ use tokio::sync::{mpsc, watch};
 use super::{
     EdgeReceiver, EnvelopeCost, StreamMessage, StreamMessageKind,
     context::{StreamTaskContext, wait_for_task_gate},
+    failure::panic_message,
     job::ValidatedOrdinarySink,
     metrics::{MetricsRecorder, sink_metric_id},
-    supervisor::{TaskFailureSignal, TaskId, TaskSupervisor, panic_message},
+    supervisor::{TaskFailureSignal, TaskId, TaskSupervisor},
 };
 use crate::{
     CalcFlowError, CancellationToken, Epoch, JsonMap, Result, SinkDeliveryManifest,

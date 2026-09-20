@@ -14,14 +14,13 @@ use super::{
     EdgeReceiver, EdgeSender, EnvelopeCost, StreamMessage, StreamMessageKind,
     context::{StreamTaskContext, wait_for_task_gate},
     entity_work::TaskEntityWorkClient,
+    failure::panic_message,
     metrics::MetricsRecorder,
     progress::{
         aggregate::{AggregateInput, IngressActivity, MultiInputProgress, ProgressEmissionKind},
         prepare::BindingOrdinal,
     },
-    supervisor::{
-        PreparedPair, RetainedTaskResult, TaskId, TaskSupervisor, contain_task_panic, panic_message,
-    },
+    supervisor::{PreparedPair, RetainedTaskResult, TaskId, TaskSupervisor, contain_task_panic},
 };
 use crate::{
     Batch, CalcFlowError, CancellationToken, EdgeBudget, Epoch, EventTime, IngressProgress,

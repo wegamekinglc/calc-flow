@@ -1,6 +1,5 @@
 use std::{
-    any::Any,
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, HashMap},
     future::Future,
     panic::AssertUnwindSafe,
     sync::Arc,
@@ -10,9 +9,12 @@ use futures::FutureExt;
 use parking_lot::Mutex;
 use tokio::{sync::oneshot, task::JoinSet};
 
+use self::terminal::TerminalArbiter;
+use super::failure::panic_message;
 use crate::{CalcFlowError, CancellationToken, Result};
 
 mod ready_pair;
+pub(crate) mod terminal;
 
 /// Stable identity assigned in supervisor registration order (spec D5.1).
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -78,125 +80,6 @@ pub(crate) struct SupervisionReport {
     /// Prefix of `errors` observed before convergence cancellation began.
     pub(crate) primary_error_count: usize,
     pub(crate) errors: Vec<TaskFailure>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum TerminalDecision {
-    TaskFailure(TaskId),
-    ExplicitCancel,
-    DeadlineExceeded,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct TerminalObservation {
-    pub(crate) terminal: Option<TerminalDecision>,
-    pub(crate) graceful_shutdown: bool,
-}
-
-#[derive(Default)]
-struct TerminalArbiterState {
-    primary_failures: BTreeSet<TaskId>,
-    explicit_cancel: bool,
-    deadline_exceeded: bool,
-    graceful_shutdown: bool,
-    committed: Option<TerminalDecision>,
-}
-
-/// One lock shared by terminal requests, task-failure announcement, and the
-/// immutable driver commit. No caller may hold a job-state lock while entering
-/// this arbiter.
-#[derive(Clone, Default)]
-pub(crate) struct TerminalArbiter(Arc<Mutex<TerminalArbiterState>>);
-
-impl TerminalArbiter {
-    pub(crate) fn request_explicit_cancel(&self) -> bool {
-        let mut state = self.0.lock();
-        if state.committed.is_some() {
-            return false;
-        }
-        state.explicit_cancel = true;
-        true
-    }
-
-    pub(crate) fn request_deadline(&self) -> bool {
-        let mut state = self.0.lock();
-        if state.committed.is_some() {
-            return false;
-        }
-        state.deadline_exceeded = true;
-        true
-    }
-
-    pub(crate) fn request_graceful_shutdown(&self) -> bool {
-        let mut state = self.0.lock();
-        if state.committed.is_some() {
-            return false;
-        }
-        state.graceful_shutdown = true;
-        true
-    }
-
-    /// Applies task-failure > explicit > deadline and cancels workers before
-    /// releasing the same lock that makes the terminal decision immutable.
-    pub(crate) fn observe_and_commit(
-        &self,
-        cancellation: &CancellationToken,
-    ) -> TerminalObservation {
-        let mut state = self.0.lock();
-        if state.committed.is_none() {
-            state.committed = state
-                .primary_failures
-                .first()
-                .copied()
-                .map(TerminalDecision::TaskFailure)
-                .or_else(|| {
-                    state
-                        .explicit_cancel
-                        .then_some(TerminalDecision::ExplicitCancel)
-                })
-                .or_else(|| {
-                    cancellation
-                        .is_cancelled()
-                        .then_some(TerminalDecision::ExplicitCancel)
-                })
-                .or_else(|| {
-                    state
-                        .deadline_exceeded
-                        .then_some(TerminalDecision::DeadlineExceeded)
-                });
-            if state.committed.is_some() {
-                cancellation.cancel();
-            }
-        }
-        TerminalObservation {
-            terminal: state.committed,
-            graceful_shutdown: state.graceful_shutdown,
-        }
-    }
-
-    fn record_task_failure(&self, task_id: TaskId, cancellation: &CancellationToken) {
-        let mut state = self.0.lock();
-        if state.committed.is_none() && !cancellation.is_cancelled() {
-            state.primary_failures.insert(task_id);
-        }
-    }
-
-    fn record_task_failure_and_cancel(&self, task_id: TaskId, cancellation: &CancellationToken) {
-        let mut state = self.0.lock();
-        if state.committed.is_none() && !cancellation.is_cancelled() {
-            state.primary_failures.insert(task_id);
-        }
-        cancellation.cancel();
-    }
-
-    fn primary_failures(&self) -> BTreeSet<TaskId> {
-        self.0.lock().primary_failures.clone()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn explicit_cancel_requested(&self) -> bool {
-        self.0.lock().explicit_cancel
-    }
 }
 
 impl SupervisionReport {
@@ -679,31 +562,8 @@ impl Drop for TaskSupervisor {
     }
 }
 
-pub(crate) fn panic_message(payload: &(dyn Any + Send)) -> String {
-    const MAX_PANIC_BYTES: usize = 1_024;
-    const ELLIPSIS: &str = "…";
-
-    let message = if let Some(message) = payload.downcast_ref::<&str>() {
-        *message
-    } else if let Some(message) = payload.downcast_ref::<String>() {
-        message.as_str()
-    } else {
-        return "non-string panic payload".into();
-    };
-    if message.len() <= MAX_PANIC_BYTES {
-        return message.to_owned();
-    }
-
-    let mut prefix_end = MAX_PANIC_BYTES - ELLIPSIS.len();
-    while !message.is_char_boundary(prefix_end) {
-        prefix_end -= 1;
-    }
-    format!("{}{}", &message[..prefix_end], ELLIPSIS)
-}
-
 #[cfg(test)]
 mod tests {
-    use std::any::Any;
     use std::sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -711,7 +571,7 @@ mod tests {
 
     use tokio::sync::{Barrier, oneshot};
 
-    use super::{TaskId, TaskSupervisor, TerminalArbiter, TerminalDecision, panic_message};
+    use super::{TaskId, TaskSupervisor};
     use crate::{CalcFlowError, CancellationToken};
 
     #[tokio::test]
@@ -930,43 +790,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn terminal_arbiter_prioritizes_one_locked_snapshot_and_keeps_graceful_nonterminal() {
-        let cancellation = CancellationToken::new();
-        let graceful_only = TerminalArbiter::default();
-        assert!(graceful_only.request_graceful_shutdown());
-        let observation = graceful_only.observe_and_commit(&cancellation);
-        assert_eq!(observation.terminal, None);
-        assert!(observation.graceful_shutdown);
-        assert!(!cancellation.is_cancelled());
-
-        let arbiter = TerminalArbiter::default();
-        assert!(arbiter.request_graceful_shutdown());
-        assert!(arbiter.request_deadline());
-        assert!(arbiter.request_explicit_cancel());
-        arbiter.record_task_failure(TaskId::new(7), &cancellation);
-        arbiter.record_task_failure(TaskId::new(3), &cancellation);
-
-        let observation = arbiter.observe_and_commit(&cancellation);
-        assert_eq!(
-            observation.terminal,
-            Some(TerminalDecision::TaskFailure(TaskId::new(3)))
-        );
-        assert!(observation.graceful_shutdown);
-        assert!(cancellation.is_cancelled());
-    }
-
-    #[test]
-    fn terminal_arbiter_classifies_external_token_cancellation_as_explicit() {
-        let cancellation = CancellationToken::new();
-        cancellation.cancel();
-
-        let observation = TerminalArbiter::default().observe_and_commit(&cancellation);
-
-        assert_eq!(observation.terminal, Some(TerminalDecision::ExplicitCancel));
-        assert!(!observation.graceful_shutdown);
-    }
-
     #[tokio::test]
     async fn first_failure_cancels_and_joins_a_sibling() {
         let cancellation = CancellationToken::new();
@@ -1110,28 +933,5 @@ mod tests {
                 if message == "connector invariant"
         ));
         assert_eq!(supervisor.task_count(), 0);
-    }
-
-    #[test]
-    fn panic_payload_is_utf8_safe_and_bounded_to_1024_bytes() {
-        let long_ascii = "a".repeat(1_100);
-        let bounded_ascii = panic_message(&long_ascii);
-        assert_eq!(bounded_ascii.len(), 1_024);
-        assert!(bounded_ascii.ends_with('…'));
-        assert_eq!(&bounded_ascii[..1_021], "a".repeat(1_021));
-
-        let split_at_limit = format!("{}{}", "a".repeat(1_020), "😀".repeat(2));
-        let bounded_multibyte = panic_message(&split_at_limit);
-        assert!(bounded_multibyte.is_char_boundary(bounded_multibyte.len()));
-        assert_eq!(bounded_multibyte.len(), 1_023);
-        assert!(bounded_multibyte.ends_with('…'));
-        assert_eq!(&bounded_multibyte[..1_020], "a".repeat(1_020));
-
-        let short = String::from("short panic");
-        assert_eq!(panic_message(&short), short);
-        assert_eq!(
-            panic_message(&(7_u64) as &(dyn Any + Send)),
-            "non-string panic payload"
-        );
     }
 }
