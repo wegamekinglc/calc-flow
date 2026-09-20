@@ -296,52 +296,73 @@ def test_late_successors_reject_even_after_allowed_transform(
         program.compile_stream(cf.Runtime())
 
 
-@pytest.mark.parametrize("successor", ["row_local", "filter", "project", "sql"])
-def test_allowed_late_successors_lower_to_single_input_expression_or_sql(
-    successor: str,
-) -> None:
-    from calc_flow.symbolic.lower import lower_program_document
-
+def _program_for_successor(successor: str) -> cf.Program:
     pair = cf.with_late_output(rolling(quotes()))
-    if successor == "row_local":
-        derived = pair.late.with_columns(
-            twice=pair.late["x"] * 2.0,
-            tagged=cf.row.coalesce(pair.late["label"], "n/a"),
-        )
-    elif successor == "filter":
-        derived = pair.late.filter(pair.late["x"] > 0.0)
-    elif successor == "project":
-        derived = pair.late.select("x", "_cf_late_reason")
-    else:
-        derived = cf.sql("SELECT * FROM rows WHERE x > 0", rows=pair.late)
-    program = cf.Program("mapped", outputs={"normal": pair.output, "late": derived})
-    runtime = cf.Runtime()
-    document = lower_program_document(program, runtime, "stream")
-    nodes = {node["id"]: node for node in document["graph"]["nodes"]}
+    late = pair.late
+    derived = {
+        "row_local": lambda: late.with_columns(
+            twice=late["x"] * 2.0,
+            tagged=cf.row.coalesce(late["label"], "n/a"),
+        ),
+        "filter": lambda: late.filter(late["x"] > 0.0),
+        "project": lambda: late.select("x", "_cf_late_reason"),
+        "sql": lambda: cf.sql("SELECT * FROM rows WHERE x > 0", rows=late),
+    }[successor]()
+    return cf.Program("mapped", outputs={"normal": pair.output, "late": derived})
+
+
+def _rolling_state_id(nodes: dict[str, dict[str, object]]) -> str:
     (state,) = [
         node for node in nodes.values() if node["operator"]["kind"] == "rolling"
     ]
-    pending = [
-        edge["target_node"]
-        for edge in document["graph"]["edges"]
-        if edge["source_node"] == state["id"] and edge["source_port"] == "late"
-    ]
-    assert pending
+    return state["id"]
+
+
+def _downstream_ids(edges: list[dict[str, object]], roots: list[str]) -> list[str]:
+    pending = list(roots)
     visited: set[str] = set()
+    ordered: list[str] = []
     while pending:
         node_id = pending.pop()
         if node_id in visited:
             continue
         visited.add(node_id)
-        node = nodes[node_id]
+        ordered.append(node_id)
+        pending.extend(
+            edge["target_node"] for edge in edges if edge["source_node"] == node_id
+        )
+    return ordered
+
+
+def _late_successor_nodes(program: cf.Program) -> list[dict[str, object]]:
+    from calc_flow.symbolic.lower import lower_program_document
+
+    document = lower_program_document(program, cf.Runtime(), "stream")
+    nodes = {node["id"]: node for node in document["graph"]["nodes"]}
+    edges = document["graph"]["edges"]
+    roots = [
+        edge["target_node"]
+        for edge in edges
+        if edge["source_node"] == _rolling_state_id(nodes)
+        and edge["source_port"] == "late"
+    ]
+    assert roots
+    return [nodes[node_id] for node_id in _downstream_ids(edges, roots)]
+
+
+def _assert_native_acceptance(program: cf.Program) -> None:
+    assert isinstance(program.compile_stream(cf.Runtime()), cf.StreamExecutionPlan)
+
+
+@pytest.mark.parametrize("successor", ["row_local", "filter", "project", "sql"])
+def test_allowed_late_successors_lower_to_single_input_expression_or_sql(
+    successor: str,
+) -> None:
+    program = _program_for_successor(successor)
+    for node in _late_successor_nodes(program):
         assert node["operator"]["kind"] in {"expression", "sql"}
         assert len(node["input_ports"]) == 1
-        pending.extend(
-            edge["target_node"]
-            for edge in document["graph"]["edges"]
-            if edge["source_node"] == node_id
-        )
-    assert isinstance(program.compile_stream(runtime), cf.StreamExecutionPlan)
+    _assert_native_acceptance(program)
 
 
 def batch(times: list[int], values: list[float]) -> pa.Table:
