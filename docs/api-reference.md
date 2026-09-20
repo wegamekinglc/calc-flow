@@ -51,7 +51,7 @@ The runnable inventories cover both surfaces; the SQL examples share a dataset:
 
 Run the user examples that need no external service with
 `JAX_PLATFORMS=cpu uv run --no-sync python scripts/run_examples.py`.
-To include the ten service-backed connector read/write examples, prepare the
+To include the service-backed connector read/write examples, prepare the
 optional native features, source data, and empty sink destinations from the
 [connector overview](connectors/README.md), then add `--include-services`.
 
