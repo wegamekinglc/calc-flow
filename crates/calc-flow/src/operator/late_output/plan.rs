@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, mem::size_of, sync::Arc};
 
 use datafusion::arrow::{
     array::{ArrayRef, Int64Array, StringArray, UInt64Array},

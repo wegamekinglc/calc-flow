@@ -1,5 +1,7 @@
 mod ownership;
 
+use std::mem::size_of;
+
 use super::*;
 use crate::{Batch, BatchMetadata, EdgeBudget, EdgeCollector};
 use datafusion::arrow::{
