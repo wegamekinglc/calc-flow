@@ -75,7 +75,6 @@ extend-exclude = [
     ".claude/critiques/**/*.md",
     ".codex/artifacts/**/*.md",
     "design/**/*.md",
-    "docs/superpowers/**/*.md",
 ]
 target-version = "py313"
 

@@ -29,7 +29,7 @@ git diff --check
 ```
 
 The runner discovers numbered Python programs in order, including the SQL and
-streaming pipeline examples. It skips the ten service-backed connector
+streaming pipeline examples. It skips the service-backed connector
 read/write examples by default, runs the maintained Rust user-example list,
 and stops with the first failing program's exit code. Add `--include-services`
 only after the [connector setup](connectors/README.md) has prepared native

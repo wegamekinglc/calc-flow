@@ -71,6 +71,8 @@ The [project schema](../schemas/project-v3.schema.json) and
 5. [Python release guide](python-release.md): packaging and publication.
 6. [Original performance development plan](plans/cross-library-performance.md):
    the initial SQL and native-streaming optimization scope and validation rules.
+7. [Bounded backward ASOF join plan, dated 2026-09-09](plans/2026-09-09-bounded-backward-asof-join.md):
+   the frozen join semantics, implementation split, and exit gates.
 
 ## History and maintenance
 

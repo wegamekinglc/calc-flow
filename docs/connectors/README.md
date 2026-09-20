@@ -7,25 +7,27 @@ databases, HTTP, or WebSocket, and to deliver its outputs. Choose a connector
 below for its Python example, service setup, project options, and delivery
 limits.
 
-| Connector                   | Native Python feature      | Read example                                                      | Write example                                                        |
-|-----------------------------|----------------------------|-------------------------------------------------------------------|----------------------------------------------------------------------|
-| [File](file.md)             | `connector-file` (default) | [15_file_source.py](../../examples/15_file_source.py)             | [15_file_source.py](../../examples/15_file_source.py) (Parquet sink) |
-| [Kafka](kafka.md)           | `connector-kafka`          | [16_kafka_source.py](../../examples/16_kafka_source.py)           | [22_kafka_sink.py](../../examples/22_kafka_sink.py)                  |
-| [PostgreSQL](postgresql.md) | `connector-postgresql`     | [17_postgresql_source.py](../../examples/17_postgresql_source.py) | [23_postgresql_sink.py](../../examples/23_postgresql_sink.py)        |
-| [MySQL](mysql.md)           | `connector-mysql`          | [18_mysql_source.py](../../examples/18_mysql_source.py)           | [24_mysql_sink.py](../../examples/24_mysql_sink.py)                  |
-| [ClickHouse](clickhouse.md) | `connector-clickhouse`     | [19_clickhouse_source.py](../../examples/19_clickhouse_source.py) | [25_clickhouse_sink.py](../../examples/25_clickhouse_sink.py)        |
-| [HTTP](http.md)             | `connector-http`           | [20_http_source.py](../../examples/20_http_source.py)             | Source-only connector                                                |
-| [WebSocket](websocket.md)   | `connector-websocket`      | [21_websocket_source.py](../../examples/21_websocket_source.py)   | Source-only connector                                                |
+| Connector                          | Native Python feature      | Read example                                                              | Write example                                                        |
+|------------------------------------|----------------------------|---------------------------------------------------------------------------|----------------------------------------------------------------------|
+| [File](file.md)                    | `connector-file` (default) | [15_file_source.py](../../examples/15_file_source.py)                     | [15_file_source.py](../../examples/15_file_source.py) (Parquet sink) |
+| [Kafka](kafka.md)                  | `connector-kafka`          | [16_kafka_source.py](../../examples/16_kafka_source.py)                   | [22_kafka_sink.py](../../examples/22_kafka_sink.py)                  |
+| [Kafka](kafka.md) (protobuf)       | `connector-kafka`          | [27_kafka_protobuf_source.py](../../examples/27_kafka_protobuf_source.py) | Source-only format                                                   |
+| [Kafka](kafka.md) (custom decoder) | `connector-kafka`          | [28_kafka_custom_decoder.py](../../examples/28_kafka_custom_decoder.py)   | Source-only format                                                   |
+| [PostgreSQL](postgresql.md)        | `connector-postgresql`     | [17_postgresql_source.py](../../examples/17_postgresql_source.py)         | [23_postgresql_sink.py](../../examples/23_postgresql_sink.py)        |
+| [MySQL](mysql.md)                  | `connector-mysql`          | [18_mysql_source.py](../../examples/18_mysql_source.py)                   | [24_mysql_sink.py](../../examples/24_mysql_sink.py)                  |
+| [ClickHouse](clickhouse.md)        | `connector-clickhouse`     | [19_clickhouse_source.py](../../examples/19_clickhouse_source.py)         | [25_clickhouse_sink.py](../../examples/25_clickhouse_sink.py)        |
+| [HTTP](http.md)                    | `connector-http`           | [20_http_source.py](../../examples/20_http_source.py)                     | Source-only connector                                                |
+| [WebSocket](websocket.md)          | `connector-websocket`      | [21_websocket_source.py](../../examples/21_websocket_source.py)           | Source-only connector                                                |
 
 Every supported connector direction has a standalone Python example. Each
 builds an order-total pipeline with Python expressions, exports it to a
 stream project, and connects native transports to that graph. All examples
 filter out nonpositive quantities and project `id` and `total`.
 
-The seven `*_source.py` programs read two sample orders, calculate totals,
+The source programs read two sample orders, calculate totals,
 write Parquet, then read the committed output and check `[20.0, 60.0]` in ID
 order. The file example creates its own CSV, JSON Lines, and Parquet inputs;
-the six other sources use the prepared data on their connector pages. Source
+the other sources use the prepared data on their connector pages. Source
 examples read their remote inputs without changing them.
 
 The four `*_sink.py` programs create three local Parquet rows, including a
@@ -159,7 +161,7 @@ uv run --no-sync python scripts/run_examples.py --surface python
 ```
 
 After all six services, source data, empty sink destinations, and environment
-variables are ready, enable all ten service-backed read/write examples:
+variables are ready, enable the service-backed read/write examples:
 
 ```bash
 uv run --no-sync python scripts/run_examples.py --surface python --include-services

@@ -153,7 +153,7 @@ preparation, environment variables, complete run commands, and delivery limits.
 Parquet totals `[20.0, 60.0]` with exactly-once delivery for each format. It
 requires no external service and removes its sample files and checkpoints.
 
-The eight other `*_source.py` scripts read two prepared orders and check the
+The eight other source scripts read two prepared orders and check the
 same Parquet totals, sorted by ID. Kafka consumes an assigned partition, once
 per JSON payload, once per protobuf payload decoded through
 `examples/data/orders.proto`'s descriptor set, and once per pipe-delimited

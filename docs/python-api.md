@@ -1069,7 +1069,7 @@ See [`examples/`](../examples/README.md) and the
 [cross-language inventory](examples.md) for executable programs. Run the
 examples that need no external service against a prepared installation with
 `JAX_PLATFORMS=cpu uv run --no-sync python scripts/run_examples.py`.
-The ten service-backed connector read/write examples require optional native
+The service-backed connector read/write examples require optional native
 connector features, prepared source data, and empty sink destinations;
 follow the [connector setup](connectors/README.md) before adding
 `--include-services` to the runner command.
