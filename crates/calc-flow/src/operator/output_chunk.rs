@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use std::mem::size_of;
 
 use datafusion::arrow::{
-    array::{Array, StructArray},
+    array::{Array, ArrayData, StructArray},
     buffer::NullBuffer,
     datatypes::{DataType, UnionMode},
     record_batch::RecordBatch,
@@ -91,13 +91,39 @@ pub(crate) fn chunk_output_record(
     // built, so a restored u64::MAX sequence fails instead of emitting.
     validate_output_sequence_range(operator_id, first_sequence, 1)?;
     // A record that already fits one message skips the per-row charge scan.
-    if record.num_rows() <= budget.max_rows {
-        let metadata = BatchMetadata::new(operator_id, first_sequence, BTreeMap::new())?;
-        let batch = Batch::table(vec![record.clone()], metadata)?;
-        if batch.estimated_bytes()? <= budget.max_bytes {
-            return Ok(vec![batch]);
-        }
+    if let Some(batch) = whole_record_batch(record, operator_id, first_sequence, budget)? {
+        return Ok(vec![batch]);
     }
+    chunked_record_batches(record, operator_id, first_sequence, budget, errors)
+}
+
+/// The whole-record fast path, or `None` when the record needs the per-row
+/// charge scan to split into edge-budget-sized chunks.
+fn whole_record_batch(
+    record: &RecordBatch,
+    operator_id: &str,
+    first_sequence: u64,
+    budget: EdgeBudget,
+) -> Result<Option<Batch>> {
+    if record.num_rows() > budget.max_rows {
+        return Ok(None);
+    }
+    let metadata = BatchMetadata::new(operator_id, first_sequence, BTreeMap::new())?;
+    let batch = Batch::table(vec![record.clone()], metadata)?;
+    if batch.estimated_bytes()? > budget.max_bytes {
+        return Ok(None);
+    }
+    Ok(Some(batch))
+}
+
+/// The per-row charge path for a record that does not fit one message.
+fn chunked_record_batches(
+    record: &RecordBatch,
+    operator_id: &str,
+    first_sequence: u64,
+    budget: EdgeBudget,
+    errors: OutputChunkErrors,
+) -> Result<Vec<Batch>> {
     let plan = ChargePlan::read(record)?;
     let ranges = plan.chunk_ranges(record.num_rows(), budget, operator_id, errors)?;
     validate_output_sequence_range(operator_id, first_sequence, ranges.len())?;
@@ -250,19 +276,39 @@ fn accumulate_column<'a>(
     chunk: &mut usize,
 ) -> Result<()> {
     if matches!(column.data_type(), DataType::Struct(_)) {
-        charges.validity.extend(column.nulls());
-        let struct_array = column
-            .as_any()
-            .downcast_ref::<StructArray>()
-            .expect("struct column matches its data type");
-        for child in struct_array.columns() {
-            accumulate_column(child, charges, chunk)?;
-        }
-        return Ok(());
+        return accumulate_struct_column(column, charges, chunk);
     }
     if charges.add_flat_column(column)? {
         return Ok(());
     }
+    accumulate_nested_column(column, charges, chunk)
+}
+
+/// Struct columns recurse because Arrow slices their children; the struct's
+/// own validity bitmap still joins the per-null-cell charges.
+fn accumulate_struct_column<'a>(
+    column: &'a dyn Array,
+    charges: &mut ColumnCharges<'a>,
+    chunk: &mut usize,
+) -> Result<()> {
+    charges.validity.extend(column.nulls());
+    let struct_array = column
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .expect("struct column matches its data type");
+    for child in struct_array.columns() {
+        accumulate_column(child, charges, chunk)?;
+    }
+    Ok(())
+}
+
+/// Nested columns charge their own per-row buffers and keep each unsliced
+/// child subtree as one fixed charge per chunk range.
+fn accumulate_nested_column<'a>(
+    column: &'a dyn Array,
+    charges: &mut ColumnCharges<'a>,
+    chunk: &mut usize,
+) -> Result<()> {
     charges.fixed = checked_accumulate(
         charges.fixed,
         nested_row_width(column.data_type())?,
@@ -270,16 +316,19 @@ fn accumulate_column<'a>(
     )?;
     charges.validity.extend(column.nulls());
     for child in column.to_data().child_data() {
-        let bytes =
-            child
-                .get_slice_memory_size()
-                .map_err(|error| CalcFlowError::InvalidArgument {
-                    field: "batch".into(),
-                    message: format!("Arrow slice memory could not be measured: {error}"),
-                })?;
-        *chunk = checked_accumulate(*chunk, bytes, "batch")?;
+        *chunk = checked_accumulate(*chunk, child_slice_memory(child)?, "batch")?;
     }
     Ok(())
+}
+
+/// The bytes Arrow keeps at full length for one unsliced child subtree.
+fn child_slice_memory(child: &ArrayData) -> Result<usize> {
+    child
+        .get_slice_memory_size()
+        .map_err(|error| CalcFlowError::InvalidArgument {
+            field: "batch".into(),
+            message: format!("Arrow slice memory could not be measured: {error}"),
+        })
 }
 
 /// Per-row charge of a nested column's own buffers: dictionary keys, list
