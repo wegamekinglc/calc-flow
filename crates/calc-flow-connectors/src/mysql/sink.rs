@@ -126,7 +126,8 @@ impl MySqlSink {
     }
 
     fn append_encoded(&mut self, schema: &SchemaRef, records: &[RecordBatch]) -> Result<()> {
-        if self.encoder.is_none() {
+        let initialized_here = self.encoder.is_none();
+        if initialized_here {
             let writer = StreamWriter::try_new(Vec::new(), schema.as_ref())
                 .map_err(|_| fail("write", "cannot encode Arrow schema"))?;
             if writer.get_ref().len() as u64 + EOS_BYTES > self.config.bytes {
@@ -147,7 +148,14 @@ impl MySqlSink {
             Ok(())
         });
         if result.is_err() {
-            writer.get_mut().truncate(before);
+            if initialized_here {
+                // Roll back the encoder created by this call: keeping it would
+                // pin the rejected schema for a later stage() that schema
+                // validation would otherwise accept with a different schema.
+                self.encoder = None;
+            } else {
+                writer.get_mut().truncate(before);
+            }
         }
         result
     }
@@ -812,11 +820,49 @@ mod tests {
         )
         .unwrap();
         sink.config.bytes = encoded.len() as u64;
+        let buffered = sink.encoder.as_ref().unwrap().get_ref().len();
         assert!(sink.stage(&batch("id", vec![4])).is_err());
+        assert_eq!(sink.encoder.as_ref().unwrap().get_ref().len(), buffered);
         assert_eq!(sink.rows, 3);
         assert_eq!(sink.records.len(), 1);
         sink.pre_commit(Epoch::INITIAL).await.unwrap();
         assert_eq!(sink.prepared.as_deref(), Some(encoded.as_slice()));
+    }
+
+    #[tokio::test]
+    async fn rejected_first_append_leaves_the_sink_fully_pristine() {
+        let mut sink = sink();
+        sink.active = Some(Epoch::INITIAL);
+        let header = StreamWriter::try_new(
+            Vec::<u8>::new(),
+            &Schema::new(vec![Field::new("rejected", DataType::Int64, false)]),
+        )
+        .unwrap()
+        .get_ref()
+        .len() as u64;
+        sink.config.bytes = header + EOS_BYTES;
+        assert!(sink.stage(&batch("rejected", vec![1])).is_err());
+        assert!(sink.encoder.is_none());
+        assert!(sink.schema.is_none());
+        assert!(sink.records.is_empty());
+        assert!(sink.insert.is_none());
+        assert!(sink.prepared.is_none());
+        assert_eq!(sink.rows, 0);
+        assert_eq!(sink.memory, 0);
+        sink.config.bytes = 64 * 1024 * 1024;
+        sink.stage(&batch("id", vec![1, 2])).unwrap();
+        sink.pre_commit(Epoch::INITIAL).await.unwrap();
+        assert_eq!(
+            sink.schema.as_deref().unwrap(),
+            &Schema::new(vec![Field::new("id", DataType::Int64, false)])
+        );
+        let expected = encode(
+            &sink.records,
+            sink.schema.as_deref().unwrap(),
+            sink.config.bytes,
+        )
+        .unwrap();
+        assert_eq!(sink.prepared.as_deref(), Some(expected.as_slice()));
     }
 
     #[tokio::test]
