@@ -3077,155 +3077,21 @@ fn state_row_count(rows: &[StoredRow], operator_id: &str) -> Result<u64> {
     u64::try_from(rows.len()).map_err(|_| counter_overflow(operator_id, "state rows"))
 }
 
-/// Splits one batched Join output record into edge-budget-sized messages.
-///
-/// Every chunk carries its own sequence and its own exact budget check, so
-/// the whole record is validated before the first message leaves the
-/// operator; a row that alone exceeds the byte budget fails loudly.
+/// Splits one batched Join output record into edge-budget-sized messages via
+/// the shared operator chunker.
 fn chunk_output_record(
     record: &RecordBatch,
     operator_id: &str,
     first_sequence: u64,
     budget: EdgeBudget,
 ) -> Result<Vec<Batch>> {
-    validate_output_sequence_range(operator_id, first_sequence, 1)?;
-    // A record that already fits one message skips the per-row charge scan.
-    if record.num_rows() <= budget.max_rows {
-        let metadata = BatchMetadata::new(operator_id, first_sequence, BTreeMap::new())?;
-        let batch = Batch::table(vec![record.clone()], metadata)?;
-        if batch.estimated_bytes()? <= budget.max_bytes {
-            return Ok(vec![batch]);
-        }
-    }
-    let row_costs = output_row_costs(record, budget, operator_id)?;
-    let ranges = output_chunk_ranges(&row_costs, record.num_rows(), budget, operator_id)?;
-    validate_output_sequence_range(operator_id, first_sequence, ranges.len())?;
-    build_output_batches(record, operator_id, first_sequence, budget, ranges)
-}
-
-/// Per-row visible slice charge of one output record, using the same
-/// estimator as [`Batch::estimated_bytes`] without building a message per row.
-fn output_row_costs(
-    record: &RecordBatch,
-    budget: EdgeBudget,
-    operator_id: &str,
-) -> Result<Vec<usize>> {
-    let mut costs = vec![0_usize; record.num_rows()];
-    for column in record.columns() {
-        let data = column.to_data();
-        for (row, cost) in costs.iter_mut().enumerate() {
-            let bytes = data
-                .slice(row, 1)
-                .get_slice_memory_size()
-                .map_err(|error| CalcFlowError::InvalidArgument {
-                    field: "batch".into(),
-                    message: format!("Arrow slice memory could not be measured: {error}"),
-                })?;
-            *cost = cost
-                .checked_add(bytes)
-                .ok_or_else(|| counter_overflow(operator_id, "output row bytes"))?;
-        }
-    }
-    if costs.iter().any(|&cost| cost > budget.max_bytes) {
-        return Err(CalcFlowError::InvalidArgument {
-            field: "message.bytes".into(),
-            message: "one stream Join output row exceeds the effective edge byte budget".into(),
-        });
-    }
-    Ok(costs)
-}
-
-fn output_chunk_ranges(
-    row_costs: &[usize],
-    row_count: usize,
-    budget: EdgeBudget,
-    operator_id: &str,
-) -> Result<Vec<(usize, usize)>> {
-    let mut ranges = Vec::<(usize, usize)>::new();
-    let mut start = 0;
-    while start < row_count {
-        let end = next_output_chunk_end(row_costs, start, row_count, budget);
-        if end == start {
-            return Err(operator_error(
-                operator_id,
-                "validated output row did not fit the effective edge budget",
-            ));
-        }
-        ranges.push((start, end));
-        start = end;
-    }
-    Ok(ranges)
-}
-
-fn next_output_chunk_end(
-    row_costs: &[usize],
-    start: usize,
-    row_count: usize,
-    budget: EdgeBudget,
-) -> usize {
-    let mut end = start;
-    let mut bytes = 0_usize;
-    while end < row_count && end - start < budget.max_rows {
-        let Some(candidate_bytes) = bytes.checked_add(row_costs[end]) else {
-            break;
-        };
-        if candidate_bytes > budget.max_bytes {
-            break;
-        }
-        bytes = candidate_bytes;
-        end += 1;
-    }
-    end
-}
-
-fn validate_output_sequence_range(
-    operator_id: &str,
-    first_sequence: u64,
-    range_count: usize,
-) -> Result<()> {
-    let chunk_count = u64::try_from(range_count).map_err(|_| {
-        operator_error(
-            operator_id,
-            "output chunk count does not fit the sequence range",
-        )
-    })?;
-    if first_sequence.checked_add(chunk_count).is_none() {
-        return Err(operator_error(
-            operator_id,
-            "output sequence overflowed before emission",
-        ));
-    }
-    Ok(())
-}
-
-fn build_output_batches(
-    record: &RecordBatch,
-    operator_id: &str,
-    first_sequence: u64,
-    budget: EdgeBudget,
-    ranges: Vec<(usize, usize)>,
-) -> Result<Vec<Batch>> {
-    ranges
-        .into_iter()
-        .enumerate()
-        .map(|(ordinal, (start, end))| {
-            let ordinal = u64::try_from(ordinal).map_err(|_| {
-                operator_error(operator_id, "output chunk ordinal does not fit u64")
-            })?;
-            let sequence = first_sequence
-                .checked_add(ordinal)
-                .expect("complete sequence range validated above");
-            let metadata = BatchMetadata::new(operator_id, sequence, BTreeMap::new())?;
-            let batch = Batch::table(vec![record.slice(start, end - start)], metadata)?;
-            if batch.estimated_bytes()? > budget.max_bytes {
-                return Err(operator_error(
-                    operator_id,
-                    "conservative row charges underreported a stream Join output chunk",
-                ));
-            }
-            Ok(batch)
-        })
-        .collect()
+    super::output_chunk::chunk_output_record(
+        record,
+        operator_id,
+        first_sequence,
+        budget,
+        super::output_chunk::OutputChunkErrors::STREAM_JOIN,
+    )
 }
 
 fn late_lateness(

@@ -30,7 +30,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    Batch, BatchKind, BatchMetadata, CalcFlowError, EventTime, JsonMap, Port, Result, StateHandle,
+    Batch, BatchKind, CalcFlowError, EventTime, JsonMap, Port, Result, StateHandle,
     StreamCollector, StreamOperator, StreamOperatorContext, canonical_json,
     state::{SegmentDescriptor, SegmentKind, StateInventory, StateOperation, fold_state_segments},
 };
@@ -791,122 +791,21 @@ impl WindowAggregateOperator {
     }
 }
 
+/// Splits one window output record into edge-budget-sized messages via the
+/// shared operator chunker.
 fn chunk_output_record(
     record: &RecordBatch,
     operator_id: &str,
     first_sequence: u64,
     budget: crate::EdgeBudget,
 ) -> Result<Vec<Batch>> {
-    let row_costs = output_row_costs(record, budget)?;
-    let ranges = output_chunk_ranges(&row_costs, record.num_rows(), budget)?;
-    validate_output_sequence_range(operator_id, first_sequence, ranges.len())?;
-    build_output_batches(record, operator_id, first_sequence, budget, ranges)
-}
-
-fn output_row_costs(record: &RecordBatch, budget: crate::EdgeBudget) -> Result<Vec<usize>> {
-    let mut row_costs = Vec::with_capacity(record.num_rows());
-    for index in 0..record.num_rows() {
-        let row = record.slice(index, 1);
-        let batch = Batch::table(vec![row], BatchMetadata::default())?;
-        let bytes = batch.estimated_bytes()?;
-        if bytes > budget.max_bytes {
-            return Err(CalcFlowError::InvalidArgument {
-                field: "message.bytes".into(),
-                message: format!(
-                    "one window output row requires {bytes} bytes, exceeding the effective edge byte budget {}",
-                    budget.max_bytes
-                ),
-            });
-        }
-        row_costs.push(bytes);
-    }
-    Ok(row_costs)
-}
-
-fn output_chunk_ranges(
-    row_costs: &[usize],
-    row_count: usize,
-    budget: crate::EdgeBudget,
-) -> Result<Vec<(usize, usize)>> {
-    let mut ranges = Vec::<(usize, usize)>::new();
-    let mut start = 0;
-    while start < row_count {
-        let end = next_output_chunk_end(row_costs, start, row_count, budget);
-        if end == start {
-            return Err(internal_error(
-                "validated output row did not fit the effective edge budget",
-            ));
-        }
-        ranges.push((start, end));
-        start = end;
-    }
-    Ok(ranges)
-}
-
-fn next_output_chunk_end(
-    row_costs: &[usize],
-    start: usize,
-    row_count: usize,
-    budget: crate::EdgeBudget,
-) -> usize {
-    let mut end = start;
-    let mut bytes = 0_usize;
-    while end < row_count && end - start < budget.max_rows {
-        let Some(candidate_bytes) = bytes.checked_add(row_costs[end]) else {
-            break;
-        };
-        if candidate_bytes > budget.max_bytes {
-            break;
-        }
-        bytes = candidate_bytes;
-        end += 1;
-    }
-    end
-}
-
-fn validate_output_sequence_range(
-    operator_id: &str,
-    first_sequence: u64,
-    range_count: usize,
-) -> Result<()> {
-    let chunk_count = u64::try_from(range_count).map_err(|_| {
-        operator_error(
-            operator_id,
-            "output chunk count does not fit the sequence range",
-        )
-    })?;
-    first_sequence
-        .checked_add(chunk_count)
-        .ok_or_else(|| operator_error(operator_id, "output sequence overflowed before emission"))?;
-    Ok(())
-}
-
-fn build_output_batches(
-    record: &RecordBatch,
-    operator_id: &str,
-    first_sequence: u64,
-    budget: crate::EdgeBudget,
-    ranges: Vec<(usize, usize)>,
-) -> Result<Vec<Batch>> {
-    ranges
-        .into_iter()
-        .enumerate()
-        .map(|(ordinal, (start, end))| {
-            let ordinal = u64::try_from(ordinal)
-                .map_err(|_| internal_error("output chunk ordinal does not fit UInt64"))?;
-            let sequence = first_sequence
-                .checked_add(ordinal)
-                .expect("complete sequence range validated above");
-            let metadata = BatchMetadata::new(operator_id, sequence, BTreeMap::new())?;
-            let batch = Batch::table(vec![record.slice(start, end - start)], metadata)?;
-            if batch.estimated_bytes()? > budget.max_bytes {
-                return Err(internal_error(
-                    "conservative row charges underreported a window output chunk",
-                ));
-            }
-            Ok(batch)
-        })
-        .collect()
+    super::output_chunk::chunk_output_record(
+        record,
+        operator_id,
+        first_sequence,
+        budget,
+        super::output_chunk::OutputChunkErrors::WINDOW,
+    )
 }
 
 impl OperatorMetadata for WindowAggregateOperator {
@@ -3615,6 +3514,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::BatchMetadata;
 
     const HIGH_CARDINALITY_ROWS: usize = 400_000;
     const LEGACY_PROJECT_JSON_LIMIT: usize = 10 * 1024 * 1024;
