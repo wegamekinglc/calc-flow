@@ -50,7 +50,6 @@ mod generated_kernel_manifest;
 mod kernel;
 mod late;
 mod ordered_stream;
-mod row_cost;
 mod state_v3;
 
 use super::checkpoint::{checkpoint_mismatch, compile_error, internal_error, state_format};
@@ -2661,77 +2660,21 @@ fn closing_coordinate(event_time: i64, allowed_lateness_micros: u64, node_id: &s
     })
 }
 
-// Budget chunking intentionally checks per-row cost, cumulative budget, and
-// sequence range in one pass so oversize output fails before enqueue.
-// #lizard forgives
+/// Splits one rolling output record into edge-budget-sized messages via the
+/// shared operator chunker.
 fn chunk_output_record(
     record: &RecordBatch,
     operator_id: &str,
     first_sequence: u64,
     budget: crate::EdgeBudget,
 ) -> Result<Vec<Batch>> {
-    if record.num_rows() != 0
-        && record.num_rows() <= budget.max_rows
-        && row_cost::RowCosts::try_total(record)?.is_some_and(|bytes| bytes <= budget.max_bytes)
-    {
-        let metadata = BatchMetadata::new(operator_id, first_sequence, BTreeMap::new())?;
-        let batch = Batch::table(vec![record.clone()], metadata)?;
-        first_sequence.checked_add(1).ok_or_else(|| {
-            operator_error(operator_id, "output sequence overflowed before emission")
-        })?;
-        return Ok(vec![batch]);
-    }
-    let row_costs = row_cost::RowCosts::try_new(record)?;
-    let mut batches = Vec::new();
-    let mut start = 0_usize;
-    let mut sequence = first_sequence;
-    while start < record.num_rows() {
-        let mut end = start;
-        let mut bytes = 0_usize;
-        while end < record.num_rows() && end - start < budget.max_rows {
-            let row_bytes = if let Some(costs) = &row_costs {
-                costs.get(end)
-            } else {
-                let row = record.slice(end, 1);
-                Batch::table(vec![row], BatchMetadata::default())
-                    .and_then(|batch| batch.estimated_bytes())
-                    .map_err(|error| operator_error(operator_id, &error.to_string()))?
-            };
-            if row_bytes > budget.max_bytes {
-                return Err(CalcFlowError::InvalidArgument {
-                    field: "message.bytes".into(),
-                    message: format!(
-                        "one rolling output row requires {row_bytes} bytes, exceeding the effective edge byte budget {}",
-                        budget.max_bytes
-                    ),
-                });
-            }
-            let Some(candidate) = bytes.checked_add(row_bytes) else {
-                break;
-            };
-            if candidate > budget.max_bytes {
-                break;
-            }
-            bytes = candidate;
-            end += 1;
-        }
-        if end == start {
-            return Err(operator_error(
-                operator_id,
-                "validated rolling output row did not fit the effective edge budget",
-            ));
-        }
-        let metadata = BatchMetadata::new(operator_id, sequence, BTreeMap::new())?;
-        batches.push(Batch::table(
-            vec![record.slice(start, end - start)],
-            metadata,
-        )?);
-        sequence = sequence.checked_add(1).ok_or_else(|| {
-            operator_error(operator_id, "output sequence overflowed before emission")
-        })?;
-        start = end;
-    }
-    Ok(batches)
+    super::output_chunk::chunk_output_record(
+        record,
+        operator_id,
+        first_sequence,
+        budget,
+        super::output_chunk::OutputChunkErrors::ROLLING,
+    )
 }
 
 /// Reads every input row with its canonical identity; null event-time or
@@ -9486,7 +9429,12 @@ mod tests {
     #[test]
     fn whole_record_budget_proof_preserves_exact_limits_and_sequence_errors() {
         let input = float64_fast_record(&[(1, "中文", 1, Some(1.0)), (2, "中文", 2, None)]);
-        let bytes = row_cost::RowCosts::try_total(&input).unwrap().unwrap();
+        // The shared chunker's whole-record fast path is priced by the same
+        // envelope estimator the channel enforces.
+        let bytes = Batch::table(vec![input.clone()], BatchMetadata::default())
+            .unwrap()
+            .estimated_bytes()
+            .unwrap();
         let exact = chunk_output_record(
             &input,
             "rolling",
@@ -9504,7 +9452,10 @@ mod tests {
         .unwrap();
         assert_eq!(split.len(), 2);
         let row = input.slice(1, 1);
-        let bytes = row_cost::RowCosts::try_total(&row).unwrap().unwrap();
+        let bytes = Batch::table(vec![row.clone()], BatchMetadata::default())
+            .unwrap()
+            .estimated_bytes()
+            .unwrap();
         let error = chunk_output_record(
             &row,
             "rolling",

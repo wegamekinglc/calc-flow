@@ -468,7 +468,8 @@ impl ColumnarHistory {
                 continue;
             }
             let retained = record.slice(count, record.num_rows() - count);
-            let Some(logical_bytes) = super::row_cost::RowCosts::try_total(&retained)? else {
+            let Some(logical_bytes) = crate::operator::row_cost::RowCosts::try_total(&retained)?
+            else {
                 return Err(internal_error(
                     "columnar history has unsupported row charges",
                 ));

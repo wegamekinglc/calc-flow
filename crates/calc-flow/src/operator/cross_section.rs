@@ -1414,63 +1414,21 @@ where
     Option::<T>::deserialize(deserializer)
 }
 
-// Budget chunking intentionally checks per-row cost, cumulative budget, and
-// sequence range in one pass so oversize output fails before enqueue.
-// #lizard forgives
+/// Splits one cross-section output record into edge-budget-sized messages
+/// via the shared operator chunker.
 fn chunk_output_record(
     record: &RecordBatch,
     operator_id: &str,
     first_sequence: u64,
     budget: crate::EdgeBudget,
 ) -> Result<Vec<Batch>> {
-    let mut batches = Vec::new();
-    let mut start = 0_usize;
-    let mut sequence = first_sequence;
-    while start < record.num_rows() {
-        let mut end = start;
-        let mut bytes = 0_usize;
-        while end < record.num_rows() && end - start < budget.max_rows {
-            let row = record.slice(end, 1);
-            let row_batch = Batch::table(vec![row], BatchMetadata::default())
-                .map_err(|error| operator_error(operator_id, &error.to_string()))?;
-            let row_bytes = row_batch
-                .estimated_bytes()
-                .map_err(|error| operator_error(operator_id, &error.to_string()))?;
-            if row_bytes > budget.max_bytes {
-                return Err(CalcFlowError::InvalidArgument {
-                    field: "message.bytes".into(),
-                    message: format!(
-                        "one cross-section output row requires {row_bytes} bytes, exceeding the effective edge byte budget {}",
-                        budget.max_bytes
-                    ),
-                });
-            }
-            let Some(candidate) = bytes.checked_add(row_bytes) else {
-                break;
-            };
-            if candidate > budget.max_bytes {
-                break;
-            }
-            bytes = candidate;
-            end += 1;
-        }
-        if end == start {
-            return Err(operator_error(
-                operator_id,
-                "validated cross-section output row did not fit the effective edge budget",
-            ));
-        }
-        let metadata = BatchMetadata::new(operator_id, sequence, BTreeMap::new())?;
-        batches.push(Batch::table(
-            vec![record.slice(start, end - start)],
-            metadata,
-        )?);
-        sequence = sequence.checked_add(1).ok_or_else(|| {
-            operator_error(operator_id, "output sequence overflowed before emission")
-        })?;
-        start = end;
-    }
-    Ok(batches)
+    super::output_chunk::chunk_output_record(
+        record,
+        operator_id,
+        first_sequence,
+        budget,
+        super::output_chunk::OutputChunkErrors::CROSS_SECTION,
+    )
 }
 
 /// Reads every input row with its canonical identity; null event-time or

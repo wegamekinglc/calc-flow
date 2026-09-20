@@ -1,7 +1,9 @@
 //! Exact columnar equivalent of the existing one-row Arrow slice charge.
 //!
-//! Nested/dictionary/view arrays keep the generic Arrow measurement path.
-//! Primitive and byte-array columns do not allocate a Batch per row.
+//! Nested/dictionary/view arrays keep the generic Arrow measurement path in
+//! `super::output_chunk`. Primitive and byte-array columns do not allocate a
+//! Batch per row. The per-column pieces are shared with the nested-aware
+//! charging plan so both paths price flat columns identically.
 
 use datafusion::arrow::{
     array::{Array, BinaryArray, LargeBinaryArray, LargeStringArray, OffsetSizeTrait, StringArray},
@@ -12,17 +14,17 @@ use datafusion::arrow::{
 
 use crate::{Result, batch::checked_accumulate};
 
-pub(super) enum RowCosts {
+pub(crate) enum RowCosts {
     Fixed(usize),
     Variable(Vec<usize>),
 }
 
-enum Offsets<'a> {
+pub(crate) enum Offsets<'a> {
     Narrow(&'a [i32]),
     Wide(&'a [i64]),
 }
 
-fn fixed_width(data_type: &DataType) -> Option<usize> {
+pub(crate) fn fixed_width(data_type: &DataType) -> Option<usize> {
     data_type.primitive_width().or(match data_type {
         DataType::Null => Some(0),
         DataType::Boolean => Some(1),
@@ -32,7 +34,7 @@ fn fixed_width(data_type: &DataType) -> Option<usize> {
     })
 }
 
-fn variable_offsets(column: &dyn Array) -> Option<Offsets<'_>> {
+pub(crate) fn variable_offsets(column: &dyn Array) -> Option<Offsets<'_>> {
     match column.data_type() {
         DataType::Utf8 => Some(Offsets::Narrow(
             column
@@ -77,7 +79,7 @@ fn add_offset_charges<O: OffsetSizeTrait>(rows: &mut [usize], offsets: &[O]) -> 
 }
 
 impl Offsets<'_> {
-    fn add_charges(&self, rows: &mut [usize]) -> Result<()> {
+    pub(crate) fn add_charges(&self, rows: &mut [usize]) -> Result<()> {
         match self {
             Self::Narrow(offsets) => add_offset_charges(rows, offsets),
             Self::Wide(offsets) => add_offset_charges(rows, offsets),
@@ -101,22 +103,31 @@ fn offset_width<O: OffsetSizeTrait>(offsets: &[O]) -> usize {
 }
 
 #[derive(Default)]
-struct ColumnCharges<'a> {
-    fixed: usize,
-    variable: Vec<Offsets<'a>>,
-    validity: Vec<&'a NullBuffer>,
+pub(crate) struct ColumnCharges<'a> {
+    pub(crate) fixed: usize,
+    pub(crate) variable: Vec<Offsets<'a>>,
+    pub(crate) validity: Vec<&'a NullBuffer>,
 }
 
 impl<'a> ColumnCharges<'a> {
+    /// Charges one flat (primitive or byte-array) column per row, or reports
+    /// `false` when the column needs the nested-aware path.
+    pub(crate) fn add_flat_column(&mut self, column: &'a dyn Array) -> Result<bool> {
+        let Some(width) = fixed_width(column.data_type()) else {
+            return Ok(false);
+        };
+        self.fixed = checked_accumulate(self.fixed, width, "batch")?;
+        self.variable.extend(variable_offsets(column));
+        self.validity.extend(column.nulls());
+        Ok(true)
+    }
+
     fn read(record: &'a RecordBatch) -> Result<Option<Self>> {
         let mut charges = Self::default();
         for column in record.columns() {
-            let Some(width) = fixed_width(column.data_type()) else {
+            if !charges.add_flat_column(column.as_ref())? {
                 return Ok(None);
-            };
-            charges.fixed = checked_accumulate(charges.fixed, width, "batch")?;
-            charges.variable.extend(variable_offsets(column.as_ref()));
-            charges.validity.extend(column.nulls());
+            }
         }
         Ok(Some(charges))
     }
@@ -132,7 +143,7 @@ impl<'a> ColumnCharges<'a> {
         Ok(())
     }
 
-    fn materialize(&self, row_count: usize) -> Result<RowCosts> {
+    pub(crate) fn materialize(&self, row_count: usize) -> Result<RowCosts> {
         if self.variable.is_empty() && self.validity.is_empty() {
             return Ok(RowCosts::Fixed(self.fixed));
         }
@@ -155,18 +166,18 @@ impl<'a> ColumnCharges<'a> {
 }
 
 impl RowCosts {
-    pub(super) fn try_total(record: &RecordBatch) -> Result<Option<usize>> {
+    pub(crate) fn try_total(record: &RecordBatch) -> Result<Option<usize>> {
         Ok(ColumnCharges::read(record)?.and_then(|charges| charges.total(record.num_rows())))
     }
 
-    pub(super) fn try_new(record: &RecordBatch) -> Result<Option<Self>> {
+    pub(crate) fn try_new(record: &RecordBatch) -> Result<Option<Self>> {
         let Some(charges) = ColumnCharges::read(record)? else {
             return Ok(None);
         };
         charges.materialize(record.num_rows()).map(Some)
     }
 
-    pub(super) fn get(&self, row: usize) -> usize {
+    pub(crate) fn get(&self, row: usize) -> usize {
         match self {
             Self::Fixed(cost) => *cost,
             Self::Variable(costs) => costs[row],
