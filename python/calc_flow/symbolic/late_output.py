@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from calc_flow.symbolic.errors import RESERVED_FIELD
 from calc_flow.symbolic.expr import TableExpr, table_input
 from calc_flow.symbolic.nodes import CInt, Node, build
 from calc_flow.symbolic.types import Field
@@ -118,6 +119,14 @@ def analyze_late_table(analyzer: _Analyzer, node: Node, path: str) -> TableFacts
         return TableFacts((), None, frozenset(), None, (), ())
     source = value.args[0]
     facts = analyzer.table(source, f"{path}.late_output.input")
+    # Mirror the native reserved-field rejection before diagnostics append.
+    for index, field in enumerate(facts.schema):
+        if field.name.startswith("_cf_late_"):
+            analyzer.issue(
+                f"{path}.late_output.input.schema[{index}].name",
+                RESERVED_FIELD,
+                f'input field "{field.name}" is reserved by late schema version 1',
+            )
     if node.op.name == "late_rows":
         analyzer.table(owner, f"{path}.late.owner")
         return TableFacts(

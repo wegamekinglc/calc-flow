@@ -232,6 +232,19 @@ fn test_late_plan_budget_bounds_actual_scratch_allocation() {
 }
 
 #[test]
+fn test_late_plan_diagnostic_base_bytes_derive_from_shared_constants() {
+    // Renaming a constant diagnostic value must re-price the per-row base;
+    // reverting to a hand-counted literal fails this check.
+    assert_eq!(
+        plan::DIAGNOSTIC_BASE_BYTES,
+        5 * size_of::<u64>()
+            + 4 * size_of::<i32>()
+            + plan::DIAGNOSTIC_INPUT_PORT.len()
+            + plan::DIAGNOSTIC_REASON.len()
+    );
+}
+
+#[test]
 fn test_late_preflight_rejects_wide_diagnostics_before_allocating_their_values() {
     let original = input(&[&[Some("")]]);
     let batch = Batch::table(

@@ -206,6 +206,30 @@ def test_late_output_rejects_non_table_value() -> None:
         cf.with_late_output(quotes()["x"])
 
 
+def test_late_output_rejects_reserved_input_field_before_native_compile() -> None:
+    source = cf.table_input(
+        "quotes",
+        schema=[
+            cf.Field("ts", "timestamp[us, UTC]", nullable=False),
+            cf.Field("symbol", "string", nullable=False),
+            cf.Field("seq", "uint64", nullable=False),
+            cf.Field("x", "float64"),
+            cf.Field("_cf_late_note", "string"),
+        ],
+        entity_by=["symbol"],
+        event_time="ts",
+        sequence_by=["seq"],
+    )
+    pair = cf.with_late_output(rolling(source))
+    program = cf.Program("reserved", outputs={"normal": pair.output, "late": pair.late})
+    with pytest.raises(
+        cf.CompileError,
+        match=r"outputs\..*reserved_field.*input field \"_cf_late_note\" is reserved"
+        r" by late schema version 1",
+    ):
+        program.compile_stream(cf.Runtime())
+
+
 def test_named_input_materialization_and_late_sql_preserve_boundary() -> None:
     from calc_flow.symbolic.analyzer import _run
     from calc_flow.symbolic.lower import lower_program_document
@@ -270,6 +294,54 @@ def test_late_successors_reject_even_after_allowed_transform(
         cf.CompileError, match=r"outputs.rejected.*unsupported_mode.*late"
     ):
         program.compile_stream(cf.Runtime())
+
+
+@pytest.mark.parametrize("successor", ["row_local", "filter", "project", "sql"])
+def test_allowed_late_successors_lower_to_single_input_expression_or_sql(
+    successor: str,
+) -> None:
+    from calc_flow.symbolic.lower import lower_program_document
+
+    pair = cf.with_late_output(rolling(quotes()))
+    if successor == "row_local":
+        derived = pair.late.with_columns(
+            twice=pair.late["x"] * 2.0,
+            tagged=cf.row.coalesce(pair.late["label"], "n/a"),
+        )
+    elif successor == "filter":
+        derived = pair.late.filter(pair.late["x"] > 0.0)
+    elif successor == "project":
+        derived = pair.late.select("x", "_cf_late_reason")
+    else:
+        derived = cf.sql("SELECT * FROM rows WHERE x > 0", rows=pair.late)
+    program = cf.Program("mapped", outputs={"normal": pair.output, "late": derived})
+    runtime = cf.Runtime()
+    document = lower_program_document(program, runtime, "stream")
+    nodes = {node["id"]: node for node in document["graph"]["nodes"]}
+    (state,) = [
+        node for node in nodes.values() if node["operator"]["kind"] == "rolling"
+    ]
+    pending = [
+        edge["target_node"]
+        for edge in document["graph"]["edges"]
+        if edge["source_node"] == state["id"] and edge["source_port"] == "late"
+    ]
+    assert pending
+    visited: set[str] = set()
+    while pending:
+        node_id = pending.pop()
+        if node_id in visited:
+            continue
+        visited.add(node_id)
+        node = nodes[node_id]
+        assert node["operator"]["kind"] in {"expression", "sql"}
+        assert len(node["input_ports"]) == 1
+        pending.extend(
+            edge["target_node"]
+            for edge in document["graph"]["edges"]
+            if edge["source_node"] == node_id
+        )
+    assert isinstance(program.compile_stream(runtime), cf.StreamExecutionPlan)
 
 
 def batch(times: list[int], values: list[float]) -> pa.Table:

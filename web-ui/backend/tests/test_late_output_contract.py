@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -584,3 +585,56 @@ def _invalidate(document, node, case):
                 "target_port": "input",
             }
         ]
+
+
+def test_stream_compile_message_with_digit_code_keeps_parsed_path(
+    tmp_path, monkeypatch
+):
+    issue = {
+        "path": "project",
+        "code": "stream_compile",
+        "message": "stored document is invalid:"
+        " graph.nodes[0].operator.spec.late_policy.metrics_version"
+        " [unsupported_version_2]: drop metrics_version must equal 1; found 2",
+    }
+    monkeypatch.setattr(
+        Runtime,
+        "validation_report",
+        Mock(return_value={"valid": False, "issues": [issue], "fingerprint": None}),
+    )
+    store = _StoredProject(_project(tmp_path))
+    with TestClient(create_app(project_store=store, run_manager=Mock())) as client:
+        response = client.post("/api/v3/jobs", json={"project_id": "late_contract"})
+    assert response.status_code == 422, response.text
+    parsed = response.json()["detail"]["issues"][0]
+    assert parsed["code"] == "unsupported_version_2"
+    assert parsed["path"] == "graph.nodes[0].operator.spec.late_policy.metrics_version"
+
+
+def test_unmatched_stream_compile_message_logs_and_keeps_generic_issue(
+    tmp_path, monkeypatch, caplog
+):
+    issue = {
+        "path": "project",
+        "code": "stream_compile",
+        "message": "graph compilation failed: rewired native wording sentinel",
+    }
+    monkeypatch.setattr(
+        Runtime,
+        "validation_report",
+        Mock(return_value={"valid": False, "issues": [issue], "fingerprint": None}),
+    )
+    store = _StoredProject(_project(tmp_path))
+    with (
+        caplog.at_level(logging.WARNING, logger="calc_flow_studio.late_output"),
+        TestClient(create_app(project_store=store, run_manager=Mock())) as client,
+    ):
+        response = client.post("/api/v3/jobs", json={"project_id": "late_contract"})
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["issues"] == [issue]
+    assert any(
+        record.levelno == logging.WARNING
+        and "matched no known late-output pattern" in record.message
+        and "rewired native wording sentinel" in record.message
+        for record in caplog.records
+    )

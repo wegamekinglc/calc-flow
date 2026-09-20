@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Protocol
 
 from calc_flow import CalcFlowError
+
+_logger = logging.getLogger(__name__)
 
 
 class ValidatingRuntime(Protocol):
@@ -36,12 +39,13 @@ def project_late_issues(project: dict, report: dict) -> dict:
 
 def _late_issue(project: dict, issue: dict) -> dict:
     # Both regexes parse native stream_compile error text; a native wording
-    # change silently degrades Studio paths/codes, so keep them in sync with
-    # the calc-flow compile diagnostics.
+    # change degrades Studio paths/codes, so keep them in sync with the
+    # calc-flow compile diagnostics. The fall-through logs instead of
+    # degrading silently.
     if issue["code"] != "stream_compile":
         return issue
     message = issue["message"]
-    match = re.search(r"(?:invalid: )([\w.\[\]]+) \[([a-z_]+)\]:", message)
+    match = re.search(r"(?:invalid: )([\w.\[\]]+) \[([a-z0-9_]+)\]:", message)
     if match:
         path, code = match.groups()
         if code == "sink_output_mismatch":
@@ -53,6 +57,11 @@ def _late_issue(project: dict, issue: dict) -> dict:
             "path": _temporal_path(project, message),
             "code": "temporal_output_unavailable",
         }
+    _logger.warning(
+        "stream_compile message matched no known late-output pattern;"
+        " keeping generic code and path (native wording may have changed): %s",
+        message,
+    )
     return issue
 
 

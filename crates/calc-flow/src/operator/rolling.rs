@@ -5153,16 +5153,7 @@ fn validate_arguments(spec: &RollingSpec) -> Result<()> {
     validate_key_names("rolling.partition_by", &spec.partition_by)?;
     validate_key_names("rolling.sequence_by", &spec.sequence_by)?;
     validate_outputs(&spec.outputs)?;
-    super::late_output::validate_policy(spec.late_policy, "rolling")?;
-    if let LatePolicySpec::Drop { metrics_version } = spec.late_policy
-        && metrics_version != 1
-    {
-        return Err(invalid_argument(
-            "rolling.late_policy.metrics_version",
-            "unsupported late-metrics version",
-        ));
-    }
-    Ok(())
+    super::late_output::validate_policy(spec.late_policy, "rolling")
 }
 
 fn validate_key_names(field: &str, columns: &[String]) -> Result<()> {
