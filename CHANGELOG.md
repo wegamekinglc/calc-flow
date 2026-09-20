@@ -9,6 +9,29 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-20: Fail the stream join's single-message output fast path before
+  emission. The batched-emission fast path that emits one output record per
+  input batch skipped the pre-emission output-sequence validation the chunked
+  path performs, so an exhausted output sequence could build a batch before
+  failing. The fast path now runs the same fail-closed sequence check first.
+  The internal concatenation helper is renamed `concat_column` (from
+  `concat_key_column`) to reflect that it concatenates payload columns as
+  well as keys.
+
+- 2026-09-20: Surface operator failure reasons and right-size ASOF workspace
+  admission. Streaming error projection no longer collapses every operator
+  reason into one opaque "operator ... execution failed" text: the
+  engine-authored reason message and reason code are appended to the
+  node-prefixed failure on the entry, task, and preflight surfaces. ASOF
+  admission replaces its per-row schema tax (roughly 41 KB per admitted row,
+  so a 10,000-row batch charged about 410 MB against a 64 MiB state limit)
+  with an allocation-free arithmetic upper bound on each admitted row's
+  bounded IPC encoding and an aligned-slice-plus-headroom identity charge.
+  Charging stays arithmetic so an unfittable schema is rejected before any
+  flatbuffer is built, `max_state_bytes` still bounds the workspace before
+  any encode, and 10,000-row batches now pass under
+  `AsofStateLimits(100_000, 64 MiB)`.
+
 - 2026-09-20: Add protobuf and custom Kafka payload decoders. The Kafka
   source gains a third payload format, `protobuf/1`: one protobuf message per
   record value, decoded through a `FileDescriptorSet` loaded once when the
@@ -29,20 +52,6 @@ measurements. Use the current guides for supported behavior.
   snapshot, so decoders may register until the job opens; an unregistered
   identity fails the source at open time, and built-in format names are
   reserved.
-
-- 2026-09-20: Surface operator failure reasons and right-size ASOF workspace
-  admission. Streaming error projection no longer collapses every operator
-  reason into one opaque "operator ... execution failed" text: the
-  engine-authored reason message and reason code are appended to the
-  node-prefixed failure on the entry, task, and preflight surfaces. ASOF
-  admission replaces its per-row schema tax (roughly 41 KB per admitted row,
-  so a 10,000-row batch charged about 410 MB against a 64 MiB state limit)
-  with an allocation-free arithmetic upper bound on each admitted row's
-  bounded IPC encoding and an aligned-slice-plus-headroom identity charge.
-  Charging stays arithmetic so an unfittable schema is rejected before any
-  flatbuffer is built, `max_state_bytes` still bounds the workspace before
-  any encode, and 10,000-row batches now pass under
-  `AsofStateLimits(100_000, 64 MiB)`.
 
 - 2026-09-19: Extend benchmark native-stream and SQL operator coverage. The
   engine matrix adds `projection`, `filter`, and `group_by` to the native
