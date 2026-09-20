@@ -65,6 +65,21 @@ measurements. Use the current guides for supported behavior.
   identity fails the source at open time, and built-in format names are
   reserved.
 
+- 2026-09-19: Emit the bounded stream join's matches as batched multi-row
+  output records instead of one message per matched row. Each input batch's
+  matches materialize in matched-pair order into one record, chunked into
+  messages sized to the edge row/byte budget with one sequence per message;
+  row order, pair semantics, the `emitted_match_rows` status counter, and
+  checkpoint and watermark-eviction semantics are unchanged. Every chunk is
+  validated before the first message leaves the operator, so a single
+  over-budget row fails with the same `message.bytes` error before any
+  emission instead of mid-stream, and a record that fits one message skips
+  the per-row charge scan. Measured on the real runner (1:1 inner join,
+  64,000-row batches): the 20,000-row workload drops from 5.4 s to 1.0 s
+  (3,728 to 19,519 rows/s) and the 1M-row workload completes at 38,244
+  rows/s; the `stream_join_perf` operator bench measures 40% lower latency
+  on `one_to_one` and 43% on `fanout10`, with `no_match` unchanged.
+
 - 2026-09-19: Extend benchmark native-stream and SQL operator coverage. The
   engine matrix adds `projection`, `filter`, and `group_by` to the native
   streaming column, for 25 supported engine/scenario combinations and 175
