@@ -14,29 +14,34 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-try:
-    import pyarrow as pa
-
-    from benchmarks.performance_diagnostics import (
-        NativeDiagnosticCase,
-        SqlDiagnosticCase,
-        diagnostic_sql,
-        save_output,
-    )
-    from scripts import measure_performance_plan as controller
-    from scripts.measure_performance_plan import (
-        _validate_completion,
-        _validate_optimized_path,
-        compare_outputs,
-        load_release,
-        measure_round,
-    )
-except ImportError as error:
+if any(importlib.util.find_spec(name) is None for name in ("numpy", "pyarrow")):
     raise unittest.SkipTest(
         "performance plan tests require numpy and pyarrow (dev dependencies)"
-    ) from error
+    )
 
-CALC_FLOW_AVAILABLE = importlib.util.find_spec("calc_flow") is not None
+import pyarrow as pa  # noqa: E402
+
+from benchmarks.performance_diagnostics import (  # noqa: E402
+    NativeDiagnosticCase,
+    SqlDiagnosticCase,
+    diagnostic_sql,
+    save_output,
+)
+from scripts import measure_performance_plan as controller  # noqa: E402
+from scripts.measure_performance_plan import (  # noqa: E402
+    _validate_completion,
+    _validate_optimized_path,
+    compare_outputs,
+    load_release,
+    measure_round,
+)
+
+try:
+    importlib.import_module("calc_flow")
+except Exception:
+    CALC_FLOW_AVAILABLE = False
+else:
+    CALC_FLOW_AVAILABLE = True
 
 
 class PerformancePlanComparisonTests(unittest.TestCase):
