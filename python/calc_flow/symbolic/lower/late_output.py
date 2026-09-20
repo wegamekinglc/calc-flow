@@ -8,9 +8,14 @@ from calc_flow.symbolic.errors import AMBIGUOUS_LATE_STAGE, raise_compile
 from calc_flow.symbolic.expr import TableExpr, table_input
 from calc_flow.symbolic.late_output import late_schema
 from calc_flow.symbolic.lower.bindings import _BatchBindings
-from calc_flow.symbolic.lower.event_windows import _rewrite_nodes, _table_port
+from calc_flow.symbolic.lower.event_windows import _rewrite_nodes
 from calc_flow.symbolic.lower.schema import _arrow_schema, infer_document_schemas
-from calc_flow.symbolic.lower.segments import _cint, _expression_node, _quote_identifier
+from calc_flow.symbolic.lower.segments import (
+    _cint,
+    _expression_node,
+    _quote_identifier,
+    _table_port,
+)
 from calc_flow.symbolic.nodes import Node, build
 from calc_flow.symbolic.program import Program
 

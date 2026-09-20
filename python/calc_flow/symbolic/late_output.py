@@ -169,8 +169,12 @@ def _is_single_stage(value: Node) -> bool:
     if _contains_stateful_primitive(value.args[0]):
         return False
     states: dict[str, Node] = {}
+    visited: set[str] = set()
 
     def visit(node: Node) -> None:
+        if node.digest in visited:
+            return
+        visited.add(node.digest)
         if node.op.name == "column_ref":
             return
         if node.op.name in _ROLLING_PRIMITIVES | _CROSS_SECTION_PRIMITIVES:

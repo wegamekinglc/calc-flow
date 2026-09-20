@@ -8,6 +8,7 @@ from datetime import timedelta
 from typing import NoReturn
 
 import pyarrow as pa
+import pyarrow.compute as pc
 
 from calc_flow.compute import TableData, _arrow_table, _table_batch
 from calc_flow.runtime import (
@@ -174,15 +175,30 @@ class _IterableSource:
             self._reject(".event_time: expected non-null event time")
         # Compare in the declared unit without datetime/range conversion. Native
         # generation retains its checked conversion and minimum-minus-delay error.
+        values = column.cast(pa.int64())
+        if not len(values):
+            return
+        if self._is_ordered(values):
+            self._last_time = values[len(values) - 1].as_py()
+            return
+        self._reject_out_of_order(values)
+
+    def _is_ordered(self, values: pa.ChunkedArray | pa.Array) -> bool:
+        if self._last_time is not None and values[0].as_py() < self._last_time:
+            return False
+        decreases = pc.less(values.slice(1), values.slice(0, len(values) - 1))
+        return not pc.any(decreases).as_py()
+
+    def _reject_out_of_order(self, values: pa.ChunkedArray | pa.Array) -> NoReturn:
         previous = self._last_time
-        for current in column.cast(pa.int64()).to_pylist():
+        for current in values.to_pylist():
             if previous is not None and current < previous:
                 self._reject(
                     ".event_time: expected nondecreasing event time; select an "
                     "explicit watermark policy for out-of-order input"
                 )
             previous = current
-        self._last_time = previous
+        raise RuntimeError(f"{self._path}.event_time: ordering violation not found")
 
     def _reject(self, message: str) -> NoReturn:
         self.failure = self._path + message

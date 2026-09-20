@@ -22,7 +22,12 @@ from calc_flow._stream_inputs import (
     _selected_policies,
     _source_binding,
 )
-from calc_flow.compute import TableData, _input_batch
+from calc_flow.compute import (
+    TableData,
+    _as_input_mapping,
+    _check_input_names,
+    _input_batch,
+)
 from calc_flow.pipeline import Runtime, StreamExecutionPlan, _canonical
 from calc_flow.runtime import (
     EdgeBudget,
@@ -81,14 +86,13 @@ class _QueueSink:
         pass
 
 
+def _stream_input_kind(value: TableExpr | Parameter) -> str:
+    return "input"
+
+
 def _validate_request(request: _StreamRequest) -> dict[str, TableExpr | Parameter]:
     expected = {_node_name(value._node): value for value in request.program.inputs}
-    for name in expected:
-        if name not in request.inputs:
-            raise ValueError(f"stream.inputs.{name}: missing input")
-    for name in request.inputs:
-        if name not in expected:
-            raise ValueError(f"stream.inputs.{name}: unexpected input name")
+    _check_input_names(request.inputs, expected, "stream.inputs", _stream_input_kind)
     for name, output in request.program.outputs:
         if not isinstance(output, TableExpr):
             raise TypeError(f"stream.outputs.{name}: expected TableExpr")
@@ -369,13 +373,12 @@ def _stream_table(
     watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None,
 ) -> StreamResults[pa.Table]:
     program = Program("stream", outputs={"result": table})
-    if not isinstance(inputs, Mapping):
-        if len(program.inputs) != 1 or not isinstance(program.inputs[0], TableExpr):
-            raise ValueError("stream: multiple or static inputs require a name mapping")
-        inputs = {_node_name(program.inputs[0]._node): inputs}
+    mapped = _as_input_mapping(
+        program, inputs, "stream: multiple or static inputs require a name mapping"
+    )
     return StreamResults(
         _StreamRequest(
-            program, dict(inputs), runtime, config, _capture_watermarks(watermarks)
+            program, dict(mapped), runtime, config, _capture_watermarks(watermarks)
         ),
         table_output=True,
     )

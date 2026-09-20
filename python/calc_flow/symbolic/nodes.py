@@ -472,10 +472,12 @@ _PRIMITIVES: dict[str, PrimitiveSpec] = {
 }
 
 
+_EVENT_WINDOW_OPS: Final = frozenset({"window_tumbling", "window_hopping"})
+
 _WINDOW_AGGREGATES: Final[dict[str, PrimitiveSpec]] = {
     name: PrimitiveSpec(spec.allowed | {"aggregates"}, spec.defaults)
     for name, spec in _PRIMITIVES.items()
-    if name in ("window_tumbling", "window_hopping")
+    if name in _EVENT_WINDOW_OPS
 }
 
 

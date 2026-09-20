@@ -21,23 +21,27 @@ from calc_flow.symbolic.lower.segments import (
     _cstr,
     _cstr_seq,
     _expression_node,
-    _field_json,
     _quote_identifier,
+    _table_port,
 )
 from calc_flow.symbolic.lower.strategies import (
     _downstream_input_endpoints,
     _project_document,
     _project_graph_lists,
 )
-from calc_flow.symbolic.nodes import CMap, CSeq, CStr, Node, build
+from calc_flow.symbolic.nodes import (
+    _EVENT_WINDOW_OPS,
+    CMap,
+    CSeq,
+    CStr,
+    Node,
+    build,
+)
 from calc_flow.symbolic.types import Field
 
 if TYPE_CHECKING:
     from calc_flow.pipeline import Runtime
     from calc_flow.symbolic.program import Program
-
-
-_WINDOWS = frozenset({"window_tumbling", "window_hopping"})
 
 
 def _event_window_nodes(program: Program, /) -> tuple[Node, ...]:
@@ -55,7 +59,7 @@ def _event_window_nodes(program: Program, /) -> tuple[Node, ...]:
     return tuple(
         node
         for _, node in sorted(visited.items())
-        if node.op.name in _WINDOWS and node.op.version == 2
+        if node.op.name in _EVENT_WINDOW_OPS and node.op.version == 2
     )
 
 
@@ -130,15 +134,6 @@ def _window_node(plan: _WindowPlan, /) -> dict[str, object]:
             },
         },
         "output_ports": [_table_port(plan.output_schema, "output")],
-    }
-
-
-def _table_port(schema: tuple[Field, ...], name: str, /) -> dict[str, object]:
-    return {
-        "name": name,
-        "kind": "table",
-        "required": True,
-        "schema": [_field_json(field) for field in schema],
     }
 
 
@@ -450,7 +445,7 @@ def _lower_event_window_program(
     )
     _append_window_inputs(graph, plans, runtime)
     _append_window_outputs(graph, plans, runtime, allowed_lateness_micros, late_policy)
-    bindings = getattr(analyzer, "_bindings", None)
+    bindings = analyzer._bindings
     if bindings is not None:
         bindings.inputs.update(graph.bindings.inputs)
         bindings.outputs.update({name: (name, "output") for name, _ in program.outputs})

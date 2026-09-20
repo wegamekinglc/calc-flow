@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from calc_flow.asof_join_spec import _asof_wire_spec
 from calc_flow.symbolic.asof import _node_spec
-from calc_flow.symbolic.lower.segments import _field_json
+from calc_flow.symbolic.lower.segments import _table_port
 from calc_flow.symbolic.nodes import Node
 from calc_flow.symbolic.types import Field
 
@@ -36,12 +36,7 @@ def native_asof_node(
     return {
         "id": node_id,
         "input_ports": [
-            {
-                "kind": "table",
-                "name": name,
-                "required": True,
-                "schema": [_field_json(field) for field in fields],
-            }
+            _table_port(fields, name)
             for name, fields in (("left", left), ("right", right))
         ],
         "operator": {
