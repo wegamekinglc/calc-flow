@@ -36,7 +36,7 @@ inventories preserve benchmark cases without a second hand-written case list.
 | Studio/frontend | Python HTTP benchmarks and Vitest benchmark files   | All collected benchmark cases                         |
 | Lifecycle       | Isolated checkpoint/recovery benchmark              | Existing minimum-20-round evidence validation         |
 
-There are 181 engine cases and 26 warm cases, in addition to dynamically
+There are 180 engine cases and 26 warm cases, in addition to dynamically
 discovered cases. Warm cases use one entity to support one-row appends.
 Compare measurements only when entity count, history depth, append size,
 and timing boundaries match.
@@ -58,11 +58,12 @@ no regression verdict.
 
 Unsupported operations are explicit cells, not silent dependency skips.
 Native streaming measures `join` through the bounded temporal join with the
-dimension side complete at the stream origin. That one combination excludes
-its 10M tier: the join retains one state row per matched input row for the
-whole run, so each sample needs roughly 200 seconds and cannot fit the
-shard's interleaved budget; the smaller decades carry the evidence and the
-cross-library table marks the 10M cell `excluded (suite budget)`. Missing
+dimension side complete at the stream origin; its evidence stops at the
+100,000-row tier. The 1M and 10M tiers stay unsupported in the catalog for
+performance (user-directed pacing constraint, 2026-09-20): the join retains
+one state row per matched input row for the whole run, so a sample needs
+roughly 5 seconds at 1M and 200 seconds at 10M on the dev machine, which
+would slow the whole suite's cadence. Missing
 DataFusion, Polars or TA-Lib fails its shard. DataFusion Python 54 matches
 the core's DataFusion major; the shared requirements file pins all Python
 build/benchmark/Studio dependencies with hashes.

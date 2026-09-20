@@ -20,12 +20,14 @@ CAPABILITIES = {
     "calc-flow-stream": STREAM_CASES,
     "ta-lib": ROLLING_CASES,
 }
-# The bounded temporal join retains one state row per matched input row for
-# the whole run — the 64-row dimension spans the full event-time window — so
-# the 10M-row stream tier needs ~200 seconds per sample and cannot fit the
-# suite's interleaved shard budget. Smaller decades carry the evidence; see
-# docs/benchmark-suite.md.
-STREAM_JOIN_EXCLUDED_ROWS = 10_000_000
+# The native-stream join column carries evidence only through the 100k tier
+# (user-directed pacing constraint, DAL-290, 2026-09-20): per-sample
+# performance above that scale (≈5 s at 1M and ≈200 s at 10M on the dev
+# machine, because the join retains one state row per matched input row for
+# the whole run) would slow the whole suite's cadence. Larger tiers stay
+# unsupported in the catalog rather than being measured to fill the column;
+# see docs/benchmark-suite.md.
+STREAM_JOIN_MAX_ROWS = 100_000
 THREADS = 32
 BATCH_ROWS = 64_000
 CONTRACT = "calc-flow-benchmark-suite-v3"
@@ -64,8 +66,11 @@ def engine_cases(rows: int | None = None) -> list[dict]:
         for size in sizes
         for backend, scenarios in CAPABILITIES.items()
         for scenario in scenarios
-        if (backend, scenario, size)
-        != ("calc-flow-stream", "join", STREAM_JOIN_EXCLUDED_ROWS)
+        if not (
+            backend == "calc-flow-stream"
+            and scenario == "join"
+            and size > STREAM_JOIN_MAX_ROWS
+        )
     ]
 
 
@@ -269,8 +274,8 @@ def _constant_range_bounds(node: ast.expr) -> tuple[int, int] | None:
 def _baseline_engine_ids(constants: dict[str, tuple[str, ...] | int]) -> frozenset[str]:
     sql, rolling = constants["SQL_CASES"], constants["ROLLING_CASES"]
     stream = constants.get("STREAM_CASES", rolling)
-    excluded = constants.get("STREAM_JOIN_EXCLUDED_ROWS")
-    excluded_rows = str(excluded) if type(excluded) is int else None
+    join_cap = constants.get("STREAM_JOIN_MAX_ROWS")
+    capped = int(join_cap) if type(join_cap) is int else None
     columns = (
         ("calc-flow-sql", sql),
         ("datafusion", sql),
@@ -283,7 +288,12 @@ def _baseline_engine_ids(constants: dict[str, tuple[str, ...] | int]) -> frozens
         for rows in constants["ROW_SCALES"]
         for backend, scenarios in columns
         for scenario in scenarios
-        if (backend, scenario, rows) != ("calc-flow-stream", "join", excluded_rows)
+        if not (
+            backend == "calc-flow-stream"
+            and scenario == "join"
+            and capped is not None
+            and int(rows) > capped
+        )
     )
 
 

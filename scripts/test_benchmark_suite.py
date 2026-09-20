@@ -65,7 +65,7 @@ class BenchmarkSuiteTests(unittest.TestCase):
         self.assertEqual(len({c["id"] for c in cases}), len(cases))
         self.assertTrue(all(c["rows"] > 0 for c in cases))
 
-    def test_native_stream_join_excludes_only_the_10m_budget_tier(self):
+    def test_native_stream_join_measures_only_through_the_100k_tier(self):
         stream_join = {
             case["id"]
             for case in engine_cases()
@@ -73,7 +73,7 @@ class BenchmarkSuiteTests(unittest.TestCase):
         }
         self.assertEqual(
             stream_join,
-            {f"engines/{size}/calc-flow-stream/join" for size in ROW_SCALES[:-1]},
+            {f"engines/{size}/calc-flow-stream/join" for size in ROW_SCALES[:5]},
         )
 
     def test_shards_exclude_slow_nightly_scale_and_keep_all_families(self):
@@ -505,13 +505,15 @@ class BenchmarkSuiteTests(unittest.TestCase):
             native_cell, {"unsupported", "missing", "error", "invalid scope"}
         )
 
-    def test_cross_library_table_marks_the_excluded_10m_stream_join_tier(self):
-        report = render_report(
-            [measured_case(**case) for case in engine_cases(10_000_000)], []
-        )
-        table = report.split("## Cross-library comparison")[1]
-        join_row = next(line for line in table.splitlines() if "| join" in line)
-        self.assertEqual(join_row.split("|")[3].strip(), "excluded (suite budget)")
+    def test_cross_library_table_keeps_large_stream_join_tiers_unsupported(self):
+        for size in ROW_SCALES[5:]:
+            with self.subTest(size=size):
+                report = render_report(
+                    [measured_case(**case) for case in engine_cases(size)], []
+                )
+                table = report.split("## Cross-library comparison")[1]
+                join_row = next(line for line in table.splitlines() if "| join" in line)
+                self.assertEqual(join_row.split("|")[3].strip(), "unsupported")
 
     def test_cross_library_table_rejects_startup_inclusive_stream_samples(self):
         case = next(c for c in engine_cases(100) if c["backend"] == "calc-flow-stream")
