@@ -217,9 +217,7 @@ class EngineCase:
             # its events are enqueued before the quote batches.
             self.streams = (
                 {
-                    "right": dimension_events(
-                        stream_dimension(self.data.dimension)
-                    ),
+                    "right": dimension_events(stream_dimension(self.data.dimension)),
                     "left": self.events,
                 }
                 if scenario == "join"
