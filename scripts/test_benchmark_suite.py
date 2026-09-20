@@ -117,6 +117,20 @@ class BenchmarkSuiteTests(unittest.TestCase):
             self.assertIsNone(baseline_case_ids(base, {"family": "engines"}))
             self.assertIsNone(baseline_case_ids(None, {"family": "engines"}))
 
+    def test_baseline_case_ids_fail_closed_on_malformed_required_constants(self):
+        with TemporaryDirectory() as directory:
+            base = Path(directory)
+            catalog_path = base / "scripts/benchmark_suite/catalog.py"
+            catalog_path.parent.mkdir(parents=True)
+            # A required constant that parses to a non-tuple (here: an int)
+            # must fail closed to full gating, never reach tuple iteration.
+            catalog_path.write_text(
+                "ROW_SCALES = ('10',)\nSQL_CASES = 1\n"
+                "ROLLING_CASES = ('sma20',)\n"
+                "STREAM_JOIN_MAX_ROWS = 100_000\n"
+            )
+            self.assertIsNone(baseline_case_ids(base, {"family": "engines"}))
+
     def test_new_candidate_benchmarks_are_new_coverage_not_errors(self):
         def block(names):
             return {

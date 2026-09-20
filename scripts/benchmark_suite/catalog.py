@@ -50,6 +50,20 @@ def comparison_kind(case: dict, baseline_ids: frozenset[str] | None) -> str:
     return "interleaved" if case["id"] in baseline_ids else "new"
 
 
+def _measured_stream_join(
+    backend: str, scenario: str, size: int, cap: int | None
+) -> bool:
+    """Whether one native-stream join scale stays in the measured catalog.
+
+    ``cap is None`` means the catalog declared no cap, so every declared
+    stream-join case is measured.
+    """
+
+    if cap is None:
+        return True
+    return not (backend == "calc-flow-stream" and scenario == "join" and size > cap)
+
+
 def engine_cases(rows: int | None = None) -> list[dict]:
     sizes = ROW_SCALES if rows is None else (rows,)
     return [
@@ -66,11 +80,7 @@ def engine_cases(rows: int | None = None) -> list[dict]:
         for size in sizes
         for backend, scenarios in CAPABILITIES.items()
         for scenario in scenarios
-        if not (
-            backend == "calc-flow-stream"
-            and scenario == "join"
-            and size > STREAM_JOIN_MAX_ROWS
-        )
+        if _measured_stream_join(backend, scenario, size, STREAM_JOIN_MAX_ROWS)
     ]
 
 
@@ -130,30 +140,45 @@ def _baseline_catalog_constants(
 ) -> dict[str, tuple[str, ...] | int] | None:
     """Read the baseline catalog's declarative constants without executing code.
 
-    Only literal string-tuple and integer assignments are accepted; anything
-    else fails closed so an unparseable baseline keeps every paired case
-    gated.
+    Only literal string-tuple and integer assignments are accepted, and every
+    required constant must resolve to a string tuple; anything else fails
+    closed so an unparseable baseline keeps every paired case gated.
     """
 
     tree = ast.parse(catalog_path.read_text(encoding="utf-8"))
     constants: dict[str, tuple[str, ...] | int] = {}
     for node in tree.body:
-        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
-            continue
-        target = node.targets[0]
-        if not isinstance(target, ast.Name):
-            continue
-        value: tuple[str, ...] | int | None = _declarative_tuple(node.value, constants)
-        if value is None and isinstance(node.value, ast.Constant):
-            literal = node.value.value
-            if type(literal) is int:
-                value = literal
-        if value is not None:
-            constants[target.id] = value
+        assigned = _assigned_constant(node, constants)
+        if assigned is not None:
+            constants[assigned[0]] = assigned[1]
     required = ("ROW_SCALES", "SQL_CASES", "ROLLING_CASES")
-    if any(name not in constants for name in required):
+    if any(not isinstance(constants.get(name), tuple) for name in required):
         return None
     return constants
+
+
+def _assigned_constant(
+    node: ast.stmt, constants: dict[str, tuple[str, ...]]
+) -> tuple[str, tuple[str, ...] | int] | None:
+    """Return one top-level ``NAME = literal`` assignment, else ``None``."""
+
+    if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+        return None
+    target = node.targets[0]
+    if not isinstance(target, ast.Name):
+        return None
+    value: tuple[str, ...] | int | None = _declarative_tuple(node.value, constants)
+    if value is None:
+        value = _declarative_int(node.value)
+    return None if value is None else (target.id, value)
+
+
+def _declarative_int(node: ast.expr) -> int | None:
+    """Accept a literal integer assignment."""
+
+    if isinstance(node, ast.Constant) and type(node.value) is int:
+        return node.value
+    return None
 
 
 def _declarative_tuple(
@@ -275,7 +300,7 @@ def _baseline_engine_ids(constants: dict[str, tuple[str, ...] | int]) -> frozens
     sql, rolling = constants["SQL_CASES"], constants["ROLLING_CASES"]
     stream = constants.get("STREAM_CASES", rolling)
     join_cap = constants.get("STREAM_JOIN_MAX_ROWS")
-    capped = int(join_cap) if type(join_cap) is int else None
+    cap = join_cap if type(join_cap) is int else None
     columns = (
         ("calc-flow-sql", sql),
         ("datafusion", sql),
@@ -288,12 +313,7 @@ def _baseline_engine_ids(constants: dict[str, tuple[str, ...] | int]) -> frozens
         for rows in constants["ROW_SCALES"]
         for backend, scenarios in columns
         for scenario in scenarios
-        if not (
-            backend == "calc-flow-stream"
-            and scenario == "join"
-            and capped is not None
-            and int(rows) > capped
-        )
+        if _measured_stream_join(backend, scenario, int(rows), cap)
     )
 
 

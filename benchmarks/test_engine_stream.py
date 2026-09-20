@@ -28,7 +28,7 @@ def _source_type(probe, advance, output):
         def __init__(self, *, max_batch_rows=64_000):
             super().__init__(max_batch_rows=max_batch_rows)
             self.ready = asyncio.Event()
-            probe.source = self
+            probe.sources.append(self)
 
         async def push(self, event):
             if probe.fail_push:
@@ -42,7 +42,10 @@ def _source_type(probe, advance, output):
                 advance("enqueue", 1_000_000)
             else:
                 advance("watermark", 2_000_000)
-                await probe.sink.write(output(probe.expected))
+                # A multi-binding stream pushes one watermark per source; the
+                # first delivers the workload, the rest find it complete.
+                if not probe.sink.rows:
+                    await probe.sink.write(output(probe.expected))
 
     return Source
 
@@ -67,7 +70,8 @@ def _runner_type(probe, advance):
 
     def ready():
         advance("ready", 300_000_000)
-        probe.source.ready.set()
+        for source in probe.sources:
+            source.ready.set()
 
     class Runner:
         def __init__(self, *_args, **_kwargs):
@@ -75,7 +79,8 @@ def _runner_type(probe, advance):
 
         async def start_async(self):
             advance("start", 1_000_000_000)
-            await probe.source.open(None)
+            for source in probe.sources:
+                await source.open(None)
             await probe.sink.open()
             if probe.deferred_ready:
                 asyncio.get_running_loop().call_soon(ready)
@@ -91,7 +96,7 @@ def stream_probe(monkeypatch):
     probe = SimpleNamespace(
         clock=0,
         phases=[],
-        source=None,
+        sources=[],
         sink=None,
         expected=None,
         outcome="completed",
@@ -119,11 +124,40 @@ def stream_probe(monkeypatch):
     return probe
 
 
-def stream_case(tmp_path, probe):
-    case = next(c for c in engine_cases(10) if c["backend"] == "calc-flow-stream")
+def stream_case(tmp_path, probe, scenario="projection"):
+    case = next(
+        c
+        for c in engine_cases(10)
+        if c["backend"] == "calc-flow-stream" and c["scenario"] == scenario
+    )
     runner = EngineCase(case, tmp_path)
     probe.expected = runner.expected
     return runner
+
+
+def test_stream_timer_supports_the_two_source_join_binding(tmp_path, stream_probe):
+    runner = stream_case(tmp_path, stream_probe, scenario="join")
+    try:
+        sample = runner.sample()
+        assert sample["correctness"]["passed"]
+        assert sample["seconds"] == pytest.approx(0.013)
+        assert stream_probe.phases == [
+            "construct",
+            "start",
+            "ready",
+            "enqueue",
+            "watermark",
+            "to-arrow",
+            "enqueue",
+            "watermark",
+            "concat",
+            "eof",
+            "eof",
+            "wait",
+            "cancel",
+        ]
+    finally:
+        runner.close()
 
 
 def test_stream_timer_excludes_startup_and_cleanup_but_includes_arrow(

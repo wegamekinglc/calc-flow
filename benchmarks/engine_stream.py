@@ -82,6 +82,50 @@ def _join_limits(rows: int) -> JoinStateLimits:
     return JoinStateLimits(capacity, max(capacity << 10, 1 << 30), capacity)
 
 
+def _join_stream_output(table: pa.Table, dimension: pa.Table, quotes):
+    """Return the bounded temporal join output and its program inputs."""
+
+    if table is None or dimension is None:
+        raise ValueError("join stream plans require the workload tables")
+    factors = table_input(
+        "dimension",
+        schema=(
+            Field("symbol", "string", nullable=False),
+            Field("factor", "float64", nullable=False),
+            Field("sequence", "uint64", nullable=False),
+            Field("event_time", "timestamp[us, UTC]", nullable=False),
+        ),
+        entity_by=("symbol",),
+        event_time="event_time",
+        sequence_by=("sequence",),
+    )
+    # The dimension side completes at the stream origin and the inclusive
+    # `before` bound spans the whole workload, so every quote row matches
+    # exactly its symbol's factor row — the stream equivalent of the
+    # suite's shared `join` query in engine_comparison.sql_query.
+    joined = tables.stream_join(
+        quotes,
+        factors,
+        left_keys=("symbol",),
+        right_keys=("symbol",),
+        left_event_time="event_time",
+        right_event_time="event_time",
+        bounds=JoinTimeBounds(_join_span(table), timedelta()),
+        limits=_join_limits(table.num_rows),
+        left_prefix="quote",
+        right_prefix="dimension",
+    )
+    output = joined.with_columns(
+        FeatureSet(
+            (
+                ("sequence", joined["quote__sequence"]),
+                ("value", joined["quote__price"] * joined["dimension__factor"]),
+            )
+        )
+    ).select("sequence", "value")
+    return output, (quotes, factors)
+
+
 def stream_plan(
     scenario: str, table: pa.Table | None = None, dimension: pa.Table | None = None
 ):
@@ -132,48 +176,7 @@ def stream_plan(
             aggregates=(window.sum("price", output="value"),),
         ).select("symbol", "value")
     elif scenario == "join":
-        if table is None or dimension is None:
-            raise ValueError("join stream plans require the workload tables")
-        factors = table_input(
-            "dimension",
-            schema=(
-                Field("symbol", "string", nullable=False),
-                Field("factor", "float64", nullable=False),
-                Field("sequence", "uint64", nullable=False),
-                Field("event_time", "timestamp[us, UTC]", nullable=False),
-            ),
-            entity_by=("symbol",),
-            event_time="event_time",
-            sequence_by=("sequence",),
-        )
-        # The dimension side completes at the stream origin and the inclusive
-        # `before` bound spans the whole workload, so every quote row matches
-        # exactly its symbol's factor row — the stream equivalent of the
-        # suite's shared `join` query in engine_comparison.sql_query.
-        joined = tables.stream_join(
-            quotes,
-            factors,
-            left_keys=("symbol",),
-            right_keys=("symbol",),
-            left_event_time="event_time",
-            right_event_time="event_time",
-            bounds=JoinTimeBounds(_join_span(table), timedelta()),
-            limits=_join_limits(table.num_rows),
-            left_prefix="quote",
-            right_prefix="dimension",
-        )
-        output = joined.with_columns(
-            FeatureSet(
-                (
-                    ("sequence", joined["quote__sequence"]),
-                    (
-                        "value",
-                        joined["quote__price"] * joined["dimension__factor"],
-                    ),
-                )
-            )
-        ).select("sequence", "value")
-        inputs = (quotes, factors)
+        output, inputs = _join_stream_output(table, dimension, quotes)
     else:
         raise ValueError("unsupported stream benchmark scenario")
     return Program(
@@ -245,6 +248,29 @@ class _CollectSink:
         return None
 
 
+def _validated_timed_streams(plan, streams: dict[str, tuple]) -> dict[str, tuple]:
+    """Return each binding's timed events after checking the EOF contract."""
+
+    if set(streams) != set(plan.source_binding_ids):
+        raise ValueError("stream events must cover every plan source binding")
+    if any(not events or events[-1] is not None for events in streams.values()):
+        raise ValueError("every stream input must end with an EOF marker")
+    return {name: events[:-1] for name, events in streams.items()}
+
+
+def _require_ready_sources(
+    sources: dict[str, _ReadySource], sink: _CollectSink
+) -> None:
+    """Fail unless every source passed the startup gate with empty state."""
+
+    if (
+        any(not source.opened.is_set() for source in sources.values())
+        or not sink.opened.is_set()
+        or sink.rows
+    ):
+        raise RuntimeError("stream must be ready with empty state before timing")
+
+
 async def _measure_ready(
     sources: dict[str, _ReadySource], sink: _CollectSink, streams: dict[str, tuple]
 ) -> tuple[pa.Table, float]:
@@ -252,12 +278,7 @@ async def _measure_ready(
         asyncio.gather(*(source.ready.wait() for source in sources.values())),
         timeout=30,
     )
-    if (
-        any(not source.opened.is_set() for source in sources.values())
-        or not sink.opened.is_set()
-        or sink.rows
-    ):
-        raise RuntimeError("stream must be ready with empty state before timing")
+    _require_ready_sources(sources, sink)
     started = time.perf_counter_ns()
     for name, events in streams.items():
         for event in events:
@@ -272,11 +293,7 @@ async def _measure_ready(
 async def run_stream(
     plan, streams: dict[str, tuple], root: Path, expected_rows: int
 ) -> tuple[pa.Table, float]:
-    if set(streams) != set(plan.source_binding_ids):
-        raise ValueError("stream events must cover every plan source binding")
-    if any(not events or events[-1] is not None for events in streams.values()):
-        raise ValueError("every stream input must end with an EOF marker")
-    timed = {name: events[:-1] for name, events in streams.items()}
+    timed = _validated_timed_streams(plan, streams)
     sources = {name: _ReadySource() for name in streams}
     sink = _CollectSink(expected_rows)
     job = await StreamingRunner(
