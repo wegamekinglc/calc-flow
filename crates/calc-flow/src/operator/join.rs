@@ -4,9 +4,10 @@ mod tests {
 
     use datafusion::arrow::{
         array::{
-            BinaryArray, FixedSizeBinaryArray, Int64Array, StringArray, TimestampMicrosecondArray,
+            BinaryArray, DictionaryArray, FixedSizeBinaryArray, Int32Array, Int64Array,
+            StringArray, TimestampMicrosecondArray,
         },
-        datatypes::{DataType, Field, Schema, TimeUnit},
+        datatypes::{DataType, Field, Int32Type, Schema, TimeUnit},
         record_batch::RecordBatch,
     };
 
@@ -330,6 +331,126 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cross_batch_matches_preserve_dictionary_encoded_payloads() {
+        // Retained rows from different input batches can carry the same
+        // dictionary type over different dictionaries; one probe batch that
+        // matches both must concatenate their dictionary columns without
+        // losing or remapping values (Copilot review of PR #298).
+        let dict_schema = Arc::new(Schema::new(vec![
+            Field::new("account_id", DataType::Int64, false),
+            Field::new(
+                "authorized_at",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                false,
+            ),
+            Field::new(
+                "amount",
+                DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+                true,
+            ),
+        ]));
+        let dictionary_row = |values: Vec<&str>, key: i32| {
+            Batch::table(
+                vec![
+                    RecordBatch::try_new(
+                        Arc::clone(&dict_schema),
+                        vec![
+                            Arc::new(Int64Array::from(vec![7])),
+                            Arc::new(
+                                TimestampMicrosecondArray::from(vec![100]).with_timezone("UTC"),
+                            ),
+                            Arc::new(DictionaryArray::<Int32Type>::new(
+                                Int32Array::from(vec![key]),
+                                Arc::new(StringArray::from(values)),
+                            )),
+                        ],
+                    )
+                    .unwrap(),
+                ],
+                BatchMetadata::default(),
+            )
+            .unwrap()
+        };
+        let mut operator =
+            StreamJoinOperator::new("match", Arc::clone(&dict_schema), right_schema(), spec())
+                .unwrap();
+        let job = StreamJobContext::new(
+            1,
+            "fingerprint",
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        );
+        let context = StreamOperatorContext::new(&job, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+
+        // The same logical value "paid" under two distinct dictionaries.
+        operator
+            .process_data(
+                "left",
+                dictionary_row(vec!["paid"], 0),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        operator
+            .process_data(
+                "left",
+                dictionary_row(vec!["other", "paid"], 1),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        operator
+            .process_data("right", right_batch(vec![100]), &context, &mut collector)
+            .await
+            .unwrap();
+
+        let outputs = collector.drain("output");
+        assert_eq!(outputs.len(), 1);
+        let data = outputs[0].as_data().unwrap();
+        assert_eq!(data.num_rows(), 2);
+        assert_eq!(
+            dictionary_strings(data, "authorization__amount"),
+            ["paid", "paid"]
+        );
+    }
+
+    /// Decodes one dictionary-encoded output column back to its strings.
+    fn dictionary_strings(data: &Batch, name: &str) -> Vec<String> {
+        data.table_payload()
+            .unwrap()
+            .batches()
+            .iter()
+            .flat_map(|record| {
+                let column = record
+                    .column_by_name(name)
+                    .expect("prefixed dictionary payload column");
+                assert_eq!(
+                    column.data_type(),
+                    &DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8))
+                );
+                let typed = column
+                    .as_any()
+                    .downcast_ref::<DictionaryArray<Int32Type>>()
+                    .expect("declared dictionary column");
+                let strings = typed
+                    .values()
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .expect("utf8 dictionary values");
+                (0..record.num_rows()).map(move |index| {
+                    strings
+                        .value(usize::try_from(typed.keys().value(index)).unwrap())
+                        .to_owned()
+                })
+            })
+            .collect()
+    }
+
+    #[tokio::test]
     async fn matched_rows_accumulate_into_one_batched_message() {
         let mut operator =
             StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
@@ -516,6 +637,122 @@ mod tests {
         );
         assert_eq!(operator.status().emitted_match_rows, 0);
         assert_eq!(operator.status().right.retained_rows, 0);
+    }
+
+    #[tokio::test]
+    async fn wide_rows_split_along_the_byte_budget_axis() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let job = job();
+        // max_rows alone would keep all four wide rows in one message; the
+        // byte bound is what must drive the split.
+        let budget = EdgeBudget::new(1_000, 800).unwrap();
+        let context =
+            StreamOperatorContext::new(&job, "match", None).with_test_output_budget(budget);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+
+        operator
+            .process_data("left", left_batch(vec![100]), &context, &mut collector)
+            .await
+            .unwrap();
+        let wide = Batch::table(
+            vec![
+                RecordBatch::try_new(
+                    right_schema(),
+                    vec![
+                        Arc::new(Int64Array::from(vec![7; 4])),
+                        Arc::new(
+                            TimestampMicrosecondArray::from(vec![100, 100, 100, 100])
+                                .with_timezone("UTC"),
+                        ),
+                        Arc::new(StringArray::from(vec!["s".repeat(256); 4])),
+                    ],
+                )
+                .unwrap(),
+            ],
+            BatchMetadata::default(),
+        )
+        .unwrap();
+        operator
+            .process_data("right", wide, &context, &mut collector)
+            .await
+            .unwrap();
+
+        let outputs = collector.drain("output");
+        assert!(
+            outputs.len() > 1,
+            "the byte bound must split rows that max_rows would keep together"
+        );
+        for message in &outputs {
+            let data = message.as_data().unwrap();
+            assert!(
+                data.estimated_bytes().unwrap() <= budget.max_bytes,
+                "every emitted message must respect the byte budget"
+            );
+        }
+        let sequences = outputs
+            .iter()
+            .map(|message| message.as_data().unwrap().metadata().sequence())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sequences,
+            (0..u64::try_from(outputs.len()).unwrap()).collect::<Vec<_>>(),
+            "sequences stay dense and increasing across byte-driven chunks"
+        );
+        let rows = outputs
+            .iter()
+            .flat_map(|message| {
+                let data = message.as_data().unwrap();
+                data.table_payload()
+                    .unwrap()
+                    .batches()
+                    .iter()
+                    .flat_map(|record| {
+                        let column = record
+                            .column_by_name("payment__status")
+                            .unwrap()
+                            .as_any()
+                            .downcast_ref::<StringArray>()
+                            .unwrap();
+                        (0..record.num_rows()).map(move |index| column.value(index).len())
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(rows, [256; 4], "all four wide rows arrive in order");
+    }
+
+    #[tokio::test]
+    async fn exhausted_output_sequence_fails_before_building_a_message() {
+        let mut seed =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let job = job();
+        let context = StreamOperatorContext::new(&job, "match", None);
+        let mut collector = EdgeCollector::new(seed.output_ports().to_vec());
+        seed.process_data("left", left_batch(vec![100]), &context, &mut collector)
+            .await
+            .unwrap();
+        let mut exhausted = seed.checkpoint(Epoch::new(1).unwrap()).unwrap();
+        exhausted
+            .inline_metadata
+            .insert("next_output_sequence".into(), u64::MAX.into());
+
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        operator.restore(&exhausted).unwrap();
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        let failure = operator
+            .process_data("right", right_batch(vec![100]), &context, &mut collector)
+            .await
+            .unwrap_err();
+        assert!(
+            failure
+                .to_string()
+                .contains("output sequence overflowed before emission"),
+            "{failure}"
+        );
+        assert!(collector.drain("output").is_empty());
+        assert_eq!(operator.status().emitted_match_rows, 0);
     }
 
     fn job() -> StreamJobContext {
@@ -2845,6 +3082,7 @@ fn chunk_output_record(
     first_sequence: u64,
     budget: EdgeBudget,
 ) -> Result<Vec<Batch>> {
+    validate_output_sequence_range(operator_id, first_sequence, 1)?;
     // A record that already fits one message skips the per-row charge scan.
     if record.num_rows() <= budget.max_rows {
         let metadata = BatchMetadata::new(operator_id, first_sequence, BTreeMap::new())?;
@@ -3115,7 +3353,7 @@ fn key_probe_batch(
             .iter()
             .map(|record| record.column(key_index).as_ref())
             .collect::<Vec<_>>();
-        columns.push(concat_key_column(&slices)?);
+        columns.push(concat_column(&slices)?);
     }
     fields.push(Field::new(extra_name, DataType::UInt64, false));
     columns.push(Arc::new(extra.clone()));
@@ -3126,9 +3364,9 @@ fn key_probe_batch(
     })
 }
 
-fn concat_key_column(slices: &[&dyn Array]) -> Result<ArrayRef> {
+fn concat_column(slices: &[&dyn Array]) -> Result<ArrayRef> {
     concat(slices).map_err(|error| CalcFlowError::Internal {
-        message: format!("stream Join key column concatenation failed: {error}"),
+        message: format!("stream Join column concatenation failed: {error}"),
     })
 }
 
@@ -3261,7 +3499,7 @@ fn materialize_output_record(
                 }
             })
             .collect::<Vec<_>>();
-        columns.push(concat_key_column(&slices)?);
+        columns.push(concat_column(&slices)?);
     }
     RecordBatch::try_new(Arc::clone(output_schema), columns)
         .map_err(|error| operator_error(operator_id, &format!("output projection failed: {error}")))
