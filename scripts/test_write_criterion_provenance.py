@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import subprocess
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
@@ -42,18 +41,15 @@ def stable_identity():
 
 class CriterionProvenanceTests(unittest.TestCase):
     def test_git_head_uses_fixed_argv_without_shell(self) -> None:
-        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="1" * 40)
-        with patch.object(subprocess, "run", return_value=completed) as run:
+        with patch(
+            "scripts.write_criterion_provenance.command_output",
+            return_value="1" * 40,
+        ) as run:
             result = provenance._git_head(Path("/repository"))
 
         self.assertEqual(result, "1" * 40)
         run.assert_called_once_with(
-            ["git", "rev-parse", "HEAD^{commit}"],
-            check=True,
-            capture_output=True,
-            cwd=Path("/repository"),
-            shell=False,
-            text=True,
+            ["git", "rev-parse", "HEAD^{commit}"], cwd=Path("/repository")
         )
 
     def test_records_exact_source_and_comparable_fingerprints(self) -> None:
