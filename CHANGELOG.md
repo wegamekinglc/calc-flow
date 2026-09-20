@@ -9,6 +9,18 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-20: Native streaming covers the `join` engine scenario through the
+  100k tier. The bounded temporal join runs with the dimension side complete
+  at the stream origin and an inclusive `before` bound spanning the
+  workload, so every quote row matches exactly its symbol's factor row and
+  the shared oracle applies. The engine matrix reaches 26 supported
+  engine/scenario combinations and 180 engine cases; the 1M and 10M tiers
+  of the native-stream join stay unsupported in the catalog by a
+  user-directed pacing constraint (2026-09-20) — the join retains one state
+  row per matched input row for the whole run, so samples need roughly 5
+  seconds at 1M and 200 seconds at 10M on the dev machine, which would slow
+  the whole suite's cadence.
+
 - 2026-09-20: Fail the stream join's single-message output fast path before
   emission. The batched-emission fast path that emits one output record per
   input batch skipped the pre-emission output-sequence validation the chunked

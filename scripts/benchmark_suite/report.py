@@ -6,7 +6,12 @@ import math
 import statistics
 from collections import Counter
 
-from scripts.benchmark_suite.catalog import CAPABILITIES, SQL_CASES, STREAM_SCOPE
+from scripts.benchmark_suite.catalog import (
+    CAPABILITIES,
+    SQL_CASES,
+    STREAM_JOIN_MAX_ROWS,
+    STREAM_SCOPE,
+)
 from scripts.benchmark_suite.statistics import paired_round
 
 THRESHOLD_PERCENT = 5.0
@@ -359,13 +364,14 @@ def _cross_library_table(cases: list[dict]) -> str:
 
 def _cross_library_row(size: int, scenario: str, index: dict) -> list[object]:
     backends = ("calc-flow-stream", "calc-flow-sql", "datafusion", "polars", "ta-lib")
-    return [
-        size,
-        scenario,
-        *(
-            "unsupported"
-            if scenario not in CAPABILITIES[backend]
-            else _reference_cell(index.get((size, scenario, backend)))
-            for backend in backends
-        ),
-    ]
+
+    def cell(backend: str) -> object:
+        if scenario not in CAPABILITIES[backend] or (
+            backend == "calc-flow-stream"
+            and scenario == "join"
+            and size > STREAM_JOIN_MAX_ROWS
+        ):
+            return "unsupported"
+        return _reference_cell(index.get((size, scenario, backend)))
+
+    return [size, scenario, *(cell(backend) for backend in backends)]

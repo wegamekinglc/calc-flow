@@ -59,11 +59,17 @@ def test_ready_stream_repeated_samples_use_fresh_execution_plans(scenario, tmp_p
 @pytest.mark.parametrize("count", [64_001, 128_000])
 @pytest.mark.parametrize("scenario", STREAM_CASES)
 def test_ready_stream_finalizes_every_chunk_before_eof(count, scenario, tmp_path):
-    case = next(
-        case
-        for case in engine_cases(count)
-        if case["backend"] == "calc-flow-stream" and case["scenario"] == scenario
-    )
+    # Boundary sizes are correctness fixtures, not suite tiers: the catalog's
+    # stream-join evidence cap must not drop the chunk-finalization coverage,
+    # so the case is built here instead of looked up from engine_cases.
+    case = {
+        "id": f"engines/{count}/calc-flow-stream/{scenario}",
+        "family": "engines",
+        "backend": "calc-flow-stream",
+        "scenario": scenario,
+        "rows": count,
+        "scope": "ready-enqueue-to-arrow",
+    }
     runner = EngineCase(case, tmp_path)
     try:
         for _ in range(2):

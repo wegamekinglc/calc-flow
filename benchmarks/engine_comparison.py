@@ -10,7 +10,13 @@ from pathlib import Path
 import numpy as np
 import pyarrow as pa
 
-from benchmarks.engine_stream import run_stream, stream_events, stream_plan
+from benchmarks.engine_stream import (
+    dimension_events,
+    run_stream,
+    stream_dimension,
+    stream_events,
+    stream_plan,
+)
 from benchmarks.rolling_indicator_comparison import (
     TaLibMethod,
     ta_lib_expected_dual_sma_spread,
@@ -207,6 +213,18 @@ class EngineCase:
         self.loop = None
         if backend == "calc-flow-stream":
             self.events = stream_events(self.data.table, self.data.entities)
+            # The join's dimension side is complete at the stream origin, so
+            # its events are enqueued before the quote batches.
+            self.streams = (
+                {
+                    "right": dimension_events(
+                        stream_dimension(self.data.dimension)
+                    ),
+                    "left": self.events,
+                }
+                if scenario == "join"
+                else {"input": self.events}
+            )
             self.loop = asyncio.new_event_loop()
         else:
             factory = {
@@ -221,11 +239,11 @@ class EngineCase:
         self.count += 1
         # Each single-use plan starts with empty rolling state. Compilation and
         # runner startup both precede the adapter's ready-to-Arrow timer.
-        plan = stream_plan(self.case["scenario"], self.data.table)
+        plan = stream_plan(self.case["scenario"], self.data.table, self.data.dimension)
         return self.loop.run_until_complete(
             run_stream(
                 plan,
-                self.events,
+                self.streams,
                 self.root / f"sample-{self.count}",
                 self.expected.num_rows,
             )
