@@ -2,7 +2,8 @@
 //!
 //! Enable `mysql` and register the factories in a trusted registry. Connection
 //! URLs are resolved from the `url` secret slot. TLS verifies certificates by
-//! default. See `docs/connectors.md` for cursor assumptions and type mappings.
+//! default. See `docs/connectors/mysql.md` for cursor assumptions and type
+//! mappings.
 //!
 //! ```
 //! use calc_flow::ConnectorRegistry;

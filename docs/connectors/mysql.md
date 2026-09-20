@@ -177,6 +177,14 @@ are outside this mode's contract. The connector validates the index and types;
 the application owns the immutability, retention, and commit-order assumptions.
 This mode advertises exact positioning only under those assumptions.
 
+Every page read in both modes re-queries `information_schema.COLUMNS` for
+fail-closed schema drift detection before fetching rows, adding one metadata
+round trip per page alongside the data query. With small pages or a low
+`poll_interval_ms` (down to 1 ms), this check roughly doubles statement
+traffic against the server. Prefer larger `max_batch_rows` pages and a higher
+`poll_interval_ms` when the schema is stable. The per-page check cannot be
+disabled: undetected drift would silently misalign decoded columns.
+
 | MySQL type                 | Arrow representation                          |
 |----------------------------|-----------------------------------------------|
 | Signed/unsigned integers   | Corresponding signed/unsigned integer width   |
