@@ -387,9 +387,11 @@ def _contains_event_window(node: Node, /) -> bool:
 class _Analyzer:
     """One analysis pass over one program, mode, and capability snapshot.
 
-    ``_bindings`` is attached by the program lowerer for the duration of one
-    lowering so boundary-aware strategies can record logical input/output
-    endpoints; analysis itself never reads it.
+    ``_runtime`` defaults to ``None`` and is assigned by ``_run`` immediately
+    after construction; native row-schema checks fall back to declared schemas
+    while it is absent. ``_bindings`` is attached by the program lowerer for
+    the duration of one lowering so boundary-aware strategies can record
+    logical input/output endpoints; analysis itself never reads it.
     """
 
     def __init__(
@@ -399,14 +401,13 @@ class _Analyzer:
         portable_types: frozenset[str],
         supports_array_kind: bool,
         capabilities: RuntimeCapabilities | None = None,
-        runtime: Runtime | None = None,
     ) -> None:
         self._mode = mode
         self._declared = declared
         self._portable_types = portable_types
         self._supports_array_kind = supports_array_kind
         self._capabilities = capabilities
-        self._runtime = runtime
+        self._runtime: Runtime | None = None
         self._bindings: _BatchBindings | None = None
         self._window_input_schemas: dict[str, tuple[Field, ...]] = {}
         self._native_row_schemas: dict[str, tuple[Field, ...]] = {}
@@ -2591,8 +2592,8 @@ def _run(
         portable,
         "array" in capabilities.batch_kinds,
         capabilities,
-        runtime,
     )
+    analyzer._runtime = runtime
     for value in program.inputs:
         node = value._node
         root = _declaration_root(node)

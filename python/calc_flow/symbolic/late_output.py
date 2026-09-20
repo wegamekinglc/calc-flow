@@ -159,10 +159,7 @@ def _analysis_boundary(
 
 def _is_single_stage(value: Node) -> bool:
     from calc_flow.symbolic.analyzer import _contains_stateful_primitive
-    from calc_flow.symbolic.lower.segments import (
-        _CROSS_SECTION_PRIMITIVES,
-        _ROLLING_PRIMITIVES,
-    )
+    from calc_flow.symbolic.lower.segments import _ROLLING_PRIMITIVES
 
     if value.op.name not in {"with_columns", "filter"}:
         return False
@@ -170,26 +167,33 @@ def _is_single_stage(value: Node) -> bool:
         return False
     states: dict[str, Node] = {}
     visited: set[str] = set()
-
-    def visit(node: Node) -> None:
-        if node.digest in visited:
-            return
-        visited.add(node.digest)
-        if node.op.name == "column_ref":
-            return
-        if node.op.name in _ROLLING_PRIMITIVES | _CROSS_SECTION_PRIMITIVES:
-            states[node.digest] = node
-        for child in node.args:
-            visit(child)
-
     for expression in value.args[1:]:
-        visit(expression)
+        _collect_stage_primitives(expression, visited, states)
     families = {node.op.name in _ROLLING_PRIMITIVES for node in states.values()}
     if len(families) != 1:
         return False
     if _has_non_column_operands(tuple(states.values()), value.args[0]):
         return False
     return _same_cross_section_group(tuple(states.values()))
+
+
+def _collect_stage_primitives(
+    node: Node, visited: set[str], states: dict[str, Node]
+) -> None:
+    from calc_flow.symbolic.lower.segments import (
+        _CROSS_SECTION_PRIMITIVES,
+        _ROLLING_PRIMITIVES,
+    )
+
+    if node.digest in visited:
+        return
+    visited.add(node.digest)
+    if node.op.name == "column_ref":
+        return
+    if node.op.name in _ROLLING_PRIMITIVES | _CROSS_SECTION_PRIMITIVES:
+        states[node.digest] = node
+    for child in node.args:
+        _collect_stage_primitives(child, visited, states)
 
 
 def _has_non_column_operands(states: tuple[Node, ...], source: Node) -> bool:
