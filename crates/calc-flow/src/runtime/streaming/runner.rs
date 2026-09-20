@@ -68,7 +68,7 @@ use super::{
     },
     supervisor::{
         SupervisionReport, TaskFailure, TaskId, TaskRegistry, TaskStatus, TaskSupervisor,
-        TerminalArbiter, TerminalDecision, panic_message,
+        terminal::{TerminalArbiter, TerminalDecision},
     },
 };
 use crate::operator::rolling_metrics::RollingMetricsStore;
@@ -88,11 +88,11 @@ use crate::{
     },
 };
 
-use super::failure::classify_failure_state;
 pub(crate) use super::failure::{
     ContinuousJobOutcome, ContinuousJobState, DriverOwnership, FailureOrigin, LaunchDeliveryState,
     LaunchId, RuntimeFailure, StartFailure, StartResult, TerminalCause, runner_shutdown_failure,
 };
+use super::failure::{classify_failure_state, panic_message};
 
 #[cfg(all(test, unix))]
 pub(crate) use super::test_seams::configure_test_manifest_transaction;
@@ -3079,6 +3079,13 @@ fn register_operator_nodes(
             .is_some_and(|second| operator_fusion::eligible_pair(&first, second));
         let first = prepare_operator_task(first, registration)?;
         if pair {
+            // Scheduling invariant: `operator_fusion::eligible_pair` requires
+            // `is_exact_column_projection`, so `pair_cooperation` classifies
+            // this pair as `OperatorCooperation::BoundedData` and
+            // `prepare_operator_task_pair` always attaches `with_readiness()`
+            // here. The supervisor's non-readiness `tokio::join!` pair branch
+            // and `OperatorCooperation::EveryMessage` therefore run only in
+            // tests.
             let second = prepare_operator_task(
                 nodes.next().expect("eligible adjacent node exists"),
                 registration,
@@ -9588,7 +9595,7 @@ mod tests {
 
         assert_eq!(
             observation.terminal,
-            Some(super::super::supervisor::TerminalDecision::ExplicitCancel)
+            Some(super::super::supervisor::terminal::TerminalDecision::ExplicitCancel)
         );
         assert!(cancellation.is_cancelled());
     }

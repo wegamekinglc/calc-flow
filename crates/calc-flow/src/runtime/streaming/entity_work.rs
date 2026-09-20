@@ -14,7 +14,8 @@ use std::{
 use parking_lot::Mutex;
 use tokio::{sync::Notify, task::JoinHandle};
 
-use super::supervisor::{TaskFailure, TaskId, panic_message};
+use super::failure::panic_message;
+use super::supervisor::{TaskFailure, TaskId};
 use crate::{
     CalcFlowError, Result,
     operator::{

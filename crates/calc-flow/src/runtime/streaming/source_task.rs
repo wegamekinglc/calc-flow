@@ -12,13 +12,14 @@ use tokio::sync::{Notify, mpsc, watch};
 use super::{
     EdgeSender, EnvelopeCost, StreamJobContext, StreamMessage,
     context::wait_for_task_gate,
+    failure::panic_message,
     metrics::MetricsRecorder,
     progress::{
         BindingIdentity, DeclaredSchema, ExistingPrivateToggleRoute, LiveProgressCoordinator,
         NativeWatermarkCapability, PreparedSourceBinding, RawIngressEvent, RawUpstreamPosition,
         ReplayPositioningCapability, SourceBindingSpec, SourceDescriptor, WatermarkPolicy,
     },
-    supervisor::{TaskFailureSignal, TaskId, TaskSupervisor, panic_message},
+    supervisor::{TaskFailureSignal, TaskId, TaskSupervisor},
 };
 use crate::{
     Batch, BatchMetadata, CalcFlowError, Epoch, EventTime, JsonMap, Result, canonical_json,
