@@ -362,6 +362,7 @@ impl StreamAsofJoinOperator {
         self.terminal = decoded.terminal;
         self.next_output_sequence = decoded.sequence;
         self.prepared = snapshot.segments.get(SEGMENT).cloned();
+        self.swept = None;
     }
 }
 
@@ -392,20 +393,10 @@ fn validate_nonnull_identity(
     row: &datafusion::arrow::record_batch::RecordBatch,
     side: &super::AsofJoinSide,
 ) -> Result<()> {
-    for column in side
-        .keys()
-        .iter()
-        .chain(side.sequence_by())
-        .map(String::as_str)
-        .chain(std::iter::once(side.event_time()))
+    if super::admission::identity_column_names(side)
+        .any(|column| super::admission::identity_column_nulls(row, column))
     {
-        if row
-            .column(row.schema().index_of(column).expect("validated schema"))
-            .null_count()
-            != 0
-        {
-            return Err(mismatch("ASOF restored identity contains null"));
-        }
+        return Err(mismatch("ASOF restored identity contains null"));
     }
     Ok(())
 }

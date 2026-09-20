@@ -28,6 +28,29 @@ pub use spec::{AsofJoinSide, AsofLatePolicy, AsofStateLimits, StreamAsofJoinSpec
 use state::State;
 pub use status::{StreamAsofJoinSideStatus, StreamAsofJoinStatus};
 
+/// Eviction inputs (both ingress watermarks and ended flags) under which the
+/// committed state was last swept. `State::evict` is deterministic in these
+/// inputs, so a matching stamp proves that re-sweeping the committed state
+/// would change nothing.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) struct SweepStamp {
+    left_watermark: Option<EventTime>,
+    left_ended: bool,
+    right_watermark: Option<EventTime>,
+    right_ended: bool,
+}
+
+impl SweepStamp {
+    fn current(status: &StreamAsofJoinStatus) -> Self {
+        Self {
+            left_watermark: status.left.watermark_micros,
+            left_ended: status.left.ended,
+            right_watermark: status.right.watermark_micros,
+            right_ended: status.right.ended,
+        }
+    }
+}
+
 /// Stream-only nearest historical match, finalized after both input frontiers.
 pub struct StreamAsofJoinOperator {
     name: String,
@@ -37,6 +60,10 @@ pub struct StreamAsofJoinOperator {
     schemas: [SchemaRef; 3],
     state: State,
     prepared: Option<crate::StateSegment>,
+    /// `Some` when the committed state was eviction-swept under the stamped
+    /// inputs; `None` when admissions, removals or a restore may have left
+    /// evictable rows behind.
+    swept: Option<SweepStamp>,
     terminal: bool,
     next_output_sequence: u64,
     status: StreamAsofJoinStatus,
@@ -86,6 +113,7 @@ impl StreamAsofJoinOperator {
             schemas,
             state: State::default(),
             prepared: None,
+            swept: None,
             terminal: false,
             next_output_sequence: 0,
             status: StreamAsofJoinStatus::default(),
@@ -145,13 +173,32 @@ impl StreamAsofJoinOperator {
         .await
         .map_err(|error| self.attempt_error(error))
     }
+    /// Validates the candidate state's charge against the limits and
+    /// refreshes the committed gauges from the transition's maintained
+    /// inventory delta instead of re-walking the full state. Debug builds
+    /// cross-check the delta arithmetic against `State::inventory`.
     fn checked_inventory(
         &self,
         state: &State,
+        delta: state::InventoryDelta,
         prepared: Option<&crate::StateSegment>,
         status: &mut StreamAsofJoinStatus,
     ) -> Result<()> {
-        let inventory = state.inventory(prepared, &self.name)?;
+        let mut inventory = state::Inventory {
+            identities: status.state_rows,
+            right_payloads: status.retained_right_rows,
+            identity_only: status.identity_only_rows,
+            bytes: status.state_bytes,
+        };
+        inventory.uncharge_prepared(self.prepared.as_ref(), &self.name)?;
+        inventory.apply(delta, &self.name)?;
+        inventory.charge_prepared(prepared, &self.name)?;
+        debug_assert!(
+            state
+                .inventory(prepared, &self.name)
+                .is_ok_and(|walked| walked == inventory),
+            "ASOF maintained inventory drifted from a full state walk"
+        );
         if inventory.identities > self.spec.limits().max_state_rows()
             || inventory.bytes > self.spec.limits().max_state_bytes()
         {
@@ -168,12 +215,18 @@ impl StreamAsofJoinOperator {
         status.state_bytes = inventory.bytes;
         Ok(())
     }
+    /// Installs a prepared candidate transactionally: state, status and the
+    /// encoded segment swap in together. `swept` records that the candidate
+    /// was eviction-swept under the installed status watermarks, letting
+    /// progress-only watermark ticks skip re-encoding.
     fn install(
         &mut self,
         state: State,
         status: StreamAsofJoinStatus,
         prepared: checkpoint::PreparedCheckpoint,
+        swept: bool,
     ) {
+        self.swept = swept.then(|| SweepStamp::current(&status));
         self.state = state;
         self.status = status;
         self.prepared = prepared.segment;
@@ -247,19 +300,25 @@ impl StreamOperator for StreamAsofJoinOperator {
             .prepare_admission(validated, &batch, context)
             .await
             .map_err(|error| self.attempt_error(error))?;
+        if admission.rows.is_empty() {
+            // Empty or fully late input: committed state, gauges and the
+            // prepared segment are untouched, so the clone/encode/inventory
+            // transaction would reinstall an identical state.
+            return Ok(());
+        }
         let state_workspace = self
-            .state_workspace(&self.state)
+            .state_workspace()
             .map_err(|error| self.attempt_error(error))?;
         let mut next = self.state.clone();
         let mut status = self.status.clone();
-        admission.install(ingress, &mut next, &mut status);
+        let delta = admission.install(ingress, &mut next, &mut status);
         let prepared = self
             .prepare_checkpoint(&next, context)
             .await
             .map_err(|error| self.attempt_error(error))?;
-        self.checked_inventory(&next, prepared.segment.as_ref(), &mut status)
+        self.checked_inventory(&next, delta, prepared.segment.as_ref(), &mut status)
             .map_err(|error| self.attempt_error(error))?;
-        self.install(next, status, prepared);
+        self.install(next, status, prepared, false);
         drop((admission, state_workspace));
         Ok(())
     }
@@ -275,6 +334,7 @@ impl StreamOperator for StreamAsofJoinOperator {
         self.state = State::default();
         self.status = StreamAsofJoinStatus::default();
         self.prepared = None;
+        self.swept = None;
         self.terminal = false;
         self.next_output_sequence = 0;
         self.runtime.reset();

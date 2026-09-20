@@ -9,46 +9,37 @@ use datafusion::arrow::{
 use sha2::{Digest as _, Sha256};
 use std::io::{self, Cursor, Write};
 
-pub(super) struct BoundedWriter {
-    pub bytes: Vec<u8>,
+/// Bounded IPC sink over a caller-owned buffer. `with_capacity` fail-closes
+/// at `min(limit, capacity)` for exactly pre-sized encodes; `growable` lets
+/// the vector grow up to `limit`.
+pub(super) struct BoundedWriter<'a> {
+    bytes: &'a mut Vec<u8>,
     limit: usize,
 }
-impl BoundedWriter {
-    pub fn with_capacity(capacity: usize, limit: usize) -> Self {
+impl<'a> BoundedWriter<'a> {
+    pub fn with_capacity(bytes: &'a mut Vec<u8>, capacity: usize, limit: usize) -> Self {
         Self {
-            bytes: Vec::with_capacity(capacity),
+            bytes,
             limit: limit.min(capacity),
         }
     }
+    pub fn growable(bytes: &'a mut Vec<u8>, limit: usize) -> Self {
+        Self { bytes, limit }
+    }
 }
-impl Write for BoundedWriter {
+impl Write for BoundedWriter<'_> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        let next = self
+        let fits = self
             .bytes
             .len()
             .checked_add(bytes.len())
-            .filter(|size| *size <= self.limit)
-            .ok_or_else(|| io::Error::other("ASOF bounded encoding workspace exhausted"))?;
-        debug_assert!(next <= self.bytes.capacity());
+            .is_some_and(|size| size <= self.limit);
+        if !fits {
+            return Err(io::Error::other(
+                "ASOF bounded encoding workspace exhausted",
+            ));
+        }
         self.bytes.extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-struct CountingWriter {
-    size: usize,
-    limit: usize,
-}
-impl Write for CountingWriter {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.size = self
-            .size
-            .checked_add(bytes.len())
-            .filter(|size| *size <= self.limit)
-            .ok_or_else(|| io::Error::other("ASOF bounded encoding workspace exhausted"))?;
         Ok(bytes.len())
     }
     fn flush(&mut self) -> io::Result<()> {
@@ -63,12 +54,18 @@ fn write_batch(batch: &RecordBatch, output: &mut impl Write) -> Result<()> {
         .map_err(|error| super::arrow_error(&error))?;
     writer.finish().map_err(|error| super::arrow_error(&error))
 }
-pub(super) fn encode_batch(batch: &RecordBatch, limit: usize) -> Result<Vec<u8>> {
-    let mut counter = CountingWriter { size: 0, limit };
-    write_batch(batch, &mut counter)?;
-    let mut bytes = BoundedWriter::with_capacity(counter.size, limit);
-    write_batch(batch, &mut bytes)?;
-    Ok(bytes.bytes)
+/// Encodes one row batch in a single pass through the reusable `scratch`
+/// buffer, then copies the exact bytes so the retained payload keeps the
+/// `len == capacity` allocation parity that checkpoint round-trips and the
+/// inventory charge rely on.
+pub(super) fn encode_batch(
+    batch: &RecordBatch,
+    limit: usize,
+    scratch: &mut Vec<u8>,
+) -> Result<Vec<u8>> {
+    scratch.clear();
+    write_batch(batch, &mut BoundedWriter::growable(scratch, limit))?;
+    Ok(scratch.clone())
 }
 
 pub(super) fn decode_batch(bytes: &[u8], schema_digest: &[u8; 32]) -> Result<RecordBatch> {

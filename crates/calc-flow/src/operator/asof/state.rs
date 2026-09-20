@@ -1,7 +1,7 @@
 use crate::{Result, StateSegment};
 use datafusion::arrow::{
     record_batch::RecordBatch,
-    row::{RowConverter, SortField},
+    row::{RowConverter, Rows, SortField},
 };
 use std::{
     collections::BTreeMap,
@@ -45,11 +45,25 @@ impl State {
     }
 }
 
-pub(super) fn encoded_columns(
-    batch: &RecordBatch,
-    row: usize,
-    names: &[String],
-) -> Result<Encoding> {
+/// Row encodings for one identity column set over a whole record batch: one
+/// `RowConverter` per batch with per-row bytes extracted on demand. The
+/// extracted bytes are identical to encoding one-row slices because the
+/// pinned Arrow 58 row format encodes each value independently of its
+/// position in the column.
+pub(super) struct EncodedColumns {
+    rows: Rows,
+}
+
+impl EncodedColumns {
+    /// Returns the owned encoding of one row.
+    pub(super) fn row(&self, row: usize) -> Encoding {
+        Arc::new(self.rows.row(row).as_ref().to_vec())
+    }
+}
+
+/// Resolves each named column once and converts the whole batch, hoisting the
+/// schema lookups and converter construction out of per-row loops.
+pub(super) fn encode_columns(batch: &RecordBatch, names: &[String]) -> Result<EncodedColumns> {
     let arrays = names
         .iter()
         .map(|name| {
@@ -60,7 +74,7 @@ pub(super) fn encoded_columns(
                         .index_of(name)
                         .map_err(|error| super::arrow_error(&error))?,
                 )
-                .slice(row, 1))
+                .clone())
         })
         .collect::<Result<Vec<_>>>()?;
     let fields = arrays
@@ -71,10 +85,27 @@ pub(super) fn encoded_columns(
     let rows = converter
         .convert_columns(&arrays)
         .map_err(|error| super::arrow_error(&error))?;
-    Ok(Arc::new(rows.row(0).as_ref().to_vec()))
+    Ok(EncodedColumns { rows })
 }
 
-#[derive(Default)]
+pub(super) fn encoded_columns(
+    batch: &RecordBatch,
+    row: usize,
+    names: &[String],
+) -> Result<Encoding> {
+    Ok(encode_columns(batch, names)?.row(row))
+}
+
+/// Ordered-map node and inline headroom charged per left identity, on top of
+/// the key, sequence and payload buffer allocations.
+const LEFT_IDENTITY_BYTES: u64 = 256 + 64 + 64;
+/// Ordered-map node charged per right identity; the bucket key allocation is
+/// charged separately, once per bucket.
+const RIGHT_IDENTITY_BYTES: u64 = 256 + 64;
+/// Per-allocation header charged on top of each owned buffer's capacity.
+const ALLOCATION_BYTES: u64 = 64;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct Inventory {
     pub identities: u64,
     pub right_payloads: u64,
@@ -83,6 +114,8 @@ pub(super) struct Inventory {
 }
 
 impl State {
+    /// Full-walk inventory charge: the cold path used by checkpoint restore
+    /// validation and by the debug cross-check of the maintained deltas.
     pub fn inventory(&self, prepared: Option<&StateSegment>, name: &str) -> Result<Inventory> {
         let mut total = Inventory::default();
         self.left.iter().try_for_each(|((_, key, sequence), row)| {
@@ -100,39 +133,170 @@ impl State {
         Ok(total)
     }
 
-    pub fn evict(&mut self, status: &super::StreamAsofJoinStatus, tolerance: u64) -> u64 {
-        let future = if status.left.ended {
-            i128::MAX
-        } else {
-            status
-                .left
-                .watermark_micros
-                .map_or(i128::MIN, |wm| i128::from(wm.as_micros()))
-        };
-        let pending = self
-            .left
-            .first_key_value()
-            .map_or(i128::MAX, |(key, _)| i128::from(key.0));
-        let threshold = future.min(pending);
+    pub fn evict(
+        &mut self,
+        status: &super::StreamAsofJoinStatus,
+        tolerance: u64,
+    ) -> (u64, InventoryDelta) {
+        let threshold = retention_threshold(self, status);
         let mut evicted = 0;
-        self.right.retain(|_, bucket| {
-            bucket.retain(|(time, _), row| {
-                if i128::from(*time) + i128::from(tolerance) < threshold
-                    && row.take_if(|_| true).is_some()
+        let mut delta = InventoryDelta::default();
+        self.right.retain(|key, bucket| {
+            bucket.retain(|(time, sequence), row| {
+                if payload_expired(*time, tolerance, threshold)
+                    && let Some(payload) = row.take()
                 {
                     evicted += 1;
+                    delta.evict_payload(&payload);
                 }
-                row.is_some()
-                    || !(status.right.ended
-                        || status
-                            .right
-                            .watermark_micros
-                            .is_some_and(|wm| *time < wm.as_micros()))
+                if row.is_some() || !identity_expired(*time, status) {
+                    true
+                } else {
+                    delta.remove_right_identity(sequence);
+                    false
+                }
             });
-            !bucket.is_empty()
+            if bucket.is_empty() {
+                delta.remove_bucket(key);
+                false
+            } else {
+                true
+            }
         });
-        evicted
+        (evicted, delta)
     }
+}
+
+/// Retention threshold shared by `evict` and `eviction_pending`: the more
+/// conservative of the left frontier and the oldest pending left row.
+fn retention_threshold(state: &State, status: &super::StreamAsofJoinStatus) -> i128 {
+    let future = if status.left.ended {
+        i128::MAX
+    } else {
+        status
+            .left
+            .watermark_micros
+            .map_or(i128::MIN, |wm| i128::from(wm.as_micros()))
+    };
+    let pending = state
+        .left
+        .first_key_value()
+        .map_or(i128::MAX, |(key, _)| i128::from(key.0));
+    future.min(pending)
+}
+
+/// Right payloads whose match window closed before the retention threshold
+/// can no longer answer a pending or future left row.
+fn payload_expired(time: i64, tolerance: u64, threshold: i128) -> bool {
+    i128::from(time) + i128::from(tolerance) < threshold
+}
+
+/// Identity-only rows past their own ingress boundary can never be rejoined
+/// by a payload, so the identity itself is dropped.
+fn identity_expired(time: i64, status: &super::StreamAsofJoinStatus) -> bool {
+    status.right.ended
+        || status
+            .right
+            .watermark_micros
+            .is_some_and(|wm| time < wm.as_micros())
+}
+
+/// Reports whether `evict` would drop any payload or identity, without
+/// mutating the state. `finish_progress` uses this to skip recloning and
+/// re-encoding an untouched state on progress-only watermark ticks.
+pub(super) fn eviction_pending(
+    state: &State,
+    status: &super::StreamAsofJoinStatus,
+    tolerance: u64,
+) -> bool {
+    let threshold = retention_threshold(state, status);
+    state.right.values().any(|bucket| {
+        bucket.iter().any(|((time, _), row)| {
+            (row.is_some() && payload_expired(*time, tolerance, threshold))
+                || (row.is_none() && identity_expired(*time, status))
+        })
+    })
+}
+
+/// Signed mutation of the charged state inventory, accumulated while one
+/// transactional transition inserts, removes or evicts entries. The delta is
+/// applied to the committed gauges instead of re-walking the full state;
+/// debug builds cross-check the result against `State::inventory`.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct InventoryDelta {
+    identities: i128,
+    right_payloads: i128,
+    identity_only: i128,
+    bytes: i128,
+}
+
+impl InventoryDelta {
+    pub fn insert_left(&mut self, key: &Encoding, sequence: &Encoding, row: &StateSegment) {
+        self.identities += 1;
+        self.bytes += i128::from(left_row_charge(key, sequence, row));
+    }
+
+    pub fn remove_left(&mut self, key: &Encoding, sequence: &Encoding, row: &StateSegment) {
+        self.identities -= 1;
+        self.bytes -= i128::from(left_row_charge(key, sequence, row));
+    }
+
+    pub fn insert_right(
+        &mut self,
+        key: &Encoding,
+        sequence: &Encoding,
+        row: &StateSegment,
+        new_bucket: bool,
+    ) {
+        if new_bucket {
+            self.bytes += i128::from(encoding_allocation(key));
+        }
+        self.identities += 1;
+        self.right_payloads += 1;
+        self.bytes += i128::from(right_row_charge(sequence, Some(row)));
+    }
+
+    fn evict_payload(&mut self, row: &StateSegment) {
+        self.right_payloads -= 1;
+        self.identity_only += 1;
+        self.bytes -= i128::from(payload_allocation(row));
+    }
+
+    fn remove_right_identity(&mut self, sequence: &Encoding) {
+        self.identities -= 1;
+        self.identity_only -= 1;
+        self.bytes -= i128::from(right_row_charge(sequence, None));
+    }
+
+    fn remove_bucket(&mut self, key: &Encoding) {
+        self.bytes -= i128::from(encoding_allocation(key));
+    }
+
+    pub fn merge(&mut self, other: InventoryDelta) {
+        self.identities += other.identities;
+        self.right_payloads += other.right_payloads;
+        self.identity_only += other.identity_only;
+        self.bytes += other.bytes;
+    }
+}
+
+fn encoding_allocation(bytes: &Encoding) -> u64 {
+    ALLOCATION_BYTES + bytes.capacity() as u64
+}
+
+fn payload_allocation(row: &StateSegment) -> u64 {
+    ALLOCATION_BYTES + row.bytes_arc().capacity() as u64
+}
+
+fn left_row_charge(key: &Encoding, sequence: &Encoding, row: &StateSegment) -> u64 {
+    LEFT_IDENTITY_BYTES
+        + encoding_allocation(key)
+        + encoding_allocation(sequence)
+        + payload_allocation(row)
+}
+
+fn right_row_charge(sequence: &Encoding, row: Option<&StateSegment>) -> u64 {
+    RIGHT_IDENTITY_BYTES + encoding_allocation(sequence) + row.map_or(0, payload_allocation)
 }
 
 impl Inventory {
@@ -144,10 +308,7 @@ impl Inventory {
         name: &str,
     ) -> Result<()> {
         self.identities = super::checked(name, self.identities, 1)?;
-        self.bytes = super::checked(name, self.bytes, 256 + 64 + 64)?;
-        self.bytes = allocation_charge(self.bytes, key, name)?;
-        self.bytes = allocation_charge(self.bytes, sequence, name)?;
-        self.bytes = allocation_charge(self.bytes, &row.bytes_arc(), name)?;
+        self.bytes = super::checked(name, self.bytes, left_row_charge(key, sequence, row))?;
         Ok(())
     }
 
@@ -158,11 +319,9 @@ impl Inventory {
         name: &str,
     ) -> Result<()> {
         self.identities = super::checked(name, self.identities, 1)?;
-        self.bytes = super::checked(name, self.bytes, 256 + 64)?;
-        self.bytes = allocation_charge(self.bytes, sequence, name)?;
-        if let Some(row) = row {
+        self.bytes = super::checked(name, self.bytes, right_row_charge(sequence, row))?;
+        if row.is_some() {
             self.right_payloads = super::checked(name, self.right_payloads, 1)?;
-            self.charge_allocation(&row.bytes_arc(), name)?;
         } else {
             self.identity_only = super::checked(name, self.identity_only, 1)?;
         }
@@ -170,12 +329,47 @@ impl Inventory {
     }
 
     fn charge_allocation(&mut self, bytes: &Encoding, name: &str) -> Result<()> {
-        self.bytes = super::checked(name, self.bytes, 64)?;
-        self.bytes = allocation_charge(self.bytes, bytes, name)?;
+        self.bytes = super::checked(name, self.bytes, encoding_allocation(bytes))?;
+        Ok(())
+    }
+
+    /// Applies a signed mutation delta, failing closed if the maintained
+    /// counters would drift negative or overflow.
+    pub fn apply(&mut self, delta: InventoryDelta, name: &str) -> Result<()> {
+        self.identities = apply_delta(name, self.identities, delta.identities)?;
+        self.right_payloads = apply_delta(name, self.right_payloads, delta.right_payloads)?;
+        self.identity_only = apply_delta(name, self.identity_only, delta.identity_only)?;
+        self.bytes = apply_delta(name, self.bytes, delta.bytes)?;
+        Ok(())
+    }
+
+    /// Charges the freshly encoded checkpoint segment allocation.
+    pub fn charge_prepared(&mut self, prepared: Option<&StateSegment>, name: &str) -> Result<()> {
+        if let Some(prepared) = prepared {
+            self.bytes = super::checked(name, self.bytes, payload_allocation(prepared))?;
+        }
+        Ok(())
+    }
+
+    /// Retires the previously installed checkpoint segment charge, failing
+    /// closed if the maintained bytes would underflow.
+    pub fn uncharge_prepared(&mut self, prepared: Option<&StateSegment>, name: &str) -> Result<()> {
+        if let Some(prepared) = prepared {
+            self.bytes = apply_delta(name, self.bytes, -i128::from(payload_allocation(prepared)))?;
+        }
         Ok(())
     }
 }
 
-fn allocation_charge(current: u64, bytes: &Encoding, name: &str) -> Result<u64> {
-    super::checked(name, current, bytes.capacity() as u64)
+fn apply_delta(name: &str, base: u64, delta: i128) -> Result<u64> {
+    i128::from(base)
+        .checked_add(delta)
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or_else(|| {
+            super::reason(
+                name,
+                crate::StreamingFailureReason::AsofCounterOverflow,
+                "ASOF counter or resource arithmetic overflowed",
+            )
+        })
 }

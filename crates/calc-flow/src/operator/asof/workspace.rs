@@ -1,7 +1,11 @@
-use super::{StreamAsofJoinOperator, checked, reason, state::State};
+use super::{StreamAsofJoinOperator, checked, reason};
 use crate::{Batch, Result, StreamingFailureReason};
 use datafusion::{
-    arrow::{array::ArrayRef, datatypes::Schema, record_batch::RecordBatch},
+    arrow::{
+        array::ArrayRef,
+        datatypes::{DataType, Schema},
+        record_batch::RecordBatch,
+    },
     execution::memory_pool::{MemoryConsumer, MemoryReservation},
 };
 
@@ -21,6 +25,15 @@ const COLUMN_FRAMING_BYTES: u64 = 48;
 /// Per-row record-message envelope: continuation, metadata length, message
 /// flatbuffer padding, and the end-of-stream marker.
 const ROW_FRAMING_BYTES: u64 = 96;
+/// Framing headroom for one fixed-width identity encoding on top of the
+/// aligned slice: the Arrow row format adds one non-null marker byte to the
+/// value width.
+const FIXED_IDENTITY_FRAMING_BYTES: u64 = 16;
+/// Framing headroom for one string identity encoding on top of the 33/32
+/// slice scaling: Arrow's blocked string row format (`identity_compare.rs`)
+/// adds one marker byte, four 8-byte block sentinels and final-block
+/// rounding beyond the scaled bytes.
+const STRING_IDENTITY_FRAMING_BYTES: u64 = 64;
 
 /// Allocation-free per-record charge shared by every admitted row: an
 /// arithmetic upper bound on the schema message each per-row IPC encoding
@@ -55,9 +68,12 @@ impl StreamAsofJoinOperator {
         batch: &Batch,
         input: super::admission::ValidatedInput,
     ) -> Result<MemoryReservation> {
-        self.reserve_input_rows(batch, input, |record, payload, row| {
-            row_workspace(payload, record, row, &self.name)
-        })
+        self.reserve_input_rows(
+            batch,
+            input,
+            |_| (),
+            |(), record, payload, row| row_workspace(payload, record, row, &self.name),
+        )
     }
 
     pub(super) fn identity_workspace(
@@ -65,36 +81,47 @@ impl StreamAsofJoinOperator {
         batch: &Batch,
         input: super::admission::ValidatedInput,
     ) -> Result<MemoryReservation> {
-        self.reserve_input_rows(batch, input, |record, _payload, row| {
-            identity_row_workspace(record, row, input.side(&self.spec), &self.name)
-        })
+        let side = input.side(&self.spec);
+        self.reserve_input_rows(
+            batch,
+            input,
+            |record| resolve_identity_columns(record, side),
+            |columns, _, _, row| identity_row_workspace(columns, row, &self.name),
+        )
     }
 
-    fn reserve_input_rows(
+    fn reserve_input_rows<C>(
         &self,
         batch: &Batch,
         input: super::admission::ValidatedInput,
-        charge: impl Fn(&RecordBatch, &PayloadCharge, usize) -> Result<u64>,
+        prepare: impl Fn(&RecordBatch) -> C,
+        charge: impl Fn(&C, &RecordBatch, &PayloadCharge, usize) -> Result<u64>,
     ) -> Result<MemoryReservation> {
         let side = input.side(&self.spec);
         let mut bytes = 0;
         for record in batch.table_payload()?.batches() {
             let payload = payload_charge(record.schema().as_ref(), &self.name)?;
+            let prepared = prepare(record);
+            let event_times = super::admission::times(record, side);
             for row in 0..record.num_rows() {
-                if input.is_late(super::admission::times(record, side).value(row)) {
+                if input.is_late(event_times.value(row)) {
                     continue;
                 }
-                bytes = checked(&self.name, bytes, charge(record, &payload, row)?)?;
+                bytes = checked(&self.name, bytes, charge(&prepared, record, &payload, row)?)?;
             }
         }
         self.reserve_workspace(bytes)
     }
 
-    pub(super) fn state_workspace(&self, state: &State) -> Result<MemoryReservation> {
-        let rows = state.inventory(None, &self.name)?.identities;
-        let bytes = rows
-            .checked_mul(384)
-            .and_then(|value| value.checked_add(state.right.len() as u64 * 64))
+    /// Clone headroom for the next transactional candidate, from the
+    /// maintained committed gauges: per-identity headroom plus one
+    /// ordered-map allocation per right bucket.
+    pub(super) fn state_workspace(&self) -> Result<MemoryReservation> {
+        let bytes = self
+            .status
+            .state_rows
+            .checked_mul(IDENTITY_ROW_BYTES)
+            .and_then(|value| value.checked_add(self.state.right.len() as u64 * 64))
             .ok_or_else(|| {
                 reason(
                     &self.name,
@@ -139,16 +166,49 @@ fn row_workspace(
     checked(name, bytes, ROW_FRAMING_BYTES)
 }
 
-fn identity_row_workspace(
+/// Identity columns resolved once per record batch: the array reference plus
+/// whether the column uses Arrow's blocked string row encoding.
+type ResolvedIdentityColumns = Vec<(ArrayRef, bool)>;
+
+fn resolve_identity_columns(
     record: &RecordBatch,
-    row: usize,
     side: &super::AsofJoinSide,
+) -> ResolvedIdentityColumns {
+    side.keys()
+        .iter()
+        .chain(side.sequence_by())
+        .map(|field| {
+            let column = record
+                .column(record.schema().index_of(field).expect("validated schema"))
+                .clone();
+            let string = matches!(column.data_type(), DataType::Utf8 | DataType::LargeUtf8);
+            (column, string)
+        })
+        .collect()
+}
+
+/// Allocation-free upper bound on one row's identity encodings: fixed
+/// headroom plus, per column, the aligned slice bytes scaled for the row
+/// format's marker framing. String columns are scaled by 33/32 because the
+/// blocked encoding adds a sentinel byte per block (~L/32 for length L).
+fn identity_row_workspace(
+    columns: &ResolvedIdentityColumns,
+    row: usize,
     name: &str,
 ) -> Result<u64> {
     let mut bytes = IDENTITY_ROW_BYTES;
-    for field in side.keys().iter().chain(side.sequence_by()) {
-        let column = record.column(record.schema().index_of(field).expect("validated schema"));
-        bytes = checked(name, bytes, aligned(column_workspace(column, row)?) + 16)?;
+    for (column, string) in columns {
+        let slice = aligned(column_workspace(column, row)?);
+        let encoded = if *string {
+            checked(
+                name,
+                checked(name, slice, slice / 32)?,
+                STRING_IDENTITY_FRAMING_BYTES,
+            )?
+        } else {
+            checked(name, slice, FIXED_IDENTITY_FRAMING_BYTES)?
+        };
+        bytes = checked(name, bytes, encoded)?;
     }
     Ok(bytes)
 }
@@ -279,13 +339,40 @@ mod tests {
         .unwrap()
     }
 
+    fn string_key_record(length: usize) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "event_time",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                false,
+            ),
+            Field::new("sequence", DataType::UInt64, false),
+            Field::new("symbol", DataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(
+                    TimestampMicrosecondArray::from_iter_values(std::iter::once(1_000_000))
+                        .with_timezone("UTC"),
+                ),
+                Arc::new(UInt64Array::from_iter_values(std::iter::once(0))),
+                Arc::new(StringArray::from_iter_values(std::iter::once(
+                    "x".repeat(length),
+                ))),
+            ],
+        )
+        .unwrap()
+    }
+
     #[test]
     fn row_workspace_bounds_the_actual_encoded_row_bytes() {
         for record in [repro_record(8), wide_string_record(), metadata_record()] {
             let payload = payload_charge(record.schema().as_ref(), "asof").unwrap();
+            let mut scratch = Vec::new();
             for row in 0..record.num_rows() {
                 let charge = row_workspace(&payload, &record, row, "asof").unwrap();
-                let actual = codec::encode_batch(&record.slice(row, 1), usize::MAX)
+                let actual = codec::encode_batch(&record.slice(row, 1), usize::MAX, &mut scratch)
                     .unwrap()
                     .len() as u64;
                 assert!(
@@ -312,8 +399,9 @@ mod tests {
     fn identity_row_workspace_bounds_the_actual_identity_encodings() {
         let record = repro_record(8);
         let side = repro_side();
+        let columns = resolve_identity_columns(&record, &side);
         for row in 0..record.num_rows() {
-            let charge = identity_row_workspace(&record, row, &side, "asof").unwrap();
+            let charge = identity_row_workspace(&columns, row, "asof").unwrap();
             let actual = state::encoded_columns(&record, row, side.keys())
                 .unwrap()
                 .len() as u64
@@ -328,6 +416,29 @@ mod tests {
     }
 
     #[test]
+    fn identity_row_workspace_bounds_long_string_keys() {
+        // Arrow's blocked string row encoding adds one marker byte plus a
+        // sentinel byte per block (~L/32 for length L), so the per-column
+        // charge must scale with the key length, not just the slice bytes.
+        let side = repro_side();
+        for length in (0..=260_usize).chain([1_000, 4_096, 48_000, 100_000]) {
+            let record = string_key_record(length);
+            let columns = resolve_identity_columns(&record, &side);
+            let charge = identity_row_workspace(&columns, 0, "asof").unwrap();
+            let actual = state::encoded_columns(&record, 0, side.keys())
+                .unwrap()
+                .len() as u64
+                + state::encoded_columns(&record, 0, side.sequence_by())
+                    .unwrap()
+                    .len() as u64;
+            assert!(
+                charge >= actual,
+                "length {length}: charge {charge} < actual {actual}"
+            );
+        }
+    }
+
+    #[test]
     fn repro_shaped_admissions_charge_close_to_actual_state_bytes() {
         let rows = 10_000_u64;
         let record = repro_record(rows);
@@ -335,7 +446,7 @@ mod tests {
         let charge = (0..record.num_rows())
             .map(|row| row_workspace(&payload, &record, row, "asof").unwrap())
             .sum::<u64>();
-        let actual = codec::encode_batch(&record.slice(0, 1), usize::MAX)
+        let actual = codec::encode_batch(&record.slice(0, 1), usize::MAX, &mut Vec::new())
             .unwrap()
             .len() as u64
             * rows;

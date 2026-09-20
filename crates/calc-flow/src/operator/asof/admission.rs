@@ -135,10 +135,16 @@ impl StreamAsofJoinOperator {
     }
 
     fn check_admission_rows(&mut self, index: usize, rows: u64) -> Result<u64> {
-        let status = side_status(&mut self.status, index);
-        let accepted = super::checked(&self.name, status.accepted_rows, rows)?;
-        let retained = self.state.inventory(None, &self.name)?.identities;
-        if super::checked(&self.name, retained, rows)? > self.spec.limits().max_state_rows() {
+        let accepted = {
+            let status = side_status(&mut self.status, index);
+            super::checked(&self.name, status.accepted_rows, rows)?
+        };
+        // The committed identity count comes from the maintained gauges; the
+        // clone-prepare-install transaction revalidates the full charge
+        // before install, so admission only needs the fail-closed row bound.
+        if super::checked(&self.name, self.status.state_rows, rows)?
+            > self.spec.limits().max_state_rows()
+        {
             return Err(reason(
                 &self.name,
                 StreamingFailureReason::AsofStateLimitExceeded,
@@ -159,12 +165,18 @@ impl StreamAsofJoinOperator {
         let mut rows = Vec::new();
         let mut duplicates = 0;
         for batch in batches {
+            // Per-batch invariants are hoisted: one event-time array
+            // resolution and one row converter per identity column set.
+            let event_times = times(batch, side);
+            let keys = state::encode_columns(batch, side.keys())?;
+            let sequences = state::encode_columns(batch, side.sequence_by())?;
             for row in 0..batch.num_rows() {
                 context.check_cancelled()?;
-                if input.is_late(times(batch, side).value(row)) {
+                let time = event_times.value(row);
+                if input.is_late(time) {
                     continue;
                 }
-                let identity = encoded_identity(batch, row, side)?;
+                let identity: LeftOrder = (time, keys.row(row), sequences.row(row));
                 let exists = self.state.contains_identity(input.index, &identity);
                 if exists || !seen.insert(identity.clone()) {
                     duplicates += 1;
@@ -182,14 +194,22 @@ impl Admission {
         ingress: &str,
         state: &mut state::State,
         status: &mut StreamAsofJoinStatus,
-    ) {
+    ) -> state::InventoryDelta {
+        let mut delta = state::InventoryDelta::default();
         if ingress == "left" {
             for (identity, payload) in self.rows.drain(..) {
+                delta.insert_left(&identity.1, &identity.2, &payload);
                 state.left.insert(identity, payload);
             }
             status.left.accepted_rows = self.accepted;
         } else {
             for (identity, payload) in self.rows.drain(..) {
+                delta.insert_right(
+                    &identity.1,
+                    &identity.2,
+                    &payload,
+                    !state.right.contains_key(&identity.1),
+                );
                 state
                     .right
                     .entry(identity.1)
@@ -198,7 +218,25 @@ impl Admission {
             }
             status.right.accepted_rows = self.accepted;
         }
+        delta
     }
+}
+
+/// Identity columns in declaration order: keys, sequence columns, event time.
+pub(super) fn identity_column_names(side: &AsofJoinSide) -> impl Iterator<Item = &str> {
+    side.keys()
+        .iter()
+        .chain(side.sequence_by())
+        .map(String::as_str)
+        .chain(std::iter::once(side.event_time()))
+}
+
+/// Reports whether one identity column of a validated batch contains nulls.
+pub(super) fn identity_column_nulls(batch: &RecordBatch, column: &str) -> bool {
+    batch
+        .column(batch.schema().index_of(column).expect("validated"))
+        .null_count()
+        != 0
 }
 
 fn validate_nulls(
@@ -207,19 +245,9 @@ fn validate_nulls(
     node: &str,
     ingress: &str,
 ) -> Result<()> {
-    for column in side
-        .keys()
-        .iter()
-        .chain(side.sequence_by())
-        .map(String::as_str)
-        .chain(std::iter::once(side.event_time()))
-    {
+    for column in identity_column_names(side) {
         for batch in batches {
-            if batch
-                .column(batch.schema().index_of(column).expect("validated"))
-                .null_count()
-                != 0
-            {
+            if identity_column_nulls(batch, column) {
                 return Err(reason(
                     node,
                     StreamingFailureReason::AsofInvalidInput,
@@ -280,20 +308,20 @@ fn side_status(status: &mut StreamAsofJoinStatus, index: usize) -> &mut StreamAs
     }
 }
 
-fn encoded_identity(batch: &RecordBatch, row: usize, side: &AsofJoinSide) -> Result<LeftOrder> {
-    Ok((
-        times(batch, side).value(row),
-        state::encoded_columns(batch, row, side.keys())?,
-        state::encoded_columns(batch, row, side.sequence_by())?,
-    ))
-}
-
 fn encode_rows(rows: Vec<InputRow<'_>>, limit: usize) -> Result<Vec<(LeftOrder, StateSegment)>> {
+    // One reusable growable scratch: each row is IPC-encoded a single time
+    // and the retained segment owns an exact copy, preserving the
+    // `len == capacity` allocation parity the inventory charge relies on.
+    let mut scratch = Vec::new();
     rows.into_iter()
         .map(|(identity, batch, row)| {
             Ok((
                 identity,
-                StateSegment::new(super::codec::encode_batch(&batch.slice(row, 1), limit)?),
+                StateSegment::new(super::codec::encode_batch(
+                    &batch.slice(row, 1),
+                    limit,
+                    &mut scratch,
+                )?),
             ))
         })
         .collect()
