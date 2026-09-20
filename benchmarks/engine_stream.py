@@ -15,6 +15,8 @@ from calc_flow import (
     Cursor,
     Data,
     EdgeBudget,
+    JoinStateLimits,
+    JoinTimeBounds,
     ManagedCheckpointRuntime,
     Runtime,
     SinkBinding,
@@ -34,10 +36,55 @@ from calc_flow.symbolic import (
     ts,
     window,
 )
+from calc_flow.symbolic import (
+    table as tables,
+)
 from scripts.benchmark_suite.catalog import BATCH_ROWS
 
 
-def stream_plan(scenario: str, table: pa.Table | None = None):
+def stream_dimension(dimension: pa.Table) -> pa.Table:
+    """Return the dimension table temporalized at the stream origin."""
+
+    rows = dimension.num_rows
+    # The stream port validates an exact schema, and the comparison workload
+    # builds the dimension table with inferred nullable fields; rebuild every
+    # column as required in the declared input order.
+    schema = pa.schema(
+        (
+            pa.field("symbol", pa.string(), nullable=False),
+            pa.field("factor", pa.float64(), nullable=False),
+            pa.field("sequence", pa.uint64(), nullable=False),
+            pa.field("event_time", pa.timestamp("us", tz="UTC"), nullable=False),
+        )
+    )
+    return pa.Table.from_arrays(
+        (
+            dimension["symbol"],
+            dimension["factor"],
+            pa.array(range(rows), type=pa.uint64()),
+            pa.array([BASE] * rows, type=pa.timestamp("us", tz="UTC")),
+        ),
+        schema=schema,
+    )
+
+
+def _join_span(table: pa.Table) -> timedelta:
+    """Bound the join so an origin row matches every quote row inclusively."""
+
+    span = int(table["event_time"][-1].value) - int(BASE_MICROS) + 1
+    return timedelta(microseconds=span)
+
+
+def _join_limits(rows: int) -> JoinStateLimits:
+    """Declare room for one fully retained side plus one input batch."""
+
+    capacity = rows + BATCH_ROWS
+    return JoinStateLimits(capacity, max(capacity << 10, 1 << 30), capacity)
+
+
+def stream_plan(
+    scenario: str, table: pa.Table | None = None, dimension: pa.Table | None = None
+):
     quotes = table_input(
         "quotes",
         schema=(
@@ -50,6 +97,7 @@ def stream_plan(scenario: str, table: pa.Table | None = None):
         event_time="event_time",
         sequence_by=("sequence",),
     )
+    inputs = (quotes,)
     if scenario in ("sma20", "dual_sma"):
         slow = ts.mean(quotes["price"], window=rows(20), min_periods=20)
         value = (
@@ -83,10 +131,53 @@ def stream_plan(scenario: str, table: pa.Table | None = None):
             group_by=("symbol",),
             aggregates=(window.sum("price", output="value"),),
         ).select("symbol", "value")
+    elif scenario == "join":
+        if table is None or dimension is None:
+            raise ValueError("join stream plans require the workload tables")
+        factors = table_input(
+            "dimension",
+            schema=(
+                Field("symbol", "string", nullable=False),
+                Field("factor", "float64", nullable=False),
+                Field("sequence", "uint64", nullable=False),
+                Field("event_time", "timestamp[us, UTC]", nullable=False),
+            ),
+            entity_by=("symbol",),
+            event_time="event_time",
+            sequence_by=("sequence",),
+        )
+        # The dimension side completes at the stream origin and the inclusive
+        # `before` bound spans the whole workload, so every quote row matches
+        # exactly its symbol's factor row — the stream equivalent of the
+        # suite's shared `join` query in engine_comparison.sql_query.
+        joined = tables.stream_join(
+            quotes,
+            factors,
+            left_keys=("symbol",),
+            right_keys=("symbol",),
+            left_event_time="event_time",
+            right_event_time="event_time",
+            bounds=JoinTimeBounds(_join_span(table), timedelta()),
+            limits=_join_limits(table.num_rows),
+            left_prefix="quote",
+            right_prefix="dimension",
+        )
+        output = joined.with_columns(
+            FeatureSet(
+                (
+                    ("sequence", joined["quote__sequence"]),
+                    (
+                        "value",
+                        joined["quote__price"] * joined["dimension__factor"],
+                    ),
+                )
+            )
+        ).select("sequence", "value")
+        inputs = (quotes, factors)
     else:
         raise ValueError("unsupported stream benchmark scenario")
     return Program(
-        "suite-stream", inputs=(quotes,), outputs=(("result", output),)
+        "suite-stream", inputs=inputs, outputs=(("result", output),)
     ).compile_stream(Runtime())
 
 
@@ -105,6 +196,20 @@ def stream_events(table: pa.Table, entities: int) -> tuple:
         micros = part["event_time"][-1].value - int(BASE_MICROS) + 1
         events.append(Watermark(BASE + timedelta(microseconds=micros)))
     return (*events, None)
+
+
+def dimension_events(dimension: pa.Table) -> tuple:
+    """Seed the dimension side at the origin, then advance and end it."""
+
+    rows = dimension.num_rows
+    return (
+        Data(
+            Batch.from_pyarrow(dimension),
+            Cursor(rows.to_bytes(8, "big"), {"rows": rows}),
+        ),
+        Watermark(BASE + timedelta(microseconds=1)),
+        None,
+    )
 
 
 class _ReadySource(_InteractiveSource):
@@ -141,14 +246,22 @@ class _CollectSink:
 
 
 async def _measure_ready(
-    source: _ReadySource, sink: _CollectSink, events: tuple
+    sources: dict[str, _ReadySource], sink: _CollectSink, streams: dict[str, tuple]
 ) -> tuple[pa.Table, float]:
-    await asyncio.wait_for(source.ready.wait(), timeout=30)
-    if not source.opened.is_set() or not sink.opened.is_set() or sink.rows:
+    await asyncio.wait_for(
+        asyncio.gather(*(source.ready.wait() for source in sources.values())),
+        timeout=30,
+    )
+    if (
+        any(not source.opened.is_set() for source in sources.values())
+        or not sink.opened.is_set()
+        or sink.rows
+    ):
         raise RuntimeError("stream must be ready with empty state before timing")
     started = time.perf_counter_ns()
-    for event in events:
-        await source.push(event)
+    for name, events in streams.items():
+        for event in events:
+            await sources[name].push(event)
     await asyncio.wait_for(sink.complete.wait(), timeout=600)
     if sink.rows != sink.expected_rows:
         raise RuntimeError("stream output row count differs from the timed workload")
@@ -157,16 +270,21 @@ async def _measure_ready(
 
 
 async def run_stream(
-    plan, events: tuple, root: Path, expected_rows: int
+    plan, streams: dict[str, tuple], root: Path, expected_rows: int
 ) -> tuple[pa.Table, float]:
-    if not events or events[-1] is not None:
-        raise ValueError("stream input must end with an EOF marker")
-    timed_events = events[:-1]
-    source = _ReadySource()
+    if set(streams) != set(plan.source_binding_ids):
+        raise ValueError("stream events must cover every plan source binding")
+    if any(not events or events[-1] is not None for events in streams.values()):
+        raise ValueError("every stream input must end with an EOF marker")
+    timed = {name: events[:-1] for name, events in streams.items()}
+    sources = {name: _ReadySource() for name in streams}
     sink = _CollectSink(expected_rows)
     job = await StreamingRunner(
         plan,
-        {"input": SourceBinding(source, watermark_policy=SourceProvidedWatermarks())},
+        {
+            name: SourceBinding(source, watermark_policy=SourceProvidedWatermarks())
+            for name, source in sources.items()
+        },
         {"output": [SinkBinding.ordinary("suite", sink)]},
         ManagedCheckpointRuntime(root),
         config=StreamRuntimeConfig(
@@ -175,9 +293,10 @@ async def run_stream(
         ),
     ).start_async()
     try:
-        table, seconds = await _measure_ready(source, sink, timed_events)
+        table, seconds = await _measure_ready(sources, sink, timed)
         # Complete and verify the job, but do not time EOF/shutdown bookkeeping.
-        await source.push(None)
+        for source in sources.values():
+            await source.push(None)
         outcome = await asyncio.wait_for(job.wait_async(), timeout=600)
         if outcome.state != "completed":
             raise RuntimeError(f"stream failed: {outcome.errors}")

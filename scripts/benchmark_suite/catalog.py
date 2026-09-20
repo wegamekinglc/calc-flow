@@ -9,11 +9,10 @@ ROW_SCALES = tuple(10**power for power in range(1, 8))
 LEGACY_SCALES = ("overhead", "small", "standard")
 SQL_CASES = ("projection", "filter", "group_by", "join", "sma20", "dual_sma")
 ROLLING_CASES = SQL_CASES[-2:]
-# The native streaming column covers every SQL scenario except `join`: the
-# bounded inner stream join emits one output stream message per matched row,
-# so the 10,000,000-row engine scale cannot complete inside the suite budget.
-# Revisit after the join operator gains batched output emission.
-STREAM_CASES = ("projection", "filter", "group_by", "sma20", "dual_sma")
+# Keep this a literal tuple: the suite resolves baseline case ids by parsing
+# the baseline catalog's declarative forms, and derived assignments fail
+# closed to degraded gating.
+STREAM_CASES = ("projection", "filter", "group_by", "join", "sma20", "dual_sma")
 CAPABILITIES = {
     "calc-flow-sql": SQL_CASES,
     "datafusion": SQL_CASES,
@@ -21,6 +20,12 @@ CAPABILITIES = {
     "calc-flow-stream": STREAM_CASES,
     "ta-lib": ROLLING_CASES,
 }
+# The bounded temporal join retains one state row per matched input row for
+# the whole run — the 64-row dimension spans the full event-time window — so
+# the 10M-row stream tier needs ~200 seconds per sample and cannot fit the
+# suite's interleaved shard budget. Smaller decades carry the evidence; see
+# docs/benchmark-suite.md.
+STREAM_JOIN_EXCLUDED_ROWS = 10_000_000
 THREADS = 32
 BATCH_ROWS = 64_000
 CONTRACT = "calc-flow-benchmark-suite-v3"
@@ -59,6 +64,8 @@ def engine_cases(rows: int | None = None) -> list[dict]:
         for size in sizes
         for backend, scenarios in CAPABILITIES.items()
         for scenario in scenarios
+        if (backend, scenario, size)
+        != ("calc-flow-stream", "join", STREAM_JOIN_EXCLUDED_ROWS)
     ]
 
 
@@ -115,22 +122,27 @@ def shard_cases(shard: dict) -> list[dict]:
 
 def _baseline_catalog_constants(
     catalog_path: Path,
-) -> dict[str, tuple[str, ...]] | None:
-    """Read the baseline catalog's declarative tuples without executing code.
+) -> dict[str, tuple[str, ...] | int] | None:
+    """Read the baseline catalog's declarative constants without executing code.
 
-    Only literal string-tuple assignments are accepted; anything else fails
-    closed so an unparseable baseline keeps every paired case gated.
+    Only literal string-tuple and integer assignments are accepted; anything
+    else fails closed so an unparseable baseline keeps every paired case
+    gated.
     """
 
     tree = ast.parse(catalog_path.read_text(encoding="utf-8"))
-    constants: dict[str, tuple[str, ...]] = {}
+    constants: dict[str, tuple[str, ...] | int] = {}
     for node in tree.body:
         if not isinstance(node, ast.Assign) or len(node.targets) != 1:
             continue
         target = node.targets[0]
         if not isinstance(target, ast.Name):
             continue
-        value = _declarative_tuple(node.value, constants)
+        value: tuple[str, ...] | int | None = _declarative_tuple(node.value, constants)
+        if value is None and isinstance(node.value, ast.Constant):
+            literal = node.value.value
+            if type(literal) is int:
+                value = literal
         if value is not None:
             constants[target.id] = value
     required = ("ROW_SCALES", "SQL_CASES", "ROLLING_CASES")
@@ -254,9 +266,11 @@ def _constant_range_bounds(node: ast.expr) -> tuple[int, int] | None:
     return None
 
 
-def _baseline_engine_ids(constants: dict[str, tuple[str, ...]]) -> frozenset[str]:
+def _baseline_engine_ids(constants: dict[str, tuple[str, ...] | int]) -> frozenset[str]:
     sql, rolling = constants["SQL_CASES"], constants["ROLLING_CASES"]
     stream = constants.get("STREAM_CASES", rolling)
+    excluded = constants.get("STREAM_JOIN_EXCLUDED_ROWS")
+    excluded_rows = str(excluded) if type(excluded) is int else None
     columns = (
         ("calc-flow-sql", sql),
         ("datafusion", sql),
@@ -269,6 +283,7 @@ def _baseline_engine_ids(constants: dict[str, tuple[str, ...]]) -> frozenset[str
         for rows in constants["ROW_SCALES"]
         for backend, scenarios in columns
         for scenario in scenarios
+        if (backend, scenario, rows) != ("calc-flow-stream", "join", excluded_rows)
     )
 
 

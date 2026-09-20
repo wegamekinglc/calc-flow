@@ -9,6 +9,16 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-20: Native streaming covers the `join` engine scenario. The
+  bounded temporal join runs with the dimension side complete at the stream
+  origin and an inclusive `before` bound spanning the workload, so every
+  quote row matches exactly its symbol's factor row and the shared oracle
+  applies. The engine matrix reaches 26 supported engine/scenario
+  combinations and 181 engine cases; the 10M tier of the native-stream join
+  alone is excluded from the suite because its per-row retained state needs
+  roughly 200 seconds per sample and cannot fit the interleaved shard
+  budget, and the cross-library table marks that cell
+  `excluded (suite budget)`.
 - 2026-09-19: Extend benchmark native-stream and SQL operator coverage. The
   engine matrix adds `projection`, `filter`, and `group_by` to the native
   streaming column, for 25 supported engine/scenario combinations and 175

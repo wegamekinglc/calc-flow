@@ -7,7 +7,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from scripts.benchmark_suite import catalog
-from scripts.benchmark_suite.catalog import baseline_case_ids, engine_cases, shards
+from scripts.benchmark_suite.catalog import (
+    ROW_SCALES,
+    baseline_case_ids,
+    engine_cases,
+    shards,
+)
 from scripts.benchmark_suite.legacy import combine_blocks
 from scripts.benchmark_suite.report import comparison, render_report, validate_shards
 
@@ -59,6 +64,17 @@ class BenchmarkSuiteTests(unittest.TestCase):
         )
         self.assertEqual(len({c["id"] for c in cases}), len(cases))
         self.assertTrue(all(c["rows"] > 0 for c in cases))
+
+    def test_native_stream_join_excludes_only_the_10m_budget_tier(self):
+        stream_join = {
+            case["id"]
+            for case in engine_cases()
+            if case["backend"] == "calc-flow-stream" and case["scenario"] == "join"
+        }
+        self.assertEqual(
+            stream_join,
+            {f"engines/{size}/calc-flow-stream/join" for size in ROW_SCALES[:-1]},
+        )
 
     def test_shards_exclude_slow_nightly_scale_and_keep_all_families(self):
         matrix = shards()
@@ -477,6 +493,25 @@ class BenchmarkSuiteTests(unittest.TestCase):
         self.assertIn("Native stream (ready)", report)
         self.assertIn("excludes runner startup", report)
         self.assertNotIn("includes runner startup/drain", report)
+
+    def test_cross_library_table_reports_measured_native_stream_join(self):
+        report = render_report(
+            [measured_case(**case) for case in engine_cases(100)], []
+        )
+        table = report.split("## Cross-library comparison")[1]
+        join_row = next(line for line in table.splitlines() if "| join" in line)
+        native_cell = join_row.split("|")[3].strip()
+        self.assertNotIn(
+            native_cell, {"unsupported", "missing", "error", "invalid scope"}
+        )
+
+    def test_cross_library_table_marks_the_excluded_10m_stream_join_tier(self):
+        report = render_report(
+            [measured_case(**case) for case in engine_cases(10_000_000)], []
+        )
+        table = report.split("## Cross-library comparison")[1]
+        join_row = next(line for line in table.splitlines() if "| join" in line)
+        self.assertEqual(join_row.split("|")[3].strip(), "excluded (suite budget)")
 
     def test_cross_library_table_rejects_startup_inclusive_stream_samples(self):
         case = next(c for c in engine_cases(100) if c["backend"] == "calc-flow-stream")
