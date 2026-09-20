@@ -52,6 +52,27 @@ fn fail(operation: &str, detail: &str) -> CalcFlowError {
     ))
 }
 
+/// Attaches one record's coordinates to its decode failure.
+///
+/// The codec detail is dropped rather than forwarded: Arrow and Python
+/// client messages may echo payload bytes, and connector error details
+/// must stay payload-free. The codec identity and operation survive, and
+/// the topic, partition, and offset pinpoint the poison record for
+/// triage and dead-lettering.
+fn decode_failure(topic: &str, partition: i32, offset: i64, error: CalcFlowError) -> CalcFlowError {
+    let detail = format!(
+        "topic {topic:?} partition {partition} offset {offset}: record payload could not be decoded"
+    );
+    match error {
+        CalcFlowError::Connector(inner) => CalcFlowError::Connector(ConnectorError::new(
+            inner.identity,
+            inner.operation,
+            &detail,
+        )),
+        _ => fail("poll", &detail),
+    }
+}
+
 /// The wire format of Kafka record values.
 #[derive(Clone, Copy, Debug)]
 pub enum KafkaFormat {
@@ -560,7 +581,10 @@ impl StreamSource for KafkaSource {
         let partition = message.partition();
         let offset = message.offset();
         let payload = message.payload().unwrap_or_default();
-        let batch = self.decoder.decode(payload, &self.config)?;
+        let batch = self
+            .decoder
+            .decode(payload, &self.config)
+            .map_err(|error| decode_failure(&self.config.topic, partition, offset, error))?;
         let next_offset = offset
             .checked_add(1)
             .ok_or_else(|| fail("poll", "Kafka offset exhausted i64"))?;
@@ -672,18 +696,43 @@ impl KafkaSinkConfig {
     }
 }
 
-/// Parses the sink payload format, rejecting the source-only codecs.
-fn parse_sink_format(options: &JsonMap) -> Result<KafkaFormat> {
-    let format = KafkaFormat::parse(&required_string(options, "format")?)?;
+/// The shared rejection of the source-only payload formats, kept in one
+/// place so sink validation and sink encoding cannot drift apart.
+const SINK_FORMAT_MESSAGE: &str =
+    "protobuf and custom payloads decode from Kafka only; sinks encode json and csv";
+
+/// Guards one parsed format against the source-only codecs.
+fn ensure_sink_format(format: KafkaFormat) -> Result<()> {
     if matches!(format, KafkaFormat::Protobuf | KafkaFormat::Custom) {
         return Err(CalcFlowError::InvalidArgument {
             field: "format".into(),
-            message:
-                "protobuf and custom payloads decode from Kafka only; sinks encode json and csv"
-                    .into(),
+            message: SINK_FORMAT_MESSAGE.into(),
         });
     }
+    Ok(())
+}
+
+/// Parses the sink payload format, rejecting the source-only codecs.
+fn parse_sink_format(options: &JsonMap) -> Result<KafkaFormat> {
+    let format = KafkaFormat::parse(&required_string(options, "format")?)?;
+    ensure_sink_format(format)?;
     Ok(format)
+}
+
+/// Encodes one batch into the sink payload for its format.
+///
+/// # Errors
+///
+/// Returns the codec's safe encode error, or the shared sink-format
+/// rejection when the format is source-only — unreachable for options
+/// parsed through [`KafkaSinkConfig::from_options`].
+fn encode_kafka_payload(format: KafkaFormat, batch: &Batch) -> Result<Vec<u8>> {
+    use calc_flow::FormatEncoder as _;
+    match format {
+        KafkaFormat::Json => JsonLinesCodec::new(json_lines::IDENTITY_VERSION)?.encode(batch),
+        KafkaFormat::Csv => CsvCodec::new(csv::IDENTITY_VERSION, true)?.encode(batch),
+        KafkaFormat::Protobuf | KafkaFormat::Custom => Err(fail("encode", SINK_FORMAT_MESSAGE)),
+    }
 }
 
 fn positive_kafka_option(options: &JsonMap, key: &str, default: u64) -> Result<u64> {
@@ -887,18 +936,6 @@ impl TransactionalKafkaSink {
             pending_records: Vec::new(),
             pending_bytes: 0,
         })
-    }
-
-    fn encode(&self, batch: &Batch) -> Result<Vec<u8>> {
-        use calc_flow::FormatEncoder as _;
-        match self.config.format {
-            KafkaFormat::Json => JsonLinesCodec::new(json_lines::IDENTITY_VERSION)?.encode(batch),
-            KafkaFormat::Csv => CsvCodec::new(csv::IDENTITY_VERSION, true)?.encode(batch),
-            KafkaFormat::Protobuf | KafkaFormat::Custom => Err(fail(
-                "encode",
-                "protobuf and custom payloads decode from Kafka only; sinks encode json and csv",
-            )),
-        }
     }
 
     async fn write_ledger_marker(&self, epoch: calc_flow::Epoch, evidence: &JsonMap) -> Result<()> {
@@ -1157,7 +1194,7 @@ impl TransactionalStreamSink for TransactionalKafkaSink {
         if !self.active {
             return Err(fail("write", "write before begin_epoch"));
         }
-        let payload = self.encode(batch)?;
+        let payload = encode_kafka_payload(self.config.format, batch)?;
         let rows = u64::try_from(batch.num_rows()).unwrap_or(u64::MAX);
         let next_rows = self
             .delivered
@@ -1352,19 +1389,7 @@ impl StreamSink for OrdinaryKafkaSink {
     }
 
     async fn write(&mut self, batch: &Batch) -> Result<()> {
-        use calc_flow::FormatEncoder as _;
-        let payload = match self.config.format {
-            KafkaFormat::Json => {
-                JsonLinesCodec::new(json_lines::IDENTITY_VERSION)?.encode(batch)?
-            }
-            KafkaFormat::Csv => CsvCodec::new(csv::IDENTITY_VERSION, true)?.encode(batch)?,
-            KafkaFormat::Protobuf | KafkaFormat::Custom => {
-                return Err(fail(
-                    "encode",
-                    "protobuf and custom payloads decode from Kafka only; sinks encode json and csv",
-                ));
-            }
-        };
+        let payload = encode_kafka_payload(self.config.format, batch)?;
         self.sequence += 1;
         let record = FutureRecord::<Vec<u8>, Vec<u8>>::to(&self.config.topic).payload(&payload);
         self.producer
@@ -1640,6 +1665,24 @@ mod tests {
     }
 
     #[test]
+    fn decode_failures_carry_record_coordinates_without_payload() {
+        let decoders = KafkaDecoderRegistry::default();
+        let config = KafkaSourceConfig::from_options(&source_options("json")).unwrap();
+        let decoder = config.decoder(&decoders).unwrap();
+        let poison = b"{\"id\":\"sentinel-leak-marker\",\"label\":\"one\"}\n";
+        let error = decoder
+            .decode(poison, &config)
+            .expect_err("a poison record fails to decode");
+        let wrapped = decode_failure(&config.topic, 3, 42, error);
+        let message = wrapped.to_string();
+        assert!(message.contains("topic \"events\""), "{message}");
+        assert!(message.contains("partition 3"), "{message}");
+        assert!(message.contains("offset 42"), "{message}");
+        assert!(!message.contains("sentinel-leak-marker"), "{message}");
+        assert!(matches!(wrapped, CalcFlowError::Connector(_)), "{wrapped}");
+    }
+
+    #[test]
     fn configuration_rejects_ambiguous_partitions_formats_and_bounds() {
         let mut candidate = source_options("future");
         assert!(KafkaSourceConfig::from_options(&candidate).is_err());
@@ -1890,24 +1933,66 @@ mod tests {
         assert!(error.to_string().contains("missing/1"), "{error}");
     }
 
+    fn sink_options(format: &str) -> JsonMap {
+        BTreeMap::from([
+            (
+                "bootstrap_servers".into(),
+                Value::String("127.0.0.1:1".into()),
+            ),
+            ("topic".into(), Value::String("events".into())),
+            ("ledger_topic".into(), Value::String("events-ledger".into())),
+            ("pipeline".into(), Value::String("orders".into())),
+            ("output".into(), Value::String("events".into())),
+            ("format".into(), Value::String(format.into())),
+        ])
+    }
+
+    fn sample_batch() -> Batch {
+        use arrow::array::Int64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int64, false)]));
+        let record = RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![1, 2]))])
+            .expect("record batch");
+        Batch::table(
+            vec![record],
+            calc_flow::BatchMetadata::new("test", 1, BTreeMap::new()).unwrap(),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn sinks_reject_the_source_only_protobuf_format() {
         for format in ["protobuf", "custom"] {
-            let options = BTreeMap::from([
-                (
-                    "bootstrap_servers".into(),
-                    Value::String("127.0.0.1:1".into()),
-                ),
-                ("topic".into(), Value::String("events".into())),
-                ("ledger_topic".into(), Value::String("events-ledger".into())),
-                ("pipeline".into(), Value::String("orders".into())),
-                ("output".into(), Value::String("events".into())),
-                ("format".into(), Value::String(format.into())),
-            ]);
-            let error = KafkaSinkConfig::from_options(&options)
+            let error = KafkaSinkConfig::from_options(&sink_options(format))
                 .expect_err("sinks cannot encode source-only payloads");
             assert!(error.to_string().contains("format"), "{format}: {error}");
         }
+    }
+
+    #[test]
+    fn sink_parsing_and_encoding_share_one_format_guard() {
+        for format in ["protobuf", "custom"] {
+            let parse_error = KafkaSinkConfig::from_options(&sink_options(format))
+                .expect_err("source-only formats are rejected at parse");
+            let parsed = KafkaFormat::parse(format).expect("known format");
+            let encode_error = encode_kafka_payload(parsed, &sample_batch())
+                .expect_err("source-only formats are rejected at encode");
+            let parse_message = parse_error.to_string();
+            let encode_message = encode_error.to_string();
+            assert!(
+                parse_message.contains(SINK_FORMAT_MESSAGE),
+                "{format}: {parse_message}"
+            );
+            assert!(
+                encode_message.contains(SINK_FORMAT_MESSAGE),
+                "{format}: {encode_message}"
+            );
+        }
+
+        let json = encode_kafka_payload(KafkaFormat::Json, &sample_batch())
+            .expect("json encodes through the shared helper");
+        assert_eq!(json, b"{\"a\":1}\n{\"a\":2}\n".to_vec());
     }
 
     #[test]

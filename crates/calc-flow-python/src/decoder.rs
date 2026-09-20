@@ -6,7 +6,7 @@
 //! connector error surface before the batch reaches the source edge.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use calc_flow::{
     ArrowFieldSpec, Batch, BatchMetadata, CalcFlowError, ConnectorError, ConnectorIdentity,
@@ -24,10 +24,20 @@ use crate::udf::parse_arrow_type;
 /// The trusted provider namespace reported by Python-hosted decoders.
 const PROVIDER: &str = "calc-flow-python";
 
+/// The parsed `(name, DataType)` plan resolved from one explicit schema.
+type SchemaFields = Vec<(String, DataType)>;
+
 /// A [`FormatDecoder`] backed by one Python callable.
+///
+/// The `pyarrow` module handle and the parsed explicit schema are fixed
+/// per source configuration, so both are cached on first use behind
+/// mutexes, mirroring `ProtobufCodec`'s plan cache; the per-message path
+/// only calls the callable and compares column names and types.
 pub(crate) struct PythonKafkaDecoder {
     identity: FormatIdentity,
     root: Arc<PythonRoot>,
+    pyarrow: Mutex<Option<Py<PyModule>>>,
+    schema_plan: Mutex<Option<(Vec<ArrowFieldSpec>, Arc<SchemaFields>)>>,
 }
 
 impl PythonKafkaDecoder {
@@ -50,6 +60,8 @@ impl PythonKafkaDecoder {
             Self {
                 identity,
                 root: Arc::clone(&root),
+                pyarrow: Mutex::new(None),
+                schema_plan: Mutex::new(None),
             },
             root,
         ))
@@ -91,33 +103,73 @@ impl PythonKafkaDecoder {
     }
 
     fn check_schema(&self, batch: &RecordBatch, schema: &[ArrowFieldSpec]) -> Result<()> {
-        if schema.is_empty() {
+        let Some(expected) = self.expected_fields(schema)? else {
             return Ok(());
-        }
-        let expected = schema
-            .iter()
-            .map(|field| {
-                let data_type = parse_arrow_type(&field.data_type).ok_or_else(|| {
-                    self.failure(&format!(
-                        "schema field {} has unsupported data type {:?}",
-                        field.name, field.data_type
-                    ))
-                })?;
-                Ok((field.name.as_str(), data_type))
-            })
-            .collect::<Result<Vec<_>>>()?;
+        };
         let batch_schema = batch.schema();
-        let actual: Vec<(&str, DataType)> = batch_schema
-            .fields()
-            .iter()
-            .map(|field| (field.name().as_str(), field.data_type().clone()))
-            .collect();
-        if actual != expected {
+        let fields = batch_schema.fields();
+        let agrees = fields.len() == expected.len()
+            && fields
+                .iter()
+                .zip(expected.iter())
+                .all(|(field, (name, data_type))| {
+                    field.name() == name && field.data_type() == data_type
+                });
+        if !agrees {
             return Err(self.failure(
                 "decoded batch fields do not match the explicit schema in name and type",
             ));
         }
         Ok(())
+    }
+
+    /// Resolves the parsed `(name, DataType)` list for one explicit
+    /// schema, cached by spec so repeat decodes skip `parse_arrow_type`.
+    fn expected_fields(&self, spec: &[ArrowFieldSpec]) -> Result<Option<Arc<SchemaFields>>> {
+        if spec.is_empty() {
+            return Ok(None);
+        }
+        let mut cached = self
+            .schema_plan
+            .lock()
+            .expect("the schema plan lock is never poisoned by planning");
+        if let Some((cached_spec, plan)) = &*cached {
+            if cached_spec.as_slice() == spec {
+                return Ok(Some(Arc::clone(plan)));
+            }
+        }
+        let plan = Arc::new(
+            spec.iter()
+                .map(|field| {
+                    let data_type = parse_arrow_type(&field.data_type).ok_or_else(|| {
+                        self.failure(&format!(
+                            "schema field {} has unsupported data type {:?}",
+                            field.name, field.data_type
+                        ))
+                    })?;
+                    Ok((field.name.clone(), data_type))
+                })
+                .collect::<Result<Vec<_>>>()?,
+        );
+        *cached = Some((spec.to_vec(), Arc::clone(&plan)));
+        Ok(Some(plan))
+    }
+
+    /// Imports `pyarrow` once per decoder instead of once per message.
+    fn pyarrow_module(&self, py: Python<'_>) -> std::result::Result<Py<PyModule>, String> {
+        let mut cached = self
+            .pyarrow
+            .lock()
+            .expect("the pyarrow module lock is never poisoned by import");
+        if let Some(module) = &*cached {
+            return Ok(module.clone_ref(py));
+        }
+        let module = py
+            .import("pyarrow")
+            .map_err(|error| error.to_string())?
+            .unbind();
+        *cached = Some(module.clone_ref(py));
+        Ok(module)
     }
 }
 
@@ -133,13 +185,17 @@ impl FormatDecoder for PythonKafkaDecoder {
         schema: &[ArrowFieldSpec],
     ) -> Result<Batch> {
         let batches = Python::attach(|py| {
+            let pyarrow = self
+                .pyarrow_module(py)
+                .map_err(|error| self.failure(&error))?;
             let payload = pyo3::types::PyBytes::new(py, bytes);
             let output = self
                 .root
                 .object()
                 .call1(py, (payload,))
                 .map_err(|error| self.failure(&error.to_string()))?;
-            python_output_to_batches(output.bind(py)).map_err(|error| self.failure(&error))
+            python_output_to_batches(output.bind(py), pyarrow.bind(py))
+                .map_err(|error| self.failure(&error))
         })?;
         self.assemble(batches, bounds, schema)
     }
@@ -147,10 +203,14 @@ impl FormatDecoder for PythonKafkaDecoder {
 
 fn python_output_to_batches(
     output: &Bound<'_, PyAny>,
+    pyarrow: &Bound<'_, PyModule>,
 ) -> std::result::Result<Vec<RecordBatch>, String> {
-    let py = output.py();
-    let batch_type = pyarrow_type(py, "RecordBatch")?;
-    let table_type = pyarrow_type(py, "Table")?;
+    let batch_type = pyarrow
+        .getattr("RecordBatch")
+        .map_err(|error| error.to_string())?;
+    let table_type = pyarrow
+        .getattr("Table")
+        .map_err(|error| error.to_string())?;
     if !is_instance_of(output, &batch_type)? && !is_instance_of(output, &table_type)? {
         return Err("decoder output must be a pyarrow.RecordBatch or pyarrow.Table".into());
     }
@@ -159,15 +219,6 @@ fn python_output_to_batches(
         .map_err(|error| error.to_string())?
         .into_inner();
     Ok(batches)
-}
-
-fn pyarrow_type<'py>(
-    py: Python<'py>,
-    name: &str,
-) -> std::result::Result<Bound<'py, PyAny>, String> {
-    py.import("pyarrow")
-        .and_then(|module| module.getattr(name))
-        .map_err(|error| error.to_string())
 }
 
 fn is_instance_of(
@@ -265,6 +316,31 @@ mod tests {
                 decoder.decode(b"1|2|10.0", &bounds, &mismatched).is_err(),
                 "schema disagreement fails closed"
             );
+        });
+    }
+
+    #[test]
+    fn schema_replanning_replaces_the_cached_parse() {
+        Python::initialize();
+        Python::attach(|py| {
+            let (decoder, _root) = order_decoder(py);
+            let bounds = DecodeBounds::new(16, 1 << 20).expect("bounds");
+            decoder
+                .decode(b"1|2|10.0", &bounds, &order_schema())
+                .expect("the first schema parses and caches");
+            let mut renamed = order_schema();
+            renamed[0] = ArrowFieldSpec {
+                name: "order_id".into(),
+                data_type: "int64".into(),
+                nullable: false,
+            };
+            assert!(
+                decoder.decode(b"1|2|10.0", &bounds, &renamed).is_err(),
+                "a changed schema re-parses and fails closed"
+            );
+            decoder
+                .decode(b"1|2|10.0", &bounds, &order_schema())
+                .expect("returning to the original schema decodes again");
         });
     }
 
