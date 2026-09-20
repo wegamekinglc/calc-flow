@@ -14,6 +14,7 @@
 //! internal invariant rather than a budget decision.
 
 use std::collections::BTreeMap;
+use std::mem::size_of;
 
 use datafusion::arrow::{
     array::{Array, StructArray},
