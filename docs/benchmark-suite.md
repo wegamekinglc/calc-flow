@@ -57,9 +57,8 @@ no regression verdict.
 | TA-Lib           | Unsupported | Unsupported | Unsupported | Unsupported | Yes     | Yes      |
 
 Unsupported operations are explicit cells, not silent dependency skips.
-Native streaming keeps `join` unsupported because the bounded inner stream
-join emits one output stream message per matched row, which cannot carry the
-10M-row engine scale inside the suite budget. Missing DataFusion, Polars or
+Native streaming keeps `join` unsupported: the scenario is not part of the
+suite's native streaming coverage. Missing DataFusion, Polars or
 TA-Lib fails its shard. DataFusion Python 54
 matches the core's DataFusion major; the shared requirements file pins all
 Python build/benchmark/Studio dependencies with hashes.
