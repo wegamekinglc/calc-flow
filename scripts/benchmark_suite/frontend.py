@@ -6,6 +6,8 @@ import hashlib
 import json
 import re
 
+from scripts.toolkit import fingerprint_json
+
 FINGERPRINT_PROTOCOL = "frontend-npm-lock-v1"
 
 
@@ -21,15 +23,12 @@ def dependency_metadata(raw: bytes) -> dict[str, str]:
             "": {key: value for key, value in packages[""].items() if key != "version"},
         },
     }
-    identity = json.dumps(
-        {"protocol": FINGERPRINT_PROTOCOL, "lock": normalized},
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-        allow_nan=False,
-    ).encode()
     return {
-        "dependency_fingerprint": hashlib.sha256(identity).hexdigest(),
+        "dependency_fingerprint": fingerprint_json(
+            {"protocol": FINGERPRINT_PROTOCOL, "lock": normalized},
+            ensure_ascii=True,
+            allow_nan=False,
+        ),
         "dependency_fingerprint_protocol": FINGERPRINT_PROTOCOL,
         "package_lock_sha256": hashlib.sha256(raw).hexdigest(),
         "project_version": project_version,

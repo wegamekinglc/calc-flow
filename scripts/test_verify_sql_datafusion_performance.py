@@ -11,7 +11,16 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from scripts.verify_sql_datafusion_performance import main, verify_p1, verify_report
+from scripts.verify_sql_datafusion_performance import (
+    CASE_FIELDS,
+    CORRECTNESS_FIELDS,
+    ENGINE_FIELDS,
+    ENVIRONMENT_FIELDS,
+    PHASES,
+    main,
+    verify_p1,
+    verify_report,
+)
 
 
 def _engine(samples: list[float]) -> dict[str, object]:
@@ -588,6 +597,26 @@ class TestSqlDataFusionEvidence(unittest.TestCase):
         self.assertEqual(
             json.loads(schema.read_text(encoding="utf-8"))["$id"], schema.name
         )
+
+    def test_schema_field_inventories_match_the_verifier(self) -> None:
+        schema = json.loads(
+            Path("schemas/sql-datafusion-performance-v1.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        definitions = schema["$defs"]
+        expected = {
+            "engine": ENGINE_FIELDS,
+            "environment": ENVIRONMENT_FIELDS,
+            "case": CASE_FIELDS,
+            "correctness": CORRECTNESS_FIELDS,
+            "phaseMedians": PHASES,
+            "phaseSamples": PHASES,
+        }
+        for name, fields in expected.items():
+            with self.subTest(definition=name):
+                self.assertEqual(set(definitions[name]["properties"]), set(fields))
+                self.assertEqual(set(definitions[name]["required"]), set(fields))
 
     def test_report_round_trips_from_disk(self) -> None:
         with TemporaryDirectory() as raw:

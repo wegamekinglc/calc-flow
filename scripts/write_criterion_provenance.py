@@ -3,69 +3,38 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
-import json
 import os
 import platform
-import subprocess  # nosec B404
 from pathlib import Path
 from typing import Any
 
+try:
+    from scripts.toolkit import (
+        command_output,
+        fingerprint_json,
+        sha256_file,
+        write_json,
+    )
+except ImportError:  # direct execution puts only scripts/ on sys.path
+    from toolkit import command_output, fingerprint_json, sha256_file, write_json
+
 
 def _git_head(repository: Path) -> str:
-    return subprocess.run(  # nosec B603 B607  # nosemgrep
-        ["git", "rev-parse", "HEAD^{commit}"],
-        check=True,
-        capture_output=True,
-        cwd=repository,
-        shell=False,
-        text=True,
-    ).stdout.strip()
+    return command_output(["git", "rev-parse", "HEAD^{commit}"], cwd=repository)
 
 
 def _git_status(repository: Path) -> str:
-    return subprocess.run(  # nosec B603 B607  # nosemgrep
-        ["git", "status", "--porcelain", "--untracked-files=no"],
-        check=True,
-        capture_output=True,
-        cwd=repository,
-        shell=False,
-        text=True,
-    ).stdout.strip()
+    return command_output(
+        ["git", "status", "--porcelain", "--untracked-files=no"], cwd=repository
+    )
 
 
 def _rustc_version() -> str:
-    return subprocess.run(  # nosec B603 B607  # nosemgrep
-        ["rustc", "-Vv"],
-        check=True,
-        capture_output=True,
-        shell=False,
-        text=True,
-    ).stdout.strip()
+    return command_output(["rustc", "-Vv"])
 
 
 def _cargo_version() -> str:
-    return subprocess.run(  # nosec B603 B607  # nosemgrep
-        ["cargo", "-V"],
-        check=True,
-        capture_output=True,
-        shell=False,
-        text=True,
-    ).stdout.strip()
-
-
-def _fingerprint(value: object) -> str:
-    encoded = json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    ).encode()
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def _file_hash(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    return command_output(["cargo", "-V"])
 
 
 def _machine_identity() -> dict[str, object]:
@@ -123,7 +92,7 @@ def _git_identity(repository: Path) -> str:
 
 def _dependency_identity(cargo_lock: Path) -> dict[str, str]:
     return {
-        "cargo_lock_sha256": _file_hash(cargo_lock),
+        "cargo_lock_sha256": sha256_file(cargo_lock),
         "rustc": _rustc_version(),
         "cargo": _cargo_version(),
     }
@@ -143,10 +112,10 @@ def build_provenance(root: Path, sources: list[Path]) -> dict[str, Any]:
     git_sha = _git_identity(repository)
     dependency_identity = _dependency_identity(cargo_lock)
     workload_identity = {
-        path: _file_hash(source) for path, source in sorted(resolved_sources)
+        path: sha256_file(source) for path, source in sorted(resolved_sources)
     }
     scoped_workload_fingerprints = {
-        Path(path).stem: _fingerprint({path: digest})
+        Path(path).stem: fingerprint_json({path: digest})
         for path, digest in workload_identity.items()
     }
     machine_identity = _machine_identity()
@@ -159,9 +128,9 @@ def build_provenance(root: Path, sources: list[Path]) -> dict[str, Any]:
         "dependency_identity": dependency_identity,
         "workload_identity": workload_identity,
         "scoped_workload_fingerprints": scoped_workload_fingerprints,
-        "machine_fingerprint": _fingerprint(machine_identity),
-        "dependency_fingerprint": _fingerprint(dependency_identity),
-        "workload_fingerprint": _fingerprint(workload_identity),
+        "machine_fingerprint": fingerprint_json(machine_identity),
+        "dependency_fingerprint": fingerprint_json(dependency_identity),
+        "workload_fingerprint": fingerprint_json(workload_identity),
     }
 
 
@@ -172,11 +141,7 @@ def main() -> int:
     parser.add_argument("sources", nargs="+", type=Path)
     options = parser.parse_args()
     document = build_provenance(options.root, options.sources)
-    options.output.parent.mkdir(parents=True, exist_ok=True)
-    options.output.write_text(
-        json.dumps(document, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    write_json(options.output, document)
     return 0
 
 

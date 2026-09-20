@@ -13,13 +13,17 @@ import shutil
 import sys
 import tempfile
 import tomllib
-import zipfile
 from dataclasses import asdict, dataclass
 from itertools import product
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+try:
+    from scripts.toolkit import sha256_file, wheel_native_sha256, worker_environment
+except ImportError:  # direct execution puts only scripts/ on sys.path
+    from toolkit import sha256_file, wheel_native_sha256, worker_environment
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 HISTORY_ROWS = (10_240, 102_400, 1_024_000, 10_240_000)
@@ -129,24 +133,6 @@ def _positive_finite(values: np.ndarray) -> bool:
     return bool(np.isfinite(values).all() and np.all(values > 0))
 
 
-def _sha256(path: Path) -> str:
-    with path.open("rb") as source:
-        return hashlib.file_digest(source, "sha256").hexdigest()
-
-
-def _wheel_native_sha256(path: Path) -> str:
-    with zipfile.ZipFile(path) as wheel:
-        names = [
-            name
-            for name in wheel.namelist()
-            if name.startswith("calc_flow/_native") and name.endswith((".so", ".pyd"))
-        ]
-        if len(names) != 1:
-            raise ValueError("wheel must contain exactly one native module")
-        with wheel.open(names[0]) as native:
-            return hashlib.file_digest(native, "sha256").hexdigest()
-
-
 async def _command_output(process: asyncio.subprocess.Process) -> str:
     stdout, stderr = await process.communicate()
     if process.returncode:
@@ -216,7 +202,7 @@ async def source_identity(source: Path) -> dict[str, Any]:
         "git_sha": await _git(source, "rev-parse", "HEAD"),
         "git_clean": not bool(await _git(source, "status", "--porcelain")),
         "source_sha256": digest.hexdigest(),
-        "cargo_lock_sha256": _sha256(source / "Cargo.lock"),
+        "cargo_lock_sha256": sha256_file(source / "Cargo.lock"),
     }
 
 
@@ -289,8 +275,8 @@ async def build(args: argparse.Namespace) -> None:
         "source": str(source),
         **before,
         "wheel": str(wheel),
-        "wheel_sha256": _sha256(wheel),
-        "native_sha256": _wheel_native_sha256(wheel),
+        "wheel_sha256": sha256_file(wheel),
+        "native_sha256": wheel_native_sha256(wheel),
         "build_profile": "release",
         "command": command,
         "rustc": await _rustc_version(source),
@@ -309,9 +295,9 @@ async def _load_build(path: Path) -> dict[str, Any]:
         or manifest.get("build_profile") != "release"
     ):
         raise ValueError("expected a warm-stream release build manifest")
-    if _sha256(Path(manifest["wheel"])) != manifest["wheel_sha256"]:
+    if sha256_file(Path(manifest["wheel"])) != manifest["wheel_sha256"]:
         raise ValueError("wheel hash changed after build")
-    if _wheel_native_sha256(Path(manifest["wheel"])) != manifest["native_sha256"]:
+    if wheel_native_sha256(Path(manifest["wheel"])) != manifest["native_sha256"]:
         raise ValueError("native module hash does not match build manifest")
     identity = await source_identity(Path(manifest["source"]))
     if any(identity[key] != manifest[key] for key in ("source_sha256", "git_sha")):
@@ -406,35 +392,6 @@ def _configured_worker_environment(
     return {**environment, "TOKIO_WORKER_THREADS": str(workers)}
 
 
-def _cpu_affinity() -> list[int] | None:
-    import psutil
-
-    process = psutil.Process()
-    if not hasattr(process, "cpu_affinity"):
-        return None
-    try:
-        return process.cpu_affinity()
-    except (psutil.Error, NotImplementedError):
-        return None
-
-
-def _worker_environment() -> dict[str, Any]:
-    import pyarrow as pa
-
-    import calc_flow._native as native
-
-    return {
-        "python": platform.python_version(),
-        "numpy": np.__version__,
-        "pyarrow": pa.__version__,
-        "platform": platform.platform(),
-        "logical_cpus": os.cpu_count(),
-        "cpu_affinity": _cpu_affinity(),
-        "native_sha256": _sha256(Path(native.__file__)),
-        "tokio_worker_threads": os.environ.get("TOKIO_WORKER_THREADS"),
-    }
-
-
 class WorkerSession:
     """Own and clean up a single worker's active streaming scenario."""
 
@@ -477,7 +434,7 @@ class WorkerSession:
     async def dispatch(self, message: dict[str, Any]) -> dict[str, Any]:
         match message["operation"]:
             case "hello":
-                return _worker_environment()
+                return worker_environment()
             case "start":
                 return await self.start(message["config"])
             case "sample":
@@ -706,9 +663,10 @@ def _new_report(
         "environments": environments,
         "sample_pairs": samples,
         "harness_sha256": {
-            name: _sha256(REPOSITORY / name)
+            name: sha256_file(REPOSITORY / name)
             for name in (
                 "scripts/profile_warm_stream.py",
+                "scripts/toolkit.py",
                 "benchmarks/warm_stream.py",
                 "benchmarks/rolling_indicator_comparison.py",
             )

@@ -24,12 +24,16 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
+try:
+    from scripts.toolkit import FULL_SHA, sha256_file
+except ImportError:  # direct execution puts only scripts/ on sys.path
+    from toolkit import FULL_SHA, sha256_file
+
 DEFAULT_THRESHOLD = 0.05
 DEFAULT_BOOTSTRAP_RESAMPLES = 20_000
 BOOTSTRAP_SEED = 20_260_829
 MIN_PAIRED_SAMPLES = 20
 ROLLING_MIN_PAIRED_SAMPLES = 60
-GIT_SHA = re.compile(r"[0-9a-f]{40}")
 FINGERPRINT = re.compile(r"[0-9a-f]{64}")
 COMPARISON_CONTRACT = "same-process-alternating-v1"
 ROLLING_SCENARIOS = frozenset({"rolling_kernel_sma20", "rolling_kernel_dual_sma_5_20"})
@@ -73,7 +77,7 @@ def _validated_commit(report: Mapping[str, object], path: Path) -> str:
     if not isinstance(commit, dict):
         raise ValueError(f"benchmark report {path} has no commit provenance")
     commit_id = commit.get("id")
-    if not isinstance(commit_id, str) or GIT_SHA.fullmatch(commit_id) is None:
+    if not isinstance(commit_id, str) or FULL_SHA.fullmatch(commit_id) is None:
         raise ValueError(f"benchmark report {path} requires a full commit id")
     if commit.get("dirty") is not False:
         raise ValueError(f"benchmark report {path} was captured from a dirty tree")
@@ -362,7 +366,7 @@ def _overall_decision(decisions: Sequence[Decision]) -> Decision:
 
 def _report_digest(path: Path) -> str:
     try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
+        return sha256_file(path)
     except OSError as error:
         raise ValueError(f"cannot hash benchmark report {path}: {error}") from error
 
@@ -471,7 +475,7 @@ def compare_reports(
     _validate_comparison_request(report_paths, scenarios, threshold)
     commit_id, machine, reports = _validated_reports(report_paths)
     if expected_commit is not None:
-        if GIT_SHA.fullmatch(expected_commit) is None:
+        if FULL_SHA.fullmatch(expected_commit) is None:
             raise ValueError("expected_commit must be a lowercase full git SHA")
         if commit_id != expected_commit:
             raise ValueError("benchmark reports do not match the expected commit")

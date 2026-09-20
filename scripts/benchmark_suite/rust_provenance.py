@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import tomllib
 from pathlib import Path
 
+from scripts.toolkit import canonical_json, fingerprint_json
+
 
 def _encoded(value: object) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+    return canonical_json(value, ensure_ascii=True)
 
 
 def _locked_packages(root: Path) -> dict:
@@ -109,7 +110,7 @@ def with_compiled_dependencies(identity: dict, root: Path, logs: dict) -> dict:
     return {
         **identity,
         "compiled_dependency_identity": dependency_identity,
-        "compiled_dependency_fingerprint": hashlib.sha256(
-            _encoded(dependency_identity).encode()
-        ).hexdigest(),
+        "compiled_dependency_fingerprint": fingerprint_json(
+            dependency_identity, ensure_ascii=True
+        ),
     }

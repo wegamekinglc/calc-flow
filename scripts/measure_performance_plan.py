@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import hashlib
 import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TextIO
 
 import numpy as np
 import pyarrow as pa
@@ -24,7 +24,7 @@ from scripts.benchmark_suite.process import ROOT, Worker
 from scripts.benchmark_suite.provenance import harness_sha256
 from scripts.benchmark_suite.report import comparison
 from scripts.benchmark_suite.statistics import paired_round
-from scripts.profile_warm_stream import _wheel_native_sha256
+from scripts.toolkit import FULL_SHA, sha256_file, wheel_native_sha256
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,11 +217,6 @@ def fallback_inventory() -> list[dict]:
     ]
 
 
-def _sha256(path: Path) -> str:
-    with path.open("rb") as source:
-        return hashlib.file_digest(source, "sha256").hexdigest()
-
-
 def load_release(path: Path) -> tuple[dict, Path]:
     manifest = json.loads(path.read_text(encoding="utf-8"))
     if manifest["profile"] != "release" or manifest["tracked_source_clean"] is not True:
@@ -229,14 +224,14 @@ def load_release(path: Path) -> tuple[dict, Path]:
             "performance comparisons require a clean, provenance-bound release build"
         )
     if any(
-        not re.fullmatch("[0-9a-f]{40}", manifest.get(field, ""))
+        not FULL_SHA.fullmatch(manifest.get(field, ""))
         for field in ("source_sha", "source_tree")
     ):
         raise ValueError("release requires exact source commit and tree identities")
     for field in ("wheel", "native"):
-        if _sha256(Path(manifest[field])) != manifest[f"{field}_sha256"]:
+        if sha256_file(Path(manifest[field])) != manifest[f"{field}_sha256"]:
             raise ValueError(f"release {field} hash differs from its build manifest")
-    if _wheel_native_sha256(Path(manifest["wheel"])) != manifest["native_sha256"]:
+    if wheel_native_sha256(Path(manifest["wheel"])) != manifest["native_sha256"]:
         raise ValueError("extracted native module does not match the recorded wheel")
     return manifest, Path(manifest["native"]).parent.parent
 
@@ -252,9 +247,9 @@ def _compare_latest(collected: dict) -> dict:
     return result
 
 
-def _record(path: Path, **event) -> None:
-    with path.open("a", encoding="utf-8") as journal:
-        journal.write(json.dumps(event, allow_nan=False) + "\n")
+def _record(journal: TextIO, **event) -> None:
+    journal.write(json.dumps(event, allow_nan=False) + "\n")
+    journal.flush()
 
 
 def _validate_callback_counts(callback: dict) -> None:
@@ -523,7 +518,7 @@ async def _prepare_workers(
     workers: dict,
     pair: ReleasePair,
     validation: SampleValidation,
-    journal: Path,
+    journal: TextIO,
 ) -> tuple[dict, dict]:
     identities, warmups = {}, {}
     for side, worker in workers.items():
@@ -574,7 +569,7 @@ async def _sample_pairs(
     workers: dict,
     validation: SampleValidation,
     count: int,
-    journal: Path,
+    journal: TextIO,
 ) -> dict:
     collected = {side: [] for side in workers}
     for index in range(count):
@@ -595,7 +590,7 @@ async def _sample_pairs(
     return collected
 
 
-async def _finish_workers(workers: dict, journal: Path) -> dict:
+async def _finish_workers(workers: dict, journal: TextIO) -> dict:
     completion = {}
     for side, worker in workers.items():
         completion[side] = await worker.request(operation="finish")
@@ -614,41 +609,47 @@ async def measure_round(
 ) -> dict:
     sites, releases = pair.sites, pair.releases
     root.mkdir(parents=True, exist_ok=True)
-    journal = root / "raw.jsonl"
-    with journal.open("x", encoding="utf-8"):
-        pass
-    _record(journal, operation="begin", case=case, pairs=count)
     workers = {}
     validation = SampleValidation(
         case,
         releases["baseline"]["native_sha256"] != releases["candidate"]["native_sha256"],
         fallback_declaration,
     )
-    try:
-        if "diagnostic_variant" in case and count > 0 and fallback_declaration is None:
-            raise ValueError("SQL fallback samples require a frozen declaration")
-        for side, site in sites.items():
-            workers[side] = await Worker.start(site, root / side)
-        identities, warmups = await _prepare_workers(workers, pair, validation, journal)
-        _validate_environments(identities, fallback_declaration)
-        frozen = _freeze_fallback(case, warmups, identities["candidate"])
-        _record(
-            journal, operation="warmup-equivalence", result=_compare_latest(warmups)
-        )
-        collected = await _sample_pairs(workers, validation, count, journal)
-        completion = await _finish_workers(workers, journal)
-        return {
-            "environment": identities["candidate"],
-            "samples": collected,
-            "completion": completion,
-            **frozen,
-        }
-    except BaseException as error:
-        _record(journal, operation="error", error=f"{type(error).__name__}: {error}")
-        raise
-    finally:
-        for worker in workers.values():
-            await worker.close()
+    with (root / "raw.jsonl").open("x", encoding="utf-8") as journal:
+        _record(journal, operation="begin", case=case, pairs=count)
+        try:
+            if (
+                "diagnostic_variant" in case
+                and count > 0
+                and fallback_declaration is None
+            ):
+                raise ValueError("SQL fallback samples require a frozen declaration")
+            for side, site in sites.items():
+                workers[side] = await Worker.start(site, root / side)
+            identities, warmups = await _prepare_workers(
+                workers, pair, validation, journal
+            )
+            _validate_environments(identities, fallback_declaration)
+            frozen = _freeze_fallback(case, warmups, identities["candidate"])
+            _record(
+                journal, operation="warmup-equivalence", result=_compare_latest(warmups)
+            )
+            collected = await _sample_pairs(workers, validation, count, journal)
+            completion = await _finish_workers(workers, journal)
+            return {
+                "environment": identities["candidate"],
+                "samples": collected,
+                "completion": completion,
+                **frozen,
+            }
+        except BaseException as error:
+            _record(
+                journal, operation="error", error=f"{type(error).__name__}: {error}"
+            )
+            raise
+        finally:
+            for worker in workers.values():
+                await worker.close()
 
 
 def _quantiles(values: list[float]) -> dict:
@@ -762,7 +763,7 @@ async def measure_case(
 
 def _diagnostic_hashes() -> dict:
     return {
-        str(path.relative_to(ROOT)): _sha256(path)
+        str(path.relative_to(ROOT)): sha256_file(path)
         for path in (Path(__file__), ROOT / "benchmarks/performance_diagnostics.py")
     }
 
@@ -960,7 +961,7 @@ def _prepare_declarations(
     return declarations, {
         "fallback_declaration": {
             "path": str(declaration_path),
-            "sha256": _sha256(declaration_path),
+            "sha256": sha256_file(declaration_path),
         }
     }
 

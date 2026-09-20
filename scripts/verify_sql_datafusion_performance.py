@@ -12,7 +12,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-GIT_SHA = re.compile(r"[0-9a-f]{40}")
+try:
+    from scripts.toolkit import FULL_SHA, linear_percentile
+except ImportError:  # direct execution puts only scripts/ on sys.path
+    from toolkit import FULL_SHA, linear_percentile
+
 FINGERPRINT = re.compile(r"[0-9a-f]{64}")
 PROFILES = {
     "serial-control",
@@ -230,8 +234,8 @@ def _verify_engine_configuration(engine: dict, label: str) -> None:
 def _engine_summary(samples: list[float]) -> dict[str, float]:
     return {
         "median_ms": _median(samples),
-        "p25_ms": _percentile(samples, 0.25),
-        "p75_ms": _percentile(samples, 0.75),
+        "p25_ms": linear_percentile(samples, 0.25),
+        "p75_ms": linear_percentile(samples, 0.75),
         "mad_ms": _median([abs(value - _median(samples)) for value in samples]),
         "cv": _cv(samples),
     }
@@ -390,17 +394,6 @@ def _verify_engine(
     _verify_engine_partitions(engine, label, check.rows, check.output_rows)
     _verify_engine_phases(engine, label, samples)
     return engine, samples, notes
-
-
-def _percentile(values: list[float], fraction: float) -> float:
-    ordered = sorted(values)
-    position = (len(ordered) - 1) * fraction
-    lower = math.floor(position)
-    upper = math.ceil(position)
-    if lower == upper:
-        return ordered[lower]
-    weight = position - lower
-    return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
 
 
 def _verify_correctness(raw: object, label: str) -> None:
@@ -840,7 +833,7 @@ def _verify_report_header(raw: object) -> dict[str, Any]:
     if report["schema_version"] != 1:
         raise ValueError("report.schema_version must be 1")
     git_sha = report["git_sha"]
-    if not isinstance(git_sha, str) or GIT_SHA.fullmatch(git_sha) is None:
+    if not isinstance(git_sha, str) or FULL_SHA.fullmatch(git_sha) is None:
         raise ValueError("report.git_sha must be a lowercase full git SHA")
     if report["profile"] not in PROFILES:
         raise ValueError("report.profile is unsupported")
