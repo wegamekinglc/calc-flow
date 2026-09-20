@@ -72,7 +72,7 @@ impl StreamAsofJoinOperator {
             batch,
             input,
             |_| (),
-            |(), record, payload, row| row_workspace(payload, record, row, &self.name),
+            |&(), record, payload, row| row_workspace(payload, record, row, &self.name),
         )
     }
 
