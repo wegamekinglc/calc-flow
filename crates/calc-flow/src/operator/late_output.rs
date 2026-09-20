@@ -111,22 +111,30 @@ fn schema(input: &Schema) -> SchemaRef {
 }
 
 pub(crate) fn validate_policy(policy: LatePolicySpec, kind: &str) -> Result<()> {
-    if let LatePolicySpec::SideOutput {
-        metrics_version,
-        schema_version,
-    } = policy
-    {
-        for (field, version) in [
-            ("metrics_version", metrics_version),
-            ("schema_version", schema_version),
-        ] {
-            if version != 1 {
-                return Err(CalcFlowError::InvalidArgument {
-                    field: format!("{kind}.late_policy.{field}"),
-                    message: format!("side_output {field} must equal 1; found {version}"),
-                });
+    match policy {
+        LatePolicySpec::SideOutput {
+            metrics_version,
+            schema_version,
+        } => {
+            for (field, version) in [
+                ("metrics_version", metrics_version),
+                ("schema_version", schema_version),
+            ] {
+                if version != 1 {
+                    return Err(CalcFlowError::InvalidArgument {
+                        field: format!("{kind}.late_policy.{field}"),
+                        message: format!("side_output {field} must equal 1; found {version}"),
+                    });
+                }
             }
         }
+        LatePolicySpec::Drop { metrics_version } if metrics_version != 1 => {
+            return Err(CalcFlowError::InvalidArgument {
+                field: format!("{kind}.late_policy.metrics_version"),
+                message: "unsupported late-metrics version".into(),
+            });
+        }
+        _ => {}
     }
     Ok(())
 }

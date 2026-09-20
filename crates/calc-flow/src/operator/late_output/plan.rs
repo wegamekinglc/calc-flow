@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, mem::size_of, sync::Arc};
 
 use datafusion::arrow::{
     array::{ArrayRef, Int64Array, StringArray, UInt64Array},
@@ -9,6 +9,18 @@ use datafusion::arrow::{
 use crate::{Batch, BatchMetadata, CalcFlowError, EdgeBudget, Result, StreamCollector};
 
 use super::error;
+
+/// Constant diagnostic values shared by the per-row byte estimate and the
+/// record builder, so renaming one re-prices `max_bytes` accounting.
+pub(super) const DIAGNOSTIC_INPUT_PORT: &str = "input";
+pub(super) const DIAGNOSTIC_REASON: &str = "late_row";
+
+/// Fixed per-row diagnostic charge: five 64-bit integers, four Utf8 offset
+/// entries, and the constant port/reason values above.
+pub(super) const DIAGNOSTIC_BASE_BYTES: usize = 5 * size_of::<u64>()
+    + 4 * size_of::<i32>()
+    + DIAGNOSTIC_INPUT_PORT.len()
+    + DIAGNOSTIC_REASON.len();
 
 struct LateRow {
     record: usize,
@@ -181,10 +193,11 @@ impl<'a> LateOutputPlan<'a> {
     }
 
     fn diagnostic_bytes(&self) -> Result<usize> {
-        // Five 64-bit values, four Utf8 offsets, and the constant string values.
+        // DIAGNOSTIC_BASE_BYTES covers the fixed charge; add the variable
+        // node/source values.
         [self.node, self.input.metadata().source()]
             .into_iter()
-            .try_fold(69_usize, |bytes, value| {
+            .try_fold(DIAGNOSTIC_BASE_BYTES, |bytes, value| {
                 i32::try_from(value.len())
                     .map_err(|_| error(self.node, "late diagnostic Utf8 offset overflowed"))?;
                 bytes
@@ -215,11 +228,11 @@ impl<'a> LateOutputPlan<'a> {
         let uint = |value| Arc::new(UInt64Array::from(vec![value])) as ArrayRef;
         let diagnostics = [
             string(self.node),
-            string("input"),
+            string(DIAGNOSTIC_INPUT_PORT),
             int(row.event_time),
             int(row.closing_time),
             int(self.watermark),
-            string("late_row"),
+            string(DIAGNOSTIC_REASON),
             string(self.input.metadata().source()),
             uint(self.input.metadata().sequence()),
             uint(row.index),

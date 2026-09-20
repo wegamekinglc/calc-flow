@@ -2615,25 +2615,12 @@ fn validate_key_declarations(spec: &CrossSectionSpec) -> Result<()> {
     validate_key_names("cross_section.sequence_by", &spec.sequence_by)
 }
 
-fn validate_late_policy(late_policy: LatePolicySpec) -> Result<()> {
-    super::late_output::validate_policy(late_policy, "cross_section")?;
-    if let LatePolicySpec::Drop { metrics_version } = late_policy
-        && metrics_version != 1
-    {
-        return Err(invalid_argument(
-            "cross_section.late_policy.metrics_version",
-            "unsupported late-metrics version",
-        ));
-    }
-    Ok(())
-}
-
 fn validate_arguments(spec: &CrossSectionSpec) -> Result<()> {
     validate_versions(spec)?;
     validate_grouping(spec.grouping)?;
     validate_key_declarations(spec)?;
     validate_outputs(&spec.outputs)?;
-    validate_late_policy(spec.late_policy)
+    super::late_output::validate_policy(spec.late_policy, "cross_section")
 }
 
 fn validate_key_names(field: &str, columns: &[String]) -> Result<()> {

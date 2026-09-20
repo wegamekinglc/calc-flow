@@ -1,5 +1,7 @@
 mod ownership;
 
+use std::mem::size_of;
+
 use super::*;
 use crate::{Batch, BatchMetadata, EdgeBudget, EdgeCollector};
 use datafusion::arrow::{
@@ -229,6 +231,19 @@ fn test_late_plan_budget_bounds_actual_scratch_allocation() {
         assert_eq!(plan.scratch_usage(), before);
         assert!(before.0 <= budget.max_rows && before.1 <= budget.max_bytes);
     }
+}
+
+#[test]
+fn test_late_plan_diagnostic_base_bytes_derive_from_shared_constants() {
+    // Renaming a constant diagnostic value must re-price the per-row base;
+    // reverting to a hand-counted literal fails this check.
+    assert_eq!(
+        plan::DIAGNOSTIC_BASE_BYTES,
+        5 * size_of::<u64>()
+            + 4 * size_of::<i32>()
+            + plan::DIAGNOSTIC_INPUT_PORT.len()
+            + plan::DIAGNOSTIC_REASON.len()
+    );
 }
 
 #[test]

@@ -17,6 +17,7 @@ CAPABILITY_MISMATCH = "capability_mismatch"
 DUPLICATE_NAME = "duplicate_name"
 INVALID_LITERAL = "invalid_literal"
 ORDERING_REQUIRED = "ordering_required"
+RESERVED_FIELD = "reserved_field"
 SCHEMA_MISMATCH = "schema_mismatch"
 UNBOUNDED_STATE = "unbounded_state"
 UNCONSUMED_OUTPUT = "unconsumed_output"
@@ -31,6 +32,7 @@ ISSUE_CODES: tuple[str, ...] = (
     DUPLICATE_NAME,
     INVALID_LITERAL,
     ORDERING_REQUIRED,
+    RESERVED_FIELD,
     SCHEMA_MISMATCH,
     UNBOUNDED_STATE,
     UNCONSUMED_OUTPUT,
@@ -47,6 +49,7 @@ __all__ = [
     "INVALID_LITERAL",
     "ISSUE_CODES",
     "ORDERING_REQUIRED",
+    "RESERVED_FIELD",
     "SCHEMA_MISMATCH",
     "UNBOUNDED_STATE",
     "UNCONSUMED_OUTPUT",

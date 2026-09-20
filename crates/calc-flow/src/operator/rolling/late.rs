@@ -45,7 +45,9 @@ impl RollingOperator {
             self.prepare_late_callback(batch, watermark, context)?;
         // Poison before emit: only the commit below clears the flag, so a
         // failed or cancelled emission forbids live retry; a durable cut
-        // is the only recovery.
+        // is the only recovery. This poison -> emit -> commit -> unpoison
+        // sequence is deliberately duplicated in cross_section/late.rs
+        // (borrow/async constraints block a shared helper); change both.
         self.state.late_output_failed = true;
         let next_sequence = prepared.emit(output).await?;
         self.state.buffer.extend(accepted);
