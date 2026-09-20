@@ -9,7 +9,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from scripts import measure_performance_plan as controller
+try:
+    from scripts import measure_performance_plan as controller
+except ImportError as error:
+    raise unittest.SkipTest(
+        "entity parallel inventory tests require numpy and pyarrow (dev dependencies)"
+    ) from error
 
 
 class EntityParallelInventoryTests(unittest.TestCase):

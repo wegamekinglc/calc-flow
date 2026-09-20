@@ -11,10 +11,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-import psutil
+try:
+    import psutil
 
-from scripts import profile_warm_stream as profile
-from scripts.profile_warm_stream import matrix_points, paired_summary
+    from scripts import profile_warm_stream as profile
+    from scripts.profile_warm_stream import matrix_points, paired_summary
+except ImportError as error:
+    raise unittest.SkipTest(
+        "warm-stream profiling tests require numpy and psutil (dev dependencies)"
+    ) from error
 
 
 class WarmProfileTests(unittest.TestCase):

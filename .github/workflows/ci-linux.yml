@@ -44,11 +44,17 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
       - name: Check whitespace
         env:
           BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
           HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         run: git diff --check "$BASE_SHA" "$HEAD_SHA"
+      - name: Check spec references
+        run: python scripts/check_spec_references.py
 
   coverage-baseline:
     name: Verify coverage comparison base
@@ -478,7 +484,7 @@ jobs:
           enable-cache: true
       - name: Build wheel and source distribution
         run: |
-          python -m unittest scripts.test_generate_rolling_kernel_manifest scripts.test_run_rust_tests scripts.test_run_rust_coverage scripts.test_classify_ci_changes scripts.test_build_python_release scripts.test_inspect_wheel scripts.test_release_config scripts.test_verify_python_release scripts.test_verify_perf_gates scripts.test_verify_stream_lifecycle_evidence scripts.test_verify_symbolic_milestone_perf scripts.test_write_criterion_provenance scripts.test_verify_complexity_gates scripts.test_verify_security_gates scripts.test_verify_sql_datafusion_performance scripts.test_analyze_sql_datafusion_attribution scripts.test_run_sql_datafusion_matrix scripts.test_resolve_coverage_baseline
+          python -m unittest discover -s scripts -p 'test_*.py' -t .
           uv build
           python scripts/inspect_wheel.py core-wheel dist/calc_flow_python-*.whl
           python scripts/inspect_wheel.py sdist dist/calc_flow_python-*.tar.gz

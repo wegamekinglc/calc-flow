@@ -7,7 +7,12 @@ import unittest
 from pathlib import Path
 from zipfile import ZipFile
 
-from scripts.benchmark_suite.release import load_release
+try:
+    from scripts.benchmark_suite.release import load_release
+except ImportError as error:
+    raise unittest.SkipTest(
+        "benchmark release tests require numpy (dev dependency)"
+    ) from error
 
 
 class BenchmarkReleaseTests(unittest.TestCase):
