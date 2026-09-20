@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import tempfile
 import unittest
@@ -53,6 +54,9 @@ class CheckpointProducerTests(unittest.TestCase):
                 copy_checkpoint(fixture, root / "must-not-exist")
             self.assertFalse((root / "must-not-exist").exists())
 
+    @unittest.skipUnless(
+        importlib.util.find_spec("pyarrow") is not None, "requires pyarrow"
+    )
     def test_arrow_comparison_preserves_validity_and_nonfinite_classification(
         self,
     ) -> None:

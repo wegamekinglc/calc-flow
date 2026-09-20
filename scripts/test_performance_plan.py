@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import importlib.util
 import io
 import json
 import tempfile
@@ -13,22 +14,34 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-import pyarrow as pa
+if any(importlib.util.find_spec(name) is None for name in ("numpy", "pyarrow")):
+    raise unittest.SkipTest(
+        "performance plan tests require numpy and pyarrow (dev dependencies)"
+    )
 
-from benchmarks.performance_diagnostics import (
+import pyarrow as pa  # noqa: E402
+
+from benchmarks.performance_diagnostics import (  # noqa: E402
     NativeDiagnosticCase,
     SqlDiagnosticCase,
     diagnostic_sql,
     save_output,
 )
-from scripts import measure_performance_plan as controller
-from scripts.measure_performance_plan import (
+from scripts import measure_performance_plan as controller  # noqa: E402
+from scripts.measure_performance_plan import (  # noqa: E402
     _validate_completion,
     _validate_optimized_path,
     compare_outputs,
     load_release,
     measure_round,
 )
+
+try:
+    importlib.import_module("calc_flow")
+except Exception:
+    CALC_FLOW_AVAILABLE = False
+else:
+    CALC_FLOW_AVAILABLE = True
 
 
 class PerformancePlanComparisonTests(unittest.TestCase):
@@ -414,6 +427,7 @@ def fallback_sample(case, side="candidate"):
     }
 
 
+@unittest.skipUnless(CALC_FLOW_AVAILABLE, "requires the built calc_flow package")
 class SqlFallbackPathTests(unittest.TestCase):
     def test_v2_rejects_old_map_variant(self):
         for scenario in ("sma20", "dual_sma"):
@@ -471,6 +485,7 @@ class SqlFallbackPathTests(unittest.TestCase):
             )
 
 
+@unittest.skipUnless(CALC_FLOW_AVAILABLE, "requires the built calc_flow package")
 class SqlFallbackFactoryTests(unittest.TestCase):
     def setUp(self):
         sequence = list(range(42))
@@ -707,6 +722,7 @@ class SqlFallbackFactoryTests(unittest.TestCase):
                         )
 
 
+@unittest.skipUnless(CALC_FLOW_AVAILABLE, "requires the built calc_flow package")
 class SqlFallbackControllerTests(unittest.IsolatedAsyncioTestCase):
     async def run_round(self, root, case, samples, *, declaration=None):
         workers = []
@@ -1021,6 +1037,7 @@ def altered_declaration(original, change):
     return altered
 
 
+@unittest.skipUnless(CALC_FLOW_AVAILABLE, "requires the built calc_flow package")
 class SqlFallbackDeclarationTests(unittest.IsolatedAsyncioTestCase):
     def arguments(self, root, *, preflight=False, declaration=None):
         return SimpleNamespace(

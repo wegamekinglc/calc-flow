@@ -548,23 +548,7 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertNotIn("\n          uv build\n", studio_package)
 
     def test_ci_and_release_execute_script_unit_tests(self) -> None:
-        command = (
-            "python -m unittest scripts.test_generate_rolling_kernel_manifest "
-            "scripts.test_run_rust_tests "
-            "scripts.test_run_rust_coverage "
-            "scripts.test_classify_ci_changes "
-            "scripts.test_build_python_release scripts.test_inspect_wheel "
-            "scripts.test_release_config scripts.test_verify_python_release "
-            "scripts.test_verify_perf_gates "
-            "scripts.test_verify_stream_lifecycle_evidence "
-            "scripts.test_verify_symbolic_milestone_perf "
-            "scripts.test_write_criterion_provenance "
-            "scripts.test_verify_complexity_gates "
-            "scripts.test_verify_security_gates "
-            "scripts.test_verify_sql_datafusion_performance "
-            "scripts.test_analyze_sql_datafusion_attribution "
-            "scripts.test_run_sql_datafusion_matrix"
-        )
+        command = "python -m unittest discover -s scripts -p 'test_*.py' -t ."
         windows_test = (
             "scripts.test_run_rust_tests.RustTestHarnessTests."
             "test_timeout_cleans_up_the_test_binary_process_tree_on_windows"

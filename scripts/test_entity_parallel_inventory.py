@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import io
 import json
 import tempfile
@@ -9,7 +10,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from scripts import measure_performance_plan as controller
+if any(importlib.util.find_spec(name) is None for name in ("numpy", "pyarrow")):
+    raise unittest.SkipTest(
+        "entity parallel inventory tests require numpy and pyarrow (dev dependencies)"
+    )
+
+from scripts import measure_performance_plan as controller  # noqa: E402
 
 
 class EntityParallelInventoryTests(unittest.TestCase):

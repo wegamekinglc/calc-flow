@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import os
 import sys
 import tempfile
@@ -11,10 +12,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-import psutil
+if any(importlib.util.find_spec(name) is None for name in ("numpy", "psutil")):
+    raise unittest.SkipTest(
+        "warm-stream profiling tests require numpy and psutil (dev dependencies)"
+    )
 
-from scripts import profile_warm_stream as profile
-from scripts.profile_warm_stream import matrix_points, paired_summary
+import psutil  # noqa: E402
+
+from scripts import profile_warm_stream as profile  # noqa: E402
+from scripts.profile_warm_stream import matrix_points, paired_summary  # noqa: E402
 
 
 class WarmProfileTests(unittest.TestCase):
