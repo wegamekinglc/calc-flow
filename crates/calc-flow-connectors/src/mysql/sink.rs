@@ -20,6 +20,9 @@ use std::{
 pub(super) const LEDGER: &str = "calc_flow_mysql_epoch_ledger";
 const SEGMENT: &str = "prepared-arrow";
 
+/// Bytes the Arrow IPC stream end-of-stream marker appends at `finish`.
+const EOS_BYTES: u64 = 8;
+
 pub(super) struct MySqlSink {
     config: SinkConfig,
     url: Option<String>,
@@ -29,6 +32,8 @@ pub(super) struct MySqlSink {
     schema: Option<SchemaRef>,
     rows: u64,
     memory: u64,
+    encoder: Option<StreamWriter<Vec<u8>>>,
+    insert: Option<InsertSql>,
     prepared: Option<Vec<u8>>,
 }
 
@@ -43,6 +48,8 @@ impl MySqlSink {
             schema: None,
             rows: 0,
             memory: 0,
+            encoder: None,
+            insert: None,
             prepared: None,
         }
     }
@@ -92,33 +99,85 @@ impl MySqlSink {
             .table_payload()
             .map_err(|_| fail("write", "MySQL sink requires table batches"))?;
         let schema = payload.schema();
-        self.check_staging_schema(schema)?;
+        let insert = self.check_staging_schema(schema)?;
         let (rows, memory) = self.staged_totals(batch.num_rows() as u64, payload.batches())?;
         payload.batches().iter().try_for_each(validate_record)?;
-        // Validate encoded size before publishing any change to owned state.
-        let records = self
-            .records
-            .iter()
-            .chain(payload.batches())
-            .cloned()
-            .collect::<Vec<_>>();
-        encode(&records, schema.as_ref(), self.config.bytes)?;
-        self.records = records;
+        // Encode only the new batches incrementally and validate the encoded
+        // bound before publishing any change to owned state.
+        self.append_encoded(schema, payload.batches())?;
+        self.records.extend(payload.batches().iter().cloned());
         self.schema = Some(Arc::clone(schema));
         self.rows = rows;
         self.memory = memory;
+        if let Some(insert) = insert {
+            self.insert = Some(insert);
+        }
         Ok(())
     }
 
-    fn check_staging_schema(&self, schema: &SchemaRef) -> Result<()> {
-        if self
-            .schema
-            .as_ref()
-            .is_some_and(|current| current != schema)
-        {
-            return Err(fail("write", "Arrow schema changed within epoch"));
+    fn check_staging_schema(&self, schema: &SchemaRef) -> Result<Option<InsertSql>> {
+        if let Some(current) = self.schema.as_ref() {
+            if current != schema {
+                return Err(fail("write", "Arrow schema changed within epoch"));
+            }
+            return Ok(None);
         }
-        insert_sql(&self.config, schema.as_ref(), 1).map(drop)
+        InsertSql::parse(&self.config, schema.as_ref()).map(Some)
+    }
+
+    fn append_encoded(&mut self, schema: &SchemaRef, records: &[RecordBatch]) -> Result<()> {
+        let initialized_here = self.encoder.is_none();
+        if initialized_here {
+            let writer = StreamWriter::try_new(Vec::new(), schema.as_ref())
+                .map_err(|_| fail("write", "cannot encode Arrow schema"))?;
+            if writer.get_ref().len() as u64 + EOS_BYTES > self.config.bytes {
+                return Err(fail("write", "encoded epoch exceeds max_epoch_bytes"));
+            }
+            self.encoder = Some(writer);
+        }
+        let limit = self.config.bytes;
+        let writer = self.encoder.as_mut().expect("encoder initialized");
+        let before = writer.get_ref().len();
+        let result = records.iter().try_for_each(|record| {
+            writer
+                .write(record)
+                .map_err(|_| fail("write", "cannot encode Arrow record"))?;
+            if writer.get_ref().len() as u64 + EOS_BYTES > limit {
+                return Err(fail("write", "encoded epoch exceeds max_epoch_bytes"));
+            }
+            Ok(())
+        });
+        if result.is_err() {
+            if initialized_here {
+                // Roll back the encoder created by this call: keeping it would
+                // pin the rejected schema for a later stage() that schema
+                // validation would otherwise accept with a different schema.
+                self.encoder = None;
+            } else {
+                writer.get_mut().truncate(before);
+            }
+        }
+        result
+    }
+
+    fn finish_encoded(&mut self) -> Result<Vec<u8>> {
+        let Some(writer) = self.encoder.as_mut() else {
+            return encode(&[], &Schema::empty(), self.config.bytes);
+        };
+        if writer.get_ref().len() as u64 + EOS_BYTES > self.config.bytes {
+            return Err(fail("pre_commit", "encoded epoch exceeds max_epoch_bytes"));
+        }
+        writer
+            .finish()
+            .map_err(|_| fail("pre_commit", "cannot finish Arrow segment"))?;
+        let writer = self.encoder.take().expect("encoder initialized");
+        let bytes = writer
+            .into_inner()
+            .map_err(|_| fail("pre_commit", "cannot finish Arrow segment"))?;
+        if bytes.len() as u64 > self.config.bytes {
+            return Err(fail("pre_commit", "encoded epoch exceeds max_epoch_bytes"));
+        }
+        Ok(bytes)
     }
 
     fn staged_totals(&self, added_rows: u64, records: &[RecordBatch]) -> Result<(u64, u64)> {
@@ -147,6 +206,8 @@ impl MySqlSink {
         self.schema = None;
         self.rows = 0;
         self.memory = 0;
+        self.encoder = None;
+        self.insert = None;
         self.prepared = None;
     }
 
@@ -177,7 +238,7 @@ impl MySqlSink {
         epoch: Epoch,
         evidence: &JsonMap,
         bytes: &[u8],
-    ) -> Result<Vec<RecordBatch>> {
+    ) -> Result<(Vec<RecordBatch>, Option<InsertSql>)> {
         self.decode_prepared(epoch, evidence, bytes)
             .map_err(|error| in_operation(operation, error))
     }
@@ -187,14 +248,16 @@ impl MySqlSink {
         epoch: Epoch,
         evidence: &JsonMap,
         bytes: &[u8],
-    ) -> Result<Vec<RecordBatch>> {
+    ) -> Result<(Vec<RecordBatch>, Option<InsertSql>)> {
         self.check_evidence(epoch, evidence, bytes)?;
         let (schema, records, rows) = self.read_prepared(evidence, bytes)?;
         crate::evidence::check_rows(evidence, rows).map_err(|error| fail("commit", &error))?;
-        if !schema.fields().is_empty() {
-            insert_sql(&self.config, &schema, 1)?;
-        }
-        Ok(records)
+        let insert = if schema.fields().is_empty() {
+            None
+        } else {
+            Some(InsertSql::parse(&self.config, &schema)?)
+        };
+        Ok((records, insert))
     }
 
     fn check_evidence(&self, epoch: Epoch, evidence: &JsonMap, bytes: &[u8]) -> Result<()> {
@@ -257,6 +320,7 @@ impl MySqlSink {
         records: &[RecordBatch],
         epoch: Option<Epoch>,
         bytes: &[u8],
+        insert: Option<&InsertSql>,
     ) -> Result<()> {
         let mut conn = self
             .conn
@@ -265,7 +329,7 @@ impl MySqlSink {
         let timeout = self.config.connection.timeout;
         let mut tx = database("commit", timeout, conn.start_transaction(TxOpts::default())).await?;
         if self.should_write(&mut tx, epoch, bytes, records).await? {
-            self.write_records(&mut tx, records).await?;
+            self.write_records(&mut tx, insert, records).await?;
         }
         database("commit", timeout, tx.commit()).await?;
         self.conn = Some(conn);
@@ -323,11 +387,21 @@ impl MySqlSink {
         Ok(true)
     }
 
-    async fn write_records(&self, tx: &mut Transaction<'_>, records: &[RecordBatch]) -> Result<()> {
+    async fn write_records(
+        &self,
+        tx: &mut Transaction<'_>,
+        insert: Option<&InsertSql>,
+        records: &[RecordBatch],
+    ) -> Result<()> {
         for record in records {
             let mut start = 0;
             while start < record.num_rows() {
-                let chunk = prepare_insert(&self.config, record, start)?;
+                let chunk = prepare_insert(
+                    &self.config,
+                    insert.ok_or_else(|| fail("write", "missing validated insert statement"))?,
+                    record,
+                    start,
+                )?;
                 database(
                     "write",
                     self.config.connection.timeout,
@@ -428,12 +502,16 @@ fn row_values(record: &RecordBatch, row: usize) -> Result<Vec<Value>> {
         .collect()
 }
 
-fn prepare_insert(config: &SinkConfig, record: &RecordBatch, start: usize) -> Result<InsertChunk> {
+fn prepare_insert(
+    config: &SinkConfig,
+    insert: &InsertSql,
+    record: &RecordBatch,
+    start: usize,
+) -> Result<InsertChunk> {
     let rows_limit = insert_row_limit(record.num_columns())?;
-    let sql = insert_sql(config, record.schema().as_ref(), 1)?;
     let mut buffer = InsertBuffer {
         values: Vec::new(),
-        bytes: sql.len() as u64 + 64,
+        bytes: insert.statement(1).len() as u64 + 64,
     };
     for row in start..record.num_rows().min(start.saturating_add(rows_limit)) {
         if !buffer.push_row(row_values(record, row)?, config.bytes) {
@@ -445,39 +523,61 @@ fn prepare_insert(config: &SinkConfig, record: &RecordBatch, start: usize) -> Re
         return Err(fail("write", "row exceeds MySQL statement byte bounds"));
     }
     Ok(InsertChunk {
-        sql: insert_sql(config, record.schema().as_ref(), rows)?,
+        sql: insert.statement(rows),
         values: buffer.values,
         end: start + rows,
     })
 }
 
-fn insert_sql(config: &SinkConfig, schema: &Schema, rows: usize) -> Result<String> {
-    if schema.fields().is_empty() {
-        return Err(fail("write", "empty column list"));
-    }
-    let mut unique = BTreeSet::new();
-    let names = schema
-        .fields()
-        .iter()
-        .map(|field| {
-            types::validate_type(field.data_type())?;
-            if !unique.insert(field.name().to_ascii_lowercase()) {
-                return Err(fail("write", "duplicate column names"));
-            }
-            identifier(field.name())
+#[derive(Clone)]
+struct InsertSql {
+    prefix: String,
+    suffix: String,
+    columns: usize,
+}
+
+impl InsertSql {
+    fn parse(config: &SinkConfig, schema: &Schema) -> Result<Self> {
+        if schema.fields().is_empty() {
+            return Err(fail("write", "empty column list"));
+        }
+        let mut unique = BTreeSet::new();
+        let names = schema
+            .fields()
+            .iter()
+            .map(|field| {
+                types::validate_type(field.data_type())?;
+                if !unique.insert(field.name().to_ascii_lowercase()) {
+                    return Err(fail("write", "duplicate column names"));
+                }
+                identifier(field.name())
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let suffix = if config.mode == SinkMode::Upsert {
+            upsert_clause(&config.connection.table, &names)
+        } else {
+            String::new()
+        };
+        Ok(Self {
+            prefix: format!(
+                "INSERT INTO {} ({}) VALUES ",
+                identifier(&config.connection.table)?,
+                names.join(", ")
+            ),
+            suffix,
+            columns: names.len(),
         })
-        .collect::<Result<Vec<_>>>()?;
-    let row = format!("({})", vec!["?"; names.len()].join(", "));
-    let mut sql = format!(
-        "INSERT INTO {} ({}) VALUES {}",
-        identifier(&config.connection.table)?,
-        names.join(", "),
-        vec![row; rows].join(", ")
-    );
-    if config.mode == SinkMode::Upsert {
-        sql.push_str(&upsert_clause(&config.connection.table, &names));
     }
-    Ok(sql)
+
+    fn statement(&self, rows: usize) -> String {
+        let row = format!("({})", vec!["?"; self.columns].join(", "));
+        format!(
+            "{}{}{}",
+            self.prefix,
+            vec![row; rows].join(", "),
+            self.suffix
+        )
+    }
 }
 
 fn upsert_clause(table: &str, columns: &[String]) -> String {
@@ -496,12 +596,12 @@ fn upsert_clause(table: &str, columns: &[String]) -> String {
 }
 
 fn validate_record(record: &RecordBatch) -> Result<()> {
-    for array in record.columns() {
-        for row in 0..record.num_rows() {
-            types::cell(array, row)?;
-        }
-    }
-    Ok(())
+    // Column types are per-batch schema properties; per-cell value conversion
+    // runs once at write time and surfaces value errors there.
+    record
+        .columns()
+        .iter()
+        .try_for_each(|array| types::validate_type(array.data_type()))
 }
 
 fn schema_hash(schema: &Schema) -> String {
@@ -555,7 +655,9 @@ impl StreamSink for MySqlSink {
     async fn write(&mut self, batch: &Batch) -> Result<()> {
         self.stage(batch)?;
         let records = self.records.clone();
-        self.commit_records(&records, None, &[]).await?;
+        let insert = self.insert.clone();
+        self.commit_records(&records, None, &[], insert.as_ref())
+            .await?;
         self.reset();
         Ok(())
     }
@@ -590,11 +692,7 @@ impl TransactionalStreamSink for MySqlSink {
             return Err(fail("pre_commit", "inactive epoch"));
         }
         if self.prepared.is_none() {
-            self.prepared = Some(encode(
-                &self.records,
-                self.schema.as_deref().unwrap_or(&Schema::empty()),
-                self.config.bytes,
-            )?);
+            self.prepared = Some(self.finish_encoded()?);
         }
         Ok(self.evidence(epoch, self.prepared.as_ref().expect("prepared")))
     }
@@ -613,8 +711,8 @@ impl TransactionalStreamSink for MySqlSink {
             .prepared
             .clone()
             .ok_or_else(|| fail("commit", "epoch has not been prepared"))?;
-        let records = self.validate_prepared("commit", epoch, evidence, &bytes)?;
-        self.commit_records(&records, Some(epoch), &bytes)
+        let (records, insert) = self.validate_prepared("commit", epoch, evidence, &bytes)?;
+        self.commit_records(&records, Some(epoch), &bytes, insert.as_ref())
             .await
             .map_err(|error| in_operation("commit", error))?;
         self.reset();
@@ -635,9 +733,9 @@ impl TransactionalStreamSink for MySqlSink {
             .segments()
             .get(SEGMENT)
             .ok_or_else(|| fail("recover", "missing prepared Arrow segment"))?;
-        let records =
+        let (records, insert) =
             self.validate_prepared("recover", recovery.epoch(), recovery.pre_commit(), bytes)?;
-        self.commit_records(&records, Some(recovery.epoch()), bytes)
+        self.commit_records(&records, Some(recovery.epoch()), bytes, insert.as_ref())
             .await
             .map_err(|error| in_operation("recover", error))
     }
@@ -676,6 +774,97 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn staging_defers_per_cell_value_errors_to_write_time() {
+        let record = RecordBatch::try_from_iter([(
+            "price",
+            Arc::new(arrow::array::Float64Array::from(vec![1.0, f64::NAN]))
+                as arrow::array::ArrayRef,
+        )])
+        .unwrap();
+        let batch =
+            Batch::table(vec![record.clone()], calc_flow::BatchMetadata::default()).unwrap();
+        let mut sink = sink();
+        sink.stage(&batch).unwrap();
+        let insert = sink.insert.as_ref().unwrap();
+        assert!(prepare_insert(&sink.config, insert, &record, 0).is_err());
+        assert!(row_values(&record, 1).is_err());
+    }
+
+    #[tokio::test]
+    async fn staged_segment_matches_one_shot_encoding() {
+        let mut sink = sink();
+        sink.active = Some(Epoch::INITIAL);
+        sink.stage(&batch("id", vec![1, 2])).unwrap();
+        sink.stage(&batch("id", vec![3])).unwrap();
+        sink.stage(&batch("id", vec![])).unwrap();
+        sink.pre_commit(Epoch::INITIAL).await.unwrap();
+        let expected = encode(
+            &sink.records,
+            sink.schema.as_deref().unwrap(),
+            sink.config.bytes,
+        )
+        .unwrap();
+        assert_eq!(sink.prepared.as_deref(), Some(expected.as_slice()));
+    }
+
+    #[tokio::test]
+    async fn over_limit_appends_reject_without_changing_epoch_state() {
+        let mut sink = sink();
+        sink.active = Some(Epoch::INITIAL);
+        sink.stage(&batch("id", vec![1, 2, 3])).unwrap();
+        let encoded = encode(
+            &sink.records,
+            sink.schema.as_deref().unwrap(),
+            sink.config.bytes,
+        )
+        .unwrap();
+        sink.config.bytes = encoded.len() as u64;
+        let buffered = sink.encoder.as_ref().unwrap().get_ref().len();
+        assert!(sink.stage(&batch("id", vec![4])).is_err());
+        assert_eq!(sink.encoder.as_ref().unwrap().get_ref().len(), buffered);
+        assert_eq!(sink.rows, 3);
+        assert_eq!(sink.records.len(), 1);
+        sink.pre_commit(Epoch::INITIAL).await.unwrap();
+        assert_eq!(sink.prepared.as_deref(), Some(encoded.as_slice()));
+    }
+
+    #[tokio::test]
+    async fn rejected_first_append_leaves_the_sink_fully_pristine() {
+        let mut sink = sink();
+        sink.active = Some(Epoch::INITIAL);
+        let header = StreamWriter::try_new(
+            Vec::<u8>::new(),
+            &Schema::new(vec![Field::new("rejected", DataType::Int64, false)]),
+        )
+        .unwrap()
+        .get_ref()
+        .len() as u64;
+        sink.config.bytes = header + EOS_BYTES;
+        assert!(sink.stage(&batch("rejected", vec![1])).is_err());
+        assert!(sink.encoder.is_none());
+        assert!(sink.schema.is_none());
+        assert!(sink.records.is_empty());
+        assert!(sink.insert.is_none());
+        assert!(sink.prepared.is_none());
+        assert_eq!(sink.rows, 0);
+        assert_eq!(sink.memory, 0);
+        sink.config.bytes = 64 * 1024 * 1024;
+        sink.stage(&batch("id", vec![1, 2])).unwrap();
+        sink.pre_commit(Epoch::INITIAL).await.unwrap();
+        assert_eq!(
+            sink.schema.as_deref().unwrap(),
+            &Schema::new(vec![Field::new("id", DataType::Int64, false)])
+        );
+        let expected = encode(
+            &sink.records,
+            sink.schema.as_deref().unwrap(),
+            sink.config.bytes,
+        )
+        .unwrap();
+        assert_eq!(sink.prepared.as_deref(), Some(expected.as_slice()));
+    }
+
     #[tokio::test]
     async fn prepared_validation_errors_report_the_calling_operation() {
         let mut sink = sink();
@@ -712,11 +901,12 @@ mod tests {
         let input = batch("id", (0..1005).collect());
         let record = &input.table_payload().unwrap().batches()[0];
         let config = sink().config;
-        let first = prepare_insert(&config, record, 0).unwrap();
+        let insert = InsertSql::parse(&config, record.schema().as_ref()).unwrap();
+        let first = prepare_insert(&config, &insert, record, 0).unwrap();
         assert_eq!(first.end, 1000);
         assert_eq!(first.sql.matches('?').count(), 1000);
         assert_eq!(first.values, (0..1000).map(Value::Int).collect::<Vec<_>>());
-        let last = prepare_insert(&config, record, first.end).unwrap();
+        let last = prepare_insert(&config, &insert, record, first.end).unwrap();
         assert_eq!(last.end, 1005);
         assert_eq!(
             last.values,
@@ -734,7 +924,8 @@ mod tests {
                 as arrow::array::ArrayRef,
         )])
         .unwrap();
-        let chunk = prepare_insert(&config, &record, 0).unwrap();
+        let insert = InsertSql::parse(&config, record.schema().as_ref()).unwrap();
+        let chunk = prepare_insert(&config, &insert, &record, 0).unwrap();
         assert!(chunk.end > 0 && chunk.end < record.num_rows());
         let encoded = chunk
             .values
@@ -748,7 +939,8 @@ mod tests {
                 as arrow::array::ArrayRef,
         )])
         .unwrap();
-        assert!(prepare_insert(&config, &oversized, 0).is_err());
+        let insert = InsertSql::parse(&config, oversized.schema().as_ref()).unwrap();
+        assert!(prepare_insert(&config, &insert, &oversized, 0).is_err());
         config.bytes = 64 * 1024 * 1024;
         let columns = (0..100).map(|i| {
             (
@@ -757,10 +949,38 @@ mod tests {
             )
         });
         let wide = RecordBatch::try_from_iter(columns).unwrap();
-        let chunk = prepare_insert(&config, &wide, 0).unwrap();
+        let insert = InsertSql::parse(&config, wide.schema().as_ref()).unwrap();
+        let chunk = prepare_insert(&config, &insert, &wide, 0).unwrap();
         assert_eq!(chunk.end, 655);
         assert_eq!(chunk.values.len(), 65_500);
         assert_eq!(chunk.sql.matches('?').count(), chunk.values.len());
+    }
+
+    #[test]
+    fn insert_statement_parts_match_the_previous_full_rebuilds() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Int64, false)]);
+        let append = InsertSql::parse(&sink().config, &schema).unwrap();
+        assert_eq!(
+            append.statement(2),
+            "INSERT INTO `orders` (`id`) VALUES (?), (?)"
+        );
+        let upsert = SinkConfig::parse(&JsonMap::from([
+            ("table".into(), json!("incoming")),
+            ("mode".into(), json!("upsert")),
+        ]))
+        .unwrap();
+        let insert = InsertSql::parse(&upsert, &schema).unwrap();
+        assert_eq!(
+            insert.statement(1),
+            "INSERT INTO `incoming` (`id`) VALUES (?) AS calc_flow_inserted ON DUPLICATE KEY UPDATE `id` = calc_flow_inserted.`id`"
+        );
+        let empty = Schema::empty();
+        assert!(InsertSql::parse(&sink().config, &empty).is_err());
+        let duplicate = Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("ID", DataType::Int64, true),
+        ]);
+        assert!(InsertSql::parse(&sink().config, &duplicate).is_err());
     }
 
     #[test]
@@ -807,7 +1027,8 @@ mod tests {
         let evidence = sink.evidence(Epoch::INITIAL, &bytes);
         assert_eq!(
             sink.validate_prepared("recover", Epoch::INITIAL, &evidence, &bytes)
-                .unwrap(),
+                .unwrap()
+                .0,
             sink.records
         );
     }
@@ -841,6 +1062,7 @@ mod tests {
         assert!(
             sink.validate_prepared("recover", Epoch::INITIAL, &evidence, &bytes)
                 .unwrap()
+                .0
                 .is_empty()
         );
         assert!(sink.stage(&batch("id", vec![1])).is_err());
