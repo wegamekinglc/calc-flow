@@ -3859,6 +3859,13 @@ async fn run_live_checkpoint_task(inputs: LiveCheckpointTaskInputs) -> crate::Re
             }
         }
     };
+    #[cfg(test)]
+    super::soak::diagnostics::driver_finished(
+        result.is_err(),
+        &checkpoint.status.snapshot(),
+        &expected_operators,
+        assembly.operators.keys(),
+    );
     let publication_unknown = assembly.manifest_installed_unknown;
     let sink_commit_incomplete =
         assembly.manifest_durable && assembly.finalized_sink_outputs != expected_sinks;
@@ -3988,6 +3995,8 @@ async fn handle_checkpoint_event(
     terminal_request_active: &mut bool,
     terminal_source_cuts: &mut Option<BTreeMap<super::progress::BindingIdentity, DurableSourceCut>>,
 ) -> crate::Result<bool> {
+    #[cfg(test)]
+    super::soak::diagnostics::checkpoint_event(&event);
     match event {
         CheckpointEvent::Started(epoch) => {
             checkpoint.status.start(epoch, *terminal_request_active);
@@ -4415,6 +4424,8 @@ async fn accept_operator_ack(
     status: &CheckpointStatusHandle,
 ) -> crate::Result<()> {
     assembly.expect_epoch(ack.epoch)?;
+    #[cfg(test)]
+    super::soak::diagnostics::operator_ack_received(&ack.node_id, ack.epoch);
     insert_identical(
         &mut assembly.operators,
         &ack.node_id,
