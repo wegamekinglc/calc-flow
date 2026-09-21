@@ -9,20 +9,22 @@ from scripts.toolkit import fingerprint_json
 IDENTITIES = ("machine", "dependency", "workload")
 
 
+def validate_component(metadata: dict, name: str) -> None:
+    raw = metadata.get(f"{name}_identity")
+    digest = metadata.get(f"{name}_fingerprint")
+    if (
+        not isinstance(raw, dict)
+        or not raw
+        or not isinstance(digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        or fingerprint_json(raw) != digest
+    ):
+        raise ValueError(f"incomparable {name} identity: missing or corrupt SHA-256")
+
+
 def validate_identity(metadata: dict) -> None:
     for name in IDENTITIES:
-        raw = metadata.get(f"{name}_identity")
-        digest = metadata.get(f"{name}_fingerprint")
-        if (
-            not isinstance(raw, dict)
-            or not raw
-            or not isinstance(digest, str)
-            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
-            or fingerprint_json(raw) != digest
-        ):
-            raise ValueError(
-                f"incomparable {name} identity: missing or corrupt SHA-256"
-            )
+        validate_component(metadata, name)
 
     workload = metadata["workload_identity"]
     for field in (

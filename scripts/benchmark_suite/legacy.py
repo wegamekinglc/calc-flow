@@ -11,11 +11,18 @@ import sys
 from pathlib import Path
 
 from scripts.benchmark_suite.catalog import CONTRACT
-from scripts.benchmark_suite.frontend import dependency_metadata, metadata_problem
+from scripts.benchmark_suite.frontend import (
+    case_identity,
+    dependency_metadata,
+    metadata_problem,
+    workload_sources,
+)
+from scripts.benchmark_suite.identity import IDENTITIES, validate_component
 from scripts.benchmark_suite.normalize import pytest_rows, read_json, vitest_rows
 from scripts.benchmark_suite.process import ROOT, child_environment, command, install
 from scripts.benchmark_suite.provenance import harness_sha256
 from scripts.benchmark_suite.report import comparison, validate_shards
+from scripts.toolkit import sha256_file
 
 
 def pytest_arguments(family: str) -> list[str]:
@@ -40,12 +47,9 @@ async def _pytest_run(shard: dict, source: Path, site: Path, output: Path) -> di
     await command(
         [
             sys.executable,
-            "-m",
-            "pytest",
+            str(ROOT / "scripts/benchmark_suite/pytest_driver.py"),
             *pytest_arguments(shard["family"]),
             "-q",
-            "-p",
-            "scripts.benchmark_suite.pytest_plugin",
             "--benchmark-only",
             "--benchmark-save-data",
             f"--benchmark-json={output / 'pytest.json'}",
@@ -64,6 +68,7 @@ async def _pytest_run(shard: dict, source: Path, site: Path, output: Path) -> di
             **row,
             "metadata": {
                 **row["metadata"],
+                "benchmark_support_sha256": sha256_file(ROOT / "benchmarks/support.py"),
                 "benchmark_source_sha256": hashlib.sha256(
                     (benchmark_root / name.split("::", 1)[0]).read_bytes()
                 ).hexdigest(),
@@ -93,6 +98,11 @@ async def _frontend_run(source: Path, output: Path) -> dict:
     runner = frontend / "node_modules/.cache/calc-flow-benchmark.mjs"
     runner.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(ROOT / "scripts/benchmark_suite/frontend.mjs", runner)
+    shutil.copyfile(
+        Path(__file__).with_name("frontend_identity.mjs"),
+        runner.with_name("frontend_identity.mjs"),
+    )
+    sources = workload_sources(frontend, runner)
     await command(
         ["node", str(runner)],
         cwd=frontend,
@@ -103,8 +113,16 @@ async def _frontend_run(source: Path, output: Path) -> dict:
         source / "target/benchmark-suite/vitest.json", output / "vitest.json"
     )
     rows = vitest_rows(output / "vitest.json")
+    machine = read_json(output / "vitest.json").get("machine_identity")
     return {
-        name: {**row, "metadata": {**row["metadata"], **identity}}
+        name: {
+            **row,
+            "metadata": {
+                **row["metadata"],
+                **identity,
+                **case_identity(machine, sources, name, row["metadata"]["group"]),
+            },
+        }
         for name, row in rows.items()
     }
 
@@ -216,27 +234,46 @@ def block_problem(name: str, blocks: dict) -> str | None:
 
 
 def _fingerprint_problem(metadata: list[dict], *, frontend: bool = False) -> str | None:
-    if frontend and (problem := metadata_problem(metadata)):
+    problem = (
+        metadata_problem(metadata) if frontend else _raw_identity_problem(metadata)
+    )
+    problem = problem or _required_fingerprints_problem(metadata)
+    if problem:
         return problem
     for key in (
         "machine_fingerprint",
         "dependency_fingerprint",
         "workload_fingerprint",
+        "benchmark_source_sha256",
+        "benchmark_support_sha256",
     ):
+        if any(row.get(key) != metadata[0].get(key) for row in metadata):
+            return f"benchmark {key} changed; no timing classification"
+    return None
+
+
+def _required_fingerprints_problem(metadata: list[dict]) -> str | None:
+    for name in IDENTITIES:
+        key = f"{name}_fingerprint"
         if any(
             not isinstance(row.get(key), str)
             or re.fullmatch(r"[0-9a-f]{64}", row[key]) is None
             for row in metadata
         ):
             return f"benchmark {key} missing or malformed; no timing classification"
-    for key in (
-        "machine_fingerprint",
-        "dependency_fingerprint",
-        "workload_fingerprint",
-        "benchmark_source_sha256",
-    ):
-        if any(row.get(key) != metadata[0].get(key) for row in metadata):
-            return f"benchmark {key} changed; no timing classification"
+    return None
+
+
+def _raw_identity_problem(metadata: list[dict]) -> str | None:
+    keys = [f"{name}_identity" for name in IDENTITIES] + ["benchmark_support_sha256"]
+    if not any(key in row for row in metadata for key in keys):
+        return None
+    try:
+        for row in metadata:
+            for name in IDENTITIES:
+                validate_component(row, name)
+    except ValueError as error:
+        return str(error)
     return None
 
 

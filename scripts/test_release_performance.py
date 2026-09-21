@@ -8,6 +8,21 @@ from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, patch
 
 
+def _specialized_context(root: Path) -> dict:
+    sides = ("baseline", "candidate")
+    return {
+        "roots": dict.fromkeys(sides, root),
+        "sites": dict.fromkeys(sides, root),
+        "releases": {
+            side: {"native_sha256": "a" * 64, "git_sha": "b" * 40} for side in sides
+        },
+        "binaries": {
+            side: {"allocation_regression": root / "allocation-binary"}
+            for side in sides
+        },
+    }
+
+
 class ReleasePerformanceTests(unittest.IsolatedAsyncioTestCase):
     async def test_preparation_failure_writes_incomparable_summary_and_nonzero_exit(
         self,
@@ -152,18 +167,7 @@ class ReleasePerformanceTests(unittest.IsolatedAsyncioTestCase):
                 (path / "pytest.json").write_text(
                     json.dumps({"benchmarks": [{"extra_info": {"scenario": scenario}}]})
                 )
-            context = {
-                "roots": {side: root for side in ("baseline", "candidate")},
-                "sites": {side: root for side in ("baseline", "candidate")},
-                "releases": {
-                    side: {"native_sha256": "a" * 64, "git_sha": "b" * 40}
-                    for side in ("baseline", "candidate")
-                },
-                "binaries": {
-                    side: {"allocation_regression": root / "allocation-binary"}
-                    for side in ("baseline", "candidate")
-                },
-            }
+            context = _specialized_context(root)
             options = argparse.Namespace(output=root, allow_dependency_drift=False)
             original = {"errors": []}
             with (
@@ -202,14 +206,15 @@ class ReleasePerformanceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(sum("--scenario" in argv for argv in commands), 2)
             self.assertEqual(sum("--compare" in argv for argv in commands), 1)
 
-    def test_failure_summary_runs_without_benchmark_dependencies(self):
+    async def test_failure_summary_runs_without_benchmark_dependencies(self):
         import os
-        import subprocess
         import sys
+
+        from scripts.benchmark_suite.process import ROOT, command
 
         with TemporaryDirectory() as raw:
             root = Path(raw)
-            result = subprocess.run(
+            await command(
                 [
                     sys.executable,
                     "-S",
@@ -219,15 +224,14 @@ class ReleasePerformanceTests(unittest.IsolatedAsyncioTestCase):
                     "--output",
                     str(root),
                 ],
+                cwd=ROOT,
+                log=root / "summary.log",
                 env={
                     **os.environ,
                     "ACCEPTANCE_STEPS": "{}",
                     "GITHUB_STEP_SUMMARY": str(root / "github.md"),
                 },
-                capture_output=True,
-                text=True,
             )
-            self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue((root / "acceptance.json").is_file())
 
     async def test_lifecycle_regression_blocks_release_without_calling_it_incomparable(

@@ -58,7 +58,10 @@ def _observation(value: dict, seal: str, reference: dict) -> float:
     if value.get("correctness") is not True:
         raise ValueError("observation correctness was not established")
     compare_identity(reference, value.get("metadata", {}))
-    samples = value.get("samples")
+    return _sample_median(value.get("samples"))
+
+
+def _sample_median(samples: object) -> float:
     if (
         not isinstance(samples, list)
         or not samples
@@ -69,6 +72,22 @@ def _observation(value: dict, seal: str, reference: dict) -> float:
     ):
         raise ValueError("raw samples must be finite and positive")
     return statistics.median(samples)
+
+
+def _pair_observations(pair: dict, index: int) -> dict:
+    if pair.get("pair") != index or pair.get("order") != pair_order(index):
+        raise ValueError("duplicate pair or incorrect AB/BA execution order")
+    observations = pair.get("observations", {})
+    if set(observations) != set(SIDES):
+        raise ValueError("incomplete paired observation")
+    return observations
+
+
+def _unique_worker(value: dict, workers: set[str]) -> str:
+    worker = value.get("worker")
+    if not isinstance(worker, str) or not worker or worker in workers:
+        raise ValueError("each invocation requires a fresh isolated worker")
+    return worker
 
 
 def evaluate_case(case: dict, seals: dict) -> dict:
@@ -82,17 +101,10 @@ def evaluate_case(case: dict, seals: dict) -> dict:
     workers = set()
     for round_index, pairs in enumerate(rounds):
         for index, pair in enumerate(pairs):
-            if pair.get("pair") != index or pair.get("order") != pair_order(index):
-                raise ValueError("duplicate pair or incorrect AB/BA execution order")
-            observations = pair.get("observations", {})
-            if set(observations) != set(SIDES):
-                raise ValueError("incomplete paired observation")
+            observations = _pair_observations(pair, index)
             for side in SIDES:
                 value = observations[side]
-                worker = value.get("worker")
-                if not isinstance(worker, str) or not worker or worker in workers:
-                    raise ValueError("each invocation requires a fresh isolated worker")
-                workers.add(worker)
+                workers.add(_unique_worker(value, workers))
                 values[side][round_index].append(
                     _observation(value, seals[side], reference)
                 )

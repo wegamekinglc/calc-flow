@@ -349,6 +349,13 @@ async def run_gate(options: argparse.Namespace) -> int:
     except Exception as error:
         report["errors"].append(f"{type(error).__name__}: {error}")
     write_json(output / "results.json", report)
+    summary = _gate_summary(report)
+    (output / "summary.md").write_text(summary, encoding="utf-8")
+    print(summary)
+    return _gate_exit_code(report)
+
+
+def _gate_summary(report: dict) -> str:
     lines = [
         "Release paired timing: two rounds of ten adjacent AB/BA case "
         "invocations; +5% gate.",
@@ -364,9 +371,10 @@ async def run_gate(options: argparse.Namespace) -> int:
     )
     if report.get("lifecycle_regressions"):
         lines.append(f"- lifecycle: regression {report['lifecycle_regressions']}")
-    summary = "\n".join(lines) + "\n"
-    (output / "summary.md").write_text(summary, encoding="utf-8")
-    print(summary)
+    return "\n".join(lines) + "\n"
+
+
+def _gate_exit_code(report: dict) -> int:
     return int(
         bool(
             report["errors"]
