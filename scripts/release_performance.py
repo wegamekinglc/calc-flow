@@ -150,14 +150,13 @@ async def _python_measure(name: str, context: dict, side: str, output: Path) -> 
     )
 
 
-async def _rust_measure(
-    target: str, name: str, context: dict, identities: dict, side: str, output: Path
-) -> dict:
+async def _rust_measure(name: str, inputs: dict, side: str, output: Path) -> dict:
+    selected = inputs[side]
     return await rust_observation(
         name,
-        context["binaries"][side][target],
-        context["roots"][side],
-        identities[side],
+        selected["binary"],
+        selected["source"],
+        selected["identity"],
         output,
     )
 
@@ -225,11 +224,19 @@ async def measure(context: dict, output: Path, previous: dict) -> dict:
         names = matching_inventory(inventories)
         report["inventory"][target] = inventories
         identities = rust_identities(context, target)
+        inputs = {
+            side: {
+                "binary": context["binaries"][side][target],
+                "source": context["roots"][side],
+                "identity": identities[side],
+            }
+            for side in SIDES
+        }
         seals = {side: sha256_file(context["binaries"][side][target]) for side in SIDES}
         for name in names:
             report = await _record_case(
                 f"rust/{target}/{name}",
-                partial(_rust_measure, target, name, context, identities),
+                partial(_rust_measure, name, inputs),
                 seals,
                 output,
                 report,
