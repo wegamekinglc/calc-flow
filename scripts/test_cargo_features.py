@@ -1,17 +1,21 @@
 from __future__ import annotations
 
-import subprocess
 import unittest
 from pathlib import Path
+
+if __package__:
+    from scripts.toolkit import command_output, require_executable
+else:
+    from toolkit import command_output, require_executable
 
 ROOT = Path(__file__).resolve().parents[1]
 KAFKA_PACKAGES = {"rdkafka", "rdkafka-sys"}
 
 
 def _python_test_dependencies(*feature_options: str) -> set[str]:
-    result = subprocess.run(
+    output = command_output(
         [
-            "cargo",
+            require_executable("cargo"),
             "tree",
             "--locked",
             "-p",
@@ -25,12 +29,8 @@ def _python_test_dependencies(*feature_options: str) -> set[str]:
             *feature_options,
         ],
         cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-        timeout=120,
     )
-    return {line.split()[0] for line in result.stdout.splitlines() if line.strip()}
+    return {line.split()[0] for line in output.splitlines() if line.strip()}
 
 
 class PythonConnectorFeatureTests(unittest.TestCase):
