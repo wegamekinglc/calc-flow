@@ -11,6 +11,7 @@ from scripts.benchmark_suite.rust import (
     _stamp_fingerprints,
     _with_fingerprints,
     allocation_rows,
+    build_binaries,
     clear_stale_bench_binary,
     measure_rust,
     run_binary,
@@ -19,6 +20,51 @@ from scripts.benchmark_suite.rust import (
 
 
 class AddedRustTargetTests(unittest.IsolatedAsyncioTestCase):
+    async def test_each_source_rebuilds_its_product_library_before_linking(self):
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            shared = root / "target"
+            deps = shared / "release/deps"
+            deps.mkdir(parents=True)
+            library = deps / "libcalc_flow-samehash.rlib"
+            metadata = deps / "libcalc_flow-samehash.rmeta"
+            dependency = deps / "libdatafusion-dependency.rlib"
+            library.write_bytes(b"baseline implementation")
+            metadata.write_bytes(b"baseline metadata")
+            dependency.write_bytes(b"reusable dependency")
+            compiled = []
+
+            async def command(argv, **kwargs):
+                if not library.exists():
+                    compiled.append(kwargs["cwd"])
+                    self.assertFalse(metadata.exists())
+                    library.write_bytes(b"candidate implementation")
+                target = argv[argv.index("--bench") + 1]
+                executable = deps / target
+                executable.write_bytes(library.read_bytes())
+                kwargs["log"].write_text(
+                    json.dumps(
+                        {
+                            "reason": "compiler-artifact",
+                            "target": {"name": target},
+                            "executable": str(executable),
+                        }
+                    )
+                )
+
+            with (
+                patch(
+                    "scripts.benchmark_suite.rust.bench_targets",
+                    return_value=["core", "stream_join_materialization"],
+                ),
+                patch("scripts.benchmark_suite.rust.command", side_effect=command),
+            ):
+                binaries = await build_binaries(root, root, shared)
+            self.assertEqual(compiled, [root])
+            self.assertEqual(dependency.read_bytes(), b"reusable dependency")
+            for binary in binaries.values():
+                self.assertEqual(binary.read_bytes(), b"candidate implementation")
+
     async def test_removed_target_still_requires_an_explicit_migration(self):
         binaries = [
             {"core": Path("core"), "previous": Path("previous")},

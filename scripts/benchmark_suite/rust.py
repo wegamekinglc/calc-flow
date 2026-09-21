@@ -45,6 +45,10 @@ def bench_targets(source: Path) -> list[str]:
 
 async def build_binaries(source: Path, output: Path, shared: Path) -> dict:
     targets = bench_targets(source)
+    # Cargo unit hashes can collide across worktrees with different product code.
+    for suffix in ("rlib", "rmeta"):
+        for stale in shared.glob(f"release/deps/libcalc_flow-*.{suffix}"):
+            stale.unlink()
     environment = {
         **child_environment(),
         "CARGO_TARGET_DIR": str(shared),
