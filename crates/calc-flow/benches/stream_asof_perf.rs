@@ -440,7 +440,8 @@ fn main() {
         worker();
         return;
     }
-    let args = std::env::args().collect::<Vec<_>>();
+    // Arguments select local benchmark mode/report paths, never authorization or credentials.
+    let args = std::env::args().collect::<Vec<_>>(); // nosemgrep: args
     let check = args.iter().any(|arg| arg == "--check" || arg == "--test");
     strict_frontiers_cancel_restore_check();
     let rt = tokio::runtime::Builder::new_current_thread()

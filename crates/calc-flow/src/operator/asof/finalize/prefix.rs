@@ -74,15 +74,24 @@ impl StreamAsofJoinOperator {
         bytes.extend_from_slice(&current.bytes()[..8]);
         bytes.extend_from_slice(&(remaining as u64).to_le_bytes());
         bytes.extend_from_slice(&current.bytes()[16..24]);
-        for chunk in current.bytes()[24 + removed..].chunks(64 * 1024) {
-            context.check_cancelled()?;
-            bytes.extend_from_slice(chunk);
-            tokio::task::yield_now().await;
-        }
-        context.check_cancelled()?;
+        let bytes = copy_checkpoint_suffix(bytes, &current.bytes()[24 + removed..], context).await?;
         Ok(PreparedCheckpoint {
             segment: Some(StateSegment::new(bytes)),
             _workspace: workspace,
         })
     }
+}
+
+async fn copy_checkpoint_suffix(
+    mut bytes: Vec<u8>,
+    suffix: &[u8],
+    context: &StreamOperatorContext<'_>,
+) -> Result<Vec<u8>> {
+    for chunk in suffix.chunks(64 * 1024) {
+        context.check_cancelled()?;
+        bytes.extend_from_slice(chunk);
+        tokio::task::yield_now().await;
+    }
+    context.check_cancelled()?;
+    Ok(bytes)
 }
