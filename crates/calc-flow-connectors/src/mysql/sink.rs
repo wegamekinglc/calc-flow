@@ -599,7 +599,7 @@ fn validate_record(record: &RecordBatch) -> Result<()> {
     for array in record.columns() {
         types::validate_type(array.data_type())?;
         for row in 0..record.num_rows() {
-            types::cell(array, row)?;
+            types::validate_cell(array, row)?;
         }
     }
     Ok(())
@@ -830,6 +830,73 @@ mod tests {
                 .unwrap();
             assert_eq!(records.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
         }
+    }
+
+    #[test]
+    fn validation_borrows_text_and_binary_payloads_without_allocating() {
+        use arrow::array::{ArrayRef, BinaryArray, StringArray};
+
+        let text = "payload".repeat(8192);
+        let bytes = vec![0xff; 65_536];
+        let record = RecordBatch::try_from_iter([
+            (
+                "text",
+                Arc::new(StringArray::from(vec![Some(text.as_str()), None, Some("")])) as ArrayRef,
+            ),
+            (
+                "binary",
+                Arc::new(BinaryArray::from(vec![
+                    Some(bytes.as_slice()),
+                    None,
+                    Some(&[]),
+                ])) as ArrayRef,
+            ),
+        ])
+        .unwrap();
+
+        let empty = record.slice(0, 0);
+        let allocations = allocation_counter::measure(|| {
+            validate_record(&record).unwrap();
+            validate_record(&empty).unwrap();
+        });
+        assert_eq!(allocations.bytes_total, 0, "{allocations:?}");
+        assert_eq!(
+            row_values(&record, 0).unwrap(),
+            vec![Value::Bytes(text.into_bytes()), Value::Bytes(bytes)]
+        );
+        assert_eq!(row_values(&record, 1).unwrap(), vec![Value::NULL; 2]);
+        assert_eq!(
+            row_values(&record, 2).unwrap(),
+            vec![Value::Bytes(vec![]); 2]
+        );
+    }
+
+    #[tokio::test]
+    async fn prepared_nonfinite_values_are_rejected_before_recovery_io() {
+        let record = RecordBatch::try_from_iter([(
+            "value",
+            Arc::new(arrow::array::Float64Array::from(vec![1.0, f64::NAN]))
+                as arrow::array::ArrayRef,
+        )])
+        .unwrap();
+        let mut sink = sink();
+        sink.schema = Some(record.schema());
+        sink.rows = 2;
+        let bytes = encode(&[record], sink.schema.as_ref().unwrap(), sink.config.bytes).unwrap();
+        let recovery = SinkRecovery::from_parts(
+            Epoch::INITIAL,
+            false,
+            calc_flow::SinkDelivery::Transactional,
+            sink.evidence(Epoch::INITIAL, &bytes),
+        )
+        .with_segments(BTreeMap::from([(SEGMENT.into(), bytes)]));
+
+        let calc_flow::CalcFlowError::Connector(error) = sink.recover(&recovery).await.unwrap_err()
+        else {
+            panic!("expected connector validation failure");
+        };
+        assert_eq!(error.operation.as_str(), "recover");
+        assert_eq!(error.detail, "MySQL cannot store non-finite floats");
     }
 
     #[tokio::test]
