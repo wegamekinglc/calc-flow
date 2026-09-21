@@ -9,7 +9,7 @@ import json
 import os
 import shutil
 import stat
-import subprocess
+import subprocess  # nosec B404  # fixed read-only queries below
 import tempfile
 import time
 from pathlib import Path
@@ -20,18 +20,35 @@ TOOLCHAIN_LIMIT = 4
 MANIFEST_LIMIT = 16
 
 
+def query_program(command: list[str]) -> str:
+    program = Path(command[0]).name if command else ""
+    allowed = {
+        "rustup": (("--version",), ("toolchain", "list", "-v")),
+        "git": (("rev-parse", "HEAD"), ("show", "-s", "--format=%P", "HEAD")),
+    }
+    if tuple(command[1:]) not in allowed.get(program, ()):
+        raise ValueError("unsupported read-only toolchain query")
+    return program
+
+
 def command_result(command: list[str], directory: Path) -> dict[str, object]:
+    program = query_program(command)
     with tempfile.TemporaryFile() as log:
         try:
-            result = subprocess.run(
-                command,
+            options = dict(
                 cwd=directory,
                 env={**os.environ, "RUSTUP_AUTO_INSTALL": "0"},
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 timeout=5,
                 check=False,
+                shell=False,
             )
+            # Fixed programs and exact query allowlist; PATH is the runner's tool setup.
+            if program == "rustup":
+                result = subprocess.run(["rustup", *command[1:]], **options)  # nosec B603 B607
+            else:
+                result = subprocess.run(["git", *command[1:]], **options)  # nosec B603 B607
             status: dict[str, object] = {"exit_code": result.returncode}
         except (OSError, subprocess.TimeoutExpired) as error:
             status = {"error": str(error)}

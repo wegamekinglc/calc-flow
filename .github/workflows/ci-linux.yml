@@ -588,7 +588,6 @@ jobs:
     if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     env:
-      RUST_TOOLCHAIN_EVIDENCE: ${{ runner.temp }}/rust-toolchain-install
       RUST_DIAGNOSTICS_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
       RUST_DIAGNOSTICS_BASE: ${{ github.event.pull_request.base.sha }}
     steps:
@@ -631,6 +630,7 @@ jobs:
         id: rust_before
         continue-on-error: true
         env:
+          RUST_TOOLCHAIN_EVIDENCE: ${{ runner.temp }}/rust-toolchain-install
           RUST_DIAGNOSTICS_UV: ${{ toJSON(steps.rust_uv) }}
         run: python scripts/rust_toolchain_diagnostics.py before
       - id: rust_install
@@ -638,12 +638,14 @@ jobs:
         with:
           components: clippy,rustfmt
         env:
+          RUST_TOOLCHAIN_EVIDENCE: ${{ runner.temp }}/rust-toolchain-install
           BASH_ENV: ${{ github.workspace }}/scripts/rust_toolchain_log.sh
       - name: Snapshot Rust installation after setup
         id: rust_after
         if: ${{ always() }}
         continue-on-error: true
         env:
+          RUST_TOOLCHAIN_EVIDENCE: ${{ runner.temp }}/rust-toolchain-install
           RUST_DIAGNOSTICS_UV: ${{ toJSON(steps.rust_uv) }}
         run: python scripts/rust_toolchain_diagnostics.py after
       - name: Cache Rust build artifacts
@@ -677,6 +679,7 @@ jobs:
         if: ${{ always() }}
         continue-on-error: true
         env:
+          RUST_TOOLCHAIN_EVIDENCE: ${{ runner.temp }}/rust-toolchain-install
           INSTALL_RESULT: ${{ toJSON(steps.rust_install) }}
           UV_RESULT: ${{ toJSON(steps.rust_uv) }}
           RUST_CACHE_RESULT: ${{ toJSON(steps.rust_cache) }}

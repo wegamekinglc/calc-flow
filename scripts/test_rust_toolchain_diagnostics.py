@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
-import sys
+import subprocess  # nosec B404  # controlled local subprocess fixtures
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,7 +17,7 @@ HOOK = ROOT / "scripts/rust_toolchain_log.sh"
 class InstallLogTests(unittest.TestCase):
     def test_hook_does_not_hide_missing_rustup_from_action_bootstrap(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            result = subprocess.run(
+            result = subprocess.run(  # nosec B603  # fixed local fixtures, no external commands
                 ["/bin/bash", "-c", "command -v rustup"],
                 env={**os.environ, "PATH": temporary, "BASH_ENV": str(HOOK)},
                 capture_output=True,
@@ -45,8 +45,8 @@ class InstallLogTests(unittest.TestCase):
             }
             for command in ("rustup toolchain install 1.88.0", "rustup --version"):
                 with self.subTest(command=command):
-                    result = subprocess.run(
-                        ["bash", "-e", "-o", "pipefail", "-c", command],
+                    result = subprocess.run(  # nosec B603  # fixed local fixtures, no external commands
+                        ["/bin/bash", "-e", "-o", "pipefail", "-c", command],
                         env=env,
                         capture_output=True,
                         check=False,
@@ -75,9 +75,9 @@ class InstallLogTests(unittest.TestCase):
                         "RUST_TOOLCHAIN_EVIDENCE": str(output),
                         "FAKE_EXIT": str(code),
                     }
-                    result = subprocess.run(
+                    result = subprocess.run(  # nosec B603  # fixed local fixtures, no external commands
                         [
-                            "bash",
+                            "/bin/bash",
                             "-e",
                             "-o",
                             "pipefail",
@@ -108,6 +108,26 @@ class InstallLogTests(unittest.TestCase):
 
 
 class SnapshotTests(unittest.TestCase):
+    def test_snapshot_rejects_commands_outside_read_only_inventory(self) -> None:
+        from scripts import rust_toolchain_diagnostics as diagnostics
+
+        with tempfile.TemporaryDirectory() as temporary:
+            for arguments in (
+                ["rustup", "update"],
+                ["git", "clean", "-fd"],
+                ["sh", "-c", "true"],
+            ):
+                with (
+                    self.subTest(arguments=arguments),
+                    mock.patch.object(
+                        diagnostics.subprocess,
+                        "run",
+                        return_value=SimpleNamespace(returncode=0),
+                    ),
+                    self.assertRaises(ValueError),
+                ):
+                    diagnostics.command_result(arguments, Path(temporary))
+
     def test_snapshot_bounds_manifest_bytes_and_marks_missing_files(self) -> None:
         from scripts import rust_toolchain_diagnostics as diagnostics
 
@@ -145,15 +165,23 @@ class SnapshotTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
-            missing = diagnostics.command_result(
-                [str(directory / "missing")], directory
-            )
+            with mock.patch.object(
+                diagnostics.subprocess, "run", side_effect=OSError("missing")
+            ):
+                missing = diagnostics.command_result(["rustup", "--version"], directory)
             self.assertIn("error", missing)
-            with mock.patch.object(diagnostics, "TEXT_LIMIT", 4):
-                failed = diagnostics.command_result(
-                    [sys.executable, "-c", "print('bounded'); raise SystemExit(23)"],
-                    directory,
-                )
+
+            def failed_query(*arguments, **options):
+                options["stdout"].write(b"bounded")
+                return SimpleNamespace(returncode=23)
+
+            with (
+                mock.patch.object(diagnostics, "TEXT_LIMIT", 4),
+                mock.patch.object(
+                    diagnostics.subprocess, "run", side_effect=failed_query
+                ),
+            ):
+                failed = diagnostics.command_result(["rustup", "--version"], directory)
             self.assertEqual(failed["exit_code"], 23)
             self.assertEqual(failed["output"], "boun")
             self.assertTrue(failed["truncated"])
