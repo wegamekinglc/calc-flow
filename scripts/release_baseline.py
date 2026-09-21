@@ -15,7 +15,7 @@ except ImportError:  # direct execution puts only scripts/ on sys.path
 
 ROOT = Path(__file__).resolve().parents[1]
 _RELEASE_TAG_RE = re.compile(
-    r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+    r"(?:calc-flow-python-)?v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
 )
 
 
@@ -47,7 +47,15 @@ def _annotation_baseline(message: str, initial: str | None) -> str | None:
 
 
 def _previous_release(root: Path, candidate: str) -> str | None:
-    tags = git_output(root, "tag", "--merged", "HEAD", "--list", "v[0-9]*").splitlines()
+    tags = git_output(
+        root,
+        "tag",
+        "--merged",
+        "HEAD",
+        "--list",
+        "v[0-9]*",
+        "calc-flow-python-v[0-9]*",
+    ).splitlines()
     previous_tags = [
         name
         for name in tags

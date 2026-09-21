@@ -313,8 +313,11 @@ selectors.
 
 ## Release invariants
 
-- Workspace crate, Python core, Studio, and frontend versions move together.
-  The binding's Rust dependency is exact; Studio accepts the current v5 major.
+- Workspace crate, Python core, Studio, and frontend versions move together
+  as calendar versions (`YYYY.M.D` release dates, for example `2026.9.22`).
+  The binding's Rust dependency is exact; Studio accepts the release's
+  calendar year, and release tags are annotated `calc-flow-python-v<version>`
+  at the current `main` head.
 - Core wheels contain only `calc_flow`, native module, metadata/SBOM, and
   license. Studio wheels contain only the Studio package/static assets,
   metadata, and license.

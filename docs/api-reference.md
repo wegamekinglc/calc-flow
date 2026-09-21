@@ -9,11 +9,11 @@ The versions below describe this checkout. Published package versions can lag
 the source; use the [source installation](getting-started.md#build-and-install-from-source)
 for the contracts documented here.
 
-| Surface          | Package or path           | Purpose                                    |
-|------------------|---------------------------|--------------------------------------------|
-| Python API       | `calc-flow-python==5.0.0` | Expressions, Arrow execution, integrations |
-| Rust core        | `calc-flow = "5.0.0"`     | Internal runtime and extension contracts   |
-| Local Studio API | `calc-flow-studio==5.0.0` | Loopback FastAPI service and React assets  |
+| Surface          | Package or path               | Purpose                                    |
+|------------------|-------------------------------|--------------------------------------------|
+| Python API       | `calc-flow-python==2026.9.22` | Expressions, Arrow execution, integrations |
+| Rust core        | `calc-flow = "2026.9.22"`     | Internal runtime and extension contracts   |
+| Local Studio API | `calc-flow-studio==2026.9.22` | Loopback FastAPI service and React assets  |
 
 For examples and lifecycle detail, see the [executable example guide](examples.md),
 [Rust runtime reference](rust-api.md), [Python API](python-api.md), and
@@ -523,11 +523,12 @@ manifest publication uses `CheckpointPublicationUnknownError`.
 ## Version and compatibility
 
 The Rust crate, Python binding, Studio package, and frontend are versioned
-`5.0.0` in this checkout. Project format version `3` and checkpoint-manifest version `3` are
+`2026.9.22` in this checkout. Project format version `3` and checkpoint-manifest version `3` are
 separate protocol values from the package version.
 
-Rust source migration requirements and exact package dependencies are recorded
-in the [5.0.0 changelog](../CHANGELOG.md#2026-09).
+Package versions use calendar versioning (`YYYY.M.D` release dates); the
+SemVer-to-5.0.0 alignment migration and exact package dependencies are
+recorded in the [2026-09 changelog](../CHANGELOG.md#2026-09).
 
 Projects accept strict format `3`; Studio serves `/api/v3`. See
 [projects and persistence](projects-guide.md) for validation and storage.

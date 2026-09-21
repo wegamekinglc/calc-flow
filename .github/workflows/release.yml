@@ -15,7 +15,7 @@ on:
         default: false
   push:
     tags:
-      - "v5.*"
+      - "calc-flow-python-v*"
 permissions:
   contents: read
 concurrency:
@@ -331,17 +331,21 @@ jobs:
           from pathlib import Path
 
           import calc_flow_studio
+          import tomllib
 
           app = calc_flow_studio.create_app()
           paths = [route.path for route in app.routes]
           assert "/api/v3/catalog" in app.openapi()["paths"]
           assert "/" in paths
           assert "/assets" in paths
+          with Path("pyproject.toml").open("rb") as stream:
+              version = tomllib.load(stream)["project"]["version"]
+          upper_bound = f"<{int(version.split('.')[0]) + 1}"
           requirements = requires("calc-flow-studio") or []
           assert any(
               requirement.lower().startswith("calc-flow-python")
-              and ">=5.0.0" in requirement
-              and "<6" in requirement
+              and f">={version}" in requirement
+              and upper_bound in requirement
               for requirement in requirements
           )
           index = next(route for route in app.routes if route.path == "/").endpoint()
