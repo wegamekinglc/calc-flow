@@ -27,10 +27,10 @@ paired-median classification retain the +5% threshold and `inconclusive` result.
 There are 240 timed observations if all six comparisons complete. Profile samples
 are separate and never enter these comparisons.
 
-| Side | Product ref | Original artifact, run 35596885420 |
-| --- | --- | --- |
-| A | `a594ad697a57947237dd289f3a1bc2272ef099e8` | `10636839917` |
-| B | `b7e92cc58bc5000be0db5e6ec9a2decec052feb5` | `10637665772` |
+| Side | Product ref                                | Original artifact, run 35596885420 |
+|------|--------------------------------------------|------------------------------------|
+| A    | `a594ad697a57947237dd289f3a1bc2272ef099e8` | `10636839917`                      |
+| B    | `b7e92cc58bc5000be0db5e6ec9a2decec052feb5` | `10637665772`                      |
 
 `contract.py` pins their wheel/native hashes. The existing release loader verifies
 the downloaded bytes; each worker also verifies its loaded native module. Missing

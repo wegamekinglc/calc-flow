@@ -14,7 +14,6 @@ from scripts.benchmark_suite.measure import _prepare, validate_sample
 from scripts.benchmark_suite.process import ROOT, command, install
 from scripts.dal301_groupby.contract import SEALS, cases
 from scripts.dal301_groupby.runtime import AuditWorker
-from scripts.profile_warm_stream import source_identity
 from scripts.toolkit import sha256_file, write_json
 
 PROFILE_ENV = {
@@ -99,6 +98,8 @@ def validate_build_settings(value: dict) -> None:
 async def build(side: str, source: Path, output: Path) -> int:
     output.mkdir(parents=True, exist_ok=True)
     try:
+        from scripts.profile_warm_stream import source_identity
+
         original = await source_identity(source)
         if original["git_sha"] != SEALS[side]["git_sha"] or not original["git_clean"]:
             raise ValueError("profile source is not the clean fixed A/B ref")

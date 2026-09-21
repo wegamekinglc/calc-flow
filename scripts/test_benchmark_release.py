@@ -1,17 +1,13 @@
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import json
 import tempfile
 import unittest
 from pathlib import Path
 from zipfile import ZipFile
 
-if importlib.util.find_spec("numpy") is None:
-    raise unittest.SkipTest("benchmark release tests require numpy (dev dependency)")
-
-from scripts.benchmark_suite.release import load_release  # noqa: E402
+from scripts.benchmark_suite.release import load_release
 
 
 class BenchmarkReleaseTests(unittest.TestCase):
