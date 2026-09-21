@@ -74,7 +74,8 @@ impl StreamAsofJoinOperator {
         bytes.extend_from_slice(&current.bytes()[..8]);
         bytes.extend_from_slice(&(remaining as u64).to_le_bytes());
         bytes.extend_from_slice(&current.bytes()[16..24]);
-        let bytes = copy_checkpoint_suffix(bytes, &current.bytes()[24 + removed..], context).await?;
+        let bytes =
+            copy_checkpoint_suffix(bytes, &current.bytes()[24 + removed..], context).await?;
         Ok(PreparedCheckpoint {
             segment: Some(StateSegment::new(bytes)),
             _workspace: workspace,
