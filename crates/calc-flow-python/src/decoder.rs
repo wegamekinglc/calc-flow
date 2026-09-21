@@ -12,32 +12,29 @@ use calc_flow::{
     ArrowFieldSpec, Batch, BatchMetadata, CalcFlowError, ConnectorError, ConnectorIdentity,
     ConnectorOperation, DecodeBounds, FormatDecoder, FormatIdentity, Result,
 };
-use datafusion::arrow::datatypes::DataType;
+use calc_flow_connectors::arrow_schema::schema_from_spec;
+use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
 use pyo3::prelude::*;
 use pyo3_arrow::PyTable;
 
 use crate::config::PythonRoot;
 use crate::error::to_py_err;
-use crate::udf::parse_arrow_type;
 
 /// The trusted provider namespace reported by Python-hosted decoders.
 const PROVIDER: &str = "calc-flow-python";
-
-/// The parsed `(name, DataType)` plan resolved from one explicit schema.
-type SchemaFields = Vec<(String, DataType)>;
 
 /// A [`FormatDecoder`] backed by one Python callable.
 ///
 /// The `pyarrow` module handle and the parsed explicit schema are fixed
 /// per source configuration, so both are cached on first use behind
 /// mutexes, mirroring `ProtobufCodec`'s plan cache; the per-message path
-/// only calls the callable and compares column names and types.
+/// validates and normalizes output to the source's exact schema.
 pub(crate) struct PythonKafkaDecoder {
     identity: FormatIdentity,
     root: Arc<PythonRoot>,
     pyarrow: Mutex<Option<Py<PyModule>>>,
-    schema_plan: Mutex<Option<(Vec<ArrowFieldSpec>, Arc<SchemaFields>)>>,
+    schema_plan: Mutex<Option<(Vec<ArrowFieldSpec>, SchemaRef)>>,
 }
 
 impl PythonKafkaDecoder {
@@ -82,9 +79,11 @@ impl PythonKafkaDecoder {
         bounds: &DecodeBounds,
         schema: &[ArrowFieldSpec],
     ) -> Result<Batch> {
-        for batch in &batches {
-            self.check_schema(batch, schema)?;
-        }
+        let expected = self.expected_schema(schema)?;
+        let batches = batches
+            .into_iter()
+            .map(|batch| self.normalize_schema(batch, expected.as_ref()))
+            .collect::<Result<Vec<_>>>()?;
         let rows: u64 = batches
             .iter()
             .map(|batch| u64::try_from(batch.num_rows()).unwrap_or(u64::MAX))
@@ -102,30 +101,34 @@ impl PythonKafkaDecoder {
         )
     }
 
-    fn check_schema(&self, batch: &RecordBatch, schema: &[ArrowFieldSpec]) -> Result<()> {
-        let Some(expected) = self.expected_fields(schema)? else {
-            return Ok(());
+    fn normalize_schema(
+        &self,
+        batch: RecordBatch,
+        expected: Option<&SchemaRef>,
+    ) -> Result<RecordBatch> {
+        let Some(expected) = expected else {
+            return Ok(batch);
         };
         let batch_schema = batch.schema();
         let fields = batch_schema.fields();
-        let agrees = fields.len() == expected.len()
+        let agrees = fields.len() == expected.fields().len()
             && fields
                 .iter()
-                .zip(expected.iter())
-                .all(|(field, (name, data_type))| {
-                    field.name() == name && field.data_type() == data_type
+                .zip(expected.fields())
+                .all(|(field, expected)| {
+                    field.name() == expected.name() && field.data_type() == expected.data_type()
                 });
         if !agrees {
             return Err(self.failure(
                 "decoded batch fields do not match the explicit schema in name and type",
             ));
         }
-        Ok(())
+        RecordBatch::try_new(Arc::clone(expected), batch.columns().to_vec())
+            .map_err(|error| self.failure(&error.to_string()))
     }
 
-    /// Resolves the parsed `(name, DataType)` list for one explicit
-    /// schema, cached by spec so repeat decodes skip `parse_arrow_type`.
-    fn expected_fields(&self, spec: &[ArrowFieldSpec]) -> Result<Option<Arc<SchemaFields>>> {
+    /// Caches the same exact schema the Kafka source advertises.
+    fn expected_schema(&self, spec: &[ArrowFieldSpec]) -> Result<Option<SchemaRef>> {
         if spec.is_empty() {
             return Ok(None);
         }
@@ -138,19 +141,7 @@ impl PythonKafkaDecoder {
                 return Ok(Some(Arc::clone(plan)));
             }
         }
-        let plan = Arc::new(
-            spec.iter()
-                .map(|field| {
-                    let data_type = parse_arrow_type(&field.data_type).ok_or_else(|| {
-                        self.failure(&format!(
-                            "schema field {} has unsupported data type {:?}",
-                            field.name, field.data_type
-                        ))
-                    })?;
-                    Ok((field.name.clone(), data_type))
-                })
-                .collect::<Result<Vec<_>>>()?,
-        );
+        let plan = schema_from_spec(spec).map_err(|error| self.failure(&error.to_string()))?;
         *cached = Some((spec.to_vec(), Arc::clone(&plan)));
         Ok(Some(plan))
     }
@@ -214,10 +205,13 @@ fn python_output_to_batches(
     if !is_instance_of(output, &batch_type)? && !is_instance_of(output, &table_type)? {
         return Err("decoder output must be a pyarrow.RecordBatch or pyarrow.Table".into());
     }
-    let (batches, _schema) = output
+    let (mut batches, schema) = output
         .extract::<PyTable>()
         .map_err(|error| error.to_string())?
         .into_inner();
+    if batches.is_empty() {
+        batches.push(RecordBatch::new_empty(schema));
+    }
     Ok(batches)
 }
 
@@ -263,6 +257,214 @@ mod tests {
                 nullable: false,
             },
         ]
+    }
+
+    #[test]
+    fn test_declared_nullability_normalizes_all_actual_nullability_combinations() {
+        Python::initialize();
+        Python::attach(|py| {
+            let module = PyModule::from_code(
+                py,
+                c"import pyarrow as pa\n\ndef decode(payload):\n    schema = pa.schema([pa.field('value', pa.int64(), nullable=payload == b'nullable')])\n    return pa.record_batch([[1]], schema=schema)\n",
+                c"nullable_decode.py",
+                c"nullable_decode",
+            )
+            .unwrap();
+            let (decoder, _root) = PythonKafkaDecoder::new(
+                py,
+                "nullable",
+                "1",
+                module.getattr("decode").unwrap().unbind(),
+            )
+            .unwrap();
+            let bounds = DecodeBounds::new(16, 1 << 20).unwrap();
+            for nullable in [false, true] {
+                let spec = vec![ArrowFieldSpec {
+                    name: "value".into(),
+                    data_type: "int64".into(),
+                    nullable,
+                }];
+                let expected = schema_from_spec(&spec).unwrap();
+                for payload in [b"nullable".as_slice(), b"required".as_slice()] {
+                    let batch = decoder.decode(payload, &bounds, &spec).unwrap();
+                    assert_eq!(batch.table_payload().unwrap().schema(), &expected);
+                    assert_eq!(batch.num_rows(), 1);
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn test_declared_non_nullable_fields_reject_nulls() {
+        Python::initialize();
+        Python::attach(|py| {
+            let module = PyModule::from_code(
+                py,
+                c"import pyarrow as pa\n\ndef decode(payload):\n    schema = pa.schema([pa.field('value', pa.int64(), nullable=payload != b'required')])\n    batch = pa.record_batch([[None]], schema=schema)\n    if payload == b'table':\n        return pa.Table.from_batches([pa.record_batch([[1]], schema=schema), batch])\n    return batch\n",
+                c"null_decode.py",
+                c"null_decode",
+            ).unwrap();
+            let (decoder, _root) = PythonKafkaDecoder::new(
+                py,
+                "nulls",
+                "1",
+                module.getattr("decode").unwrap().unbind(),
+            )
+            .unwrap();
+            let bounds = DecodeBounds::new(16, 1 << 20).unwrap();
+            for nullable in [false, true] {
+                let spec = vec![ArrowFieldSpec {
+                    name: "value".into(),
+                    data_type: "int64".into(),
+                    nullable,
+                }];
+                for payload in [
+                    b"batch".as_slice(),
+                    b"table".as_slice(),
+                    b"required".as_slice(),
+                ] {
+                    let result = decoder.decode(payload, &bounds, &spec);
+                    if nullable && payload != b"required" {
+                        let batch = result.unwrap();
+                        let records = batch.table_payload().unwrap().batches();
+                        assert_eq!(records.last().unwrap().column(0).null_count(), 1);
+                    } else {
+                        let error =
+                            result.expect_err("required fields must reject actual NULL values");
+                        assert!(matches!(error, CalcFlowError::Connector(_)), "{error}");
+                        assert!(error.to_string().contains("value"), "{error}");
+                        assert!(error.to_string().contains("null"), "{error}");
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn test_declared_schema_normalizes_callback_metadata_without_mutation() {
+        Python::initialize();
+        Python::attach(|py| {
+            let module = PyModule::from_code(
+                py,
+                c"import pyarrow as pa\n\nschema = pa.schema([pa.field('value', pa.int64(), nullable=False, metadata={'unit': 'count'})], metadata={'producer': 'callback'})\noriginal = pa.record_batch([[1]], schema=schema)\ndef decode(payload):\n    return original\n",
+                c"metadata_decode.py",
+                c"metadata_decode",
+            ).unwrap();
+            let (decoder, _root) = PythonKafkaDecoder::new(
+                py,
+                "metadata",
+                "1",
+                module.getattr("decode").unwrap().unbind(),
+            )
+            .unwrap();
+            let bounds = DecodeBounds::new(16, 1 << 20).unwrap();
+            let spec = vec![ArrowFieldSpec {
+                name: "value".into(),
+                data_type: "int64".into(),
+                nullable: false,
+            }];
+            let original = decoder.decode(b"ignored", &bounds, &[]).unwrap();
+            let normalized = decoder.decode(b"ignored", &bounds, &spec).unwrap();
+            let expected = schema_from_spec(&spec).unwrap();
+            assert_eq!(normalized.table_payload().unwrap().schema(), &expected);
+            let again = decoder.decode(b"ignored", &bounds, &[]).unwrap();
+            let schema = again.table_payload().unwrap().schema();
+            assert_eq!(schema, original.table_payload().unwrap().schema());
+            assert_eq!(schema.metadata().get("producer").unwrap(), "callback");
+            assert_eq!(schema.field(0).metadata().get("unit").unwrap(), "count");
+        });
+    }
+
+    #[test]
+    fn test_empty_table_and_record_batch_preserve_schema() {
+        Python::initialize();
+        Python::attach(|py| {
+            let module = PyModule::from_code(
+                py,
+                c"import pyarrow as pa\n\nschema = pa.schema([pa.field('value', pa.int64(), nullable=False, metadata={'unit': 'count'})], metadata={'producer': 'callback'})\ndef decode(payload):\n    if payload == b'batch':\n        return pa.record_batch([[]], schema=schema)\n    return pa.Table.from_batches([], schema=schema)\n",
+                c"empty_decode.py",
+                c"empty_decode",
+            ).unwrap();
+            let (decoder, _root) = PythonKafkaDecoder::new(
+                py,
+                "empty",
+                "1",
+                module.getattr("decode").unwrap().unbind(),
+            )
+            .unwrap();
+            let bounds = DecodeBounds::new(16, 1 << 20).unwrap();
+            let spec = vec![ArrowFieldSpec {
+                name: "value".into(),
+                data_type: "int64".into(),
+                nullable: false,
+            }];
+            for fields in [spec.as_slice(), &[]] {
+                let empty_batch = decoder.decode(b"batch", &bounds, fields).unwrap();
+                let empty_table = decoder.decode(b"table", &bounds, fields).unwrap();
+                let table = empty_table.table_payload().unwrap();
+                assert_eq!(empty_table.num_rows(), 0);
+                assert_eq!(table.batches().len(), 1);
+                assert_eq!(
+                    table.schema(),
+                    empty_batch.table_payload().unwrap().schema()
+                );
+                assert!(!table.schema().field(0).is_nullable());
+                if fields.is_empty() {
+                    assert_eq!(
+                        table.schema().metadata().get("producer").unwrap(),
+                        "callback"
+                    );
+                    assert_eq!(
+                        table.schema().field(0).metadata().get("unit").unwrap(),
+                        "count"
+                    );
+                }
+            }
+            for (name, data_type) in [("wrong", "int64"), ("value", "string")] {
+                let wrong = vec![ArrowFieldSpec {
+                    name: name.into(),
+                    data_type: data_type.into(),
+                    nullable: false,
+                }];
+                for payload in [b"batch".as_slice(), b"table".as_slice()] {
+                    let error = decoder.decode(payload, &bounds, &wrong).unwrap_err();
+                    assert!(matches!(error, CalcFlowError::Connector(_)), "{error}");
+                    assert!(error.to_string().contains("name and type"), "{error}");
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn test_fieldless_output_preserves_rows_and_decode_bounds() {
+        Python::initialize();
+        Python::attach(|py| {
+            let module = PyModule::from_code(
+                py,
+                c"import pyarrow as pa\n\ndef decode(payload):\n    batch = pa.record_batch([[1, 2]], names=['value']).select([])\n    return batch if payload == b'batch' else pa.Table.from_batches([batch])\n",
+                c"fieldless_decode.py",
+                c"fieldless_decode",
+            ).unwrap();
+            let (decoder, _root) = PythonKafkaDecoder::new(
+                py,
+                "fieldless",
+                "1",
+                module.getattr("decode").unwrap().unbind(),
+            )
+            .unwrap();
+            for payload in [b"batch".as_slice(), b"table".as_slice()] {
+                let batch = decoder
+                    .decode(payload, &DecodeBounds::new(2, 1024).unwrap(), &[])
+                    .unwrap();
+                assert_eq!(batch.num_rows(), 2);
+                assert!(batch.table_payload().unwrap().schema().fields().is_empty());
+                assert!(
+                    decoder
+                        .decode(payload, &DecodeBounds::new(1, 1024).unwrap(), &[])
+                        .is_err()
+                );
+            }
+        });
     }
 
     #[test]
@@ -315,6 +517,12 @@ mod tests {
             assert!(
                 decoder.decode(b"1|2|10.0", &bounds, &mismatched).is_err(),
                 "schema disagreement fails closed"
+            );
+            assert!(
+                decoder
+                    .decode(b"1|2|10.0", &bounds, &order_schema()[1..])
+                    .is_err(),
+                "column count disagreement fails closed"
             );
         });
     }

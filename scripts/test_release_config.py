@@ -205,6 +205,7 @@ class ReleaseConfigTests(unittest.TestCase):
         openapi = json.loads((ROOT / "web-ui/openapi.json").read_text(encoding="utf-8"))
         self.assertEqual(openapi["info"]["version"], version)
 
+    def test_release_workflows_use_calver_bounds_and_preserve_gates(self) -> None:
         release_text = "\n".join(
             (ROOT / path).read_text(encoding="utf-8")
             for path in (
@@ -465,7 +466,7 @@ class ReleaseConfigTests(unittest.TestCase):
         compile_step = rust_core.split("      - name: Compile Rust tests\n", 1)[
             1
         ].split("      - name:", 1)[0]
-        self.assertIn("timeout-minutes: 30", compile_step)
+        self.assertIn("timeout-minutes: 45", compile_step)
         self.assertIn(
             "run: python3.13 scripts/run_rust_tests.py --no-run", compile_step
         )

@@ -807,6 +807,10 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
+#[cfg(all(test, feature = "connector-kafka"))]
+#[path = "config/kafka_tests.rs"]
+mod kafka_tests;
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
