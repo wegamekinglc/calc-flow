@@ -9,6 +9,17 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-22: Package versions switch from aligned SemVer to calendar
+  versioning `YYYY.M.D` (release dates, starting at `2026.9.22`). Workspace
+  crate, Python core, Studio, and frontend still move together; native
+  internal crate dependencies pin the date version exactly, and Studio
+  requires `calc-flow-python` within the release's calendar year
+  (`>=2026.9.22,<2027`) instead of the removed `>=5.0.0,<6` major bound.
+  Release tags become annotated `calc-flow-python-v<version>` at the current
+  `main` head; the workflow trigger is `calc-flow-python-v*`. Historical
+  `v4.0.0`/`v5.0.0` tags remain valid performance baselines. PyPI
+  immutability now means retrying under the next calendar date.
+
 - 2026-09-21: Enforce the complete declared schema for Python Kafka custom
   decoder output (DAL-296 / DAL-297). Field count, order, names, and types
   remain strict; valid columns adopt the source's nullability and metadata,
