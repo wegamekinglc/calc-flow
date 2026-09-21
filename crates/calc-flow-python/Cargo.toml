@@ -15,7 +15,7 @@ crate-type = ["cdylib"]
 [features]
 default = ["connector-file"]
 connector-file = ["dep:calc-flow-connectors", "calc-flow-connectors/file"]
-connector-kafka = ["dep:calc-flow-connectors", "calc-flow-connectors/kafka"]
+connector-kafka = ["dep:calc-flow-connectors", "calc-flow-connectors/kafka", "dep:rdkafka"]
 connector-postgresql = ["dep:calc-flow-connectors", "calc-flow-connectors/postgresql"]
 connector-mysql = ["dep:calc-flow-connectors", "calc-flow-connectors/mysql"]
 connector-clickhouse = ["dep:calc-flow-connectors", "calc-flow-connectors/clickhouse"]
@@ -35,11 +35,11 @@ parking_lot.workspace = true
 pyo3 = { version = "0.28.3", features = ["abi3-py313"] }
 pyo3-async-runtimes = { version = "0.28.0", features = ["tokio-runtime"] }
 pyo3-arrow = "0.17.0"
+rdkafka = { version = "=0.39.0", default-features = false, features = ["cmake-build", "libz-static", "tokio"], optional = true }
 serde_json.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
-rdkafka = { version = "=0.39.0", default-features = false, features = ["cmake-build", "libz-static", "tokio"] }
 tempfile.workspace = true
 
 [lints]
