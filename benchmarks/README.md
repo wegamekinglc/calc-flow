@@ -1,7 +1,7 @@
 # Benchmarks
 
 The [unified CI suite](../docs/benchmark-suite.md) runs the overhead, small and
-standard Python scales, all five Rust bench targets, Studio, frontend and
+standard Python scales, every registered Rust bench target, Studio, frontend and
 isolated stream lifecycle measurements. It adds SQL/native-streaming and
 external-engine comparisons at every decade from 10 to 10,000,000 rows, plus warm-state
 incremental measurements. Every non-documentation Linux PR/main run publishes
@@ -75,6 +75,29 @@ The v2 suite covers DataFusion projections, filters, aggregates, joins,
 windows, trusted Python scalar UDFs, explicit session configuration, and
 repeated execution of a compiled plan. The runtime scenario covers graph
 fan-out.
+
+## Join materialization benchmark
+
+`stream_join_materialization` covers four narrow/wide payload, fan-out and
+slow-sink cases with a real bounded edge. The maintained commands and case
+dimensions are in [Join materialization measurements](../docs/benchmark-suite.md#join-materialization-measurements).
+Normal mode produces one full row oracle and 20 samples per case;
+`--check` or `--test` produces oracle-only reports with no performance samples.
+The Rust-suite loader preserves configuration, oracle and raw observations,
+validating sample counts, output counts, timings and diagnostic fields.
+
+Timing includes incoming-batch processing, output materialization, the edge
+and sink drain/delay. Setup, left-state preload and full row validation stay
+outside performance samples. Keep cumulative allocation, active allocation
+peak, RSS, logical chunk/queue bytes and blocked-send metrics distinct.
+State, match descriptors, nested/dictionary preflight and sink-held chunks
+remain separate costs; [Join output and recovery](../docs/streaming-guide.md#join-output-materialization-and-recovery)
+does not promise total RSS below the edge budget or rollback of accepted output.
+
+Candidate-only samples establish coverage and whole-suite ABBA deltas remain
+informational. Version verdicts require separately paired observations and
+their actual source/build identities; oracle-only reports and later heads
+cannot substitute for those measurements.
 
 ## Array measurement scopes
 
