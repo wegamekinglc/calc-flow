@@ -2,6 +2,9 @@
 
 #![cfg(feature = "mysql")]
 
+#[path = "mysql_connector/checkpoint.rs"]
+mod checkpoint;
+
 use calc_flow::{ConnectorIdentity, ConnectorRegistry, JsonMap};
 use calc_flow_connectors::register_mysql_connectors;
 use serde_json::json;

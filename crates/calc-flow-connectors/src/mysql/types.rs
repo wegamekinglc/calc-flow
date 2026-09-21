@@ -196,8 +196,7 @@ fn typed_array<T: Array + 'static>(array: &ArrayRef) -> Result<&T> {
 }
 
 pub(super) fn cell(array: &ArrayRef, row: usize) -> Result<Value> {
-    // Column types are validated per batch before staging; the per-cell value
-    // conversion here is the single conversion performed at write time.
+    // Share value validation between staging, prepared recovery, and writes.
     if array.is_null(row) {
         return Ok(Value::NULL);
     }

@@ -596,12 +596,13 @@ fn upsert_clause(table: &str, columns: &[String]) -> String {
 }
 
 fn validate_record(record: &RecordBatch) -> Result<()> {
-    // Column types are per-batch schema properties; per-cell value conversion
-    // runs once at write time and surfaces value errors there.
-    record
-        .columns()
-        .iter()
-        .try_for_each(|array| types::validate_type(array.data_type()))
+    for array in record.columns() {
+        types::validate_type(array.data_type())?;
+        for row in 0..record.num_rows() {
+            types::cell(array, row)?;
+        }
+    }
+    Ok(())
 }
 
 fn schema_hash(schema: &Schema) -> String {
@@ -774,21 +775,61 @@ mod tests {
         .unwrap()
     }
 
-    #[test]
-    fn staging_defers_per_cell_value_errors_to_write_time() {
-        let record = RecordBatch::try_from_iter([(
-            "price",
-            Arc::new(arrow::array::Float64Array::from(vec![1.0, f64::NAN]))
-                as arrow::array::ArrayRef,
-        )])
-        .unwrap();
-        let batch =
-            Batch::table(vec![record.clone()], calc_flow::BatchMetadata::default()).unwrap();
-        let mut sink = sink();
-        sink.stage(&batch).unwrap();
-        let insert = sink.insert.as_ref().unwrap();
-        assert!(prepare_insert(&sink.config, insert, &record, 0).is_err());
-        assert!(row_values(&record, 1).is_err());
+    #[tokio::test]
+    async fn staging_rejects_invalid_values_before_preparing_without_changing_epoch() {
+        use arrow::array::{
+            ArrayRef, Date32Array, Float32Array, Float64Array, TimestampMicrosecondArray,
+        };
+
+        let arrays: Vec<ArrayRef> = vec![
+            Arc::new(Float32Array::from(vec![1.0, f32::NAN])),
+            Arc::new(Float32Array::from(vec![1.0, f32::INFINITY])),
+            Arc::new(Float32Array::from(vec![1.0, f32::NEG_INFINITY])),
+            Arc::new(Float64Array::from(vec![1.0, f64::NAN])),
+            Arc::new(Float64Array::from(vec![1.0, f64::INFINITY])),
+            Arc::new(Float64Array::from(vec![1.0, f64::NEG_INFINITY])),
+            Arc::new(Date32Array::from(vec![0, i32::MAX])),
+            Arc::new(Date32Array::from(vec![0, -354_651])),
+            Arc::new(TimestampMicrosecondArray::from(vec![0, i64::MAX])),
+            Arc::new(TimestampMicrosecondArray::from(vec![
+                0,
+                253_402_300_800_000_000,
+            ])),
+        ];
+        for array in arrays {
+            let record = RecordBatch::try_from_iter([("value", array)]).unwrap();
+            let valid = Batch::table(
+                vec![record.slice(0, 1)],
+                calc_flow::BatchMetadata::default(),
+            )
+            .unwrap();
+            let invalid = Batch::table(vec![record], calc_flow::BatchMetadata::default()).unwrap();
+            let mut sink = sink();
+            sink.active = Some(Epoch::INITIAL);
+            sink.stage(&valid).unwrap();
+            let encoded = sink.encoder.as_ref().unwrap().get_ref().clone();
+            let memory = sink.memory;
+
+            let error = sink.stage(&invalid).unwrap_err();
+            assert!(matches!(error, calc_flow::CalcFlowError::Connector(_)));
+            assert_eq!(sink.rows, 1);
+            assert_eq!(sink.memory, memory);
+            assert_eq!(sink.records, valid.table_payload().unwrap().batches());
+            assert_eq!(sink.encoder.as_ref().unwrap().get_ref(), &encoded);
+            assert!(sink.prepared.is_none());
+
+            sink.stage(&valid).unwrap();
+            let evidence = sink.pre_commit(Epoch::INITIAL).await.unwrap();
+            let (records, _) = sink
+                .validate_prepared(
+                    "recover",
+                    Epoch::INITIAL,
+                    &evidence,
+                    sink.prepared.as_ref().unwrap(),
+                )
+                .unwrap();
+            assert_eq!(records.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
+        }
     }
 
     #[tokio::test]
