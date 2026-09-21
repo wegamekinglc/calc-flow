@@ -208,12 +208,19 @@ def _lower_program(
     edges: list[dict[str, object]] = []
     fanout_ids: dict[str, str] = {}
     if fanout:
+        declared_ids = frozenset(
+            _cstr(value._node.attr("name"))
+            for value in program.inputs
+            if value._node.digest in consumed
+        )
         for value in program.inputs:
             input_node = value._node
             if input_node.digest not in consumed:
                 continue
             input_name = _relational_source_name(
-                input_node, frozenset(name for name, _ in program.outputs)
+                input_node,
+                frozenset(name for name, _ in program.outputs),
+                fallback_reserved_ids=declared_ids | frozenset(fanout_ids.values()),
             )
             schema = _schema_fields(input_node.attr("schema"))
             pinned = (
