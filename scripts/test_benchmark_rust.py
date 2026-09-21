@@ -4,6 +4,7 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import AsyncMock, patch
 
 from scripts.benchmark_suite.legacy import combine_blocks
 from scripts.benchmark_suite.rust import (
@@ -11,8 +12,149 @@ from scripts.benchmark_suite.rust import (
     _with_fingerprints,
     allocation_rows,
     clear_stale_bench_binary,
+    measure_rust,
+    run_binary,
     sql_rows,
 )
+
+
+class AddedRustTargetTests(unittest.IsolatedAsyncioTestCase):
+    async def test_removed_target_still_requires_an_explicit_migration(self):
+        binaries = [
+            {"core": Path("core"), "previous": Path("previous")},
+            {"core": Path("core")},
+        ]
+        with (
+            patch(
+                "scripts.benchmark_suite.rust.build_binaries",
+                AsyncMock(side_effect=binaries),
+            ),
+            patch("scripts.benchmark_suite.rust._rust_provenance", return_value={}),
+            self.assertRaisesRegex(ValueError, "targets removed"),
+        ):
+            await measure_rust(
+                {"id": "rust", "family": "rust"},
+                {},
+                {"baseline": Path("base"), "candidate": Path("head")},
+                Path("target/test"),
+            )
+
+    async def test_materialization_collector_retains_memory_and_backpressure_samples(
+        self,
+    ):
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            samples = [
+                {
+                    **dict.fromkeys(
+                        (
+                            "allocation_total_bytes",
+                            "allocation_count",
+                            "rss_before_bytes",
+                            "rss_first_emit_bytes",
+                            "chunks",
+                            "max_chunk_bytes",
+                            "queue_high_water_bytes",
+                        ),
+                        1,
+                    ),
+                    "rss_available": True,
+                    "blocked_seconds": 0.0,
+                    "seconds": 0.1,
+                    "output_rows": 100_000,
+                    "allocation_peak_bytes": 123,
+                    "rss_peak_bytes": 456,
+                    "blocked_sends": 9,
+                }
+                for _ in range(20)
+            ]
+            report = {
+                "schema": "calc-flow.join-materialization.v1",
+                "scope": "operator-bounded-edge",
+                "cases": [
+                    {
+                        "name": "wide_f100_slow",
+                        "config": {"incoming": 1000, "fan": 100},
+                        "oracle": {"validated_all_rows": True, "output_rows": 100_000},
+                        "samples": samples,
+                    }
+                ],
+            }
+
+            async def command(argv, **_kwargs):
+                self.assertIn("--output", argv)
+                Path(argv[argv.index("--output") + 1]).write_text(json.dumps(report))
+
+            with patch("scripts.benchmark_suite.rust.command", side_effect=command):
+                rows = await run_binary(
+                    "stream_join_materialization",
+                    root / "binary",
+                    root,
+                    root,
+                    "candidate",
+                )
+            row = rows["stream_join_materialization/wide_f100_slow"]
+            self.assertEqual(row["rows"], 100_000)
+            self.assertEqual(row["samples"], [0.1] * 20)
+            self.assertEqual(row["scope"], "operator-bounded-edge")
+            self.assertEqual(row["metadata"]["observations"], samples)
+
+    async def test_added_target_is_new_coverage_without_fabricating_baseline(self):
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            binary = root / "binary"
+            binary.write_bytes(b"fixture")
+            binaries = {
+                "baseline": {"core": binary},
+                "candidate": {"core": binary, "stream_join_materialization": binary},
+            }
+            row = {
+                "rows": 100_000,
+                "scope": "operator-bounded-edge",
+                "metadata": {},
+                "samples": [0.1],
+            }
+
+            async def block(_binaries, _source, _output, _stamps, side):
+                return (
+                    {"stream_join_materialization/wide_f100_slow": row}
+                    if side == "candidate"
+                    else {},
+                    [],
+                )
+
+            with (
+                patch(
+                    "scripts.benchmark_suite.rust.build_binaries",
+                    AsyncMock(side_effect=list(binaries.values())),
+                ),
+                patch("scripts.benchmark_suite.rust._rust_provenance", return_value={}),
+                patch(
+                    "scripts.benchmark_suite.rust.declared_migrations", return_value={}
+                ),
+                patch(
+                    "scripts.benchmark_suite.rust._stamp_fingerprints",
+                    return_value={"baseline": {}, "candidate": {}},
+                ),
+                patch("scripts.benchmark_suite.rust._rust_block", side_effect=block),
+                patch(
+                    "scripts.benchmark_suite.rust._allocation_reports",
+                    AsyncMock(return_value={}),
+                ),
+                patch("scripts.benchmark_suite.rust.allocation_rows", return_value=[]),
+            ):
+                result = await measure_rust(
+                    {"id": "rust", "family": "rust"},
+                    {},
+                    {"baseline": root, "candidate": root},
+                    root,
+                )
+            self.assertEqual(result["errors"], [])
+            case = result["cases"][0]
+            self.assertEqual(case["comparison"], "new")
+            self.assertEqual(case["result"]["verdict"], "new-coverage")
+            self.assertEqual(case["baseline"], [])
+            self.assertEqual(case["candidate"], [[0.1], [0.1]])
 
 
 def legacy_sql_report() -> dict:

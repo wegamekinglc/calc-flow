@@ -9,6 +9,7 @@ import tomllib
 from pathlib import Path
 
 from scripts.benchmark_suite.catalog import CONTRACT
+from scripts.benchmark_suite.join_materialization import materialization_rows
 from scripts.benchmark_suite.legacy import combine_blocks
 from scripts.benchmark_suite.migrations import declared_migrations, load_migrations
 from scripts.benchmark_suite.normalize import criterion_rows, read_json
@@ -160,6 +161,15 @@ async def run_binary(
     target: str, binary: Path, source: Path, output: Path, side: str
 ) -> dict:
     environment = {**child_environment(), "CRITERION_HOME": str(output / "criterion")}
+    if target == "stream_join_materialization":
+        path = output / "materialization.json"
+        await command(
+            [str(binary), "--output", str(path)],
+            cwd=source,
+            log=output / "run.log",
+            env=environment,
+        )
+        return materialization_rows(path)
     if target == "sql_datafusion_performance":
         path = output / "sql.json"
         await command(
@@ -295,9 +305,9 @@ async def measure_rust(shard: dict, releases: dict, roots: dict, output: Path) -
         for side, source in roots.items()
     }
     provenance = _rust_provenance(roots, output)
-    if set(binaries["baseline"]) != set(binaries["candidate"]):
+    if set(binaries["baseline"]) - set(binaries["candidate"]):
         raise ValueError(
-            "Rust benchmark targets changed; an explicit migration is required"
+            "Rust benchmark targets removed; an explicit migration is required"
         )
     blocks = {side: [] for side in roots}
     errors = []
