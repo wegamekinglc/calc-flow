@@ -142,10 +142,7 @@ impl JoinOutput<'_> {
         let mut bytes = 0_usize;
         for (index, pair) in self.matched.iter().enumerate() {
             let row_bytes = incoming[pair.pos].saturating_add(opposite[pair.opposite_index]);
-            if index > start
-                && (index - start >= budget.max_rows
-                    || bytes.saturating_add(row_bytes) > budget.max_bytes)
-            {
+            if nested_range_is_full(start..index, bytes, row_bytes, budget) {
                 self.validate_nested_range(start..index, budget, &mut ranges)?;
                 start = index;
                 bytes = 0;
@@ -177,6 +174,17 @@ impl JoinOutput<'_> {
         }
         Ok(())
     }
+}
+
+fn nested_range_is_full(
+    range: Range<usize>,
+    bytes: usize,
+    row_bytes: usize,
+    budget: EdgeBudget,
+) -> bool {
+    range.start < range.end
+        && (range.end - range.start >= budget.max_rows
+            || bytes.saturating_add(row_bytes) > budget.max_bytes)
 }
 
 fn flat_rows<'a>(records: impl Iterator<Item = &'a RecordBatch>) -> Result<Option<Vec<FlatRow>>> {

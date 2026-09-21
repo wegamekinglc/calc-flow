@@ -337,7 +337,8 @@ fn main() {
         worker();
         return;
     }
-    let arguments = std::env::args().collect::<Vec<_>>();
+    // Arguments select local benchmark mode/report paths, never authorization or credentials.
+    let arguments = std::env::args().collect::<Vec<_>>(); // nosemgrep: args
     let check_only = arguments
         .iter()
         .any(|arg| arg == "--check" || arg == "--test");
