@@ -6,6 +6,7 @@ import copy
 import json
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import patch
 
@@ -35,16 +36,83 @@ class CoverageRecoveryTests(unittest.TestCase):
         self.assertIn(recovery.SOURCE_SHA, workflow)
         publish = workflow.split("  publish:\n", 1)[1]
         self.assertIn("needs: [rust, python-studio]", publish)
-        self.assertLess(publish.index("--manifest"), publish.index("flag-name: rust"))
         self.assertLess(
-            publish.index("flag-name: studio"), publish.index("parallel-finished: true")
+            publish.index("--manifest"), publish.index("Report rust measured")
         )
-        self.assertEqual(publish.count("git-commit: ${{ env.SOURCE_SHA }}"), 4)
-        self.assertEqual(publish.count("build-number: ${{ github.run_id }}"), 4)
+        self.assertLess(
+            publish.index("Report studio measured"), publish.index("Finish only")
+        )
+        self.assertIn(f"COVERALLS_GIT_COMMIT: {recovery.SOURCE_SHA}", publish)
+        self.assertIn("COVERALLS_GIT_BRANCH: main", publish)
+        self.assertEqual(publish.count('--build-number "$GITHUB_RUN_ID"'), 7)
         self.assertNotIn("carryforward:", workflow)
         self.assertNotIn("compare-sha:", workflow)
         self.assertNotIn("continue-on-error:", workflow)
         self.assertIn("github.run_attempt == 1", workflow)
+
+    def test_publication_preflights_formats_from_the_measured_source_directory(self):
+        root = Path(__file__).resolve().parents[1]
+        workflow = (root / ".github/workflows/coverage-recovery.yml").read_text(
+            encoding="utf-8"
+        )
+        publish = workflow.split("  publish:\n", 1)[1]
+        self.assertIn("working-directory: source", workflow)
+        self.assertIn("gh release download v0.6.22", publish)
+        self.assertIn("sha256sum --check --strict", publish)
+        self.assertLess(
+            publish.index("--dry-run"), publish.index("Report rust measured")
+        )
+        self.assertEqual(publish.count("--dry-run"), 3)
+        self.assertNotIn("--base-path source", publish)
+        self.assertNotIn("base-path: source", publish)
+        self.assertIn("--base-path web-ui/backend", publish)
+        self.assertNotIn("--allow-empty", publish)
+        self.assertNotIn("--no-fail", publish)
+
+    def test_python_report_maps_wheel_paths_without_changing_measurements(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            code = source / "python/calc_flow/example.py"
+            code.parent.mkdir(parents=True)
+            code.write_text("answer = 42\n", encoding="utf-8")
+            name = ".venv/lib/python3.13/site-packages/calc_flow/example.py"
+            raw = (
+                f'<coverage line-rate="0.5"><class filename="{name}"><lines>'
+                '<line number="1" hits="3"/><line number="2" hits="0"/>'
+                "</lines></class></coverage>"
+            )
+            original = source / "coverage.xml"
+            original.write_text(raw, encoding="utf-8")
+            output = source / "mapped.xml"
+            result = recovery.prepare_python_report(source, output)
+            self.assertEqual(original.read_text(encoding="utf-8"), raw)
+            mapped = ET.parse(output).getroot()
+            self.assertEqual(mapped.attrib, {"line-rate": "0.5"})
+            self.assertEqual(
+                mapped.find("class").get("filename"), "python/calc_flow/example.py"
+            )
+            self.assertEqual(
+                [line.attrib for line in mapped.findall(".//line")],
+                [{"number": "1", "hits": "3"}, {"number": "2", "hits": "0"}],
+            )
+            self.assertEqual(result["paths"][name], "python/calc_flow/example.py")
+
+    def test_python_report_rejects_unknown_or_escaping_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            for name in (
+                "elsewhere.py",
+                ".venv/lib/python3.13/site-packages/calc_flow/../../secret.py",
+                ".venv/lib/python3.13/site-packages/calc_flow/missing.py",
+            ):
+                with self.subTest(name=name):
+                    (source / "coverage.xml").write_text(
+                        f'<coverage><class filename="{name}"/></coverage>',
+                        encoding="utf-8",
+                    )
+                    with self.assertRaises(ValueError):
+                        recovery.prepare_python_report(source, source / "mapped.xml")
+                    self.assertFalse((source / "mapped.xml").exists())
 
     def test_workflow_retains_full_coverage_commands_and_services(self):
         root = Path(__file__).resolve().parents[1]

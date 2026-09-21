@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import xml.etree.ElementTree as ET
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -92,6 +93,40 @@ def seal(
     return {**identity, "reports": reports}
 
 
+def prepare_python_report(source: Path, output: Path) -> dict:
+    raw = source / REPORTS["python"]
+    if raw.resolve() == output.resolve():
+        raise ValueError("the original report must remain unchanged")
+    tree = ET.parse(raw)
+    prefix = ".venv/lib/python3.13/site-packages/calc_flow/"
+    paths = {}
+    digests = {}
+    for entry in tree.findall(".//class"):
+        original = entry.attrib["filename"]
+        suffix = Path(original.removeprefix(prefix))
+        mapped = Path("python/calc_flow") / suffix
+        if (
+            not original.startswith(prefix)
+            or suffix.is_absolute()
+            or ".." in suffix.parts
+            or suffix.suffix != ".py"
+            or not (source / mapped).is_file()
+        ):
+            raise ValueError(f"unmapped Python coverage path: {original}")
+        paths[original] = mapped.as_posix()
+        digests[mapped.as_posix()] = sha256_file(source / mapped)
+        entry.set("filename", mapped.as_posix())
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("xb") as stream:
+        tree.write(stream, encoding="utf-8", xml_declaration=True)
+    return {
+        "raw_sha256": sha256_file(raw),
+        "mapped_sha256": sha256_file(output),
+        "paths": paths,
+        "source_sha256": digests,
+    }
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, required=True)
@@ -100,8 +135,12 @@ def main(argv: list[str] | None = None) -> None:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--flag", choices=REPORTS, action="append", default=[])
     mode.add_argument("--manifest", type=Path, action="append")
+    mode.add_argument("--python-report", type=Path)
     args = parser.parse_args(argv)
-    if args.manifest:
+    if args.python_report:
+        identity = record(args.source, args.control, os.environ)
+        result = {**identity, **prepare_python_report(args.source, args.python_report)}
+    elif args.manifest:
         records = [
             json.loads(path.read_text(encoding="utf-8")) for path in args.manifest
         ]

@@ -258,6 +258,10 @@ jobs:
     needs: [rust, python-studio]
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      COVERALLS_GIT_COMMIT: 2fcc36fd224dd1c8a9f6396bddd5fbe0b60b0987
+      COVERALLS_GIT_BRANCH: main
+      COVERALLS_REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Check out reviewed workflow tools
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -291,50 +295,53 @@ jobs:
           --manifest ../evidence/rust.json
           --manifest ../evidence/python-studio.json
           --output ../evidence/publication.json
+      - name: Install pinned Coveralls reporter
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p ../reporter
+          gh release download v0.6.22 --repo coverallsapp/coverage-reporter \
+            --pattern coveralls-linux-x86_64 --dir ../reporter
+          printf '%s  %s\n' \
+            34fcaf347627307e505ec207acd617c3bfc6c3e2684b22e760be29eb339c36d5 \
+            ../reporter/coveralls-linux-x86_64 | sha256sum --check --strict
+          chmod u+x ../reporter/coveralls-linux-x86_64
+      - name: Map wheel coverage filenames to the measured Python sources
+        run: >-
+          python ../control/scripts/coverage_recovery.py
+          --source . --control ../control
+          --python-report ../evidence/python-cobertura.xml
+          --output ../evidence/python-path-map.json
+      - name: Preflight all formats without sending reports
+        run: |
+          ../reporter/coveralls-linux-x86_64 report --dry-run --debug \
+            --build-number "$GITHUB_RUN_ID" --parallel --job-flag rust \
+            --format lcov rust-lcov.info > ../evidence/rust-payload.log
+          ../reporter/coveralls-linux-x86_64 report --dry-run --debug \
+            --build-number "$GITHUB_RUN_ID" --parallel --job-flag python \
+            --format cobertura ../evidence/python-cobertura.xml > ../evidence/python-payload.log
+          ../reporter/coveralls-linux-x86_64 report --dry-run --debug \
+            --build-number "$GITHUB_RUN_ID" --parallel --job-flag studio \
+            --format cobertura --base-path web-ui/backend web-ui/backend/coverage.xml \
+            > ../evidence/studio-payload.log
       - name: Report rust measured coverage
-        uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329 # v2.3.8
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          flag-name: rust
-          file: source/rust-lcov.info
-          format: lcov
-          base-path: source
-          git-commit: ${{ env.SOURCE_SHA }}
-          git-branch: main
-          build-number: ${{ github.run_id }}
-          parallel: true
+        run: >-
+          ../reporter/coveralls-linux-x86_64 report
+          --build-number "$GITHUB_RUN_ID" --parallel --job-flag rust
+          --format lcov rust-lcov.info
       - name: Report python measured coverage
-        uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329 # v2.3.8
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          flag-name: python
-          file: source/coverage.xml
-          format: cobertura
-          base-path: source
-          git-commit: ${{ env.SOURCE_SHA }}
-          git-branch: main
-          build-number: ${{ github.run_id }}
-          parallel: true
+        run: >-
+          ../reporter/coveralls-linux-x86_64 report
+          --build-number "$GITHUB_RUN_ID" --parallel --job-flag python
+          --format cobertura ../evidence/python-cobertura.xml
       - name: Report studio measured coverage
-        uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329 # v2.3.8
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          flag-name: studio
-          file: source/web-ui/backend/coverage.xml
-          format: cobertura
-          base-path: source
-          git-commit: ${{ env.SOURCE_SHA }}
-          git-branch: main
-          build-number: ${{ github.run_id }}
-          parallel: true
+        run: >-
+          ../reporter/coveralls-linux-x86_64 report
+          --build-number "$GITHUB_RUN_ID" --parallel --job-flag studio
+          --format cobertura --base-path web-ui/backend web-ui/backend/coverage.xml
       - name: Finish only the complete recovered build
-        uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329 # v2.3.8
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          git-commit: ${{ env.SOURCE_SHA }}
-          git-branch: main
-          build-number: ${{ github.run_id }}
-          parallel-finished: true
+        run: >-
+          ../reporter/coveralls-linux-x86_64 done --build-number "$GITHUB_RUN_ID"
       - name: Retain recovery-publication
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

@@ -57,14 +57,28 @@ download them with logs and GitHub metadata before that deadline.
 The publisher downloads only these artifacts from its own workflow run. It
 requires exactly `rust`, `python`, and `studio`, all with the same source SHA,
 full tree, workflow SHA, run ID and attempt; it rechecks each report digest.
-`recovery-publication` retains the merged evidence. The pinned Coveralls action
-uses its documented [commit, branch and build-number inputs](https://github.com/coverallsapp/github-action/blob/8d6379e14d29928660c4ba802d8e85393440b329/action.yml):
+`recovery-publication` retains the merged evidence. Publication runs from
+`source/` using the official [Coveralls reporter v0.6.22](https://github.com/coverallsapp/coverage-reporter/releases/tag/v0.6.22),
+with its Linux x86-64 binary verified against SHA256
+`34fcaf347627307e505ec207acd617c3bfc6c3e2684b22e760be29eb339c36d5`:
 
 - measured commit: `2fcc36fd224dd1c8a9f6396bddd5fbe0b60b0987`;
 - measured branch: `main`, regardless of the workflow control branch;
 - build number: this new GitHub `run_id`, identical for all three flags and finish;
 - run attempt: exactly `1`; reruns are rejected;
 - no carryforward, comparison SHA override, or status API writes.
+
+The publisher first dry-runs all three formats without HTTP requests. LCOV
+already contains absolute paths, so it receives no base-path prefix. Studio's
+relative filenames use `web-ui/backend`. Python's wheel-installed paths are
+mapped to existing `python/calc_flow` files in a separate XML copy; all other
+measurement fields remain unchanged. The original XML remains in its raw
+artifact. `python-path-map.json` records both XML hashes, the filename mapping,
+and SHA256 values of the corresponding measured source files. This gives the
+reporter actual files for the [source paths and digests required by Coveralls](https://docs.coveralls.io/api-jobs-endpoint#json-object-source-file).
+Unknown, escaping or missing Python paths fail before publication. Dry-run
+payloads are retained; the reporter replaces the token with `dry-run` in these
+payloads and does not send them.
 
 The finish request is sent only after all three uploads succeed. A Coveralls
 percentage regression can remain a real failure: finish is not a synthetic
@@ -77,20 +91,47 @@ conflated. The production resolver is unchanged.
 cf-reviewer must review the exact control commit and this execution path before
 the same writer creates the execution ref. Confirm the source SHA, copied
 coverage commands and floors, artifact layout, token scope (`contents: read`
-plus the existing Coveralls GitHub integration), publication identity, and
+plus the existing Coveralls GitHub integration), publication identity and paths, and
 failure behavior. Record approval against the full control SHA in DAL-296.
 This is recovery-plan approval, not final #318 acceptance.
 
 After approval, the original writer runs the following from the recovery
 worktree. Set `REVIEWED_RECOVERY_SHA` to that approved full commit, not to a
-moving branch name. The expected execution branch must not already exist;
-if it does, stop and investigate its run history instead of forcing it.
+moving branch name. For the first execution, the execution branch must not
+already exist. The commands below fail closed; never force the branch.
 
 ```bash
+set -eu
 : "${REVIEWED_RECOVERY_SHA:?set the approved full recovery commit SHA}"
 test "$(git rev-parse HEAD)" = "$REVIEWED_RECOVERY_SHA"
 test -z "$(git status --porcelain --untracked-files=no)"
 test -z "$(git ls-remote --heads origin fix/dal-296-coverage-recovery-execute)"
+git push origin "$REVIEWED_RECOVERY_SHA:refs/heads/fix/dal-296-coverage-recovery-execute"
+```
+
+Run `35651911889` executed the original approved control SHA
+`05d2064f6f3e6a02c4d81e5b70572b58ed684eb9`, attempt 1. Both producers passed
+(Rust 92.06% lines, Python 95.37%, Studio 92.19%) and all report hashes matched.
+Publication failed before its first HTTP request with `Nothing to report`:
+the reporter prepended `source` to LCOV's already-absolute source filenames.
+Python/Studio uploads and finish were skipped. The original artifacts and
+failed run must remain visible; main's incomplete baseline was not restored.
+
+The correction switches to a checksum-pinned CLI in the actual source working
+directory and the preflight/path handling above. It requires review of its new
+full control SHA. After that approval, the same writer may fast-forward the
+execution ref from **exactly** the original approved commit; this starts a new
+run and regenerates all three reports. Do not rerun the failed attempt or replay
+its reports under a different run ID. Confirm the old run is completed, then:
+
+```bash
+set -eu
+: "${REVIEWED_RECOVERY_SHA:?set the approved corrected full commit SHA}"
+test "$(git rev-parse HEAD)" = "$REVIEWED_RECOVERY_SHA"
+test -z "$(git status --porcelain --untracked-files=no)"
+test "$(git ls-remote --heads origin fix/dal-296-coverage-recovery-execute | cut -f1)" = \
+  05d2064f6f3e6a02c4d81e5b70572b58ed684eb9
+git merge-base --is-ancestor 05d2064f6f3e6a02c4d81e5b70572b58ed684eb9 "$REVIEWED_RECOVERY_SHA"
 git push origin "$REVIEWED_RECOVERY_SHA:refs/heads/fix/dal-296-coverage-recovery-execute"
 ```
 
