@@ -9,6 +9,16 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-21: Enforce the complete declared schema for Python Kafka custom
+  decoder output (DAL-296 / DAL-297). Field count, order, names, and types
+  remain strict; valid columns adopt the source's nullability and metadata,
+  while actual NULLs in non-nullable columns fail at the decoder boundary.
+  Undeclared schemas retain callback metadata, and caller-owned Arrow
+  objects remain unchanged. Zero-batch Tables retain their schema and decode
+  as valid zero-row output under the same validation and bounds as
+  RecordBatches. Empty output consumes the message and advances its cursor
+  for continued consumption; zero-column results preserve their row counts.
+
 - 2026-09-20: Native streaming covers the `join` engine scenario through the
   100k tier. The bounded temporal join runs with the dimension side complete
   at the stream origin and an inclusive `before` bound spanning the
