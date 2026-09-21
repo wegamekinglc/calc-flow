@@ -8,6 +8,8 @@ use crate::{
 };
 use datafusion::execution::memory_pool::MemoryReservation;
 
+mod prefix;
+
 struct PreparedOutput {
     batch: Batch,
     matched: u64,
@@ -22,26 +24,43 @@ impl StreamAsofJoinOperator {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
+        let mut right_stable = None;
         loop {
             context.check_cancelled()?;
             let mut keys = self.finalizable_keys(frontier, ended, context);
             if keys.is_empty() {
                 break;
             }
+            let stable = *right_stable.get_or_insert_with(|| {
+                state::right_stable_during_finalization(
+                    &self.state,
+                    &self.status,
+                    self.spec.tolerance_micros(),
+                )
+            });
             // Clone and checkpoint headroom are reserved only once a
             // finalizable chunk exists, so empty progress ticks stay free.
             let state_workspace = self.state_workspace()?;
             let headroom = self.checkpoint_workspace()?;
             let prepared_output = self.prepare_output(&mut keys, context).await?;
-            self.commit_output(&keys, prepared_output, headroom, context, output)
-                .await?;
+            if stable {
+                self.commit_prefix_output(&keys, prepared_output, headroom, context, output)
+                    .await?;
+            } else {
+                self.commit_output(&keys, prepared_output, headroom, context, output)
+                    .await?;
+            }
             drop(state_workspace);
         }
         self.finish_progress(frontier, ended, context).await
     }
 
     fn checkpoint_workspace(&self) -> Result<MemoryReservation> {
-        self.reserve_workspace(super::checkpoint::encoded_length(&self.state, &self.name)?)
+        self.reserve_workspace(
+            self.prepared
+                .as_ref()
+                .map_or(0, |segment| segment.bytes().len() as u64),
+        )
     }
 
     fn finalizable_keys(
@@ -91,19 +110,19 @@ impl StreamAsofJoinOperator {
                 delta.remove_left(&key.1, &key.2, &payload);
             }
         }
-        let mut status = self.status.clone();
-        status.emitted_left_rows =
-            checked(&self.name, status.emitted_left_rows, keys.len() as u64)?;
-        status.matched_rows = checked(&self.name, status.matched_rows, matched)?;
-        status.unmatched_rows = checked(
-            &self.name,
-            status.unmatched_rows,
-            keys.len() as u64 - matched,
-        )?;
+        let mut status = self.output_status(keys.len(), matched)?;
         let (evicted, eviction) = next.evict(&status, self.spec.tolerance_micros());
         delta.merge(eviction);
         status.evicted_right_rows = checked(&self.name, status.evicted_right_rows, evicted)?;
         Ok((next, status, delta))
+    }
+
+    fn output_status(&self, rows: usize, matched: u64) -> Result<StreamAsofJoinStatus> {
+        let mut status = self.status.clone();
+        status.emitted_left_rows = checked(&self.name, status.emitted_left_rows, rows as u64)?;
+        status.matched_rows = checked(&self.name, status.matched_rows, matched)?;
+        status.unmatched_rows = checked(&self.name, status.unmatched_rows, rows as u64 - matched)?;
+        Ok(status)
     }
 
     async fn finish_progress(

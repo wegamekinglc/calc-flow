@@ -16,6 +16,194 @@ impl crate::operator::stream::LateMetricSink for LateMetrics {
         Ok(())
     }
 }
+
+struct RetainedPayloadCollector {
+    payload: Arc<Vec<u8>>,
+    owners: Vec<usize>,
+}
+
+#[async_trait]
+impl StreamCollector for RetainedPayloadCollector {
+    async fn emit(&mut self, _port: &str, _batch: Batch) -> Result<()> {
+        self.owners.push(Arc::strong_count(&self.payload));
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn finalization_without_eviction_does_not_clone_retained_state() {
+    let (mut op, left, right) = prefix_fixture();
+    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+    let cx = StreamOperatorContext::new(&job, "asof", None)
+        .with_test_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
+    let mut preload = EdgeCollector::new(op.output_ports().to_vec());
+    op.process_data("right", right, &cx, &mut preload)
+        .await
+        .unwrap();
+    op.process_data("left", left, &cx, &mut preload)
+        .await
+        .unwrap();
+    let payload = op
+        .state
+        .right
+        .values()
+        .next()
+        .unwrap()
+        .values()
+        .next()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .bytes_arc();
+    let owners = Arc::strong_count(&payload);
+    let mut output = RetainedPayloadCollector {
+        payload,
+        owners: Vec::new(),
+    };
+    op.on_watermark(EventTime::from_micros(103), &cx, &mut output)
+        .await
+        .unwrap();
+    assert_eq!(
+        output.owners, [owners; 3],
+        "each chunk must borrow unchanged right state"
+    );
+    assert_eq!(op.status.matched_rows, 3);
+    assert_eq!(op.status.pending_left_rows, 0);
+    let expected = op.prepare_checkpoint(&op.state, &cx).await.unwrap();
+    assert_eq!(
+        op.prepared, expected.segment,
+        "checkpoint bytes stay canonical"
+    );
+}
+struct CancelPrefixCollector {
+    cancel: CancellationToken,
+    accepted: Vec<Batch>,
+}
+
+#[async_trait]
+impl StreamCollector for CancelPrefixCollector {
+    async fn emit(&mut self, _port: &str, batch: Batch) -> Result<()> {
+        if self.accepted.is_empty() {
+            self.accepted.push(batch);
+            Ok(())
+        } else {
+            self.cancel.cancel();
+            std::future::pending().await
+        }
+    }
+}
+
+#[tokio::test]
+async fn cancelled_prefix_has_canonical_checkpoint_and_resumes_exactly() {
+    let (mut op, left, right) = prefix_fixture();
+    let cancel = CancellationToken::new();
+    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, cancel.clone());
+    let cx = StreamOperatorContext::new(&job, "asof", None)
+        .with_test_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
+    let mut preload = EdgeCollector::new(op.output_ports().to_vec());
+    op.process_data("right", right, &cx, &mut preload)
+        .await
+        .unwrap();
+    op.process_data("left", left, &cx, &mut preload)
+        .await
+        .unwrap();
+    let before = op.capture(Epoch::INITIAL).unwrap();
+    let mut stopped = CancelPrefixCollector {
+        cancel,
+        accepted: Vec::new(),
+    };
+    let result = op
+        .on_watermark(EventTime::from_micros(103), &cx, &mut stopped)
+        .await;
+    assert!(matches!(result, Err(CalcFlowError::Cancelled { .. })));
+    assert_eq!(op.status.pending_left_rows, 2);
+    assert_eq!(op.status.matched_rows, 1);
+    assert_eq!(op.next_output_sequence, 1);
+    assert_eq!(op.runtime.pool.reserved(), 0);
+    let snapshot = op.capture(Epoch::INITIAL).unwrap();
+    let fresh_job =
+        StreamJobContext::new(2, "asof", JsonMap::new(), None, CancellationToken::new());
+    let resumed_cx = StreamOperatorContext::new(&fresh_job, "asof", None)
+        .with_test_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
+    let canonical = op.prepare_checkpoint(&op.state, &resumed_cx).await.unwrap();
+    assert_eq!(op.prepared, canonical.segment);
+    let (mut restored, _, _) = prefix_fixture();
+    restored.restore(&before).unwrap();
+    assert_eq!(
+        restored.status.pending_left_rows, 3,
+        "older shared snapshot is unchanged"
+    );
+    restored.restore(&snapshot).unwrap();
+    let repeated = restored.capture(Epoch::INITIAL).unwrap();
+    assert!(Arc::ptr_eq(
+        &snapshot.segments["asof-state-v1"].bytes_arc(),
+        &repeated.segments["asof-state-v1"].bytes_arc()
+    ));
+    restored.restore(&repeated).unwrap();
+    let mut remaining = EdgeCollector::new(restored.output_ports().to_vec());
+    restored
+        .on_watermark(EventTime::from_micros(103), &resumed_cx, &mut remaining)
+        .await
+        .unwrap();
+    let mut batches = stopped.accepted;
+    batches.extend(
+        remaining
+            .drain("output")
+            .into_iter()
+            .map(|message| message.as_data().unwrap().clone()),
+    );
+    for (index, batch) in batches.iter().enumerate() {
+        assert_eq!(batch.metadata().sequence(), index as u64);
+        let record = &batch.table_payload().unwrap().batches()[0];
+        let left = record
+            .column(2)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let right = record
+            .column(5)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(left.value(0), i64::try_from(index).unwrap() + 1);
+        assert_eq!(right.value(0), 1);
+    }
+    assert_eq!(batches.len(), 3);
+    assert_eq!(restored.status.emitted_left_rows, 3);
+    assert_eq!(restored.status.pending_left_rows, 0);
+}
+
+fn prefix_fixture() -> (StreamAsofJoinOperator, Batch, Batch) {
+    let (template, right) = fixture();
+    let schema = template.schemas[0].clone();
+    let spec = StreamAsofJoinSpec::new(
+        template.spec.left().clone(),
+        template.spec.right().clone(),
+        Duration::from_micros(10),
+        template.spec.limits(),
+    )
+    .unwrap();
+    let op = StreamAsofJoinOperator::new("asof", schema.clone(), schema.clone(), spec).unwrap();
+    let left = Batch::table(
+        vec![
+            RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(StringArray::from(vec!["A"; 3])),
+                    Arc::new(
+                        TimestampMicrosecondArray::from(vec![100, 101, 102]).with_timezone("UTC"),
+                    ),
+                    Arc::new(Int64Array::from(vec![1, 2, 3])),
+                ],
+            )
+            .unwrap(),
+        ],
+        BatchMetadata::default(),
+    )
+    .unwrap();
+    (op, left, right)
+}
+
 fn fixture() -> (StreamAsofJoinOperator, Batch) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("key", DataType::Utf8, false),

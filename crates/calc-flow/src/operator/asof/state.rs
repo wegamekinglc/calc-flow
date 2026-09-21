@@ -210,6 +210,32 @@ pub(super) fn eviction_pending(
     tolerance: u64,
 ) -> bool {
     let threshold = retention_threshold(state, status);
+    eviction_pending_at(state, status, tolerance, threshold)
+}
+
+/// Checks the greatest retention threshold reachable while finalizing this progress tick.
+pub(super) fn right_stable_during_finalization(
+    state: &State,
+    status: &super::StreamAsofJoinStatus,
+    tolerance: u64,
+) -> bool {
+    let threshold = if status.left.ended {
+        i128::MAX
+    } else {
+        status
+            .left
+            .watermark_micros
+            .map_or(i128::MIN, |wm| i128::from(wm.as_micros()))
+    };
+    !eviction_pending_at(state, status, tolerance, threshold)
+}
+
+fn eviction_pending_at(
+    state: &State,
+    status: &super::StreamAsofJoinStatus,
+    tolerance: u64,
+    threshold: i128,
+) -> bool {
     state.right.values().any(|bucket| {
         bucket.iter().any(|((time, _), row)| {
             (row.is_some() && payload_expired(*time, tolerance, threshold))

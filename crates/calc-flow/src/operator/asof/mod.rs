@@ -184,6 +184,27 @@ impl StreamAsofJoinOperator {
         prepared: Option<&crate::StateSegment>,
         status: &mut StreamAsofJoinStatus,
     ) -> Result<()> {
+        let inventory = self.candidate_inventory(delta, prepared, status)?;
+        debug_assert!(
+            state
+                .inventory(prepared, &self.name)
+                .is_ok_and(|walked| walked == inventory),
+            "ASOF maintained inventory drifted from a full state walk"
+        );
+        status.pending_left_rows = state.left.len() as u64;
+        status.retained_right_rows = inventory.right_payloads;
+        status.identity_only_rows = inventory.identity_only;
+        status.state_rows = inventory.identities;
+        status.state_bytes = inventory.bytes;
+        Ok(())
+    }
+
+    fn candidate_inventory(
+        &self,
+        delta: state::InventoryDelta,
+        prepared: Option<&crate::StateSegment>,
+        status: &StreamAsofJoinStatus,
+    ) -> Result<state::Inventory> {
         let mut inventory = state::Inventory {
             identities: status.state_rows,
             right_payloads: status.retained_right_rows,
@@ -193,12 +214,6 @@ impl StreamAsofJoinOperator {
         inventory.uncharge_prepared(self.prepared.as_ref(), &self.name)?;
         inventory.apply(delta, &self.name)?;
         inventory.charge_prepared(prepared, &self.name)?;
-        debug_assert!(
-            state
-                .inventory(prepared, &self.name)
-                .is_ok_and(|walked| walked == inventory),
-            "ASOF maintained inventory drifted from a full state walk"
-        );
         if inventory.identities > self.spec.limits().max_state_rows()
             || inventory.bytes > self.spec.limits().max_state_bytes()
         {
@@ -208,12 +223,7 @@ impl StreamAsofJoinOperator {
                 "stream_asof_join state limits exceeded",
             ));
         }
-        status.pending_left_rows = state.left.len() as u64;
-        status.retained_right_rows = inventory.right_payloads;
-        status.identity_only_rows = inventory.identity_only;
-        status.state_rows = inventory.identities;
-        status.state_bytes = inventory.bytes;
-        Ok(())
+        Ok(inventory)
     }
     /// Installs a prepared candidate transactionally: state, status and the
     /// encoded segment swap in together. `swept` records that the candidate
