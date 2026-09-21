@@ -161,6 +161,17 @@ async def _rust_measure(name: str, inputs: dict, side: str, output: Path) -> dic
     )
 
 
+def _rust_inputs(context: dict, target: str, identities: dict) -> dict:
+    return {
+        side: {
+            "binary": context["binaries"][side][target],
+            "source": context["roots"][side],
+            "identity": identities[side],
+        }
+        for side in SIDES
+    }
+
+
 async def _record_case(
     name: str, measure, seals: dict, output: Path, previous: dict
 ) -> dict:
@@ -224,14 +235,7 @@ async def measure(context: dict, output: Path, previous: dict) -> dict:
         names = matching_inventory(inventories)
         report["inventory"][target] = inventories
         identities = rust_identities(context, target)
-        inputs = {
-            side: {
-                "binary": context["binaries"][side][target],
-                "source": context["roots"][side],
-                "identity": identities[side],
-            }
-            for side in SIDES
-        }
+        inputs = _rust_inputs(context, target, identities)
         seals = {side: sha256_file(context["binaries"][side][target]) for side in SIDES}
         for name in names:
             report = await _record_case(
