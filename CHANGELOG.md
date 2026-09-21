@@ -9,6 +9,14 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-21: Reject MySQL sink values that fail the connector's conversion
+  checks before epoch state changes and durable checkpoint publication
+  (DAL-295). Non-finite floats and out-of-range Arrow dates/timestamps leave the
+  previous valid recovery point intact; corrected replayable input can resume
+  without duplicating committed epochs. Prepared recovery uses the same value
+  checks. Incremental IPC encoding, checkpoint format, and database commit after
+  manifest publication are unchanged; existing invalid manifests are not repaired.
+
 - 2026-09-20: Native streaming covers the `join` engine scenario through the
   100k tier. The bounded temporal join runs with the dimension side complete
   at the stream origin and an inclusive `before` bound spanning the
