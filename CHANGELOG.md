@@ -9,6 +9,18 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-21: Keep distinct symbolic sources separate when generated source
+  IDs collide (DAL-298). Relational DAG and ordinary batch fan-out lowering
+  check graph reservations, reachable logical input names, and allocated
+  source IDs, adding deterministic numeric suffixes through consecutive
+  collisions. Matching schemas no longer silently merge inputs, and differing
+  schemas no longer cause an internal source-ID conflict. Logical collection
+  and streaming bindings remain unchanged. Noncolliding graphs and previously
+  valid unsuffixed fallback graphs retain their node IDs and plan fingerprints;
+  project and checkpoint formats are unchanged. This does not migrate or
+  guarantee recovery of checkpoints from graphs that previously merged sources
+  incorrectly.
+
 - 2026-09-20: Native streaming covers the `join` engine scenario through the
   100k tier. The bounded temporal join runs with the dimension side complete
   at the stream origin and an inclusive `before` bound spanning the

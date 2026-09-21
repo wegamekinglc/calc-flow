@@ -98,6 +98,25 @@ innermost calculation outward, with deterministic row-local stages between
 stateful stages when necessary. Each unique bounded join declaration has one
 native join state owner.
 
+Relational source allocation in
+[strategies.py](../python/calc_flow/symbolic/lower/strategies.py) preserves
+available declared names. A name reserved by an output or physical stage
+falls back to `cf_source_<digest16>`, then `_1`, `_2`, and successive suffixes
+until free. Candidates exclude graph reservations, reachable logical source
+names, and source IDs already allocated in program input order. Ordinary
+batch fan-out in [program.py](../python/calc_flow/symbolic/lower/program.py)
+uses the same allocator with output-name reservations. Distinct logical
+sources therefore remain separate even with identical schemas, while an
+available unsuffixed fallback retains its identity.
+
+The declaration-to-endpoint map records the chosen physical ID for collection
+and convenience streaming. Exported projects contain physical graph names;
+explicit runners use the compiled plan's binding IDs. Checkpoint recovery
+validates graph identity and the source/operator/sink ID sets through
+[CheckpointManifest](../crates/calc-flow/src/state/manifest.rs). This mapping
+does not provide checkpoint identity migration. See
+[logical names and physical bindings](symbolic-api.md#logical-names-and-physical-bindings).
+
 Aggregate-bearing event windows lower to the existing native
 `WindowAggregateOperator`. Their `@2` declaration identity includes the full
 input graph, geometry, grouping order, and aggregate order and output names.
