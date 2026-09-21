@@ -1,0 +1,346 @@
+name: Recover exact main coverage
+on:
+  push:
+    branches: [fix/dal-296-coverage-recovery-execute]
+permissions:
+  contents: read
+concurrency:
+  group: dal-296-coverage-recovery
+  cancel-in-progress: false
+env:
+  SOURCE_SHA: 2fcc36fd224dd1c8a9f6396bddd5fbe0b60b0987
+defaults:
+  run:
+    working-directory: source
+jobs:
+  rust:
+    if: github.repository == 'wegamekinglc/calc-flow' && github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: calcflow-test
+          MYSQL_DATABASE: calcflow
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h localhost -pcalcflow-test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      kafka:
+        image: apache/kafka:3.9.0
+        ports:
+          - 9092:9092
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      clickhouse:
+        image: clickhouse/clickhouse-server:24.12
+        env:
+          CLICKHOUSE_USER: default
+          CLICKHOUSE_PASSWORD: ""
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+        ports:
+          - 8123:8123
+        options: >-
+          --health-cmd "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      CALC_FLOW_CONNECTOR_CONTAINERS: "1"
+      CALC_FLOW_KAFKA_BOOTSTRAP: localhost:9092
+      CALC_FLOW_PG_TEST_URL: postgresql://postgres:postgres@localhost:5432/postgres
+      CALC_FLOW_MYSQL_TEST_URL: mysql://root:calcflow-test@localhost:3306/calcflow
+      CH_TEST_URL: http://localhost:8123
+    steps:
+      - name: Check out reviewed workflow tools
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - name: Check out exact measured source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: source/.python-version
+      - name: Verify clean source and original run identity
+        run: >-
+          python ../control/scripts/coverage_recovery.py
+          --source . --control ../control
+          --output ../evidence/preflight-${{ github.job }}.json
+      - name: Ensure libcurl headers for vendored librdkafka
+        run: |
+          if dpkg-query -W -f='${Status}' libcurl4-openssl-dev 2>/dev/null \
+            | grep -qx 'install ok installed'; then
+            exit 0
+          fi
+          install_libcurl_headers() {
+            timeout 5m sudo apt-get \
+              -o Acquire::Retries=3 \
+              -o Acquire::http::Timeout=15 \
+              -o Acquire::https::Timeout=15 \
+              install --no-install-recommends -y libcurl4-openssl-dev
+          }
+          if ! install_libcurl_headers; then
+            timeout 2m sudo apt-get \
+              -o Acquire::Retries=3 \
+              -o Acquire::http::Timeout=15 \
+              -o Acquire::https::Timeout=15 \
+              update
+            install_libcurl_headers
+          fi
+      - name: Wait for Kafka and enable PostgreSQL logical replication
+        env:
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          for attempt in $(seq 1 60); do
+            if timeout 1 bash -c '</dev/tcp/localhost/9092' 2>/dev/null; then
+              break
+            fi
+            if [ "$attempt" -eq 60 ]; then
+              echo "broker never became reachable" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          docker exec "$POSTGRES_CONTAINER" psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c "ALTER SYSTEM SET wal_level = 'logical'" \
+            -c "ALTER SYSTEM SET max_replication_slots = 10" \
+            -c "ALTER SYSTEM SET max_wal_senders = 10"
+          docker restart "$POSTGRES_CONTAINER"
+          for attempt in $(seq 1 60); do
+            if docker exec "$POSTGRES_CONTAINER" pg_isready -U postgres -d postgres; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "PostgreSQL never became ready after enabling logical replication" >&2
+          exit 1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: source/.python-version
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+      - name: Install compatible Python test dependencies
+        run: python -m pip install "numpy>=2.0.0" "pyarrow==24.0.0"
+      - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
+        with:
+          components: llvm-tools-preview
+      - name: Install Rust coverage tool
+        uses: taiki-e/install-action@537c30d2b45cc3aa3fb35e2bbcfb61ef93fd6f02 # v2.62.52
+        with:
+          tool: cargo-llvm-cov@0.8.7
+      - name: Enforce combined Rust and connector line coverage
+        run: python3.13 scripts/run_rust_coverage.py
+      - name: Seal Rust measurement
+        run: >-
+          python ../control/scripts/coverage_recovery.py
+          --source . --control ../control --flag rust
+          --output ../evidence/rust.json
+      - name: Retain recovery-rust
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: recovery-rust
+          path: |
+            source/rust-lcov.info
+            evidence/
+          if-no-files-found: error
+          retention-days: 30
+
+  python-studio:
+    if: github.repository == 'wegamekinglc/calc-flow' && github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out reviewed workflow tools
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - name: Check out exact measured source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: source/.python-version
+      - name: Verify clean source and original run identity
+        run: >-
+          python ../control/scripts/coverage_recovery.py
+          --source . --control ../control
+          --output ../evidence/preflight-${{ github.job }}.json
+      - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 20.20.0
+          cache: npm
+          cache-dependency-path: source/web-ui/package-lock.json
+      - name: Build and inspect the measured wheel
+        run: |
+          uv build --wheel --out-dir target/recovery-dist
+          python scripts/inspect_wheel.py core-wheel target/recovery-dist/calc_flow_python-*.whl
+          sha256sum target/recovery-dist/*.whl > ../evidence/wheel.sha256
+      - name: Install Python dependencies
+        run: |
+          uv sync --extra dev --no-install-workspace
+          uv pip install --python .venv/bin/python --no-deps target/recovery-dist/calc_flow_python-*.whl
+      - name: Run unit, property, and coverage tests
+        env:
+          PYTEST_XDIST_AUTO_NUM_WORKERS: 2
+        run: >-
+          uv run --no-sync pytest -q -n auto --dist load -p no:benchmark
+          python/tests benchmarks/test_warm_stream.py
+          --cov=calc_flow --cov-report=term-missing --cov-report=xml
+      - name: Install Studio dependencies
+        run: |
+          uv sync --package calc-flow-studio --extra dev --no-install-workspace
+          uv pip install --python .venv/bin/python --no-deps target/recovery-dist/calc_flow_python-*.whl
+          uv pip install --python .venv/bin/python --no-deps --editable web-ui/backend
+          cd web-ui && npm ci
+      - name: Run studio backend coverage
+        working-directory: source/web-ui/backend
+        run: >-
+          uv run --no-sync --project . pytest -q
+          --cov=calc_flow_studio --cov-report=term-missing --cov-report=xml
+      - name: Verify generated API contract
+        run: |
+          uv run --no-sync --project web-ui/backend python web-ui/scripts/export_openapi.py
+          npm --prefix web-ui run generate:api
+          git diff --exit-code -- web-ui/openapi.json web-ui/src/api/schema.d.ts
+      - name: Seal Python and Studio measurements
+        run: >-
+          python ../control/scripts/coverage_recovery.py
+          --source . --control ../control --flag python --flag studio
+          --output ../evidence/python-studio.json
+      - name: Retain recovery-python-studio
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: recovery-python-studio
+          path: |
+            source/coverage.xml
+            source/web-ui/backend/coverage.xml
+            evidence/
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    needs: [rust, python-studio]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out reviewed workflow tools
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - name: Check out exact measured source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: source/.python-version
+      - name: Verify clean source and original run identity
+        run: >-
+          python ../control/scripts/coverage_recovery.py
+          --source . --control ../control
+          --output ../evidence/preflight-${{ github.job }}.json
+      - name: Download only this run's original measurements
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: recovery-*
+          merge-multiple: true
+      - name: Validate all three reports before any publication
+        run: >-
+          python ../control/scripts/coverage_recovery.py
+          --source . --control ../control
+          --manifest ../evidence/rust.json
+          --manifest ../evidence/python-studio.json
+          --output ../evidence/publication.json
+      - name: Report rust measured coverage
+        uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329 # v2.3.8
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          flag-name: rust
+          file: source/rust-lcov.info
+          format: lcov
+          base-path: source
+          git-commit: ${{ env.SOURCE_SHA }}
+          git-branch: main
+          build-number: ${{ github.run_id }}
+          parallel: true
+      - name: Report python measured coverage
+        uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329 # v2.3.8
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          flag-name: python
+          file: source/coverage.xml
+          format: cobertura
+          base-path: source
+          git-commit: ${{ env.SOURCE_SHA }}
+          git-branch: main
+          build-number: ${{ github.run_id }}
+          parallel: true
+      - name: Report studio measured coverage
+        uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329 # v2.3.8
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          flag-name: studio
+          file: source/web-ui/backend/coverage.xml
+          format: cobertura
+          base-path: source
+          git-commit: ${{ env.SOURCE_SHA }}
+          git-branch: main
+          build-number: ${{ github.run_id }}
+          parallel: true
+      - name: Finish only the complete recovered build
+        uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329 # v2.3.8
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          git-commit: ${{ env.SOURCE_SHA }}
+          git-branch: main
+          build-number: ${{ github.run_id }}
+          parallel-finished: true
+      - name: Retain recovery-publication
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: recovery-publication
+          path: |
+            evidence/
+          if-no-files-found: error
+          retention-days: 30
