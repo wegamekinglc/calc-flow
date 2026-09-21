@@ -95,6 +95,13 @@ def validate_build_settings(value: dict) -> None:
         raise ValueError("profiling build settings or dependency lock differ")
 
 
+def rustc_release(log: str) -> str:
+    releases = re.findall(r"^[ \t]*release[ \t]*:[ \t]*([^\r\n]*)", log, re.MULTILINE)
+    if len(releases) != 1:
+        raise ValueError("expected exactly one rustc release field")
+    return releases[0].strip()
+
+
 async def build(side: str, source: Path, output: Path) -> int:
     output.mkdir(parents=True, exist_ok=True)
     try:
@@ -118,7 +125,7 @@ async def build(side: str, source: Path, output: Path) -> int:
         rustc = await logged(["rustc", "-Vv"], output, "rustc", cwd=source)
         settings = {
             "env": PROFILE_ENV,
-            "rustc_release": rustc.split()[1],
+            "rustc_release": rustc_release(rustc),
             "dependency_lock": sha256_file(ROOT / "benchmarks/requirements.lock"),
         }
         validate_build_settings(settings)
