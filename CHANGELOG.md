@@ -9,6 +9,25 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-21: Add the maintained `stream_asof_perf` command and eight-case
+  settlement reports with a strict Rust-suite loader (DAL-301). Stable right
+  history avoids repeated retained-state cloning and row re-encoding while
+  preserving canonical v1 bytes, strict watermarks, per-chunk commit, and
+  cancellation/restore behavior. Remaining checkpoint copying and hashing
+  still cost `O(retained state)` per chunk.
+  [PR #322](https://github.com/wegamekinglc/calc-flow/pull/322) records five
+  scenarios with 200 paired samples: four `improved`, one
+  `no-confirmed-regression`, measured at `8020cf89` against the benchmark-only
+  baseline overlay `e2d768f8` on product `a594ad6`. The separate eight-case
+  loader run retained 160 candidate-only samples; the later `b7e92cc5` CLI
+  checks yielded 24 oracles and no performance samples. Later validation and
+  documentation commits were not performance remeasured. The comparison
+  harness came from unmerged PR #319 at `8ec52c88` (tree-equivalent to
+  `48fed573`), independently of the product source. RSS did not improve
+  consistently. Earlier ASOF noise results, historical release inconclusive,
+  SQL sameHEAD RSS failures and ABBA informational boundaries remain unchanged;
+  these measurements establish no release-wide performance result.
+
 - 2026-09-20: Native streaming covers the `join` engine scenario through the
   100k tier. The bounded temporal join runs with the dimension side complete
   at the stream origin and an inclusive `before` bound spanning the

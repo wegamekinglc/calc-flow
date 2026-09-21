@@ -1,7 +1,7 @@
 # Benchmarks
 
 The [unified CI suite](../docs/benchmark-suite.md) runs the overhead, small and
-standard Python scales, all five Rust bench targets, Studio, frontend and
+standard Python scales, every registered Rust bench target, Studio, frontend and
 isolated stream lifecycle measurements. It adds SQL/native-streaming and
 external-engine comparisons at every decade from 10 to 10,000,000 rows, plus warm-state
 incremental measurements. Every non-documentation Linux PR/main run publishes
@@ -75,6 +75,28 @@ The v2 suite covers DataFusion projections, filters, aggregates, joins,
 windows, trusted Python scalar UDFs, explicit session configuration, and
 repeated execution of a compiled plan. The runtime scenario covers graph
 fan-out.
+
+## ASOF settlement benchmark
+
+The independent `stream_asof_perf` target covers eight pending/retained,
+fixed-output, skewed-key and restored ASOF workloads. Run the maintained
+commands in [ASOF settlement measurements](../docs/benchmark-suite.md#asof-settlement-measurements).
+Normal mode produces one full row oracle and 20 samples per case.
+`--check` or `--test` produces oracle-only reports with no performance samples.
+The strict loader in `scripts/benchmark_suite/asof.py` requires the complete
+eight-case sampling inventory and preserves every raw diagnostic.
+
+Timing covers watermark settlement, excluding admission, operator restoration,
+checkpoint capture and full row validation. Keep cumulative allocation,
+active allocation peak and sampled process RSS separate. Stable right history
+avoids repeated retained-state cloning and row encoding, but each output chunk
+still copies and hashes the remaining checkpoint bytes; see
+[state preparation and recovery](../docs/asof-join-guide.md#bounded-state-and-workspace).
+
+Candidate-only collection establishes coverage; Rust whole-suite ABBA deltas
+remain informational. A version verdict requires separate compatible paired
+measurements with their actual source/build identities. Neither oracle reports
+nor a later source revision inherit that verdict.
 
 ## Array measurement scopes
 

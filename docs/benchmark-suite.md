@@ -12,6 +12,7 @@ On this page:
 
 - [Complete inventory](#complete-inventory)
 - [Inputs, correctness and timing boundaries](#inputs-correctness-and-timing-boundaries)
+- [ASOF settlement measurements](#asof-settlement-measurements)
 - [Revision comparisons and regression gate](#revision-comparisons-and-regression-gate)
 - [Reports and failure behavior](#reports-and-failure-behavior)
 - [Local reproduction](#local-reproduction)
@@ -26,15 +27,15 @@ small and standard remain. The separate engine and warm-state matrices still
 run every decade through 10M rows. Dynamic pytest, Criterion and Vitest
 inventories preserve benchmark cases without a second hand-written case list.
 
-| Family          | Dimensions                                          | Cases per dimension                                   |
-|-----------------|-----------------------------------------------------|-------------------------------------------------------|
-| Python          | overhead 1k, small 10k, standard 100k               | All collected non-lifecycle pytest benchmarks         |
-| Engines         | 10, 100, 1k, 10k, 100k, 1M, 10M rows                | 26 supported engine/scenario combinations             |
-| Warm streaming  | 10, 100, 1k, 10k, 100k, 1M, 10M history; append 64  | SMA(20), SMA(5) minus SMA(20)                         |
-| Warm append     | History 1M; append 1, 4, 16, 64, 640, 6,400, 64,000 | Both indicators; append 64 shared with history matrix |
-| Rust            | Every `[[bench]]` target in the core crate          | Core, allocation, state/window, join, SQL/DataFusion  |
-| Studio/frontend | Python HTTP benchmarks and Vitest benchmark files   | All collected benchmark cases                         |
-| Lifecycle       | Isolated checkpoint/recovery benchmark              | Existing minimum-20-round evidence validation         |
+| Family          | Dimensions                                          | Cases per dimension                                       |
+|-----------------|-----------------------------------------------------|-----------------------------------------------------------|
+| Python          | overhead 1k, small 10k, standard 100k               | All collected non-lifecycle pytest benchmarks             |
+| Engines         | 10, 100, 1k, 10k, 100k, 1M, 10M rows                | 26 supported engine/scenario combinations                 |
+| Warm streaming  | 10, 100, 1k, 10k, 100k, 1M, 10M history; append 64  | SMA(20), SMA(5) minus SMA(20)                             |
+| Warm append     | History 1M; append 1, 4, 16, 64, 640, 6,400, 64,000 | Both indicators; append 64 shared with history matrix     |
+| Rust            | Every `[[bench]]` target in the core crate          | Core, allocation, state/window, Join/ASOF, SQL/DataFusion |
+| Studio/frontend | Python HTTP benchmarks and Vitest benchmark files   | All collected benchmark cases                             |
+| Lifecycle       | Isolated checkpoint/recovery benchmark              | Existing minimum-20-round evidence validation             |
 
 There are 180 engine cases and 26 warm cases, in addition to dynamically
 discovered cases. Warm cases use one entity to support one-row appends.
@@ -118,6 +119,77 @@ sample statistics. Both revisions must be measured with the same scope;
 do not subtract a separately measured startup time from another report.
 These settings describe target/pool sizes, not measured CPU utilization;
 TA-Lib calls remain sequential per-series operations.
+
+## ASOF settlement measurements
+
+`stream_asof_perf` is an independent Rust target for bounded backward ASOF.
+It measures `operator-watermark-settlement`: one large watermark advance
+settles preloaded pending left rows against retained right history. Input
+construction/admission, optional operator snapshot restoration, checkpoint
+capture, and the full row oracle remain outside performance samples.
+The restored workload uses an in-memory operator snapshot; it does not measure
+managed checkpoint publication, source replay, or job restart.
+
+The target and `scripts/benchmark_suite/asof.py` share this exact inventory.
+`pending` counts left rows to finalize; `retained` counts right payload rows,
+not total charged state. Total state also includes pending left and any
+identity-only entries. Every workload retains its right rows after settlement.
+
+| Case                 | Pending left | Retained right | Keys               | Restored | Output chunks |
+|----------------------|--------------|----------------|--------------------|----------|---------------|
+| `balanced_512`       | 512          | 512            | 32, balanced       | No       | 4             |
+| `balanced_2048`      | 2,048        | 2,048          | 32, balanced       | No       | 16            |
+| `balanced_8192`      | 8,192        | 8,192          | 32, balanced       | No       | 64            |
+| `fixed128_right512`  | 128          | 512            | 32, balanced       | No       | 1             |
+| `fixed128_right2048` | 128          | 2,048          | 32, balanced       | No       | 1             |
+| `fixed128_right8192` | 128          | 8,192          | 32, balanced       | No       | 1             |
+| `skew_8192`          | 8,192        | 8,192          | About 90% on key 0 | No       | 64            |
+| `restored_skew_8192` | 8,192        | 8,192          | About 90% on key 0 | Yes      | 64            |
+
+These fixtures produce 128-row chunks of 8 KiB logical output bytes. Left time
+starts at 1,000,000 microseconds, right time is 999,999, both watermarks advance
+to 2,000,000, and tolerance is 10,000,000 microseconds. The state limits are
+100,000 rows and 512 MiB. These choices exercise stable right history; they do
+not cover eviction-heavy settlement or imply that arbitrary payloads fit the
+same chunk size. See [ASOF state and workspace](asof-join-guide.md#bounded-state-and-workspace).
+
+Run from the repository root:
+
+```bash
+cargo bench --locked -p calc-flow --bench stream_asof_perf -- --output target/asof.json
+cargo bench --locked -p calc-flow --bench stream_asof_perf -- --check --output target/asof-check.json
+```
+
+Normal mode runs the strict-frontier/cancellation/restore check, then one full
+row oracle and 20 samples for each of the eight cases. `--check` and `--test`
+run the same correctness checks with empty `samples` arrays; their oracle
+diagnostics are not timing evidence. `--output` writes JSON and creates parent
+directories; without it the report is printed to stdout.
+
+The report schema is `calc-flow.asof-finalization.v1`. Raw observations retain
+elapsed seconds, output rows, chunk row counts and cumulative emission times,
+maximum logical chunk bytes, before/after status and checkpoint sizes, and
+untimed admission/restore/capture durations. Allocation totals count cumulative
+bytes allocated during settlement; allocation peaks count peak active bytes
+in the measured thread. Process RSS is sampled separately at 1 ms intervals
+through Linux `/proc` and may miss shorter peaks; `rss_available=false`
+means RSS is unavailable, not zero memory use.
+
+The Rust adapter saves each block's `stream_asof_perf/asof.json`. Its loader
+requires all eight unique cases, exact configurations, successful full-row
+oracles, at least 20 samples per case, valid times/counts, 128-row chunk
+coverage, and the expected final status. It retains all diagnostic observations
+in normalized metadata. Oracle-only reports intentionally fail this sampling
+contract.
+
+Standalone samples and the Rust shard's ABBA blocks do not constitute a
+two-revision paired result. A target absent from the baseline is candidate-only
+`new-coverage`; removing a baseline target fails. An ASOF optimization claim
+requires separate comparable builds and per-case interleaved observations under
+the [paired comparison contract](#revision-comparisons-and-regression-gate).
+Keep product refs, benchmark source, compiled dependencies, binary hashes,
+machine identity, and any separately sourced comparison harness with that
+evidence. Do not transfer a measured verdict to a later source or build.
 
 ## Revision comparisons and regression gate
 

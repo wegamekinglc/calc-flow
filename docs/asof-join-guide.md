@@ -60,11 +60,11 @@ positional arguments; `left.stream_asof_join` takes the right declaration.
 Both require keyword arguments `tolerance: timedelta` and
 `limits: AsofStateLimits`. They also accept these optional keywords:
 
-| Keyword           | Default                 | Meaning                                                           |
-|-------------------|-------------------------|-------------------------------------------------------------------|
-| `keys`            | `None`                  | Use each input's entity keys, or supply two column sequences      |
-| `late_policy`     | `"error"`               | Fail on late input; `"drop"` discards and counts late rows        |
-| `prefixes`        | `("left", "right")`     | Distinct ASCII identifiers used to name output columns            |
+| Keyword       | Default             | Meaning                                                      |
+|---------------|---------------------|--------------------------------------------------------------|
+| `keys`        | `None`              | Use each input's entity keys, or supply two column sequences |
+| `late_policy` | `"error"`           | Fail on late input; `"drop"` discards and counts late rows   |
+| `prefixes`    | `("left", "right")` | Distinct ASCII identifiers used to name output columns       |
 
 Event time and sequence come from each operand's declared temporal metadata.
 An explicit `keys` pair changes the matching keys; the output entity metadata
@@ -91,12 +91,12 @@ right row may serve multiple left rows.
 
 For one key with right times 90, 100, and 110:
 
-| Left time     | Tolerance     | Selected right time     | Result                                 |
-|---------------|---------------|-------------------------|----------------------------------------|
-| 105           | 10            | 100                     | Latest eligible historical row         |
-| 105           | 4             | None                    | Left row kept; right fields null       |
-| 100           | 0             | 100                     | Exact-time match                       |
-| 105           | 0             | None                    | No same-time right row                 |
+| Left time | Tolerance | Selected right time | Result                           |
+|-----------|-----------|---------------------|----------------------------------|
+| 105       | 10        | 100                 | Latest eligible historical row   |
+| 105       | 4         | None                | Left row kept; right fields null |
+| 100       | 0         | 100                 | Exact-time match                 |
+| 105       | 0         | None                | No same-time right row           |
 
 All values in this table are integer microseconds. If right time 100 has
 sequence values 7 and 9, sequence 9 wins regardless of arrival order. Composite
@@ -219,26 +219,39 @@ Native Rust/Arrow indexes choose at most one candidate per left row. One reused
 DataFusion session performs the bounded ordinal-and-key left join, projection,
 and output ordering. Python only declares and lowers the graph. The operator
 prepares a complete compacted state segment during asynchronous handlers,
-with budget checks and cancellation points. Each preparation is
-`O(retained state)` and repeats for each accepted output chunk, so one handler's
-total work includes those repeated preparations.
-The `checkpoint` capture then shares the prepared segment and records metadata.
+with budget checks and cancellation points. At the first finalizable chunk
+of a progress tick, it checks whether right payloads and identity-only entries
+will remain unchanged throughout that tick. When they will, each chunk's next
+segment removes the finalized left prefix from the existing canonical encoding.
+This avoids cloning the retained state and re-encoding unchanged rows. Ticks
+that may evict right history use the full clone, eviction, and encoding path.
+
+Each chunk still copies and hashes the remaining complete checkpoint bytes:
+preparation remains `O(retained state)`, repeated for every accepted chunk.
+Output chunks contain at most 128 rows and may shrink to fit workspace or edge
+budgets. Workspace reservations remain conservative; the optimization does not
+turn state limits into a process RSS bound or remove the repeated preparation
+cost of a large settlement.
+
+The `checkpoint` capture shares the prepared segment and records metadata.
 Small captures do not imply constant-cost admission or finalization. No
 throughput or latency guarantee follows from the configured resource bounds.
+See the [ASOF benchmark boundary and workloads](benchmark-suite.md#asof-settlement-measurements)
+for separate settlement, allocation, and RSS diagnostics.
 
 ## Composition and explanation
 
-| Composition                                                 | Contract                                                           |
-|-------------------------------------------------------------|--------------------------------------------------------------------|
-| Source or row-local transformation into ASOF                | Supported with exact non-null temporal facts and source progress   |
-| ASOF fan-out, independent ASOF nodes, unrelated branches    | Supported; identical declarations share one native state owner     |
-| ASOF into ASOF                                              | Supported using valid left-derived identity and time fields        |
-| Inner Join into ASOF, or ASOF into inner Join               | Supported with complete valid ordering and schema evidence         |
-| ASOF into rolling/cross-section                             | Supported under the downstream operator's own type rules           |
-| ASOF into projection/filter or single-alias stream SQL      | Supported; SQL output has its usual new lineage and no ordering    |
-| SQL into ASOF                                               | Rejected because SQL does not retain temporal ordering             |
-| Event window into ASOF, or ASOF into event window           | Rejected; independent window branches may coexist                  |
-| Matrix attachment around ASOF                               | Unsupported                                                        |
+| Composition                                              | Contract                                                         |
+|----------------------------------------------------------|------------------------------------------------------------------|
+| Source or row-local transformation into ASOF             | Supported with exact non-null temporal facts and source progress |
+| ASOF fan-out, independent ASOF nodes, unrelated branches | Supported; identical declarations share one native state owner   |
+| ASOF into ASOF                                           | Supported using valid left-derived identity and time fields      |
+| Inner Join into ASOF, or ASOF into inner Join            | Supported with complete valid ordering and schema evidence       |
+| ASOF into rolling/cross-section                          | Supported under the downstream operator's own type rules         |
+| ASOF into projection/filter or single-alias stream SQL   | Supported; SQL output has its usual new lineage and no ordering  |
+| SQL into ASOF                                            | Rejected because SQL does not retain temporal ordering           |
+| Event window into ASOF, or ASOF into event window        | Rejected; independent window branches may coexist                |
+| Matrix attachment around ASOF                            | Unsupported                                                      |
 
 Optimization preserves ASOF's finality boundary and candidate set. Use
 `Program.analyze(mode="stream")` and `Program.explain(mode="stream")` to inspect
@@ -256,6 +269,15 @@ these together with configuration, schema, segment integrity, and recomputed
 resource charges before installing state. Repeated capture and restore retain a
 self-contained segment. `reset` only clears operator-owned memory; it does not
 delete shared checkpoints, reset sources, or operate sink transactions.
+
+The prefix preparation path produces the same canonical v1 bytes as the full
+encoder. It prepares and validates the next segment before emitting a chunk,
+then installs state, counters, segment, and output sequence synchronously after
+the sink accepts it. Cancellation during preparation or a blocked emit leaves
+that chunk pending and preserves any earlier committed prefix. A checkpoint
+captured there resumes the remaining rows and sequence without losing or
+repeating the committed operator prefix. This preparation optimization requires
+no state-format migration and preserves the strict dual-watermark boundary.
 
 A managed checkpoint aligns source cursors, operator state, and sink decisions.
 A published terminal checkpoint resumes without repeating final output.
