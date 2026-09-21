@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 from scripts.benchmark_suite.catalog import THREADS
+from scripts.toolkit import write_json
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -38,30 +39,52 @@ async def command(
     env: dict | None = None,
     timeout: float = 7200,
 ) -> None:
-    executable = shutil.which(argv[0])
-    if executable is None:
-        raise ValueError(f"benchmark executable is unavailable: {argv[0]}")
     log.parent.mkdir(parents=True, exist_ok=True)
-    with log.open("wb") as output:
-        # Callers supply fixed argv layouts for trusted benchmark tools/binaries.
-        # Make its path absolute without dereferencing venv/rustup dispatch links.
-        # Never interpret arguments through a shell.
-        process = await asyncio.create_subprocess_exec(  # nosemgrep
-            str(Path(executable).absolute()),
-            *argv[1:],
-            cwd=cwd,
-            env=env,
-            shell=False,
-            stdout=output,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        try:
-            code = await asyncio.wait_for(process.wait(), timeout=timeout)
-        except BaseException:
-            await stop(process)
-            raise
-    if code:
-        raise RuntimeError(f"command exited {code}; see {log}")
+    record = {
+        "argv": argv,
+        "cwd": str(cwd),
+        "exit_code": None,
+        "threads": {
+            key: (env or os.environ).get(key)
+            for key in (
+                "TOKIO_WORKER_THREADS",
+                "POLARS_MAX_THREADS",
+                "OMP_NUM_THREADS",
+                "OPENBLAS_NUM_THREADS",
+                "MKL_NUM_THREADS",
+                "JAX_PLATFORMS",
+            )
+        },
+    }
+    manifest = log.with_suffix(".command.json")
+    write_json(manifest, record)
+    try:
+        executable = shutil.which(argv[0])
+        if executable is None:
+            raise ValueError(f"benchmark executable is unavailable: {argv[0]}")
+        with log.open("wb") as output:
+            process = await asyncio.create_subprocess_exec(  # nosemgrep
+                str(Path(executable).absolute()),
+                *argv[1:],
+                cwd=cwd,
+                env=env,
+                shell=False,
+                stdout=output,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            try:
+                code = await asyncio.wait_for(process.wait(), timeout=timeout)
+            except BaseException:
+                await stop(process)
+                raise
+        record = {**record, "exit_code": code}
+        if code:
+            raise RuntimeError(f"command exited {code}; see {log}")
+    except BaseException as error:
+        record = {**record, "error": f"{type(error).__name__}: {error}"}
+        raise
+    finally:
+        write_json(manifest, record)
 
 
 async def stop(process: asyncio.subprocess.Process) -> None:

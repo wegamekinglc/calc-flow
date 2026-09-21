@@ -42,8 +42,10 @@ def bench_targets(source: Path) -> list[str]:
     return targets
 
 
-async def build_binaries(source: Path, output: Path, shared: Path) -> dict:
-    targets = bench_targets(source)
+async def build_binaries(
+    source: Path, output: Path, shared: Path, *, targets: tuple[str, ...] | None = None
+) -> dict:
+    targets = targets if targets is not None else bench_targets(source)
     environment = {
         **child_environment(),
         "CARGO_TARGET_DIR": str(shared),

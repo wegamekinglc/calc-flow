@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -217,6 +218,17 @@ def block_problem(name: str, blocks: dict) -> str | None:
 def _fingerprint_problem(metadata: list[dict], *, frontend: bool = False) -> str | None:
     if frontend and (problem := metadata_problem(metadata)):
         return problem
+    for key in (
+        "machine_fingerprint",
+        "dependency_fingerprint",
+        "workload_fingerprint",
+    ):
+        if any(
+            not isinstance(row.get(key), str)
+            or re.fullmatch(r"[0-9a-f]{64}", row[key]) is None
+            for row in metadata
+        ):
+            return f"benchmark {key} missing or malformed; no timing classification"
     for key in (
         "machine_fingerprint",
         "dependency_fingerprint",

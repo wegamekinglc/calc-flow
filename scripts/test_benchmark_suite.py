@@ -13,7 +13,7 @@ from scripts.benchmark_suite.catalog import (
     engine_cases,
     shards,
 )
-from scripts.benchmark_suite.legacy import combine_blocks
+from scripts.benchmark_suite.legacy import _fingerprint_problem, combine_blocks
 from scripts.benchmark_suite.report import comparison, render_report, validate_shards
 
 
@@ -138,7 +138,10 @@ class BenchmarkSuiteTests(unittest.TestCase):
                     "samples": [1.0],
                     "rows": 10,
                     "scope": "native-sql-paired-boundary",
-                    "metadata": {"workload_fingerprint": "f"},
+                    "metadata": {
+                        f"{name}_fingerprint": "f" * 64
+                        for name in ("machine", "dependency", "workload")
+                    },
                 }
                 for name in names
             }
@@ -164,7 +167,10 @@ class BenchmarkSuiteTests(unittest.TestCase):
                     "samples": [1.0],
                     "rows": 10,
                     "scope": "native-sql-paired-boundary",
-                    "metadata": {"workload_fingerprint": "f"},
+                    "metadata": {
+                        f"{name}_fingerprint": "f" * 64
+                        for name in ("machine", "dependency", "workload")
+                    },
                 }
                 for name in names
             }
@@ -454,6 +460,18 @@ class BenchmarkSuiteTests(unittest.TestCase):
                         baseline=[[base] * 10] * 2, candidate=[[head] * 10] * 2
                     )
                 )
+
+    def test_legacy_missing_or_malformed_fingerprints_are_incomparable(self):
+        valid = {
+            f"{name}_fingerprint": "a" * 64
+            for name in ("machine", "dependency", "workload")
+        }
+        for field in valid:
+            for value in (None, "", "wrong", 42):
+                with self.subTest(field=field, value=value):
+                    metadata = {**valid, field: value}
+                    self.assertIn(field, _fingerprint_problem([metadata] * 4) or "")
+        self.assertIsNone(_fingerprint_problem([valid] * 4))
 
     def test_informational_blocks_are_not_called_paired(self):
         row = measured_case(comparison="suite-blocks", candidate=[[1.2] * 10] * 2)

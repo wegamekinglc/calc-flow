@@ -171,6 +171,23 @@ def record_benchmark(
         **metric_info,
     }
 
+    record_comparable_identity(
+        benchmark,
+        workload_identity={
+            "scenario": scenario,
+            "scope": "pytest-native-boundary",
+            "backend": backend or "calc-flow",
+            "scale": scale.name,
+            "table_rows": scale.table_rows,
+            "array_elements": scale.array_elements,
+            "matrix_dimension": scale.matrix_dimension,
+            "input_rows": input_rows,
+            "output_rows": output_rows,
+            "seed": SEED,
+        },
+        dependency_packages=("numpy", "pyarrow", "pytest", "pytest-benchmark"),
+    )
+
 
 def record_comparable_identity(
     benchmark: BenchmarkFixture,
