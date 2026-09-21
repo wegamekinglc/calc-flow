@@ -550,6 +550,7 @@ jobs:
 
           import calc_flow
           import calc_flow_studio
+          import tomllib
 
           app = calc_flow_studio.create_app()
           paths = [route.path for route in app.routes]
@@ -557,14 +558,17 @@ jobs:
           assert "/" in paths
           assert "/assets" in paths
           assert not hasattr(calc_flow, "web")
+          with Path("pyproject.toml").open("rb") as stream:
+              version = tomllib.load(stream)["project"]["version"]
+          upper_bound = f"<{int(version.split('.')[0]) + 1}"
           core_requirements = requires("calc-flow-python") or []
           studio_requirements = requires("calc-flow-studio") or []
           assert not any("fastapi" in item.lower() for item in core_requirements)
           assert not any("uvicorn" in item.lower() for item in core_requirements)
           assert any(
               item.lower().startswith("calc-flow-python")
-              and ">=5.0.0" in item
-              and "<6" in item
+              and f">={version}" in item
+              and upper_bound in item
               for item in studio_requirements
           )
           index = next(route for route in app.routes if route.path == "/").endpoint()

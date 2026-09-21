@@ -5,8 +5,8 @@ from calc_flow import _native
 
 
 def test_native_package_reports_v3() -> None:
-    assert calc_flow.__version__ == "5.0.0"
-    assert _native.version() == "5.0.0"
+    assert calc_flow.__version__ == "2026.9.22"
+    assert _native.version() == "2026.9.22"
     assert issubclass(calc_flow.CompileError, calc_flow.CalcFlowError)
     assert calc_flow.CalcFlowError.__module__ == "calc_flow._native"
 
