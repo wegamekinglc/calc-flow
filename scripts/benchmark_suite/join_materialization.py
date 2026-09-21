@@ -35,17 +35,21 @@ def materialization_rows(path: Path) -> dict:
     for case in cases:
         _validate_case(case)
     return {
-        f"stream_join_materialization/{case['name']}": {
-            "samples": [sample["seconds"] for sample in case["samples"]],
-            "rows": case["config"]["incoming"] * case["config"]["fan"],
-            "scope": report["scope"],
-            "metadata": {
-                "config": case["config"],
-                "oracle": case["oracle"],
-                "observations": case["samples"],
-            },
-        }
+        f"stream_join_materialization/{case['name']}": _case_row(case, report["scope"])
         for case in cases
+    }
+
+
+def _case_row(case: dict, scope: str) -> dict:
+    return {
+        "samples": [sample["seconds"] for sample in case["samples"]],
+        "rows": case["config"]["incoming"] * case["config"]["fan"],
+        "scope": scope,
+        "metadata": {
+            "config": case["config"],
+            "oracle": case["oracle"],
+            "observations": case["samples"],
+        },
     }
 
 

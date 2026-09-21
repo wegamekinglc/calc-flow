@@ -702,6 +702,7 @@ class ReleaseConfigTests(unittest.TestCase):
                 "core",
                 "m4_state_window",
                 "stream_join_perf",
+                "stream_join_materialization",
                 "allocation_regression",
                 "sql_datafusion_performance",
             },
