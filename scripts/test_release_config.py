@@ -454,7 +454,7 @@ class ReleaseConfigTests(unittest.TestCase):
         compile_step = rust_core.split("      - name: Compile Rust tests\n", 1)[
             1
         ].split("      - name:", 1)[0]
-        self.assertIn("timeout-minutes: 30", compile_step)
+        self.assertIn("timeout-minutes: 45", compile_step)
         self.assertIn(
             "run: python3.13 scripts/run_rust_tests.py --no-run", compile_step
         )
