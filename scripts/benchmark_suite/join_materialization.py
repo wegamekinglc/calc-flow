@@ -53,11 +53,19 @@ def _case_row(case: dict, scope: str) -> dict:
     }
 
 
+def _configured_rows(config: dict) -> int:
+    dimensions = [config.get(field) for field in ("incoming", "fan")]
+    if any(type(value) is not int or value <= 0 for value in dimensions):
+        raise ValueError("Join materialization dimensions must be positive integers")
+    return dimensions[0] * dimensions[1]
+
+
 def _validate_case(case: dict) -> None:
-    rows = case["config"]["incoming"] * case["config"]["fan"]
+    rows = _configured_rows(case["config"])
     oracle = case["oracle"]
     if (
         oracle.get("validated_all_rows") is not True
+        or type(oracle.get("output_rows")) is not int
         or oracle.get("output_rows") != rows
     ):
         raise ValueError("Join materialization row oracle failed")
@@ -74,6 +82,7 @@ def _valid_sample(sample: dict, rows: int) -> bool:
         type(seconds) in (int, float)
         and math.isfinite(seconds)
         and seconds > 0
+        and type(sample.get("output_rows")) is int
         and sample.get("output_rows") == rows
         and _valid_diagnostics(sample)
     )

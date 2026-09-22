@@ -15,7 +15,10 @@ from scripts.benchmark_suite.migrations import declared_migrations, load_migrati
 from scripts.benchmark_suite.normalize import criterion_rows, read_json
 from scripts.benchmark_suite.process import ROOT, child_environment, command
 from scripts.benchmark_suite.provenance import harness_sha256
-from scripts.benchmark_suite.rust_provenance import with_compiled_dependencies
+from scripts.benchmark_suite.rust_provenance import (
+    target_dependency_fingerprint,
+    with_compiled_dependencies,
+)
 from scripts.verify_sql_datafusion_performance import verify_report
 from scripts.write_criterion_provenance import build_provenance
 
@@ -401,7 +404,9 @@ def _stamp_fingerprints(provenance: dict, applied: dict) -> dict:
         side: {
             target: {
                 "machine_fingerprint": identity["machine_fingerprint"],
-                "dependency_fingerprint": identity["compiled_dependency_fingerprint"],
+                "dependency_fingerprint": target_dependency_fingerprint(
+                    identity, target
+                ),
                 "workload_fingerprint": (
                     candidate_scoped[target] if target in applied else scoped
                 ),

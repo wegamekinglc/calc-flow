@@ -49,6 +49,45 @@ def report() -> dict:
 
 
 class MaterializationEvidenceTests(unittest.TestCase):
+    def test_workload_dimensions_require_positive_integers(self):
+        with TemporaryDirectory() as raw:
+            path = Path(raw) / "report.json"
+            for field in ("incoming", "fan"):
+                for value in (-1, 0, 1.5, True, "1", None):
+                    with self.subTest(field=field, value=value):
+                        item = report()
+                        case = item["cases"][0]
+                        case["config"] = {"incoming": 1, "fan": 1, field: value}
+                        rows = value if type(value) in (int, float, bool) else 1
+                        case["oracle"]["output_rows"] = rows
+                        for sample in case["samples"]:
+                            sample["output_rows"] = rows
+                        path.write_text(json.dumps(item))
+                        with self.assertRaises(ValueError):
+                            materialization_rows(path)
+
+    def test_output_counts_require_actual_integers(self):
+        with TemporaryDirectory() as raw:
+            path = Path(raw) / "report.json"
+            for location in ("oracle", "sample"):
+                for value in (1.0, True):
+                    with self.subTest(location=location, value=value):
+                        item = report()
+                        case = item["cases"][0]
+                        case["config"] = {"incoming": 1, "fan": 1}
+                        case["oracle"]["output_rows"] = 1
+                        for sample in case["samples"]:
+                            sample["output_rows"] = 1
+                        target = (
+                            case["oracle"]
+                            if location == "oracle"
+                            else case["samples"][0]
+                        )
+                        target["output_rows"] = value
+                        path.write_text(json.dumps(item))
+                        with self.assertRaises(ValueError):
+                            materialization_rows(path)
+
     def test_missing_or_corrupt_memory_backpressure_evidence_is_rejected(self):
         invalid = []
         for field in (

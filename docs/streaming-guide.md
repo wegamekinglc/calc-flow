@@ -917,10 +917,13 @@ sequence range. It then materializes each validated range into independently
 owned output payload buffers, awaits emission, and proceeds to the next range.
 Matching, duplicate-row behavior, and deterministic output order are preserved.
 
-For flat columns, preflight computes row costs and validity-bitmap charges
-without building the complete output. Nested and dictionary payloads require
-actual candidate-range materialization: an over-budget range is split in half
-and checked again. Each trial allocation is released before the next trial;
+Preflight computes and caches row costs only for distinct indices referenced
+by matched pairs, for both flat and nested payloads. Unmatched retained rows
+are not scanned for these costs. For flat columns, row costs and
+validity-bitmap charges avoid building the complete output. Nested and
+dictionary payloads require actual candidate-range materialization: an
+over-budget range is split in half and checked again. Each trial allocation
+is released before the next trial;
 accepted ranges are materialized again for emission. A trial can exceed the
 edge byte budget before splitting or rejection, so this path is not a hard
 allocation ceiling. Unreferenced dictionary values are excluded from the

@@ -9,6 +9,27 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-22: Scope Rust suite dependency comparisons to each benchmark
+  target's compiled dependencies and compiler identity, retaining aggregate
+  provenance. Adding a target no longer invalidates shared cases; real
+  dependency changes still fail closed. Join preflight caches costs only for
+  distinct matched row indices while preserving complete preflight, output
+  order, oversized-row rejection before emission, and checkpoint recovery.
+  Join report parsing requires positive integer input dimensions and integer
+  oracle/sample row counts, rejecting booleans and floats. These corrections
+  add no performance measurements or speedup claims.
+
+- 2026-09-22: Package versions switch from aligned SemVer to calendar
+  versioning `YYYY.M.D` (release dates, starting at `2026.9.22`). Workspace
+  crate, Python core, Studio, and frontend still move together; native
+  internal crate dependencies pin the date version exactly, and Studio
+  requires `calc-flow-python` within the release's calendar year
+  (`>=2026.9.22,<2027`) instead of the removed `>=5.0.0,<6` major bound.
+  Release tags become annotated `calc-flow-python-v<version>` at the current
+  `main` head; the workflow trigger is `calc-flow-python-v*`. Historical
+  `v4.0.0`/`v5.0.0` tags remain valid performance baselines. PyPI
+  immutability now means retrying under the next calendar date.
+
 - 2026-09-21: Materialize bounded event-time Join output one chunk at a time
   after complete range/row-budget and sequence preflight (DAL-300). An
   oversized row rejects the input's output before emission; cancellation after
@@ -29,17 +50,6 @@ measurements. Use the current guides for supported behavior.
   to `48fed573`), separately from product source. No release-wide performance
   pass follows; historical release inconclusive, SQL sameHEAD RSS failures
   and whole-suite ABBA informational boundaries remain unchanged.
-
-- 2026-09-22: Package versions switch from aligned SemVer to calendar
-  versioning `YYYY.M.D` (release dates, starting at `2026.9.22`). Workspace
-  crate, Python core, Studio, and frontend still move together; native
-  internal crate dependencies pin the date version exactly, and Studio
-  requires `calc-flow-python` within the release's calendar year
-  (`>=2026.9.22,<2027`) instead of the removed `>=5.0.0,<6` major bound.
-  Release tags become annotated `calc-flow-python-v<version>` at the current
-  `main` head; the workflow trigger is `calc-flow-python-v*`. Historical
-  `v4.0.0`/`v5.0.0` tags remain valid performance baselines. PyPI
-  immutability now means retrying under the next calendar date.
 
 - 2026-09-21: Keep distinct symbolic sources separate when generated source
   IDs collide (DAL-298). Relational DAGs and ordinary batch fan-out reserve

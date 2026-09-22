@@ -174,9 +174,11 @@ The Rust adapter saves each block's
 `scripts/benchmark_suite/join_materialization.py` requires a nonempty inventory
 with unique names, a successful full-row oracle with the configured output
 count, at least 20 samples per case, positive finite sample times, and valid
-allocation/RSS/queue/backpressure diagnostics. It retains the configuration,
-oracle and all raw observations in normalized metadata. Oracle-only reports
-do not satisfy this sampling contract.
+allocation/RSS/queue/backpressure diagnostics. Configured `incoming` and `fan`
+values must be positive integers; oracle and sample output-row counts must be
+integers matching their product. Boolean and floating-point row counts are
+rejected. It retains the configuration, oracle and all raw observations in
+normalized metadata. Oracle-only reports do not satisfy this sampling contract.
 
 The Rust shard measures a target absent from the baseline as candidate-only
 `new-coverage`; removing a baseline target fails. Whole-suite ABBA deltas
@@ -256,10 +258,12 @@ corrupt, or incompatible comparison identities produce an error without a
 timing classification, including when both sides lack the same fingerprint.
 Comparable ABBA suite blocks remain informational.
 
-The Rust suite retains the full `Cargo.lock` hash for provenance, while its
-comparison fingerprint covers the registry packages actually compiled for
-each benchmark, their lockfile checksums, enabled features, target kinds,
-profiles, and Rust/Cargo versions. The inventory comes from Cargo's
+The Rust suite retains the full `Cargo.lock` hash and aggregate compiled
+dependency identity for provenance. Each case's comparison fingerprint covers
+only its own benchmark target's compiled registry packages, their lockfile
+checksums, enabled features, target kinds, profiles, and Rust/Cargo versions.
+Adding a target does not invalidate comparisons for unchanged shared targets.
+The inventory comes from Cargo's
 [compiler-artifact messages](https://doc.rust-lang.org/cargo/reference/external-tools.html#artifact-messages),
 including cache hits. Unused optional connector dependencies can change without
 invalidating a core-only comparison. Changes to compiled dependencies still

@@ -242,6 +242,28 @@ def provenance_side(scoped: dict[str, str]) -> dict:
     return {
         "machine_fingerprint": "machine",
         "compiled_dependency_fingerprint": "compiled-dependency",
+        "compiled_dependency_identity": {
+            "schema": "calc-flow.compiled-benchmark-dependencies.v1",
+            "rustc": "rustc 1.88",
+            "cargo": "cargo 1.88",
+            "builds": {
+                name: [
+                    {
+                        "target": {"kind": ["bench"], "name": name},
+                        "features": [],
+                        "profile": {"opt_level": "3"},
+                        "package": {"workspace_package": "crates/calc-flow"},
+                    },
+                    {
+                        "target": {"kind": ["lib"], "name": "arrow"},
+                        "features": [],
+                        "profile": {"opt_level": "3"},
+                        "package": {"source": "registry"},
+                    },
+                ]
+                for name in scoped
+            },
+        },
         "scoped_workload_fingerprints": scoped,
     }
 
@@ -336,7 +358,7 @@ class BenchmarkRustTests(unittest.TestCase):
         )
         metadata = rows["core/one"]["metadata"]
         self.assertEqual(metadata["workload_fingerprint"], "a" * 64)
-        self.assertEqual(metadata["dependency_fingerprint"], "compiled-dependency")
+        self.assertEqual(len(metadata["dependency_fingerprint"]), 64)
         self.assertEqual(metadata["machine_fingerprint"], "machine")
         self.assertNotIn("workload_migration", metadata)
 
