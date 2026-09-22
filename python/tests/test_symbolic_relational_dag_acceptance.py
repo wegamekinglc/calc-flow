@@ -263,6 +263,66 @@ def _expected() -> list[tuple[int, int, int, int, float]]:
     return [(1, 1, 1, 1, 15.0), (1, 2, 2, 2, 16.0), (2, 1, 1, 1, 17.0)]
 
 
+@pytest.mark.parametrize("right_value", ["value", "other_value"])
+@pytest.mark.parametrize("reverse_inputs", [False, True])
+def test_source_fallback_collision_keeps_distinct_stream_values(
+    right_value: str, reverse_inputs: bool
+) -> None:
+    left = _input("result", "value")
+    right_name = f"cf_source_{left.digest[:16]}"
+    right = _input(right_name, right_value)
+    joined = table.stream_join(
+        left,
+        right,
+        left_keys=["key"],
+        right_keys=["key"],
+        left_event_time="ts",
+        right_event_time="ts",
+        bounds=JoinTimeBounds(timedelta(seconds=5), timedelta(seconds=2)),
+        limits=JoinStateLimits(1_000, 16 * 1024 * 1024, 10_000),
+        output_entity_by=["left__key"],
+        output_event_time="left__ts",
+        output_sequence_by=["left__sequence", "right__sequence"],
+    )
+    program = Program(
+        "source-fallback-collision",
+        inputs=[right, left] if reverse_inputs else [left, right],
+        outputs=[("result", joined)],
+    )
+
+    async def exercise() -> list[dict[str, object]]:
+        rows = []
+        async with program.stream(
+            {
+                "result": SourceBinding(
+                    _SegmentedSource(
+                        _table("value", [(1, 10, 1, 100.0), (2, 20, 1, 200.0)]), 1
+                    ),
+                    watermark_policy=SourceProvidedWatermarks(),
+                ),
+                right_name: SourceBinding(
+                    _SegmentedSource(
+                        _table(right_value, [(1, 11, 2, 7.0), (2, 21, 2, 9.0)]), 1
+                    ),
+                    watermark_policy=SourceProvidedWatermarks(),
+                ),
+            }
+        ) as results:
+            async for output in results:
+                assert output.name == "result"
+                rows.extend(
+                    output.table.select(
+                        ["left__key", "left__value", f"right__{right_value}"]
+                    ).to_pylist()
+                )
+        return sorted(rows, key=lambda row: row["left__key"])
+
+    assert asyncio.run(exercise()) == [
+        {"left__key": 1, "left__value": 100.0, f"right__{right_value}": 7.0},
+        {"left__key": 2, "left__value": 200.0, f"right__{right_value}": 9.0},
+    ]
+
+
 @pytest.mark.parametrize("segments", [(1, 2, 1), (3, 1, 2)])
 def test_nested_symbolic_joins_match_reference_across_segmentations(
     tmp_path: Path, segments: tuple[int, int, int]

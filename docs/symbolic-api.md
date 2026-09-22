@@ -34,17 +34,17 @@ The declaration catalog is intentionally wider than the implemented project
 lowerers. Use this availability matrix when constructing user-facing formula
 editors or validating stored declarations:
 
-| Domain                     | Construct/analyze   | Batch/stream compile     | Current lowering boundary                                               |
-|----------------------------|---------------------|--------------------------|-------------------------------------------------------------------------|
-| row-local columns          | yes                 | yes                      | portable scalar types and the documented SQL allowlist                  |
-| SQL table stages           | yes                 | yes; one stream alias    | native SELECT/CTE schema; row-local expressions after SQL               |
-| rolling `ts`               | yes                 | yes                      | source/alias/row-local operands and earlier rolling results             |
-| cross-section `cs`         | yes                 | yes                      | staged values; event time and partitions resolve to inputs or aliases   |
-| relational stream joins    | yes                 | stream only              | independent/nested native joins with proved post-join ordering          |
-| backward ASOF joins        | yes                 | stream only              | strict final left preservation; typed identity and bounded state        |
-| symbolic matrix            | yes                 | exact supported shape    | one static `weights` parameter and one allowlisted matmul               |
-| event `window`             | yes                 | stream with aggregates   | fixed UTC tumbling/hopping; stateless table work on either side         |
-| standalone array outputs   | yes                 | no                       | arrays compile only through the supported table attachment              |
+| Domain                   | Construct/analyze | Batch/stream compile   | Current lowering boundary                                             |
+|--------------------------|-------------------|------------------------|-----------------------------------------------------------------------|
+| row-local columns        | yes               | yes                    | portable scalar types and the documented SQL allowlist                |
+| SQL table stages         | yes               | yes; one stream alias  | native SELECT/CTE schema; row-local expressions after SQL             |
+| rolling `ts`             | yes               | yes                    | source/alias/row-local operands and earlier rolling results           |
+| cross-section `cs`       | yes               | yes                    | staged values; event time and partitions resolve to inputs or aliases |
+| relational stream joins  | yes               | stream only            | independent/nested native joins with proved post-join ordering        |
+| backward ASOF joins      | yes               | stream only            | strict final left preservation; typed identity and bounded state      |
+| symbolic matrix          | yes               | exact supported shape  | one static `weights` parameter and one allowlisted matmul             |
+| event `window`           | yes               | stream with aggregates | fixed UTC tumbling/hopping; stateless table work on either side       |
+| standalone array outputs | yes               | no                     | arrays compile only through the supported table attachment            |
 
 `Program.analyze` reports `unsupported_type` for stateful operands outside
 the current materialization boundary, so a clean analysis does not advertise
@@ -242,14 +242,40 @@ Compile again and create fresh bindings and a runner for each job or restart.
 Any successful provider, stream-lifecycle, or UDF registration invalidates
 that runtime's entries. Cache facts do not promise a measured compile speedup.
 
-Programs with one input and one output bind the plan endpoints `input` and
-`output`, matching the `PipelineBuilder` convention; multi-branch graphs name
-endpoints `<node>.input` and `<node>.output` deterministically. Batches
-supplied at explicit plan execution must match the declared input schema
-exactly. Collection and convenience stream methods translate logical declaration
-names to physical bindings. Collection returns tables by logical output name;
-Program streams yield named events. Project reload and explicit stream runners
-retain physical bindings; Python logical aliases are not serialized.
+### Logical names and physical bindings
+
+Plan endpoints use the port name when it is unique, such as `input` or
+`output`; repeated port names are qualified as `<node>.input` or
+`<node>.output`. Batches supplied at explicit plan execution must match the
+declared input schema exactly.
+
+Relational DAGs and ordinary batch fan-out graphs materialize source nodes.
+Both reserve output and planned physical node IDs, including intermediate
+rolling, cross-section, materialization, and prefilter stages. A source keeps
+its declared input name unless it is in that reservation set. On a collision,
+lowering tries `cf_source_<digest16>`, where `digest16` is the first 16 hexadecimal characters
+of the source declaration's digest. If occupied, it tries suffixes `_1`, `_2`,
+and so on until the ID is free. Each candidate is checked against that
+reservation set, all reachable logical input names, and source IDs already
+allocated in program input order. Distinct logical sources retain distinct
+physical source nodes even when their schemas match. Unused declared inputs
+do not reserve source IDs.
+
+`Program.collect` and `Program.stream` accept logical declaration names and
+translate them to physical bindings, including these fallback IDs. Collection
+returns tables by logical output name; Program streams yield named events.
+Legal logical inputs do not need renaming to avoid a generated fallback ID.
+`Program.to_project` and project reload retain physical graph names; Python
+logical aliases are not serialized. When constructing an explicit
+`StreamingRunner`, read `plan.source_binding_ids` and `plan.sink_binding_ids`
+from the compiled plan.
+
+Source allocation is deterministic for the same declarations and input order.
+An available declared name or unsuffixed fallback is retained. Checkpoint
+recovery requires a matching plan fingerprint and source, operator, and sink
+ID sets, together with the native state compatibility checks. Logical aliases
+do not migrate checkpoint identities; see
+[managed recovery](streaming-guide.md#checkpoints-and-recovery).
 
 ## Symbolic event-time window aggregation
 
@@ -437,8 +463,12 @@ cannot consume or feed a symbolic join.
 Lowering copies every declaration into the existing project-v3 join spec with
 no symbolic-only serialized fields. Native watermarks, inclusive time bounds,
 state limits, match order, metrics, checkpoint state v1, and recovery remain
-authoritative. A direct join root exposes source binding ids `left` and
-`right`; a relational DAG exposes `<declared-input>.input` source bindings.
+authoritative. A directly compiled single `stream_join@1` root exposes source
+binding IDs `left` and `right`; a relational DAG exposes
+`<physical-source-id>.input` bindings.
+The physical source ID is the declared input name when available, with the
+collision handling described under
+[logical names and physical bindings](#logical-names-and-physical-bindings).
 Single-output plans retain sink binding `output`, while multi-output graphs use
 ordinary `<node>.output` names. See
 [`12_symbolic_stream_join.py`](../examples/12_symbolic_stream_join.py) for a

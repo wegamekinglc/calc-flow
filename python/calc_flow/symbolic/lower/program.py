@@ -85,14 +85,11 @@ def _edge(source_node: str, target_node: str, /) -> dict[str, object]:
 def _wire_upstream(
     edges: list[dict[str, object]],
     upstream_id: str | None,
-    fanout_id: str | None,
     target_node: str,
     /,
 ) -> None:
     if upstream_id is not None:
         edges.append(_edge(upstream_id, target_node))
-    elif fanout_id is not None:
-        edges.append(_edge(fanout_id, target_node))
 
 
 # The lowerer keeps per-output segment staging in one deterministic pass:
@@ -205,32 +202,10 @@ def _lower_program(
                 shared_plan_counts.get(plan.node_id, 0) + 1
             )
     nodes: list[dict[str, object]] = []
-    edges: list[dict[str, object]] = []
-    fanout_ids: dict[str, str] = {}
-    if fanout:
-        for value in program.inputs:
-            input_node = value._node
-            if input_node.digest not in consumed:
-                continue
-            input_name = _relational_source_name(
-                input_node, frozenset(name for name, _ in program.outputs)
-            )
-            schema = _schema_fields(input_node.attr("schema"))
-            pinned = (
-                input_node.digest in rolling_digests
-                or input_node.digest in direct_cross_section_digests
-            )
-            nodes.append(
-                _expression_node(
-                    input_name,
-                    [_quote_identifier(field.name) for field in schema],
-                    None,
-                    schema,
-                    schema if pinned else None,
-                )
-            )
-            fanout_ids[input_node.digest] = input_name
+    output_edges: list[tuple[str, str, list[dict[str, object]]]] = []
     for output_name, segment in segments:
+        first_node_index = len(nodes)
+        edges: list[dict[str, object]] = []
         rolling = plans[output_name]
         cross = cross_plans[output_name]
         env = dict(segment.env)
@@ -238,7 +213,6 @@ def _lower_program(
             field.name for field in _schema_fields(segment.input_node.attr("schema"))
         ]
         upstream_id: str | None = None
-        fanout_id = fanout_ids.get(segment.input_node.digest)
         final_predicate = segment.predicate
         if (rolling is not None or cross is not None) and segment.predicate is not None:
             state_plan = _required_segment_state_plan(rolling, cross)
@@ -257,7 +231,7 @@ def _lower_program(
                     input_fields,
                 )
             )
-            _wire_upstream(edges, upstream_id, fanout_id, prefilter_id)
+            _wire_upstream(edges, upstream_id, prefilter_id)
             upstream_id = prefilter_id
         if rolling is not None:
             for stage in rolling.stages:
@@ -266,10 +240,10 @@ def _lower_program(
                     materialization_id = stage.materialization_node_id
                     if materialization_id is None:
                         raise RuntimeError("rolling materialization node has no id")
-                    _wire_upstream(edges, upstream_id, fanout_id, materialization_id)
+                    _wire_upstream(edges, upstream_id, materialization_id)
                     upstream_id = materialization_id
                 nodes.append(stage.node)
-                _wire_upstream(edges, upstream_id, fanout_id, stage.node_id)
+                _wire_upstream(edges, upstream_id, stage.node_id)
                 upstream_id = stage.node_id
             env = dict(rolling.env)
             input_field_names = list(rolling.input_field_names)
@@ -280,10 +254,10 @@ def _lower_program(
                 materialization_id = cross.materialization_node_id
                 if materialization_id is None:
                     raise RuntimeError("cross-section materialization node has no id")
-                _wire_upstream(edges, upstream_id, fanout_id, materialization_id)
+                _wire_upstream(edges, upstream_id, materialization_id)
                 upstream_id = materialization_id
             nodes.append(cross.node)
-            _wire_upstream(edges, upstream_id, fanout_id, cross.node_id)
+            _wire_upstream(edges, upstream_id, cross.node_id)
             upstream_id = cross.node_id
             env = dict(cross.env)
             input_field_names = list(cross.input_field_names)
@@ -350,8 +324,7 @@ def _lower_program(
                         if rolling is not None
                         else None
                     )
-                elif fanout_id is not None:
-                    edges.append(_edge(fanout_id, node_id))
+                elif fanout:
                     input_schema = (
                         _schema_fields(segment.input_node.attr("schema"))
                         if segment.input_node.digest
@@ -364,6 +337,50 @@ def _lower_program(
                 edges.append(_edge(stage_ids[position - 1], node_id))
                 input_schema = None
             nodes.append(_expression_node(node_id, select, filter_sql, input_schema))
+        output_edges.append(
+            (segment.input_node.digest, str(nodes[first_node_index]["id"]), edges)
+        )
+    reserved_ids = frozenset(str(node["id"]) for node in nodes)
+    source_nodes: list[dict[str, object]] = []
+    fanout_ids: dict[str, str] = {}
+    if fanout:
+        declared_ids = frozenset(
+            _cstr(value._node.attr("name"))
+            for value in program.inputs
+            if value._node.digest in consumed
+        )
+        for value in program.inputs:
+            input_node = value._node
+            if input_node.digest not in consumed:
+                continue
+            input_name = _relational_source_name(
+                input_node,
+                reserved_ids,
+                fallback_reserved_ids=declared_ids | frozenset(fanout_ids.values()),
+            )
+            schema = _schema_fields(input_node.attr("schema"))
+            pinned = (
+                input_node.digest in rolling_digests
+                or input_node.digest in direct_cross_section_digests
+            )
+            source_nodes.append(
+                _expression_node(
+                    input_name,
+                    [_quote_identifier(field.name) for field in schema],
+                    None,
+                    schema,
+                    schema if pinned else None,
+                )
+            )
+            fanout_ids[input_node.digest] = input_name
+    nodes = [*source_nodes, *nodes]
+    edges = [
+        edge
+        for digest, target, stage_edges in output_edges
+        for edge in (
+            [_edge(fanout_ids[digest], target), *stage_edges] if fanout else stage_edges
+        )
+    ]
     nodes, edges = _deduplicate_node_ids(nodes, edges)
     nodes, edges = _deduplicate_pure_expression_nodes(
         nodes,

@@ -5013,8 +5013,9 @@ async fn start_checkpoint_restart_generation(
 }
 
 async fn wait_for_completed_checkpoints(job: &PublicStreamingJob, expected: u64) {
-    let baseline = job
-        .status()
+    let mut last_running_status = job.status();
+    let mut last_running_sample = std::time::Instant::now();
+    let baseline = last_running_status
         .checkpoint
         .last_completed_epoch
         .map_or(0, Epoch::as_u64);
@@ -5027,7 +5028,10 @@ async fn wait_for_completed_checkpoints(job: &PublicStreamingJob, expected: u64)
             assert_eq!(
                 status.state,
                 PublicJobState::Running,
-                "checkpoint soak generation terminated before {expected} checkpoints: {:?}",
+                "checkpoint soak generation terminated before {expected} checkpoints \
+                 (baseline={baseline}, target={target}); last running sample age={:?}: \
+                 {last_running_status:?}; terminal status: {status:?}; outcome: {:?}",
+                last_running_sample.elapsed(),
                 job.wait().await
             );
             if status
@@ -5037,6 +5041,8 @@ async fn wait_for_completed_checkpoints(job: &PublicStreamingJob, expected: u64)
             {
                 break;
             }
+            last_running_status = status;
+            last_running_sample = std::time::Instant::now();
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
     })

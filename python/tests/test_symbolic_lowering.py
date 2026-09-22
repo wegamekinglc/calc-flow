@@ -61,6 +61,30 @@ def test_compile_batch_is_deterministic_across_builds() -> None:
     assert build().fingerprint == build().fingerprint
 
 
+@pytest.mark.parametrize("right_column", ["value", "other_value"])
+def test_batch_source_fallback_collision_keeps_distinct_values(
+    right_column: str,
+) -> None:
+    left = table_input("result", schema=[Field("value", "int64")])
+    right_name = f"cf_source_{left.digest[:16]}"
+    right = table_input(right_name, schema=[Field(right_column, "int64")])
+    program = Program(
+        "batch-source-collision",
+        inputs=[left, right],
+        outputs=[("result", left), ("other", right)],
+    )
+
+    outputs = program.collect(
+        {
+            "result": pa.table({"value": [1, 2]}),
+            right_name: pa.table({right_column: [10, 20]}),
+        }
+    )
+
+    assert outputs["result"].to_pydict() == {"value": [1, 2]}
+    assert outputs["other"].to_pydict() == {right_column: [10, 20]}
+
+
 def test_compile_batch_requires_a_runtime() -> None:
     quotes = _quotes()
     program = Program("p", inputs=[quotes], outputs=[("signals", quotes)])

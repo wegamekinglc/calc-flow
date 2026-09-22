@@ -391,9 +391,12 @@ jobs:
           uv pip install --python .venv/bin/python --no-deps --editable web-ui/backend
           cd web-ui && npm ci
       - name: Run studio backend coverage
+        timeout-minutes: 15
         working-directory: web-ui/backend
+        env:
+          PYTHONUNBUFFERED: "1"
         run: >-
-          uv run --no-sync --project . pytest -q
+          uv run --no-sync --project . pytest -vv -o faulthandler_timeout=60
           --cov=calc_flow_studio --cov-report=term-missing --cov-report=xml
       - name: Verify generated API contract
         run: |
