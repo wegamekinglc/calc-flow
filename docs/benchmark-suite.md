@@ -14,6 +14,7 @@ On this page:
 - [Inputs, correctness and timing boundaries](#inputs-correctness-and-timing-boundaries)
 - [Join materialization measurements](#join-materialization-measurements)
 - [Revision comparisons and regression gate](#revision-comparisons-and-regression-gate)
+- [Release acceptance measurements](#release-acceptance-measurements)
 - [Reports and failure behavior](#reports-and-failure-behavior)
 - [Local reproduction](#local-reproduction)
 - [Performance-plan diagnostics](#performance-plan-diagnostics)
@@ -235,6 +236,26 @@ the baseline declared keep the full interleaved gate. The baseline's case ids
 are resolved from the baseline source's declarative catalog forms, and a
 baseline file outside those forms fails closed to full gating.
 
+Python suite blocks execute each checkout's own benchmark tests with the
+current harness's collector and shared `benchmarks/support.py`, including
+when the baseline checkout has an older recorder. Reports retain benchmark
+source and shared-support hashes; the support also contributes to the harness
+hash. Ordinary Python cases record raw machine, dependency, and workload
+identities with SHA-256 fingerprints. Workload identity includes scenario,
+timing scope, backend, scale, dimensions, row counts, and seed; array cases
+retain their more specific contract-v2 identities.
+
+The frontend runner records the actual Node process's hardware and runtime
+identity, including CPU models/count, memory, architecture, Node/V8 versions,
+and thread-related settings. Each workload binds the case/group and hashes
+of the benchmark sources, Vite config, runner, and identity collector.
+Dependency identity uses `frontend-npm-lock-v1`: only the top-level and root
+package version fields are omitted from the comparison lock. The unmodified
+lock hash and both version values remain in provenance. Missing, malformed,
+corrupt, or incompatible comparison identities produce an error without a
+timing classification, including when both sides lack the same fingerprint.
+Comparable ABBA suite blocks remain informational.
+
 The Rust suite retains the full `Cargo.lock` hash for provenance, while its
 comparison fingerprint covers the registry packages actually compiled for
 each benchmark, their lockfile checksums, enabled features, target kinds,
@@ -259,6 +280,47 @@ documents keep their real differing workload identities, and the applied
 migrations are listed in the shard's JSON artifact. Undeclared or mismatched
 workload changes still fail closed, now scoped to the changed target.
 
+## Release acceptance measurements
+
+The release workflow uses `python -m scripts.release_performance` for ordinary
+Python cases and the Rust `core` and `stream_join_perf` targets. It builds and
+installs sealed baseline/candidate wheels separately and records the loaded
+Python native hash and each Rust benchmark binary hash. The formal baseline
+and candidate commits must differ; baseline selection follows the
+[release baseline contract](python-release.md#first-release-performance-baseline).
+
+Python release collection runs the current candidate's benchmark declarations
+against both sealed native builds at `overhead` scale. Rust runs each
+revision's compiled cases with the compiled-dependency and target-scoped
+workload identities described above. Both sides must have matching, nonempty,
+duplicate-free inventories; this release path has no `new-coverage` exemption.
+
+Each case receives two rounds of ten adjacent baseline/candidate invocation
+pairs, alternating AB/BA. Every invocation starts a fresh isolated process.
+Its observation is the median of its saved pytest or Criterion raw samples,
+using the fixture's existing timing boundary. Process startup, builds,
+warm-up, and correctness checks stay outside that boundary; JAX completion
+remains inside its timed calls. Separate summary means or whole-suite ABBA
+blocks cannot substitute for these invocation pairs.
+
+All observations must match the expected sealed native/binary hash and have
+compatible machine, dependency, and workload identities. Raw identity objects
+must reproduce their fingerprints. Missing pairs, reused worker identities,
+incorrect execution order, invalid samples, or failed correctness checks are
+evidence errors and block acceptance.
+
+The collector applies the same two-round paired-median interval and +5%
+verdict rules as the engine/warm gate. A timing-only `inconclusive` result does
+not itself fail this gate, but is not proof of equivalence or improvement.
+Invalid or incomparable evidence fails regardless of timing. The separate
+stream lifecycle quantile, rolling-kernel, and allocation gates still apply.
+`--allow-dependency-drift` records acknowledgement only; it does not permit
+classification across incompatible dependencies or waive release acceptance.
+`scripts/verify_perf_gates.py` rejects independent pytest/Criterion summaries
+as release pairing evidence. See the
+[release command and retained evidence](python-release.md#performance-acceptance-and-failure-evidence)
+for execution and failure inspection.
+
 ## Reports and failure behavior
 
 The final always-run job publishes all result rows, with dimensions, timing
@@ -278,6 +340,16 @@ error rows. If a suite runner fails before discovery, its unavailable inventory
 is explicitly shown rather than invented. The complete Markdown/JSON remains
 an artifact if it exceeds GitHub's step-summary size limit; overflow fails
 instead of silently truncating rows.
+
+Release collection writes `results.json` and `summary.md` under its output
+directory. Each case retains `pairs.json`, per-invocation `observation.json`,
+raw pytest/Criterion data, and a `failure.json` when an invocation fails.
+Command records beside logs include arguments, working directory, thread
+settings, exit code, and errors. Build records, dependency provenance, and
+harness hashes remain available with collected samples when a later step
+fails. Release CI's always-run summary and 30-day artifact also record
+performance/security/soak outcomes and why a downstream step was skipped;
+see [release failure evidence](python-release.md#performance-acceptance-and-failure-evidence).
 
 ## Local reproduction
 

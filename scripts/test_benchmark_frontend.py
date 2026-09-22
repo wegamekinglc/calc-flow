@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -163,13 +164,21 @@ class FrontendFingerprintTests(unittest.TestCase):
 
 
 def frontend_blocks(baseline: dict, candidate: dict) -> dict:
+    from scripts.benchmark_suite.frontend import case_identity
+
+    identity = case_identity(
+        frontend_machine(),
+        {"case.bench.ts": hashlib.sha256(b"fixture").hexdigest()},
+        "case",
+        "compare",
+    )
     return {
         side: [
             {
                 "case": {
                     "rows": None,
                     "scope": "vitest-native-boundary",
-                    "metadata": metadata,
+                    "metadata": {**identity, **metadata},
                 }
             }
             for _ in range(2)
@@ -243,15 +252,30 @@ class FrontendBlockTests(unittest.TestCase):
         self.assertIn("confirmation block", block_problem("case", incomplete))
 
 
+def frontend_machine() -> dict:
+    return {
+        "platform": "linux",
+        "architecture": "x64",
+        "cpu_models": ["fixture CPU"],
+        "logical_cpus": 2,
+        "node_version": "v24.0.0",
+        "v8_version": "fixture-v8",
+    }
+
+
 def write_frontend_checkout(root: Path, version: str) -> None:
     frontend = root / "web-ui"
     frontend.mkdir(parents=True)
     (frontend / "package-lock.json").write_text(json.dumps(frontend_lock(version)))
+    (frontend / "src").mkdir()
+    (frontend / "src/case.bench.ts").write_text("// same workload\n")
+    (frontend / "vite.config.ts").write_text("export default {};\n")
     generated = root / "target/benchmark-suite/vitest.json"
     generated.parent.mkdir(parents=True)
     generated.write_text(
         json.dumps(
             {
+                "machine_identity": frontend_machine(),
                 "files": [
                     {
                         "groups": [
@@ -267,13 +291,58 @@ def write_frontend_checkout(root: Path, version: str) -> None:
                             }
                         ]
                     }
-                ]
+                ],
             }
         )
     )
 
 
 class BenchmarkFrontendTests(unittest.IsolatedAsyncioTestCase):
+    @unittest.skipUnless(
+        shutil.which("node"), "Node is required for runner identity smoke"
+    )
+    async def test_node_collector_records_its_actual_runtime_and_hardware(self):
+        from scripts.benchmark_suite.process import ROOT, command
+
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "node.log"
+            await command(
+                [
+                    "node",
+                    "--input-type=module",
+                    "-e",
+                    "import { machineIdentity } from "
+                    "'./scripts/benchmark_suite/frontend_identity.mjs'; "
+                    "console.log(JSON.stringify(machineIdentity()));",
+                ],
+                cwd=ROOT,
+                log=log,
+            )
+            machine = json.loads(log.read_text())
+            self.assertTrue(machine["node_version"].startswith("v"))
+            self.assertGreater(machine["logical_cpus"], 0)
+            self.assertTrue(machine["cpu_models"])
+            self.assertGreater(machine["memory_bytes"], 0)
+
+    async def test_adapter_identities_reject_missing_machine_and_workload_drift(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            write_frontend_checkout(source, "5.0.0")
+            output = source / "output"
+            output.mkdir()
+            with patch("scripts.benchmark_suite.legacy.command"):
+                baseline = await _frontend_run(source, output)
+                (source / "web-ui/src/case.bench.ts").write_text("// changed workload")
+                changed = await _frontend_run(source, output)
+                blocks = {"baseline": [baseline] * 2, "candidate": [changed] * 2}
+                self.assertIn("workload", block_problem("compare/100_cases", blocks))
+                raw = source / "target/benchmark-suite/vitest.json"
+                report = json.loads(raw.read_text())
+                del report["machine_identity"]
+                raw.write_text(json.dumps(report))
+                with self.assertRaisesRegex(ValueError, "machine"):
+                    await _frontend_run(source, output)
+
     async def test_same_candidate_harness_records_both_versions_and_raw_locks(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -324,6 +393,9 @@ class BenchmarkFrontendTests(unittest.IsolatedAsyncioTestCase):
                 for block in blocks[side]:
                     for row in block.values():
                         metadata = row["metadata"]
+                        from scripts.benchmark_suite.identity import validate_identity
+
+                        validate_identity(metadata)
                         self.assertEqual(metadata["group"], "compare")
                         self.assertEqual(
                             metadata["dependency_fingerprint_protocol"],
@@ -388,7 +460,18 @@ class BenchmarkFrontendTests(unittest.IsolatedAsyncioTestCase):
             generated = source / "target/benchmark-suite/vitest.json"
             generated.parent.mkdir(parents=True)
             frontend.mkdir()
-            generated.write_text('{"files": []}', encoding="utf-8")
+            generated.write_text(
+                json.dumps(
+                    {
+                        "files": [],
+                        "machine_identity": frontend_machine(),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (frontend / "src").mkdir()
+            (frontend / "src/case.bench.ts").write_text("// workload\n")
+            (frontend / "vite.config.ts").write_text("export default {};\n")
             (frontend / "package-lock.json").write_text(
                 json.dumps(frontend_lock()), encoding="utf-8"
             )

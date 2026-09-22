@@ -248,8 +248,8 @@ def provenance_side(scoped: dict[str, str]) -> dict:
 
 def suite_block(workload_fingerprint: str, migration: str | None = None) -> dict:
     metadata = {
-        "machine_fingerprint": "machine",
-        "dependency_fingerprint": "dependency",
+        "machine_fingerprint": "d" * 64,
+        "dependency_fingerprint": "e" * 64,
         "workload_fingerprint": workload_fingerprint,
     }
     if migration is not None:

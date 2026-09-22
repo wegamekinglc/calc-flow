@@ -712,6 +712,23 @@ class WindowsSoakSmokeIsolationTests(unittest.TestCase):
         workflow = LINUX_WORKFLOW.read_text(encoding="utf-8")
         self.assertNotIn("--lib-skip", workflow)
 
+    def test_windows_preserves_smoke_artifacts_and_native_exit_status(self) -> None:
+        job = self._rust_tests_job()
+        for fragment in (
+            "CALC_FLOW_CHECKPOINT_SMOKE_ARTIFACTS:",
+            "parent.stdout",
+            "parent.stderr",
+            "$smokeExitCode = $LASTEXITCODE",
+            "exit $smokeExitCode",
+            "checkout_sha",
+            "head_sha",
+            "base_sha",
+            "name: Upload checkpoint smoke evidence\n        if: always()",
+            "path: target/checkpoint-smoke-evidence",
+            "include-hidden-files: true",
+        ):
+            self.assertIn(fragment, job)
+
 
 if __name__ == "__main__":
     unittest.main()

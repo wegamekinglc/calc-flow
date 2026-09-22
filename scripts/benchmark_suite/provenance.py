@@ -16,6 +16,7 @@ def harness_sha256() -> str:
         ROOT / "benchmarks/warm_stream.py",
         ROOT / "benchmarks/rolling_indicator_comparison.py",
         ROOT / "benchmarks/requirements.lock",
+        ROOT / "benchmarks/support.py",
         ROOT / "scripts/profile_warm_stream.py",
         ROOT / "scripts/toolkit.py",
         ROOT / "scripts/verify_sql_datafusion_performance.py",

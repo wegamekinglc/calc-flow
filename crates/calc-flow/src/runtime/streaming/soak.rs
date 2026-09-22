@@ -1,3 +1,5 @@
+pub(super) mod diagnostics;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{File, OpenOptions},
@@ -5013,30 +5015,41 @@ async fn start_checkpoint_restart_generation(
 }
 
 async fn wait_for_completed_checkpoints(job: &PublicStreamingJob, expected: u64) {
-    let baseline = job
-        .status()
+    let mut last_running_status = job.status();
+    let mut last_running_sample = std::time::Instant::now();
+    let baseline = last_running_status
         .checkpoint
         .last_completed_epoch
         .map_or(0, Epoch::as_u64);
     let target = baseline
         .checked_add(expected)
         .expect("checkpoint soak smoke target epoch overflowed");
+    diagnostics::wait_started(baseline, target);
     let completed = tokio::time::timeout(CHECKPOINT_SOAK_SMOKE_CHECKPOINT_WAIT, async {
         loop {
             let status = job.status();
             assert_eq!(
                 status.state,
                 PublicJobState::Running,
-                "checkpoint soak generation terminated before {expected} checkpoints: {:?}",
-                job.wait().await
+                "checkpoint soak generation terminated before {expected} checkpoints \
+                 (baseline={baseline}, target={target}); last running sample age={:?}: \
+                 {last_running_status:?}; terminal status: {status:?}; outcome: {:?}",
+                last_running_sample.elapsed(),
+                {
+                    diagnostics::observation("wait_observed_non_running", &status);
+                    job.wait().await
+                }
             );
             if status
                 .checkpoint
                 .last_completed_epoch
                 .is_some_and(|epoch| epoch.as_u64() >= target)
             {
+                diagnostics::observation("wait_target_reached", &status);
                 break;
             }
+            last_running_status = status;
+            last_running_sample = std::time::Instant::now();
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
     })
@@ -5044,7 +5057,11 @@ async fn wait_for_completed_checkpoints(job: &PublicStreamingJob, expected: u64)
     assert!(
         completed.is_ok(),
         "checkpoint soak generation did not complete {expected} checkpoints: {:?}",
-        job.status()
+        {
+            let status = job.status();
+            diagnostics::observation("wait_timeout", &status);
+            status
+        }
     );
 }
 
@@ -5294,6 +5311,7 @@ async fn run_checkpoint_soak_child(
     let before = checkpoint_manifest_documents(&manifest_root).await;
     let selected = before.last();
     let restored_epoch = selected.map(|manifest| manifest.epoch().as_u64());
+    diagnostics::restored(restored_epoch);
     let restored_cursor_orders = selected.map_or_else(
         || BTreeMap::from([("left".into(), None), ("right".into(), None)]),
         |manifest| {
@@ -5797,7 +5815,7 @@ async fn spawn_checkpoint_soak_process(
     let blocking_plan = plan_path.clone();
     let blocking_stdout = stdout_path.clone();
     let blocking_stderr = stderr_path.clone();
-    let exit_code = tokio::task::spawn_blocking(move || {
+    let exit_result = tokio::task::spawn_blocking(move || {
         run_checkpoint_soak_process_blocking(
             &executable,
             &blocking_plan,
@@ -5809,7 +5827,10 @@ async fn spawn_checkpoint_soak_process(
     .await
     .map_err(|error| CalcFlowError::Internal {
         message: format!("checkpoint soak child owner task failed: {error}"),
-    })??;
+    })
+    .and_then(|result| result);
+    diagnostics::process_exit(plan, &exit_result);
+    let exit_code = exit_result?;
     if exit_code != 0 {
         return Err(checkpoint_soak_process_error(format!(
             "checkpoint soak child generation {} exited {exit_code}; stderr: {}",
@@ -6156,9 +6177,9 @@ async fn run_checkpoint_restart_soak_smoke_with_retention(
     retained_epochs: usize,
 ) -> CheckpointRestartSoakReport {
     let _exclusive_smoke = CHECKPOINT_SOAK_SMOKE_LOCK.lock().await;
-    let directory = tempfile::tempdir().unwrap();
+    let directory = diagnostics::run_directory(retained_epochs);
     run_checkpoint_soak_processes_with_retention(
-        directory.path(),
+        &directory,
         CheckpointSoakProcessMode::Smoke,
         retained_epochs,
     )
@@ -7712,6 +7733,7 @@ async fn checkpoint_restart_soak_generation_child_process() {
         return;
     };
     let plan: CheckpointSoakProcessPlan = read_checkpoint_soak_document(&plan_path).unwrap();
+    let _diagnostics = diagnostics::Session::start(&plan);
     let report = run_checkpoint_soak_child(&plan).await.unwrap();
     write_checkpoint_soak_document(&checkpoint_soak_report_path(&plan), &report).unwrap();
 }

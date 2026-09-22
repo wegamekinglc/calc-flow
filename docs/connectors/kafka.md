@@ -216,6 +216,44 @@ runtime.register_kafka_decoder(
 )
 ```
 
+With a nonempty `schema` option, Python decoder output must satisfy the
+source's complete `SourceSchema::Exact` contract:
+
+- Field count, order, names, and Arrow types must match the declaration.
+  The wrapper does not cast or reorder columns.
+- Callback field nullability may differ from the declaration. Valid output
+  is normalized to the declared `nullable` flags. Actual NULL values in a
+  declared non-nullable column fail decoding before any output from that
+  message is returned, including NULLs in later chunks of a Table. Declared
+  nullable columns accept NULLs in a valid Arrow result; a result that
+  violates its own Arrow schema still fails import.
+- Schema and field metadata follow the source's declared schema. The
+  `ArrowFieldSpec` declarations carry no metadata, so this replaces callback
+  schema and field metadata with empty metadata.
+
+With `schema` omitted or empty, the wrapper preserves the callback's
+imported schema, including nullability and schema and field metadata.
+In both cases, the callback's Table or RecordBatch remains unchanged;
+normalization reuses its Arrow columns without modifying their values.
+Kafka assigns the separate `Batch.metadata` envelope with the topic,
+partition, message offset, and source sequence.
+
+A zero-row RecordBatch or Table is valid, including a Table whose Arrow C
+stream contains a schema and no record batches. The wrapper retains that
+schema, creates a zero-row record batch when needed, and applies the same
+schema validation, metadata rules, and row/byte decode bounds. An empty
+result with the wrong schema still fails. Zero-column results that contain
+rows retain their row count and remain subject to the decode bounds.
+
+A successful empty result consumes the Kafka message and returns a zero-row
+data event. Its cursor records the next offset for that partition and
+advances the source sequence; consumption continues with later messages.
+Reopening the source with that cursor resumes after the consumed message
+in that partition. A decode failure reports the topic, partition, and
+offset and returns no successful data event for that message. Durable
+restart uses managed checkpoints under the shared
+[recovery ownership rules](README.md#recovery-ownership).
+
 Run [28_kafka_custom_decoder.py](../../examples/28_kafka_custom_decoder.py)
 after producing the text sample with the console producer:
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import timedelta
 
 import pytest
@@ -10,6 +11,7 @@ from calc_flow.symbolic import (
     FeatureSet,
     Field,
     Program,
+    TableExpr,
     cs,
     exact_time,
     table,
@@ -17,6 +19,7 @@ from calc_flow.symbolic import (
     ts,
 )
 from calc_flow.symbolic.lower import lower_program_document
+from calc_flow.symbolic.lower.strategies import _relational_source_nodes
 
 
 def _bounds() -> JoinTimeBounds:
@@ -399,6 +402,101 @@ def test_relational_source_id_avoids_output_name_collision() -> None:
     assert len(source_ids) == 2
     assert any(name.startswith("cf_source_") for name in source_ids)
     assert "right_events.input" in source_ids
+
+
+@pytest.mark.parametrize("depth", [1, 10])
+@pytest.mark.parametrize("reverse_inputs", [False, True])
+def test_relational_source_id_skips_logical_and_physical_collision_chain(
+    depth: int, reverse_inputs: bool
+) -> None:
+    left = _input("result", "value")
+    fallback = f"cf_source_{left.digest[:16]}"
+    right = _input(fallback, "value")
+    joined = _join(
+        left, right, left_prefix="left", right_prefix="right", ordered_output=True
+    )
+    program = Program(
+        "source-collision-chain",
+        inputs=[right, left] if reverse_inputs else [left, right],
+        outputs=[
+            ("result", joined),
+            *((f"{fallback}_{index}", right) for index in range(1, depth + 1)),
+        ],
+    )
+
+    assert program.compile_stream(Runtime()).source_binding_ids == (
+        f"{fallback}.input",
+        f"{fallback}_{depth + 1}.input",
+    )
+
+
+def test_relational_source_id_avoids_already_allocated_digest_prefix() -> None:
+    left = _input("left", "value")
+    original_right = _input("right", "value")
+    # Force a truncated digest collision without searching for a SHA-256 preimage.
+    right = TableExpr(
+        replace(
+            original_right._node,
+            digest=left.digest[:16] + original_right.digest[16:],
+        )
+    )
+    program = Program(
+        "source-digest-collision",
+        inputs=[left, right],
+        outputs=[("left_output", left), ("right_output", right)],
+    )
+    reserved = frozenset({"left", "right"})
+
+    names, nodes = _relational_source_nodes(program, reserved)
+
+    assert names == {
+        left.digest: f"cf_source_{left.digest[:16]}",
+        right.digest: f"cf_source_{left.digest[:16]}_1",
+    }
+    assert len({node["id"] for node in nodes}) == 2
+    assert reserved == frozenset({"left", "right"})
+    assert original_right.digest != right.digest
+
+
+@pytest.mark.parametrize(
+    ("left_name", "source_id", "join_id", "fingerprint"),
+    [
+        (
+            "left_events",
+            "left_events",
+            "cf_stream_join_7b66421b10916d0d",
+            "02daf042e1a3b77f175c59bc6c74cde0639eb5e37bdcda22bd0cbd7db544dfa8",
+        ),
+        (
+            "matches",
+            "cf_source_df5b7cd17a593c7c",
+            "cf_stream_join_f38bf9abbad4825f",
+            "faa817e3f4ac774f7e701dc5538a332e6e3bf778f4179ffe39479464e98c3840",
+        ),
+    ],
+)
+def test_relational_source_ids_preserve_main_graph_fingerprints(
+    left_name: str, source_id: str, join_id: str, fingerprint: str
+) -> None:
+    left = _input(left_name, "left_value")
+    right = _input("right_events", "right_value")
+    joined = _join(
+        left, right, left_prefix="left", right_prefix="right", ordered_output=True
+    )
+    program = Program(
+        "stable-relational-sources", inputs=[left, right], outputs=[("matches", joined)]
+    )
+
+    document = lower_program_document(program, Runtime(), "stream")
+
+    # Captured from main a594ad6 using its CI-built native wheel.
+    assert [node["id"] for node in document["graph"]["nodes"]] == [
+        source_id,
+        "right_events",
+        join_id,
+        "matches",
+    ]
+    assert program.compile_stream(Runtime()).fingerprint == fingerprint
 
 
 def test_relational_source_id_avoids_generated_stage_collision() -> None:

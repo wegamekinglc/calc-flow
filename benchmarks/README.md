@@ -99,6 +99,35 @@ informational. Version verdicts require separately paired observations and
 their actual source/build identities; oracle-only reports and later heads
 cannot substitute for those measurements.
 
+## Measurement identity and release acceptance
+
+Ordinary Python cases record raw machine/dependency/workload identities and
+their SHA-256 fingerprints through `support.py`. The workload includes the
+scenario, timing scope, backend, scale, dimensions, row counts, and seed.
+The unified suite runs each checkout's tests with the current collector and
+shared support, retaining both source hashes. Its Node runner records actual
+hardware/runtime identity and binds case/group, benchmark/config sources,
+and runner hashes to each frontend workload. Raw npm lock provenance remains
+available alongside the normalized dependency fingerprint. See
+[comparison identities](../docs/benchmark-suite.md#revision-comparisons-and-regression-gate).
+
+Formal release acceptance uses `python -m scripts.release_performance` for
+ordinary Python cases at `overhead` and Rust `core`/`stream_join_perf` cases.
+For each case, two rounds each collect ten adjacent AB/BA invocation pairs;
+each invocation uses a fresh process and contributes the median of its saved
+raw samples. Sealed native/binary hashes and complete compatible identities
+are required before the existing +5% paired-median verdict is applied.
+Independent summaries and the unified suite's informational ABBA blocks do
+not supply this evidence. A timing-only inconclusive result does not itself
+fail the gate and does not establish equivalence; invalid evidence fails.
+Lifecycle, rolling-kernel, and allocation gates remain separate requirements.
+
+Use the [release command](../docs/python-release.md#performance-acceptance-and-failure-evidence)
+from a clean candidate checkout with the selected baseline prepared. Keep
+the raw pairs, command/build provenance, and failure records; CI retains the
+release evidence artifact for 30 days, including failed runs and downstream
+skip reasons. Dependency-drift acknowledgement does not waive incompatibility.
+
 ## Array measurement scopes
 
 Array benchmarks use the same deterministic elementwise, reduction, matrix
@@ -150,6 +179,8 @@ runner samples. Do not compare results across different machines, dependency
 versions, power modes, or benchmark scales. The unified CI suite publishes
 these array measurements as informational ABBA whole-suite block comparisons.
 It does not promote their deltas to the new engine/warm interleaved gate.
+The release collector measures its own invocation pairs for these cases under
+the [release acceptance contract](../docs/benchmark-suite.md#release-acceptance-measurements).
 
 ## Rolling indicator implementation comparison
 
