@@ -114,3 +114,33 @@ def with_compiled_dependencies(identity: dict, root: Path, logs: dict) -> dict:
             dependency_identity, ensure_ascii=True
         ),
     }
+
+
+def target_dependency_fingerprint(identity: dict, target: str) -> str:
+    """Scope comparison to one compiled target, retaining aggregate provenance."""
+    compiled = identity["compiled_dependency_identity"]
+    if compiled["schema"] != "calc-flow.compiled-benchmark-dependencies.v1":
+        raise ValueError("invalid compiled dependency schema")
+    if any(
+        not isinstance(compiled[key], str) or not compiled[key]
+        for key in ("rustc", "cargo")
+    ):
+        raise ValueError("missing compiled dependency compiler identity")
+    if set(compiled["builds"]) != set(identity["scoped_workload_fingerprints"]):
+        raise ValueError("incomplete compiled target inventory")
+    artifacts = compiled["builds"][target]
+    _validate_artifacts(target, artifacts)
+    if not all(_valid_build_settings(row) for row in artifacts):
+        raise ValueError("incomplete compiled artifact features or profile")
+    return fingerprint_json(
+        {**compiled, "builds": {target: artifacts}}, ensure_ascii=True
+    )
+
+
+def _valid_build_settings(row: dict) -> bool:
+    return (
+        isinstance(row.get("features"), list)
+        and all(isinstance(feature, str) for feature in row["features"])
+        and isinstance(row.get("profile"), dict)
+        and bool(row["profile"])
+    )

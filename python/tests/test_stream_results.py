@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import shutil
 import threading
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -619,30 +621,78 @@ def test_stream_preserves_cancel_when_source_close_also_fails() -> None:
     asyncio.run(run())
 
 
+class _StartCancellation:
+    def __init__(self) -> None:
+        self.native_result = asyncio.Event()
+        self.milestones: list[tuple[str, float]] = []
+        self.cancellation_args: tuple[object, ...] | None = None
+
+    def mark(self, name: str) -> None:
+        self.milestones.append((name, time.monotonic()))
+
+    def cancel_at_result(self, observer, owner: asyncio.Task) -> None:
+        if observer.cancelled() or observer.exception() is not None:
+            self.mark("observer-failed")
+            return
+        if not observer.result()[0]:
+            self.mark("native-start-failed")
+            return
+        self.mark("native-result")
+        self.native_result.set()
+        assert owner.cancel("native-start-result")
+        self.mark("cancel-injected")
+
+    def diagnostic(self, feed: _Feed, root: Path) -> str:
+        stacks = io.StringIO()
+        for task in asyncio.all_tasks():
+            task.print_stack(file=stacks)
+        return (
+            f"native-start cancellation timed out: milestones={self.milestones!r}; "
+            f"feed opened/closed={feed.opened}/{feed.closed}; "
+            f"directories={list(root.iterdir())!r}; "
+            f"descriptors={_open_managed_descriptors(str(root))!r}\n"
+            f"{stacks.getvalue()}"
+        )
+
+
 class _CancelStartResult:
-    def __init__(self, awaitable, owner: asyncio.Task) -> None:
+    def __init__(
+        self, awaitable, owner: asyncio.Task, probe: _StartCancellation
+    ) -> None:
         self._awaitable = awaitable
         self._owner = owner
+        self._probe = probe
 
     def __await__(self):
         iterator = self._awaitable.__await__()
         observer = next(iterator)
-        observer.add_done_callback(lambda _: self._owner.cancel())
+        self._probe.mark("observer-armed")
+        observer.add_done_callback(
+            lambda result: self._probe.cancel_at_result(result, self._owner)
+        )
         try:
             yield observer
         except asyncio.CancelledError as cancellation:
+            self._probe.mark("cancel-delivered")
+            self._probe.cancellation_args = cancellation.args
             observer = None
             return iterator.throw(cancellation)
         raise AssertionError("start-result observer was not cancelled")
 
 
 class _StartProxy:
-    def __init__(self, native, owner: asyncio.Task) -> None:
+    def __init__(self, native, owner: asyncio.Task, probe: _StartCancellation) -> None:
         self._native = native
         self._owner = owner
+        self._probe = probe
 
     def start_async(self):
-        return _CancelStartResult(self._native.start_async(), self._owner)
+        return _CancelStartResult(self._native.start_async(), self._owner, self._probe)
+
+    async def _wait_start_cleanup_async(self):
+        self._probe.mark("cleanup-started")
+        await self._native._wait_start_cleanup_async()
+        self._probe.mark("cleanup-finished")
 
     def __getattr__(self, name: str):
         return getattr(self._native, name)
@@ -671,18 +721,20 @@ def test_stream_cancellation_at_native_start_result_releases_job(
     monkeypatch.setattr(stream_module.tempfile, "tempdir", str(tmp_path))
     original = cf.StreamingRunner.start_async
     remove = stream_module.shutil.rmtree
+    probe = _StartCancellation()
 
     def remove_released_root(root: str) -> None:
         # Linux permits unlinking open directories; inspect handles before removal.
         # Windows retains its real deny-delete/rmdir check below.
         assert _open_managed_descriptors(root) == []
         remove(root)
+        probe.mark("root-removed")
 
     monkeypatch.setattr(stream_module.shutil, "rmtree", remove_released_root)
 
     async def start(runner):
         native = runner._inner
-        runner._inner = _StartProxy(native, asyncio.current_task())
+        runner._inner = _StartProxy(native, asyncio.current_task(), probe)
         try:
             return await original(runner)
         finally:
@@ -694,9 +746,36 @@ def test_stream_cancellation_at_native_start_result_releases_job(
         before = asyncio.all_tasks()
         feed = _IdleFeed()
         results = _source().stream(feed)
+        probe.mark("entry-started")
+        deadline = asyncio.get_running_loop().time() + 5
         task = asyncio.create_task(results.__aenter__())
+        native_result = asyncio.create_task(probe.native_result.wait())
+        try:
+            await asyncio.wait(
+                (native_result, task), timeout=5, return_when=asyncio.FIRST_COMPLETED
+            )
+            assert probe.native_result.is_set(), probe.diagnostic(feed, tmp_path)
+            done, _ = await asyncio.wait(
+                (task,), timeout=max(0, deadline - asyncio.get_running_loop().time())
+            )
+            assert task in done, probe.diagnostic(feed, tmp_path)
+        finally:
+            native_result.cancel()
+            await asyncio.gather(native_result, return_exceptions=True)
         with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(task, 5)
+            await task
+        assert probe.cancellation_args == ("native-start-result",)
+        assert [name for name, _ in probe.milestones] == [
+            "entry-started",
+            "observer-armed",
+            "native-result",
+            "cancel-injected",
+            "cancel-delivered",
+            "cleanup-started",
+            "cleanup-finished",
+            "root-removed",
+        ]
+        assert results._job is None
         assert feed.opened == feed.closed == 1
         assert asyncio.all_tasks() == before
 

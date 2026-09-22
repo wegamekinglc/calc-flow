@@ -945,26 +945,47 @@ def _reachable_relational_sources(program: Program, /) -> frozenset[str]:
     )
 
 
-def _relational_source_name(node: Node, reserved_ids: frozenset[str], /) -> str:
+def _relational_source_name(
+    node: Node,
+    reserved_ids: frozenset[str],
+    /,
+    *,
+    fallback_reserved_ids: frozenset[str] = frozenset(),
+) -> str:
     declared_name = _cstr(node.attr("name"))
     if declared_name is None:
         _raise_lowering_invariant("relational source is missing its declared name")
-    if declared_name in reserved_ids:
-        return f"cf_source_{node.digest[:16]}"
-    return declared_name
+    if declared_name not in reserved_ids:
+        return declared_name
+    preferred = f"cf_source_{node.digest[:16]}"
+    name = preferred
+    ordinal = 0
+    while name in reserved_ids or name in fallback_reserved_ids:
+        ordinal += 1
+        name = f"{preferred}_{ordinal}"
+    return name
 
 
 def _relational_source_nodes(
     program: Program, reserved_ids: frozenset[str], /
 ) -> tuple[dict[str, str], list[dict[str, object]]]:
     reachable = _reachable_relational_sources(program)
+    declared_ids = frozenset(
+        _cstr(value._node.attr("name"))
+        for value in program.inputs
+        if value._node.digest in reachable
+    )
     by_digest: dict[str, str] = {}
     nodes: list[dict[str, object]] = []
     for value in program.inputs:
         node = value._node
         if node.op.name != "table_input" or node.digest not in reachable:
             continue
-        name = _relational_source_name(node, reserved_ids)
+        name = _relational_source_name(
+            node,
+            reserved_ids,
+            fallback_reserved_ids=declared_ids | frozenset(by_digest.values()),
+        )
         schema = _schema_fields(node.attr("schema"))
         by_digest[node.digest] = name
         nodes.append(

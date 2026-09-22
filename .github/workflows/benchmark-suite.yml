@@ -56,6 +56,7 @@ jobs:
           scripts.test_benchmark_rust_migrations
           scripts.test_benchmark_worker
           scripts.test_benchmark_frontend
+          scripts.test_benchmark_pytest
 
   build:
     name: Release benchmark wheel (${{ matrix.side }})

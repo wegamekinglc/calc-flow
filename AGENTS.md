@@ -86,9 +86,9 @@ same interpreter so its NumPy, PyArrow, and shared-library paths stay aligned.
 Pass `--no-run` to precompile the selected core, connector, benchmark, and
 PyO3 targets without executing tests. Run the normal command afterward with
 the same build settings and target directory; it retains doctests and tests
-that compile fixtures. Linux CI gives precompilation and normal execution
-separate 30-minute steps, retaining three serial PyO3 runs and the five-minute
-limit for each run.
+that compile fixtures. Linux CI gives precompilation a 45-minute budget for cold
+builds and normal execution a separate 30-minute budget, retaining three serial
+PyO3 runs and the five-minute limit for each run.
 
 Run informational benchmarks with:
 
@@ -313,8 +313,11 @@ selectors.
 
 ## Release invariants
 
-- Workspace crate, Python core, Studio, and frontend versions move together.
-  The binding's Rust dependency is exact; Studio accepts the current v5 major.
+- Workspace crate, Python core, Studio, and frontend versions move together
+  as calendar versions (`YYYY.M.D` release dates, for example `2026.9.22`).
+  The binding's Rust dependency is exact; Studio accepts the release's
+  calendar year, and release tags are annotated `calc-flow-python-v<version>`
+  at the current `main` head.
 - Core wheels contain only `calc_flow`, native module, metadata/SBOM, and
   license. Studio wheels contain only the Studio package/static assets,
   metadata, and license.

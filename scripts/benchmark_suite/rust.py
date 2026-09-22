@@ -10,12 +10,16 @@ from pathlib import Path
 
 from scripts.benchmark_suite.asof import asof_rows
 from scripts.benchmark_suite.catalog import CONTRACT
+from scripts.benchmark_suite.join_materialization import materialization_rows
 from scripts.benchmark_suite.legacy import combine_blocks
 from scripts.benchmark_suite.migrations import declared_migrations, load_migrations
 from scripts.benchmark_suite.normalize import criterion_rows, read_json
 from scripts.benchmark_suite.process import ROOT, child_environment, command
 from scripts.benchmark_suite.provenance import harness_sha256
-from scripts.benchmark_suite.rust_provenance import with_compiled_dependencies
+from scripts.benchmark_suite.rust_provenance import (
+    target_dependency_fingerprint,
+    with_compiled_dependencies,
+)
 from scripts.verify_sql_datafusion_performance import verify_report
 from scripts.write_criterion_provenance import build_provenance
 
@@ -50,8 +54,10 @@ def clear_stale_product_library(shared: Path) -> None:
             stale.unlink()
 
 
-async def build_binaries(source: Path, output: Path, shared: Path) -> dict:
-    targets = bench_targets(source)
+async def build_binaries(
+    source: Path, output: Path, shared: Path, *, targets: tuple[str, ...] | None = None
+) -> dict:
+    targets = targets if targets is not None else bench_targets(source)
     clear_stale_product_library(shared)
     environment = {
         **child_environment(),
@@ -79,23 +85,27 @@ async def build_binaries(source: Path, output: Path, shared: Path) -> dict:
             log=log,
             env=environment,
         )
-        artifacts = []
-        for line in log.read_text(encoding="utf-8").splitlines():
-            if not line.startswith("{"):
-                continue
-            item = json.loads(line)
-            if (
-                item.get("reason") == "compiler-artifact"
-                and item["target"]["name"] == target
-                and item.get("executable")
-            ):
-                artifacts.append(item["executable"])
-        if len(artifacts) != 1:
-            raise ValueError(f"expected one compiled executable for {target}")
         destination = output / target
-        shutil.copy2(artifacts[0], destination)
+        shutil.copy2(_compiled_executable(log, target), destination)
         binaries[target] = destination
     return binaries
+
+
+def _compiled_executable(log: Path, target: str) -> str:
+    artifacts = []
+    for line in log.read_text(encoding="utf-8").splitlines():
+        if not line.startswith("{"):
+            continue
+        item = json.loads(line)
+        if (
+            item.get("reason") == "compiler-artifact"
+            and item["target"]["name"] == target
+            and item.get("executable")
+        ):
+            artifacts.append(item["executable"])
+    if len(artifacts) != 1:
+        raise ValueError(f"expected one compiled executable for {target}")
+    return artifacts[0]
 
 
 SQL_MINIMUM_SAMPLES = 20
@@ -178,6 +188,15 @@ async def run_binary(
             env=environment,
         )
         return asof_rows(path)
+    if target == "stream_join_materialization":
+        path = output / "materialization.json"
+        await command(
+            [str(binary), "--output", str(path)],
+            cwd=source,
+            log=output / "run.log",
+            env=environment,
+        )
+        return materialization_rows(path)
     if target == "sql_datafusion_performance":
         path = output / "sql.json"
         await command(
@@ -399,7 +418,9 @@ def _stamp_fingerprints(provenance: dict, applied: dict) -> dict:
         side: {
             target: {
                 "machine_fingerprint": identity["machine_fingerprint"],
-                "dependency_fingerprint": identity["compiled_dependency_fingerprint"],
+                "dependency_fingerprint": target_dependency_fingerprint(
+                    identity, target
+                ),
                 "workload_fingerprint": (
                     candidate_scoped[target] if target in applied else scoped
                 ),

@@ -908,6 +908,47 @@ per-side retained rows and bytes, evicted, late, and null drop counters,
 without a Join node report an empty mapping. Studio progress events carry the
 same per-node rows as a `stream_joins` list on the run event.
 
+### Join output materialization and recovery
+
+Join retains admitted rows and compact descriptors for all matched pairs.
+Before the first output from an input batch, it validates retained-state and
+match admission, every output range's row/byte budget, and the complete output
+sequence range. It then materializes each validated range into independently
+owned output payload buffers, awaits emission, and proceeds to the next range.
+Matching, duplicate-row behavior, and deterministic output order are preserved.
+
+Preflight computes and caches row costs only for distinct indices referenced
+by matched pairs, for both flat and nested payloads. Unmatched retained rows
+are not scanned for these costs. For flat columns, row costs and
+validity-bitmap charges avoid building the complete output. Nested and
+dictionary payloads require actual candidate-range materialization: an
+over-budget range is split in half and checked again. Each trial allocation
+is released before the next trial;
+accepted ranges are materialized again for emission. A trial can exceed the
+edge byte budget before splitting or rejection, so this path is not a hard
+allocation ceiling. Unreferenced dictionary values are excluded from the
+materialized payload.
+
+A single output row that cannot fit fails before any output from that input
+batch, even when earlier matched rows would fit. Cancellation or a failed send
+after some chunks have escaped instead aborts the job. New input state is
+committed only after all its chunks are emitted; output already accepted by a
+sink cannot be rolled back. Resume through a fresh compatible job from the last
+durable checkpoint, replaying input from that cut rather than retrying the live
+callback. Ordinary sinks may see repeated writes; stronger delivery still
+requires the [complete route proof](#delivery-requirements). State and
+checkpoint formats are unchanged.
+
+The working set includes retained state, admitted input references,
+`O(matches)` pair descriptors, equality-probe scratch space, preflight
+allocations, the current output chunk, and chunks held by edges or sinks.
+Per-side state limits and `max_matches_per_input_batch` remain separate from
+the edge's logical row/byte limits. Chunking removes the need to hold one
+complete materialized output, but neither bounds total process RSS by
+`EdgeBudget.max_bytes` nor limits results retained by application code.
+See [Join materialization measurements](benchmark-suite.md#join-materialization-measurements)
+for the maintained wide-payload, fan-out and slow-sink workloads.
+
 ## Bounded backward ASOF Join
 
 `cf.table.stream_asof_join` and `TableExpr.stream_asof_join` attach at most one

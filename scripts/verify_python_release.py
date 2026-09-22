@@ -150,13 +150,14 @@ def project_configuration(root: Path = ROOT) -> ReleaseConfig:
     if len(studio_requirements) != 1:
         raise ValueError("Studio must declare exactly one calc-flow-python requirement")
     studio_requirement = studio_requirements[0]
+    upper_bound = f"<{int(version.split('.')[0]) + 1}"
     if _normalized_requirement(studio_requirement) != (
         "calc-flow-python",
-        tuple(sorted((f">={version}", "<6"))),
+        tuple(sorted((f">={version}", upper_bound))),
     ):
         raise ValueError(
             f"Studio requirement {studio_requirement!r} does not cover "
-            f"{version} within v5"
+            f"{version} within its calendar year"
         )
     return ReleaseConfig(version, requires_python, studio_requirement)
 
@@ -187,7 +188,7 @@ def validate_versions(
     check_pypi: bool = False,
 ) -> ReleaseConfig:
     config = project_configuration(root)
-    expected_tag = f"v{config.version}"
+    expected_tag = f"calc-flow-python-v{config.version}"
     if tag is not None and tag != expected_tag:
         raise ValueError(f"release tag {tag!r} must equal {expected_tag!r}")
     if check_pypi:

@@ -94,9 +94,36 @@ jobs:
           --lib-skip checkpoint_restart_soak_smoke
       - name: Run soak smoke tests serially
         timeout-minutes: 10
-        run: >-
-          cargo test -p calc-flow --lib --all-features
-          checkpoint_restart_soak_smoke -- --test-threads=1
+        shell: pwsh
+        env:
+          CALC_FLOW_CHECKPOINT_SMOKE_ARTIFACTS: ${{ github.workspace }}/target/checkpoint-smoke-evidence
+          SMOKE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          SMOKE_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $smokeRoot = $env:CALC_FLOW_CHECKPOINT_SMOKE_ARTIFACTS
+          New-Item -ItemType Directory -Force -Path $smokeRoot | Out-Null
+          @{
+            checkout_sha = (git rev-parse HEAD)
+            head_sha = $env:SMOKE_HEAD_SHA
+            base_sha = $env:SMOKE_BASE_SHA
+            run_id = $env:GITHUB_RUN_ID
+            run_attempt = $env:GITHUB_RUN_ATTEMPT
+          } | ConvertTo-Json | Set-Content "$smokeRoot/checkout.json"
+          cargo test -p calc-flow --lib --all-features checkpoint_restart_soak_smoke -- --test-threads=1 1> "$smokeRoot/parent.stdout" 2> "$smokeRoot/parent.stderr"
+          $smokeExitCode = $LASTEXITCODE
+          @{ exit_code = $smokeExitCode } | ConvertTo-Json | Set-Content "$smokeRoot/exit.json"
+          Get-Content "$smokeRoot/parent.stdout"
+          Get-Content "$smokeRoot/parent.stderr"
+          exit $smokeExitCode
+      - name: Upload checkpoint smoke evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: checkpoint-smoke-windows-${{ github.run_attempt }}
+          path: target/checkpoint-smoke-evidence
+          include-hidden-files: true
+          if-no-files-found: warn
   python-tests:
     name: Python tests
     needs: changes
