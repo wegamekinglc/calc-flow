@@ -130,7 +130,7 @@ raw tables or arrays, and configuration contains data and registration
 references rather than executable objects.
 
 Projects use format `3`; managed checkpoint manifests also use version `3`.
-These protocol versions are separate from this checkout's package version `2026.9.22`.
+These protocol versions are separate from this checkout's package version `2026.9.23`.
 Streaming delivery is checked per output against source, operator, and sink
 capabilities. Ordinary sinks can receive duplicates after recovery; exactly-once
 delivery requires a compatible route and transactional or epoch-idempotent
