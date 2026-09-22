@@ -492,7 +492,7 @@ or `"drop"`; the paired declaration selects SideOutput locally.
 ASOF and event-window lateness retain their separate operator contracts.
 The [streaming guide](streaming-guide.md#route-late-rows) gives the exact
 diagnostic schema, closing-coordinate rules, physical binding names, and
-resource/recovery boundaries. See the [5.0.0 changelog](../CHANGELOG.md#2026-09)
+resource/recovery boundaries. See the [2026-09 changelog](../CHANGELOG.md#2026-09)
 for Rust source migration requirements.
 
 ## Bounded backward ASOF Join

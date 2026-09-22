@@ -9,6 +9,50 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-22: Package versions switch from aligned SemVer to calendar
+  versioning `YYYY.M.D` (release dates, starting at `2026.9.22`). Workspace
+  crate, Python core, Studio, and frontend still move together; native
+  internal crate dependencies pin the date version exactly, and Studio
+  requires `calc-flow-python` within the release's calendar year
+  (`>=2026.9.22,<2027`) instead of the removed `>=5.0.0,<6` major bound.
+  Release tags become annotated `calc-flow-python-v<version>` at the current
+  `main` head; the workflow trigger is `calc-flow-python-v*`. Historical
+  `v4.0.0`/`v5.0.0` tags remain valid performance baselines. PyPI
+  immutability now means retrying under the next calendar date.
+
+- 2026-09-21: Keep distinct symbolic sources separate when generated source
+  IDs collide (DAL-298). Relational DAGs and ordinary batch fan-out reserve
+  output and planned physical node IDs, including intermediate rolling,
+  cross-section, materialization, and shared prefilter stages. Both paths also
+  check reachable logical input names and allocated source IDs when assigning
+  fallback IDs, adding deterministic numeric suffixes through consecutive
+  collisions. These source-ID collisions no longer silently merge same-schema
+  inputs or cause an internal conflict with calculation nodes or differing
+  schemas. Logical collection and streaming bindings remain unchanged.
+  Noncolliding graphs and previously valid unsuffixed fallback graphs retain
+  their node IDs and plan fingerprints; project and checkpoint formats are
+  unchanged. This does not migrate or
+  guarantee recovery of checkpoints from graphs that previously merged sources
+  incorrectly.
+
+- 2026-09-21: Enforce the complete declared schema for Python Kafka custom
+  decoder output (DAL-296 / DAL-297). Field count, order, names, and types
+  remain strict; valid columns adopt the source's nullability and metadata,
+  while actual NULLs in non-nullable columns fail at the decoder boundary.
+  Undeclared schemas retain callback metadata, and caller-owned Arrow
+  objects remain unchanged. Zero-batch Tables retain their schema and decode
+  as valid zero-row output under the same validation and bounds as
+  RecordBatches. Empty output consumes the message and advances its cursor
+  for continued consumption; zero-column results preserve their row counts.
+
+- 2026-09-21: Reject MySQL sink values that fail the connector's conversion
+  checks before epoch state changes and durable checkpoint publication
+  (DAL-295). Non-finite floats and out-of-range Arrow dates/timestamps leave the
+  previous valid recovery point intact; corrected replayable input can resume
+  without duplicating committed epochs. Prepared recovery uses the same value
+  checks. Incremental IPC encoding, checkpoint format, and database commit after
+  manifest publication are unchanged; existing invalid manifests are not repaired.
+
 - 2026-09-21: Require comparable paired release performance evidence (DAL-299).
   `python -m scripts.release_performance` binds ordinary Python and Rust
   `core`/`stream_join_perf` observations to sealed native/binary hashes and

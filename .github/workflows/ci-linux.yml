@@ -391,9 +391,12 @@ jobs:
           uv pip install --python .venv/bin/python --no-deps --editable web-ui/backend
           cd web-ui && npm ci
       - name: Run studio backend coverage
+        timeout-minutes: 15
         working-directory: web-ui/backend
+        env:
+          PYTHONUNBUFFERED: "1"
         run: >-
-          uv run --no-sync --project . pytest -q
+          uv run --no-sync --project . pytest -vv -o faulthandler_timeout=60
           --cov=calc_flow_studio --cov-report=term-missing --cov-report=xml
       - name: Verify generated API contract
         run: |
@@ -550,6 +553,7 @@ jobs:
 
           import calc_flow
           import calc_flow_studio
+          import tomllib
 
           app = calc_flow_studio.create_app()
           paths = [route.path for route in app.routes]
@@ -557,14 +561,17 @@ jobs:
           assert "/" in paths
           assert "/assets" in paths
           assert not hasattr(calc_flow, "web")
+          with Path("pyproject.toml").open("rb") as stream:
+              version = tomllib.load(stream)["project"]["version"]
+          upper_bound = f"<{int(version.split('.')[0]) + 1}"
           core_requirements = requires("calc-flow-python") or []
           studio_requirements = requires("calc-flow-studio") or []
           assert not any("fastapi" in item.lower() for item in core_requirements)
           assert not any("uvicorn" in item.lower() for item in core_requirements)
           assert any(
               item.lower().startswith("calc-flow-python")
-              and ">=5.0.0" in item
-              and "<6" in item
+              and f">={version}" in item
+              and upper_bound in item
               for item in studio_requirements
           )
           index = next(route for route in app.routes if route.path == "/").endpoint()
@@ -631,7 +638,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Compile Rust tests
         # Cache misses must not consume the runtime test step's budget.
-        timeout-minutes: 30
+        timeout-minutes: 45
         run: python3.13 scripts/run_rust_tests.py --no-run
       - name: Run Rust tests
         timeout-minutes: 30

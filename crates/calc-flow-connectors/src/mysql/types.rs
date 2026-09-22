@@ -195,9 +195,16 @@ fn typed_array<T: Array + 'static>(array: &ArrayRef) -> Result<&T> {
         .ok_or_else(|| fail("write", "Arrow type mismatch"))
 }
 
+pub(super) fn validate_cell(array: &ArrayRef, row: usize) -> Result<()> {
+    match array.data_type() {
+        DataType::Utf8 | DataType::Binary if !array.is_null(row) => {
+            bytes_cell(array, row).map(|_| ())
+        }
+        _ => cell(array, row).map(|_| ()),
+    }
+}
+
 pub(super) fn cell(array: &ArrayRef, row: usize) -> Result<Value> {
-    // Column types are validated per batch before staging; the per-cell value
-    // conversion here is the single conversion performed at write time.
     if array.is_null(row) {
         return Ok(Value::NULL);
     }
@@ -242,7 +249,9 @@ fn noninteger_cell(array: &ArrayRef, row: usize) -> Result<Value> {
             typed_array::<BooleanArray>(array)?.value(row),
         ))),
         DataType::Float32 | DataType::Float64 => float_cell(array, row),
-        DataType::Utf8 | DataType::Binary => bytes_cell(array, row),
+        DataType::Utf8 | DataType::Binary => {
+            bytes_cell(array, row).map(|bytes| Value::Bytes(bytes.to_vec()))
+        }
         DataType::Date32 | DataType::Timestamp(TimeUnit::Microsecond, _) => {
             temporal_cell(array, row)
         }
@@ -273,16 +282,12 @@ fn require_finite(value: f64) -> Result<()> {
     Ok(())
 }
 
-fn bytes_cell(array: &ArrayRef, row: usize) -> Result<Value> {
-    let bytes = if array.data_type() == &DataType::Utf8 {
-        typed_array::<StringArray>(array)?
-            .value(row)
-            .as_bytes()
-            .to_vec()
+fn bytes_cell(array: &ArrayRef, row: usize) -> Result<&[u8]> {
+    if array.data_type() == &DataType::Utf8 {
+        Ok(typed_array::<StringArray>(array)?.value(row).as_bytes())
     } else {
-        typed_array::<BinaryArray>(array)?.value(row).to_vec()
-    };
-    Ok(Value::Bytes(bytes))
+        Ok(typed_array::<BinaryArray>(array)?.value(row))
+    }
 }
 
 fn temporal_cell(array: &ArrayRef, row: usize) -> Result<Value> {

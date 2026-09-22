@@ -141,8 +141,16 @@ class ReleaseConfigTests(unittest.TestCase):
         tree = ast.parse(source)
         self.assertEqual(_non_utf8_read_text_calls(tree), [])
 
-    def test_release_versions_are_final_and_aligned(self) -> None:
+    def test_release_versions_are_calver_and_aligned(self) -> None:
         workspace = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+        version = workspace["workspace"]["package"]["version"]
+        self.assertRegex(
+            version,
+            r"20\d{2}\.(?:[1-9]|1[0-2])\.(?:[1-9]|[12]\d|3[01])\Z",
+        )
+        exact_pin = f"={version}"
+        upper_bound = f"<{int(version.split('.')[0]) + 1}"
+        studio_requirement = f"calc-flow-python>={version},{upper_bound}"
         binding = tomllib.loads(
             (ROOT / "crates/calc-flow-python/Cargo.toml").read_text(encoding="utf-8")
         )
@@ -157,8 +165,7 @@ class ReleaseConfigTests(unittest.TestCase):
             (ROOT / "web-ui/package-lock.json").read_text(encoding="utf-8")
         )
 
-        self.assertEqual(workspace["workspace"]["package"]["version"], "5.0.0")
-        self.assertEqual(binding["dependencies"]["calc-flow"]["version"], "=5.0.0")
+        self.assertEqual(binding["dependencies"]["calc-flow"]["version"], exact_pin)
         for name in ("calc-flow", "calc-flow-connectors", "calc-flow-python"):
             manifest = tomllib.loads(
                 (ROOT / "crates" / name / "Cargo.toml").read_text(encoding="utf-8")
@@ -167,7 +174,7 @@ class ReleaseConfigTests(unittest.TestCase):
             for dependency in ("calc-flow", "calc-flow-connectors"):
                 if dependency in manifest["dependencies"]:
                     self.assertEqual(
-                        manifest["dependencies"][dependency]["version"], "=5.0.0"
+                        manifest["dependencies"][dependency]["version"], exact_pin
                     )
         lock = tomllib.loads((ROOT / "Cargo.lock").read_text(encoding="utf-8"))
         for package_entry in lock["package"]:
@@ -176,28 +183,29 @@ class ReleaseConfigTests(unittest.TestCase):
                 "calc-flow-connectors",
                 "calc-flow-python",
             ):
-                self.assertEqual(package_entry["version"], "5.0.0")
-        self.assertEqual(package["project"]["version"], "5.0.0")
+                self.assertEqual(package_entry["version"], version)
+        self.assertEqual(package["project"]["version"], version)
         self.assertEqual(package["project"]["name"], "calc-flow-python")
         self.assertEqual(package["tool"]["maturin"]["module-name"], "calc_flow._native")
-        self.assertEqual(studio["project"]["version"], "5.0.0")
-        self.assertIn("calc-flow-python>=5.0.0,<6", studio["project"]["dependencies"])
-        self.assertEqual(frontend["version"], "5.0.0")
-        self.assertEqual(frontend_lock["version"], "5.0.0")
-        self.assertEqual(frontend_lock["packages"][""]["version"], "5.0.0")
+        self.assertEqual(studio["project"]["version"], version)
+        self.assertIn(studio_requirement, studio["project"]["dependencies"])
+        self.assertEqual(frontend["version"], version)
+        self.assertEqual(frontend_lock["version"], version)
+        self.assertEqual(frontend_lock["packages"][""]["version"], version)
         self.assertIn(
-            '__version__ = "5.0.0"',
+            f'__version__ = "{version}"',
             (ROOT / "python/calc_flow/__init__.py").read_text(encoding="utf-8"),
         )
         self.assertIn(
-            'version="5.0.0"',
+            f'version="{version}"',
             (ROOT / "web-ui/backend/src/calc_flow_studio/app.py").read_text(
                 encoding="utf-8"
             ),
         )
         openapi = json.loads((ROOT / "web-ui/openapi.json").read_text(encoding="utf-8"))
-        self.assertEqual(openapi["info"]["version"], "5.0.0")
+        self.assertEqual(openapi["info"]["version"], version)
 
+    def test_release_workflows_use_calver_bounds_and_preserve_gates(self) -> None:
         release_text = "\n".join(
             (ROOT / path).read_text(encoding="utf-8")
             for path in (
@@ -206,16 +214,20 @@ class ReleaseConfigTests(unittest.TestCase):
             )
         )
         self.assertNotIn(">=2.0.0a1", release_text)
-        self.assertIn(">=5.0.0", release_text)
+        for name in (".github/workflows/ci-linux.yml", ".github/workflows/release.yml"):
+            workflow = (ROOT / name).read_text(encoding="utf-8")
+            with self.subTest(workflow=name):
+                self.assertNotIn('">=5.0.0"', workflow)
+                self.assertNotIn('"<6"', workflow)
+                self.assertIn("int(version.split('.')[0]) + 1", workflow)
 
         release_workflow = (ROOT / ".github/workflows/release.yml").read_text(
             encoding="utf-8"
         )
-        self.assertIn('- "v5.*"', release_workflow)
+        self.assertIn('- "calc-flow-python-v*"', release_workflow)
+        self.assertNotIn('- "v5.*"', release_workflow)
         self.assertNotIn('- "v4.*"', release_workflow)
         self.assertIn('assert "/api/v3/catalog"', release_workflow)
-        self.assertIn('and ">=5.0.0" in requirement', release_workflow)
-        self.assertIn('and "<6" in requirement', release_workflow)
         self.assertIn("python -m scripts.release_performance", release_workflow)
         self.assertIn('baseline_sha="$(git rev-parse', release_workflow)
         self.assertIn('candidate_sha="$(git rev-parse', release_workflow)
@@ -334,7 +346,7 @@ class ReleaseConfigTests(unittest.TestCase):
             "`pypi`",
             "Studio is not uploaded",
             "release.yml",
-            "git tag -a v<version>",
+            "git tag -a calc-flow-python-v<version>",
             "PyPI versions and files are immutable",
         ):
             self.assertIn(expected, guide)
@@ -443,7 +455,7 @@ class ReleaseConfigTests(unittest.TestCase):
         compile_step = rust_core.split("      - name: Compile Rust tests\n", 1)[
             1
         ].split("      - name:", 1)[0]
-        self.assertIn("timeout-minutes: 30", compile_step)
+        self.assertIn("timeout-minutes: 45", compile_step)
         self.assertIn(
             "run: python3.13 scripts/run_rust_tests.py --no-run", compile_step
         )
@@ -850,7 +862,7 @@ class ReleaseConfigTests(unittest.TestCase):
         }
         stale_package_claims = tuple(
             claim
-            for stale_version in ("2.0", "4.0")
+            for stale_version in ("2.0", "4.0", "5.0")
             for claim in (
                 f"Calc Flow {stale_version}",
                 f'calc-flow = "{stale_version}.0"',

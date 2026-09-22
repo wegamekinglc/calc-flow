@@ -185,39 +185,65 @@ traffic against the server. Prefer larger `max_batch_rows` pages and a higher
 `poll_interval_ms` when the schema is stable. The per-page check cannot be
 disabled: undetected drift would silently misalign decoded columns.
 
-| MySQL type                 | Arrow representation                          |
-|----------------------------|-----------------------------------------------|
-| Signed/unsigned integers   | Corresponding signed/unsigned integer width   |
-| `MEDIUMINT`                | `int32` / `uint32`                            |
-| `YEAR`                     | `uint16`                                      |
-| `FLOAT`, `DOUBLE`          | `float32`, `float64`                          |
-| Text, enum, set, JSON      | UTF-8 string                                  |
-| `DECIMAL`                  | Exact decimal string                          |
-| Binary, blob, bit          | Binary bytes                                  |
-| `DATE`                     | `date32`                                      |
-| `DATETIME`, `TIMESTAMP`    | `timestamp[us]`, UTC session                  |
-| `TIME`                     | Signed `HH:MM:SS.ffffff` string               |
+| MySQL type                 | Arrow representation                         |
+|----------------------------|----------------------------------------------|
+| Signed/unsigned integers   | Corresponding signed/unsigned integer width  |
+| `MEDIUMINT`                | `int32` / `uint32`                           |
+| `YEAR`                     | `uint16`                                     |
+| `FLOAT`, `DOUBLE`          | `float32`, `float64`                         |
+| Text, enum, set, JSON      | UTF-8 string                                 |
+| `DECIMAL`                  | Exact decimal string                         |
+| Binary, blob, bit          | Binary bytes                                 |
+| `DATE`                     | `date32`                                     |
+| `DATETIME`, `TIMESTAMP`    | `timestamp[us]`, UTC session                 |
+| `TIME`                     | Signed `HH:MM:SS.ffffff` string              |
 
 `TINYINT(1)` remains an integer on reads. Sinks additionally accept Arrow
 booleans and `decimal128`, using bound parameters without float conversion.
 Invalid/zero dates and non-finite sink floats fail closed. Unsigned 64-bit
 integers retain their full range in Arrow and checkpoint cursor payloads.
 
+## Sink validation and recovery
+
 Sink modes are `append` (default), `upsert`, and `transactional`. Append and
 upsert commit each batch atomically, using multi-row statements capped at
 1000 rows and bounded by MySQL parameter limits and the configured byte budget.
 All statement chunks share the batch transaction. Upsert uses MySQL's unique/primary key
 conflict semantics and updates all supplied columns; it does not accept a
-PostgreSQL-style conflict target. Transactional mode stages bounded immutable
-Arrow segments, then inserts data and the epoch ledger in one InnoDB
-transaction after manifest publication. Recovery validates the sink identity,
-epoch, schema, rows, and segment checksum; a repeated epoch with different
-content fails even when its row count matches. Retain the reserved
-`calc_flow_mysql_epoch_ledger` table for the entire checkpoint lineage. Use
-stable, distinct `pipeline`/`output` identities for independent sink lineages.
+PostgreSQL-style conflict target.
+
+Every sink batch passes the connector's Arrow type and value conversion checks
+before staging changes the epoch's records, row/byte totals, or encoded data.
+These checks reject `NaN`, positive and negative infinity, and Arrow dates or
+microsecond timestamps outside the connector's conversion range. A rejected
+batch leaves the staged epoch unchanged. These are connector conversion checks;
+target-table constraints and database or network failures can still fail the
+database write.
+
+Transactional mode stages bounded immutable Arrow segments with incremental
+IPC encoding. Value rejection happens during `write`, before `pre_commit` and
+durable manifest publication, so an epoch containing these invalid values
+cannot publish a new recovery checkpoint. Once the manifest is durable, the
+sink inserts data and the epoch ledger in one InnoDB transaction.
+
+Recovery validates the sink identity, epoch, schema, rows, and segment checksum,
+then applies the same conversion checks to every prepared value before writing. A
+repeated epoch with different content fails even when its row count matches.
+Retain the reserved `calc_flow_mysql_epoch_ledger` table for the entire
+checkpoint lineage. Use stable, distinct `pipeline`/`output` identities for
+independent sink lineages.
 Target tables must exist; the connector creates only its validated ledger.
 Exactly-once assumes transactional target-side effects, so triggers must not
 write to nontransactional tables or perform external effects.
+
+After a conversion error stops a transactional job, the previous valid
+checkpoint remains available. Correct the rejected input in a source that can
+replay from the saved cursor, then restart the compatible job with the same
+managed state, sink identities, and ledger. Recovery resumes from that cursor
+and the ledger prevents duplicate writes for an already committed epoch.
+Invalid input is not skipped automatically. If a published manifest already
+references invalid prepared values, recovery rejects them; it does not repair
+the manifest or automatically fall back to an older checkpoint.
 
 The MySQL 8.4 service tests require `CALC_FLOW_CONNECTOR_CONTAINERS=1` and
 `CALC_FLOW_MYSQL_TEST_URL`. Run them with
