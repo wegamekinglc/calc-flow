@@ -156,6 +156,14 @@ class TestExactRefProvenance(unittest.TestCase):
 
 
 class TestCheckRegression(unittest.TestCase):
+    def test_legacy_summary_gates_reject_threshold_overrides(self) -> None:
+        for check in (check_regression, check_criterion_regression):
+            with (
+                self.subTest(check=check.__name__),
+                self.assertRaisesRegex(TypeError, "threshold"),
+            ):
+                check({}, {}, threshold=1.0)
+
     def setUp(self) -> None:
         super().setUp()
         self.baseline = {

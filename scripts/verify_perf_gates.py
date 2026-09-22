@@ -13,7 +13,7 @@ import math
 import re
 import sys
 from pathlib import Path
-from typing import TypedDict
+from typing import Never, TypedDict
 
 try:
     from scripts.benchmark_suite.identity import compare_identity, validate_identity
@@ -35,7 +35,7 @@ class BenchResult(TypedDict):
     mean_seconds: float
     std_dev: float
     rounds: int
-    metadata: dict
+    metadata: dict[str, object]
 
 
 class CriterionResult(TypedDict):
@@ -43,7 +43,7 @@ class CriterionResult(TypedDict):
     mean_seconds: float
     lower_seconds: float
     upper_seconds: float
-    metadata: dict
+    metadata: dict[str, object]
 
 
 class BenchmarkProvenance(TypedDict):
@@ -290,8 +290,7 @@ def check_stream_lifecycle_regression(
 def check_regression(
     baseline: dict[str, BenchResult],
     candidate: dict[str, BenchResult],
-    threshold: float = REGRESSION_THRESHOLD,
-) -> list[tuple[str, float]]:
+) -> Never:
     """Reject independent summaries: release timing requires collected pairs."""
     missing = sorted(set(baseline) - set(candidate))
     if missing:
@@ -334,8 +333,7 @@ def load_criterion(path: Path, baseline: str) -> dict[str, CriterionResult]:
 def check_criterion_regression(
     baseline: dict[str, CriterionResult],
     candidate: dict[str, CriterionResult],
-    threshold: float = REGRESSION_THRESHOLD,
-) -> list[tuple[str, float]]:
+) -> Never:
     """Reject independent Criterion summaries as release pairing evidence."""
     missing = sorted(set(baseline) - set(candidate))
     if missing:
