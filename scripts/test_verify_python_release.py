@@ -31,7 +31,7 @@ else:
 
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "2026.9.22"
+VERSION = "2026.9.23"
 PLATFORMS = {
     "linux-aarch64": "manylinux_2_28_aarch64",
     "linux-x86_64": "manylinux_2_28_x86_64",
@@ -103,7 +103,7 @@ class VerifyPythonReleaseTests(unittest.TestCase):
                 f"{dist_info}/METADATA",
                 self._metadata(
                     "calc-flow-studio",
-                    requires_dist="calc-flow-python<2027,>=2026.9.22",
+                    requires_dist="calc-flow-python<2027,>=2026.9.23",
                 ),
             )
             archive.writestr(
@@ -142,7 +142,7 @@ class VerifyPythonReleaseTests(unittest.TestCase):
         self._sdist()
 
     def test_versions_match_the_release_tag(self) -> None:
-        config = validate_versions(root=ROOT, tag="calc-flow-python-v2026.9.22")
+        config = validate_versions(root=ROOT, tag="calc-flow-python-v2026.9.23")
 
         self.assertEqual(config.version, VERSION)
         self.assertEqual(config.requires_python, ">=3.13")
@@ -152,7 +152,7 @@ class VerifyPythonReleaseTests(unittest.TestCase):
             "scripts.verify_python_release.ensure_version_is_new_on_pypi"
         ) as check:
             validate_versions(
-                root=ROOT, tag="calc-flow-python-v2026.9.22", check_pypi=True
+                root=ROOT, tag="calc-flow-python-v2026.9.23", check_pypi=True
             )
 
         check.assert_called_once_with("calc-flow-python", VERSION)
@@ -207,12 +207,12 @@ class VerifyPythonReleaseTests(unittest.TestCase):
             "scripts.verify_python_release.HTTPSConnection",
             return_value=connection,
         ) as constructor:
-            ensure_version_is_new_on_pypi("calc-flow-python", "2026.9.22+candidate")
+            ensure_version_is_new_on_pypi("calc-flow-python", "2026.9.23+candidate")
 
         constructor.assert_called_once_with("pypi.org", timeout=20)
         connection.request.assert_called_once_with(
             "GET",
-            "/pypi/calc-flow-python/2026.9.22%2Bcandidate/json",
+            "/pypi/calc-flow-python/2026.9.23%2Bcandidate/json",
             headers={"Accept": "application/json"},
         )
         response.read.assert_called_once_with()
@@ -264,20 +264,20 @@ class ReleaseBaselineTests(unittest.TestCase):
             resolve_release_baseline(self.directory)
 
     def test_tag_must_be_annotated_and_point_at_candidate(self) -> None:
-        self.git("tag", "calc-flow-python-v2026.9.22")
+        self.git("tag", "calc-flow-python-v2026.9.23")
         with self.assertRaisesRegex(ValueError, "annotated"):
-            resolve_release_baseline(self.directory, tag="calc-flow-python-v2026.9.22")
+            resolve_release_baseline(self.directory, tag="calc-flow-python-v2026.9.23")
 
         self.git(
             "tag",
             "-a",
-            "calc-flow-python-v2026.9.23",
+            "calc-flow-python-v2026.9.24",
             self.baseline,
             "-m",
             "Wrong head",
         )
         with self.assertRaisesRegex(ValueError, "candidate HEAD"):
-            resolve_release_baseline(self.directory, tag="calc-flow-python-v2026.9.23")
+            resolve_release_baseline(self.directory, tag="calc-flow-python-v2026.9.24")
 
     def test_rehearsal_accepts_an_explicit_ancestor_sha(self) -> None:
         self.assertEqual(
@@ -289,12 +289,12 @@ class ReleaseBaselineTests(unittest.TestCase):
         self.git(
             "tag",
             "-a",
-            "calc-flow-python-v2026.9.22",
+            "calc-flow-python-v2026.9.23",
             "-m",
-            f"Release 2026.9.22\n\nBenchmark-Baseline: {self.baseline}",
+            f"Release 2026.9.23\n\nBenchmark-Baseline: {self.baseline}",
         )
         self.assertEqual(
-            resolve_release_baseline(self.directory, tag="calc-flow-python-v2026.9.22"),
+            resolve_release_baseline(self.directory, tag="calc-flow-python-v2026.9.23"),
             self.baseline,
         )
 
@@ -345,13 +345,13 @@ class ReleaseBaselineTests(unittest.TestCase):
         self.git(
             "tag",
             "-a",
-            "calc-flow-python-v2026.9.22",
+            "calc-flow-python-v2026.9.23",
             "-m",
             f"Benchmark-Baseline: {self.baseline}",
         )
         with self.assertRaisesRegex(ValueError, "disagree"):
             resolve_release_baseline(
-                self.directory, initial="f" * 40, tag="calc-flow-python-v2026.9.22"
+                self.directory, initial="f" * 40, tag="calc-flow-python-v2026.9.23"
             )
 
 
