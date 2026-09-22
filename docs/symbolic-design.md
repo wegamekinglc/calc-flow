@@ -105,9 +105,13 @@ falls back to `cf_source_<digest16>`, then `_1`, `_2`, and successive suffixes
 until free. Candidates exclude graph reservations, reachable logical source
 names, and source IDs already allocated in program input order. Ordinary
 batch fan-out in [program.py](../python/calc_flow/symbolic/lower/program.py)
-uses the same allocator with output-name reservations. Distinct logical
-sources therefore remain separate even with identical schemas, while an
-available unsuffixed fallback retains its identity.
+stages calculation nodes first, then uses the same allocator with every actual
+node ID reserved, including intermediate rolling, cross-section,
+materialization, shared prefilter, and common-subexpression stages. Source
+allocation preserves the existing node and edge order. Distinct logical
+sources therefore remain separate even with identical schemas, while
+noncolliding graphs and valid unsuffixed fallbacks retain their node IDs and
+plan fingerprints.
 
 The declaration-to-endpoint map records the chosen physical ID for collection
 and convenience streaming. Exported projects contain physical graph names;

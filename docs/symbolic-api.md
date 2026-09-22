@@ -250,10 +250,10 @@ Plan endpoints use the port name when it is unique, such as `input` or
 declared input schema exactly.
 
 Relational DAGs and ordinary batch fan-out graphs materialize source nodes.
-Relational DAGs reserve output and planned physical node IDs; ordinary batch
-fan-out reserves output names. A source keeps its declared input name unless
-it is in the applicable reservation set. On a collision, lowering tries
-`cf_source_<digest16>`, where `digest16` is the first 16 hexadecimal characters
+Both reserve output and planned physical node IDs, including intermediate
+rolling, cross-section, materialization, and prefilter stages. A source keeps
+its declared input name unless it is in that reservation set. On a collision,
+lowering tries `cf_source_<digest16>`, where `digest16` is the first 16 hexadecimal characters
 of the source declaration's digest. If occupied, it tries suffixes `_1`, `_2`,
 and so on until the ID is free. Each candidate is checked against that
 reservation set, all reachable logical input names, and source IDs already
