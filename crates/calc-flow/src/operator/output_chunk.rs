@@ -1,8 +1,8 @@
 //! Shared edge-budget chunking for stateful operator output records.
 //!
-//! Join, window, rolling, and cross-section outputs leave the operator as
+//! Window, rolling, and cross-section outputs leave the operator as
 //! messages that must individually fit the edge budget. This module is the
-//! single implementation every built-in operator uses: the sequence range is
+//! shared implementation for materialized records: the sequence range is
 //! validated before any batch is built, a record that fits one message skips
 //! the per-row scan, per-row charges come from the allocation-free
 //! [`RowCosts`] measurement for flat columns, and dictionary or list columns
@@ -53,7 +53,7 @@ impl OutputChunkErrors {
     }
 
     /// The over-budget single-row failure shared by every operator.
-    fn over_budget_row(&self, bytes: usize, max_bytes: usize) -> CalcFlowError {
+    pub(super) fn over_budget_row(&self, bytes: usize, max_bytes: usize) -> CalcFlowError {
         let message = if self.quote_bytes {
             format!(
                 "one {} output row requires {bytes} bytes, exceeding the effective edge byte budget {max_bytes}",
@@ -358,7 +358,7 @@ fn nested_row_width(data_type: &DataType) -> Result<usize> {
     })
 }
 
-fn validate_output_sequence_range(
+pub(super) fn validate_output_sequence_range(
     operator_id: &str,
     first_sequence: u64,
     range_count: usize,

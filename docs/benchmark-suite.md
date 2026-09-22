@@ -12,6 +12,7 @@ On this page:
 
 - [Complete inventory](#complete-inventory)
 - [Inputs, correctness and timing boundaries](#inputs-correctness-and-timing-boundaries)
+- [Join materialization measurements](#join-materialization-measurements)
 - [Revision comparisons and regression gate](#revision-comparisons-and-regression-gate)
 - [Release acceptance measurements](#release-acceptance-measurements)
 - [Reports and failure behavior](#reports-and-failure-behavior)
@@ -120,6 +121,74 @@ do not subtract a separately measured startup time from another report.
 These settings describe target/pool sizes, not measured CPU utilization;
 TA-Lib calls remain sequential per-series operations.
 
+## Join materialization measurements
+
+`stream_join_materialization` is an independent Rust benchmark target.
+Its `operator-bounded-edge` scope includes the incoming batch's
+`process_data`, output materialization, a real bounded edge, and a draining
+sink. The slow sink waits after each received chunk, including the final one.
+Input construction, left-state preload, runtime startup and full row-oracle
+validation are outside performance samples. This is an operator/edge boundary,
+not end-to-end managed-job startup or checkpoint recovery.
+
+All four maintained cases use 10 keys and 1,000 incoming right rows. The
+preloaded left side has `10 * fan` rows; each incoming row matches `fan`
+left rows. Payload width applies to each side's UTF-8 payload. The default
+edge budget is 10,000 rows and 64 MiB of logical bytes.
+
+| Case               | Payload per side | Fan-out | Sink delay per chunk | Output rows | Output chunks |
+|--------------------|------------------|---------|----------------------|-------------|---------------|
+| `narrow_f100_fast` | 128 B            | 100     | 0 ms                 | 100,000     | 10            |
+| `wide_f10_fast`    | 1 KiB            | 10      | 0 ms                 | 10,000      | 1             |
+| `wide_f100_fast`   | 1 KiB            | 100     | 0 ms                 | 100,000     | 10            |
+| `wide_f100_slow`   | 1 KiB            | 100     | 10 ms                | 100,000     | 10            |
+
+Run from the repository root:
+
+```bash
+cargo bench --locked -p calc-flow --bench stream_join_materialization -- --check
+cargo bench --locked -p calc-flow --bench stream_join_materialization -- --output target/join-materialization.json
+```
+
+Normal standalone mode runs the pre-cancelled-input check, then one full row
+oracle and 20 samples per case. `--check` and `--test` run correctness checks
+with empty `samples` arrays: oracle diagnostics are not performance evidence.
+`--output` writes JSON and creates parent directories; otherwise the report
+goes to stdout. These default samples are independent collection, not an
+interleaved comparison between versions.
+
+The `calc-flow.join-materialization.v1` report retains sample times, input
+and output rows, chunk counts, maximum logical chunk bytes, queue high-water
+bytes, blocked sends and blocked duration. Allocation totals, counts and
+active peaks cover the measured execution thread. Process RSS is separate:
+Linux `/proc` sampling runs about every 1 ms and includes a first-emit
+observation. It can miss shorter peaks; `rss_available=false` means the
+measurement is unavailable. A 64 MiB logical edge budget does not cap total
+RSS or sink-held output. The [Join memory boundary](streaming-guide.md#join-output-materialization-and-recovery)
+also includes retained state, match descriptors, equality-probe scratch and
+nested/dictionary preflight costs; these four flat-payload cases do not
+establish performance for all payload types.
+
+The Rust adapter saves each block's
+`stream_join_materialization/materialization.json`.
+`scripts/benchmark_suite/join_materialization.py` requires a nonempty inventory
+with unique names, a successful full-row oracle with the configured output
+count, at least 20 samples per case, positive finite sample times, and valid
+allocation/RSS/queue/backpressure diagnostics. Configured `incoming` and `fan`
+values must be positive integers; oracle and sample output-row counts must be
+integers matching their product. Boolean and floating-point row counts are
+rejected. It retains the configuration, oracle and all raw observations in
+normalized metadata. Oracle-only reports do not satisfy this sampling contract.
+
+The Rust shard measures a target absent from the baseline as candidate-only
+`new-coverage`; removing a baseline target fails. Whole-suite ABBA deltas
+remain informational. A separate version comparison must retain compatible
+machine/dependency/workload identities, actual product refs, benchmark source,
+sealed binaries and the comparison harness, using the existing
+[two-round paired contract](#revision-comparisons-and-regression-gate).
+Neither candidate-only samples nor oracle checks supply a paired verdict, and
+a later head does not inherit measurements from an earlier build.
+
 ## Revision comparisons and regression gate
 
 CI resolves immutable base/head commits before building clean release wheels.
@@ -189,10 +258,12 @@ corrupt, or incompatible comparison identities produce an error without a
 timing classification, including when both sides lack the same fingerprint.
 Comparable ABBA suite blocks remain informational.
 
-The Rust suite retains the full `Cargo.lock` hash for provenance, while its
-comparison fingerprint covers the registry packages actually compiled for
-each benchmark, their lockfile checksums, enabled features, target kinds,
-profiles, and Rust/Cargo versions. The inventory comes from Cargo's
+The Rust suite retains the full `Cargo.lock` hash and aggregate compiled
+dependency identity for provenance. Each case's comparison fingerprint covers
+only its own benchmark target's compiled registry packages, their lockfile
+checksums, enabled features, target kinds, profiles, and Rust/Cargo versions.
+Adding a target does not invalidate comparisons for unchanged shared targets.
+The inventory comes from Cargo's
 [compiler-artifact messages](https://doc.rust-lang.org/cargo/reference/external-tools.html#artifact-messages),
 including cache hits. Unused optional connector dependencies can change without
 invalidating a core-only comparison. Changes to compiled dependencies still

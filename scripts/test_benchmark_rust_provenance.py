@@ -8,7 +8,8 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from scripts.benchmark_suite.rust import _with_fingerprints
+from scripts.benchmark_suite.legacy import combine_blocks
+from scripts.benchmark_suite.rust import _stamp_fingerprints, _with_fingerprints
 from scripts.benchmark_suite.rust_provenance import (
     compiled_dependencies,
     with_compiled_dependencies,
@@ -72,7 +73,7 @@ class CompiledDependencyTests(unittest.TestCase):
                     "cargo": "cargo 1.88.0",
                 },
                 "dependency_fingerprint": "full-lock-fingerprint",
-                "machine_fingerprint": "machine",
+                "machine_fingerprint": "a" * 64,
                 "workload_fingerprint": "workload",
             }
             original = copy.deepcopy(identity)
@@ -90,6 +91,119 @@ class CompiledDependencyTests(unittest.TestCase):
                 result["compiled_dependency_fingerprint"],
             )
             self.assertEqual(result["dependency_fingerprint"], "full-lock-fingerprint")
+
+    def test_added_target_preserves_shared_dependency_stamp_and_new_coverage(self):
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            log, messages = write_inputs(root)
+            measure(root, log, messages)
+            identity = {
+                "dependency_identity": {"rustc": "1.88", "cargo": "1.88"},
+                "machine_fingerprint": "a" * 64,
+                "scoped_workload_fingerprints": {"core": "b" * 64},
+            }
+            baseline = with_compiled_dependencies(identity, root, {"core": log})
+            added = copy.deepcopy(messages)
+            added[1]["target"]["name"] = "new_target"
+            new_log = root / "new.jsonl"
+            new_log.write_text("\n".join(json.dumps(row) for row in added))
+            candidate = with_compiled_dependencies(
+                {
+                    **identity,
+                    "scoped_workload_fingerprints": {
+                        "core": "b" * 64,
+                        "new_target": "c" * 64,
+                    },
+                },
+                root,
+                {"core": log, "new_target": new_log},
+            )
+            original = copy.deepcopy(candidate)
+            stamps = _stamp_fingerprints(
+                {"baseline": baseline, "candidate": candidate}, {}
+            )
+            self.assertEqual(stamps["baseline"]["core"], stamps["candidate"]["core"])
+            self.assertNotIn("new_target", stamps["baseline"])
+            self.assertIn("new_target", stamps["candidate"])
+            self.assertNotEqual(
+                baseline["compiled_dependency_fingerprint"],
+                candidate["compiled_dependency_fingerprint"],
+            )
+            self.assertEqual(candidate, original)
+            blocks = {
+                side: [
+                    {
+                        f"{target}/case": {
+                            "rows": 1,
+                            "scope": "native",
+                            "samples": [1.0] * 20,
+                            "metadata": stamp,
+                        }
+                        for target, stamp in targets.items()
+                    }
+                ]
+                * 2
+                for side, targets in stamps.items()
+            }
+            cases = {
+                case["scenario"]: case
+                for case in combine_blocks({"id": "rust", "family": "rust"}, blocks)
+            }
+            self.assertEqual(cases["core/case"]["status"], "ok")
+            self.assertEqual(
+                cases["new_target/case"]["result"]["verdict"], "new-coverage"
+            )
+
+    def test_target_stamps_fail_closed_on_dependency_changes_or_missing_identity(self):
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            log, messages = write_inputs(root)
+            measure(root, log, messages)
+            identity = with_compiled_dependencies(
+                {
+                    "dependency_identity": {"rustc": "1.88", "cargo": "1.88"},
+                    "machine_fingerprint": "a" * 64,
+                    "scoped_workload_fingerprints": {"core": "b" * 64},
+                },
+                root,
+                {"core": log},
+            )
+            before = _stamp_fingerprints({"candidate": identity}, {})
+            for field in ("rustc", "cargo", "builds"):
+                changed = copy.deepcopy(identity)
+                compiled = changed["compiled_dependency_identity"]
+                if field == "builds":
+                    compiled["builds"]["core"][0]["features"] = ["changed"]
+                else:
+                    compiled[field] = "changed"
+                with self.subTest(field=field):
+                    self.assertNotEqual(
+                        _stamp_fingerprints({"candidate": changed}, {}), before
+                    )
+            for field in ("rustc", "cargo", "builds", "schema"):
+                changed = copy.deepcopy(identity)
+                del changed["compiled_dependency_identity"][field]
+                with (
+                    self.subTest(missing=field),
+                    self.assertRaises((ValueError, KeyError)),
+                ):
+                    _stamp_fingerprints({"candidate": changed}, {})
+            for field in ("features", "profile"):
+                changed = copy.deepcopy(identity)
+                del changed["compiled_dependency_identity"]["builds"]["core"][0][field]
+                with (
+                    self.subTest(missing_artifact=field),
+                    self.assertRaises((ValueError, KeyError)),
+                ):
+                    _stamp_fingerprints({"candidate": changed}, {})
+            for builds in ({}, {"core": []}, {"core": [{}]}):
+                changed = copy.deepcopy(identity)
+                changed["compiled_dependency_identity"]["builds"] = builds
+                with (
+                    self.subTest(builds=builds),
+                    self.assertRaises((ValueError, KeyError)),
+                ):
+                    _stamp_fingerprints({"candidate": changed}, {})
 
     def test_unused_lock_entries_do_not_invalidate_comparable_benchmarks(self):
         with TemporaryDirectory() as raw:

@@ -9,12 +9,16 @@ import tomllib
 from pathlib import Path
 
 from scripts.benchmark_suite.catalog import CONTRACT
+from scripts.benchmark_suite.join_materialization import materialization_rows
 from scripts.benchmark_suite.legacy import combine_blocks
 from scripts.benchmark_suite.migrations import declared_migrations, load_migrations
 from scripts.benchmark_suite.normalize import criterion_rows, read_json
 from scripts.benchmark_suite.process import ROOT, child_environment, command
 from scripts.benchmark_suite.provenance import harness_sha256
-from scripts.benchmark_suite.rust_provenance import with_compiled_dependencies
+from scripts.benchmark_suite.rust_provenance import (
+    target_dependency_fingerprint,
+    with_compiled_dependencies,
+)
 from scripts.verify_sql_datafusion_performance import verify_report
 from scripts.write_criterion_provenance import build_provenance
 
@@ -46,6 +50,10 @@ async def build_binaries(
     source: Path, output: Path, shared: Path, *, targets: tuple[str, ...] | None = None
 ) -> dict:
     targets = targets if targets is not None else bench_targets(source)
+    # Cargo unit hashes can collide across worktrees with different product code.
+    for suffix in ("rlib", "rmeta"):
+        for stale in shared.glob(f"release/deps/libcalc_flow-*.{suffix}"):
+            stale.unlink()
     environment = {
         **child_environment(),
         "CARGO_TARGET_DIR": str(shared),
@@ -166,6 +174,15 @@ async def run_binary(
     target: str, binary: Path, source: Path, output: Path, side: str
 ) -> dict:
     environment = {**child_environment(), "CRITERION_HOME": str(output / "criterion")}
+    if target == "stream_join_materialization":
+        path = output / "materialization.json"
+        await command(
+            [str(binary), "--output", str(path)],
+            cwd=source,
+            log=output / "run.log",
+            env=environment,
+        )
+        return materialization_rows(path)
     if target == "sql_datafusion_performance":
         path = output / "sql.json"
         await command(
@@ -301,9 +318,9 @@ async def measure_rust(shard: dict, releases: dict, roots: dict, output: Path) -
         for side, source in roots.items()
     }
     provenance = _rust_provenance(roots, output)
-    if set(binaries["baseline"]) != set(binaries["candidate"]):
+    if set(binaries["baseline"]) - set(binaries["candidate"]):
         raise ValueError(
-            "Rust benchmark targets changed; an explicit migration is required"
+            "Rust benchmark targets removed; an explicit migration is required"
         )
     blocks = {side: [] for side in roots}
     errors = []
@@ -387,7 +404,9 @@ def _stamp_fingerprints(provenance: dict, applied: dict) -> dict:
         side: {
             target: {
                 "machine_fingerprint": identity["machine_fingerprint"],
-                "dependency_fingerprint": identity["compiled_dependency_fingerprint"],
+                "dependency_fingerprint": target_dependency_fingerprint(
+                    identity, target
+                ),
                 "workload_fingerprint": (
                     candidate_scoped[target] if target in applied else scoped
                 ),

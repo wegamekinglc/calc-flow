@@ -586,6 +586,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn output_chunks_own_only_their_materialized_payload() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let job = job();
+        let context = StreamOperatorContext::new(&job, "match", None)
+            .with_test_output_budget(EdgeBudget::new(2, 8 << 20).unwrap());
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("left", left_batch(vec![100; 4]), &context, &mut collector)
+            .await
+            .unwrap();
+        let right = Batch::table(
+            vec![
+                RecordBatch::try_new(
+                    right_schema(),
+                    vec![
+                        Arc::new(Int64Array::from(vec![7])),
+                        Arc::new(TimestampMicrosecondArray::from(vec![100]).with_timezone("UTC")),
+                        Arc::new(StringArray::from(vec!["r".repeat(1024)])),
+                    ],
+                )
+                .unwrap(),
+            ],
+            BatchMetadata::default(),
+        )
+        .unwrap();
+        operator
+            .process_data("right", right, &context, &mut collector)
+            .await
+            .unwrap();
+        let outputs = collector.drain("output");
+        assert_eq!(outputs.len(), 2);
+        for (sequence, message) in outputs.iter().enumerate() {
+            let batch = message.as_data().unwrap();
+            assert_eq!(
+                batch.metadata().sequence(),
+                u64::try_from(sequence).unwrap()
+            );
+            let record = &batch.table_payload().unwrap().batches()[0];
+            let payload = record
+                .column(5)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            assert_eq!(payload.len(), 2);
+            assert_eq!(payload.value(0), "r".repeat(1024));
+            assert_eq!(
+                payload.value_data().len(),
+                2048,
+                "a chunk must not retain the full fan-out output buffer"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn chunk_preflight_ignores_unreferenced_dictionary_payloads() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("account_id", DataType::Int64, false),
+            left_schema().field(1).clone(),
+            Field::new(
+                "amount",
+                DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+                false,
+            ),
+        ]));
+        let mut operator =
+            StreamJoinOperator::new("match", Arc::clone(&schema), right_schema(), spec()).unwrap();
+        let job = job();
+        let context = StreamOperatorContext::new(&job, "match", None)
+            .with_test_output_budget(EdgeBudget::new(1, 64).unwrap());
+        let mut output = EdgeCollector::new(operator.output_ports().to_vec());
+        for unused in ["a".repeat(512), "b".repeat(512)] {
+            let record = RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![
+                    Arc::new(Int64Array::from(vec![7])),
+                    Arc::new(TimestampMicrosecondArray::from(vec![100]).with_timezone("UTC")),
+                    Arc::new(DictionaryArray::<Int32Type>::new(
+                        Int32Array::from(vec![1]),
+                        Arc::new(StringArray::from(vec![unused.as_str(), "paid"])),
+                    )),
+                ],
+            )
+            .unwrap();
+            operator
+                .process_data(
+                    "left",
+                    Batch::table(vec![record], BatchMetadata::default()).unwrap(),
+                    &context,
+                    &mut output,
+                )
+                .await
+                .unwrap();
+        }
+        operator
+            .process_data("right", right_batch(vec![100]), &context, &mut output)
+            .await
+            .unwrap();
+        let chunks = output.drain("output");
+        assert_eq!(chunks.len(), 2);
+        for chunk in chunks {
+            let batch = chunk.as_data().unwrap();
+            assert!(batch.estimated_bytes().unwrap() <= 64);
+            assert_eq!(dictionary_strings(batch, "authorization__amount"), ["paid"]);
+        }
+    }
+
+    #[tokio::test]
     async fn oversized_row_fails_loudly_before_any_emission() {
         let mut operator =
             StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
@@ -637,6 +745,86 @@ mod tests {
         );
         assert_eq!(operator.status().emitted_match_rows, 0);
         assert_eq!(operator.status().right.retained_rows, 0);
+    }
+
+    struct BlockingChunkCollector {
+        accepted: Vec<Batch>,
+        cancel: CancellationToken,
+    }
+
+    #[async_trait]
+    impl StreamCollector for BlockingChunkCollector {
+        async fn emit(&mut self, _port: &str, batch: Batch) -> Result<()> {
+            if self.accepted.is_empty() {
+                self.accepted.push(batch);
+                Ok(())
+            } else {
+                self.cancel.cancel();
+                std::future::pending().await
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn blocked_chunk_cancellation_restores_the_last_committed_checkpoint() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let cancel = CancellationToken::new();
+        let run = StreamJobContext::new(1, "fingerprint", JsonMap::new(), None, cancel.clone());
+        let budget = EdgeBudget::new(2, 8 << 20).unwrap();
+        let context =
+            StreamOperatorContext::new(&run, "match", None).with_test_output_budget(budget);
+        let mut preload = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("left", left_batch(vec![100; 4]), &context, &mut preload)
+            .await
+            .unwrap();
+        let checkpoint = operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
+        let mut blocked = BlockingChunkCollector {
+            accepted: Vec::new(),
+            cancel: cancel.clone(),
+        };
+        tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::select! {
+                () = cancel.cancelled() => {},
+                result = operator.process_data("right", right_batch(vec![100]), &context, &mut blocked) => {
+                    panic!("second chunk must block until cancelled: {result:?}");
+                }
+            }
+        }).await.unwrap();
+        assert_eq!(blocked.accepted.len(), 1);
+        assert_eq!(blocked.accepted[0].metadata().sequence(), 0);
+        assert_eq!(operator.status().right.retained_rows, 0);
+        assert_eq!(operator.status().emitted_match_rows, 0);
+        assert_eq!(operator.state.next_output_sequence, 1);
+        let mut restored =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        restored.restore(&checkpoint).unwrap();
+        let resumed_job = job();
+        let resumed =
+            StreamOperatorContext::new(&resumed_job, "match", None).with_test_output_budget(budget);
+        let mut output = EdgeCollector::new(restored.output_ports().to_vec());
+        restored
+            .process_data("right", right_batch(vec![100]), &resumed, &mut output)
+            .await
+            .unwrap();
+        let chunks = output.drain("output");
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|message| message.as_data().unwrap().num_rows())
+                .sum::<usize>(),
+            4
+        );
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|message| message.as_data().unwrap().metadata().sequence())
+                .collect::<Vec<_>>(),
+            [0, 1]
+        );
+        assert_eq!(restored.status().emitted_match_rows, 4);
+        assert_eq!(restored.status().right.retained_rows, 1);
     }
 
     #[tokio::test]
@@ -720,6 +908,70 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(rows, [256; 4], "all four wide rows arrive in order");
+    }
+
+    #[tokio::test]
+    async fn sparse_null_payloads_fit_the_chunk_validity_bitmap_budget() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let job = job();
+        let budget = EdgeBudget::new(100, 433).unwrap();
+        let context =
+            StreamOperatorContext::new(&job, "match", None).with_test_output_budget(budget);
+        let keys = (0..9).collect::<Vec<_>>();
+        let record = RecordBatch::try_new(
+            left_schema(),
+            vec![
+                Arc::new(Int64Array::from(keys.clone())),
+                Arc::new(TimestampMicrosecondArray::from(vec![100; 9]).with_timezone("UTC")),
+                Arc::new(Int64Array::from(
+                    (0..9)
+                        .map(|index| (index != 5).then_some(42))
+                        .collect::<Vec<_>>(),
+                )),
+            ],
+        )
+        .unwrap();
+        let mut output = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data(
+                "left",
+                Batch::table(vec![record], BatchMetadata::default()).unwrap(),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap();
+        operator
+            .process_data(
+                "right",
+                keyed_right_batch(&keys, &[100; 9]),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap();
+        let chunks = output.drain("output");
+        assert_eq!(chunks.len(), 2);
+        let mut values = Vec::new();
+        for chunk in chunks {
+            let batch = chunk.as_data().unwrap();
+            assert!(batch.estimated_bytes().unwrap() <= budget.max_bytes);
+            for record in batch.table_payload().unwrap().batches() {
+                let column = record
+                    .column(2)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap();
+                values.extend(column.iter());
+            }
+        }
+        assert_eq!(
+            values,
+            (0..9)
+                .map(|index| (index != 5).then_some(42))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]
@@ -1617,7 +1869,7 @@ use datafusion::arrow::{
         LargeStringArray, ListArray, ListViewArray, MapArray, PrimitiveArray, RunArray,
         StringArray, StringViewArray, StructArray, TimestampMicrosecondArray,
         TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt64Array,
-        UnionArray,
+        UnionArray, new_empty_array,
     },
     compute::concat,
     datatypes::{
@@ -1632,9 +1884,9 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::Value;
 
 use crate::{
-    Batch, BatchKind, BatchMetadata, CalcFlowError, DataFusionConfig, DataFusionRuntime,
-    EdgeBudget, Epoch, EventTime, IngressProgress, JsonMap, OperatorStateSnapshot, Port, Result,
-    StateSegment, StreamCollector, StreamOperator, StreamOperatorContext, UdfRegistrySnapshot,
+    Batch, BatchKind, BatchMetadata, CalcFlowError, DataFusionConfig, DataFusionRuntime, Epoch,
+    EventTime, IngressProgress, JsonMap, OperatorStateSnapshot, Port, Result, StateSegment,
+    StreamCollector, StreamOperator, StreamOperatorContext, UdfRegistrySnapshot,
 };
 
 use super::{OperatorMetadata, StreamRuntimeState, is_portable_identifier, validate_operator_name};
@@ -2206,8 +2458,12 @@ struct JoinCheckpointMetadata {
     epoch: u64,
 }
 
+mod materialization;
+
 struct PreparedJoinBatch {
-    output: RecordBatch,
+    output: Vec<MatchedPair>,
+    admitted: Vec<AdmittedRow>,
+    incoming_is_left: bool,
     retained: Vec<StoredRow>,
     next_row_id: u64,
     metrics: SideMetrics,
@@ -2344,12 +2600,14 @@ impl StreamJoinOperator {
         &mut self,
         plan: &SidePlan,
         bundle: AdmissionBundle,
-        output: RecordBatch,
+        output: Vec<MatchedPair>,
     ) -> Result<PreparedJoinBatch> {
         let retained = retained_rows(&bundle.admitted, &plan.key_indices, &self.name)?;
         self.validate_state_admission(plan.incoming_is_left, &retained)?;
         Ok(PreparedJoinBatch {
             output,
+            admitted: bundle.admitted,
+            incoming_is_left: plan.incoming_is_left,
             retained,
             next_row_id: bundle.next_row_id,
             metrics: bundle.metrics,
@@ -2472,8 +2730,7 @@ impl StreamJoinOperator {
         }
     }
 
-    /// Runs the batched key-equality probe and materializes one multi-row
-    /// output record carrying every matched pair.
+    /// Runs the batched key-equality probe and retains compact pair descriptors.
     ///
     /// Key equality executes as one `DataFusion` join over scratch tables per
     /// input batch; the time bound stays in checked `i128` Rust arithmetic.
@@ -2481,18 +2738,15 @@ impl StreamJoinOperator {
         &mut self,
         plan: &SidePlan,
         admitted: &[AdmittedRow],
-    ) -> Result<RecordBatch> {
+    ) -> Result<Vec<MatchedPair>> {
         let runtime = self.runtime.runtime()?;
-        let output_schema = self.output_ports[0]
-            .schema()
-            .expect("stream Join output always has an exact schema");
         let opposite = if plan.incoming_is_left {
             self.state.right.as_slice()
         } else {
             self.state.left.as_slice()
         };
         if admitted.is_empty() || opposite.is_empty() {
-            return Ok(RecordBatch::new_empty(Arc::clone(output_schema)));
+            return Ok(Vec::new());
         }
         let matched = matched_pairs(
             runtime,
@@ -2510,14 +2764,7 @@ impl StreamJoinOperator {
             self.spec.limits.max_matches_per_input_batch,
             &self.name,
         )?;
-        materialize_output_record(
-            output_schema,
-            admitted,
-            opposite,
-            &matched,
-            plan.incoming_is_left,
-            &self.name,
-        )
+        Ok(matched)
     }
 
     fn validate_state_admission(
@@ -2587,22 +2834,41 @@ impl StreamJoinOperator {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
-        if prepared.output.num_rows() == 0 {
+        if prepared.output.is_empty() {
             return Ok(());
         }
-        let messages = chunk_output_record(
-            &prepared.output,
+        let materializer = materialization::JoinOutput {
+            schema: self.output_ports[0]
+                .schema()
+                .expect("compiled Join output schema"),
+            admitted: &prepared.admitted,
+            opposite: if prepared.incoming_is_left {
+                &self.state.right
+            } else {
+                &self.state.left
+            },
+            matched: &prepared.output,
+            incoming_is_left: prepared.incoming_is_left,
+            operator_id: &self.name,
+        };
+        let ranges = materializer.ranges(context.output_budget())?;
+        super::output_chunk::validate_output_sequence_range(
             &self.name,
             self.state.next_output_sequence,
-            context.output_budget(),
+            ranges.len(),
         )?;
-        let sequence_count = u64::try_from(messages.len())
-            .map_err(|_| counter_overflow(&self.name, "output sequence"))?;
-        self.state
-            .next_output_sequence
-            .checked_add(sequence_count)
-            .ok_or_else(|| counter_overflow(&self.name, "output sequence"))?;
-        for message in messages {
+        for range in ranges {
+            context.check_cancelled()?;
+            let record = materializer.materialize(range)?;
+            let metadata =
+                BatchMetadata::new(&self.name, self.state.next_output_sequence, BTreeMap::new())?;
+            let message = Batch::table(vec![record], metadata)?;
+            if message.estimated_bytes()? > context.output_budget().max_bytes {
+                return Err(operator_error(
+                    &self.name,
+                    "validated Join chunk exceeded its byte budget",
+                ));
+            }
             output.emit("output", message).await?;
             self.state.next_output_sequence += 1;
         }
@@ -2735,7 +3001,7 @@ impl StreamOperator for StreamJoinOperator {
         }
         let prepared = self.prepare_batch(ingress, &batch, context).await?;
         self.emit_prepared(&prepared, context, output).await?;
-        let emitted = u64::try_from(prepared.output.num_rows())
+        let emitted = u64::try_from(prepared.output.len())
             .map_err(|_| counter_overflow(&self.name, "emitted rows"))?;
         self.state.metrics.emitted_match_rows = checked_metric(
             self.state.metrics.emitted_match_rows,
@@ -3077,23 +3343,6 @@ fn state_row_count(rows: &[StoredRow], operator_id: &str) -> Result<u64> {
     u64::try_from(rows.len()).map_err(|_| counter_overflow(operator_id, "state rows"))
 }
 
-/// Splits one batched Join output record into edge-budget-sized messages via
-/// the shared operator chunker.
-fn chunk_output_record(
-    record: &RecordBatch,
-    operator_id: &str,
-    first_sequence: u64,
-    budget: EdgeBudget,
-) -> Result<Vec<Batch>> {
-    super::output_chunk::chunk_output_record(
-        record,
-        operator_id,
-        first_sequence,
-        budget,
-        super::output_chunk::OutputChunkErrors::STREAM_JOIN,
-    )
-}
-
 fn late_lateness(
     event_time: EventTime,
     progress: Option<IngressProgress>,
@@ -3330,7 +3579,7 @@ fn index_by_row_id(opposite: &[StoredRow]) -> BTreeMap<u64, usize> {
         .collect()
 }
 
-/// Materializes every matched pair into one multi-row output record.
+/// Materializes one validated chunk of matched pairs into an independent record.
 ///
 /// Each output column concatenates the per-pair single-row column slices in
 /// matched-pair order, so row order is exactly the emission order the
@@ -3371,10 +3620,21 @@ fn materialize_output_record(
                 }
             })
             .collect::<Vec<_>>();
-        columns.push(concat_column(&slices)?);
+        columns.push(concat_output_column(&slices)?);
     }
     RecordBatch::try_new(Arc::clone(output_schema), columns)
         .map_err(|error| operator_error(operator_id, &format!("output projection failed: {error}")))
+}
+
+fn concat_output_column(slices: &[&dyn Array]) -> Result<ArrayRef> {
+    if slices.len() > 1 && !matches!(slices[0].data_type(), DataType::Dictionary(..)) {
+        return concat_column(slices);
+    }
+    // Avoid Arrow's singleton slice shortcut and discard unused dictionary values.
+    let empty = new_empty_array(slices[0].data_type());
+    let mut inputs = slices.to_vec();
+    inputs.push(empty.as_ref());
+    concat_column(&inputs)
 }
 
 fn exact_safe_duration_micros(duration: Duration, field: &str) -> Result<u64> {
