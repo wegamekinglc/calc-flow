@@ -8,6 +8,7 @@ import shutil
 import tomllib
 from pathlib import Path
 
+from scripts.benchmark_suite.asof import asof_rows
 from scripts.benchmark_suite.catalog import CONTRACT
 from scripts.benchmark_suite.join_materialization import materialization_rows
 from scripts.benchmark_suite.legacy import combine_blocks
@@ -46,14 +47,18 @@ def bench_targets(source: Path) -> list[str]:
     return targets
 
 
-async def build_binaries(
-    source: Path, output: Path, shared: Path, *, targets: tuple[str, ...] | None = None
-) -> dict:
-    targets = targets if targets is not None else bench_targets(source)
+def clear_stale_product_library(shared: Path) -> None:
     # Cargo unit hashes can collide across worktrees with different product code.
     for suffix in ("rlib", "rmeta"):
         for stale in shared.glob(f"release/deps/libcalc_flow-*.{suffix}"):
             stale.unlink()
+
+
+async def build_binaries(
+    source: Path, output: Path, shared: Path, *, targets: tuple[str, ...] | None = None
+) -> dict:
+    targets = targets if targets is not None else bench_targets(source)
+    clear_stale_product_library(shared)
     environment = {
         **child_environment(),
         "CARGO_TARGET_DIR": str(shared),
@@ -174,6 +179,15 @@ async def run_binary(
     target: str, binary: Path, source: Path, output: Path, side: str
 ) -> dict:
     environment = {**child_environment(), "CRITERION_HOME": str(output / "criterion")}
+    if target == "stream_asof_perf":
+        path = output / "asof.json"
+        await command(
+            [str(binary), "--output", str(path)],
+            cwd=source,
+            log=output / "run.log",
+            env=environment,
+        )
+        return asof_rows(path)
     if target == "stream_join_materialization":
         path = output / "materialization.json"
         await command(

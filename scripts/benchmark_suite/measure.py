@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
-
-import numpy as np
 
 from scripts.benchmark_suite.catalog import (
     CONTRACT,
@@ -35,7 +34,7 @@ def validate_sample(sample: dict) -> float:
     seconds = sample["seconds"]
     if (
         type(seconds) not in (int, float)
-        or not np.isfinite(seconds)
+        or not math.isfinite(seconds)
         or seconds <= 0
         or sample["correctness"]["passed"] is not True
     ):
@@ -153,6 +152,8 @@ def _measured_row(case: dict, evidence: list[dict], kind: str) -> dict:
 async def measure_shard(
     shard: dict, releases: dict, root: Path, baseline_source: Path | None
 ) -> dict:
+    import numpy as np
+
     root.mkdir(parents=True, exist_ok=True)
     sites = {
         side: await install(release, root / side) for side, release in releases.items()

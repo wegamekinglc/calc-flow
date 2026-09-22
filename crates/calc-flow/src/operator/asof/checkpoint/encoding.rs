@@ -119,6 +119,16 @@ pub(in super::super) fn encoded_length(state: &State, name: &str) -> Result<u64>
     Ok(size)
 }
 
+pub(in super::super) fn left_prefix_length(state: &State, count: usize, name: &str) -> Result<u64> {
+    state
+        .left
+        .iter()
+        .take(count)
+        .try_fold(0, |size, ((_, key, sequence), payload)| {
+            left_length(size, name, key, sequence, payload)
+        })
+}
+
 fn left_length(
     mut size: u64,
     name: &str,

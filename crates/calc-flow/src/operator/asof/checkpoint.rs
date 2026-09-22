@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::{collections::BTreeMap, sync::Arc};
 
-pub(super) use encoding::encoded_length;
 use encoding::{Decoder, encode_state, restore_charge};
+pub(super) use encoding::{encoded_length, left_prefix_length};
 use validation::{validate_counters, validate_progress};
 
 const MAGIC: &[u8; 8] = b"CFASOF01";

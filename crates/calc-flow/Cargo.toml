@@ -62,3 +62,7 @@ harness = false
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "stream_asof_perf"
+harness = false

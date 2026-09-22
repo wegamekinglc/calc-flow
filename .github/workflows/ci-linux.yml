@@ -594,6 +594,9 @@ jobs:
     needs: changes
     if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
+    env:
+      RUST_DIAGNOSTICS_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+      RUST_DIAGNOSTICS_BASE: ${{ github.event.pull_request.base.sha }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Ensure libcurl headers for vendored librdkafka
@@ -624,15 +627,36 @@ jobs:
         with:
           python-version-file: .python-version
       - name: Install uv
+        id: rust_uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           enable-cache: true
       - name: Install compatible Python test dependencies
         run: python -m pip install "numpy>=2.0.0" "pyarrow==24.0.0"
-      - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
+      - name: Snapshot Rust installation before setup
+        id: rust_before
+        continue-on-error: true
+        env:
+          RUST_TOOLCHAIN_EVIDENCE: ${{ runner.temp }}/rust-toolchain-install
+          RUST_DIAGNOSTICS_UV: ${{ toJSON(steps.rust_uv) }}
+        run: python scripts/rust_toolchain_diagnostics.py before
+      - id: rust_install
+        uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
         with:
           components: clippy,rustfmt
+        env:
+          RUST_TOOLCHAIN_EVIDENCE: ${{ runner.temp }}/rust-toolchain-install
+          BASH_ENV: ${{ github.workspace }}/scripts/rust_toolchain_log.sh
+      - name: Snapshot Rust installation after setup
+        id: rust_after
+        if: ${{ always() }}
+        continue-on-error: true
+        env:
+          RUST_TOOLCHAIN_EVIDENCE: ${{ runner.temp }}/rust-toolchain-install
+          RUST_DIAGNOSTICS_UV: ${{ toJSON(steps.rust_uv) }}
+        run: python scripts/rust_toolchain_diagnostics.py after
       - name: Cache Rust build artifacts
+        id: rust_cache
         uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -658,6 +682,31 @@ jobs:
             "${GITHUB_WORKSPACE}/benchmark-results/sql-datafusion-smoke.json" \
             --minimum-samples 3
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
+      - name: Record Rust installation and cache step results
+        if: ${{ always() }}
+        continue-on-error: true
+        env:
+          RUST_TOOLCHAIN_EVIDENCE: ${{ runner.temp }}/rust-toolchain-install
+          INSTALL_RESULT: ${{ toJSON(steps.rust_install) }}
+          UV_RESULT: ${{ toJSON(steps.rust_uv) }}
+          RUST_CACHE_RESULT: ${{ toJSON(steps.rust_cache) }}
+          BEFORE_RESULT: ${{ toJSON(steps.rust_before) }}
+          AFTER_RESULT: ${{ toJSON(steps.rust_after) }}
+        run: |
+          mkdir -p "$RUST_TOOLCHAIN_EVIDENCE"
+          printf '%s\n' "$INSTALL_RESULT" > "$RUST_TOOLCHAIN_EVIDENCE/install-step.json"
+          printf '%s\n' "$UV_RESULT" > "$RUST_TOOLCHAIN_EVIDENCE/uv-cache-step.json"
+          printf '%s\n' "$RUST_CACHE_RESULT" > "$RUST_TOOLCHAIN_EVIDENCE/rust-cache-step.json"
+          printf '%s\n' "$BEFORE_RESULT" > "$RUST_TOOLCHAIN_EVIDENCE/before-step.json"
+          printf '%s\n' "$AFTER_RESULT" > "$RUST_TOOLCHAIN_EVIDENCE/after-step.json"
+      - name: Upload Rust installation evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: rust-toolchain-install-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rust-toolchain-install/
+          if-no-files-found: error
+          retention-days: 14
   rust-coverage:
     name: Rust combined coverage
     needs:

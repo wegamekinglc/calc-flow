@@ -6,11 +6,12 @@ import argparse
 import json
 from pathlib import Path
 
-from scripts.profile_warm_stream import build, source_identity
 from scripts.toolkit import FULL_SHA, sha256_file, wheel_native_sha256
 
 
 async def build_release(source: Path, output: Path) -> None:
+    from scripts.profile_warm_stream import build, source_identity
+
     if (await source_identity(source))["git_clean"] is not True:
         raise ValueError("benchmark release builds require a clean source checkout")
     await build(

@@ -4,6 +4,12 @@ on:
     - cron: "17 3 * * *"
     - cron: "41 4 * * 0"
   workflow_dispatch:
+    inputs:
+      mode:
+        description: Standard benchmarks or the fixed DAL-301 two-case diagnostic
+        type: choice
+        options: [standard, dal301-groupby]
+        default: standard
 permissions:
   contents: read
 concurrency:
@@ -12,7 +18,7 @@ concurrency:
 jobs:
   sql-datafusion-nightly:
     name: SQL and raw DataFusion paired evidence
-    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '17 3 * * *'
+    if: inputs.mode != 'dal301-groupby' && (github.event_name == 'workflow_dispatch' || github.event.schedule == '17 3 * * *')
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -69,7 +75,7 @@ jobs:
           retention-days: 90
   sql-datafusion-weekly-matrix:
     name: SQL/DataFusion adaptive tuning matrix
-    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '41 4 * * 0'
+    if: inputs.mode != 'dal301-groupby' && (github.event_name == 'workflow_dispatch' || github.event.schedule == '41 4 * * 0')
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
@@ -121,4 +127,157 @@ jobs:
           retention-days: 90
   benchmark:
     name: Complete benchmark suite
+    if: inputs.mode != 'dal301-groupby'
     uses: ./.github/workflows/benchmark-suite.yml
+  dal301-profile-build:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'dal301-groupby'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        side: [A, B]
+    steps:
+      - id: harness
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - id: source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ matrix.side == 'A' && 'a594ad697a57947237dd289f3a1bc2272ef099e8' || 'b7e92cc58bc5000be0db5e6ec9a2decec052feb5' }}
+          path: target/profile-source
+      - id: python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: 3.13.15
+      - id: uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - id: rust
+        uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
+      - name: Install locked build dependencies
+        id: dependencies
+        run: |
+          uv venv target/diagnostic-venv
+          uv pip sync --python target/diagnostic-venv/bin/python --require-hashes benchmarks/requirements.lock
+      - name: Build separately identified profile wheel
+        id: build
+        env:
+          PROFILE_SIDE: ${{ matrix.side }}
+        run: |
+          mkdir -p target/dal301-profile
+          set +e
+          target/diagnostic-venv/bin/python -m scripts.dal301_groupby build \
+            --side "$PROFILE_SIDE" --source target/profile-source --output target/dal301-profile \
+            >target/dal301-profile/stdout.log 2>target/dal301-profile/stderr.log
+          result=$?
+          set -e
+          printf '%s\n' "$result" > target/dal301-profile/exit-code.txt
+          cat target/dal301-profile/stdout.log
+          cat target/dal301-profile/stderr.log >&2
+          exit "$result"
+      - name: Keep profile build step results
+        if: always()
+        env:
+          STEP_RESULTS: ${{ toJSON(steps) }}
+          CHECKOUT_SHA: ${{ github.sha }}
+        run: |
+          mkdir -p target/dal301-profile
+          printf '%s\n' "$STEP_RESULTS" > target/dal301-profile/steps.json
+          printf '%s\n' "$CHECKOUT_SHA" > target/dal301-profile/workflow-sha.log
+      - name: Upload profile build and any failure evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: dal301-profile-${{ matrix.side }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            target/dal301-profile/*.whl
+            target/dal301-profile/*.json
+            target/dal301-profile/*.log
+            target/dal301-profile/*.txt
+            target/dal301-profile/*.patch
+          if-no-files-found: error
+  dal301-groupby:
+    if: always() && github.event_name == 'workflow_dispatch' && inputs.mode == 'dal301-groupby'
+    needs: dal301-profile-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - id: harness
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - id: python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: 3.13.15
+      - id: uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - name: Require completed profiling builds
+        id: profile_builds
+        env:
+          BUILD_RESULT: ${{ needs.dal301-profile-build.result }}
+        run: test "$BUILD_RESULT" = success
+      - id: sealed_a
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: 10636839917
+          run-id: 35596885420
+          github-token: ${{ github.token }}
+          path: target/sealed/A
+          merge-multiple: true
+      - id: sealed_b
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: 10637665772
+          run-id: 35596885420
+          github-token: ${{ github.token }}
+          path: target/sealed/B
+          merge-multiple: true
+      - id: profile_a
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dal301-profile-A-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/profiles/A
+      - id: profile_b
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dal301-profile-B-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/profiles/B
+      - name: Install identical locked benchmark dependencies
+        id: dependencies
+        run: |
+          uv venv target/diagnostic-venv
+          uv pip sync --python target/diagnostic-venv/bin/python --require-hashes benchmarks/requirements.lock
+      - name: Run only fixed group_by controls, comparison and separate profiles
+        id: diagnostic
+        run: |
+          mkdir -p target/dal301-evidence
+          set +e
+          target/diagnostic-venv/bin/python -m scripts.dal301_groupby run \
+            --releases target/sealed --profiles target/profiles --output target/dal301-evidence \
+            >target/dal301-evidence/stdout.log 2>target/dal301-evidence/stderr.log
+          result=$?
+          set -e
+          printf '%s\n' "$result" > target/dal301-evidence/exit-code.txt
+          cat target/dal301-evidence/stdout.log
+          cat target/dal301-evidence/stderr.log >&2
+          exit "$result"
+      - name: Keep all preflight outcomes and missing artifact evidence
+        if: always()
+        env:
+          STEP_RESULTS: ${{ toJSON(steps) }}
+          BUILD_RESULT: ${{ needs.dal301-profile-build.result }}
+          CHECKOUT_SHA: ${{ github.sha }}
+        run: |
+          mkdir -p target/dal301-evidence
+          printf '%s\n' "$STEP_RESULTS" > target/dal301-evidence/steps.json
+          printf '%s\n' "$BUILD_RESULT" > target/dal301-evidence/profile-build-result.txt
+          printf '%s\n' "$CHECKOUT_SHA" > target/dal301-evidence/workflow-sha.txt
+      - name: Upload all two-case diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: dal301-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/dal301-evidence/
+          include-hidden-files: true
+          if-no-files-found: error
