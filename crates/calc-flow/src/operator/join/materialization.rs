@@ -1,15 +1,16 @@
 //! Preflight matched-pair ranges before allocating independently owned output chunks.
 
 use std::{
-    collections::{BTreeMap, btree_map::Entry},
+    collections::{BTreeMap, HashMap, btree_map::Entry, hash_map::Entry as HashEntry},
     ops::Range,
 };
 
 use datafusion::arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 
 use super::{AdmittedRow, MatchedPair, StoredRow, materialize_output_record};
+use crate::batch::checked_accumulate;
 use crate::operator::output_chunk::OutputChunkErrors;
-use crate::operator::row_cost::RowCosts;
+use crate::operator::row_cost::{fixed_width, variable_offsets};
 use crate::{Batch, BatchMetadata, CalcFlowError, EdgeBudget, Result};
 
 pub(super) struct JoinOutput<'a> {
@@ -23,7 +24,7 @@ pub(super) struct JoinOutput<'a> {
 
 struct FlatRow {
     bytes: usize,
-    nulls: Vec<bool>,
+    nulls: Vec<usize>,
 }
 
 #[derive(Default)]
@@ -31,6 +32,7 @@ struct FlatChunk {
     rows: usize,
     bytes: usize,
     nulls: Vec<bool>,
+    null_count: usize,
 }
 
 impl FlatChunk {
@@ -42,11 +44,13 @@ impl FlatChunk {
     }
 
     fn bytes_with(&self, incoming: &FlatRow, opposite: &FlatRow) -> Option<usize> {
-        let null_columns = incoming.nulls.iter().chain(&opposite.nulls);
-        let bitmap_count = null_columns
-            .enumerate()
-            .filter(|(index, null)| **null || self.nulls.get(*index).copied().unwrap_or(false))
-            .count();
+        let bitmap_count = self.null_count
+            + incoming
+                .nulls
+                .iter()
+                .chain(&opposite.nulls)
+                .filter(|index| !self.nulls.get(**index).copied().unwrap_or(false))
+                .count();
         incoming
             .bytes
             .checked_add(opposite.bytes)
@@ -61,12 +65,13 @@ impl FlatChunk {
     fn push(&mut self, incoming: &FlatRow, opposite: &FlatRow) {
         self.rows += 1;
         self.bytes += incoming.bytes + opposite.bytes;
-        let nulls = incoming.nulls.iter().chain(&opposite.nulls);
-        if self.nulls.is_empty() {
-            self.nulls.extend(nulls.copied());
-        } else {
-            for (current, added) in self.nulls.iter_mut().zip(nulls) {
-                *current |= added;
+        for &index in incoming.nulls.iter().chain(&opposite.nulls) {
+            if index >= self.nulls.len() {
+                self.nulls.resize(index + 1, false);
+            }
+            if !self.nulls[index] {
+                self.nulls[index] = true;
+                self.null_count += 1;
             }
         }
     }
@@ -85,34 +90,33 @@ impl JoinOutput<'_> {
     }
 
     pub(super) fn ranges(&self, budget: EdgeBudget) -> Result<Vec<Range<usize>>> {
-        let incoming = flat_rows(
-            self.matched
-                .iter()
-                .map(|pair| (pair.pos, &self.admitted[pair.pos].record)),
-        )?;
-        let opposite = flat_rows(self.matched.iter().map(|pair| {
-            (
-                pair.opposite_index,
-                &self.opposite[pair.opposite_index].record,
-            )
-        }))?;
-        if let (Some(incoming), Some(opposite)) = (incoming, opposite) {
-            return self.flat_ranges(&incoming, &opposite, budget);
+        if self
+            .schema
+            .fields()
+            .iter()
+            .all(|field| fixed_width(field.data_type()).is_some())
+        {
+            self.flat_ranges(budget)
+        } else {
+            self.nested_ranges(budget)
         }
-        self.nested_ranges(budget)
     }
 
-    fn flat_ranges(
-        &self,
-        incoming: &BTreeMap<usize, FlatRow>,
-        opposite: &BTreeMap<usize, FlatRow>,
-        budget: EdgeBudget,
-    ) -> Result<Vec<Range<usize>>> {
+    fn flat_ranges(&self, budget: EdgeBudget) -> Result<Vec<Range<usize>>> {
+        let mut incoming = HashMap::new();
+        let mut opposite = HashMap::new();
         let mut ranges = Vec::new();
         let mut start = 0;
         let mut chunk = FlatChunk::default();
         for (index, pair) in self.matched.iter().enumerate() {
-            let (left, right) = (&incoming[&pair.pos], &opposite[&pair.opposite_index]);
+            let record = &self.admitted[pair.pos].record;
+            let left = flat_row(&mut incoming, pair.pos, record, 0)?;
+            let right = flat_row(
+                &mut opposite,
+                pair.opposite_index,
+                &self.opposite[pair.opposite_index].record,
+                record.num_columns(),
+            )?;
             if !chunk.fits(left, right, budget) {
                 if start == index {
                     return Err(oversized_row(
@@ -200,32 +204,32 @@ fn nested_range_is_full(
             || bytes.saturating_add(row_bytes) > budget.max_bytes)
 }
 
-fn flat_rows<'a>(
-    records: impl Iterator<Item = (usize, &'a RecordBatch)>,
-) -> Result<Option<BTreeMap<usize, FlatRow>>> {
-    let mut rows = BTreeMap::new();
-    for (index, record) in records {
-        let Entry::Vacant(entry) = rows.entry(index) else {
-            continue;
-        };
-
-        #[cfg(test)]
-        tests::FLAT_VISITS.with(|count| count.set(count.get() + 1));
-        let Some(bytes) = RowCosts::try_total(record)? else {
-            return Ok(None);
-        };
-        let nulls = record
-            .columns()
-            .iter()
-            .map(|column| column.nulls().is_some_and(|nulls| nulls.is_null(0)))
-            .collect::<Vec<_>>();
-        let null_count = nulls.iter().filter(|null| **null).count();
-        entry.insert(FlatRow {
-            bytes: bytes - null_count,
-            nulls,
-        });
+fn flat_row<'a>(
+    rows: &'a mut HashMap<usize, FlatRow>,
+    index: usize,
+    record: &RecordBatch,
+    column_offset: usize,
+) -> Result<&'a FlatRow> {
+    match rows.entry(index) {
+        HashEntry::Occupied(entry) => Ok(entry.into_mut()),
+        HashEntry::Vacant(entry) => {
+            #[cfg(test)]
+            tests::FLAT_VISITS.with(|count| count.set(count.get() + 1));
+            let mut bytes = 0;
+            let mut nulls = Vec::new();
+            for (column_index, column) in record.columns().iter().enumerate() {
+                let width = fixed_width(column.data_type()).expect("flat schema was checked");
+                bytes = checked_accumulate(bytes, width, "batch")?;
+                if let Some(offsets) = variable_offsets(column.as_ref()) {
+                    bytes = checked_accumulate(bytes, offsets.total_width(), "batch")?;
+                }
+                if column.nulls().is_some_and(|nulls| nulls.is_null(0)) {
+                    nulls.push(column_offset + column_index);
+                }
+            }
+            Ok(entry.insert(FlatRow { bytes, nulls }))
+        }
     }
-    Ok(Some(rows))
 }
 
 fn estimated_rows<'a>(
@@ -255,7 +259,7 @@ mod tests {
     use super::*;
     use crate::EventTime;
     use datafusion::arrow::{
-        array::{ArrayRef, Int64Array, ListArray},
+        array::{ArrayRef, Int64Array, ListArray, StringArray},
         datatypes::{DataType, Field, Int64Type, Schema},
     };
     use std::{cell::Cell, sync::Arc};
@@ -346,6 +350,72 @@ mod tests {
     fn test_sparse_nested_preflight_cost_is_independent_of_retained_rows() {
         for retained in [1_000, 100_000] {
             sparse_preflight(true, retained);
+        }
+    }
+
+    #[test]
+    fn test_flat_preflight_avoids_per_row_scratch_allocations() {
+        let record = RecordBatch::try_from_iter(vec![
+            (
+                "key",
+                Arc::new(StringArray::from(vec!["K0000000"])) as ArrayRef,
+            ),
+            ("value", Arc::new(Int64Array::from(vec![7])) as ArrayRef),
+        ])
+        .unwrap();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("left_key", DataType::Utf8, false),
+            Field::new("left_value", DataType::Int64, false),
+            Field::new("right_key", DataType::Utf8, false),
+            Field::new("right_value", DataType::Int64, false),
+        ]));
+        let admitted = (0..1_000)
+            .map(|_| AdmittedRow {
+                record: record.clone(),
+                event_time: EventTime::from_micros(100),
+                row_id: 0,
+                retain: true,
+            })
+            .collect::<Vec<_>>();
+        let opposite = vec![
+            StoredRow {
+                record,
+                event_time: EventTime::from_micros(100),
+                row_id: 0,
+                charge: 0,
+                encoded_key: Arc::new(vec![]),
+            };
+            1_000
+        ];
+        for fanout in [1, 10] {
+            let matched = (0..1_000)
+                .flat_map(|pos| {
+                    (0..fanout).map(move |offset| MatchedPair {
+                        pos,
+                        opposite_index: (pos + offset) % 1_000,
+                    })
+                })
+                .collect::<Vec<_>>();
+            let output = JoinOutput {
+                schema: &schema,
+                admitted: &admitted,
+                opposite: &opposite,
+                matched: &matched,
+                incoming_is_left: true,
+                operator_id: "allocation",
+            };
+            let measured = allocation_counter::measure(|| {
+                let ranges = output
+                    .ranges(EdgeBudget::new(1_000, 40_000).unwrap())
+                    .unwrap();
+                assert_eq!(ranges.len(), fanout);
+                assert_eq!(ranges.iter().map(Range::len).sum::<usize>(), matched.len());
+            });
+            assert!(
+                measured.count_total < 1_000,
+                "fanout {fanout}: preflight allocated {} times; flat row scratch must be reused",
+                measured.count_total
+            );
         }
     }
 }

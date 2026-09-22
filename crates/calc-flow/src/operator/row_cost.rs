@@ -86,7 +86,7 @@ impl Offsets<'_> {
         }
     }
 
-    fn total_width(&self) -> usize {
+    pub(crate) fn total_width(&self) -> usize {
         match self {
             Self::Narrow(offsets) => offset_width(offsets),
             Self::Wide(offsets) => offset_width(offsets),
