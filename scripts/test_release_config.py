@@ -228,21 +228,10 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertNotIn('- "v5.*"', release_workflow)
         self.assertNotIn('- "v4.*"', release_workflow)
         self.assertIn('assert "/api/v3/catalog"', release_workflow)
-        self.assertEqual(release_workflow.count("--save-baseline exact-"), 4)
-        self.assertIn("--criterion-dir", release_workflow)
-        self.assertIn("--criterion-baseline exact-baseline", release_workflow)
-        self.assertIn("--criterion-candidate exact-candidate", release_workflow)
-        self.assertIn("--scenario rolling_kernel_sma20", release_workflow)
-        self.assertIn("--scenario rolling_kernel_dual_sma_5_20", release_workflow)
-        self.assertIn('--expected-commit "${candidate_sha}"', release_workflow)
-        self.assertEqual(release_workflow.count("provenance.json"), 3)
+        self.assertIn("python -m scripts.release_performance", release_workflow)
         self.assertIn('baseline_sha="$(git rev-parse', release_workflow)
         self.assertIn('candidate_sha="$(git rev-parse', release_workflow)
         self.assertIn('test "${baseline_sha}" != "${candidate_sha}"', release_workflow)
-        self.assertLess(
-            release_workflow.index("cargo bench --manifest-path"),
-            release_workflow.index("scripts/verify_perf_gates.py"),
-        )
 
     def test_python_projects_ship_license_files(self) -> None:
         for project in (ROOT, ROOT / "web-ui/backend"):
@@ -762,7 +751,7 @@ class ReleaseConfigTests(unittest.TestCase):
             "  crate:\n", 1
         )[0]
 
-        self.assertIn("    timeout-minutes: 180\n", acceptance)
+        self.assertIn("    timeout-minutes: 360\n", acceptance)
         for soak in (
             "twenty_minute_two_source_slow_sink",
             "twenty_minute_epoch_checkpoint_restart",
@@ -791,19 +780,14 @@ class ReleaseConfigTests(unittest.TestCase):
         exact_gate = release.split(
             "      - name: Run paired exact-ref Rust and Python performance gate\n", 1
         )[1].split("      - name:", 1)[0]
-        self.assertEqual(exact_gate.count("--bench stream_join_perf"), 2)
+        self.assertIn("python -m scripts.release_performance", exact_gate)
+        from scripts.release_performance import LIFECYCLE, TARGETS
+
+        self.assertIn("stream_join_perf", TARGETS)
         self.assertEqual(
-            exact_gate.count(
-                "benchmarks/test_symbolic_baseline.py::"
-                "test_stream_window_checkpoint_and_recovery"
-            ),
-            2,
+            LIFECYCLE,
+            "benchmarks/test_symbolic_baseline.py::test_stream_window_checkpoint_and_recovery",
         )
-        self.assertEqual(
-            exact_gate.count('-k "not test_stream_window_checkpoint_and_recovery"'),
-            2,
-        )
-        self.assertIn("--require-stream-lifecycle", exact_gate)
         self.assertIn("allow-dependency-drift:", release)
         self.assertIn("inputs['allow-dependency-drift']", exact_gate)
         self.assertIn("--allow-dependency-drift", exact_gate)

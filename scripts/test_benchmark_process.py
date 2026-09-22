@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import tempfile
 import unittest
@@ -67,6 +68,10 @@ class BenchmarkProcessTests(unittest.IsolatedAsyncioTestCase):
                     log=log,
                 )
             self.assertIn("failure evidence", log.read_text(encoding="utf-8"))
+            record = json.loads(log.with_suffix(".command.json").read_text())
+            self.assertEqual(record["exit_code"], 2)
+            self.assertEqual(record["argv"][0], sys.executable)
+            self.assertEqual(record["cwd"], str(root))
 
     async def test_command_timeout_is_bounded(self):
         with tempfile.TemporaryDirectory() as directory:

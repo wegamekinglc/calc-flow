@@ -8,9 +8,8 @@ on:
         required: false
       allow-dependency-drift:
         description: >-
-          Acknowledge an intended benchmark dependency change so the
-          exact-ref stream lifecycle gate records the drift instead of
-          failing on the dependency fingerprint mismatch
+          Record an intended dependency change; incompatible benchmark
+          evidence still blocks release acceptance
         type: boolean
         default: false
   push:
@@ -47,8 +46,8 @@ jobs:
     name: Exact-head performance, security, and soak gates
     needs: prepare-python-release
     runs-on: ubuntu-latest
-    # Cold exact-ref builds precede two mandatory 20-minute soaks.
-    timeout-minutes: 180
+    # Fresh per-case pairs and cold builds precede two mandatory 20-minute soaks.
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -69,11 +68,14 @@ jobs:
         with:
           tool: cargo-audit@0.22.2,cargo-deny@0.20.2
       - name: Run paired exact-ref Rust and Python performance gate
+        id: performance
         env:
           CALC_FLOW_BENCHMARK_SCALE: overhead
           JAX_PLATFORMS: cpu
           INITIAL_RELEASE_BASELINE: ${{ inputs['initial-baseline'] }}
         run: |
+          mkdir -p target/release-evidence
+          exec > >(tee target/release-evidence/performance.log) 2>&1
           baseline_args=()
           if [[ -n "${INITIAL_RELEASE_BASELINE}" ]]; then
             baseline_args+=(--initial-baseline "${INITIAL_RELEASE_BASELINE}")
@@ -86,75 +88,26 @@ jobs:
           baseline_sha="$(git rev-parse "${baseline_ref}^{commit}")"
           candidate_sha="$(git rev-parse "HEAD^{commit}")"
           test "${baseline_sha}" != "${candidate_sha}"
-          git worktree add --detach "${RUNNER_TEMP}/calc-flow-baseline" "${baseline_ref}"
-          mkdir -p "${RUNNER_TEMP}/benchmark-baseline" "${RUNNER_TEMP}/benchmark-candidate"
-          python -c 'import json,pathlib,sys; pathlib.Path(sys.argv[1]).write_text(json.dumps({"role":sys.argv[2],"git_sha":sys.argv[3]},sort_keys=True)+"\n",encoding="utf-8")' \
-            "${RUNNER_TEMP}/benchmark-baseline/provenance.json" baseline "${baseline_sha}"
-          python -c 'import json,pathlib,sys; pathlib.Path(sys.argv[1]).write_text(json.dumps({"role":sys.argv[2],"git_sha":sys.argv[3]},sort_keys=True)+"\n",encoding="utf-8")' \
-            "${RUNNER_TEMP}/benchmark-candidate/provenance.json" candidate "${candidate_sha}"
-          CARGO_TARGET_DIR="${RUNNER_TEMP}/criterion-target" \
-            cargo bench --manifest-path "${RUNNER_TEMP}/calc-flow-baseline/Cargo.toml" \
-            --locked -p calc-flow --bench core -- --save-baseline exact-baseline
-          CARGO_TARGET_DIR="${RUNNER_TEMP}/criterion-target" \
-            cargo bench --manifest-path "${RUNNER_TEMP}/calc-flow-baseline/Cargo.toml" \
-            --locked -p calc-flow --bench stream_join_perf -- \
-            --save-baseline exact-baseline
-          CARGO_TARGET_DIR="${RUNNER_TEMP}/criterion-target" \
-            cargo bench --locked -p calc-flow --bench core -- \
-            --save-baseline exact-candidate
-          CARGO_TARGET_DIR="${RUNNER_TEMP}/criterion-target" \
-            cargo bench --locked -p calc-flow --bench stream_join_perf -- \
-            --save-baseline exact-candidate
-          python -c 'import json,pathlib,sys; pathlib.Path(sys.argv[1]).write_text(json.dumps({sys.argv[2]:sys.argv[3],sys.argv[4]:sys.argv[5]},sort_keys=True)+"\n",encoding="utf-8")' \
-            "${RUNNER_TEMP}/criterion-target/criterion/criterion-provenance.json" \
-            exact-baseline "${baseline_sha}" exact-candidate "${candidate_sha}"
-          cd "${RUNNER_TEMP}/calc-flow-baseline"
-          uv sync --extra benchmark
-          uv run pytest benchmarks -q --benchmark-only \
-            -k "not test_stream_window_checkpoint_and_recovery" \
-            --benchmark-json="${RUNNER_TEMP}/benchmark-baseline/results.json"
-          PYTHONPATH="${GITHUB_WORKSPACE}" uv run pytest \
-            "${GITHUB_WORKSPACE}/benchmarks/test_symbolic_baseline.py::test_stream_window_checkpoint_and_recovery" \
-            -q --benchmark-only \
-            --benchmark-json="${RUNNER_TEMP}/benchmark-baseline/stream-lifecycle.json"
-          uv run python "${GITHUB_WORKSPACE}/scripts/verify_stream_lifecycle_evidence.py" \
-            "${RUNNER_TEMP}/benchmark-baseline/stream-lifecycle.json" \
-            --minimum-rounds 20
-          cd "${GITHUB_WORKSPACE}"
-          uv sync --extra benchmark
-          uv run pytest benchmarks -q --benchmark-only \
-            -k "not test_stream_window_checkpoint_and_recovery" \
-            --benchmark-json="${RUNNER_TEMP}/benchmark-candidate/results.json"
-          uv run pytest \
-            benchmarks/test_symbolic_baseline.py::test_stream_window_checkpoint_and_recovery \
-            -q --benchmark-only \
-            --benchmark-json="${RUNNER_TEMP}/benchmark-candidate/stream-lifecycle.json"
-          uv run python scripts/verify_stream_lifecycle_evidence.py \
-            "${RUNNER_TEMP}/benchmark-candidate/stream-lifecycle.json" \
-            --minimum-rounds 20
-          uv run python scripts/verify_symbolic_milestone_perf.py \
-            --report "${RUNNER_TEMP}/benchmark-candidate/results.json" \
-            --scenario rolling_kernel_sma20 \
-            --scenario rolling_kernel_dual_sma_5_20 \
-            --expected-commit "${candidate_sha}" \
-            --output "${RUNNER_TEMP}/rolling-kernel-evidence.json"
+          git worktree add --detach target/release-baseline "${baseline_ref}"
+          uv venv target/release-benchmark-env
+          source target/release-benchmark-env/bin/activate
+          uv pip install --require-hashes -r benchmarks/requirements.lock
+          uv pip freeze > target/release-evidence/dependencies.txt
           perf_gate_extra_args=()
           if [[ "${{ inputs['allow-dependency-drift'] }}" == "true" ]]; then
             perf_gate_extra_args+=(--allow-dependency-drift)
           fi
-          uv run python scripts/verify_perf_gates.py \
-            --baseline-dir "${RUNNER_TEMP}/benchmark-baseline" \
-            --candidate-dir "${RUNNER_TEMP}/benchmark-candidate" \
-            --criterion-dir "${RUNNER_TEMP}/criterion-target/criterion" \
-            --criterion-baseline exact-baseline \
-            --criterion-candidate exact-candidate \
-            --require-stream-lifecycle \
+          python -m scripts.release_performance \
+            --baseline-source target/release-baseline \
+            --output target/release-evidence \
             "${perf_gate_extra_args[@]}"
       - name: Run security and supply-chain gate
+        id: security
         run: |
           npm ci --prefix web-ui
-          uv run python scripts/verify_security_gates.py
+          python scripts/verify_security_gates.py
       - name: Run exact-head continuous-runtime soaks
+        id: soak
         env:
           CALC_FLOW_STREAM_SOAK: "1"
           CALC_FLOW_M5_CHECKPOINT_SOAK: "1"
@@ -169,6 +122,27 @@ jobs:
           cargo test -p calc-flow --lib \
             runtime::streaming::soak::twenty_minute_epoch_checkpoint_restart \
             -- --ignored --exact --nocapture
+      - name: Summarize acceptance outcomes
+        if: always()
+        env:
+          ACCEPTANCE_STEPS: ${{ toJSON(steps) }}
+        run: |
+          python -m scripts.release_performance \
+            --output target/release-evidence --acceptance-summary
+      - name: Upload release performance evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-performance-evidence
+          path: |
+            target/release-evidence
+            !target/release-evidence/builds/*/cargo/**
+            !target/release-evidence/install/**
+            !target/release-evidence/rust-builds/*/core
+            !target/release-evidence/rust-builds/*/stream_join_perf
+            !target/release-evidence/rust-builds/*/allocation_regression
+          if-no-files-found: error
+          retention-days: 30
   crate:
     name: Verify crates.io package
     needs: acceptance-gates

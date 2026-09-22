@@ -1,20 +1,8 @@
-"""M7-01 paired Python and Rust benchmark-result gate.
+"""Validate legacy summaries and the dedicated stream lifecycle quantile gate.
 
-Validates saved pytest-benchmark baseline and candidate results with a 5%
-paired regression gate and saved Criterion estimates with their reported 95%
-confidence intervals. Benchmark invocation, exact-ref provenance, and soak
-execution remain release-workflow responsibilities.
-
-Usage:
-    CALC_FLOW_BENCHMARK_SCALE=overhead \\
-    JAX_PLATFORMS=cpu \\
-    uv run --extra benchmark \\
-    python scripts/verify_perf_gates.py \
-      --baseline-dir .benchmarks/base \
-      --candidate-dir .benchmarks/candidate \
-      --criterion-dir target/criterion \
-      --criterion-baseline exact-baseline \
-      --criterion-candidate exact-candidate
+Independent pytest/Criterion summaries lack adjacent pairs and cannot receive a
+release timing verdict. Use ``python -m scripts.release_performance`` to collect
+and classify two rounds of ten real AB/BA case invocations.
 """
 
 from __future__ import annotations
@@ -25,15 +13,18 @@ import math
 import re
 import sys
 from pathlib import Path
-from typing import TypedDict
+from typing import Never, TypedDict
 
 try:
+    from scripts.benchmark_suite.identity import compare_identity, validate_identity
     from scripts.toolkit import FULL_SHA
 except ImportError:  # direct execution puts only scripts/ on sys.path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from toolkit import FULL_SHA
 
+    from scripts.benchmark_suite.identity import compare_identity, validate_identity
+
 REGRESSION_THRESHOLD = 0.05
-CONFIDENCE_Z = 1.96
 PROVENANCE_FILE = "provenance.json"
 CRITERION_PROVENANCE_FILE = "criterion-provenance.json"
 FINGERPRINT = re.compile(r"[0-9a-f]{64}")
@@ -44,6 +35,7 @@ class BenchResult(TypedDict):
     mean_seconds: float
     std_dev: float
     rounds: int
+    metadata: dict[str, object]
 
 
 class CriterionResult(TypedDict):
@@ -51,6 +43,7 @@ class CriterionResult(TypedDict):
     mean_seconds: float
     lower_seconds: float
     upper_seconds: float
+    metadata: dict[str, object]
 
 
 class BenchmarkProvenance(TypedDict):
@@ -120,11 +113,15 @@ def load_baseline(path: Path) -> dict[str, BenchResult]:
             try:
                 name = bench["name"]
                 stats = bench["stats"]
+                if name in results:
+                    raise ValueError(f"duplicate benchmark: {name}")
+                validate_identity(extra or {})
                 results[name] = BenchResult(
                     name=name,
                     mean_seconds=stats.get("mean", 0.0),
                     std_dev=stats.get("stddev", 0.0),
                     rounds=stats.get("rounds", 0),
+                    metadata=extra,
                 )
             except (KeyError, TypeError, AttributeError) as error:
                 raise ValueError(
@@ -250,35 +247,17 @@ def check_stream_lifecycle_regression(
     *,
     allow_dependency_drift: bool = False,
 ) -> list[tuple[str, float]]:
-    """Return phase/size regressions supported by the recorded quantiles.
-
-    Machine and workload fingerprints must match exactly; a dependency
-    fingerprint drift fails closed unless the caller explicitly acknowledges
-    an intended lockfile change, in which case the comparison continues with
-    a recorded warning because the paired timing evidence stays meaningful
-    for the checkpoint/recovery phases dominated by engine code.
-    """
-
-    for field in ("machine_fingerprint", "workload_fingerprint"):
+    """Compare compatible lifecycle phases; acknowledgement never waives identity."""
+    for field in (
+        "machine_fingerprint",
+        "workload_fingerprint",
+        "dependency_fingerprint",
+    ):
         if baseline[field] != candidate[field]:
-            raise ValueError(f"stream lifecycle {field} does not match")
-    if baseline["dependency_fingerprint"] != candidate["dependency_fingerprint"]:
-        if not allow_dependency_drift:
+            acknowledgement = " (drift acknowledged)" if allow_dependency_drift else ""
             raise ValueError(
-                "stream lifecycle dependency_fingerprint does not match: the"
-                " paired refs resolved different benchmark dependencies"
-                " (baseline"
-                f" {baseline['dependency_fingerprint'][:12]}, candidate"
-                f" {candidate['dependency_fingerprint'][:12]}); rerun the"
-                " release workflow with the dependency-drift acknowledgement"
-                " after confirming the lockfile change is intended"
+                f"incomparable stream lifecycle {field} does not match{acknowledgement}"
             )
-        print(
-            "WARNING: comparing stream lifecycle evidence across drifted"
-            " benchmark dependencies (baseline"
-            f" {baseline['dependency_fingerprint'][:12]}, candidate"
-            f" {candidate['dependency_fingerprint'][:12]})"
-        )
     regressions = []
     byte_delta = (
         candidate["checkpoint_bytes_p50"] - baseline["checkpoint_bytes_p50"]
@@ -311,28 +290,18 @@ def check_stream_lifecycle_regression(
 def check_regression(
     baseline: dict[str, BenchResult],
     candidate: dict[str, BenchResult],
-    threshold: float = REGRESSION_THRESHOLD,
-) -> list[tuple[str, float]]:
-    """Returns statistically supported regressions for complete pairs.
-
-    A regression fails only when the candidate's 95% lower confidence bound is
-    more than ``threshold`` above the baseline's 95% upper confidence bound.
-    Missing pairs and unusable statistics fail closed.
-    """
+) -> Never:
+    """Reject independent summaries: release timing requires collected pairs."""
     missing = sorted(set(baseline) - set(candidate))
     if missing:
         raise ValueError(f"missing candidate benchmarks: {', '.join(missing)}")
-    regressions: list[tuple[str, float]] = []
+    if set(baseline) != set(candidate):
+        raise ValueError("incomparable benchmark inventories")
     for name, base in baseline.items():
-        cand = candidate[name]
         _validate_result(base, role="baseline")
-        _validate_result(cand, role="candidate")
-        delta = (cand["mean_seconds"] - base["mean_seconds"]) / base["mean_seconds"]
-        baseline_upper = _confidence_bound(base, direction=1)
-        candidate_lower = _confidence_bound(cand, direction=-1)
-        if candidate_lower > baseline_upper * (1.0 + threshold):
-            regressions.append((name, delta))
-    return regressions
+        _validate_result(candidate[name], role="candidate")
+        compare_identity(base.get("metadata", {}), candidate[name].get("metadata", {}))
+    raise ValueError("two rounds of collected paired observations are required")
 
 
 def load_criterion(path: Path, baseline: str) -> dict[str, CriterionResult]:
@@ -343,8 +312,13 @@ def load_criterion(path: Path, baseline: str) -> dict[str, CriterionResult]:
         data = json.loads(estimates_file.read_text(encoding="utf-8"))
         mean = data.get("mean", {})
         interval = mean.get("confidence_interval", {})
+        metadata = json.loads(
+            estimates_file.with_name("identity.json").read_text(encoding="utf-8")
+        )
+        validate_identity(metadata)
         result = CriterionResult(
             name=relative,
+            metadata=metadata,
             mean_seconds=float(mean.get("point_estimate", 0.0)) / 1_000_000_000,
             lower_seconds=float(interval.get("lower_bound", 0.0)) / 1_000_000_000,
             upper_seconds=float(interval.get("upper_bound", 0.0)) / 1_000_000_000,
@@ -359,22 +333,20 @@ def load_criterion(path: Path, baseline: str) -> dict[str, CriterionResult]:
 def check_criterion_regression(
     baseline: dict[str, CriterionResult],
     candidate: dict[str, CriterionResult],
-    threshold: float = REGRESSION_THRESHOLD,
-) -> list[tuple[str, float]]:
-    """Return Criterion regressions supported by non-overlapping intervals."""
+) -> Never:
+    """Reject independent Criterion summaries as release pairing evidence."""
     missing = sorted(set(baseline) - set(candidate))
     if missing:
-        missing_names = ", ".join(missing)
-        raise ValueError(f"missing candidate Criterion benchmarks: {missing_names}")
-    regressions: list[tuple[str, float]] = []
+        raise ValueError(
+            f"missing candidate Criterion benchmarks: {', '.join(missing)}"
+        )
+    if set(baseline) != set(candidate):
+        raise ValueError("incomparable Criterion inventories")
     for name, base in baseline.items():
-        cand = candidate[name]
         _validate_criterion_result(base, role="baseline")
-        _validate_criterion_result(cand, role="candidate")
-        delta = (cand["mean_seconds"] - base["mean_seconds"]) / base["mean_seconds"]
-        if cand["lower_seconds"] > base["upper_seconds"] * (1.0 + threshold):
-            regressions.append((name, delta))
-    return regressions
+        _validate_criterion_result(candidate[name], role="candidate")
+        compare_identity(base.get("metadata", {}), candidate[name].get("metadata", {}))
+    raise ValueError("two rounds of collected paired observations are required")
 
 
 def _validate_result(result: BenchResult, *, role: str) -> None:
@@ -413,11 +385,6 @@ def _validate_criterion_result(result: CriterionResult, *, role: str) -> None:
         )
 
 
-def _confidence_bound(result: BenchResult, *, direction: int) -> float:
-    standard_error = result["std_dev"] / math.sqrt(result["rounds"])
-    return result["mean_seconds"] + direction * CONFIDENCE_Z * standard_error
-
-
 def _parse_options() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -449,9 +416,8 @@ def _parse_options() -> argparse.Namespace:
         "--allow-dependency-drift",
         action="store_true",
         help=(
-            "Acknowledge an intended benchmark dependency change instead of"
-            " failing the stream lifecycle comparison on a dependency"
-            " fingerprint mismatch"
+            "Record dependency drift acknowledgement; incompatible evidence"
+            " still blocks release"
         ),
     )
     return parser.parse_args()

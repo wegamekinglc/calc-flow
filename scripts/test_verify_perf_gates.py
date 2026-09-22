@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import unittest
+from inspect import signature
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from scripts.toolkit import fingerprint_json
 from scripts.verify_perf_gates import (
     check_criterion_regression,
     check_regression,
@@ -17,6 +19,17 @@ from scripts.verify_perf_gates import (
     load_provenance,
     load_stream_lifecycle,
 )
+
+
+def _identity():
+    return {
+        key: value
+        for name in ("machine", "dependency", "workload")
+        for key, value in (
+            (f"{name}_identity", {"fixture": name}),
+            (f"{name}_fingerprint", fingerprint_json({"fixture": name})),
+        )
+    }
 
 
 def _write_benchmark(
@@ -32,6 +45,7 @@ def _write_benchmark(
             {
                 "name": name,
                 "stats": {"mean": mean, "stddev": stddev, "rounds": rounds},
+                "extra_info": _identity(),
             }
         ]
     }
@@ -143,6 +157,14 @@ class TestExactRefProvenance(unittest.TestCase):
 
 
 class TestCheckRegression(unittest.TestCase):
+    def test_legacy_summary_gates_reject_threshold_overrides(self) -> None:
+        for check in (check_regression, check_criterion_regression):
+            with (
+                self.subTest(check=check.__name__),
+                self.assertRaisesRegex(TypeError, "threshold"),
+            ):
+                signature(check).bind({}, {}, threshold=1.0)
+
     def setUp(self) -> None:
         super().setUp()
         self.baseline = {
@@ -160,59 +182,21 @@ class TestCheckRegression(unittest.TestCase):
             },
         }
 
-    def test_within_threshold_passes(self) -> None:
-        candidate = {
-            "bench_a": {
-                "name": "bench_a",
-                "mean_seconds": 1.03,
-                "std_dev": 0.01,
-                "rounds": 100,
-            },
-            "bench_b": {
-                "name": "bench_b",
-                "mean_seconds": 2.04,
-                "std_dev": 0.02,
-                "rounds": 100,
-            },
-        }
-        self.assertEqual(check_regression(self.baseline, candidate), [])
-
-    def test_improvement_passes(self) -> None:
-        candidate = {
-            "bench_a": {
-                "name": "bench_a",
-                "mean_seconds": 0.5,
-                "std_dev": 0.01,
-                "rounds": 100,
-            },
-            "bench_b": {
-                "name": "bench_b",
-                "mean_seconds": 1.0,
-                "std_dev": 0.02,
-                "rounds": 100,
-            },
-        }
-        self.assertEqual(check_regression(self.baseline, candidate), [])
-
-    def test_exceeding_threshold_fails(self) -> None:
-        candidate = {
-            "bench_a": {
-                "name": "bench_a",
-                "mean_seconds": 1.06,
-                "std_dev": 0.01,
-                "rounds": 100,
-            },
-            "bench_b": {
-                "name": "bench_b",
-                "mean_seconds": 2.0,
-                "std_dev": 0.02,
-                "rounds": 100,
-            },
-        }
-        regressions = check_regression(self.baseline, candidate)
-        self.assertEqual(len(regressions), 1)
-        self.assertEqual(regressions[0][0], "bench_a")
-        self.assertGreater(regressions[0][1], 0.05)
+    def test_independent_summary_cannot_classify_stable_slow_or_improved(self):
+        for ratio in (0.5, 1.03, 1.06):
+            baseline = {
+                name: {**row, "metadata": _identity()}
+                for name, row in self.baseline.items()
+            }
+            candidate = {
+                name: {**row, "mean_seconds": row["mean_seconds"] * ratio}
+                for name, row in baseline.items()
+            }
+            with (
+                self.subTest(ratio=ratio),
+                self.assertRaisesRegex(ValueError, "paired.*required"),
+            ):
+                check_regression(baseline, candidate)
 
     def test_missing_candidate_fails_closed(self) -> None:
         candidate = {
@@ -227,18 +211,6 @@ class TestCheckRegression(unittest.TestCase):
             ValueError, "missing candidate benchmarks: bench_b"
         ):
             check_regression(self.baseline, candidate)
-
-    def test_noisy_mean_regression_without_confidence_support_passes(self) -> None:
-        candidate = {
-            "bench_a": {
-                "name": "bench_a",
-                "mean_seconds": 1.10,
-                "std_dev": 1.0,
-                "rounds": 4,
-            },
-            "bench_b": self.baseline["bench_b"],
-        }
-        self.assertEqual(check_regression(self.baseline, candidate), [])
 
     def test_zero_baseline_mean_fails_closed(self) -> None:
         baseline = {
@@ -273,12 +245,15 @@ class TestCriterionGate(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            report.joinpath("identity.json").write_text(
+                json.dumps(_identity()), encoding="utf-8"
+            )
             results = load_criterion(root, "exact-base")
 
         self.assertEqual(set(results), {"stream/channel"})
         self.assertEqual(results["stream/channel"]["mean_seconds"], 1.0)
 
-    def test_statistically_supported_criterion_regression_fails(self) -> None:
+    def test_independent_criterion_intervals_require_actual_pairs(self) -> None:
         baseline = {
             "stream/channel": {
                 "name": "stream/channel",
@@ -295,10 +270,14 @@ class TestCriterionGate(unittest.TestCase):
                 "upper_seconds": 1.11,
             }
         }
-        self.assertEqual(
-            check_criterion_regression(baseline, candidate)[0][0],
-            "stream/channel",
-        )
+        baseline = {
+            name: {**row, "metadata": _identity()} for name, row in baseline.items()
+        }
+        candidate = {
+            name: {**row, "metadata": _identity()} for name, row in candidate.items()
+        }
+        with self.assertRaisesRegex(ValueError, "paired.*required"):
+            check_criterion_regression(baseline, candidate)
 
     def test_missing_candidate_criterion_case_fails_closed(self) -> None:
         baseline = {
@@ -402,47 +381,29 @@ class TestStreamLifecycleGate(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "machine_fingerprint"):
             check_stream_lifecycle_regression(baseline, candidate)
 
-    def test_dependency_drift_fails_closed_with_an_escape_hint(self) -> None:
+    def test_dependency_drift_fails_closed(self) -> None:
         baseline = _comparable_lifecycle()
         candidate = {**baseline, "dependency_fingerprint": "e" * 64}
 
-        with self.assertRaisesRegex(ValueError, "dependency-drift acknowledgement"):
+        with self.assertRaisesRegex(ValueError, "dependency_fingerprint"):
             check_stream_lifecycle_regression(baseline, candidate)
 
-    def test_acknowledged_dependency_drift_still_gates_regressions(self) -> None:
+    def test_acknowledged_dependency_drift_is_still_incomparable(self) -> None:
         baseline = _comparable_lifecycle()
-        drifted_stable = {
-            **baseline,
-            "dependency_fingerprint": "e" * 64,
-        }
-        drifted_regressed = {
-            **drifted_stable,
-            "checkpoint_bytes": 107,
-            "checkpoint_bytes_p50": 107,
-            "checkpoint_bytes_p95": 108,
-        }
-
-        self.assertEqual(
-            check_stream_lifecycle_regression(
-                baseline, drifted_stable, allow_dependency_drift=True
-            ),
-            [],
-        )
-        self.assertEqual(
-            [
-                name
-                for name, _delta in check_stream_lifecycle_regression(
-                    baseline, drifted_regressed, allow_dependency_drift=True
+        for byte_count in (100, 107):
+            with (
+                self.subTest(byte_count=byte_count),
+                self.assertRaisesRegex(ValueError, "incomparable.*dependency"),
+            ):
+                check_stream_lifecycle_regression(
+                    baseline,
+                    {
+                        **baseline,
+                        "dependency_fingerprint": "e" * 64,
+                        "checkpoint_bytes_p50": byte_count,
+                    },
+                    allow_dependency_drift=True,
                 )
-            ],
-            ["checkpoint_bytes"],
-        )
-        with self.assertRaisesRegex(ValueError, "machine_fingerprint"):
-            check_stream_lifecycle_regression(
-                baseline,
-                {**drifted_stable, "machine_fingerprint": "f" * 64},
-                allow_dependency_drift=True,
-            )
 
     def test_malformed_benchmark_entries_fail_with_file_context(self) -> None:
         with TemporaryDirectory() as raw:

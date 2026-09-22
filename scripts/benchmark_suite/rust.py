@@ -42,8 +42,10 @@ def bench_targets(source: Path) -> list[str]:
     return targets
 
 
-async def build_binaries(source: Path, output: Path, shared: Path) -> dict:
-    targets = bench_targets(source)
+async def build_binaries(
+    source: Path, output: Path, shared: Path, *, targets: tuple[str, ...] | None = None
+) -> dict:
+    targets = targets if targets is not None else bench_targets(source)
     environment = {
         **child_environment(),
         "CARGO_TARGET_DIR": str(shared),
@@ -70,23 +72,27 @@ async def build_binaries(source: Path, output: Path, shared: Path) -> dict:
             log=log,
             env=environment,
         )
-        artifacts = []
-        for line in log.read_text(encoding="utf-8").splitlines():
-            if not line.startswith("{"):
-                continue
-            item = json.loads(line)
-            if (
-                item.get("reason") == "compiler-artifact"
-                and item["target"]["name"] == target
-                and item.get("executable")
-            ):
-                artifacts.append(item["executable"])
-        if len(artifacts) != 1:
-            raise ValueError(f"expected one compiled executable for {target}")
         destination = output / target
-        shutil.copy2(artifacts[0], destination)
+        shutil.copy2(_compiled_executable(log, target), destination)
         binaries[target] = destination
     return binaries
+
+
+def _compiled_executable(log: Path, target: str) -> str:
+    artifacts = []
+    for line in log.read_text(encoding="utf-8").splitlines():
+        if not line.startswith("{"):
+            continue
+        item = json.loads(line)
+        if (
+            item.get("reason") == "compiler-artifact"
+            and item["target"]["name"] == target
+            and item.get("executable")
+        ):
+            artifacts.append(item["executable"])
+    if len(artifacts) != 1:
+        raise ValueError(f"expected one compiled executable for {target}")
+    return artifacts[0]
 
 
 SQL_MINIMUM_SAMPLES = 20

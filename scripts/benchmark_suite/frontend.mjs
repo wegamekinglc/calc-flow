@@ -1,6 +1,7 @@
 // Run each checkout's installed Vitest with raw samples retained on both sides.
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { startVitest } from "vitest/node";
+import { machineIdentity } from "./frontend_identity.mjs";
 
 // Installed under each trusted checkout's node_modules/.cache by the adapter.
 // No request-selected module or output path is imported or opened.
@@ -34,6 +35,7 @@ async function retainSamples(context) {
   for (const file of context.state.getFiles()) collect(file, entries);
   const samples = new Map(entries);
   const report = JSON.parse(await readFile("../target/benchmark-suite/vitest.json", "utf8"));
+  report.machine_identity = machineIdentity();
   const count = attachSamples(report, samples);
   if (count === 0 || count !== samples.size) {
     throw new Error("Incomplete frontend benchmark inventory");

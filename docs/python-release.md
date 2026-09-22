@@ -93,9 +93,10 @@ Manual dispatches are build-only rehearsals, including dispatches on tags.
 Only a pushed `calc-flow-python-v*` tag can reach the publication job. No API
 token or `skip-existing` behavior is used.
 
-The acceptance job has a 180-minute limit to accommodate cold exact-ref Rust
-and Python builds plus both mandatory 20-minute soaks. This is a job time
-budget, not a performance threshold; all benchmark and soak gates still apply.
+The acceptance job has a 360-minute limit for cold exact-ref Rust and Python
+builds, per-case paired collection, and both mandatory 20-minute soaks.
+This is a job time budget; benchmark thresholds and soak requirements still
+apply without `continue-on-error`.
 
 ## First-release performance baseline
 
@@ -117,6 +118,52 @@ git push origin calc-flow-python-v<version>
 duplicate, non-ancestor, or candidate-equal bootstrap baselines. An input cannot
 disagree with the annotation or override an existing earlier release.
 Later release tags omit the bootstrap annotation and input.
+
+## Performance acceptance and failure evidence
+
+From a clean candidate checkout, prepare the selected baseline as
+`target/release-baseline` and activate an environment installed from
+`benchmarks/requirements.lock` with hash verification. The release workflow
+invokes:
+
+```bash
+python -m scripts.release_performance \
+  --baseline-source target/release-baseline \
+  --output target/release-evidence
+```
+
+Use a fresh output directory for a new measurement. The command builds both
+sealed releases and the Rust benchmark binaries, collects ordinary Python
+and Rust `core`/`stream_join_perf` cases, and runs the lifecycle, rolling-kernel,
+and allocation gates. Each timed case uses two rounds of ten adjacent AB/BA
+invocation pairs and the existing +5% paired-median decision. Python release
+fixtures use `overhead`; the unified suite's lifecycle shard uses `standard`
+and must not be compared across those scales. See
+[release measurement boundaries](benchmark-suite.md#release-acceptance-measurements).
+
+Missing, corrupt, or incompatible identity/sample evidence blocks acceptance.
+A timing-only `inconclusive` verdict is not a confirmed regression and does
+not itself fail the timing gate, but does not prove equivalent performance.
+The workflow input `allow-dependency-drift` and command option
+`--allow-dependency-drift` only record acknowledgement; dependency mismatch
+still rejects the comparison, including the lifecycle gate.
+
+CI runs performance, security, and soak steps in order. Its `if: always()`
+summary writes `acceptance.json` and `acceptance.md` with each step's `outcome`
+and `conclusion`. Skipped steps name prior failed steps, or report setup/ref
+selection failure or cancellation when no earlier gate outcome explains them.
+The helper command `python -m scripts.release_performance --output
+target/release-evidence --acceptance-summary` consumes `ACCEPTANCE_STEPS` and
+`GITHUB_STEP_SUMMARY` from the workflow environment; it summarizes outcomes
+without running measurements.
+
+The `release-performance-evidence` artifact uploads with `if: always()` and
+30-day retention. It includes available raw samples and pairs, failure
+records, results/summary files, command logs and exit records, sealed-build
+and Rust provenance, dependency listings, and acceptance outcomes. Cargo
+build caches, installed import directories, and copied Rust benchmark
+executables are excluded. Inspect this evidence after a failed run; a skipped
+security or soak step supplies no acceptance evidence for that gate.
 
 ## One-time Trusted Publisher setup
 

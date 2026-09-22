@@ -53,6 +53,20 @@ measurements. Use the current guides for supported behavior.
   checks. Incremental IPC encoding, checkpoint format, and database commit after
   manifest publication are unchanged; existing invalid manifests are not repaired.
 
+- 2026-09-21: Require comparable paired release performance evidence (DAL-299).
+  `python -m scripts.release_performance` binds ordinary Python and Rust
+  `core`/`stream_join_perf` observations to sealed native/binary hashes and
+  complete identities, collecting two rounds of ten adjacent AB/BA invocation
+  pairs under the existing +5% paired-median rules. Independent summaries are
+  rejected as release timing evidence; dependency-drift acknowledgement no
+  longer permits incompatible lifecycle comparisons. Unified Python collectors
+  support older checkouts, frontend reports record actual Node identities,
+  and ABBA suite blocks remain informational. Failed release runs retain raw
+  evidence and downstream skip reasons for 30 days; the acceptance job budget
+  is 360 minutes. Specialized gates and thresholds remain in force. This
+  evidence-chain correction establishes no product speedup and does not clear
+  historical inconclusive release measurements or SQL sameHEAD RSS failures.
+
 - 2026-09-20: Native streaming covers the `join` engine scenario through the
   100k tier. The bounded temporal join runs with the dimension side complete
   at the stream origin and an inclusive `before` bound spanning the
