@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from inspect import signature
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -162,7 +163,7 @@ class TestCheckRegression(unittest.TestCase):
                 self.subTest(check=check.__name__),
                 self.assertRaisesRegex(TypeError, "threshold"),
             ):
-                check({}, {}, threshold=1.0)
+                signature(check).bind({}, {}, threshold=1.0)
 
     def setUp(self) -> None:
         super().setUp()
