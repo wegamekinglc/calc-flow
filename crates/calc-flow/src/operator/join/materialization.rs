@@ -96,9 +96,7 @@ impl JoinOutput<'_> {
         if let Some(charges) = self.admitted_charges
             && self.single_chunk_fits(charges, budget)
         {
-            let mut single = Vec::with_capacity(1);
-            single.push(0..self.matched.len());
-            return Ok(single);
+            return Ok(std::iter::once(0..self.matched.len()).collect());
         }
         if self
             .schema

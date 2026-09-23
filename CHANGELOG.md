@@ -9,6 +9,21 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-23: Restore stream Join handler throughput after DAL-300. The
+  bounded-chunk preflight scanned every matched pair through hashed per-row
+  caches (a measured 26% release-gate regression on
+  `handler/right_10k_one_to_one` and `handler/right_10k_fanout10`); admission
+  now caches conservative logical row charges columnarly, single-chunk
+  outputs are decided from the charge sum alone, and the flat fallback
+  indexes per-row costs by dense position. Chunk boundaries, atomic
+  admission, oversized-row rejection, and checkpoint recovery are unchanged.
+  The allocation comparability lock now covers the measurement identity
+  (frozen harness source, pinned allocation-counter build, toolchain);
+  lockfile, manifest, and harness-commit values stay recorded attribution
+  because every release bumps the product's own entries in them, which made
+  the previous byte-equality lock reject ordinary release-to-release
+  comparisons.
+
 - 2026-09-23: Release paired timing collects two rounds of six adjacent
   AB/BA invocations per case (24 observations) instead of two rounds of ten,
   and the two mandatory 20-minute soaks moved from the acceptance job into a
