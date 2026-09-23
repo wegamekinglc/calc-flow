@@ -420,8 +420,11 @@ instead of silently truncating rows.
 Release CI collects the Python, Rust core, and stream join suites in parallel.
 Each suite writes `results.json` and `summary.md`; the acceptance job downloads
 all three artifacts, checks their sealed release manifests, Rust build
-provenance, inventories, and raw pairs, and writes the merged verdict. Each case
-retains `pairs.json`, per-invocation `observation.json`,
+provenance, inventories, and raw pairs, and writes the merged verdict. Each
+Rust build records its binary SHA-256 in `binary-sha256.json`; suite reports
+retain the same digest so the merge can check every case seal against its
+build. Each case retains `pairs.json`,
+per-invocation `observation.json`,
 raw pytest/Criterion data, and a `failure.json` when an invocation fails.
 Command records beside logs include arguments, working directory, thread
 settings, exit code, and errors. Build records, dependency provenance, and
