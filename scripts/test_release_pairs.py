@@ -62,7 +62,7 @@ def case(ratios=(1.0, 1.0)):
                         for side in ("baseline", "candidate")
                     },
                 }
-                for p in range(10)
+                for p in range(6)
             ]
             for r, ratio in enumerate(ratios)
         ],
@@ -130,10 +130,18 @@ class ReleaseCollectionTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as raw:
             path = Path(raw)
             result = await collect_case("python/case", measure, path)
-            self.assertEqual(
-                calls, ["baseline", "candidate", "candidate", "baseline"] * 10
-            )
-            self.assertEqual(len(list(path.rglob("observation.json"))), 40)
+            expected = [
+                side
+                for _ in range(2)
+                for pair in range(6)
+                for side in (
+                    ("baseline", "candidate")
+                    if pair % 2 == 0
+                    else ("candidate", "baseline")
+                )
+            ]
+            self.assertEqual(calls, expected)
+            self.assertEqual(len(list(path.rglob("observation.json"))), 24)
             self.assertEqual(result, json.loads((path / "pairs.json").read_text()))
 
     async def test_failed_measurement_preserves_partial_evidence(self):

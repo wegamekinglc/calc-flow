@@ -2,7 +2,7 @@
 
 Independent pytest/Criterion summaries lack adjacent pairs and cannot receive a
 release timing verdict. Use ``python -m scripts.release_performance`` to collect
-and classify two rounds of ten real AB/BA case invocations.
+and classify two rounds of six real AB/BA case invocations.
 """
 
 from __future__ import annotations

@@ -7,10 +7,15 @@ import statistics
 from pathlib import Path
 
 from scripts.benchmark_suite.identity import compare_identity
-from scripts.benchmark_suite.report import ROUNDS, SAMPLES, comparison
+from scripts.benchmark_suite.report import comparison
 from scripts.toolkit import write_json
 
 SIDES = ("baseline", "candidate")
+# Release evidence samples fewer pairs per case (six still yields a finite
+# 95% median interval and the complete collection fits the 6-hour GitHub
+# job budget); the AB/BA alternation and +5% verdict are unchanged.
+RELEASE_ROUNDS = 2
+RELEASE_SAMPLES = 6
 
 
 def pair_order(index: int) -> list[str]:
@@ -22,10 +27,10 @@ async def collect_case(name: str, measure, output: Path) -> dict:
         raise ValueError("paired collection requires a fresh evidence directory")
     output.mkdir(parents=True, exist_ok=True)
     evidence = {"id": name, "rounds": []}
-    for round_index in range(ROUNDS):
+    for round_index in range(RELEASE_ROUNDS):
         pairs = []
         evidence["rounds"].append(pairs)
-        for index in range(SAMPLES):
+        for index in range(RELEASE_SAMPLES):
             pair = {"pair": index, "order": pair_order(index), "observations": {}}
             pairs.append(pair)
             for side in pair["order"]:
@@ -92,8 +97,10 @@ def _unique_worker(value: dict, workers: set[str]) -> str:
 
 def evaluate_case(case: dict, seals: dict) -> dict:
     rounds = case.get("rounds", [])
-    if len(rounds) != ROUNDS or any(len(pairs) != SAMPLES for pairs in rounds):
-        raise ValueError("release evidence requires two rounds of ten actual pairs")
+    if len(rounds) != RELEASE_ROUNDS or any(
+        len(pairs) != RELEASE_SAMPLES for pairs in rounds
+    ):
+        raise ValueError("release evidence requires two rounds of six actual pairs")
     values = {side: [[], []] for side in SIDES}
     reference = (
         rounds[0][0].get("observations", {}).get("baseline", {}).get("metadata", {})
@@ -109,5 +116,6 @@ def evaluate_case(case: dict, seals: dict) -> dict:
                     _observation(value, seals[side], reference)
                 )
     return comparison(
-        {"id": case["id"], "comparison": "interleaved", "correctness": True, **values}
+        {"id": case["id"], "comparison": "interleaved", "correctness": True, **values},
+        minimum_samples=RELEASE_SAMPLES,
     )

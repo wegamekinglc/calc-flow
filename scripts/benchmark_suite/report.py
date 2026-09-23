@@ -75,11 +75,14 @@ def _head_statistics(case: dict, head: list[float]) -> dict:
     }
 
 
-def comparison(case: dict) -> dict:
+def comparison(case: dict, *, minimum_samples: int | None = None) -> dict:
     if case.get("correctness") is not True:
         raise ValueError(f"{case['id']}: correctness was not established")
     kind = case["comparison"]
-    minimum = SAMPLES if kind == "interleaved" else 1
+    if minimum_samples is not None:
+        minimum = minimum_samples
+    else:
+        minimum = SAMPLES if kind == "interleaved" else 1
     head = checked_samples(case["candidate"], minimum=minimum)
     result = _head_statistics(case, head)
     if not case["baseline"]:

@@ -67,6 +67,19 @@ class ReleasePerformanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("prior step performance", rendered)
         self.assertIn("soak: outcome=skipped", rendered)
 
+    def test_acceptance_summary_reports_only_the_jobs_own_steps(self):
+        from scripts.release_performance import acceptance_summary
+
+        results = {
+            "performance": {"outcome": "success", "conclusion": "success"},
+            "security": {"outcome": "success", "conclusion": "success"},
+            "soak": {"outcome": "failure", "conclusion": "failure"},
+        }
+        rendered = acceptance_summary(results, steps=("performance", "security"))
+        self.assertIn("performance: outcome=success", rendered)
+        self.assertIn("security: outcome=success", rendered)
+        self.assertNotIn("soak:", rendered)
+
     async def test_measure_covers_required_inventories_without_mutating_report(self):
         from scripts.release_performance import measure
         from scripts.toolkit import fingerprint_json, sha256_file
@@ -137,7 +150,7 @@ class ReleasePerformanceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 set(result["inventory"]), {"python", "core", "stream_join_perf"}
             )
-            self.assertEqual(len(list(root.rglob("observation.json"))), 120)
+            self.assertEqual(len(list(root.rglob("observation.json"))), 72)
 
     async def test_relative_output_is_resolved_before_builds(self):
         from scripts.release_performance import run_gate

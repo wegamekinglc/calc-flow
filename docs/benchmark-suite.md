@@ -371,7 +371,7 @@ revision's compiled cases with the compiled-dependency and target-scoped
 workload identities described above. Both sides must have matching, nonempty,
 duplicate-free inventories; this release path has no `new-coverage` exemption.
 
-Each case receives two rounds of ten adjacent baseline/candidate invocation
+Each case receives two rounds of six adjacent baseline/candidate invocation
 pairs, alternating AB/BA. Every invocation starts a fresh isolated process.
 Its observation is the median of its saved pytest or Criterion raw samples,
 using the fixture's existing timing boundary. Process startup, builds,

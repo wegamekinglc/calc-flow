@@ -368,7 +368,7 @@ async def run_gate(options: argparse.Namespace) -> int:
 
 def _gate_summary(report: dict) -> str:
     lines = [
-        "Release paired timing: two rounds of ten adjacent AB/BA case "
+        "Release paired timing: two rounds of six adjacent AB/BA case "
         "invocations; +5% gate.",
         "Timing inconclusive is not evidence of equivalence. "
         "Missing/invalid evidence blocks acceptance.",
@@ -396,9 +396,11 @@ def _gate_exit_code(report: dict) -> int:
     )
 
 
-def acceptance_summary(results: dict) -> str:
+def acceptance_summary(
+    results: dict, steps: tuple[str, ...] = ("performance", "security", "soak")
+) -> str:
     lines, failed = [], []
-    for step in ("performance", "security", "soak"):
+    for step in steps:
         result = results.get(step, {})
         outcome, conclusion = (
             result.get("outcome", "skipped"),
@@ -427,12 +429,17 @@ def main() -> int:
         help="Record acknowledgement; incompatible dependencies still block release",
     )
     parser.add_argument("--acceptance-summary", action="store_true")
+    parser.add_argument(
+        "--steps",
+        default="performance,security,soak",
+        help="comma-separated acceptance step ids owned by this job",
+    )
     options = parser.parse_args()
     if options.acceptance_summary:
         options.output.mkdir(parents=True, exist_ok=True)
         results = json.loads(os.environ["ACCEPTANCE_STEPS"])
         write_json(options.output / "acceptance.json", results)
-        summary = acceptance_summary(results)
+        summary = acceptance_summary(results, steps=tuple(options.steps.split(",")))
         (options.output / "acceptance.md").write_text(summary, encoding="utf-8")
         with Path(os.environ["GITHUB_STEP_SUMMARY"]).open(
             "a", encoding="utf-8"

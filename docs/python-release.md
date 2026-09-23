@@ -94,9 +94,10 @@ Only a pushed `calc-flow-python-v*` tag can reach the publication job. No API
 token or `skip-existing` behavior is used.
 
 The acceptance job has a 360-minute limit for cold exact-ref Rust and Python
-builds, per-case paired collection, and both mandatory 20-minute soaks.
-This is a job time budget; benchmark thresholds and soak requirements still
-apply without `continue-on-error`.
+builds, per-case paired collection, and the security gate. The two mandatory
+20-minute soaks run in a parallel `soak-gates` job so the paired collection
+fits the 6-hour hosted-runner job cap. These are job time budgets; benchmark
+thresholds and soak requirements still apply without `continue-on-error`.
 
 ## First-release performance baseline
 
@@ -135,7 +136,7 @@ python -m scripts.release_performance \
 Use a fresh output directory for a new measurement. The command builds both
 sealed releases and the Rust benchmark binaries, collects ordinary Python
 and Rust `core`/`stream_join_perf` cases, and runs the lifecycle, rolling-kernel,
-and allocation gates. Each timed case uses two rounds of ten adjacent AB/BA
+and allocation gates. Each timed case uses two rounds of six adjacent AB/BA
 invocation pairs and the existing +5% paired-median decision. Python release
 fixtures use `overhead`; the unified suite's lifecycle shard uses `standard`
 and must not be compared across those scales. See
