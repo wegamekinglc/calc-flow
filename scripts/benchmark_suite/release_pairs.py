@@ -7,15 +7,12 @@ import statistics
 from pathlib import Path
 
 from scripts.benchmark_suite.identity import compare_identity
-from scripts.benchmark_suite.report import comparison
+from scripts.benchmark_suite.report import ROUNDS, SAMPLES, comparison
 from scripts.toolkit import write_json
 
 SIDES = ("baseline", "candidate")
-# Release evidence samples fewer pairs per case (six still yields a finite
-# 95% median interval and the complete collection fits the 6-hour GitHub
-# job budget); the AB/BA alternation and +5% verdict are unchanged.
-RELEASE_ROUNDS = 2
-RELEASE_SAMPLES = 6
+RELEASE_ROUNDS = ROUNDS
+RELEASE_SAMPLES = SAMPLES
 
 
 def pair_order(index: int) -> list[str]:
@@ -100,7 +97,10 @@ def evaluate_case(case: dict, seals: dict) -> dict:
     if len(rounds) != RELEASE_ROUNDS or any(
         len(pairs) != RELEASE_SAMPLES for pairs in rounds
     ):
-        raise ValueError("release evidence requires two rounds of six actual pairs")
+        raise ValueError(
+            f"release evidence requires {RELEASE_ROUNDS} rounds of "
+            f"{RELEASE_SAMPLES} actual pairs"
+        )
     values = {side: [[], []] for side in SIDES}
     reference = (
         rounds[0][0].get("observations", {}).get("baseline", {}).get("metadata", {})

@@ -749,19 +749,20 @@ class ReleaseConfigTests(unittest.TestCase):
 
     def test_release_budget_preserves_cold_builds_and_full_soaks(self) -> None:
         release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
-        acceptance = release.split("  acceptance-gates:\n", 1)[1].split(
-            "  crate:\n", 1
+        collection = release.split("  performance-collection:\n", 1)[1].split(
+            "  acceptance-gates:\n", 1
         )[0]
+        soak_job = release.split("  soak-gates:\n", 1)[1].split("  crate:\n", 1)[0]
 
-        self.assertIn("    timeout-minutes: 360\n", acceptance)
+        self.assertIn("    timeout-minutes: 360\n", collection)
         for soak in (
             "twenty_minute_two_source_slow_sink",
             "twenty_minute_epoch_checkpoint_restart",
         ):
             with self.subTest(soak=soak):
-                self.assertIn(f"runtime::streaming::soak::{soak}", acceptance)
-        self.assertEqual(acceptance.count("-- --ignored --exact --nocapture"), 3)
-        self.assertNotIn("continue-on-error:", acceptance)
+                self.assertIn(f"runtime::streaming::soak::{soak}", soak_job)
+        self.assertEqual(soak_job.count("-- --ignored --exact --nocapture"), 3)
+        self.assertNotIn("continue-on-error:", collection + soak_job)
 
     def test_pr_and_release_isolate_stream_lifecycle_evidence(self) -> None:
         linux = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
@@ -780,7 +781,7 @@ class ReleaseConfigTests(unittest.TestCase):
 
         release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         exact_gate = release.split(
-            "      - name: Run paired exact-ref Rust and Python performance gate\n", 1
+            "      - name: Collect paired exact-ref ${{ matrix.suite }} evidence\n", 1
         )[1].split("      - name:", 1)[0]
         self.assertIn("python -m scripts.release_performance", exact_gate)
         from scripts.release_performance import LIFECYCLE, TARGETS

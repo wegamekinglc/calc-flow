@@ -62,7 +62,7 @@ def case(ratios=(1.0, 1.0)):
                         for side in ("baseline", "candidate")
                     },
                 }
-                for p in range(6)
+                for p in range(10)
             ]
             for r, ratio in enumerate(ratios)
         ],
@@ -70,6 +70,15 @@ def case(ratios=(1.0, 1.0)):
 
 
 class ReleasePairTests(unittest.TestCase):
+    def test_release_uses_the_reviewed_pr_sampling_plan(self):
+        from scripts.benchmark_suite.release_pairs import (
+            RELEASE_ROUNDS,
+            RELEASE_SAMPLES,
+        )
+        from scripts.benchmark_suite.report import ROUNDS, SAMPLES
+
+        self.assertEqual((RELEASE_ROUNDS, RELEASE_SAMPLES), (ROUNDS, SAMPLES))
+
     def evaluate(self, row):
         from scripts.benchmark_suite.release_pairs import evaluate_case
 
@@ -133,7 +142,7 @@ class ReleaseCollectionTests(unittest.IsolatedAsyncioTestCase):
             expected = [
                 side
                 for _ in range(2)
-                for pair in range(6)
+                for pair in range(10)
                 for side in (
                     ("baseline", "candidate")
                     if pair % 2 == 0
@@ -141,7 +150,7 @@ class ReleaseCollectionTests(unittest.IsolatedAsyncioTestCase):
                 )
             ]
             self.assertEqual(calls, expected)
-            self.assertEqual(len(list(path.rglob("observation.json"))), 24)
+            self.assertEqual(len(list(path.rglob("observation.json"))), 40)
             self.assertEqual(result, json.loads((path / "pairs.json").read_text()))
 
     async def test_failed_measurement_preserves_partial_evidence(self):

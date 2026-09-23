@@ -93,11 +93,11 @@ Manual dispatches are build-only rehearsals, including dispatches on tags.
 Only a pushed `calc-flow-python-v*` tag can reach the publication job. No API
 token or `skip-existing` behavior is used.
 
-The acceptance job has a 360-minute limit for cold exact-ref Rust and Python
-builds, per-case paired collection, and the security gate. The two mandatory
-20-minute soaks run in a parallel `soak-gates` job so the paired collection
-fits the 6-hour hosted-runner job cap. These are job time budgets; benchmark
-thresholds and soak requirements still apply without `continue-on-error`.
+Each of the three `performance-collection` jobs has a 360-minute limit for its
+own cold exact-ref builds and paired cases. The two mandatory 20-minute soaks
+run alongside those jobs in `soak-gates`. The acceptance job merges the suite
+evidence and runs the security gate after collection. Benchmark thresholds and
+soak requirements still apply without `continue-on-error`.
 
 ## First-release performance baseline
 
@@ -130,15 +130,17 @@ invokes:
 ```bash
 python -m scripts.release_performance \
   --baseline-source target/release-baseline \
-  --output target/release-evidence
+  --output target/release-evidence --suite python
 ```
 
 Use a fresh output directory for a new measurement. The command builds both
-sealed releases and the Rust benchmark binaries, collects ordinary Python
-and Rust `core`/`stream_join_perf` cases, and runs the lifecycle, rolling-kernel,
-and allocation gates. Each timed case uses two rounds of six adjacent AB/BA
-invocation pairs and the existing +5% paired-median decision. Python release
-fixtures use `overhead`; the unified suite's lifecycle shard uses `standard`
+sealed releases and the allocation benchmark binary, collects ordinary Python
+cases, and runs the lifecycle, rolling-kernel, and allocation gates. Run the
+same command with `--suite core` and `--suite stream_join_perf` in separate fresh
+output directories to collect the Rust cases. Each timed case uses two rounds
+of ten adjacent AB/BA invocation pairs and the existing +5% paired-median
+decision. Python release fixtures use `overhead`; the unified suite's lifecycle
+shard uses `standard`
 and must not be compared across those scales. See
 [release measurement boundaries](benchmark-suite.md#release-acceptance-measurements).
 
@@ -149,7 +151,8 @@ The workflow input `allow-dependency-drift` and command option
 `--allow-dependency-drift` only record acknowledgement; dependency mismatch
 still rejects the comparison, including the lifecycle gate.
 
-CI runs performance, security, and soak steps in order. Its `if: always()`
+CI runs the three paired suites and the soak job in parallel. The acceptance
+job checks the merged suite evidence before its security gate. Its `if: always()`
 summary writes `acceptance.json` and `acceptance.md` with each step's `outcome`
 and `conclusion`. Skipped steps name prior failed steps, or report setup/ref
 selection failure or cancellation when no earlier gate outcome explains them.
@@ -158,10 +161,11 @@ target/release-evidence --acceptance-summary` consumes `ACCEPTANCE_STEPS` and
 `GITHUB_STEP_SUMMARY` from the workflow environment; it summarizes outcomes
 without running measurements.
 
-The `release-performance-evidence` artifact uploads with `if: always()` and
-30-day retention. It includes available raw samples and pairs, failure
-records, results/summary files, command logs and exit records, sealed-build
-and Rust provenance, dependency listings, and acceptance outcomes. Cargo
+Each suite artifact and the merged `release-performance-evidence` artifact
+upload with `if: always()` and 30-day retention. They include available raw
+samples and pairs, failure records, results/summary files, command logs and
+exit records, sealed-build and Rust provenance, and dependency listings. The
+merged artifact also includes acceptance outcomes. Cargo
 build caches, installed import directories, and copied Rust benchmark
 executables are excluded. Inspect this evidence after a failed run; a skipped
 security or soak step supplies no acceptance evidence for that gate.

@@ -371,7 +371,7 @@ revision's compiled cases with the compiled-dependency and target-scoped
 workload identities described above. Both sides must have matching, nonempty,
 duplicate-free inventories; this release path has no `new-coverage` exemption.
 
-Each case receives two rounds of six adjacent baseline/candidate invocation
+Each case receives two rounds of ten adjacent baseline/candidate invocation
 pairs, alternating AB/BA. Every invocation starts a fresh isolated process.
 Its observation is the median of its saved pytest or Criterion raw samples,
 using the fixture's existing timing boundary. Process startup, builds,
@@ -417,8 +417,14 @@ is explicitly shown rather than invented. The complete Markdown/JSON remains
 an artifact if it exceeds GitHub's step-summary size limit; overflow fails
 instead of silently truncating rows.
 
-Release collection writes `results.json` and `summary.md` under its output
-directory. Each case retains `pairs.json`, per-invocation `observation.json`,
+Release CI collects the Python, Rust core, and stream join suites in parallel.
+Each suite writes `results.json` and `summary.md`; the acceptance job downloads
+all three artifacts, checks their sealed release manifests, Rust build
+provenance, inventories, and raw pairs, and writes the merged verdict. Each
+Rust build records its binary SHA-256 in `binary-sha256.json`; suite reports
+retain the same digest so the merge can check every case seal against its
+build. Each case retains `pairs.json`,
+per-invocation `observation.json`,
 raw pytest/Criterion data, and a `failure.json` when an invocation fails.
 Command records beside logs include arguments, working directory, thread
 settings, exit code, and errors. Build records, dependency provenance, and
