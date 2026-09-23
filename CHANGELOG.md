@@ -9,6 +9,19 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-23: Release paired timing collects two rounds of six adjacent
+  AB/BA invocations per case (24 observations) instead of two rounds of ten,
+  and the two mandatory 20-minute soaks moved from the acceptance job into a
+  parallel `soak-gates` job. The first 2026.9.23 release attempt measured the
+  complete collection at roughly five minutes per case across 74 cases and
+  exceeded the six-hour GitHub job cap while rust cases were still running,
+  so the previous sampling could never complete on hosted runners; six pairs
+  per round is the smallest count that still yields a finite 95% median
+  interval. The AB/BA alternation, fresh isolated workers, sealed binaries,
+  and +5% paired-median verdict are unchanged; restoring ten pairs per round
+  requires splitting the collection into parallel per-suite jobs. PR-suite
+  sampling is unaffected.
+
 - 2026-09-22: Scope Rust suite dependency comparisons to each benchmark
   target's compiled dependencies and compiler identity, retaining aggregate
   provenance. Adding a target no longer invalidates shared cases; real

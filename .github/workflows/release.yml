@@ -43,10 +43,11 @@ jobs:
           fi
           python scripts/verify_python_release.py "${args[@]}"
   acceptance-gates:
-    name: Exact-head performance, security, and soak gates
+    name: Exact-head performance and security gates
     needs: prepare-python-release
     runs-on: ubuntu-latest
-    # Fresh per-case pairs and cold builds precede two mandatory 20-minute soaks.
+    # Fresh per-case pairs and cold builds; the two mandatory 20-minute soaks
+    # run in the parallel soak-gates job so this job fits the 6-hour cap.
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -106,6 +107,38 @@ jobs:
         run: |
           npm ci --prefix web-ui
           python scripts/verify_security_gates.py
+      - name: Summarize acceptance outcomes
+        if: always()
+        env:
+          ACCEPTANCE_STEPS: ${{ toJSON(steps) }}
+        run: |
+          python -m scripts.release_performance \
+            --output target/release-evidence --acceptance-summary \
+            --steps performance,security
+      - name: Upload release performance evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-performance-evidence
+          path: |
+            target/release-evidence
+            !target/release-evidence/builds/*/cargo/**
+            !target/release-evidence/install/**
+            !target/release-evidence/rust-builds/*/core
+            !target/release-evidence/rust-builds/*/stream_join_perf
+            !target/release-evidence/rust-builds/*/allocation_regression
+          if-no-files-found: error
+          retention-days: 30
+  soak-gates:
+    name: Exact-head continuous-runtime soaks
+    needs: prepare-python-release
+    runs-on: ubuntu-latest
+    # Runs parallel to acceptance-gates; the paired timing collection alone
+    # consumes most of that job's 6-hour budget.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
       - name: Run exact-head continuous-runtime soaks
         id: soak
         env:
@@ -122,30 +155,9 @@ jobs:
           cargo test -p calc-flow --lib \
             runtime::streaming::soak::twenty_minute_epoch_checkpoint_restart \
             -- --ignored --exact --nocapture
-      - name: Summarize acceptance outcomes
-        if: always()
-        env:
-          ACCEPTANCE_STEPS: ${{ toJSON(steps) }}
-        run: |
-          python -m scripts.release_performance \
-            --output target/release-evidence --acceptance-summary
-      - name: Upload release performance evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: release-performance-evidence
-          path: |
-            target/release-evidence
-            !target/release-evidence/builds/*/cargo/**
-            !target/release-evidence/install/**
-            !target/release-evidence/rust-builds/*/core
-            !target/release-evidence/rust-builds/*/stream_join_perf
-            !target/release-evidence/rust-builds/*/allocation_regression
-          if-no-files-found: error
-          retention-days: 30
   crate:
     name: Verify crates.io package
-    needs: acceptance-gates
+    needs: [acceptance-gates, soak-gates]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -169,7 +181,7 @@ jobs:
           retention-days: 30
   wheels:
     name: Wheel ${{ matrix.os }} ${{ matrix.target }}
-    needs: acceptance-gates
+    needs: [acceptance-gates, soak-gates]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -236,7 +248,7 @@ jobs:
           retention-days: 30
   sdist:
     name: Python source distribution
-    needs: acceptance-gates
+    needs: [acceptance-gates, soak-gates]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -264,7 +276,7 @@ jobs:
           retention-days: 30
   studio-wheel:
     name: Studio wheel and static assets
-    needs: acceptance-gates
+    needs: [acceptance-gates, soak-gates]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
