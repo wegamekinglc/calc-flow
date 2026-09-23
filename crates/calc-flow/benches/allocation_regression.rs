@@ -1782,16 +1782,34 @@ fn validate_report(
     }
     // The product SHA is attribution, not identity: the measured delta is
     // precisely the product difference between the two reports. The
-    // comparability lock is the harness/dependency/toolchain identity below.
+    // comparability lock is the measurement identity below: the frozen
+    // harness source, the pinned allocation-counter build, and the toolchain.
+    // The lockfile, crate-manifest hashes, and harness commit stay recorded
+    // attribution only — every release bumps the product's own entries in
+    // them, so requiring equality would reject the very product evolution
+    // this comparison measures.
     if report.product_sha.is_empty() {
         return Err(HarnessError(format!("{label} product SHA is missing")));
     }
-    if report.harness_commit_sha != expected_provenance.harness_commit_sha {
-        return Err(HarnessError(format!("{label} harness commit is incorrect")));
-    }
-    if report.frozen_files != expected_provenance.frozen_files {
+    if report.harness_commit_sha.is_empty() {
         return Err(HarnessError(format!(
-            "{label} frozen-file or dependency identity is incorrect"
+            "{label} harness commit attribution is missing"
+        )));
+    }
+    if report.frozen_files.benchmark_sha256 != expected_provenance.frozen_files.benchmark_sha256 {
+        return Err(HarnessError(format!(
+            "{label} benchmark source identity is incorrect"
+        )));
+    }
+    if report.frozen_files.allocation_counter_version
+        != expected_provenance.frozen_files.allocation_counter_version
+        || report.frozen_files.allocation_counter_registry_checksum
+            != expected_provenance
+                .frozen_files
+                .allocation_counter_registry_checksum
+    {
+        return Err(HarnessError(format!(
+            "{label} allocation-counter identity is incorrect"
         )));
     }
     if !report.git_status_short.is_empty() {
@@ -2068,7 +2086,33 @@ fn run_regression_tests() -> HarnessResult<()> {
         &original_baseline,
         &original_candidate,
     )?;
+    // A release bump changes the product's own Cargo.lock and manifest
+    // entries between the compared revisions; that attribution churn must
+    // not invalidate the measurement-identity lock.
+    let mut churned_baseline = original_baseline.clone();
+    for (pointer, value) in [
+        ("/harness_commit_sha", "attribution-only"),
+        ("/frozen_files/cargo_lock_sha256", "release-bump-lock"),
+        (
+            "/frozen_files/crate_manifest_sha256",
+            "release-bump-manifest",
+        ),
+    ] {
+        churned_baseline[pointer] = serde_json::json!(value);
+    }
+    let churned = test_comparison_status(
+        &directory,
+        "product-attribution-churn-positive",
+        &churned_baseline,
+        &original_candidate,
+    )?;
     let mut failures = Vec::new();
+    if !churned.status.success() {
+        failures.push(format!(
+            "product-attribution-churn-positive: comparison failed: {}",
+            String::from_utf8_lossy(&churned.stderr)
+        ));
+    }
     if !positive.status.success() {
         failures.push(format!(
             "fixed-contract-positive: comparison failed: {}",
@@ -2264,18 +2308,18 @@ fn test_mutations(
             json!(99),
         )?,
         test_paired_mutation(
-            "paired-forged-harness",
-            baseline,
-            candidate,
-            "/harness_commit_sha",
-            json!("forged-harness"),
-        )?,
-        test_paired_mutation(
             "paired-forged-file-hash",
             baseline,
             candidate,
             "/frozen_files/benchmark_sha256",
             json!("forged-file-hash"),
+        )?,
+        test_paired_mutation(
+            "paired-forged-counter-version",
+            baseline,
+            candidate,
+            "/frozen_files/allocation_counter_version",
+            json!("0.0.0-forged"),
         )?,
         test_paired_mutation(
             "paired-forged-dependency-checksum",

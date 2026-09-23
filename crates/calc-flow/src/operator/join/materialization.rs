@@ -1,7 +1,7 @@
 //! Preflight matched-pair ranges before allocating independently owned output chunks.
 
 use std::{
-    collections::{BTreeMap, HashMap, btree_map::Entry, hash_map::Entry as HashEntry},
+    collections::{BTreeMap, btree_map::Entry},
     ops::Range,
 };
 
@@ -20,6 +20,9 @@ pub(super) struct JoinOutput<'a> {
     pub(super) matched: &'a [MatchedPair],
     pub(super) incoming_is_left: bool,
     pub(super) operator_id: &'a str,
+    /// Conservative per-admitted-row logical byte charges aligned with
+    /// `admitted`. `None` when the schema keeps the generic measured path.
+    pub(super) admitted_charges: Option<&'a [u64]>,
 }
 
 struct FlatRow {
@@ -90,6 +93,13 @@ impl JoinOutput<'_> {
     }
 
     pub(super) fn ranges(&self, budget: EdgeBudget) -> Result<Vec<Range<usize>>> {
+        if let Some(charges) = self.admitted_charges
+            && self.single_chunk_fits(charges, budget)
+        {
+            let mut single = Vec::with_capacity(1);
+            single.push(0..self.matched.len());
+            return Ok(single);
+        }
         if self
             .schema
             .fields()
@@ -102,9 +112,33 @@ impl JoinOutput<'_> {
         }
     }
 
+    /// Conservative whole-output fit check using cached logical charges.
+    ///
+    /// Each per-row charge includes the state-row overhead and a null-bitmap
+    /// allowance, so the summed bound never under-estimates the detailed flat
+    /// model. Only the row cap and byte sum decide; no per-row schema work.
+    fn single_chunk_fits(&self, charges: &[u64], budget: EdgeBudget) -> bool {
+        if self.matched.is_empty() || self.matched.len() > budget.max_rows {
+            return false;
+        }
+        let limit = budget.max_bytes as u128;
+        let mut total = 0_u128;
+        for pair in self.matched {
+            let incoming = charges[pair.pos];
+            let opposite = self.opposite[pair.opposite_index].charge;
+            total += u128::from(incoming) + u128::from(opposite);
+            if total > limit {
+                return false;
+            }
+        }
+        true
+    }
+
     fn flat_ranges(&self, budget: EdgeBudget) -> Result<Vec<Range<usize>>> {
-        let mut incoming = HashMap::new();
-        let mut opposite = HashMap::new();
+        // Matched positions are dense indices into both sides, so per-row
+        // costs cache in plain vectors instead of hashed maps.
+        let mut incoming: Vec<Option<FlatRow>> = (0..self.admitted.len()).map(|_| None).collect();
+        let mut opposite: Vec<Option<FlatRow>> = (0..self.opposite.len()).map(|_| None).collect();
         let mut ranges = Vec::new();
         let mut start = 0;
         let mut chunk = FlatChunk::default();
@@ -205,31 +239,29 @@ fn nested_range_is_full(
 }
 
 fn flat_row<'a>(
-    rows: &'a mut HashMap<usize, FlatRow>,
+    rows: &'a mut [Option<FlatRow>],
     index: usize,
     record: &RecordBatch,
     column_offset: usize,
 ) -> Result<&'a FlatRow> {
-    match rows.entry(index) {
-        HashEntry::Occupied(entry) => Ok(entry.into_mut()),
-        HashEntry::Vacant(entry) => {
-            #[cfg(test)]
-            tests::FLAT_VISITS.with(|count| count.set(count.get() + 1));
-            let mut bytes = 0;
-            let mut nulls = Vec::new();
-            for (column_index, column) in record.columns().iter().enumerate() {
-                let width = fixed_width(column.data_type()).expect("flat schema was checked");
-                bytes = checked_accumulate(bytes, width, "batch")?;
-                if let Some(offsets) = variable_offsets(column.as_ref()) {
-                    bytes = checked_accumulate(bytes, offsets.total_width(), "batch")?;
-                }
-                if column.nulls().is_some_and(|nulls| nulls.is_null(0)) {
-                    nulls.push(column_offset + column_index);
-                }
+    if rows[index].is_none() {
+        #[cfg(test)]
+        tests::FLAT_VISITS.with(|count| count.set(count.get() + 1));
+        let mut bytes = 0;
+        let mut nulls = Vec::new();
+        for (column_index, column) in record.columns().iter().enumerate() {
+            let width = fixed_width(column.data_type()).expect("flat schema was checked");
+            bytes = checked_accumulate(bytes, width, "batch")?;
+            if let Some(offsets) = variable_offsets(column.as_ref()) {
+                bytes = checked_accumulate(bytes, offsets.total_width(), "batch")?;
             }
-            Ok(entry.insert(FlatRow { bytes, nulls }))
+            if column.nulls().is_some_and(|nulls| nulls.is_null(0)) {
+                nulls.push(column_offset + column_index);
+            }
         }
+        rows[index] = Some(FlatRow { bytes, nulls });
     }
+    Ok(rows[index].as_ref().expect("just populated"))
 }
 
 fn estimated_rows<'a>(
@@ -252,6 +284,41 @@ fn estimated(record: &RecordBatch) -> Result<usize> {
 
 fn oversized_row(bytes: usize, budget: EdgeBudget) -> CalcFlowError {
     OutputChunkErrors::STREAM_JOIN.over_budget_row(bytes, budget.max_bytes)
+}
+
+/// Conservative logical byte charges for every row of one incoming record.
+///
+/// Returns `None` when any column lacks the flat width model, so the charge
+/// fast path never runs for nested schemas. Each row carries the state-row
+/// overhead plus a whole-schema null-bitmap allowance, keeping the sum an
+/// upper bound of the detailed flat model for single-chunk decisions.
+pub(super) fn flat_row_charges(record: &RecordBatch, overhead: u64) -> Result<Option<Vec<u64>>> {
+    let bitmap_per_row = record.num_columns().div_ceil(8);
+    let overhead = usize::try_from(overhead).map_err(|_| overflow_charge())?;
+    let mut charges = vec![overhead + bitmap_per_row; record.num_rows()];
+    for column in record.columns() {
+        let Some(width) = fixed_width(column.data_type()) else {
+            return Ok(None);
+        };
+        for charge in &mut charges {
+            *charge = checked_accumulate(*charge, width, "batch")?;
+        }
+        if let Some(offsets) = variable_offsets(column.as_ref()) {
+            offsets.add_charges(&mut charges)?;
+        }
+    }
+    let charges = charges
+        .into_iter()
+        .map(|charge| u64::try_from(charge).map_err(|_| overflow_charge()))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Some(charges))
+}
+
+fn overflow_charge() -> CalcFlowError {
+    CalcFlowError::InvalidArgument {
+        field: "batch".into(),
+        message: "row charge overflowed".into(),
+    }
 }
 
 #[cfg(test)]
@@ -320,6 +387,7 @@ mod tests {
             matched: &matched,
             incoming_is_left: true,
             operator_id: "sparse",
+            admitted_charges: None,
         };
         let ranges = output.ranges(EdgeBudget::new(2, 4096).unwrap()).unwrap();
         assert_eq!(ranges, vec![0..2, 2..3]);
@@ -403,6 +471,7 @@ mod tests {
                 matched: &matched,
                 incoming_is_left: true,
                 operator_id: "allocation",
+                admitted_charges: None,
             };
             let measured = allocation_counter::measure(|| {
                 let ranges = output
@@ -417,5 +486,109 @@ mod tests {
                 measured.count_total
             );
         }
+    }
+
+    #[test]
+    fn test_single_chunk_output_takes_the_charge_fast_path() {
+        let column: ArrayRef = Arc::new(Int64Array::from(vec![7_i64; 4]));
+        let field = Field::new("value", DataType::Int64, false);
+        let record =
+            RecordBatch::try_new(Arc::new(Schema::new(vec![field.clone()])), vec![column]).unwrap();
+        let schema = Arc::new(Schema::new(vec![
+            field.clone().with_name("left_value"),
+            field.with_name("right_value"),
+        ]));
+        let admitted: Vec<AdmittedRow> = (0..4)
+            .map(|index| AdmittedRow {
+                record: record.slice(index, 1),
+                event_time: EventTime::from_micros(100),
+                row_id: index as u64,
+                retain: true,
+            })
+            .collect();
+        let opposite: Vec<StoredRow> = (0..4)
+            .map(|index| StoredRow {
+                record: record.slice(index, 1),
+                event_time: EventTime::from_micros(100),
+                row_id: index as u64,
+                charge: 81,
+                encoded_key: Arc::new(vec![]),
+            })
+            .collect();
+        let matched: Vec<MatchedPair> = (0..4)
+            .map(|index| MatchedPair {
+                pos: index,
+                opposite_index: index,
+            })
+            .collect();
+        let charges = vec![81_u64; 4];
+        let output = JoinOutput {
+            schema: &schema,
+            admitted: &admitted,
+            opposite: &opposite,
+            matched: &matched,
+            incoming_is_left: true,
+            operator_id: "fast",
+            admitted_charges: Some(&charges),
+        };
+        FLAT_VISITS.with(|count| count.set(0));
+        let ranges = output.ranges(EdgeBudget::new(4, 1 << 20).unwrap()).unwrap();
+        assert_eq!(ranges, vec![0..4]);
+        assert_eq!(
+            FLAT_VISITS.with(Cell::get),
+            0,
+            "a provably single-chunk output must not visit matched rows"
+        );
+    }
+
+    #[test]
+    fn test_charge_fast_path_falls_back_when_the_bound_exceeds_the_budget() {
+        let column: ArrayRef = Arc::new(Int64Array::from(vec![7_i64; 4]));
+        let field = Field::new("value", DataType::Int64, false);
+        let record =
+            RecordBatch::try_new(Arc::new(Schema::new(vec![field.clone()])), vec![column]).unwrap();
+        let schema = Arc::new(Schema::new(vec![
+            field.clone().with_name("left_value"),
+            field.with_name("right_value"),
+        ]));
+        let admitted: Vec<AdmittedRow> = (0..4)
+            .map(|index| AdmittedRow {
+                record: record.slice(index, 1),
+                event_time: EventTime::from_micros(100),
+                row_id: index as u64,
+                retain: true,
+            })
+            .collect();
+        let opposite: Vec<StoredRow> = (0..4)
+            .map(|index| StoredRow {
+                record: record.slice(index, 1),
+                event_time: EventTime::from_micros(100),
+                row_id: index as u64,
+                charge: 81,
+                encoded_key: Arc::new(vec![]),
+            })
+            .collect();
+        let matched: Vec<MatchedPair> = (0..4)
+            .map(|index| MatchedPair {
+                pos: index,
+                opposite_index: index,
+            })
+            .collect();
+        let charges = vec![81_u64; 4];
+        let output = JoinOutput {
+            schema: &schema,
+            admitted: &admitted,
+            opposite: &opposite,
+            matched: &matched,
+            incoming_is_left: true,
+            operator_id: "fallback",
+            admitted_charges: Some(&charges),
+        };
+        FLAT_VISITS.with(|count| count.set(0));
+        // 4 pairs x (81 + 81) = 648 charge bytes exceeds 200, but exact flat
+        // widths fit, so planning falls back to the detailed flat scan.
+        let ranges = output.ranges(EdgeBudget::new(2, 200).unwrap()).unwrap();
+        assert_eq!(ranges, vec![0..2, 2..4]);
+        assert!(FLAT_VISITS.with(Cell::get) > 0);
     }
 }

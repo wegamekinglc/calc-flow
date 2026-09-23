@@ -2320,6 +2320,9 @@ struct AdmissionBundle {
     next_row_id: u64,
     metrics: SideMetrics,
     admitted: Vec<AdmittedRow>,
+    /// Source row offsets of admitted rows, aligning charge vectors with
+    /// `admitted` when admission drops rows.
+    admitted_source_rows: Vec<usize>,
     had_late: bool,
 }
 
@@ -2467,6 +2470,9 @@ struct PreparedJoinBatch {
     retained: Vec<StoredRow>,
     next_row_id: u64,
     metrics: SideMetrics,
+    /// Conservative per-admitted-row logical charges enabling the single
+    /// chunk fast path; `None` keeps the generic measured planning.
+    admitted_charges: Option<Vec<u64>>,
 }
 
 impl StreamJoinOperator {
@@ -2588,12 +2594,37 @@ impl StreamJoinOperator {
     ) -> Result<PreparedJoinBatch> {
         let plan = self.begin_batch(ingress, batch)?;
         let mut bundle = self.admission_bundle(&plan);
+        let mut charges: Option<Vec<u64>> = Some(Vec::new());
+        let mut source_row_base = 0_usize;
         for record in batch.table_payload()?.batches() {
-            self.admit_record(record, &plan, ingress, context, &mut bundle)?;
+            match (
+                materialization::flat_row_charges(record, STREAM_JOIN_STATE_ROW_OVERHEAD_BYTES_V1)?,
+                charges.as_mut(),
+            ) {
+                (Some(record_charges), Some(all_charges)) => {
+                    all_charges.extend(record_charges);
+                }
+                _ => charges = None,
+            }
+            self.admit_record(
+                record,
+                &plan,
+                ingress,
+                context,
+                &mut bundle,
+                source_row_base,
+            )?;
+            source_row_base += record.num_rows();
         }
         bundle.finish(&self.name)?;
         let outputs = self.evaluate_matches(&plan, &bundle.admitted).await?;
-        self.finish_prepared(&plan, bundle, outputs)
+        let admitted_charges = match (charges, &bundle.admitted_source_rows) {
+            (Some(all), source_rows) => {
+                Some(source_rows.iter().map(|row| all[*row]).collect::<Vec<_>>())
+            }
+            (None, _) => None,
+        };
+        self.finish_prepared(&plan, bundle, outputs, admitted_charges)
     }
 
     fn finish_prepared(
@@ -2601,6 +2632,7 @@ impl StreamJoinOperator {
         plan: &SidePlan,
         bundle: AdmissionBundle,
         output: Vec<MatchedPair>,
+        admitted_charges: Option<Vec<u64>>,
     ) -> Result<PreparedJoinBatch> {
         let retained = retained_rows(&bundle.admitted, &plan.key_indices, &self.name)?;
         self.validate_state_admission(plan.incoming_is_left, &retained)?;
@@ -2611,6 +2643,7 @@ impl StreamJoinOperator {
             retained,
             next_row_id: bundle.next_row_id,
             metrics: bundle.metrics,
+            admitted_charges,
         })
     }
 
@@ -2661,6 +2694,7 @@ impl StreamJoinOperator {
             next_row_id,
             metrics,
             admitted: Vec::new(),
+            admitted_source_rows: Vec::new(),
             had_late: false,
         }
     }
@@ -2672,6 +2706,7 @@ impl StreamJoinOperator {
         ingress: &str,
         context: &StreamOperatorContext<'_>,
         bundle: &mut AdmissionBundle,
+        source_row_base: usize,
     ) -> Result<()> {
         let side_progress = context.ingress_progress().get(ingress);
         let opposite_progress = context.ingress_progress().get(if plan.incoming_is_left {
@@ -2683,17 +2718,22 @@ impl StreamJoinOperator {
             let row_id = bundle.reserve_row_id(&self.name)?;
             match self.classify_row(record, plan, row_index, side_progress, ingress)? {
                 RowAdmission::Dropped(kind) => bundle.note_dropped(kind, &self.name)?,
-                RowAdmission::Admitted(event_time) => bundle.push_admitted(AdmittedRow {
-                    record: record.slice(row_index, 1),
-                    event_time,
-                    row_id,
-                    retain: should_retain(
-                        plan.incoming_is_left,
+                RowAdmission::Admitted(event_time) => {
+                    bundle.push_admitted(AdmittedRow {
+                        record: record.slice(row_index, 1),
                         event_time,
-                        opposite_progress,
-                        self.spec.bounds,
-                    ),
-                }),
+                        row_id,
+                        retain: should_retain(
+                            plan.incoming_is_left,
+                            event_time,
+                            opposite_progress,
+                            self.spec.bounds,
+                        ),
+                    });
+                    bundle
+                        .admitted_source_rows
+                        .push(source_row_base + row_index);
+                }
             }
         }
         Ok(())
@@ -2850,6 +2890,7 @@ impl StreamJoinOperator {
             matched: &prepared.output,
             incoming_is_left: prepared.incoming_is_left,
             operator_id: &self.name,
+            admitted_charges: prepared.admitted_charges.as_deref(),
         };
         let ranges = materializer.ranges(context.output_budget())?;
         super::output_chunk::validate_output_sequence_range(
