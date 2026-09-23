@@ -2090,16 +2090,10 @@ fn run_regression_tests() -> HarnessResult<()> {
     // entries between the compared revisions; that attribution churn must
     // not invalidate the measurement-identity lock.
     let mut churned_baseline = original_baseline.clone();
-    for (pointer, value) in [
-        ("/harness_commit_sha", "attribution-only"),
-        ("/frozen_files/cargo_lock_sha256", "release-bump-lock"),
-        (
-            "/frozen_files/crate_manifest_sha256",
-            "release-bump-manifest",
-        ),
-    ] {
-        churned_baseline[pointer] = serde_json::json!(value);
-    }
+    churned_baseline["harness_commit_sha"] = serde_json::json!("attribution-only");
+    churned_baseline["frozen_files"]["cargo_lock_sha256"] = serde_json::json!("release-bump-lock");
+    churned_baseline["frozen_files"]["crate_manifest_sha256"] =
+        serde_json::json!("release-bump-manifest");
     let churned = test_comparison_status(
         &directory,
         "product-attribution-churn-positive",
