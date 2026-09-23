@@ -23,10 +23,16 @@ from scripts.benchmark_suite.release_collectors import (
     rust_inventory,
     rust_observation,
 )
-from scripts.benchmark_suite.release_pairs import SIDES, collect_case, evaluate_case
+from scripts.benchmark_suite.release_pairs import (
+    RELEASE_ROUNDS,
+    RELEASE_SAMPLES,
+    SIDES,
+    collect_case,
+    evaluate_case,
+)
 from scripts.benchmark_suite.rust import allocation, build_binaries
 from scripts.benchmark_suite.rust_provenance import with_compiled_dependencies
-from scripts.toolkit import fingerprint_json, sha256_file, write_json
+from scripts.toolkit import FULL_SHA, fingerprint_json, sha256_file, write_json
 from scripts.verify_perf_gates import (
     check_stream_lifecycle_regression,
     load_stream_lifecycle,
@@ -34,6 +40,7 @@ from scripts.verify_perf_gates import (
 from scripts.write_criterion_provenance import build_provenance
 
 TARGETS = ("core", "stream_join_perf")
+SUITES = ("python", *TARGETS)
 LIFECYCLE = (
     "benchmarks/test_symbolic_baseline.py::test_stream_window_checkpoint_and_recovery"
 )
@@ -68,6 +75,13 @@ async def prepare(options: argparse.Namespace) -> dict:
     output = options.output
     roots = {"baseline": options.baseline_source.resolve(), "candidate": ROOT}
     releases, sites, binaries, provenance = {}, {}, {}, {}
+    suite = getattr(options, "suite", None) or "all"
+    rust_targets = TARGETS if suite == "all" else (suite,) if suite in TARGETS else ()
+    build_targets = (
+        (*rust_targets, "allocation_regression")
+        if suite in ("all", "python")
+        else rust_targets
+    )
     for side, source in roots.items():
         release = output / "builds" / side
         await command(
@@ -95,19 +109,27 @@ async def prepare(options: argparse.Namespace) -> dict:
             source,
             destination,
             ROOT / "target/release-benchmark-build",
-            targets=(*TARGETS, "allocation_regression"),
+            targets=build_targets,
         )
-        provenance[side] = with_compiled_dependencies(
-            build_provenance(
+        if rust_targets:
+            provenance[side] = with_compiled_dependencies(
+                build_provenance(
+                    source,
+                    [
+                        Path(f"crates/calc-flow/benches/{target}.rs")
+                        for target in rust_targets
+                    ],
+                ),
                 source,
-                [Path(f"crates/calc-flow/benches/{target}.rs") for target in TARGETS],
-            ),
-            source,
-            {target: destination / f"build-{target}.jsonl" for target in TARGETS},
-        )
-        if provenance[side]["git_sha"] != releases[side]["git_sha"]:
-            raise ValueError(f"{side} Rust source differs from the sealed release")
-    write_json(output / "rust-provenance.json", provenance)
+                {
+                    target: destination / f"build-{target}.jsonl"
+                    for target in rust_targets
+                },
+            )
+            if provenance[side]["git_sha"] != releases[side]["git_sha"]:
+                raise ValueError(f"{side} Rust source differs from the sealed release")
+    if provenance:
+        write_json(output / "rust-provenance.json", provenance)
     return {
         "roots": roots,
         "releases": releases,
@@ -198,32 +220,36 @@ async def _record_case(
     return report
 
 
-async def measure(context: dict, output: Path, previous: dict) -> dict:
+async def measure(
+    context: dict, output: Path, previous: dict, suite: str = "all"
+) -> dict:
     report = {
         **previous,
         "cases": list(previous["cases"]),
         "errors": list(previous["errors"]),
     }
-    inventories = {
-        side: await python_inventory(
-            context["sites"][side],
-            context["releases"][side]["native_sha256"],
-            output / "inventory" / side,
-        )
-        for side in SIDES
-    }
-    names = matching_inventory(inventories)
-    report["inventory"] = {"python": inventories}
-    seals = {side: context["releases"][side]["native_sha256"] for side in SIDES}
-    for name in names:
-        report = await _record_case(
-            f"python/{name}",
-            partial(_python_measure, name, context),
-            seals,
-            output,
-            report,
-        )
-    for target in TARGETS:
+    report["inventory"] = {}
+    if suite in ("all", "python"):
+        inventories = {
+            side: await python_inventory(
+                context["sites"][side],
+                context["releases"][side]["native_sha256"],
+                output / "inventory" / side,
+            )
+            for side in SIDES
+        }
+        names = matching_inventory(inventories)
+        report["inventory"]["python"] = inventories
+        seals = {side: context["releases"][side]["native_sha256"] for side in SIDES}
+        for name in names:
+            report = await _record_case(
+                f"python/{name}",
+                partial(_python_measure, name, context),
+                seals,
+                output,
+                report,
+            )
+    for target in TARGETS if suite == "all" else (suite,) if suite in TARGETS else ():
         inventories = {
             side: await rust_inventory(
                 context["binaries"][side][target],
@@ -344,6 +370,7 @@ async def run_gate(options: argparse.Namespace) -> int:
     output.mkdir(parents=True, exist_ok=True)
     report = {
         "contract": "release-paired-v1",
+        "suite": getattr(options, "suite", None) or "all",
         "cases": [],
         "errors": [],
         "harness": harness_identity(),
@@ -352,11 +379,13 @@ async def run_gate(options: argparse.Namespace) -> int:
         "power_configuration": "not controlled by the release harness",
     }
     write_json(output / "results.json", report)
+    suite = report["suite"]
     try:
         context = await prepare(options)
         report["releases"] = context["releases"]
-        report = await measure(context, output, report)
-        report = await specialized(context, options, report)
+        report = await measure(context, output, report, suite)
+        if suite in ("all", "python"):
+            report = await specialized(context, options, report)
     except Exception as error:
         report["errors"].append(f"{type(error).__name__}: {error}")
     write_json(output / "results.json", report)
@@ -368,8 +397,8 @@ async def run_gate(options: argparse.Namespace) -> int:
 
 def _gate_summary(report: dict) -> str:
     lines = [
-        "Release paired timing: two rounds of six adjacent AB/BA case "
-        "invocations; +5% gate.",
+        f"Release paired timing: {RELEASE_ROUNDS} rounds of {RELEASE_SAMPLES} "
+        "adjacent AB/BA case invocations; +5% gate.",
         "Timing inconclusive is not evidence of equivalence. "
         "Missing/invalid evidence blocks acceptance.",
         "",
@@ -394,6 +423,161 @@ def _gate_exit_code(report: dict) -> int:
             or any(row["result"]["verdict"] == "regression" for row in report["cases"])
         )
     )
+
+
+def _verify_suite_builds(source: Path, collected: dict, suite: str, shas: dict) -> None:
+    from scripts.benchmark_suite.release import load_release
+
+    for side in SIDES:
+        manifest = source / "builds" / side / "release.json"
+        if not manifest.is_file():
+            raise ValueError(f"missing {suite} {side} sealed release manifest")
+        sealed = load_release(manifest)
+        if any(
+            sealed[key] != collected["releases"][side][key]
+            for key in ("git_sha", "wheel_sha256", "native_sha256")
+        ):
+            raise ValueError(f"{suite} {side} sealed release identity differs")
+        target = "allocation_regression" if suite == "python" else suite
+        log = source / "rust-builds" / side / f"build-{target}.jsonl"
+        if not log.is_file():
+            raise ValueError(f"missing {suite} {side} Rust build log")
+    if suite not in TARGETS:
+        return
+    path = source / "rust-provenance.json"
+    if not path.is_file():
+        raise ValueError(f"missing {suite} Rust provenance")
+    provenance = read_json(path)
+    if set(provenance) != set(SIDES):
+        raise ValueError(f"incomplete {suite} Rust provenance")
+    for side in SIDES:
+        if provenance[side].get("git_sha") != shas[side]:
+            raise ValueError(f"{suite} {side} Rust source differs from sealed release")
+    rust_identities({"provenance": provenance}, suite)
+
+
+def merge_reports(sources: Path) -> dict:
+    """Verify and combine the independently collected release suite evidence."""
+    report = {
+        "contract": "release-paired-v1",
+        "suite": "all",
+        "cases": [],
+        "errors": [],
+        "inventory": {},
+    }
+    expected_harness = harness_identity()
+    expected_lock = sha256_file(ROOT / "benchmarks/requirements.lock")
+    release_shas = None
+    for suite in SUITES:
+        source = sources / f"release-performance-{suite}"
+        path = source / "results.json"
+        if not path.is_file():
+            raise ValueError(f"missing {suite} suite results")
+        collected = read_json(path)
+        if (
+            collected.get("contract") != "release-paired-v1"
+            or collected.get("suite") != suite
+        ):
+            raise ValueError(f"invalid {suite} suite contract")
+        if collected.get("harness") != expected_harness:
+            raise ValueError(f"{suite} suite harness differs from the candidate")
+        if collected.get("dependency_lock_sha256") != expected_lock:
+            raise ValueError(
+                f"{suite} suite dependency lock differs from the candidate"
+            )
+        try:
+            shas = {side: collected["releases"][side]["git_sha"] for side in SIDES}
+        except (KeyError, TypeError):
+            if collected.get("errors"):
+                report["errors"].extend(
+                    f"{suite}: {error}" for error in collected["errors"]
+                )
+                continue
+            raise ValueError(f"missing {suite} sealed release identity") from None
+        if any(
+            not isinstance(sha, str) or not FULL_SHA.fullmatch(sha)
+            for sha in shas.values()
+        ):
+            raise ValueError(f"invalid {suite} sealed release SHA")
+        if shas["baseline"] == shas["candidate"]:
+            raise ValueError(f"{suite} baseline and candidate SHAs are equal")
+        if release_shas is None:
+            release_shas = shas
+            report["releases"] = collected["releases"]
+            report["harness"] = expected_harness
+            report["dependency_lock_sha256"] = expected_lock
+        elif shas != release_shas:
+            raise ValueError(f"{suite} suite release SHAs disagree")
+        if not collected.get("errors"):
+            _verify_suite_builds(source, collected, suite, shas)
+        report["errors"].extend(
+            f"{suite}: {error}" for error in collected.get("errors", [])
+        )
+        inventory = collected.get("inventory", {})
+        if set(inventory) != {suite}:
+            if collected.get("errors"):
+                report["errors"].append(f"{suite}: missing case inventory")
+                continue
+            raise ValueError(f"invalid {suite} case inventory")
+        names = matching_inventory(inventory[suite])
+        report["inventory"][suite] = inventory[suite]
+        prefix = "python/" if suite == "python" else f"rust/{suite}/"
+        expected_ids = {f"{prefix}{name}" for name in names}
+        seen = set()
+        for row in collected.get("cases", []):
+            case_id = row["id"]
+            if case_id not in expected_ids or case_id in seen:
+                raise ValueError(f"unexpected or duplicate {suite} case: {case_id}")
+            seen.add(case_id)
+            digest = hashlib.sha256(case_id.encode()).hexdigest()[:20]
+            relative = Path("cases") / digest / "pairs.json"
+            evidence = source / relative
+            if (
+                Path(row["evidence"]).parts[-3:] != relative.parts
+                or not evidence.is_file()
+            ):
+                raise ValueError(f"missing paired evidence for {case_id}")
+            raw = read_json(evidence)
+            if raw.get("id") != case_id:
+                raise ValueError(f"paired case identity differs for {case_id}")
+            if suite == "python" and any(
+                row["seals"][side] != collected["releases"][side]["native_sha256"]
+                for side in SIDES
+            ):
+                raise ValueError(f"Python native seal differs for {case_id}")
+            if evaluate_case(raw, row["seals"]) != row["result"]:
+                raise ValueError(
+                    f"paired verdict differs from raw evidence for {case_id}"
+                )
+            report["cases"].append(
+                {**row, "evidence": str(Path("suites") / source.name / relative)}
+            )
+        if seen != expected_ids and not collected.get("errors"):
+            raise ValueError(f"incomplete {suite} case results")
+        if suite == "python":
+            report["allocation"] = collected.get("allocation", {})
+            report["lifecycle_regressions"] = collected.get("lifecycle_regressions", [])
+            if not collected.get("errors") and set(report["allocation"]) != set(SIDES):
+                raise ValueError("missing Python suite allocation gate")
+    return report
+
+
+def run_merge(sources: Path, output: Path) -> int:
+    output.mkdir(parents=True, exist_ok=True)
+    try:
+        report = merge_reports(sources)
+    except Exception as error:
+        report = {
+            "contract": "release-paired-v1",
+            "suite": "all",
+            "cases": [],
+            "errors": [f"{type(error).__name__}: {error}"],
+        }
+    write_json(output / "results.json", report)
+    summary = _gate_summary(report)
+    (output / "summary.md").write_text(summary, encoding="utf-8")
+    print(summary)
+    return _gate_exit_code(report)
 
 
 def acceptance_summary(
@@ -423,6 +607,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--baseline-source", type=Path)
+    parser.add_argument("--suite", choices=SUITES)
+    parser.add_argument("--merge-suites", type=Path)
     parser.add_argument(
         "--allow-dependency-drift",
         action="store_true",
@@ -446,6 +632,8 @@ def main() -> int:
         ) as handle:
             handle.write(summary)
         return 0
+    if options.merge_suites is not None:
+        return run_merge(options.merge_suites, options.output)
     if options.baseline_source is None:
         parser.error("--baseline-source is required for measurement")
     return asyncio.run(run_gate(options))

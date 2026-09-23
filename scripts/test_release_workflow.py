@@ -7,13 +7,33 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
+    def test_release_collects_three_suites_in_parallel_before_merging_verdict(self):
+        text = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        collection = text.split("  performance-collection:\n", 1)[1].split(
+            "  acceptance-gates:\n", 1
+        )[0]
+        self.assertIn("suite: [python, core, stream_join_perf]", collection)
+        self.assertIn('--suite "${{ matrix.suite }}"', collection)
+        self.assertIn("--require-hashes -r benchmarks/requirements.lock", collection)
+        self.assertIn("if: always()", collection)
+        self.assertIn("release-performance-${{ matrix.suite }}", collection)
+        acceptance = text.split("  acceptance-gates:\n", 1)[1].split(
+            "  soak-gates:\n", 1
+        )[0]
+        self.assertIn("performance-collection", acceptance)
+        self.assertIn("actions/download-artifact@", acceptance)
+        self.assertIn("--merge-suites", acceptance)
+        self.assertIn(
+            "COLLECTION_RESULT: ${{ needs.performance-collection.result }}", acceptance
+        )
+        self.assertIn('test "${COLLECTION_RESULT}" = success', acceptance)
+
     def test_release_collects_pairs_and_always_uploads_failure_evidence(self):
         text = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         self.assertIn("  acceptance-gates:\n", text)
         self.assertIn("  crate:\n", text)
         job = text.split("  acceptance-gates:\n", 1)[1].split("  soak-gates:\n", 1)[0]
         self.assertIn("python -m scripts.release_performance", job)
-        self.assertIn("--require-hashes -r benchmarks/requirements.lock", job)
         for step in ("performance", "security"):
             self.assertIn(f"id: {step}", job)
         self.assertIn("--steps performance,security", job)

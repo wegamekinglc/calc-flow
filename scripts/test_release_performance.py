@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import unittest
 from pathlib import Path
@@ -150,7 +151,244 @@ class ReleasePerformanceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 set(result["inventory"]), {"python", "core", "stream_join_perf"}
             )
-            self.assertEqual(len(list(root.rglob("observation.json"))), 72)
+            self.assertEqual(len(list(root.rglob("observation.json"))), 120)
+
+    async def test_measure_collects_only_selected_suite(self):
+        from scripts.release_performance import measure
+
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            context = {
+                "binaries": {
+                    side: {"core": root / side} for side in ("baseline", "candidate")
+                },
+                "roots": dict.fromkeys(("baseline", "candidate"), root),
+            }
+            with (
+                patch(
+                    "scripts.release_performance.python_inventory", new=AsyncMock()
+                ) as py,
+                patch(
+                    "scripts.release_performance.rust_inventory",
+                    new=AsyncMock(return_value=["one"]),
+                ),
+                patch(
+                    "scripts.release_performance.rust_identities",
+                    return_value={"baseline": {}, "candidate": {}},
+                ),
+                patch("scripts.release_performance.sha256_file", return_value="seal"),
+                patch(
+                    "scripts.release_performance.collect_case",
+                    new=AsyncMock(return_value={"id": "rust/core/one"}),
+                ),
+                patch(
+                    "scripts.release_performance.evaluate_case",
+                    return_value={"verdict": "no-confirmed-regression"},
+                ),
+            ):
+                report = await measure(
+                    context, root, {"cases": [], "errors": []}, "core"
+                )
+            py.assert_not_called()
+            self.assertEqual(list(report["inventory"]), ["core"])
+            self.assertEqual([row["id"] for row in report["cases"]], ["rust/core/one"])
+
+    def test_merge_checks_suite_identity_inventory_and_raw_evidence(self):
+        import zipfile
+
+        from scripts.release_performance import harness_identity, merge_reports
+        from scripts.toolkit import sha256_file
+
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            sources = root / "suites"
+            expected = {"verdict": "no-confirmed-regression"}
+            for suite in ("python", "core", "stream_join_perf"):
+                case_id = "python/one" if suite == "python" else f"rust/{suite}/one"
+                digest = hashlib.sha256(case_id.encode()).hexdigest()[:20]
+                relative = Path("cases") / digest / "pairs.json"
+                source = sources / f"release-performance-{suite}"
+                (source / relative).parent.mkdir(parents=True)
+                (source / relative).write_text(json.dumps({"id": case_id}))
+                releases = {}
+                for side, sha in (("baseline", "a" * 40), ("candidate", "b" * 40)):
+                    destination = source / "builds" / side
+                    destination.mkdir(parents=True)
+                    wheel = destination / "fixture.whl"
+                    with zipfile.ZipFile(wheel, "w") as archive:
+                        archive.writestr("calc_flow/_native.so", side.encode())
+                    release = {
+                        "contract": "benchmark-release-v1",
+                        "build_profile": "release",
+                        "git_clean": True,
+                        "git_sha": sha,
+                        "wheel": wheel.name,
+                        "wheel_sha256": sha256_file(wheel),
+                        "native_sha256": hashlib.sha256(side.encode()).hexdigest(),
+                    }
+                    (destination / "release.json").write_text(json.dumps(release))
+                    releases[side] = release
+                    target = "allocation_regression" if suite == "python" else suite
+                    log = source / "rust-builds" / side / f"build-{target}.jsonl"
+                    log.parent.mkdir(parents=True)
+                    log.write_text('{"reason": "build-finished", "success": true}\n')
+                if suite != "python":
+                    (source / "rust-provenance.json").write_text(
+                        json.dumps(
+                            {
+                                side: {"git_sha": releases[side]["git_sha"]}
+                                for side in releases
+                            }
+                        )
+                    )
+                (source / "results.json").write_text(
+                    json.dumps(
+                        {
+                            "contract": "release-paired-v1",
+                            "suite": suite,
+                            "cases": [
+                                {
+                                    "id": case_id,
+                                    "evidence": str(Path("/runner/output") / relative),
+                                    "seals": {
+                                        side: releases[side]["native_sha256"]
+                                        for side in releases
+                                    },
+                                    "result": expected,
+                                }
+                            ],
+                            "errors": [],
+                            "allocation": {"baseline": {}, "candidate": {}},
+                            "inventory": {
+                                suite: {"baseline": ["one"], "candidate": ["one"]}
+                            },
+                            "harness": harness_identity(),
+                            "dependency_lock_sha256": sha256_file(
+                                Path(__file__).resolve().parents[1]
+                                / "benchmarks/requirements.lock"
+                            ),
+                            "releases": releases,
+                        }
+                    )
+                )
+            with (
+                patch(
+                    "scripts.release_performance.evaluate_case", return_value=expected
+                ) as evaluate,
+                patch("scripts.release_performance.rust_identities"),
+            ):
+                merged = merge_reports(sources)
+            self.assertEqual(evaluate.call_count, 3)
+            self.assertEqual(len(merged["cases"]), 3)
+            core_provenance = sources / "release-performance-core/rust-provenance.json"
+            provenance = core_provenance.read_text()
+            core_provenance.unlink()
+            with (
+                patch(
+                    "scripts.release_performance.evaluate_case", return_value=expected
+                ),
+                self.assertRaisesRegex(ValueError, "missing core Rust provenance"),
+            ):
+                merge_reports(sources)
+            core_provenance.write_text(provenance)
+            wrong_provenance = json.loads(provenance)
+            wrong_provenance["baseline"]["git_sha"] = "c" * 40
+            core_provenance.write_text(json.dumps(wrong_provenance))
+            with (
+                patch(
+                    "scripts.release_performance.evaluate_case", return_value=expected
+                ),
+                self.assertRaisesRegex(ValueError, "core baseline Rust source differs"),
+            ):
+                merge_reports(sources)
+            core_provenance.write_text(provenance)
+            core_log = (
+                sources
+                / "release-performance-core/rust-builds/baseline/build-core.jsonl"
+            )
+            log_content = core_log.read_text()
+            core_log.unlink()
+            with (
+                patch(
+                    "scripts.release_performance.evaluate_case", return_value=expected
+                ),
+                self.assertRaisesRegex(
+                    ValueError, "missing core baseline Rust build log"
+                ),
+            ):
+                merge_reports(sources)
+            core_log.write_text(log_content)
+            allocation_log = (
+                sources
+                / "release-performance-python"
+                / "rust-builds"
+                / "baseline"
+                / "build-allocation_regression.jsonl"
+            )
+            allocation_content = allocation_log.read_text()
+            allocation_log.unlink()
+            with (
+                patch(
+                    "scripts.release_performance.evaluate_case", return_value=expected
+                ),
+                patch("scripts.release_performance.rust_identities"),
+                self.assertRaisesRegex(
+                    ValueError, "missing python baseline Rust build log"
+                ),
+            ):
+                merge_reports(sources)
+            allocation_log.write_text(allocation_content)
+            python_manifest = (
+                sources / "release-performance-python/builds/baseline/release.json"
+            )
+            manifest_content = python_manifest.read_text()
+            python_manifest.unlink()
+            with self.assertRaisesRegex(
+                ValueError, "missing python baseline sealed release manifest"
+            ):
+                merge_reports(sources)
+            python_manifest.write_text(manifest_content)
+            self.assertTrue(
+                all(
+                    (sources.parent / row["evidence"]).is_file()
+                    for row in merged["cases"]
+                )
+            )
+            core_result = sources / "release-performance-core" / "results.json"
+            core = json.loads(core_result.read_text())
+            core["releases"]["baseline"]["git_sha"] = "c" * 40
+            core_result.write_text(json.dumps(core))
+            with (
+                patch(
+                    "scripts.release_performance.evaluate_case", return_value=expected
+                ),
+                patch("scripts.release_performance.rust_identities"),
+                self.assertRaisesRegex(ValueError, "release SHAs disagree"),
+            ):
+                merge_reports(sources)
+            core["releases"]["baseline"]["git_sha"] = "a" * 40
+            core_result.write_text(json.dumps(core))
+            (sources / "release-performance-core" / "cases").rename(
+                sources / "release-performance-core" / "lost-cases"
+            )
+            with (
+                patch(
+                    "scripts.release_performance.evaluate_case", return_value=expected
+                ),
+                patch("scripts.release_performance.rust_identities"),
+                self.assertRaisesRegex(ValueError, "missing paired evidence"),
+            ):
+                merge_reports(sources)
+
+    def test_merge_failure_writes_evidence_and_nonzero_verdict(self):
+        from scripts.release_performance import run_merge
+
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            self.assertEqual(run_merge(root / "missing", root / "output"), 1)
+            report = json.loads((root / "output/results.json").read_text())
+            self.assertIn("missing python suite results", report["errors"][0])
+            self.assertIn("incomparable", (root / "output/summary.md").read_text())
 
     async def test_relative_output_is_resolved_before_builds(self):
         from scripts.release_performance import run_gate
@@ -318,3 +556,60 @@ class ReleasePerformanceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertRaisesRegex(ValueError, "sealed release"),
             ):
                 await prepare(argparse.Namespace(output=root, baseline_source=root))
+
+    async def test_prepare_builds_only_the_selected_suite_binaries(self):
+        import sys
+        from types import ModuleType
+        from unittest.mock import Mock
+
+        from scripts.release_performance import prepare
+
+        for suite, targets in (
+            ("python", ("allocation_regression",)),
+            ("core", ("core",)),
+            ("stream_join_perf", ("stream_join_perf",)),
+        ):
+            with self.subTest(suite=suite), TemporaryDirectory() as raw:
+                root = Path(raw)
+                release_module = ModuleType("scripts.benchmark_suite.release")
+                release_module.load_release = Mock(
+                    side_effect=[{"git_sha": "a" * 40}, {"git_sha": "b" * 40}]
+                )
+                with (
+                    patch.dict(
+                        sys.modules,
+                        {"scripts.benchmark_suite.release": release_module},
+                    ),
+                    patch("scripts.release_performance.command", new=AsyncMock()),
+                    patch(
+                        "scripts.release_performance.install",
+                        new=AsyncMock(return_value=root),
+                    ),
+                    patch(
+                        "scripts.release_performance.build_binaries",
+                        new=AsyncMock(return_value={}),
+                    ) as build,
+                    patch(
+                        "scripts.release_performance.build_provenance",
+                        side_effect=[
+                            {"git_sha": "a" * 40},
+                            {"git_sha": "b" * 40},
+                        ],
+                    ),
+                    patch(
+                        "scripts.release_performance.with_compiled_dependencies",
+                        side_effect=lambda identity, *args: identity,
+                    ),
+                ):
+                    await prepare(
+                        argparse.Namespace(
+                            suite=suite, output=root, baseline_source=root
+                        )
+                    )
+                self.assertEqual(
+                    [call.kwargs["targets"] for call in build.call_args_list],
+                    [targets] * 2,
+                )
+                self.assertEqual(
+                    (root / "rust-provenance.json").is_file(), suite != "python"
+                )
