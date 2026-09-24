@@ -131,6 +131,7 @@ class VerifyPythonReleaseTests(unittest.TestCase):
             "crates/calc-flow/Cargo.toml": b"fixture",
             "crates/calc-flow/src/lib.rs": b"fixture",
             "crates/calc-flow-python/Cargo.toml": b"fixture",
+            "crates/calc-flow-python/build.rs": b"fixture",
             "python/calc_flow/__init__.py": b"fixture",
         }
         with open_tar(sdist, "w:gz") as archive:

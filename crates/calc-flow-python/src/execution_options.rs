@@ -374,6 +374,19 @@ fn settings_to_python<'py>(
     crate::config::json_to_python(py, &encoded)
 }
 
+#[cfg(any(feature = "legacy-python", not(Py_3_13)))]
+fn signature_parameter<'py>(
+    py: Python<'py>,
+    parameter: &Bound<'py, PyAny>,
+    kind: &Bound<'py, PyAny>,
+    name: &str,
+    default: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let kwargs = PyDict::new(py);
+    kwargs.set_item(pyo3::intern!(py, "default"), default)?;
+    parameter.call((name, kind), Some(&kwargs))
+}
+
 #[pyclass(name = "ExecutionOptions", frozen, module = "calc_flow._native")]
 pub(crate) struct PyExecutionOptions {
     settings: calc_flow::JsonMap,
@@ -406,12 +419,9 @@ impl PyExecutionOptions {
         let inspect = py.import(pyo3::intern!(py, "inspect"))?;
         let parameter = inspect.getattr(pyo3::intern!(py, "Parameter"))?;
         let kind = parameter.getattr(pyo3::intern!(py, "POSITIONAL_OR_KEYWORD"))?;
-        let settings_kwargs = PyDict::new(py);
-        settings_kwargs.set_item(pyo3::intern!(py, "default"), PyDict::new(py))?;
-        let settings = parameter.call(("settings", &kind), Some(&settings_kwargs))?;
-        let deadline_kwargs = PyDict::new(py);
-        deadline_kwargs.set_item(pyo3::intern!(py, "default"), py.None())?;
-        let deadline = parameter.call(("deadline", &kind), Some(&deadline_kwargs))?;
+        let settings_default = PyDict::new(py).into_any();
+        let settings = signature_parameter(py, &parameter, &kind, "settings", &settings_default)?;
+        let deadline = signature_parameter(py, &parameter, &kind, "deadline", py.None().bind(py))?;
         let parameters = PyList::new(py, [settings, deadline])?;
         inspect
             .getattr(pyo3::intern!(py, "Signature"))?

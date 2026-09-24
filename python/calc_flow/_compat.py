@@ -19,51 +19,56 @@ if sys.version_info >= (3, 10):
     dataclass = _stdlib_dataclass
 else:
 
+    def _inherited_slots(cls: type) -> set[str]:
+        return {
+            name
+            for base in cls.__mro__[1:]
+            for name in (
+                (base.__slots__,)
+                if isinstance(getattr(base, "__slots__", ()), str)
+                else getattr(base, "__slots__", ())
+            )
+        }
+
+    def _install_frozen_pickle(slotted: type, namespace: dict[str, Any]) -> None:
+        def getstate(self: object) -> list[object]:
+            return [getattr(self, item.name) for item in fields(self)]
+
+        def setstate(self: object, values: list[object]) -> None:
+            for item, value in zip(fields(self), values):
+                object.__setattr__(self, item.name, value)
+
+        if "__getstate__" not in namespace:
+            slotted.__getstate__ = getstate
+        if "__setstate__" not in namespace:
+            slotted.__setstate__ = setstate
+
+    def _slotted_dataclass(result: type, *, frozen: bool) -> type:
+        if "__slots__" in result.__dict__:
+            raise TypeError(f"{result.__name__} already specifies __slots__")
+
+        names = tuple(item.name for item in fields(result))
+        inherited = _inherited_slots(result)
+        namespace = dict(result.__dict__)
+        namespace["__slots__"] = tuple(name for name in names if name not in inherited)
+        for name in names:
+            namespace.pop(name, None)
+        namespace.pop("__dict__", None)
+        namespace.pop("__weakref__", None)
+        slotted = type(result)(result.__name__, result.__bases__, namespace)
+        slotted.__qualname__ = result.__qualname__
+        if frozen:
+            _install_frozen_pickle(slotted, namespace)
+        return slotted
+
     def dataclass(*, slots: bool = False, **options: Any) -> Any:
         """Build stdlib data classes with slots on Python 3.9."""
 
         def decorate(cls: type) -> type:
             result = _stdlib_dataclass(cls, **options)
-            if not slots:
-                return result
-            if "__slots__" in result.__dict__:
-                raise TypeError(f"{result.__name__} already specifies __slots__")
-
-            names = tuple(item.name for item in fields(result))
-            inherited = {
-                name
-                for base in result.__mro__[1:]
-                for name in (
-                    (base.__slots__,)
-                    if isinstance(getattr(base, "__slots__", ()), str)
-                    else getattr(base, "__slots__", ())
-                )
-            }
-            namespace = dict(result.__dict__)
-            namespace["__slots__"] = tuple(
-                name for name in names if name not in inherited
-            )
-            for name in names:
-                namespace.pop(name, None)
-            namespace.pop("__dict__", None)
-            namespace.pop("__weakref__", None)
-            slotted = type(result)(result.__name__, result.__bases__, namespace)
-            slotted.__qualname__ = result.__qualname__
-
-            if options.get("frozen"):
-
-                def getstate(self: object) -> list[object]:
-                    return [getattr(self, item.name) for item in fields(self)]
-
-                def setstate(self: object, values: list[object]) -> None:
-                    for item, value in zip(fields(self), values):
-                        object.__setattr__(self, item.name, value)
-
-                if "__getstate__" not in namespace:
-                    slotted.__getstate__ = getstate
-                if "__setstate__" not in namespace:
-                    slotted.__setstate__ = setstate
-            return slotted
+            if slots:
+                return _slotted_dataclass(result, frozen=bool(options.get("frozen")))
+            return result
 
         return decorate
 
