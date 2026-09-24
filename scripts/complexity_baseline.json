@@ -137,7 +137,7 @@
       "C901": 5,
       "PLR0912": 3,
       "PLR0913": 1,
-      "PLR0915": 3
+      "PLR0915": 2
     },
     "web-ui/backend/tests/test_app.py": {
       "C901": 1,
