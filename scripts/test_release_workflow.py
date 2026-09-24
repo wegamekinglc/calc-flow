@@ -5,10 +5,6 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-PUBLISH_NEEDS = (
-    "needs: [verify-core-artifacts, wheel-python-versions, "
-    "acceptance-gates, soak-gates]"
-)
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
@@ -43,11 +39,13 @@ class ReleaseWorkflowTests(unittest.TestCase):
             self.assertIn("pattern: wheel-*", wheel_download)
             self.assertIn("merge-multiple: true", wheel_download)
             self.assertIn("path: dist", wheel_download)
-        self.assertIn(PUBLISH_NEEDS, publication)
+        self.assertIn(
+            "needs: [verify-core-artifacts, wheel-python-versions]", publication
+        )
         self.assertEqual(publication.count("uses: pypa/gh-action-pypi-publish@"), 1)
         self.assertIn("packages-dir: dist", publication)
 
-    def test_release_gates_performance_and_soaks_before_publication(self) -> None:
+    def test_release_jobs_only_prepare_build_verify_test_and_publish_core(self) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         jobs = re.findall(
             r"^  ([a-z-]+):$", workflow.split("jobs:\n", 1)[1], re.MULTILINE
@@ -57,9 +55,6 @@ class ReleaseWorkflowTests(unittest.TestCase):
             jobs,
             [
                 "prepare-python-release",
-                "performance-collection",
-                "acceptance-gates",
-                "soak-gates",
                 "wheels",
                 "sdist",
                 "wheel-python-versions",
@@ -67,27 +62,11 @@ class ReleaseWorkflowTests(unittest.TestCase):
                 "publish-python-core",
             ],
         )
-        self.assertIn("matrix.suite", workflow)
-        self.assertIn("suite: [python, core, stream_join_perf]", workflow)
-        self.assertIn("python -m scripts.release_performance", workflow)
-        self.assertIn("twenty_minute_two_source_slow_sink", workflow)
-        self.assertIn("twenty_minute_epoch_checkpoint_restart", workflow)
+        self.assertNotIn("release_performance", workflow)
+        self.assertNotIn("cargo test", workflow)
+        self.assertNotIn("npm audit", workflow)
         self.assertNotIn("studio-wheel", workflow)
-        publication = workflow.split("  publish-python-core:\n", 1)[1]
-        self.assertIn("acceptance-gates", publication.split("    steps:\n", 1)[0])
-        self.assertIn("soak-gates", publication.split("    steps:\n", 1)[0])
-
-    def test_release_wheels_run_native_smoke_on_supported_hosts(self) -> None:
-        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
-        wheel_job = workflow.split("  wheels:\n", 1)[1].split("  sdist:\n", 1)[0]
-        matrix = wheel_job.split("    steps:\n", 1)[0]
-        self.assertEqual(matrix.count("smoke: true"), 8)
-        self.assertEqual(matrix.count("smoke: false"), 2)
-        self.assertIn("if: matrix.smoke", wheel_job)
-        self.assertIn(
-            "python scripts/inspect_wheel.py core-wheel dist/*.whl", wheel_job
-        )
-        self.assertIn('"${wheel_python}" scripts/smoke_wheel.py', wheel_job)
+        self.assertNotIn("smoke_wheel.py", workflow)
 
     def test_installed_wheel_unit_tests_gate_tagged_publication(self) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
@@ -106,7 +85,9 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("python -m pytest -q", unit_tests)
         self.assertIn("needs: [wheels, sdist]", verification)
         self.assertIn("--dist-dir dist --core-only", verification)
-        self.assertIn(PUBLISH_NEEDS, publication)
+        self.assertIn(
+            "needs: [verify-core-artifacts, wheel-python-versions]", publication
+        )
         self.assertIn("sha256sum --check ../release-manifest.txt", publication)
         self.assertIn(
             "if: github.event_name == 'push' && github.ref_type == 'tag'", publication

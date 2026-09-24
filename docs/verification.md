@@ -121,10 +121,10 @@ and [warm-stream measurements](warm-stream-performance.md) for timing work.
 Do not run benchmarks alongside builds or tests. Preserve raw failed and
 inconclusive results as well as successful ones.
 
-The [Python release workflow](python-release.md) gates exact-head paired
-performance, security, and continuous-runtime soaks; verifies core wheels and
-sdist; tests native wheels on supported hosts and Linux wheels across Python
-versions; and publishes the core package on a pushed release tag. Select local
-checks under the same scope and exception policy.
+The [Python release workflow](python-release.md) builds and verifies the core
+wheels and sdist, tests the installed Linux wheels across supported Python
+versions, and publishes the core package on a pushed release tag. Benchmarks
+and other verification remain outside that workflow. Select local checks under
+the same scope and exception policy.
 
 Next: [benchmark suite](benchmark-suite.md).

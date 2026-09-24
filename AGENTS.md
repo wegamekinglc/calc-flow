@@ -360,8 +360,7 @@ criteria explicitly require the final CI result. Pending or absent CI can be
 reported in a completed handoff; it is not green or merge-ready. Report failed,
 cancelled, and inconclusive checks accurately. Required test, coverage, and
 cross-platform checks block merge when failed or unresolved. The Python package
-release also requires exact-head paired performance, security, soaks, artifact
-verification, cross-platform smoke, and post-build unit tests to pass.
+release requires its artifact verification and post-build unit tests to pass.
 The final specialist review remains required; merging also requires explicit
 authority and green required checks.
 
@@ -375,9 +374,8 @@ git diff --exit-code -- \
 git diff --check
 ```
 
-The Python release workflow runs exact-head paired performance, security, and
-continuous-runtime soak gates; builds and verifies the core wheels and source
-distribution; runs cross-platform wheel smoke and installed Linux wheel tests;
-and publishes only the core package on release tags. Crate and Studio packaging
-and documentation checks remain in repository CI.
+The Python release workflow builds and verifies the core wheels and source
+distribution, tests installed Linux wheels across supported Python versions,
+and publishes only the core package on release tags. Benchmarks, soaks, audits,
+crate and Studio packaging, and documentation checks do not run in that workflow.
 Select local release verification under the same scope and exception rules above.

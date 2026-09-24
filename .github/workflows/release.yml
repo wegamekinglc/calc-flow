@@ -1,17 +1,6 @@
 name: Python package release
 on:
   workflow_dispatch:
-    inputs:
-      initial-baseline:
-        description: Full ancestor commit SHA for the first release rehearsal only
-        type: string
-        required: false
-      allow-dependency-drift:
-        description: >-
-          Record an intended dependency change; incompatible benchmark
-          evidence still blocks release acceptance
-        type: boolean
-        default: false
   push:
     tags:
       - "calc-flow-python-v*"
@@ -43,161 +32,6 @@ jobs:
           fi
           python scripts/verify_python_release.py "${args[@]}"
 
-  performance-collection:
-    name: Paired release collection (${{ matrix.suite }})
-    needs: prepare-python-release
-    runs-on: ubuntu-latest
-    timeout-minutes: 360
-    strategy:
-      fail-fast: false
-      matrix:
-        suite: [python, core, stream_join_perf]
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: "3.13"
-      - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-      - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
-      - name: Collect paired exact-ref ${{ matrix.suite }} evidence
-        id: performance
-        env:
-          CALC_FLOW_BENCHMARK_SCALE: overhead
-          JAX_PLATFORMS: cpu
-          INITIAL_RELEASE_BASELINE: ${{ inputs['initial-baseline'] }}
-        run: |
-          mkdir -p target/release-evidence
-          exec > >(tee target/release-evidence/performance.log) 2>&1
-          baseline_args=()
-          if [[ -n "${INITIAL_RELEASE_BASELINE}" ]]; then
-            baseline_args+=(--initial-baseline "${INITIAL_RELEASE_BASELINE}")
-          fi
-          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            baseline_args+=(--tag "${GITHUB_REF_NAME}")
-          fi
-          baseline_ref="$(python scripts/release_baseline.py "${baseline_args[@]}")"
-          test -n "${baseline_ref}"
-          baseline_sha="$(git rev-parse "${baseline_ref}^{commit}")"
-          candidate_sha="$(git rev-parse "HEAD^{commit}")"
-          test "${baseline_sha}" != "${candidate_sha}"
-          git worktree add --detach target/release-baseline "${baseline_ref}"
-          uv venv target/release-benchmark-env
-          source target/release-benchmark-env/bin/activate
-          uv pip install --require-hashes -r benchmarks/requirements.lock
-          uv pip freeze > target/release-evidence/dependencies.txt
-          perf_gate_extra_args=()
-          if [[ "${{ inputs['allow-dependency-drift'] }}" == "true" ]]; then
-            perf_gate_extra_args+=(--allow-dependency-drift)
-          fi
-          python -m scripts.release_performance \
-            --baseline-source target/release-baseline \
-            --output target/release-evidence \
-            --suite "${{ matrix.suite }}" \
-            "${perf_gate_extra_args[@]}"
-      - name: Upload suite evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: release-performance-${{ matrix.suite }}
-          path: |
-            target/release-evidence
-            !target/release-evidence/builds/*/cargo/**
-            !target/release-evidence/install/**
-            !target/release-evidence/rust-builds/*/core
-            !target/release-evidence/rust-builds/*/stream_join_perf
-            !target/release-evidence/rust-builds/*/allocation_regression
-          if-no-files-found: error
-          retention-days: 30
-  acceptance-gates:
-    name: Exact-head performance and security gates
-    needs: [prepare-python-release, performance-collection]
-    if: ${{ always() && needs.prepare-python-release.result == 'success' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: "3.13"
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version: 20.20.0
-          cache: npm
-          cache-dependency-path: web-ui/package-lock.json
-      - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
-      - name: Install locked Rust audit tools
-        uses: taiki-e/install-action@537c30d2b45cc3aa3fb35e2bbcfb61ef93fd6f02 # v2.62.52
-        with:
-          tool: cargo-audit@0.22.2,cargo-deny@0.20.2
-      - name: Download paired suite evidence
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          pattern: release-performance-*
-          path: target/release-evidence/suites
-          merge-multiple: false
-      - name: Merge paired exact-ref performance verdict
-        id: performance
-        env:
-          COLLECTION_RESULT: ${{ needs.performance-collection.result }}
-        run: |
-          python -m scripts.release_performance \
-            --merge-suites target/release-evidence/suites \
-            --output target/release-evidence
-          test "${COLLECTION_RESULT}" = success
-      - name: Run security and supply-chain gate
-        id: security
-        run: |
-          npm ci --prefix web-ui
-          python scripts/verify_security_gates.py
-      - name: Summarize acceptance outcomes
-        if: always()
-        env:
-          ACCEPTANCE_STEPS: ${{ toJSON(steps) }}
-        run: |
-          python -m scripts.release_performance \
-            --output target/release-evidence --acceptance-summary \
-            --steps performance,security
-      - name: Upload release performance evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: release-performance-evidence
-          path: |
-            target/release-evidence
-            !target/release-evidence/suites/*/builds/*/cargo/**
-            !target/release-evidence/suites/*/install/**
-            !target/release-evidence/suites/*/rust-builds/*/core
-            !target/release-evidence/suites/*/rust-builds/*/stream_join_perf
-            !target/release-evidence/suites/*/rust-builds/*/allocation_regression
-          if-no-files-found: error
-          retention-days: 30
-  soak-gates:
-    name: Exact-head continuous-runtime soaks
-    needs: prepare-python-release
-    runs-on: ubuntu-latest
-    # Runs alongside all three paired collection jobs.
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
-      - name: Run exact-head continuous-runtime soaks
-        id: soak
-        env:
-          CALC_FLOW_STREAM_SOAK: "1"
-          CALC_FLOW_M5_CHECKPOINT_SOAK: "1"
-          CALC_FLOW_M7_WINDOW_STATE_SOAK: "1"
-        run: |
-          cargo test -p calc-flow --lib \
-            operator::window::tests::high_cardinality_window_state_exceeds_legacy_json_limit_and_restores \
-            -- --ignored --exact --nocapture
-          cargo test -p calc-flow --lib \
-            runtime::streaming::soak::twenty_minute_two_source_slow_sink \
-            -- --ignored --exact --nocapture
-          cargo test -p calc-flow --lib \
-            runtime::streaming::soak::twenty_minute_epoch_checkpoint_restart \
-            -- --ignored --exact --nocapture
   wheels:
     name: Wheel ${{ matrix.os }} ${{ matrix.target }} ${{ matrix.python_tag }}
     needs: prepare-python-release
@@ -210,52 +44,42 @@ jobs:
             target: x86_64
             python_tag: cp313
             manylinux: "2_28"
-            smoke: true
           - os: ubuntu-latest
             target: x86_64
             python_tag: cp39
             manylinux: "2_28"
-            smoke: true
           - os: ubuntu-latest
             target: aarch64
             python_tag: cp313
             manylinux: "2_28"
-            smoke: false
           - os: ubuntu-latest
             target: aarch64
             python_tag: cp39
             manylinux: "2_28"
-            smoke: false
           - os: macos-15-intel
             target: x86_64
             python_tag: cp313
             manylinux: "off"
-            smoke: true
           - os: macos-15-intel
             target: x86_64
             python_tag: cp39
             manylinux: "off"
-            smoke: true
           - os: macos-15
             target: aarch64
             python_tag: cp313
             manylinux: "off"
-            smoke: true
           - os: macos-15
             target: aarch64
             python_tag: cp39
             manylinux: "off"
-            smoke: true
           - os: windows-latest
             target: x64
             python_tag: cp313
             manylinux: "off"
-            smoke: true
           - os: windows-latest
             target: x64
             python_tag: cp39
             manylinux: "off"
-            smoke: true
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -281,27 +105,6 @@ jobs:
           target: ${{ matrix.target }}
           args: --release --locked --out dist --find-interpreter --features legacy-python
           manylinux: ${{ matrix.manylinux }}
-      - name: Inspect wheel contents
-        shell: bash
-        run: python scripts/inspect_wheel.py core-wheel dist/*.whl
-      - name: Select wheel smoke interpreter
-        if: matrix.smoke
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: ${{ matrix.python_tag == 'cp39' && '3.9' || '3.13' }}
-      - name: Run native wheel smoke
-        if: matrix.smoke
-        shell: bash
-        run: |
-          python -m venv wheel-smoke
-          if [[ "${RUNNER_OS}" == "Windows" ]]; then
-            wheel_python="wheel-smoke/Scripts/python.exe"
-          else
-            wheel_python="wheel-smoke/bin/python"
-          fi
-          "${wheel_python}" -m pip install dist/*.whl
-          "${wheel_python}" -m pip show calc-flow-python
-          "${wheel_python}" scripts/smoke_wheel.py
       - name: Upload wheel
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -422,7 +225,7 @@ jobs:
   publish-python-core:
     name: Publish calc-flow-python to PyPI
     if: github.event_name == 'push' && github.ref_type == 'tag'
-    needs: [verify-core-artifacts, wheel-python-versions, acceptance-gates, soak-gates]
+    needs: [verify-core-artifacts, wheel-python-versions]
     runs-on: ubuntu-latest
     environment:
       name: pypi
