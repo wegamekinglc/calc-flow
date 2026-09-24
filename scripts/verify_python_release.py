@@ -437,30 +437,39 @@ def _relative_name(path: Path, dist_dir: Path) -> str:
     return str(PurePosixPath(path.relative_to(dist_dir)))
 
 
-def _release_artifacts(
-    dist_dir: Path, core_only: bool
-) -> tuple[list[Path], list[Path], list[Path]]:
-    wheels = sorted(dist_dir.rglob("*.whl"))
-    sdists = sorted(dist_dir.rglob("*.tar.gz"))
-    core_wheels = [path for path in wheels if path.name.startswith("calc_flow_python-")]
-    studio_wheels = [
-        path for path in wheels if path.name.startswith("calc_flow_studio-")
-    ]
-    unknown_wheels = [
-        path for path in wheels if path not in core_wheels and path not in studio_wheels
-    ]
+def _wheel_artifacts(dist_dir: Path) -> tuple[list[Path], list[Path]]:
+    core_wheels = sorted(dist_dir.rglob("calc_flow_python-*.whl"))
+    studio_wheels = sorted(dist_dir.rglob("calc_flow_studio-*.whl"))
+    unknown_wheels = sorted(
+        set(dist_dir.rglob("*.whl")) - set(core_wheels) - set(studio_wheels)
+    )
     if unknown_wheels:
         raise ValueError(
             f"unexpected wheel artifacts: {[path.name for path in unknown_wheels]}"
         )
+    return core_wheels, studio_wheels
+
+
+def _reject_extra_artifacts(
+    dist_dir: Path, core_wheels: list[Path], sdists: list[Path]
+) -> None:
+    allowed = set(core_wheels) | set(sdists)
+    unexpected = sorted(
+        path.name
+        for path in dist_dir.rglob("*")
+        if path.is_file() and path not in allowed
+    )
+    if unexpected:
+        raise ValueError(f"unexpected release artifacts: {unexpected}")
+
+
+def _release_artifacts(
+    dist_dir: Path, core_only: bool
+) -> tuple[list[Path], list[Path], list[Path]]:
+    core_wheels, studio_wheels = _wheel_artifacts(dist_dir)
+    sdists = sorted(dist_dir.rglob("*.tar.gz"))
     if core_only:
-        unexpected = sorted(
-            path.name
-            for path in dist_dir.rglob("*")
-            if path.is_file() and path not in core_wheels and path not in sdists
-        )
-        if unexpected:
-            raise ValueError(f"unexpected release artifacts: {unexpected}")
+        _reject_extra_artifacts(dist_dir, core_wheels, sdists)
     elif len(studio_wheels) != 1:
         raise ValueError(
             f"expected one Studio wheel, found {[path.name for path in studio_wheels]}"
