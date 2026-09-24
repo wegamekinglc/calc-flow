@@ -53,6 +53,12 @@ paired performance gates still apply before publication. CI installs the wheels
 on CPython 3.9–3.14; later interpreter releases need the same dependency and
 runtime checks before they are claimed as supported.
 
+The source distribution selects the build interpreter's CPython ABI by default.
+This lets a source install on CPython 3.9 use its native 3.9 APIs. The release
+workflow explicitly enables `legacy-python` or `pyo3/abi3-py313` when it
+builds the portable wheel tiers. Pull request CI builds the default source
+path on 3.9 and the modern abi3 wheel on 3.14 before the full release matrix.
+
 ## Local packaging rehearsal
 
 Install development dependencies and run the cross-platform helper:

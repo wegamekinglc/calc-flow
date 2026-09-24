@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+import tomllib
 from collections import Counter
 from dataclasses import dataclass
 from email.parser import BytesParser
@@ -14,8 +15,6 @@ from http.client import HTTPSConnection
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 from zipfile import ZipFile
-
-import tomllib
 
 if __package__:
     from scripts.inspect_wheel import (

@@ -34,11 +34,11 @@ fn settings_encode_error() -> PyErr {
 }
 
 fn portable_string(value: &Bound<'_, PyString>) -> PyResult<String> {
-    #[cfg(feature = "legacy-python")]
+    #[cfg(any(feature = "legacy-python", not(Py_3_13)))]
     {
         value.extract::<String>()
     }
-    #[cfg(not(feature = "legacy-python"))]
+    #[cfg(all(not(feature = "legacy-python"), Py_3_13))]
     {
         value.to_str().map(str::to_owned)
     }
@@ -400,7 +400,7 @@ impl PyExecutionOptions {
 
 #[pymethods]
 impl PyExecutionOptions {
-    #[cfg(feature = "legacy-python")]
+    #[cfg(any(feature = "legacy-python", not(Py_3_13)))]
     #[classattr]
     fn __signature__(py: Python<'_>) -> PyResult<Py<PyAny>> {
         let inspect = py.import(pyo3::intern!(py, "inspect"))?;

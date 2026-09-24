@@ -505,6 +505,50 @@ jobs:
           path: dist/*
           if-no-files-found: error
           retention-days: 30
+  python-compatibility:
+    name: Python compatibility (${{ matrix.python-version }})
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.14']
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+      - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+      - name: Build source fallback or modern abi3 wheel
+        run: |
+          if [ "${{ matrix.python-version }}" = "3.9" ]; then
+            uvx maturin==1.14.1 build --release --locked \
+              --interpreter python --out target/compat-wheel
+          else
+            uvx maturin==1.14.1 build --release --locked \
+              --interpreter python --out target/compat-wheel \
+              --features pyo3/abi3-py313
+          fi
+      - name: Verify installed compatibility wheel
+        run: |
+          uv pip install --system target/compat-wheel/calc_flow_python-*.whl pytest numpy
+          python scripts/smoke_wheel.py
+          python -m pytest -q \
+            python/tests/test_import.py \
+            python/tests/test_python_version_contract.py \
+            python/tests/test_stream_entrypoints.py \
+            python/tests/test_execution_options.py \
+            python/tests/test_compute.py
   studio-package:
     name: Build + isolated studio wheel smoke test
     needs:
@@ -900,6 +944,7 @@ jobs:
       - studio-backend
       - browser-e2e
       - package
+      - python-compatibility
       - studio-package
       - benchmark-smoke
       - rust-core
@@ -921,6 +966,7 @@ jobs:
       STUDIO_BACKEND_RESULT: ${{ needs.studio-backend.result }}
       BROWSER_RESULT: ${{ needs.browser-e2e.result }}
       PACKAGE_RESULT: ${{ needs.package.result }}
+      PYTHON_COMPATIBILITY_RESULT: ${{ needs.python-compatibility.result }}
       STUDIO_PACKAGE_RESULT: ${{ needs.studio-package.result }}
       BENCHMARK_RESULT: ${{ needs.benchmark-smoke.result }}
       RUST_CORE_RESULT: ${{ needs.rust-core.result }}
@@ -946,6 +992,7 @@ jobs:
             "$STUDIO_BACKEND_RESULT" \
             "$BROWSER_RESULT" \
             "$PACKAGE_RESULT" \
+            "$PYTHON_COMPATIBILITY_RESULT" \
             "$STUDIO_PACKAGE_RESULT" \
             "$BENCHMARK_RESULT" \
             "$RUST_CORE_RESULT" \

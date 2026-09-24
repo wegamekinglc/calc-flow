@@ -292,7 +292,7 @@ jobs:
           maturin-version: v1.14.1
           rust-toolchain: "1.88.0"
           target: ${{ matrix.target }}
-          args: --release --locked --out dist --find-interpreter
+          args: --release --locked --out dist --find-interpreter --features pyo3/abi3-py313
           manylinux: ${{ matrix.manylinux }}
       - name: Build legacy abi3 wheel
         if: matrix.python_tag == 'cp39'
@@ -434,7 +434,7 @@ jobs:
           maturin-version: v1.14.1
           rust-toolchain: "1.88.0"
           target: x86_64
-          args: --release --locked --out dist --find-interpreter
+          args: --release --locked --out dist --find-interpreter --features pyo3/abi3-py313
           manylinux: "2_28"
       - name: Build Studio static assets and wheel
         working-directory: web-ui

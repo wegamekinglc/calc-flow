@@ -158,7 +158,9 @@ async def run(directory: Path, *, timeout: float = 60) -> None:
     plan = Runtime().compile_stream_project(build_project(directory).canonical_json())
     job = None
     try:
-        async with asyncio.timeout(timeout):
+
+        async def wait_for_completion():
+            nonlocal job
             job = await StreamingRunner(plan).start_async()
             # A continuous source does not end after the sample. Wait for sink
             # delivery before draining; observing source reads alone is too early.
@@ -171,6 +173,9 @@ async def run(directory: Path, *, timeout: float = 60) -> None:
                     break
                 await asyncio.sleep(0.05)
             outcome = await job.shutdown_async()
+            return outcome
+
+        outcome = await asyncio.wait_for(wait_for_completion(), timeout)
         if outcome.state != "completed":
             raise RuntimeError(f"unexpected kafka job outcome: {outcome}")
         totals = await asyncio.to_thread(read_totals, directory)

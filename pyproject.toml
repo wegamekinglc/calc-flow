@@ -52,7 +52,6 @@ build-backend = "maturin"
 manifest-path = "crates/calc-flow-python/Cargo.toml"
 python-source = "python"
 module-name = "calc_flow._native"
-features = ["pyo3/abi3-py313"]
 strip = true
 
 [tool.uv.workspace]
@@ -79,6 +78,12 @@ extend-exclude = [
     "design/**/*.md",
 ]
 target-version = "py39"
+
+[tool.ruff.per-file-target-version]
+"scripts/*.py" = "py313"
+"python/tests/a6_cross_surface_worker.py" = "py312"
+"python/tests/test_asof_stream_results.py" = "py310"
+"python/tests/test_stream_results.py" = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]

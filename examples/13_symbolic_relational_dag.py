@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from tempfile import TemporaryDirectory
 
 import pyarrow as pa
@@ -135,7 +135,7 @@ class OneBatchSource:
             return Data(Batch.from_pyarrow(self._value), Cursor(b"1", {"offset": 1}))
         if not self._watermark_sent:
             self._watermark_sent = True
-            return Watermark(datetime(2030, 1, 1, tzinfo=UTC))
+            return Watermark(datetime(2030, 1, 1, tzinfo=timezone.utc))
         return None
 
     async def close(self) -> None:
@@ -173,7 +173,7 @@ def _input_table(
         [
             pa.array([7], type=pa.int64()),
             pa.array(
-                [datetime(2026, 1, 1, tzinfo=UTC) + timedelta(seconds=second)],
+                [datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=second)],
                 type=pa.timestamp("us", tz="UTC"),
             ),
             pa.array([1], type=pa.uint64()),

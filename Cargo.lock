@@ -636,6 +636,7 @@ dependencies = [
  "pyo3",
  "pyo3-arrow",
  "pyo3-async-runtimes",
+ "pyo3-build-config",
  "rdkafka",
  "serde_json",
  "tempfile",

@@ -146,6 +146,7 @@ def inspect_sdist(sdist: Path) -> int:
         PurePosixPath("crates/calc-flow/Cargo.toml"),
         PurePosixPath("crates/calc-flow/src/lib.rs"),
         PurePosixPath("crates/calc-flow-python/Cargo.toml"),
+        PurePosixPath("crates/calc-flow-python/build.rs"),
         PurePosixPath("python/calc_flow/__init__.py"),
     }
     missing = required.difference(relative)

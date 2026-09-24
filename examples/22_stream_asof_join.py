@@ -10,7 +10,7 @@ managed checkpoint root.
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pyarrow as pa
 
@@ -50,7 +50,7 @@ def rows(times: list[int], prices: list[float]) -> pa.Table:
 
 def watermark(micros: int) -> cf.Watermark:
     return cf.Watermark(
-        datetime(1970, 1, 1, tzinfo=UTC) + timedelta(microseconds=micros)
+        datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(microseconds=micros)
     )
 
 
@@ -86,17 +86,18 @@ async def main() -> None:
         "quotes": events(rows([90, 100, 110], [10.0, 10.2, 10.5]), advance),
     }
     policies = {name: cf.SourceProvidedWatermarks() for name in inputs}
-    async with (
-        asyncio.timeout(10),
-        matched.stream(inputs, watermarks=policies) as result,
-    ):
-        pending = asyncio.create_task(anext(result))
-        await wait_for_watermarks(result.job, 105)
-        if pending.done():
-            raise RuntimeError("Equal watermarks cannot finalize the trade at 105")
-        print("Both watermarks equal 105: no final output yet.")
-        advance.set()
-        batches = [await pending, *[batch async for batch in result]]
+
+    async def collect() -> list[pa.Table]:
+        async with matched.stream(inputs, watermarks=policies) as result:
+            pending = asyncio.create_task(result.__anext__())
+            await wait_for_watermarks(result.job, 105)
+            if pending.done():
+                raise RuntimeError("Equal watermarks cannot finalize the trade at 105")
+            print("Both watermarks equal 105: no final output yet.")
+            advance.set()
+            return [await pending, *[batch async for batch in result]]
+
+    batches = await asyncio.wait_for(collect(), timeout=10)
     output = pa.concat_tables(batches)
     if output["quote__price"].to_pylist() != [10.2, None]:
         raise RuntimeError("Expected the recent quote and an unmatched trade")

@@ -1594,11 +1594,11 @@ fn set_exception_property(
 }
 
 fn is_exception_storage_name(name: &Bound<'_, PyAny>) -> PyResult<bool> {
-    #[cfg(feature = "legacy-python")]
+    #[cfg(any(feature = "legacy-python", not(Py_3_13)))]
     {
         Ok(name.extract::<String>()? == NATIVE_EXCEPTION_STORAGE)
     }
-    #[cfg(not(feature = "legacy-python"))]
+    #[cfg(all(not(feature = "legacy-python"), Py_3_13))]
     {
         Ok(name.extract::<&str>()? == NATIVE_EXCEPTION_STORAGE)
     }

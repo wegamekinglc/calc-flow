@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from tempfile import TemporaryDirectory
 
 import pyarrow as pa
@@ -26,7 +26,7 @@ from calc_flow import (
 )
 from calc_flow.symbolic import FeatureSet, Field, Program, table_input, window
 
-BASE = datetime(2026, 1, 1, tzinfo=UTC)
+BASE = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
 def minute_program() -> Program:

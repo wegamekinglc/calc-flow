@@ -3,10 +3,9 @@ from __future__ import annotations
 import ast
 import json
 import re
+import tomllib
 import unittest
 from pathlib import Path
-
-import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -188,6 +187,8 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertEqual(package["project"]["version"], version)
         self.assertEqual(package["project"]["name"], "calc-flow-python")
         self.assertEqual(package["tool"]["maturin"]["module-name"], "calc_flow._native")
+        self.assertNotIn("features", package["tool"]["maturin"])
+        self.assertIsInstance(binding["dependencies"]["pyo3"], str)
         self.assertEqual(studio["project"]["version"], version)
         self.assertIn(studio_requirement, studio["project"]["dependencies"])
         self.assertEqual(frontend["version"], version)
@@ -303,6 +304,15 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertEqual(action_count, 4)
         self.assertEqual(workflow.count("maturin-version: v1.14.1"), action_count)
         self.assertEqual(workflow.count('rust-toolchain: "1.88.0"'), action_count)
+        self.assertIn("--find-interpreter --features pyo3/abi3-py313", workflow)
+        self.assertIn("--find-interpreter --features legacy-python", workflow)
+
+    def test_pr_ci_checks_python_39_source_and_314_abi3_wheel(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
+        self.assertIn("  python-compatibility:\n", workflow)
+        self.assertIn("python-version: ['3.9', '3.14']", workflow)
+        self.assertIn("--interpreter python --out target/compat-wheel", workflow)
+        self.assertIn("--features pyo3/abi3-py313", workflow)
 
     def test_python_release_verifies_exact_artifacts_before_oidc_publish(self) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")

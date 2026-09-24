@@ -94,11 +94,15 @@ async def main() -> None:
     )
     output = source.pipe(features).sql("SELECT delta, mean_delta FROM input")
     tables = []
-    async with asyncio.timeout(5), output.stream(batches()) as results:
-        async for table in results:
-            tables.append(table)
-            if sum(batch.num_rows for batch in tables) >= 3:
-                break
+
+    async def collect() -> None:
+        async with output.stream(batches()) as results:
+            async for table in results:
+                tables.append(table)
+                if sum(batch.num_rows for batch in tables) >= 3:
+                    break
+
+    await asyncio.wait_for(collect(), timeout=5)
     actual = pa.concat_tables(tables).to_pydict()
     if actual != {"delta": [None, 2.0, 3.0], "mean_delta": [None, 2.0, 2.5]}:
         raise RuntimeError(actual)
@@ -186,11 +190,11 @@ This complete example runs with the current Python package. Save it as
 
 ```python
 import asyncio
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import pyarrow as pa
 import calc_flow as cf
 
-base = datetime(2026, 1, 1, tzinfo=UTC)
+base = datetime(2026, 1, 1, tzinfo=timezone.utc)
 schema = pa.schema(
     [
         pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),

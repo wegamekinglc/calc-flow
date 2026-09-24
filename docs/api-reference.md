@@ -193,7 +193,7 @@ aliases, and neither retains nor mutates caller containers. Every
 `options.settings` read returns another deep `dict`/`list` copy. Exceptions
 from caller mappings are replaced without retaining their value, type,
 message, or traceback. `deadline` accepts `None` or any valid timezone-aware
-`datetime`. Accepted offsets are normalized to `datetime.UTC` without losing
+`datetime`. Accepted offsets are normalized to `datetime.timezone.utc` without losing
 microseconds; naive, invalid, and out-of-range UTC conversions are rejected
 with fixed redacted errors.
 

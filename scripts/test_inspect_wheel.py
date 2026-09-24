@@ -220,10 +220,26 @@ class InspectWheelTests(unittest.TestCase):
             "calc_flow_python-2.0.0/crates/calc-flow/Cargo.toml",
             "calc_flow_python-2.0.0/crates/calc-flow/src/lib.rs",
             "calc_flow_python-2.0.0/crates/calc-flow-python/Cargo.toml",
+            "calc_flow_python-2.0.0/crates/calc-flow-python/build.rs",
             "calc_flow_python-2.0.0/python/calc_flow/__init__.py",
         )
 
-        self.assertEqual(inspect_sdist(sdist), 7)
+        self.assertEqual(inspect_sdist(sdist), 8)
+
+    def test_rejects_sdist_without_binding_build_script(self) -> None:
+        sdist = self._archive_with(
+            "calc_flow_python-2.0.0.tar.gz",
+            "calc_flow_python-2.0.0/LICENSE",
+            "calc_flow_python-2.0.0/Cargo.lock",
+            "calc_flow_python-2.0.0/pyproject.toml",
+            "calc_flow_python-2.0.0/crates/calc-flow/Cargo.toml",
+            "calc_flow_python-2.0.0/crates/calc-flow/src/lib.rs",
+            "calc_flow_python-2.0.0/crates/calc-flow-python/Cargo.toml",
+            "calc_flow_python-2.0.0/python/calc_flow/__init__.py",
+        )
+
+        with self.assertRaisesRegex(ValueError, "missing sdist entries"):
+            inspect_sdist(sdist)
 
     def test_rejects_sdist_without_license(self) -> None:
         sdist = self._archive_with(
@@ -258,6 +274,7 @@ class InspectWheelTests(unittest.TestCase):
             "calc_flow_python-2.0.0/crates/calc-flow/Cargo.toml",
             "calc_flow_python-2.0.0/crates/calc-flow/src/lib.rs",
             "calc_flow_python-2.0.0/crates/calc-flow-python/Cargo.toml",
+            "calc_flow_python-2.0.0/crates/calc-flow-python/build.rs",
             "calc_flow_python-2.0.0/python/calc_flow/__init__.py",
             "calc_flow_python-2.0.0/docs/superpowers/plans/symbolic-engine.md",
         )
