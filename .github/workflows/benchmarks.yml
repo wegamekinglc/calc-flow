@@ -159,9 +159,9 @@ jobs:
           uv venv target/bench316-venv
           uv pip sync --python target/bench316-venv/bin/python \
             --require-hashes benchmarks/requirements.lock
-      - name: Measure same-wheel and swapped-side controls
+      - name: Measure original and copied B trees at the same path
         run: >-
-          target/bench316-venv/bin/python -m scripts.benchmark_suite.side_bias_diagnostic
+          target/bench316-venv/bin/python -m scripts.benchmark_suite.tree_identity_diagnostic
           --baseline target/bench316-releases/baseline/release.json
           --candidate target/bench316-releases/candidate/release.json
           --output target/bench316-results
