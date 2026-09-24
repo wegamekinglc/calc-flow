@@ -1,11 +1,12 @@
 # Benchmarks
 
-The [unified CI suite](../docs/benchmark-suite.md) runs the overhead, small and
+The [scheduled benchmark suite](../docs/benchmark-suite.md) runs the overhead, small and
 standard Python scales, every registered Rust bench target, Studio, frontend and
 isolated stream lifecycle measurements. It adds SQL/native-streaming and
 external-engine comparisons at every decade from 10 to 10,000,000 rows, plus warm-state
-incremental measurements. Every non-documentation Linux PR/main run publishes
-complete Markdown tables and raw artifacts, including failures.
+incremental measurements. Its 06:00 and 18:00 Asia/Shanghai runs publish
+complete Markdown tables and raw artifacts, including failures. Manual runs
+remain available independently of regular CI.
 
 The slow legacy Python `nightly` scale is not part of the automated suite.
 The separate 10-to-10M engine and warm-state matrices remain enabled. Native
@@ -198,7 +199,7 @@ them stable, improved, or regressed.
 
 Compare saved reports with `pytest-benchmark` after collecting compatible
 runner samples. Do not compare results across different machines, dependency
-versions, power modes, or benchmark scales. The unified CI suite publishes
+versions, power modes, or benchmark scales. The scheduled suite publishes
 these array measurements as informational ABBA whole-suite block comparisons.
 It does not promote their deltas to the new engine/warm interleaved gate.
 The release collector measures its own invocation pairs for these cases under
@@ -371,7 +372,7 @@ likewise cap rows at 400,000 so the dense 20-column feature matrix stays
 under the runtime's owned-NumPy 10,000,000-element conversion limit.
 
 Run the stream lifecycle in its own process. The unified suite's `lifecycle`
-shard uses `standard` for PR/main and scheduled/manual runs. Symbolic
+shard uses `standard` for scheduled and manual runs. Symbolic
 compilation cases cannot retain allocator or memory-pool state before this
 isolated measurement:
 

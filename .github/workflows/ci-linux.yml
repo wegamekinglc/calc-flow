@@ -584,11 +584,6 @@ jobs:
           path: dist/calc_flow_studio-*.whl
           if-no-files-found: error
           retention-days: 30
-  benchmark-smoke:
-    name: Complete benchmark suite
-    needs: changes
-    if: needs.changes.outputs.docs_only != 'true'
-    uses: ./.github/workflows/benchmark-suite.yml
   rust-core:
     name: Rust core parity
     needs: changes
@@ -667,20 +662,6 @@ jobs:
       - name: Run Rust tests
         timeout-minutes: 30
         run: python3.13 scripts/run_rust_tests.py --python-stress-runs 3
-      - name: Validate SQL/DataFusion comparison smoke
-        run: |
-          mkdir -p "${GITHUB_WORKSPACE}/benchmark-results"
-          cargo bench --locked -p calc-flow --bench sql_datafusion_performance -- \
-            --profile serial-control \
-            --rows 10000 \
-            --entities 4 \
-            --partitions 1 \
-            --samples 3 \
-            --warmups 1 \
-            --output "${GITHUB_WORKSPACE}/benchmark-results/sql-datafusion-smoke.json"
-          python3.13 scripts/verify_sql_datafusion_performance.py \
-            "${GITHUB_WORKSPACE}/benchmark-results/sql-datafusion-smoke.json" \
-            --minimum-samples 3
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
       - name: Record Rust installation and cache step results
         if: ${{ always() }}
@@ -901,7 +882,6 @@ jobs:
       - browser-e2e
       - package
       - studio-package
-      - benchmark-smoke
       - rust-core
       - rust-coverage
       - rust-supply-chain
@@ -922,7 +902,6 @@ jobs:
       BROWSER_RESULT: ${{ needs.browser-e2e.result }}
       PACKAGE_RESULT: ${{ needs.package.result }}
       STUDIO_PACKAGE_RESULT: ${{ needs.studio-package.result }}
-      BENCHMARK_RESULT: ${{ needs.benchmark-smoke.result }}
       RUST_CORE_RESULT: ${{ needs.rust-core.result }}
       RUST_COVERAGE_RESULT: ${{ needs.rust-coverage.result }}
       RUST_SUPPLY_CHAIN_RESULT: ${{ needs.rust-supply-chain.result }}
@@ -947,7 +926,6 @@ jobs:
             "$BROWSER_RESULT" \
             "$PACKAGE_RESULT" \
             "$STUDIO_PACKAGE_RESULT" \
-            "$BENCHMARK_RESULT" \
             "$RUST_CORE_RESULT" \
             "$RUST_COVERAGE_RESULT" \
             "$RUST_SUPPLY_CHAIN_RESULT" \
