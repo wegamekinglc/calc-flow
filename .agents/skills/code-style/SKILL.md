@@ -90,8 +90,10 @@ Markdown, tests, and verification.
 Follow the local scope, CI responsibilities, and three full-test exceptions in
 [AGENTS.md](../../../AGENTS.md#verification). Use the smallest checks for the
 change and necessary formatter/linter/type checks for directly affected modules.
-Full regression and routine performance gates belong to CI; the complete command
-groups in AGENTS.md remain CI or explicitly scoped full-verification references.
+Full regression gates belong to regular CI; routine benchmarks run twice daily
+on their own schedule. The Python package release verifies artifacts and runs
+post-build unit tests. The complete command groups in AGENTS.md remain CI or
+explicitly scoped full-verification references.
 Preserve the Rust 90% line and Studio backend 85% coverage floors. Do not repeat
 unchanged passing checks or rebuild native code only to review documentation.
 For Markdown and agent guidance, check changed structure, synchronization,

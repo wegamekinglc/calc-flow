@@ -1,4 +1,4 @@
-"""Run ``python -m scripts.benchmark_suite --help`` for the CI entrypoints."""
+"""Run ``python -m scripts.benchmark_suite --help`` for benchmark commands."""
 
 from __future__ import annotations
 

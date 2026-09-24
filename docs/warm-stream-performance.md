@@ -8,7 +8,7 @@ and it is not directly interchangeable with a TA-Lib array call or a SQL query
 over a complete historical table.
 
 Use this guide to produce measurements for the revisions under investigation.
-The [benchmark suite](benchmark-suite.md) explains the complete CI matrix and
+The [benchmark suite](benchmark-suite.md) explains the scheduled matrix and
 regression gates. Keep individual measurement reports with their raw artifacts.
 
 ## What is measured

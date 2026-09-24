@@ -339,9 +339,10 @@ changed structure, synchronization, links/anchors, and diff; run only necessary
 example checks that fit the requested scope, without building native code merely
 to validate prose.
 
-Full regression and routine performance gates belong to GitHub CI. The complete
-commands remain references for CI and explicitly scoped full verification. Keep
-the combined Rust 90% line floor (including connector services) and independent
+Full regression gates belong to GitHub CI. Routine benchmark measurements run
+independently at 06:00 and 18:00 Asia/Shanghai every day. The complete commands
+remain references for CI and explicitly scoped full verification. Keep the
+combined Rust 90% line floor (including connector services) and independent
 Studio backend 85% floor; a skipped local coverage run does not prove either gate.
 Expand local full testing only for an explicit user request, reproduction or
 diagnosis of a CI failure, or a clearly high-risk change without CI coverage.
@@ -357,8 +358,9 @@ After a commit/push or at review handoff, read at most one non-blocking CI statu
 snapshot. Do not wait, watch, poll, or sleep/retry unless the user or acceptance
 criteria explicitly require the final CI result. Pending or absent CI can be
 reported in a completed handoff; it is not green or merge-ready. Report failed,
-cancelled, and inconclusive checks accurately. Required test, coverage,
-cross-platform, and performance gates still block merge when failed or unresolved.
+cancelled, and inconclusive checks accurately. Required test, coverage, and
+cross-platform checks block merge when failed or unresolved. The Python package
+release requires its artifact verification and post-build unit tests to pass.
 The final specialist review remains required; merging also requires explicit
 authority and green required checks.
 

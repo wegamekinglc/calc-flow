@@ -542,7 +542,7 @@ class ReleaseConfigTests(unittest.TestCase):
             0
         ]
         studio_package = workflow.split("  studio-package:\n", 1)[1].split(
-            "  benchmark-smoke:\n", 1
+            "  rust-core:\n", 1
         )[0]
 
         self.assertIn("needs: changes", package)
@@ -619,7 +619,7 @@ class ReleaseConfigTests(unittest.TestCase):
         )
         return tuple(ast.literal_eval(key) for key in scales.keys)
 
-    def test_pr_and_schedule_run_the_same_complete_catalog(self) -> None:
+    def test_scheduled_suite_catalog_matches_legacy_scales(self) -> None:
         from scripts.benchmark_suite.catalog import LEGACY_SCALES, ROW_SCALES, shards
 
         names = self._legacy_scale_names()
@@ -627,9 +627,10 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertEqual(automated, LEGACY_SCALES)
         self.assertNotIn("nightly", LEGACY_SCALES)
         self.assertEqual(ROW_SCALES, tuple(10**n for n in range(1, 8)))
-        for name in ("ci-linux.yml", "benchmarks.yml"):
-            workflow = (ROOT / ".github/workflows" / name).read_text(encoding="utf-8")
-            self.assertIn("uses: ./.github/workflows/benchmark-suite.yml", workflow)
+        workflow = (ROOT / ".github/workflows/benchmark-suite.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("scripts.benchmark_suite catalog", workflow)
         self.assertEqual(
             {s["scale"] for s in shards() if s["family"] == "python"},
             set(automated),
@@ -730,34 +731,12 @@ class ReleaseConfigTests(unittest.TestCase):
         ):
             self.assertIn(case, core)
 
-    def test_linux_ci_executes_sql_datafusion_smoke_benchmark(self) -> None:
-        workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
-        smoke = workflow.split(
-            "      - name: Validate SQL/DataFusion comparison smoke\n", 1
-        )[1].split("      - run: RUSTDOCFLAGS=", 1)[0]
-
-        self.assertIn(
-            "cargo bench --locked -p calc-flow --bench sql_datafusion_performance --",
-            smoke,
-        )
-        self.assertNotIn("cargo test", smoke)
-        evidence_path = (
-            '"${GITHUB_WORKSPACE}/benchmark-results/sql-datafusion-smoke.json"'
-        )
-        self.assertIn('mkdir -p "${GITHUB_WORKSPACE}/benchmark-results"', smoke)
-        self.assertEqual(smoke.count(evidence_path), 2)
-        self.assertIn("scripts/verify_sql_datafusion_performance.py", smoke)
-
     def test_benchmark_suite_isolates_stream_lifecycle_evidence(self) -> None:
-        linux = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
         from scripts.benchmark_suite.catalog import shards
         from scripts.benchmark_suite.legacy import pytest_arguments
 
         self.assertIn("not stream_lifecycle", pytest_arguments("python"))
         self.assertIn({"id": "lifecycle", "family": "lifecycle"}, shards())
-        linux_gate = linux.split("  linux-gate:\n", 1)[1]
-        self.assertIn("- benchmark-smoke", linux_gate)
-        self.assertIn('"$BENCHMARK_RESULT"', linux_gate)
         legacy = (ROOT / "scripts/benchmark_suite/legacy.py").read_text(
             encoding="utf-8"
         )
