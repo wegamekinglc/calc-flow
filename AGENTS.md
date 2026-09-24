@@ -372,7 +372,8 @@ git diff --exit-code -- \
 git diff --check
 ```
 
-Release CI additionally builds the core wheel, source distribution, crate, and
-Studio wheel; inspects the artifacts; installs wheels in clean environments; and
-runs the core/Studio smoke checks. Select local release verification under the
-same scope and exception rules above.
+The Python release workflow builds and verifies the core wheels and source
+distribution, tests installed Linux wheels across supported Python versions,
+and publishes only the core package on release tags. Benchmarks, soaks, audits,
+crate and Studio packaging, and documentation checks do not run in that workflow.
+Select local release verification under the same scope and exception rules above.

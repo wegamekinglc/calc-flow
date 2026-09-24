@@ -442,6 +442,7 @@ def validate_release(
     root: Path = ROOT,
     tag: str | None = None,
     check_pypi: bool = False,
+    core_only: bool = False,
 ) -> list[str]:
     config = validate_versions(root, tag, check_pypi)
     dist_dir = dist_dir.resolve()
@@ -461,7 +462,15 @@ def validate_release(
         raise ValueError(
             f"unexpected wheel artifacts: {[path.name for path in unknown_wheels]}"
         )
-    if len(studio_wheels) != 1:
+    if core_only:
+        unexpected = sorted(
+            path.name
+            for path in dist_dir.rglob("*")
+            if path.is_file() and path not in core_wheels and path not in sdists
+        )
+        if unexpected:
+            raise ValueError(f"unexpected release artifacts: {unexpected}")
+    elif len(studio_wheels) != 1:
         raise ValueError(
             f"expected one Studio wheel, found {[path.name for path in studio_wheels]}"
         )
@@ -490,10 +499,11 @@ def validate_release(
             f"core wheel matrix mismatch: missing={missing}, unexpected={unexpected}"
         )
 
-    studio = studio_wheels[0]
-    manifest_by_name[_relative_name(studio, dist_dir)] = validate_studio_wheel(
-        studio, config
-    )
+    if not core_only:
+        studio = studio_wheels[0]
+        manifest_by_name[_relative_name(studio, dist_dir)] = validate_studio_wheel(
+            studio, config
+        )
     sdist = sdists[0]
     manifest_by_name[_relative_name(sdist, dist_dir)] = validate_sdist(sdist, config)
     return [f"{manifest_by_name[name]}  {name}" for name in sorted(manifest_by_name)]
@@ -507,6 +517,7 @@ def main() -> int:
     parser.add_argument("--tag")
     parser.add_argument("--check-pypi", action="store_true")
     parser.add_argument("--version-only", action="store_true")
+    parser.add_argument("--core-only", action="store_true")
     args = parser.parse_args()
     try:
         if args.version_only:
@@ -519,6 +530,7 @@ def main() -> int:
             args.dist_dir,
             tag=args.tag,
             check_pypi=args.check_pypi,
+            core_only=args.core_only,
         )
     except (OSError, ValueError) as error:
         print(f"Python release verification failed: {error}", file=sys.stderr)

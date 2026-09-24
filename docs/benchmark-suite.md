@@ -15,7 +15,7 @@ On this page:
 - [ASOF settlement measurements](#asof-settlement-measurements)
 - [Join materialization measurements](#join-materialization-measurements)
 - [Revision comparisons and regression gate](#revision-comparisons-and-regression-gate)
-- [Release acceptance measurements](#release-acceptance-measurements)
+- [Standalone paired measurements](#standalone-paired-measurements)
 - [Reports and failure behavior](#reports-and-failure-behavior)
 - [Local reproduction](#local-reproduction)
 - [Performance-plan diagnostics](#performance-plan-diagnostics)
@@ -356,20 +356,21 @@ documents keep their real differing workload identities, and the applied
 migrations are listed in the shard's JSON artifact. Undeclared or mismatched
 workload changes still fail closed, now scoped to the changed target.
 
-## Release acceptance measurements
+## Standalone paired measurements
 
-The release workflow uses `python -m scripts.release_performance` for ordinary
-Python cases and the Rust `core` and `stream_join_perf` targets. It builds and
-installs sealed baseline/candidate wheels separately and records the loaded
+The optional `python -m scripts.release_performance` command measures ordinary
+Python cases and the Rust `core` and `stream_join_perf` targets outside the
+Python package release workflow. It builds and installs sealed
+baseline/candidate wheels separately and records the loaded
 Python native hash and each Rust benchmark binary hash. The formal baseline
-and candidate commits must differ; baseline selection follows the
-[release baseline contract](python-release.md#first-release-performance-baseline).
+and candidate commits must differ; `scripts/release_baseline.py` selects the
+baseline for a manual comparison.
 
-Python release collection runs the current candidate's benchmark declarations
-against both sealed native builds at `overhead` scale. Rust runs each
+The standalone Python collector runs the current candidate's benchmark
+declarations against both sealed native builds at `overhead` scale. Rust runs each
 revision's compiled cases with the compiled-dependency and target-scoped
 workload identities described above. Both sides must have matching, nonempty,
-duplicate-free inventories; this release path has no `new-coverage` exemption.
+duplicate-free inventories; this collector has no `new-coverage` exemption.
 
 The `core` Criterion target uses `cargo rustc --profile bench` with 64-byte
 loop alignment applied only to the bench target. This keeps its sub-nanosecond
@@ -390,7 +391,7 @@ All observations must match the expected sealed native/binary hash and have
 compatible machine, dependency, and workload identities. Raw identity objects
 must reproduce their fingerprints. Missing pairs, reused worker identities,
 incorrect execution order, invalid samples, or failed correctness checks are
-evidence errors and block acceptance.
+evidence errors and invalidate the comparison.
 
 The collector applies the same two-round paired-median interval and +5%
 verdict rules as the engine/warm gate. A timing-only `inconclusive` result does
@@ -398,11 +399,9 @@ not itself fail this gate, but is not proof of equivalence or improvement.
 Invalid or incomparable evidence fails regardless of timing. The separate
 stream lifecycle quantile, rolling-kernel, and allocation gates still apply.
 `--allow-dependency-drift` records acknowledgement only; it does not permit
-classification across incompatible dependencies or waive release acceptance.
+classification across incompatible dependencies or waive identity checks.
 `scripts/verify_perf_gates.py` rejects independent pytest/Criterion summaries
-as release pairing evidence. See the
-[release command and retained evidence](python-release.md#performance-acceptance-and-failure-evidence)
-for execution and failure inspection.
+as paired evidence.
 
 ## Reports and failure behavior
 
@@ -424,10 +423,9 @@ is explicitly shown rather than invented. The complete Markdown/JSON remains
 an artifact if it exceeds GitHub's step-summary size limit; overflow fails
 instead of silently truncating rows.
 
-Release CI collects the Python, Rust core, and stream join suites in parallel.
-Each suite writes `results.json` and `summary.md`; the acceptance job downloads
-all three artifacts, checks their sealed release manifests, Rust build
-provenance, inventories, and raw pairs, and writes the merged verdict. Each
+The standalone collector writes `results.json` and `summary.md` for each suite.
+Its merge command checks sealed release manifests, Rust build provenance,
+inventories, and raw pairs, then writes the combined verdict. Each
 Rust build records its binary SHA-256 in `binary-sha256.json`; suite reports
 retain the same digest so the merge can check every case seal against its
 build. Each case retains `pairs.json`,
@@ -436,9 +434,7 @@ raw pytest/Criterion data, and a `failure.json` when an invocation fails.
 Command records beside logs include arguments, working directory, thread
 settings, exit code, and errors. Build records, dependency provenance, and
 harness hashes remain available with collected samples when a later step
-fails. Release CI's always-run summary and 30-day artifact also record
-performance/security/soak outcomes and why a downstream step was skipped;
-see [release failure evidence](python-release.md#performance-acceptance-and-failure-evidence).
+fails. The Python publishing workflow does not run this collector.
 
 ## Local reproduction
 

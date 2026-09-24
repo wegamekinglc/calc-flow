@@ -188,6 +188,29 @@ class VerifyPythonReleaseTests(unittest.TestCase):
         )
         self.assertTrue(all("  calc_flow" in line for line in manifest))
 
+    def test_core_only_release_validates_the_complete_python_artifact_set(self) -> None:
+        for target in sorted(CORE_TARGETS):
+            for python_tag in ("cp39", "cp313"):
+                self._core_wheel(target, python_tag=python_tag)
+        self._sdist()
+
+        manifest = validate_release(self.directory, root=ROOT, core_only=True)
+
+        self.assertEqual(len(manifest), 11)
+        self.assertEqual(
+            manifest, sorted(manifest, key=lambda line: line.split("  ", 1)[1])
+        )
+
+    def test_core_only_release_rejects_non_core_artifacts(self) -> None:
+        for target in sorted(CORE_TARGETS):
+            for python_tag in ("cp39", "cp313"):
+                self._core_wheel(target, python_tag=python_tag)
+        self._sdist()
+        self._studio_wheel()
+
+        with self.assertRaisesRegex(ValueError, "unexpected release artifacts"):
+            validate_release(self.directory, root=ROOT, core_only=True)
+
     def test_release_requires_legacy_and_modern_abi3_wheels(self) -> None:
         for target in sorted(CORE_TARGETS):
             self._core_wheel(target)
