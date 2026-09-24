@@ -5689,6 +5689,12 @@ fn validate_checkpoint_soak_report(
     let preflight_micros = report
         .sampling_started_micros
         .checked_sub(report.generation_started_micros);
+    // Standard evidence has a strict startup budget; smoke only has a process watchdog.
+    let maximum_preflight = match plan.mode {
+        CheckpointSoakProcessMode::Smoke => CHECKPOINT_SOAK_SMOKE_GENERATION_TIMEOUT,
+        CheckpointSoakProcessMode::Standard => MAX_CHECKPOINT_SOAK_CHILD_PREFLIGHT,
+    };
+    let maximum_preflight_micros = u64::try_from(maximum_preflight.as_micros()).unwrap();
     let expected_cause = if plan.final_generation {
         "natural_end"
     } else {
@@ -5707,9 +5713,7 @@ fn validate_checkpoint_soak_report(
         || report.sample_start != plan.sample_start
         || report.sample_end != plan.sample_end
         || report.generation_started_micros != plan.parent_launch_offset_micros
-        || !preflight_micros.is_some_and(|elapsed| {
-            elapsed <= u64::try_from(MAX_CHECKPOINT_SOAK_CHILD_PREFLIGHT.as_micros()).unwrap()
-        })
+        || preflight_micros.is_none_or(|elapsed| elapsed > maximum_preflight_micros)
         || report.generation_finished_micros <= report.sampling_started_micros
         || report.terminal_cause != expected_cause
         || report.source_open_events != 2
@@ -5726,7 +5730,8 @@ fn validate_checkpoint_soak_report(
             "checkpoint soak child report identity, exit, or terminal bounds are invalid: \
              exit={exit_code}, generation={}, cause={}, opens={}, source_closes={}, \
              sink_closes={}, failed={}, manifests={}, state_bytes={}, tasks={}, charged_edges={}, \
-             registries={:?}",
+             registries={:?}, mode={:?}, preflight_micros={preflight_micros:?}, \
+             maximum_preflight_micros={maximum_preflight_micros}",
             report.generation,
             report.terminal_cause,
             report.source_open_events,
@@ -5738,6 +5743,7 @@ fn validate_checkpoint_soak_report(
             report.terminal_tasks,
             report.terminal_charged_edges,
             report.terminal_registries,
+            plan.mode,
         )));
     }
     if plan.final_generation && report.temporary_artifacts != 0 {
@@ -7525,6 +7531,27 @@ fn checkpoint_soak_cadence_starts_after_child_startup() {
 
     delayed.sampling_started_micros += 1;
     assert!(validate_checkpoint_soak_report(&plan, &delayed, 0).is_err());
+}
+
+#[test]
+fn checkpoint_soak_smoke_allows_slow_preflight_with_ordered_timestamps() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut plan = checkpoint_soak_process_plans(
+        directory.path(),
+        &"a".repeat(40),
+        &"b".repeat(64),
+        CheckpointSoakProcessMode::Smoke,
+    )
+    .remove(0);
+    bind_checkpoint_soak_parent_launch(&mut plan, Duration::from_micros(1)).unwrap();
+    let mut report = checkpoint_soak_process_report_fixture(&plan, 10_000);
+    report.sampling_started_micros += 61_000_000;
+    report.generation_finished_micros += 61_000_000;
+
+    validate_checkpoint_soak_report(&plan, &report, 0).unwrap();
+
+    report.sampling_started_micros = 0;
+    assert!(validate_checkpoint_soak_report(&plan, &report, 0).is_err());
 }
 
 #[test]
