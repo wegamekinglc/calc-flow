@@ -7,6 +7,25 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
+    def test_wheel_inspection_keeps_platform_checks_and_scopes_helper_tests(
+        self,
+    ) -> None:
+        text = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        wheels = text.split("  wheels:\n", 1)[1].split("  sdist:\n", 1)[0]
+        self.assertEqual(wheels.count("python scripts/inspect_wheel.py core-wheel"), 1)
+        self.assertEqual(wheels.count("python -m unittest discover -s scripts"), 1)
+        helper = wheels.split("      - name: Verify release helpers\n", 1)[1].split(
+            "      - name: Inspect wheel contents\n", 1
+        )[0]
+        self.assertIn("matrix.os == 'ubuntu-latest'", helper)
+        self.assertIn("matrix.target == 'x86_64'", helper)
+        self.assertIn("matrix.python_tag == 'cp313'", helper)
+        inspector = wheels.split("      - name: Inspect wheel contents\n", 1)[1].split(
+            "      - name: Smoke native wheel\n", 1
+        )[0]
+        self.assertNotIn("if:", inspector)
+        self.assertNotIn("unittest", inspector)
+
     def test_release_collects_three_suites_in_parallel_before_merging_verdict(self):
         text = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         collection = text.split("  performance-collection:\n", 1)[1].split(

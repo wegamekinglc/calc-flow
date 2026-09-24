@@ -304,6 +304,17 @@ class InspectWheelTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "forbidden crate entry"):
             inspect_crate(crate)
 
+    def test_accepts_crate_source_unit_test_modules(self) -> None:
+        crate = self._archive_with(
+            "calc-flow-2.0.0.crate",
+            "calc-flow-2.0.0/LICENSE",
+            "calc-flow-2.0.0/Cargo.toml",
+            "calc-flow-2.0.0/src/lib.rs",
+            "calc-flow-2.0.0/src/operator/cross_section/tests/late.rs",
+        )
+
+        self.assertEqual(inspect_crate(crate), 4)
+
     def test_rejects_repository_only_symbolic_plans_from_crate(self) -> None:
         crate = self._archive_with(
             "calc-flow-2.0.0.crate",

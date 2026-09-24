@@ -304,10 +304,12 @@ jobs:
           target: ${{ matrix.target }}
           args: --release --locked --out dist --find-interpreter --features legacy-python
           manylinux: ${{ matrix.manylinux }}
+      - name: Verify release helpers
+        if: matrix.os == 'ubuntu-latest' && matrix.target == 'x86_64' && matrix.python_tag == 'cp313'
+        run: python -m unittest discover -s scripts -p 'test_*.py' -t .
       - name: Inspect wheel contents
         shell: bash
         run: |
-          python -m unittest discover -s scripts -p 'test_*.py' -t .
           python scripts/inspect_wheel.py core-wheel dist/*.whl
       - name: Smoke native wheel
         if: matrix.smoke

@@ -173,9 +173,7 @@ def inspect_crate(crate: Path) -> int:
     if missing:
         raise ValueError(f"{crate}: missing crate entries: {sorted(map(str, missing))}")
     for path in relative:
-        if "tests" in (part.lower() for part in path.parts) or _is_repository_guidance(
-            path
-        ):
+        if path.parts[0].lower() == "tests" or _is_repository_guidance(path):
             raise ValueError(f"{crate}: forbidden crate entry: {path}")
     return len(names)
 
