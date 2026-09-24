@@ -5949,10 +5949,10 @@ fn validate_checkpoint_soak_timeline(
     for ((plan, report), timing) in plans.iter().zip(reports).zip(parent_timings) {
         if timing.generation != plan.generation
             || timing.launch_micros != report.generation_started_micros
-            || !timing
+            || timing
                 .finish_micros
                 .checked_sub(report.generation_finished_micros)
-                .is_some_and(|overhead| overhead <= maximum_process_overhead)
+                .is_none_or(|overhead| overhead > maximum_process_overhead)
         {
             return Err(checkpoint_soak_process_error(
                 "checkpoint soak parent timing does not bound the child report",
