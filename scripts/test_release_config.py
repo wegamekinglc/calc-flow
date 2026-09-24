@@ -314,6 +314,19 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn("--interpreter python --out target/compat-wheel", workflow)
         self.assertIn("--features pyo3/abi3-py313", workflow)
 
+    def test_pr_ci_core_wheel_uses_explicit_abi3_feature(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
+        package = workflow.split("  package:\n", 1)[1].split("  studio-package:\n", 1)[
+            0
+        ]
+
+        self.assertIn("uv build --sdist", package)
+        self.assertIn(
+            "uv build --wheel --config-setting 'build-args=--features pyo3/abi3-py313'",
+            package,
+        )
+        self.assertNotIn("\n          uv build\n", package)
+
     def test_python_release_verifies_exact_artifacts_before_oidc_publish(self) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
 

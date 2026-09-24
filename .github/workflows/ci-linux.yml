@@ -488,7 +488,8 @@ jobs:
       - name: Build wheel and source distribution
         run: |
           python -m unittest discover -s scripts -p 'test_*.py' -t .
-          uv build
+          uv build --sdist
+          uv build --wheel --config-setting 'build-args=--features pyo3/abi3-py313'
           python scripts/inspect_wheel.py core-wheel dist/calc_flow_python-*.whl
           python scripts/inspect_wheel.py sdist dist/calc_flow_python-*.tar.gz
       - name: Install and execute the wheel in isolation

@@ -751,7 +751,7 @@ mod tests {
             let locals = PyDict::new(py);
             py.run(
                 c_str!(
-                    "import datetime\nvalid = datetime.datetime(\n    2027, 4, 5, 6, 7, 8, 123456,\n    tzinfo=datetime.timezone(datetime.timedelta(0), 'zero'),\n)\nnaive = datetime.datetime(2027, 4, 5)\nnonzero = datetime.datetime(\n    2027, 4, 5,\n    tzinfo=datetime.timezone(datetime.timedelta(hours=1)),\n)\nclass BrokenOffset(datetime.datetime):\n    def utcoffset(self):\n        raise RuntimeError('broken offset')\nbroken = BrokenOffset(2027, 4, 5, tzinfo=datetime.UTC)\nclass InvalidOffset(datetime.datetime):\n    def utcoffset(self):\n        return object()\ninvalid_offset = InvalidOffset(2027, 4, 5, tzinfo=datetime.UTC)"
+                    "import datetime\nvalid = datetime.datetime(\n    2027, 4, 5, 6, 7, 8, 123456,\n    tzinfo=datetime.timezone(datetime.timedelta(0), 'zero'),\n)\nnaive = datetime.datetime(2027, 4, 5)\nnonzero = datetime.datetime(\n    2027, 4, 5,\n    tzinfo=datetime.timezone(datetime.timedelta(hours=1)),\n)\nclass BrokenOffset(datetime.datetime):\n    def utcoffset(self):\n        raise RuntimeError('broken offset')\nbroken = BrokenOffset(2027, 4, 5, tzinfo=datetime.timezone.utc)\nclass InvalidOffset(datetime.datetime):\n    def utcoffset(self):\n        return object()\ninvalid_offset = InvalidOffset(2027, 4, 5, tzinfo=datetime.timezone.utc)"
                 ),
                 Some(&locals),
                 None,
@@ -787,7 +787,9 @@ mod tests {
                 round_trip.getattr("tzinfo").unwrap().is(py
                     .import("datetime")
                     .unwrap()
-                    .getattr("UTC")
+                    .getattr("timezone")
+                    .unwrap()
+                    .getattr("utc")
                     .unwrap())
             );
             assert_eq!(
@@ -813,7 +815,14 @@ mod tests {
             let datetime = py.import("datetime").unwrap();
             let kwargs = PyDict::new(py);
             kwargs
-                .set_item("tzinfo", datetime.getattr("UTC").unwrap())
+                .set_item(
+                    "tzinfo",
+                    datetime
+                        .getattr("timezone")
+                        .unwrap()
+                        .getattr("utc")
+                        .unwrap(),
+                )
                 .unwrap();
             let deadline = datetime
                 .getattr("datetime")
