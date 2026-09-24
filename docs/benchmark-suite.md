@@ -16,7 +16,7 @@ On this page:
 - [ASOF settlement measurements](#asof-settlement-measurements)
 - [Join materialization measurements](#join-materialization-measurements)
 - [Revision comparisons and regression gate](#revision-comparisons-and-regression-gate)
-- [Standalone paired measurements](#standalone-paired-measurements)
+- [Paired release and standalone measurements](#paired-release-and-standalone-measurements)
 - [Reports and failure behavior](#reports-and-failure-behavior)
 - [Local reproduction](#local-reproduction)
 - [Performance-plan diagnostics](#performance-plan-diagnostics)
@@ -356,17 +356,17 @@ documents keep their real differing workload identities, and the applied
 migrations are listed in the shard's JSON artifact. Undeclared or mismatched
 workload changes still fail closed, now scoped to the changed target.
 
-## Standalone paired measurements
+## Paired release and standalone measurements
 
-The optional `python -m scripts.release_performance` command measures ordinary
-Python cases and the Rust `core` and `stream_join_perf` targets outside the
-Python package release workflow. It builds and installs sealed
+The Python release workflow runs `python -m scripts.release_performance` for
+ordinary Python cases and the Rust `core` and `stream_join_perf` targets. The
+same collector can run manually. It builds and installs sealed
 baseline/candidate wheels separately and records the loaded
 Python native hash and each Rust benchmark binary hash. The formal baseline
 and candidate commits must differ; `scripts/release_baseline.py` selects the
 baseline for a manual comparison.
 
-The standalone Python collector runs the current candidate's benchmark
+The Python collector runs the current candidate's benchmark
 declarations against both sealed native builds at `overhead` scale. Rust runs each
 revision's compiled cases with the compiled-dependency and target-scoped
 workload identities described above. Both sides must have matching, nonempty,
@@ -423,7 +423,7 @@ is explicitly shown rather than invented. The complete Markdown/JSON remains
 an artifact if it exceeds GitHub's step-summary size limit; overflow fails
 instead of silently truncating rows.
 
-The standalone collector writes `results.json` and `summary.md` for each suite.
+The collector writes `results.json` and `summary.md` for each suite.
 Its merge command checks sealed release manifests, Rust build provenance,
 inventories, and raw pairs, then writes the combined verdict. Each
 Rust build records its binary SHA-256 in `binary-sha256.json`; suite reports
@@ -434,7 +434,8 @@ raw pytest/Criterion data, and a `failure.json` when an invocation fails.
 Command records beside logs include arguments, working directory, thread
 settings, exit code, and errors. Build records, dependency provenance, and
 harness hashes remain available with collected samples when a later step
-fails. The Python publishing workflow does not run this collector.
+fails. Release CI merges the three suite artifacts and requires a valid verdict
+before a tag can publish.
 
 ## Local reproduction
 

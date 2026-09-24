@@ -331,7 +331,11 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn('git cat-file -t "${GITHUB_REF}"', workflow)
         self.assertIn("  wheel-python-versions:\n", workflow)
         self.assertIn("  verify-core-artifacts:\n", workflow)
-        self.assertIn("needs: [verify-core-artifacts, wheel-python-versions]", workflow)
+        self.assertIn(
+            "needs: [verify-core-artifacts, wheel-python-versions, "
+            "acceptance-gates, soak-gates]",
+            workflow,
+        )
         self.assertEqual(workflow.count("uses: pypa/gh-action-pypi-publish@"), 1)
         self.assertEqual(workflow.count("id-token: write"), 1)
         self.assertIn("name: pypi\n", workflow)
@@ -341,7 +345,7 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn(
             "if: github.event_name == 'push' && github.ref_type == 'tag'", workflow
         )
-        self.assertNotIn("initial-baseline:", workflow)
+        self.assertIn("initial-baseline:", workflow)
         self.assertNotIn("skip-existing", workflow)
 
     def test_python_release_guide_covers_rehearsal_and_trusted_publishers(self) -> None:
