@@ -7,8 +7,8 @@ This page describes the Python application API and its contracts; the full
 expression catalog has its own [reference](symbolic-api.md).
 
 The `calc-flow-python` package exposes Python expressions and Arrow
-execution over the internal Rust runtime through PyO3. Python 3.13 or newer
-is required. This page describes version `2026.9.23` in the current checkout;
+execution over the internal Rust runtime through PyO3. CPython 3.9 or newer
+is required. This page describes version `2026.9.24` in the current checkout;
 use a source build when the published package has a different version.
 
 On this page:
@@ -655,13 +655,13 @@ Use the frozen native `ExecutionOptions` value to attach run-scoped settings
 and an absolute UTC deadline:
 
 ```python
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from calc_flow import ExecutionOptions
 
 options = ExecutionOptions(
     settings={"request": {"tenant": "demo", "attempt": 1}},
-    deadline=datetime.now(UTC) + timedelta(seconds=30),
+    deadline=datetime.now(timezone.utc) + timedelta(seconds=30),
 )
 result = plan.execute({"input": batch}, options=options)
 ```
@@ -684,7 +684,7 @@ any nested caller container cannot change the options. Every
 observation cannot change a later read or execution. Omitting `settings`
 creates an empty mapping, and passing `None` explicitly has the same meaning.
 `deadline` accepts `None` or any valid timezone-aware `datetime`. Calc Flow
-normalizes every accepted offset to `datetime.UTC` and preserves
+normalizes every accepted offset to `datetime.timezone.utc` and preserves
 microseconds; it rejects naive, invalid, and out-of-range UTC conversions with
 fixed redacted errors.
 
@@ -739,7 +739,7 @@ does not populate execution settings or a deadline in the worker.
 
 ```python
 import asyncio
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pyarrow as pa
 
@@ -749,7 +749,7 @@ import calc_flow as cf
 async def run() -> None:
     options = cf.ExecutionOptions(
         settings={"request": {"source": "async-example"}},
-        deadline=datetime.now(UTC) + timedelta(seconds=30),
+        deadline=datetime.now(timezone.utc) + timedelta(seconds=30),
     )
     heartbeat = asyncio.create_task(asyncio.sleep(0, result="event loop remained live"))
     execution = asyncio.create_task(

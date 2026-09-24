@@ -1593,13 +1593,24 @@ fn set_exception_property(
     namespace.set_item(name, property.call1((getter,))?)
 }
 
+fn is_exception_storage_name(name: &Bound<'_, PyAny>) -> PyResult<bool> {
+    #[cfg(any(feature = "legacy-python", not(Py_3_13)))]
+    {
+        Ok(name.extract::<String>()? == NATIVE_EXCEPTION_STORAGE)
+    }
+    #[cfg(all(not(feature = "legacy-python"), Py_3_13))]
+    {
+        Ok(name.extract::<&str>()? == NATIVE_EXCEPTION_STORAGE)
+    }
+}
+
 fn exception_setattr(py: Python<'_>) -> PyResult<Bound<'_, PyCFunction>> {
     PyCFunction::new_closure(py, None, None, move |args, _kwargs| {
         let instance = args.get_item(0)?.unbind();
         PyCFunction::new_closure(args.py(), None, None, move |args, _kwargs| {
             let instance = instance.bind(args.py());
             let name = args.get_item(0)?;
-            if name.extract::<&str>()? == NATIVE_EXCEPTION_STORAGE
+            if is_exception_storage_name(&name)?
                 && instance.getattr(NATIVE_EXCEPTION_STORAGE).is_ok()
             {
                 return Err(pyo3::exceptions::PyAttributeError::new_err(
@@ -1623,7 +1634,7 @@ fn exception_delattr(py: Python<'_>) -> PyResult<Bound<'_, PyCFunction>> {
         PyCFunction::new_closure(args.py(), None, None, move |args, _kwargs| {
             let instance = instance.bind(args.py());
             let name = args.get_item(0)?;
-            if name.extract::<&str>()? == NATIVE_EXCEPTION_STORAGE {
+            if is_exception_storage_name(&name)? {
                 return Err(pyo3::exceptions::PyAttributeError::new_err(
                     "native safe exception backing is read-only",
                 ));

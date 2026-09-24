@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
 from datetime import timedelta
 from typing import Literal
 
+from calc_flow._compat import dataclass
 from calc_flow.join_spec import timedelta_micros
 
 _MAX_SAFE_INTEGER = 9_007_199_254_740_991

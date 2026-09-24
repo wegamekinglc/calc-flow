@@ -148,7 +148,8 @@ Ordinary feature work must not rewrite either team definition.
 
 ### Python
 
-- Target Python 3.13 or newer, use four spaces and double quotes, and retain
+- Target CPython 3.9 or newer for `calc-flow-python`; Studio development uses
+  Python 3.13 or newer. Use four spaces and double quotes, and retain
   `from __future__ import annotations`.
 - Use built-in type syntax such as `list[str]`, `dict[str, object]`, and
   `A | B`.
@@ -339,10 +340,9 @@ example checks that fit the requested scope, without building native code merely
 to validate prose.
 
 Full regression gates belong to GitHub CI. Routine benchmark measurements run
-independently at 06:00 and 18:00 Asia/Shanghai every day; release acceptance
-performance gates run in release CI. The complete commands remain references
-for CI and explicitly scoped full verification. Keep the combined Rust 90% line
-floor (including connector services) and independent
+independently at 06:00 and 18:00 Asia/Shanghai every day. The complete commands
+remain references for CI and explicitly scoped full verification. Keep the
+combined Rust 90% line floor (including connector services) and independent
 Studio backend 85% floor; a skipped local coverage run does not prove either gate.
 Expand local full testing only for an explicit user request, reproduction or
 diagnosis of a CI failure, or a clearly high-risk change without CI coverage.
@@ -359,8 +359,8 @@ snapshot. Do not wait, watch, poll, or sleep/retry unless the user or acceptance
 criteria explicitly require the final CI result. Pending or absent CI can be
 reported in a completed handoff; it is not green or merge-ready. Report failed,
 cancelled, and inconclusive checks accurately. Required test, coverage, and
-cross-platform checks block merge when failed or unresolved. Release
-performance gates block release when failed or unresolved.
+cross-platform checks block merge when failed or unresolved. The Python package
+release requires its artifact verification and post-build unit tests to pass.
 The final specialist review remains required; merging also requires explicit
 authority and green required checks.
 
@@ -374,7 +374,8 @@ git diff --exit-code -- \
 git diff --check
 ```
 
-Release CI additionally builds the core wheel, source distribution, crate, and
-Studio wheel; inspects the artifacts; installs wheels in clean environments; and
-runs the core/Studio smoke checks. Select local release verification under the
-same scope and exception rules above.
+The Python release workflow builds and verifies the core wheels and source
+distribution, tests installed Linux wheels across supported Python versions,
+and publishes only the core package on release tags. Benchmarks, soaks, audits,
+crate and Studio packaging, and documentation checks do not run in that workflow.
+Select local release verification under the same scope and exception rules above.

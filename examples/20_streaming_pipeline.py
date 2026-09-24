@@ -36,11 +36,15 @@ async def main() -> None:
     )
     output = source.pipe(features).sql("SELECT delta, mean_delta FROM input")
     tables = []
-    async with asyncio.timeout(5), output.stream(batches()) as results:
-        async for table in results:
-            tables.append(table)
-            if sum(batch.num_rows for batch in tables) >= 3:
-                break
+
+    async def collect() -> None:
+        async with output.stream(batches()) as results:
+            async for table in results:
+                tables.append(table)
+                if sum(batch.num_rows for batch in tables) >= 3:
+                    break
+
+    await asyncio.wait_for(collect(), timeout=5)
     actual = pa.concat_tables(tables).to_pydict()
     if actual != {"delta": [None, 2.0, 3.0], "mean_delta": [None, 2.0, 2.5]}:
         raise RuntimeError(actual)

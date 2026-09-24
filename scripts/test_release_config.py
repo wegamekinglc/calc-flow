@@ -110,7 +110,6 @@ class ReleaseConfigTests(unittest.TestCase):
         for path in (
             "AGENTS.md",
             ".github/workflows/ci-linux.yml",
-            ".github/workflows/release.yml",
             "scripts/verify_security_gates.py",
         ):
             with self.subTest(path=path):
@@ -187,6 +186,8 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertEqual(package["project"]["version"], version)
         self.assertEqual(package["project"]["name"], "calc-flow-python")
         self.assertEqual(package["tool"]["maturin"]["module-name"], "calc_flow._native")
+        self.assertNotIn("features", package["tool"]["maturin"])
+        self.assertIsInstance(binding["dependencies"]["pyo3"], str)
         self.assertEqual(studio["project"]["version"], version)
         self.assertIn(studio_requirement, studio["project"]["dependencies"])
         self.assertEqual(frontend["version"], version)
@@ -205,7 +206,7 @@ class ReleaseConfigTests(unittest.TestCase):
         openapi = json.loads((ROOT / "web-ui/openapi.json").read_text(encoding="utf-8"))
         self.assertEqual(openapi["info"]["version"], version)
 
-    def test_release_workflows_use_calver_bounds_and_preserve_gates(self) -> None:
+    def test_ci_uses_calver_bounds_and_release_uses_calver_tags(self) -> None:
         release_text = "\n".join(
             (ROOT / path).read_text(encoding="utf-8")
             for path in (
@@ -214,12 +215,12 @@ class ReleaseConfigTests(unittest.TestCase):
             )
         )
         self.assertNotIn(">=2.0.0a1", release_text)
-        for name in (".github/workflows/ci-linux.yml", ".github/workflows/release.yml"):
-            workflow = (ROOT / name).read_text(encoding="utf-8")
-            with self.subTest(workflow=name):
-                self.assertNotIn('">=5.0.0"', workflow)
-                self.assertNotIn('"<6"', workflow)
-                self.assertIn("int(version.split('.')[0]) + 1", workflow)
+        ci_workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn('">=5.0.0"', ci_workflow)
+        self.assertNotIn('"<6"', ci_workflow)
+        self.assertIn("int(version.split('.')[0]) + 1", ci_workflow)
 
         release_workflow = (ROOT / ".github/workflows/release.yml").read_text(
             encoding="utf-8"
@@ -227,11 +228,7 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn('- "calc-flow-python-v*"', release_workflow)
         self.assertNotIn('- "v5.*"', release_workflow)
         self.assertNotIn('- "v4.*"', release_workflow)
-        self.assertIn('assert "/api/v3/catalog"', release_workflow)
-        self.assertIn("python -m scripts.release_performance", release_workflow)
-        self.assertIn('baseline_sha="$(git rev-parse', release_workflow)
-        self.assertIn('candidate_sha="$(git rev-parse', release_workflow)
-        self.assertIn('test "${baseline_sha}" != "${candidate_sha}"', release_workflow)
+        self.assertIn("python scripts/verify_python_release.py", release_workflow)
 
     def test_python_projects_ship_license_files(self) -> None:
         for project in (ROOT, ROOT / "web-ui/backend"):
@@ -302,56 +299,65 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertEqual(action_count, 3)
         self.assertEqual(workflow.count("maturin-version: v1.14.1"), action_count)
         self.assertEqual(workflow.count('rust-toolchain: "1.88.0"'), action_count)
+        self.assertIn("--find-interpreter --features pyo3/abi3-py313", workflow)
+        self.assertIn("--find-interpreter --features legacy-python", workflow)
 
-    def test_python_release_verifies_exact_artifacts_before_oidc_publish(self) -> None:
+    def test_pr_ci_checks_python_39_source_and_314_abi3_wheel(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
+        self.assertIn("  python-compatibility:\n", workflow)
+        self.assertIn("python-version: ['3.9', '3.14']", workflow)
+        self.assertIn("--interpreter python --out target/compat-wheel", workflow)
+        self.assertIn("--features pyo3/abi3-py313", workflow)
+
+    def test_pr_ci_core_wheel_uses_explicit_abi3_feature(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
+        package = workflow.split("  package:\n", 1)[1].split("  studio-package:\n", 1)[
+            0
+        ]
+
+        self.assertIn("uv build --sdist", package)
+        self.assertIn(
+            "uv build --wheel --config-setting 'build-args=--features pyo3/abi3-py313'",
+            package,
+        )
+        self.assertNotIn("\n          uv build\n", package)
+
+    def test_python_release_publishes_core_after_installed_wheel_tests(self) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
 
         self.assertIn("  prepare-python-release:\n", workflow)
         self.assertIn("python scripts/verify_python_release.py", workflow)
         self.assertIn("git fetch --no-tags origin main", workflow)
         self.assertIn('git cat-file -t "${GITHUB_REF}"', workflow)
-        self.assertIn("  verify-python-release:\n", workflow)
-        self.assertIn("name: verified-python-release", workflow)
-        self.assertEqual(workflow.count("sha256sum --check release-manifest.txt"), 1)
+        self.assertIn("  wheel-python-versions:\n", workflow)
+        self.assertIn("  verify-core-artifacts:\n", workflow)
+        self.assertIn("needs: [verify-core-artifacts, wheel-python-versions]", workflow)
         self.assertEqual(workflow.count("uses: pypa/gh-action-pypi-publish@"), 1)
         self.assertEqual(workflow.count("id-token: write"), 1)
         self.assertIn("name: pypi\n", workflow)
-        self.assertNotIn("name: pypi-studio\n", workflow)
         self.assertIn("url: https://pypi.org/project/calc-flow-python/", workflow)
-        self.assertNotIn("  publish-python-studio:\n", workflow)
-        self.assertIn("packages-dir: release-dist/core", workflow)
-        self.assertNotIn("packages-dir: release-dist/studio", workflow)
+        self.assertIn("packages-dir: dist", workflow)
+        self.assertNotIn("  studio-wheel:\n", workflow)
         self.assertIn(
             "if: github.event_name == 'push' && github.ref_type == 'tag'", workflow
         )
-        self.assertIn("python scripts/release_baseline.py", workflow)
-        self.assertIn("initial-baseline:", workflow)
+        self.assertNotIn("initial-baseline:", workflow)
         self.assertNotIn("skip-existing", workflow)
-
-        verify_job = workflow.split("  verify-python-release:\n", 1)[1].split(
-            "  publish-python-core:\n", 1
-        )[0]
-        self.assertIn(
-            "uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1",
-            verify_job,
-        )
-        self.assertIn('python-version: "3.13"', verify_job)
 
     def test_python_release_guide_covers_rehearsal_and_trusted_publishers(self) -> None:
         guide = (ROOT / "docs/python-release.md").read_text(encoding="utf-8")
 
         for expected in (
-            "python scripts/build_python_release.py --clean",
-            "python scripts/verify_python_release.py",
             "`pypi`",
             "Studio is not uploaded",
             "release.yml",
             "git tag -a calc-flow-python-v<version>",
             "PyPI versions and files are immutable",
+            "post-build unit tests",
         ):
             self.assertIn(expected, guide)
 
-        release_table = guide.split("tagged release run:\n\n", 1)[1].split("\n\n", 1)[0]
+        release_table = guide.split("release\nrun:\n\n", 1)[1].split("\n\n", 1)[0]
         pipe_positions = {
             tuple(index for index, character in enumerate(line) if character == "|")
             for line in release_table.splitlines()
@@ -548,20 +554,15 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn("name: Download core distributions", studio_package)
         self.assertNotIn("\n          uv build\n", studio_package)
 
-    def test_ci_and_release_execute_script_unit_tests(self) -> None:
+    def test_ci_executes_script_unit_tests(self) -> None:
         command = "python -m unittest discover -s scripts -p 'test_*.py' -t ."
         windows_test = (
             "scripts.test_run_rust_tests.RustTestHarnessTests."
             "test_timeout_cleans_up_the_test_binary_process_tree_on_windows"
         )
 
-        for path in (
-            ".github/workflows/ci-linux.yml",
-            ".github/workflows/release.yml",
-        ):
-            with self.subTest(path=path):
-                workflow = (ROOT / path).read_text(encoding="utf-8")
-                self.assertIn(command, workflow)
+        workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
+        self.assertIn(command, workflow)
 
         windows_ci = (ROOT / ".github/workflows/ci-windows.yml").read_text(
             encoding="utf-8"
@@ -730,24 +731,7 @@ class ReleaseConfigTests(unittest.TestCase):
         ):
             self.assertIn(case, core)
 
-    def test_release_budget_preserves_cold_builds_and_full_soaks(self) -> None:
-        release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
-        collection = release.split("  performance-collection:\n", 1)[1].split(
-            "  acceptance-gates:\n", 1
-        )[0]
-        soak_job = release.split("  soak-gates:\n", 1)[1].split("  crate:\n", 1)[0]
-
-        self.assertIn("    timeout-minutes: 360\n", collection)
-        for soak in (
-            "twenty_minute_two_source_slow_sink",
-            "twenty_minute_epoch_checkpoint_restart",
-        ):
-            with self.subTest(soak=soak):
-                self.assertIn(f"runtime::streaming::soak::{soak}", soak_job)
-        self.assertEqual(soak_job.count("-- --ignored --exact --nocapture"), 3)
-        self.assertNotIn("continue-on-error:", collection + soak_job)
-
-    def test_benchmark_and_release_isolate_stream_lifecycle_evidence(self) -> None:
+    def test_benchmark_suite_isolates_stream_lifecycle_evidence(self) -> None:
         from scripts.benchmark_suite.catalog import shards
         from scripts.benchmark_suite.legacy import pytest_arguments
 
@@ -758,11 +742,6 @@ class ReleaseConfigTests(unittest.TestCase):
         )
         self.assertIn("scripts/verify_stream_lifecycle_evidence.py", legacy)
 
-        release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
-        exact_gate = release.split(
-            "      - name: Collect paired exact-ref ${{ matrix.suite }} evidence\n", 1
-        )[1].split("      - name:", 1)[0]
-        self.assertIn("python -m scripts.release_performance", exact_gate)
         from scripts.release_performance import LIFECYCLE, TARGETS
 
         self.assertIn("stream_join_perf", TARGETS)
@@ -770,18 +749,21 @@ class ReleaseConfigTests(unittest.TestCase):
             LIFECYCLE,
             "benchmarks/test_symbolic_baseline.py::test_stream_window_checkpoint_and_recovery",
         )
-        self.assertIn("allow-dependency-drift:", release)
-        self.assertIn("inputs['allow-dependency-drift']", exact_gate)
-        self.assertIn("--allow-dependency-drift", exact_gate)
-        self.assertIn('"${perf_gate_extra_args[@]}"', exact_gate)
 
     def test_python_package_excludes_unsupported_pyarrow_25(self) -> None:
-        for project in (ROOT, ROOT / "web-ui/backend"):
-            with self.subTest(project=project):
-                package = tomllib.loads(
-                    (project / "pyproject.toml").read_text(encoding="utf-8")
-                )
-                self.assertIn("pyarrow>=24.0.0,<25", package["project"]["dependencies"])
+        core = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        studio = tomllib.loads(
+            (ROOT / "web-ui/backend/pyproject.toml").read_text(encoding="utf-8")
+        )
+        self.assertIn(
+            "pyarrow>=21.0.0,<22; python_version < '3.10'",
+            core["project"]["dependencies"],
+        )
+        self.assertIn(
+            "pyarrow>=24.0.0,<25; python_version >= '3.10'",
+            core["project"]["dependencies"],
+        )
+        self.assertIn("pyarrow>=24.0.0,<25", studio["project"]["dependencies"])
 
     def test_final_release_error_docs_do_not_claim_alpha_status(self) -> None:
         stale_claims = {

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
+from calc_flow._compat import dataclass
 from calc_flow.symbolic import errors
 from calc_flow.symbolic.analyzer import (
     _ROW_LOCAL_PRIMITIVES,

@@ -8,10 +8,10 @@ can see through that boundary and no Python object owns runtime window state.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 from hashlib import sha256
 from typing import TYPE_CHECKING
 
+from calc_flow._compat import dataclass
 from calc_flow.symbolic import errors
 from calc_flow.symbolic.analyzer import _Analyzer, _schema_fields
 from calc_flow.symbolic.expr import TableExpr, table_input

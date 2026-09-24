@@ -53,14 +53,15 @@ def test_collection_binds_logical_names_across_distinct_inputs_and_shared_output
 
 def test_async_collection_snapshots_mapping_and_forwards_options(monkeypatch):
     import asyncio
-    from datetime import UTC, datetime, timedelta
+    from datetime import datetime, timedelta, timezone
 
     data = pa.table({"x": [3]})
     t = cf.table_input("quotes", schema=data.schema)
     p = cf.Program("p", outputs={"answer": t.select(v=t["x"] + 1)})
     inputs = {"quotes": data}
     options = cf.ExecutionOptions(
-        settings={"label": "public"}, deadline=datetime.now(UTC) + timedelta(minutes=1)
+        settings={"label": "public"},
+        deadline=datetime.now(timezone.utc) + timedelta(minutes=1),
     )
     seen = []
     execute = cf.BatchExecutionPlan.execute_async
@@ -211,12 +212,14 @@ def _rolling_program():
 @pytest.mark.parametrize("temporal", [False, True], ids=["compute", "ordered-collect"])
 def test_convenience_forwards_runtime_and_options(asynchronous, temporal, monkeypatch):
     import asyncio
-    from datetime import UTC, datetime, timedelta
+    from datetime import datetime, timedelta, timezone
 
     data, program = _rolling_program()
     expression = program.outputs[0][1]
     runtime = cf.Runtime()
-    options = cf.ExecutionOptions(deadline=datetime.now(UTC) + timedelta(minutes=1))
+    options = cf.ExecutionOptions(
+        deadline=datetime.now(timezone.utc) + timedelta(minutes=1)
+    )
     runtimes = []
     executions = []
     compile_project = cf.Runtime.compile_batch_project
@@ -379,12 +382,14 @@ def test_async_cancellation_drains_native_bridge(monkeypatch):
 
 
 def test_compute_preserves_batch_identity_metadata_and_sync_options(monkeypatch):
-    from datetime import UTC, datetime, timedelta
+    from datetime import datetime, timedelta, timezone
 
     batch = cf.Batch.from_pyarrow(
         pa.table({"x": [1.0]}), metadata={"source": "quotes", "sequence": 7}
     )
-    options = cf.ExecutionOptions(deadline=datetime.now(UTC) + timedelta(minutes=1))
+    options = cf.ExecutionOptions(
+        deadline=datetime.now(timezone.utc) + timedelta(minutes=1)
+    )
     captured = []
     execute = cf.BatchExecutionPlan.execute
 
@@ -405,11 +410,13 @@ def test_compute_preserves_batch_identity_metadata_and_sync_options(monkeypatch)
 
 
 def test_compute_expired_deadline_uses_native_cancellation():
-    from datetime import UTC, datetime, timedelta
+    from datetime import datetime, timedelta, timezone
 
     import pytest
 
-    options = cf.ExecutionOptions(deadline=datetime.now(UTC) - timedelta(seconds=1))
+    options = cf.ExecutionOptions(
+        deadline=datetime.now(timezone.utc) - timedelta(seconds=1)
+    )
     with pytest.raises(cf.CancelledError):
         cf.compute(pa.table({"x": [1]}), lambda t: t, options=options)
 

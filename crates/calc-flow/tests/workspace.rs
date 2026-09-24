@@ -1,4 +1,4 @@
 #[test]
 fn crate_reports_v3_version() {
-    assert_eq!(calc_flow::VERSION, "2026.9.23");
+    assert_eq!(calc_flow::VERSION, "2026.9.24");
 }

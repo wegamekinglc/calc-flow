@@ -91,9 +91,14 @@ async def run(directory: Path, *, timeout: float = 60) -> None:
     plan = Runtime().compile_stream_project(build_project(directory).canonical_json())
     job = None
     try:
-        async with asyncio.timeout(timeout):
+
+        async def wait_for_completion():
+            nonlocal job
             job = await StreamingRunner(plan).start_async()
             outcome = await job.wait_async()
+            return outcome
+
+        outcome = await asyncio.wait_for(wait_for_completion(), timeout)
         if outcome.state != "completed":
             raise RuntimeError(f"unexpected postgresql job outcome: {outcome}")
         totals = await asyncio.to_thread(read_totals, directory)

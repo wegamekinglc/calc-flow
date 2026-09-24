@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Concatenate, Literal, Unpack, overload
+from typing import TYPE_CHECKING, Generic, Literal, TypeVar, Union, overload
 
 import pyarrow as pa
+from typing_extensions import Concatenate, ParamSpec, Unpack
 
+from calc_flow._compat import TypeAliasType, dataclass
 from calc_flow.symbolic.domains import (
     array_operator_error,
     bool_error,
@@ -60,12 +61,18 @@ if TYPE_CHECKING:
     from calc_flow.symbolic.asof import _AsofJoinOptions
     from calc_flow.symbolic.program import FeatureSet
 
-type ColumnOperand = ColumnExpr | ScalarLiteral
-type ArrayOperand = ArrayExpr | Parameter[ArrayExpr] | ScalarLiteral
+ColumnOperand = TypeAliasType("ColumnOperand", Union["ColumnExpr", ScalarLiteral])
+ArrayOperand = TypeAliasType(
+    "ArrayOperand", Union["ArrayExpr", "Parameter[ArrayExpr]", ScalarLiteral]
+)
+T = TypeVar("T")
+SelfExpr = TypeVar("SelfExpr", bound="Expr")
+P = ParamSpec("P")
+R = TypeVar("R")
 
 
 @dataclass(frozen=True, slots=True, eq=False, repr=False)
-class Expr[T]:
+class Expr(Generic[T]):
     """Base class of every immutable symbolic expression."""
 
     _node: Node
@@ -91,7 +98,7 @@ class Expr[T]:
 
         return explain_node(self._node)
 
-    def pipe[SelfExpr: Expr, **P, R](
+    def pipe(
         self: SelfExpr,
         function: Callable[Concatenate[SelfExpr, P], R],
         /,
@@ -545,7 +552,7 @@ class TableExpr(Expr[object]):
 
 
 @dataclass(frozen=True, slots=True, eq=False, repr=False)
-class Parameter[T](Expr[T]):
+class Parameter(Expr[T]):
     """A named external static input of table or array kind.
 
     Parameters define no scalar operator dunders; an array-kind parameter

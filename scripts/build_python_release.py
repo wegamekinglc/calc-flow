@@ -78,6 +78,8 @@ def build_commands(root: Path, dist_dir: Path) -> tuple[BuildStep, ...]:
                 "build",
                 "--release",
                 "--locked",
+                "--features",
+                "pyo3/abi3-py313",
                 "--out",
                 str(dist_dir),
             ),

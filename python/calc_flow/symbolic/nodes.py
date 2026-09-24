@@ -14,9 +14,11 @@ import json
 import math
 import struct
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
-from typing import Final
+from typing import Final, Union
 
+from typing_extensions import TypeAlias
+
+from calc_flow._compat import TypeAliasType, dataclass
 from calc_flow.symbolic.domains import type_name
 
 ENCODING_VERSION = "calc_flow.symbolic.declaration.v1"
@@ -169,22 +171,12 @@ class CDType:
     name: str
 
 
-CValue = (
-    CNull
-    | CBool
-    | CInt
-    | CFloat
-    | CStr
-    | CBytes
-    | CEnum
-    | CSeq
-    | CMap
-    | CShape
-    | CDType
-)
+CValue: TypeAlias = Union[
+    CNull, CBool, CInt, CFloat, CStr, CBytes, CEnum, CSeq, CMap, CShape, CDType
+]
 
-type ValueEncoder = Callable[[CValue], bytes]
-type ValueFormatter = Callable[[CValue], str]
+ValueEncoder = TypeAliasType("ValueEncoder", Callable[[CValue], bytes])
+ValueFormatter = TypeAliasType("ValueFormatter", Callable[[CValue], str])
 
 
 def _encode_cbool(value: CBool, /) -> bytes:

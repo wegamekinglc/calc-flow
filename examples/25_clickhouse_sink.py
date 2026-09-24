@@ -87,9 +87,14 @@ async def run(directory: Path, *, timeout: float = 60) -> None:
     )
     job = None
     try:
-        async with asyncio.timeout(timeout):
+
+        async def wait_for_completion():
+            nonlocal job
             job = await cf.StreamingRunner(plan).start_async()
             outcome = await job.wait_async()
+            return outcome
+
+        outcome = await asyncio.wait_for(wait_for_completion(), timeout)
         if outcome.state != "completed":
             raise RuntimeError(f"unexpected clickhouse job outcome: {outcome}")
         status = job.status()

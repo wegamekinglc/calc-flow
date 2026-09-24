@@ -4,13 +4,15 @@ import asyncio
 import json
 import os
 from collections.abc import Awaitable, Callable, Mapping
-from typing import Any
+from typing import Any, TypeVar
 
 from calc_flow import _native
 from calc_flow.config import ProjectDocument, _validate_json_value
 
+T = TypeVar("T")
 
-def _run_blocking[T](factory: Callable[[], Awaitable[T]], async_method: str) -> T:
+
+def _run_blocking(factory: Callable[[], Awaitable[T]], async_method: str) -> T:
     try:
         asyncio.get_running_loop()
     except RuntimeError:

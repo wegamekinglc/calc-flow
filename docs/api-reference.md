@@ -11,9 +11,9 @@ for the contracts documented here.
 
 | Surface          | Package or path               | Purpose                                    |
 |------------------|-------------------------------|--------------------------------------------|
-| Python API       | `calc-flow-python==2026.9.23` | Expressions, Arrow execution, integrations |
-| Rust core        | `calc-flow = "2026.9.23"`     | Internal runtime and extension contracts   |
-| Local Studio API | `calc-flow-studio==2026.9.23` | Loopback FastAPI service and React assets  |
+| Python API       | `calc-flow-python==2026.9.24` | Expressions, Arrow execution, integrations |
+| Rust core        | `calc-flow = "2026.9.24"`     | Internal runtime and extension contracts   |
+| Local Studio API | `calc-flow-studio==2026.9.24` | Loopback FastAPI service and React assets  |
 
 For examples and lifecycle detail, see the [executable example guide](examples.md),
 [Rust runtime reference](rust-api.md), [Python API](python-api.md), and
@@ -193,7 +193,7 @@ aliases, and neither retains nor mutates caller containers. Every
 `options.settings` read returns another deep `dict`/`list` copy. Exceptions
 from caller mappings are replaced without retaining their value, type,
 message, or traceback. `deadline` accepts `None` or any valid timezone-aware
-`datetime`. Accepted offsets are normalized to `datetime.UTC` without losing
+`datetime`. Accepted offsets are normalized to `datetime.timezone.utc` without losing
 microseconds; naive, invalid, and out-of-range UTC conversions are rejected
 with fixed redacted errors.
 
@@ -523,7 +523,7 @@ manifest publication uses `CheckpointPublicationUnknownError`.
 ## Version and compatibility
 
 The Rust crate, Python binding, Studio package, and frontend are versioned
-`2026.9.23` in this checkout. Project format version `3` and checkpoint-manifest version `3` are
+`2026.9.24` in this checkout. Project format version `3` and checkpoint-manifest version `3` are
 separate protocol values from the package version.
 
 Package versions use calendar versioning (`YYYY.M.D` release dates); the
