@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import platform
+import shutil
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -30,6 +32,20 @@ def condition_matrix() -> tuple[tuple[str, str, str, str], ...]:
         ("aa_reversed_start", "A0", "A1", "candidate"),
         ("bb_separate", "B0", "B1", "baseline"),
     )
+
+
+def swap_site_contents(left: Path, right: Path, backups: Path) -> None:
+    """Exchange owned install trees while retaining their absolute site paths."""
+    backups.mkdir(parents=True)
+    left.rename(backups / "left")
+    right.rename(backups / "right")
+    shutil.copytree(backups / "right", left)
+    shutil.copytree(backups / "left", right)
+
+
+def _record_sha256(site: Path) -> str:
+    record = next(site.glob("*.dist-info/RECORD"))
+    return hashlib.sha256(record.read_bytes()).hexdigest()
 
 
 def _affinity(pid: int) -> list[int] | None:
@@ -123,7 +139,20 @@ async def run(baseline_path: Path, candidate_path: Path, output: Path) -> None:
     }
     _write_json(output / "host.json", host)
 
-    for label, baseline_slot, candidate_slot, first in condition_matrix():
+    swapped_conditions = (
+        ("ab_swapped_contents", "B1", "A0", "baseline"),
+        ("ba_swapped_contents", "A0", "B1", "baseline"),
+        ("aa_swapped_contents", "A1", "B1", "baseline"),
+        ("bb_swapped_contents", "A0", "B0", "baseline"),
+    )
+    wheel_by_slot = {slot: slot[0] for slot in slots}
+    for label, baseline_slot, candidate_slot, first in (
+        *condition_matrix(),
+        *swapped_conditions,
+    ):
+        if label == "ab_swapped_contents":
+            swap_site_contents(slots["A0"], slots["B1"], output / "site-backups")
+            wheel_by_slot = {**wheel_by_slot, "A0": "B", "B1": "A"}
         events: list[dict] = []
 
         class BoundWorker(ObservedWorker):
@@ -138,8 +167,8 @@ async def run(baseline_path: Path, candidate_path: Path, output: Path) -> None:
             )
         }
         trial_releases = {
-            "baseline": releases[baseline_slot[0]],
-            "candidate": releases[candidate_slot[0]],
+            "baseline": releases[wheel_by_slot[baseline_slot]],
+            "candidate": releases[wheel_by_slot[candidate_slot]],
         }
         with patch.object(measure, "Worker", BoundWorker):
             row = await measure.measure_case(
@@ -149,8 +178,13 @@ async def run(baseline_path: Path, candidate_path: Path, output: Path) -> None:
             "label": label,
             "baseline_slot": baseline_slot,
             "candidate_slot": candidate_slot,
+            "baseline_wheel": wheel_by_slot[baseline_slot],
+            "candidate_wheel": wheel_by_slot[candidate_slot],
             "first_worker": first,
             "sites": {side: str(site.resolve()) for side, site in sites.items()},
+            "site_record_sha256": {
+                side: _record_sha256(site) for side, site in sites.items()
+            },
             "events": events,
             "measurement": row,
         }

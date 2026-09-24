@@ -2,16 +2,39 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from scripts.benchmark_suite.side_bias_diagnostic import (
     ObservedWorker,
     condition_matrix,
+    swap_site_contents,
 )
 
 
 class SideBiasDiagnosticTests(unittest.IsolatedAsyncioTestCase):
+    def test_swap_site_contents_preserves_physical_paths(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            left = root / "A0" / "site"
+            right = root / "B1" / "site"
+            left.mkdir(parents=True)
+            right.mkdir(parents=True)
+            (left / "native.so").write_bytes(b"A")
+            (right / "native.so").write_bytes(b"B")
+
+            swap_site_contents(left, right, root / "backups")
+
+            self.assertEqual((left / "native.so").read_bytes(), b"B")
+            self.assertEqual((right / "native.so").read_bytes(), b"A")
+            self.assertEqual(
+                (root / "backups" / "left" / "native.so").read_bytes(), b"A"
+            )
+            self.assertEqual(
+                (root / "backups" / "right" / "native.so").read_bytes(), b"B"
+            )
+
     def test_condition_matrix_covers_identity_and_reversed_physical_slots(self):
         conditions = {condition[0]: condition[1:] for condition in condition_matrix()}
 
