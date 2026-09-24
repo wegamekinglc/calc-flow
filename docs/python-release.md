@@ -74,10 +74,21 @@ No long-lived PyPI token or `skip-existing` option is used.
 2. Run `Python package release` manually from the reviewed `main` commit.
    Confirm the performance, security, soak, artifact verification, cross-platform
    smoke, and installed-wheel unit tests all finish successfully.
-3. Tag that same `main` commit and push the annotated tag:
+3. If a previous release tag exists, tag that same `main` commit and push the
+   annotated tag:
 
    ```bash
    git tag -a calc-flow-python-v<version> -m "Release calc-flow-python <version>"
+   git push origin calc-flow-python-v<version>
+   ```
+
+   For the first release, include the ancestor SHA used as `initial-baseline`
+   in a second tag message:
+
+   ```bash
+   git tag -a calc-flow-python-v<version> \
+     -m "Release calc-flow-python <version>" \
+     -m "Benchmark-Baseline: <full-ancestor-commit-sha>"
    git push origin calc-flow-python-v<version>
    ```
 
