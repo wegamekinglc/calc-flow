@@ -69,8 +69,27 @@ async def build_binaries(
     for target in targets:
         log = output / f"build-{target}.jsonl"
         clear_stale_bench_binary(shared, target)
-        await command(
+        # The sub-nanosecond core getter benchmark changes when its loop crosses
+        # a 64-byte instruction-cache line. Align only the bench target's loops;
+        # cargo rustc passes the extra codegen flag to that target, not its deps.
+        argv = (
             [
+                "cargo",
+                "rustc",
+                "--locked",
+                "--profile",
+                "bench",
+                "-p",
+                "calc-flow",
+                "--bench",
+                target,
+                "--message-format=json",
+                "--",
+                "-C",
+                "llvm-args=--align-loops=64",
+            ]
+            if target == "core"
+            else [
                 "cargo",
                 "bench",
                 "--locked",
@@ -80,7 +99,10 @@ async def build_binaries(
                 target,
                 "--no-run",
                 "--message-format=json",
-            ],
+            ]
+        )
+        await command(
+            argv,
             cwd=source,
             log=log,
             env=environment,

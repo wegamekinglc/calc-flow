@@ -371,6 +371,13 @@ revision's compiled cases with the compiled-dependency and target-scoped
 workload identities described above. Both sides must have matching, nonempty,
 duplicate-free inventories; this release path has no `new-coverage` exemption.
 
+The `core` Criterion target uses `cargo rustc --profile bench` with 64-byte
+loop alignment applied only to the bench target. This keeps its sub-nanosecond
+plan getter check from changing when a version-only binary layout shift places
+the loop across an instruction-cache line. The product library retains the
+ordinary bench profile, and the other Rust targets keep their existing build
+command. The baseline and candidate use the same alignment setting.
+
 Each case receives two rounds of ten adjacent baseline/candidate invocation
 pairs, alternating AB/BA. Every invocation starts a fresh isolated process.
 Its observation is the median of its saved pytest or Criterion raw samples,
