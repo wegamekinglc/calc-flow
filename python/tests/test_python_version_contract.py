@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import sys
 from dataclasses import FrozenInstanceError, fields, replace
 
 import pyarrow as pa
 import pytest
+from typing_extensions import TypeAliasType
 
-from calc_flow import Field, ReplayPositioning, table_input
+from calc_flow import Field, ReplayPositioning, _compat, table_input
 from calc_flow.runtime import WatermarkPolicy
 
 
@@ -38,6 +40,82 @@ def test_modern_type_alias_retains_stdlib_identity() -> None:
         from typing import TypeAliasType
 
         assert isinstance(WatermarkPolicy, TypeAliasType)
+
+
+@pytest.mark.skipif(sys.version_info < (3, 10), reason="requires native strict zip")
+def test_modern_strict_zip_uses_builtin_fast_path() -> None:
+    assert _compat.zip is zip
+    assert list(_compat.zip([1, 2], ["a", "b"], strict=True)) == [
+        (1, "a"),
+        (2, "b"),
+    ]
+
+
+def test_python39_compatibility_paths_keep_dataclass_enum_and_zip_behavior(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = importlib.util.spec_from_file_location(
+        "calc_flow._compat_python39_test", _compat.__file__
+    )
+    assert spec is not None and spec.loader is not None
+    legacy = importlib.util.module_from_spec(spec)
+    with monkeypatch.context() as patch:
+        patch.setattr(sys, "version_info", (3, 9, 0))
+        spec.loader.exec_module(legacy)
+
+    assert legacy.TypeAliasType is TypeAliasType
+
+    class Mode(legacy.StrEnum):
+        LIVE = "live"
+
+    assert isinstance(Mode.LIVE, str)
+    assert str(Mode.LIVE) == "live"
+
+    @legacy.dataclass(slots=True, frozen=True)
+    class Record:
+        name: str
+        count: int
+
+    record = Record("events", 2)
+    assert not hasattr(record, "__dict__")
+    assert record.__getstate__() == ["events", 2]
+    restored = object.__new__(Record)
+    restored.__setstate__(["events", 2])
+    assert restored == record
+    with pytest.raises(FrozenInstanceError):
+        record.count = 3  # type: ignore[misc]
+
+    class Parent:
+        __slots__ = "name"
+
+    @legacy.dataclass(slots=True)
+    class Child(Parent):
+        name: str
+        count: int
+
+    assert Child.__slots__ == ("count",)
+    assert Child("events", 2).name == "events"
+
+    @legacy.dataclass()
+    class Unslotted:
+        value: int
+
+    assert hasattr(Unslotted(1), "__dict__")
+
+    with pytest.raises(TypeError, match="already specifies __slots__"):
+
+        @legacy.dataclass(slots=True)
+        class OwnSlots:
+            __slots__ = ("value",)
+            value: int
+
+    assert list(legacy.zip([1, 2], ["a", "b"], strict=True)) == [
+        (1, "a"),
+        (2, "b"),
+    ]
+    assert list(legacy.zip([1], ["a"])) == [(1, "a")]
+    with pytest.raises(ValueError, match="different lengths"):
+        list(legacy.zip([1], ["a", "b"], strict=True))
 
 
 def test_async_stream_keeps_owned_result_lifecycle() -> None:

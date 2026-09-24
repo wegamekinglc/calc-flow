@@ -83,17 +83,21 @@ else:
         __str__ = str.__str__
 
 
-def zip(*iterables: Any, strict: bool = False) -> Any:
-    """Preserve strict zip validation on Python 3.9."""
-    if not strict:
-        return _builtin_zip(*iterables)
+if sys.version_info >= (3, 10):
+    zip = _builtin_zip
+else:
 
-    sentinel = object()
+    def zip(*iterables: Any, strict: bool = False) -> Any:
+        """Preserve strict zip validation on Python 3.9."""
+        if not strict:
+            return _builtin_zip(*iterables)
 
-    def rows() -> Any:
-        for values in zip_longest(*iterables, fillvalue=sentinel):
-            if any(value is sentinel for value in values):
-                raise ValueError("zip() arguments have different lengths")
-            yield values
+        sentinel = object()
 
-    return rows()
+        def rows() -> Any:
+            for values in zip_longest(*iterables, fillvalue=sentinel):
+                if any(value is sentinel for value in values):
+                    raise ValueError("zip() arguments have different lengths")
+                yield values
+
+        return rows()

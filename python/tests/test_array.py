@@ -44,6 +44,20 @@ def _jax_device(array: Any) -> object:
     return device() if callable(device) else device
 
 
+def test_jax_device_accepts_legacy_single_device_and_rejects_shards() -> None:
+    class LegacyArray:
+        def __init__(self, devices: set[object]) -> None:
+            self._devices = devices
+
+        def devices(self) -> set[object]:
+            return self._devices
+
+    device = object()
+    assert array_module._jax_device(LegacyArray({device})) is device
+    with pytest.raises(ValueError, match="resident on one device"):
+        array_module._jax_device(LegacyArray({object(), object()}))
+
+
 def test_array_and_dataframe_example_uses_table_matmul(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
