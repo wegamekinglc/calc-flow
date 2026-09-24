@@ -67,12 +67,29 @@ class BenchmarkWorkflowTests(unittest.TestCase):
         )[0]
         self.assertIn("--warmups 2", nightly)
 
-    def test_regular_ci_and_schedule_call_the_same_complete_suite(self):
-        for name in ("ci-linux.yml", "benchmarks.yml"):
-            workflow = (ROOT / ".github/workflows" / name).read_text(encoding="utf-8")
-            self.assertIn("uses: ./.github/workflows/benchmark-suite.yml", workflow)
+    def test_complete_suite_runs_twice_daily_outside_regular_ci(self):
+        linux = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
+        self.assertNotIn("benchmark-smoke:", linux)
+        self.assertNotIn("BENCHMARK_RESULT", linux)
+        self.assertNotIn("uses: ./.github/workflows/benchmark-suite.yml", linux)
+        self.assertNotIn("cargo bench", linux)
+
+        benchmarks = (ROOT / ".github/workflows/benchmarks.yml").read_text(
+            encoding="utf-8"
+        )
+        benchmark_job = benchmarks.split("  benchmark:\n", 1)[1].split(
+            "  dal301-profile-build:\n", 1
+        )[0]
+        self.assertIn("github.event_name == 'workflow_dispatch'", benchmark_job)
+        self.assertIn("uses: ./.github/workflows/benchmark-suite.yml", benchmark_job)
+
         suite = (ROOT / ".github/workflows/benchmark-suite.yml").read_text(
             encoding="utf-8"
+        )
+        schedule = suite.split("  schedule:\n", 1)[1].split("  workflow_call:\n", 1)[0]
+        self.assertEqual(
+            [line.strip() for line in schedule.splitlines() if "cron:" in line],
+            ['- cron: "0 22 * * *"', '- cron: "0 10 * * *"'],
         )
         self.assertIn("workflow_call:", suite)
         self.assertIn("scripts.benchmark_suite catalog", suite)

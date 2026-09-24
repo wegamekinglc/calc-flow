@@ -2,6 +2,8 @@
 
 [![Linux CI](https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-linux.yml/badge.svg?branch=main)](https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-linux.yml)
 [![Windows CI](https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-windows.yml/badge.svg?branch=main)](https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-windows.yml)
+[![Scheduled Benchmarks](https://github.com/wegamekinglc/calc-flow/actions/workflows/benchmark-suite.yml/badge.svg?branch=main)](https://github.com/wegamekinglc/calc-flow/actions/workflows/benchmark-suite.yml)
+[![Codacy Grade](https://app.codacy.com/project/badge/Grade/7416ea8873544e599089cf63aba3717d)](https://app.codacy.com/gh/wegamekinglc/calc-flow/dashboard)
 [![Coverage Status](https://coveralls.io/repos/github/wegamekinglc/calc-flow/badge.svg?branch=main)](https://coveralls.io/github/wegamekinglc/calc-flow?branch=main)
 
 Calc Flow is a Python calculation library for Arrow tables and stateful streams.
@@ -100,7 +102,7 @@ Python package is not a second engine.
 | `web-ui/src/`                  | React + TypeScript + Vite + React Flow studio; API types generated from `web-ui/openapi.json`                                            |
 | `schemas/`                     | `project-v3.schema.json`, the canonical generated project contract                                                                       |
 | `examples/`                    | Executable Python expression and integration examples                                                                                    |
-| `benchmarks/`                  | Benchmark workloads; unified CI regression gates and informational comparisons                                                           |
+| `benchmarks/`                  | Benchmark workloads; scheduled regression gates and informational comparisons                                                            |
 
 ## Data and execution model
 
@@ -201,8 +203,8 @@ recorded in [CHANGELOG.md](CHANGELOG.md).
 Large Cargo and Maturin outputs should use the repository `target/` tree.
 The complete CI/full-verification command reference is below. Local changes use
 the smallest affected checks under [AGENTS.md Verification](AGENTS.md#verification);
-full regression, Rust 90% coverage, Studio backend 85% coverage, and routine
-performance gates belong to CI:
+full regression, Rust 90% coverage, and Studio backend 85% coverage belong to
+CI; routine performance gates run on the benchmark schedule:
 
 ```bash
 uv sync --extra dev
@@ -262,7 +264,7 @@ repository commands and constraints.
 - **[Verification](docs/verification.md)** — documentation, examples, and implementation checks
 - **[Python release guide](docs/python-release.md)** — packaging, verification,
   Trusted Publishers, and the PyPI procedure
-- **[Benchmark suite](docs/benchmark-suite.md)** — complete CI tables, scale matrices,
+- **[Benchmark suite](docs/benchmark-suite.md)** — scheduled tables, scale matrices,
   external-engine comparisons and historical regression evidence
 - **[Changelog](CHANGELOG.md)** — the single history of changes
 

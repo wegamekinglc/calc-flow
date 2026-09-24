@@ -1,5 +1,9 @@
 name: Complete benchmark suite
 on:
+  schedule:
+    # 06:00 and 18:00 Asia/Shanghai (UTC+8).
+    - cron: "0 22 * * *"
+    - cron: "0 10 * * *"
   workflow_call:
     inputs:
       baseline_sha:

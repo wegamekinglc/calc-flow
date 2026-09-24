@@ -127,7 +127,7 @@ jobs:
           retention-days: 90
   benchmark:
     name: Complete benchmark suite
-    if: inputs.mode != 'dal301-groupby'
+    if: github.event_name == 'workflow_dispatch' && inputs.mode != 'dal301-groupby'
     uses: ./.github/workflows/benchmark-suite.yml
   dal301-profile-build:
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'dal301-groupby'

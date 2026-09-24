@@ -3,10 +3,11 @@
 [Documentation](README.md) / 5.2 Benchmark suite
 
 The suite reports complete workloads and repeated base/head comparisons.
-`.github/workflows/benchmark-suite.yml` is the shared entrypoint for ordinary
-non-documentation Linux PR/main CI and daily/manual benchmarks. Windows keeps
-its existing correctness gates. SQL adaptive tuning experiments remain
-supplemental nightly/weekly jobs; they are not missing required suite shards.
+`.github/workflows/benchmark-suite.yml` runs independently of regular CI at
+06:00 and 18:00 Asia/Shanghai every day (22:00 and 10:00 UTC), and also supports
+manual runs. Regular Linux and Windows CI retain their correctness gates. SQL
+adaptive tuning experiments remain supplemental nightly/weekly jobs; they are
+not missing required suite shards.
 
 On this page:
 
@@ -23,11 +24,11 @@ On this page:
 ## Complete inventory
 
 The catalog is executable: `python -m scripts.benchmark_suite catalog` emits
-the same 21 shards consumed by CI. The slow Python `nightly` scale is
-excluded from this suite, including its daily/manual workflow calls; overhead,
-small and standard remain. The separate engine and warm-state matrices still
-run every decade through 10M rows. Dynamic pytest, Criterion and Vitest
-inventories preserve benchmark cases without a second hand-written case list.
+the same 21 shards consumed by the scheduled and manual suite. The slow Python
+`nightly` scale is excluded from this suite; overhead, small and standard
+remain. The separate engine and warm-state matrices still run every decade
+through 10M rows. Dynamic pytest, Criterion and Vitest inventories preserve
+benchmark cases without a second hand-written case list.
 
 | Family          | Dimensions                                          | Cases per dimension                                       |
 |-----------------|-----------------------------------------------------|-----------------------------------------------------------|
@@ -263,11 +264,10 @@ a later head does not inherit measurements from an earlier build.
 
 ## Revision comparisons and regression gate
 
-CI resolves immutable base/head commits before building clean release wheels.
-PRs compare the event's base SHA with its head SHA. Pushes use `before`;
-scheduled/manual runs default to the head's first parent. A manual full
-baseline SHA can override that choice. There is no silent fallback to a
-different successful run or debug wheel.
+The benchmark workflow resolves immutable base/head commits before building
+clean release wheels. Scheduled and manual runs default to the head's first
+parent. A manual full baseline SHA can override that choice. There is no silent
+fallback to a different successful run or debug wheel.
 
 For every Calc Flow engine/warm case:
 
@@ -296,7 +296,7 @@ otherwise the result is `no-confirmed-regression`, not proof of equivalence.
 Minimum ratios remain diagnostic: comparing unrelated best samples can signal
 a slowdown even with identical binaries and nearly unchanged P50 values.
 The fixed +5% threshold, two-round sample budget and correctness checks remain
-unchanged; CI does not retry measurements to select a passing timing result.
+unchanged; the suite does not retry measurements to select a passing timing result.
 External libraries are measured references, never fake historical baselines.
 The pytest/Criterion/Vitest suites run ABBA whole-suite
 blocks. Their deltas remain informational because those blocks are not
@@ -456,11 +456,11 @@ target/benchmark-venv/bin/python -m scripts.benchmark_suite run \
   --baseline-source target/base --output target/results/engines-1000
 ```
 
-Run every emitted catalog shard to reproduce the complete CI gate. A single
+Run every emitted catalog shard to reproduce the complete benchmark gate. A single
 shard's own `summary.md` is useful locally; the complete summarizer deliberately
 fails when shards are missing. To update dependencies, regenerate and commit
-`benchmarks/requirements.lock` using the command in its header. CI checks lock
-drift before its adapter tests.
+`benchmarks/requirements.lock` using the command in its header. The suite
+checks lock drift before its adapter tests.
 
 ## Performance-plan diagnostics
 

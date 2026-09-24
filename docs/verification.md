@@ -6,9 +6,11 @@ Run commands from the repository root unless a working directory is shown.
 [AGENTS.md](../AGENTS.md#commands) maintains the complete CI/full-verification
 command groups and toolchain rules. Its [verification policy](../AGENTS.md#verification)
 defines the smallest local checks, three exceptions for local full testing, and
-one non-blocking CI snapshot. Full regression and routine performance gates run
-in CI; pending results permit handoff but do not permit merge. Keep build, coverage, release, and cache outputs
-under `target/` in a constrained checkout.
+one non-blocking CI snapshot. Full regression gates run in regular CI; routine
+benchmarks run twice daily on a separate schedule, and release performance
+gates run in release CI. Pending required CI results permit handoff but do not
+permit merge. Keep build, coverage, release, and cache outputs under `target/`
+in a constrained checkout.
 
 ## Documentation and examples
 
