@@ -137,6 +137,7 @@ const CHECKPOINT_SOAK_REPORT_LIMIT: u64 = 1 << 20;
 const CHECKPOINT_SOAK_CADENCE_TOLERANCE: Duration = Duration::from_secs(3);
 const MAX_CHECKPOINT_SOAK_RESTART_GAP: Duration = Duration::from_secs(60);
 const MAX_CHECKPOINT_SOAK_CHILD_PREFLIGHT: Duration = Duration::from_secs(60);
+const CHECKPOINT_SOAK_CANCEL_ALIGNMENT_TIMEOUT: Duration = Duration::from_secs(20);
 // This bounds the OS/test-harness startup omitted by the child-local clock,
 // plus report publication and parent polling after the child finishes.
 const CHECKPOINT_SOAK_PROCESS_OVERHEAD_BUDGET: Duration = Duration::from_secs(10);
@@ -4622,6 +4623,8 @@ fn checkpoint_restart_soak_metadata(
         "maximum_restart_gap_seconds": MAX_CHECKPOINT_SOAK_RESTART_GAP.as_secs(),
         "maximum_child_preflight_seconds": MAX_CHECKPOINT_SOAK_CHILD_PREFLIGHT.as_secs(),
         "maximum_process_overhead_seconds": CHECKPOINT_SOAK_PROCESS_OVERHEAD_BUDGET.as_secs(),
+        "cancel_alignment_timeout_seconds": CHECKPOINT_SOAK_CANCEL_ALIGNMENT_TIMEOUT.as_secs(),
+        "cancel_alignment_policy": "fresh_completed_idle_checkpoint",
         "sampling_clock_start": "after_running_preflight",
         "child_preflight_clock_start": "child_test_entry",
         "timing_source": "parent_std_instant_plus_child_local_instant",
@@ -5216,6 +5219,38 @@ struct CheckpointSoakTerminalEvidence {
     terminal_registries: (usize, usize),
 }
 
+fn checkpoint_soak_fresh_checkpoint_idle(
+    status: &crate::CheckpointStatus,
+    previous_completed: Option<Epoch>,
+) -> bool {
+    status.current_epoch.is_none() && status.last_completed_epoch > previous_completed
+}
+
+async fn wait_for_checkpoint_soak_cancel_window(job: &PublicStreamingJob) -> Result<()> {
+    let previous_completed = job.status().checkpoint.last_completed_epoch;
+    let deadline = tokio::time::Instant::now() + CHECKPOINT_SOAK_CANCEL_ALIGNMENT_TIMEOUT;
+    loop {
+        let status = job.status();
+        if status.state != PublicJobState::Running
+            || status.checkpoint.failure_category.is_some()
+            || job.test_probe().checkpoint_failures != 0
+        {
+            return Err(checkpoint_soak_process_error(
+                "checkpoint soak failed while waiting to cancel after sampling",
+            ));
+        }
+        if checkpoint_soak_fresh_checkpoint_idle(&status.checkpoint, previous_completed) {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(checkpoint_soak_process_error(
+                "checkpoint soak did not complete a fresh checkpoint before cancel",
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 async fn settle_checkpoint_soak_process(
     job: PublicStreamingJob,
     stop: &AtomicUsize,
@@ -5403,6 +5438,9 @@ async fn run_checkpoint_soak_child(
                 .await?,
             );
         }
+    }
+    if plan.mode == CheckpointSoakProcessMode::Standard && !plan.final_generation {
+        wait_for_checkpoint_soak_cancel_window(&job).await?;
     }
     let before_terminal = job.status();
     let steady_task_count = initial_status.task_count;
@@ -5818,8 +5856,14 @@ fn checkpoint_soak_process_timeout(plan: &CheckpointSoakProcessPlan) -> Duration
         CheckpointSoakProcessMode::Smoke => CHECKPOINT_SOAK_SMOKE_GENERATION_TIMEOUT,
         CheckpointSoakProcessMode::Standard => {
             let samples = u64::try_from(plan.sample_end - plan.sample_start).unwrap();
+            let alignment = if plan.final_generation {
+                Duration::ZERO
+            } else {
+                CHECKPOINT_SOAK_CANCEL_ALIGNMENT_TIMEOUT
+            };
             CHECKPOINT_SOAK_CADENCE * u32::try_from(samples).unwrap()
                 + MAX_CHECKPOINT_SOAK_CHILD_PREFLIGHT
+                + alignment
                 + CHECKPOINT_SOAK_SETTLE_TIMEOUT
                 + CHECKPOINT_SOAK_PROCESS_OVERHEAD_BUDGET
         }
@@ -7496,8 +7540,75 @@ fn checkpoint_soak_standard_watchdog_covers_startup_and_settle() {
     let samples = u32::try_from(plan.sample_end - plan.sample_start).unwrap();
     let minimum = CHECKPOINT_SOAK_CADENCE * samples
         + MAX_CHECKPOINT_SOAK_CHILD_PREFLIGHT
+        + CHECKPOINT_SOAK_CANCEL_ALIGNMENT_TIMEOUT
         + CHECKPOINT_SOAK_SETTLE_TIMEOUT;
     assert!(checkpoint_soak_process_timeout(&plan) > minimum);
+}
+
+#[test]
+fn checkpoint_soak_cancel_requires_a_fresh_idle_checkpoint() {
+    let previous = Epoch::new(7).unwrap();
+    let next = Epoch::new(8).unwrap();
+    let mut status = crate::CheckpointStatus {
+        last_completed_epoch: Some(previous),
+        ..crate::CheckpointStatus::default()
+    };
+    assert!(!checkpoint_soak_fresh_checkpoint_idle(
+        &status,
+        Some(previous)
+    ));
+    status.last_completed_epoch = Some(next);
+    status.current_epoch = Some(next);
+    assert!(!checkpoint_soak_fresh_checkpoint_idle(
+        &status,
+        Some(previous)
+    ));
+    status.current_epoch = None;
+    assert!(checkpoint_soak_fresh_checkpoint_idle(
+        &status,
+        Some(previous)
+    ));
+}
+
+#[tokio::test]
+async fn checkpoint_soak_cancel_window_preserves_clean_terminal_metrics() {
+    let _guard = CHECKPOINT_SOAK_SMOKE_LOCK.lock().await;
+    let directory = tempfile::tempdir().unwrap();
+    let stop = Arc::new(AtomicUsize::new(0));
+    let opened_with: SourceOpenHistory = Arc::new(Mutex::new(Vec::new()));
+    let source_closed = Arc::new(AtomicUsize::new(0));
+    let sink_closed = Arc::new(AtomicUsize::new(0));
+    let config = StreamRuntimeConfig {
+        checkpoint_interval: Duration::from_secs(2),
+        checkpoint_timeout: Duration::from_secs(10),
+        retained_epochs: CHECKPOINT_SOAK_RETAINED_EPOCHS,
+        edge_budget: EdgeBudget {
+            max_rows: 8,
+            max_bytes: 1 << 20,
+        },
+    };
+    let job = start_checkpoint_restart_generation(
+        directory.path(),
+        &directory.path().join("sinks"),
+        &stop,
+        &opened_with,
+        &source_closed,
+        &sink_closed,
+        config,
+        Duration::from_millis(20),
+    )
+    .await;
+    let completed_baseline = job
+        .status()
+        .checkpoint
+        .last_completed_epoch
+        .map_or(0, Epoch::as_u64);
+    wait_for_checkpoint_soak_cancel_window(&job).await.unwrap();
+    let terminal = settle_checkpoint_soak_process(job, &stop, false, completed_baseline)
+        .await
+        .unwrap();
+    assert!(terminal.completed_checkpoints >= 1);
+    assert_eq!(terminal.failed_checkpoints, 0);
 }
 
 #[test]
@@ -7961,6 +8072,11 @@ fn checkpoint_restart_soak_contract_is_exact_and_machine_readable() {
     assert_eq!(metadata["maximum_restart_gap_seconds"], 60);
     assert_eq!(metadata["maximum_child_preflight_seconds"], 60);
     assert_eq!(metadata["maximum_process_overhead_seconds"], 10);
+    assert_eq!(metadata["cancel_alignment_timeout_seconds"], 20);
+    assert_eq!(
+        metadata["cancel_alignment_policy"],
+        "fresh_completed_idle_checkpoint"
+    );
     assert_eq!(metadata["sampling_clock_start"], "after_running_preflight");
     assert_eq!(metadata["child_preflight_clock_start"], "child_test_entry");
     assert_eq!(

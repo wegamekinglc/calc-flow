@@ -123,6 +123,10 @@ budgets those startup costs, preflight, sampling, and settlement. Parent-observe
 completion must remain within 10 seconds of the child report's completion;
 this bounds the omitted process startup together with report publication and
 exit polling.
+After each of the first two 40-sample windows, the harness waits at most
+20 seconds for a fresh checkpoint to finish before explicit cancellation. It
+still rejects any checkpoint failure before or after cancellation; the
+120-sample cadence, restart gap, and whole-run bounds remain unchanged.
 
 ## First-release performance baseline
 
