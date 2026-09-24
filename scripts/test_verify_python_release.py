@@ -211,6 +211,20 @@ class VerifyPythonReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unexpected release artifacts"):
             validate_release(self.directory, root=ROOT, core_only=True)
 
+    def test_core_only_release_requires_linux_and_windows_wheels(self) -> None:
+        for missing_target in ("linux-x86_64", "windows-amd64"):
+            with self.subTest(missing_target=missing_target):
+                for target in sorted(CORE_TARGETS - {missing_target}):
+                    for python_tag in ("cp39", "cp313"):
+                        self._core_wheel(target, python_tag=python_tag)
+                self._sdist()
+
+                with self.assertRaisesRegex(ValueError, missing_target):
+                    validate_release(self.directory, root=ROOT, core_only=True)
+
+                for artifact in self.directory.iterdir():
+                    artifact.unlink()
+
     def test_release_requires_legacy_and_modern_abi3_wheels(self) -> None:
         for target in sorted(CORE_TARGETS):
             self._core_wheel(target)

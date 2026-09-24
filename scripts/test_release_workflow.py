@@ -8,6 +8,43 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
+    def test_linux_and_windows_wheels_reach_one_publication(self) -> None:
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        wheel_job = workflow.split("  wheels:\n", 1)[1].split("  sdist:\n", 1)[0]
+        matrix = wheel_job.split("    steps:\n", 1)[0]
+        targets = set(
+            re.findall(
+                r"          - os: ([^\n]+)\n"
+                r"            target: ([^\n]+)\n"
+                r"            python_tag: ([^\n]+)\n",
+                matrix,
+            )
+        )
+        for os, target in (
+            ("ubuntu-latest", "x86_64"),
+            ("ubuntu-latest", "aarch64"),
+            ("windows-latest", "x64"),
+        ):
+            for python_tag in ("cp39", "cp313"):
+                self.assertIn((os, target, python_tag), targets)
+
+        verification = workflow.split("  verify-core-artifacts:\n", 1)[1].split(
+            "  publish-python-core:\n", 1
+        )[0]
+        publication = workflow.split("  publish-python-core:\n", 1)[1]
+        for job in (verification, publication):
+            wheel_download = job.split(
+                "      - name: Download Linux, Windows, and macOS wheels\n", 1
+            )[1].split("      - name:", 1)[0]
+            self.assertIn("pattern: wheel-*", wheel_download)
+            self.assertIn("merge-multiple: true", wheel_download)
+            self.assertIn("path: dist", wheel_download)
+        self.assertIn(
+            "needs: [verify-core-artifacts, wheel-python-versions]", publication
+        )
+        self.assertEqual(publication.count("uses: pypa/gh-action-pypi-publish@"), 1)
+        self.assertIn("packages-dir: dist", publication)
+
     def test_release_jobs_only_prepare_build_verify_test_and_publish_core(self) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         jobs = re.findall(

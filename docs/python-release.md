@@ -26,8 +26,9 @@ ARM64, and Windows AMD64) gets a `cp39-abi3` wheel for Python 3.9–3.12 and a
 `cp313-abi3` wheel for Python 3.13 and newer. The source distribution builds
 against the installing interpreter. The artifact verifier accepts only the ten
 versioned wheels and one versioned source distribution from the same workflow
-run. It checks each wheel's platform, ABI, metadata, and contents, checks the
-source distribution's contents, and records artifact hashes.
+run. Linux and Windows wheels are required together, alongside macOS wheels.
+It checks each wheel's platform, ABI, metadata, and contents, checks the source
+distribution's contents, and records artifact hashes.
 
 ## Workflow
 
@@ -40,8 +41,8 @@ The workflow:
    package unit tests. Python 3.9 also runs the optional JAX array unit test.
 4. Verifies the eleven built artifacts and saves their hash manifest.
 5. On a pushed release tag only, checks the downloaded artifacts against that
-   manifest and publishes them through the `pypi` environment using Trusted
-   Publishing.
+   manifest and publishes the Linux, Windows, and macOS wheels together with the
+   source distribution through the `pypi` environment using Trusted Publishing.
 
 Manual workflow dispatch builds artifacts and runs the post-build unit tests
 without publishing. Benchmark, soak, audit, documentation, crate, and Studio
