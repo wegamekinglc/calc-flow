@@ -222,7 +222,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
   wheels:
-    name: Wheel ${{ matrix.os }} ${{ matrix.target }}
+    name: Wheel ${{ matrix.os }} ${{ matrix.target }} ${{ matrix.python_tag }}
     needs: [acceptance-gates, soak-gates]
     runs-on: ${{ matrix.os }}
     strategy:
@@ -231,22 +231,52 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64
+            python_tag: cp313
+            manylinux: "2_28"
+            smoke: true
+          - os: ubuntu-latest
+            target: x86_64
+            python_tag: cp39
             manylinux: "2_28"
             smoke: true
           - os: ubuntu-latest
             target: aarch64
+            python_tag: cp313
+            manylinux: "2_28"
+            smoke: false
+          - os: ubuntu-latest
+            target: aarch64
+            python_tag: cp39
             manylinux: "2_28"
             smoke: false
           - os: macos-15-intel
             target: x86_64
+            python_tag: cp313
+            manylinux: "off"
+            smoke: true
+          - os: macos-15-intel
+            target: x86_64
+            python_tag: cp39
             manylinux: "off"
             smoke: true
           - os: macos-15
             target: aarch64
+            python_tag: cp313
+            manylinux: "off"
+            smoke: true
+          - os: macos-15
+            target: aarch64
+            python_tag: cp39
             manylinux: "off"
             smoke: true
           - os: windows-latest
             target: x64
+            python_tag: cp313
+            manylinux: "off"
+            smoke: true
+          - os: windows-latest
+            target: x64
+            python_tag: cp39
             manylinux: "off"
             smoke: true
     steps:
@@ -254,7 +284,8 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.13"
-      - name: Build abi3 wheel
+      - name: Build modern abi3 wheel
+        if: matrix.python_tag == 'cp313'
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
           command: build
@@ -263,12 +294,27 @@ jobs:
           target: ${{ matrix.target }}
           args: --release --locked --out dist --find-interpreter
           manylinux: ${{ matrix.manylinux }}
+      - name: Build legacy abi3 wheel
+        if: matrix.python_tag == 'cp39'
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
+        with:
+          command: build
+          maturin-version: v1.14.1
+          rust-toolchain: "1.88.0"
+          target: ${{ matrix.target }}
+          args: --release --locked --out dist --find-interpreter --features legacy-python
+          manylinux: ${{ matrix.manylinux }}
       - name: Inspect wheel contents
         shell: bash
         run: |
           python -m unittest discover -s scripts -p 'test_*.py' -t .
           python scripts/inspect_wheel.py core-wheel dist/*.whl
       - name: Smoke native wheel
+        if: matrix.smoke
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ matrix.python_tag == 'cp39' && '3.9' || '3.13' }}
+      - name: Run native wheel smoke
         if: matrix.smoke
         shell: bash
         run: |
@@ -284,7 +330,7 @@ jobs:
       - name: Upload wheel
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: wheel-${{ matrix.os }}-${{ matrix.target }}
+          name: wheel-${{ matrix.os }}-${{ matrix.target }}-${{ matrix.python_tag }}
           path: dist/*.whl
           if-no-files-found: error
           retention-days: 30
@@ -316,6 +362,55 @@ jobs:
           path: dist/*.tar.gz
           if-no-files-found: error
           retention-days: 30
+  wheel-python-versions:
+    name: Wheel Python ${{ matrix.python_version }}
+    needs: wheels
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python_version: "3.9"
+            python_tag: cp39
+          - python_version: "3.10"
+            python_tag: cp39
+          - python_version: "3.11"
+            python_tag: cp39
+          - python_version: "3.12"
+            python_tag: cp39
+          - python_version: "3.13"
+            python_tag: cp313
+          - python_version: "3.14"
+            python_tag: cp313
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ matrix.python_version }}
+      - name: Download matching Linux wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: wheel-ubuntu-latest-x86_64-${{ matrix.python_tag }}
+          path: dist
+      - name: Verify installed wheel behavior
+        run: |
+          python -m pip install dist/*.whl pytest numpy
+          python scripts/smoke_wheel.py
+          python -m pytest -q \
+            python/tests/test_import.py \
+            python/tests/test_python_version_contract.py \
+            python/tests/test_compute.py \
+            python/tests/test_symbolic_expr.py \
+            python/tests/test_stream_entrypoints.py \
+            python/tests/test_execution_options.py \
+            python/tests/test_batch.py \
+            python/tests/test_config.py \
+            python/tests/test_udf.py
+      - name: Verify Python 3.9 JAX array extra
+        if: matrix.python_version == '3.9'
+        run: |
+          python -m pip install 'jax==0.4.30'
+          JAX_PLATFORMS=cpu python -m pytest -q python/tests/test_array.py
   studio-wheel:
     name: Studio wheel and static assets
     needs: [acceptance-gates, soak-gates]
@@ -434,6 +529,7 @@ jobs:
     needs:
       - crate
       - wheels
+      - wheel-python-versions
       - sdist
       - studio-wheel
       - audits

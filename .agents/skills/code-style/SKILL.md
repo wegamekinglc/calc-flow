@@ -13,7 +13,8 @@ Markdown, tests, and verification.
 
 ## Python
 
-- Target Python 3.13 or newer. Do not add compatibility shims for the removed
+- Target CPython 3.9 or newer for the core Python package; Studio targets 3.13
+  or newer. Do not add compatibility shims for the removed
   pure-Python v1 implementation (`src/calc_flow/` is gone).
 - Keep `from __future__ import annotations` in Python modules unless the project
   explicitly removes it everywhere.

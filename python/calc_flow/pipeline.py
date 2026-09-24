@@ -3,14 +3,16 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, field
-from enum import StrEnum
+from dataclasses import field
 from threading import RLock
 from types import MappingProxyType
-from typing import Any, Literal
+from typing import Any, Literal, Union
 from uuid import uuid4
 
+from typing_extensions import TypeAlias
+
 from calc_flow import _native
+from calc_flow._compat import StrEnum, dataclass
 from calc_flow.asof_join_spec import AsofJoinSide, AsofJoinSpec
 from calc_flow.capabilities import (
     ProviderArrayRules,
@@ -35,7 +37,9 @@ from calc_flow.join_spec import (
 )
 from calc_flow.store import _copy_json_value, _run_blocking
 
-JSONValue = None | bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"]
+JSONValue: TypeAlias = Union[
+    None, bool, int, float, str, list["JSONValue"], dict[str, "JSONValue"]
+]
 UdfReference = tuple[str, str, str]
 _SYMBOLIC_COMPILE_CACHE_MAX_ENTRIES = 128
 
@@ -669,11 +673,9 @@ class BatchExecutionPlan:
                 # never reports it as unretrieved) and then discarded.
                 while not native.done():
                     try:
-                        await asyncio.shield(native)
+                        await asyncio.wait({native})
                     except asyncio.CancelledError:
                         continue
-                    except Exception:
-                        break
                 if native.done() and not native.cancelled():
                     native.exception()
                 raise cancelled

@@ -290,10 +290,19 @@ impl PythonAwaitScheduler {
         kwargs.set_item(pyo3::intern!(py, "loop"), state.event_loop.object())?;
         // Task copies the dispatch context instead of re-entering it. A
         // queued cancellation cannot start an unstarted coroutine eagerly.
-        kwargs.set_item(
-            pyo3::intern!(py, "eager_start"),
-            !state.cancel_requested.load(Ordering::Acquire),
-        )?;
+        #[cfg(feature = "legacy-python")]
+        let supports_eager_start = *{
+            static SUPPORTS_EAGER_START: OnceLock<bool> = OnceLock::new();
+            SUPPORTS_EAGER_START.get_or_init(|| py.version_info() >= (3, 12))
+        };
+        #[cfg(not(feature = "legacy-python"))]
+        let supports_eager_start = true;
+        if supports_eager_start {
+            kwargs.set_item(
+                pyo3::intern!(py, "eager_start"),
+                !state.cancel_requested.load(Ordering::Acquire),
+            )?;
+        }
         asyncio
             .getattr(pyo3::intern!(py, "Task"))?
             .call((awaitable,), Some(&kwargs))

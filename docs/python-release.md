@@ -26,10 +26,10 @@ tagged release run:
 
 | Package            | Built artifacts                                  | PyPI upload |
 |--------------------|--------------------------------------------------|-------------|
-| `calc-flow-python` | Five abi3 wheels and one source distribution     | Core only   |
+| `calc-flow-python` | Ten abi3 wheels and one source distribution      | Core only   |
 | `calc-flow-studio` | One `py3-none-any` wheel with built React assets | Never       |
 
-The five core wheels cover this matrix:
+The ten core wheels cover five platform targets with two Python ABI floors:
 
 | Operating system | Architecture | Required platform family |
 |------------------|--------------|--------------------------|
@@ -39,11 +39,19 @@ The five core wheels cover this matrix:
 | macOS            | ARM64        | `macosx_*_arm64`         |
 | Windows          | AMD64        | `win_amd64`              |
 
-Every core filename starts with `calc_flow_python-` and uses `cp313-abi3`
-(CPython 3.13+). The verifier checks internal tags, `calc_flow._native`,
+Every core filename starts with `calc_flow_python-`. Each target has a
+`cp39-abi3` wheel for CPython 3.9–3.12 and a `cp313-abi3` wheel for CPython
+3.13 and newer. The verifier checks internal tags, `calc_flow._native`,
 metadata, license, exact version, platform family, source-distribution contents,
 Studio assets, and Studio's dependency on `calc-flow-python` within the
 release's calendar year.
+
+Python 3.9 installs PyArrow 21 and, when requested, JAX 0.4.30; Python 3.10+
+keeps the PyArrow 24 dependency. Both wheel tiers retain Arrow capsule transfer.
+The 3.13+ tier keeps its direct native string and eager task paths. Existing
+paired performance gates still apply before publication. CI installs the wheels
+on CPython 3.9–3.14; later interpreter releases need the same dependency and
+runtime checks before they are claimed as supported.
 
 ## Local packaging rehearsal
 
@@ -57,10 +65,10 @@ python scripts/build_python_release.py --clean
 The helper builds the current platform's core wheel, core source distribution,
 frontend, and Studio wheel, then runs artifact content inspectors. Outputs stay
 beneath `target/python-release/`. Without `--clean`, a nonempty directory is
-rejected. The single-platform output is not the complete PyPI release set and
+rejected. The single-wheel output is not the complete PyPI release set and
 must not be uploaded as an official release.
 
-To validate a combined seven-artifact CI directory, run:
+To validate a combined twelve-artifact CI directory, run:
 
 ```bash
 python scripts/verify_python_release.py --dist-dir <release-directory>
@@ -80,13 +88,14 @@ The `Release artifacts` workflow in `.github/workflows/release.yml`:
    core PyPI version.
 2. Passes exact-head performance, security, soak, packaging, crate, and audit
    gates. The crate is packaged and dry-run checked, not uploaded to crates.io.
-3. Builds all five core wheels, the source distribution, and the Studio wheel.
+3. Builds all ten core wheels, the source distribution, and the Studio wheel.
    Native smoke checks run on Linux x86-64, both macOS targets, and Windows.
-   Linux AArch64 receives artifact validation but no runtime smoke test.
-4. Downloads all seven artifacts, validates their matrix and metadata, and
+   Linux AArch64 receives artifact validation but no runtime smoke test. Linux
+   also installs the matching wheel on CPython 3.9–3.14 for API checks.
+4. Downloads all twelve artifacts, validates their matrix and metadata, and
    records their exact bytes in `release-manifest.txt`.
 5. Re-downloads the verified bundle and checks every SHA-256 before upload.
-6. Publishes only the six files in `release-dist/core` through `pypi`.
+6. Publishes only the eleven files in `release-dist/core` through `pypi`.
    There is no Studio publication job or Studio OIDC permission.
 
 Manual dispatches are build-only rehearsals, including dispatches on tags.
@@ -193,7 +202,7 @@ do not add long-lived PyPI API tokens. No Studio publisher is required.
 2. Run the full verification groups in `AGENTS.md`, including release helper
    tests, artifact inspectors, and clean core/Studio wheel smoke checks.
 3. Run `Release artifacts` manually from the reviewed `main` commit. For the
-   first release, provide `initial-baseline`. Confirm all seven build artifacts
+   first release, provide `initial-baseline`. Confirm all twelve build artifacts
    and the verified SHA-256 bundle are present.
 4. Tag that same current `main` commit and push only the tag. Use the annotated
    bootstrap example above for the first release. For later releases:
@@ -204,7 +213,7 @@ do not add long-lived PyPI API tokens. No Studio publisher is required.
    ```
 
 5. Approve the `pypi` deployment after reviewing gates and the manifest.
-6. Confirm PyPI lists exactly six `calc-flow-python` files with matching SHA-256
+6. Confirm PyPI lists exactly eleven `calc-flow-python` files with matching SHA-256
    hashes and publisher provenance. Install the exact version from public PyPI
    in clean environments and run the native core smoke check. Confirm that no
    Studio package was uploaded.

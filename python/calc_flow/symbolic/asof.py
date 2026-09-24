@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Sequence
-from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING, Literal, TypedDict
 
+from calc_flow._compat import dataclass
 from calc_flow.asof_join_spec import (
     AsofJoinSide,
     AsofJoinSpec,
@@ -20,6 +21,9 @@ if TYPE_CHECKING:
     from calc_flow.symbolic.analyzer import TableFacts, _Analyzer
     from calc_flow.symbolic.expr import TableExpr
     from calc_flow.symbolic.types import Field
+
+if sys.version_info < (3, 10):
+    from calc_flow._compat import zip as zip
 
 
 class _AsofJoinOptions(TypedDict, total=False):

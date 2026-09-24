@@ -33,6 +33,17 @@ fn settings_encode_error() -> PyErr {
     PyValueError::new_err("settings could not be encoded as strict JSON data")
 }
 
+fn portable_string(value: &Bound<'_, PyString>) -> PyResult<String> {
+    #[cfg(feature = "legacy-python")]
+    {
+        value.extract::<String>()
+    }
+    #[cfg(not(feature = "legacy-python"))]
+    {
+        value.to_str().map(str::to_owned)
+    }
+}
+
 fn strict_string(value: &Bound<'_, PyAny>, path: &str) -> PyResult<String> {
     if !value.is_exact_instance_of::<PyString>() {
         return Err(settings_path_error(
@@ -40,12 +51,12 @@ fn strict_string(value: &Bound<'_, PyAny>, path: &str) -> PyResult<String> {
             "contains a non-string object key",
         ));
     }
-    value
-        .cast::<PyString>()
-        .map_err(|_| settings_copy_error())?
-        .to_str()
-        .map(str::to_owned)
-        .map_err(|_| settings_path_error(path, "contains a non-portable Unicode string"))
+    portable_string(
+        value
+            .cast::<PyString>()
+            .map_err(|_| settings_copy_error())?,
+    )
+    .map_err(|_| settings_path_error(path, "contains a non-portable Unicode string"))
 }
 
 struct StrictSettingsCopier<'py> {
@@ -184,12 +195,13 @@ impl<'py> StrictSettingsCopier<'py> {
             )?));
         }
         if value.is_exact_instance_of::<PyString>() {
-            return value
-                .cast::<PyString>()
-                .map_err(|_| settings_copy_error())?
-                .to_str()
-                .map(|text| Value::String(text.to_owned()))
-                .map_err(|_| settings_path_error(path, "contains a non-portable Unicode string"));
+            return portable_string(
+                value
+                    .cast::<PyString>()
+                    .map_err(|_| settings_copy_error())?,
+            )
+            .map(Value::String)
+            .map_err(|_| settings_path_error(path, "contains a non-portable Unicode string"));
         }
         if value.is_exact_instance_of::<PyList>() {
             return self
@@ -267,7 +279,8 @@ fn parse_deadline(
         return Err(invalid_deadline());
     }
     let utc = mapping
-        .getattr(pyo3::intern!(py, "UTC"))
+        .getattr(pyo3::intern!(py, "timezone"))
+        .and_then(|timezone| timezone.getattr(pyo3::intern!(py, "utc")))
         .map_err(|_| invalid_deadline())?;
     let normalized = value
         .call_method1(pyo3::intern!(py, "astimezone"), (&utc,))
@@ -332,7 +345,9 @@ fn deadline_to_python<'py>(
     let kwargs = PyDict::new(py);
     kwargs.set_item(
         pyo3::intern!(py, "tzinfo"),
-        datetime_module.getattr(pyo3::intern!(py, "UTC"))?,
+        datetime_module
+            .getattr(pyo3::intern!(py, "timezone"))?
+            .getattr(pyo3::intern!(py, "utc"))?,
     )?;
     datetime_module
         .getattr(pyo3::intern!(py, "datetime"))?
@@ -385,6 +400,25 @@ impl PyExecutionOptions {
 
 #[pymethods]
 impl PyExecutionOptions {
+    #[cfg(feature = "legacy-python")]
+    #[classattr]
+    fn __signature__(py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let inspect = py.import(pyo3::intern!(py, "inspect"))?;
+        let parameter = inspect.getattr(pyo3::intern!(py, "Parameter"))?;
+        let kind = parameter.getattr(pyo3::intern!(py, "POSITIONAL_OR_KEYWORD"))?;
+        let settings_kwargs = PyDict::new(py);
+        settings_kwargs.set_item(pyo3::intern!(py, "default"), PyDict::new(py))?;
+        let settings = parameter.call(("settings", &kind), Some(&settings_kwargs))?;
+        let deadline_kwargs = PyDict::new(py);
+        deadline_kwargs.set_item(pyo3::intern!(py, "default"), py.None())?;
+        let deadline = parameter.call(("deadline", &kind), Some(&deadline_kwargs))?;
+        let parameters = PyList::new(py, [settings, deadline])?;
+        inspect
+            .getattr(pyo3::intern!(py, "Signature"))?
+            .call1((parameters,))
+            .map(Bound::unbind)
+    }
+
     #[new]
     #[pyo3(
         signature = (*args, **kwargs),

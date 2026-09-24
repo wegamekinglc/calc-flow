@@ -1,17 +1,20 @@
+from __future__ import annotations
+
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime
-from typing import Literal, Never, Protocol, TypedDict, final
+from typing import Literal, Protocol, TypedDict, final
 
 import pyarrow as pa
+from typing_extensions import Never, TypeAlias
 
-type JSONValue = (
-    None | bool | int | float | str | list[JSONValue] | dict[str, JSONValue]
+JSONValue: TypeAlias = (
+    None | bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"]
 )
-type _JSONInput = (
-    None | bool | int | float | str | list[_JSONInput] | Mapping[str, _JSONInput]
+_JSONInput: TypeAlias = (
+    None | bool | int | float | str | list["_JSONInput"] | Mapping[str, "_JSONInput"]
 )
-type StreamingFailureReasonCode = Literal[
+StreamingFailureReasonCode: TypeAlias = Literal[
     "join_state_limit_exceeded",
     "join_match_limit_exceeded",
     "join_counter_overflow",

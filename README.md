@@ -12,7 +12,7 @@ Calc Flow Studio is a separate local FastAPI and React application.
 
 ## Install
 
-Python 3.13 or newer:
+CPython 3.9 or newer:
 
 ```bash
 uv add calc-flow-python

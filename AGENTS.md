@@ -148,7 +148,8 @@ Ordinary feature work must not rewrite either team definition.
 
 ### Python
 
-- Target Python 3.13 or newer, use four spaces and double quotes, and retain
+- Target CPython 3.9 or newer for `calc-flow-python`; Studio development uses
+  Python 3.13 or newer. Use four spaces and double quotes, and retain
   `from __future__ import annotations`.
 - Use built-in type syntax such as `list[str]`, `dict[str, object]`, and
   `A | B`.

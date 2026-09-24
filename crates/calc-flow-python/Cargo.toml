@@ -14,6 +14,7 @@ crate-type = ["cdylib"]
 
 [features]
 default = ["connector-file"]
+legacy-python = ["pyo3/abi3-py39"]
 connector-file = ["dep:calc-flow-connectors", "calc-flow-connectors/file"]
 connector-kafka = ["dep:calc-flow-connectors", "calc-flow-connectors/kafka", "dep:rdkafka"]
 connector-postgresql = ["dep:calc-flow-connectors", "calc-flow-connectors/postgresql"]
@@ -24,8 +25,8 @@ connector-websocket = ["dep:calc-flow-connectors", "calc-flow-connectors/websock
 
 [dependencies]
 async-trait.workspace = true
-calc-flow = { path = "../calc-flow", version = "=2026.9.23" }
-calc-flow-connectors = { path = "../calc-flow-connectors", version = "=2026.9.23", default-features = false, optional = true }
+calc-flow = { path = "../calc-flow", version = "=2026.9.24" }
+calc-flow-connectors = { path = "../calc-flow-connectors", version = "=2026.9.24", default-features = false, optional = true }
 chrono.workspace = true
 datafusion.workspace = true
 ndarray = "0.17.2"
@@ -34,7 +35,7 @@ numpy = "0.28.0"
 parking_lot.workspace = true
 pyo3 = { version = "0.28.3", features = ["abi3-py313"] }
 pyo3-async-runtimes = { version = "0.28.0", features = ["tokio-runtime"] }
-pyo3-arrow = "0.17.0"
+pyo3-arrow = { version = "0.17.0", default-features = false }
 rdkafka = { version = "=0.39.0", default-features = false, features = ["cmake-build", "libz-static", "tokio"], optional = true }
 serde_json.workspace = true
 tokio.workspace = true

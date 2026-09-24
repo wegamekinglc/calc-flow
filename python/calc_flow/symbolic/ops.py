@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Literal, Unpack
+from typing import TYPE_CHECKING, Literal
+
+from typing_extensions import Unpack
 
 from calc_flow.symbolic.domains import (
     is_strict_scalar_type,

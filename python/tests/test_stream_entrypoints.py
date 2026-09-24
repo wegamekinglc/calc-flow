@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 import pyarrow as pa
 import pytest
@@ -54,7 +54,9 @@ def test_stream_entrypoints_forward_explicit_progress_before_eof(named):
         async def feed():
             try:
                 yield data
-                yield cf.Watermark(datetime(1970, 1, 1, microsecond=3, tzinfo=UTC))
+                yield cf.Watermark(
+                    datetime(1970, 1, 1, microsecond=3, tzinfo=timezone.utc)
+                )
                 paused.set()
                 await asyncio.Event().wait()
             finally:
@@ -63,10 +65,14 @@ def test_stream_entrypoints_forward_explicit_progress_before_eof(named):
         inputs = {"quotes": feed()} if named else feed()
         watermarks = {"quotes": policy} if named else policy
         results = owner.stream(inputs, watermarks=watermarks)
-        async with asyncio.timeout(5), results:
-            await paused.wait()
-            assert await _read_previous(results) == [None, 10.0]
-            assert not closed.is_set()
+
+        async def consume():
+            async with results:
+                await paused.wait()
+                assert await _read_previous(results) == [None, 10.0]
+                assert not closed.is_set()
+
+        await asyncio.wait_for(consume(), 5)
         assert closed.is_set()
         assert results.job.status()["task_count"] == 0
 

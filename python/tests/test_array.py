@@ -11,7 +11,6 @@ import sys
 import warnings
 import weakref
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +32,16 @@ from calc_flow import (
     register_jax,
     register_numpy,
 )
+from calc_flow._compat import dataclass
+
+
+def _jax_device(array: Any) -> object:
+    try:
+        device = array.device
+    except AttributeError:
+        (device,) = array.devices()
+        return device
+    return device() if callable(device) else device
 
 
 def test_array_and_dataframe_example_uses_table_matmul(
@@ -40,7 +49,7 @@ def test_array_and_dataframe_example_uses_table_matmul(
 ) -> None:
     example = Path(__file__).parents[2] / "examples" / "07_array_and_dataframe.py"
 
-    runpy.run_path(example, run_name="__main__")
+    runpy.run_path(str(example), run_name="__main__")
 
     assert capsys.readouterr().out.splitlines() == [
         "NumPy result: [[6.0, 10.0], [2.0, 12.0], [8.0, 10.0]]",
@@ -470,7 +479,7 @@ def test_owned_jax_result_retains_identity_and_device_without_numpy_conversion(
     jax = pytest.importorskip("jax")
     jnp = pytest.importorskip("jax.numpy")
     result = jnp.asarray([[1.0, 2.0]])
-    device = result.device
+    device = _jax_device(result)
 
     def reject_numpy_conversion(*_args: object, **_kwargs: object) -> None:
         pytest.fail("owned JAX adoption must not convert through NumPy")
@@ -485,7 +494,7 @@ def test_owned_jax_result_retains_identity_and_device_without_numpy_conversion(
 
     assert isinstance(batch.array, jax.Array)
     assert batch.array is result
-    assert batch.array.device == device
+    assert _jax_device(batch.array) == device
 
 
 def test_array_expression_cache_reuses_successful_exact_strings() -> None:
@@ -1316,7 +1325,7 @@ def test_jax_table_matmul_stays_on_jax() -> None:
     assert isinstance(output.array, jax.Array)
     assert output.backend == "jax"
     assert output.array.tolist() == [[6.0, 10.0], [2.0, 12.0], [8.0, 10.0]]
-    assert output.array.device == weights.array.device
+    assert _jax_device(output.array) == _jax_device(weights.array)
 
 
 def test_jax_table_matmul_preserves_device_identity_and_copy_ceiling(
@@ -1409,13 +1418,13 @@ def test_jax_table_matmul_preserves_device_identity_and_copy_ceiling(
     assert allocations[0][2].flags.c_contiguous
     assert len(transfers) == 1
     assert transfers[0][0] is allocations[0][2]
-    assert transfers[0][1] is weights_payload.device
+    assert transfers[0][1] is _jax_device(weights_payload)
     assert len(multiplications) == 1
     assert multiplications[0][0] is transfers[0][2]
     assert multiplications[0][1] is weights_payload
     assert adoptions == [multiplications[0][2]]
     assert output.array is multiplications[0][2]
-    assert output.array.device == weights_payload.device
+    assert _jax_device(output.array) == _jax_device(weights_payload)
     assert output.array.tolist() == [[9.0], [12.0], [15.0]]
     assert table.to_pydict() == expected_table
     assert weights.array is weights_payload
@@ -1452,7 +1461,13 @@ output = plan.execute(
 ).outputs["output"]
 assert output.array.dtype == jnp.dtype(jnp.float64)
 assert output.array.tolist() == [[3.0], [5.0]]
-assert output.array.device == weights.array.device
+def device(array):
+    try:
+        value = array.device
+    except AttributeError:
+        (value,) = array.devices()
+    return value() if callable(value) else value
+assert device(output.array) == device(weights.array)
 """
     completed = subprocess.run(
         [sys.executable, "-c", script],

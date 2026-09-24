@@ -9,6 +9,15 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-24: Publish `calc-flow-python` for CPython 3.9–3.14 with two
+  abi3 wheel tiers on the existing five platform targets. The 3.13+ tier
+  retains its direct Unicode extraction and eager asyncio task paths;
+  older interpreters use compatible fallbacks. Python 3.9 resolves PyArrow
+  21 and JAX 0.4.30 when the JAX extra is requested. Stream result ownership,
+  cancellation cleanup, and JAX device selection work across the supported
+  interpreter range. Release CI installs matching wheels on each version and
+  retains the paired performance acceptance gates.
+
 - 2026-09-23: Restore stream Join handler throughput after DAL-300. The
   bounded-chunk preflight scanned every matched pair through hashed per-row
   caches (a measured 26% release-gate regression on

@@ -4,9 +4,12 @@ Moved verbatim from ``symbolic/lower.py``."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Never
+import sys
+from typing import TYPE_CHECKING
 
+from typing_extensions import Never
+
+from calc_flow._compat import dataclass
 from calc_flow.join_spec import (
     JoinSideWire,
     bounds_wire,
@@ -55,6 +58,9 @@ from calc_flow.symbolic.types import Field
 
 if TYPE_CHECKING:
     from calc_flow.symbolic.program import Program
+
+if sys.version_info < (3, 10):
+    from calc_flow._compat import zip as zip
 
 
 def _matrix_literal(node: Node, path: str, /) -> bool | int | float:

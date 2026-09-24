@@ -20,10 +20,12 @@ competing Python promotion table exists here.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
-from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Final
+from dataclasses import replace
+from typing import TYPE_CHECKING, Final, Union
 
+from calc_flow._compat import TypeAliasType, dataclass
 from calc_flow.capabilities import ProviderPort, RuntimeCapabilities
 from calc_flow.errors import CompileError, ConfigError, ExecutionError
 from calc_flow.pipeline import Runtime
@@ -46,6 +48,9 @@ from calc_flow.symbolic.types import CompileMode, Field
 
 if TYPE_CHECKING:
     from calc_flow.symbolic.lower.bindings import _BatchBindings
+
+if sys.version_info < (3, 10):
+    from calc_flow._compat import zip as zip
 
 _MODES: Final[tuple[str, ...]] = ("batch", "stream")
 _EVENT_TIME_TYPE: Final = "timestamp[us, UTC]"
@@ -209,7 +214,9 @@ class _LateRowOrigin:
     digest: str
 
 
-type _RowOrigin = str | _WindowRowOrigin | _SQLRowOrigin | _LateRowOrigin
+_RowOrigin = TypeAliasType(
+    "_RowOrigin", Union[str, _WindowRowOrigin, _SQLRowOrigin, _LateRowOrigin]
+)
 
 
 @dataclass(frozen=True, slots=True)

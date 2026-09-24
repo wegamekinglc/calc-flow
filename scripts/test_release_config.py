@@ -3,9 +3,10 @@ from __future__ import annotations
 import ast
 import json
 import re
-import tomllib
 import unittest
 from pathlib import Path
+
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -299,7 +300,7 @@ class ReleaseConfigTests(unittest.TestCase):
     def test_release_maturin_actions_pin_tool_and_rust_versions(self) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         action_count = workflow.count("uses: PyO3/maturin-action@")
-        self.assertEqual(action_count, 3)
+        self.assertEqual(action_count, 4)
         self.assertEqual(workflow.count("maturin-version: v1.14.1"), action_count)
         self.assertEqual(workflow.count('rust-toolchain: "1.88.0"'), action_count)
 
@@ -797,12 +798,19 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn('"${perf_gate_extra_args[@]}"', exact_gate)
 
     def test_python_package_excludes_unsupported_pyarrow_25(self) -> None:
-        for project in (ROOT, ROOT / "web-ui/backend"):
-            with self.subTest(project=project):
-                package = tomllib.loads(
-                    (project / "pyproject.toml").read_text(encoding="utf-8")
-                )
-                self.assertIn("pyarrow>=24.0.0,<25", package["project"]["dependencies"])
+        core = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        studio = tomllib.loads(
+            (ROOT / "web-ui/backend/pyproject.toml").read_text(encoding="utf-8")
+        )
+        self.assertIn(
+            "pyarrow>=21.0.0,<22; python_version < '3.10'",
+            core["project"]["dependencies"],
+        )
+        self.assertIn(
+            "pyarrow>=24.0.0,<25; python_version >= '3.10'",
+            core["project"]["dependencies"],
+        )
+        self.assertIn("pyarrow>=24.0.0,<25", studio["project"]["dependencies"])
 
     def test_final_release_error_docs_do_not_claim_alpha_status(self) -> None:
         stale_claims = {
