@@ -437,18 +437,9 @@ def _relative_name(path: Path, dist_dir: Path) -> str:
     return str(PurePosixPath(path.relative_to(dist_dir)))
 
 
-def validate_release(
-    dist_dir: Path,
-    root: Path = ROOT,
-    tag: str | None = None,
-    check_pypi: bool = False,
-    core_only: bool = False,
-) -> list[str]:
-    config = validate_versions(root, tag, check_pypi)
-    dist_dir = dist_dir.resolve()
-    if not dist_dir.is_dir():
-        raise ValueError(f"release directory does not exist: {dist_dir}")
-
+def _release_artifacts(
+    dist_dir: Path, core_only: bool
+) -> tuple[list[Path], list[Path], list[Path]]:
     wheels = sorted(dist_dir.rglob("*.whl"))
     sdists = sorted(dist_dir.rglob("*.tar.gz"))
     core_wheels = [path for path in wheels if path.name.startswith("calc_flow_python-")]
@@ -478,6 +469,22 @@ def validate_release(
         raise ValueError(
             f"expected one source distribution, found {[path.name for path in sdists]}"
         )
+    return core_wheels, studio_wheels, sdists
+
+
+def validate_release(
+    dist_dir: Path,
+    root: Path = ROOT,
+    tag: str | None = None,
+    check_pypi: bool = False,
+    core_only: bool = False,
+) -> list[str]:
+    config = validate_versions(root, tag, check_pypi)
+    dist_dir = dist_dir.resolve()
+    if not dist_dir.is_dir():
+        raise ValueError(f"release directory does not exist: {dist_dir}")
+
+    core_wheels, studio_wheels, sdists = _release_artifacts(dist_dir, core_only)
 
     manifest_by_name: dict[str, str] = {}
     actual_targets: set[tuple[str, str]] = set()
