@@ -120,9 +120,9 @@ const CHECKPOINT_SOAK_MALLOC_TRIM_THRESHOLD: &str = "0";
 const CHECKPOINT_SOAK_MALLOC_TOP_PAD: &str = "0";
 const CHECKPOINT_SOAK_CHILD_TEST: &str =
     "runtime::streaming::soak::checkpoint_restart_soak_generation_child_process";
-const CHECKPOINT_SOAK_PROCESS_SCHEMA: &str = "calc-flow.m5-checkpoint-soak-process.v1";
+const CHECKPOINT_SOAK_PROCESS_SCHEMA: &str = "calc-flow.m5-checkpoint-soak-process.v2";
 const CHECKPOINT_SOAK_PLAN_SCHEMA: &str = "calc-flow.m5-checkpoint-soak-plan.v1";
-const CHECKPOINT_SOAK_SCHEMA: &str = "calc-flow.m5-checkpoint-soak.v2";
+const CHECKPOINT_SOAK_SCHEMA: &str = "calc-flow.m5-checkpoint-soak.v3";
 const CHECKPOINT_SOAK_GENERATIONS: usize = 3;
 const CHECKPOINT_SOAK_RETAINED_EPOCHS: usize = 2;
 const CHECKPOINT_SOAK_MAX_RETAINED_EPOCHS: usize = 64;
@@ -136,6 +136,10 @@ const _: () = assert!(MAX_CHECKPOINT_RSS_NORMALIZED_GROWTH_SPREAD_KIB < MAX_MEDI
 const CHECKPOINT_SOAK_REPORT_LIMIT: u64 = 1 << 20;
 const CHECKPOINT_SOAK_CADENCE_TOLERANCE: Duration = Duration::from_secs(3);
 const MAX_CHECKPOINT_SOAK_RESTART_GAP: Duration = Duration::from_secs(60);
+const MAX_CHECKPOINT_SOAK_CHILD_PREFLIGHT: Duration = Duration::from_secs(60);
+// This bounds the OS/test-harness startup omitted by the child-local clock,
+// plus report publication and parent polling after the child finishes.
+const CHECKPOINT_SOAK_PROCESS_OVERHEAD_BUDGET: Duration = Duration::from_secs(10);
 // Smoke wait bounds are harness budgets, not behavioral assertions: debug-profile
 // operator cost, fsync latency, and deep-retention per-epoch checkpoint cost
 // (DAL-164) all scale with machine speed and load, so the bounds must stay far
@@ -4547,6 +4551,7 @@ struct CheckpointSoakProcessReport {
     sample_start: usize,
     sample_end: usize,
     generation_started_micros: u64,
+    sampling_started_micros: u64,
     generation_finished_micros: u64,
     restored_epoch: Option<u64>,
     restored_cursor_orders: BTreeMap<String, Option<String>>,
@@ -4615,6 +4620,10 @@ fn checkpoint_restart_soak_metadata(
         "cadence_tolerance_seconds": CHECKPOINT_SOAK_CADENCE_TOLERANCE.as_secs(),
         "cadence_tolerance_boundary": "inclusive",
         "maximum_restart_gap_seconds": MAX_CHECKPOINT_SOAK_RESTART_GAP.as_secs(),
+        "maximum_child_preflight_seconds": MAX_CHECKPOINT_SOAK_CHILD_PREFLIGHT.as_secs(),
+        "maximum_process_overhead_seconds": CHECKPOINT_SOAK_PROCESS_OVERHEAD_BUDGET.as_secs(),
+        "sampling_clock_start": "after_running_preflight",
+        "child_preflight_clock_start": "child_test_entry",
         "timing_source": "parent_std_instant_plus_child_local_instant",
         "restart_sample_indices": CHECKPOINT_SOAK_RESTART_SAMPLES,
         "restart_kind": "os_process",
@@ -5360,6 +5369,12 @@ async fn run_checkpoint_soak_child(
         ));
     }
     assert_public_edge_budgets(&initial_status);
+    let sampling_started = tokio::time::Instant::now();
+    let sampling_started_micros = generation_started_micros
+        .checked_add(checkpoint_soak_parent_elapsed_micros(
+            generation_started.elapsed(),
+        )?)
+        .ok_or_else(|| checkpoint_soak_process_error("checkpoint soak sample clock overflowed"))?;
 
     let mut samples = Vec::with_capacity(plan.sample_end - plan.sample_start);
     if plan.mode == CheckpointSoakProcessMode::Smoke {
@@ -5367,7 +5382,7 @@ async fn run_checkpoint_soak_child(
     } else {
         for (local_index, index) in (plan.sample_start..plan.sample_end).enumerate() {
             let sample_number = u32::try_from(local_index + 1).unwrap();
-            tokio::time::sleep_until(generation_started + CHECKPOINT_SOAK_CADENCE * sample_number)
+            tokio::time::sleep_until(sampling_started + CHECKPOINT_SOAK_CADENCE * sample_number)
                 .await;
             let elapsed_micros = generation_started_micros
                 .checked_add(checkpoint_soak_parent_elapsed_micros(
@@ -5444,6 +5459,7 @@ async fn run_checkpoint_soak_child(
         sample_start: plan.sample_start,
         sample_end: plan.sample_end,
         generation_started_micros,
+        sampling_started_micros,
         generation_finished_micros,
         restored_epoch,
         restored_cursor_orders,
@@ -5533,10 +5549,10 @@ fn checkpoint_soak_sample_issue(
     let target = cadence_micros * u64::try_from(local_index + 1).unwrap();
     let Some(observed) = sample
         .elapsed_micros
-        .checked_sub(report.generation_started_micros)
+        .checked_sub(report.sampling_started_micros)
     else {
         return Some(format!(
-            "checkpoint soak generation {} sample {} precedes its generation",
+            "checkpoint soak generation {} sample {} precedes sampling start",
             report.generation, sample.index
         ));
     };
@@ -5632,6 +5648,9 @@ fn validate_checkpoint_soak_report(
     report: &CheckpointSoakProcessReport,
     exit_code: i32,
 ) -> Result<()> {
+    let preflight_micros = report
+        .sampling_started_micros
+        .checked_sub(report.generation_started_micros);
     let expected_cause = if plan.final_generation {
         "natural_end"
     } else {
@@ -5650,7 +5669,10 @@ fn validate_checkpoint_soak_report(
         || report.sample_start != plan.sample_start
         || report.sample_end != plan.sample_end
         || report.generation_started_micros != plan.parent_launch_offset_micros
-        || report.generation_finished_micros <= report.generation_started_micros
+        || !preflight_micros.is_some_and(|elapsed| {
+            elapsed <= u64::try_from(MAX_CHECKPOINT_SOAK_CHILD_PREFLIGHT.as_micros()).unwrap()
+        })
+        || report.generation_finished_micros <= report.sampling_started_micros
         || report.terminal_cause != expected_cause
         || report.source_open_events != 2
         || report.source_close_events != 2
@@ -5791,6 +5813,19 @@ fn checkpoint_soak_child_command(executable: &Path, plan_path: &Path) -> Command
     command
 }
 
+fn checkpoint_soak_process_timeout(plan: &CheckpointSoakProcessPlan) -> Duration {
+    match plan.mode {
+        CheckpointSoakProcessMode::Smoke => CHECKPOINT_SOAK_SMOKE_GENERATION_TIMEOUT,
+        CheckpointSoakProcessMode::Standard => {
+            let samples = u64::try_from(plan.sample_end - plan.sample_start).unwrap();
+            CHECKPOINT_SOAK_CADENCE * u32::try_from(samples).unwrap()
+                + MAX_CHECKPOINT_SOAK_CHILD_PREFLIGHT
+                + CHECKPOINT_SOAK_SETTLE_TIMEOUT
+                + CHECKPOINT_SOAK_PROCESS_OVERHEAD_BUDGET
+        }
+    }
+}
+
 async fn spawn_checkpoint_soak_process(
     executable: &Path,
     plan: &CheckpointSoakProcessPlan,
@@ -5804,13 +5839,7 @@ async fn spawn_checkpoint_soak_process(
     })?;
     let stdout_path = log_root.join(format!("generation-{}.stdout", plan.generation));
     let stderr_path = log_root.join(format!("generation-{}.stderr", plan.generation));
-    let timeout = match plan.mode {
-        CheckpointSoakProcessMode::Smoke => CHECKPOINT_SOAK_SMOKE_GENERATION_TIMEOUT,
-        CheckpointSoakProcessMode::Standard => {
-            let samples = u64::try_from(plan.sample_end - plan.sample_start).unwrap();
-            CHECKPOINT_SOAK_CADENCE * u32::try_from(samples).unwrap() + Duration::from_secs(60)
-        }
-    };
+    let timeout = checkpoint_soak_process_timeout(plan);
     let executable = executable.to_path_buf();
     let blocking_plan = plan_path.clone();
     let blocking_stdout = stdout_path.clone();
@@ -5915,10 +5944,15 @@ fn validate_checkpoint_soak_timeline(
     parent_timings: &[CheckpointSoakParentTiming],
 ) -> Result<()> {
     let maximum_restart_gap = u64::try_from(MAX_CHECKPOINT_SOAK_RESTART_GAP.as_micros()).unwrap();
+    let maximum_process_overhead =
+        u64::try_from(CHECKPOINT_SOAK_PROCESS_OVERHEAD_BUDGET.as_micros()).unwrap();
     for ((plan, report), timing) in plans.iter().zip(reports).zip(parent_timings) {
         if timing.generation != plan.generation
             || timing.launch_micros != report.generation_started_micros
-            || timing.finish_micros < report.generation_finished_micros
+            || !timing
+                .finish_micros
+                .checked_sub(report.generation_finished_micros)
+                .is_some_and(|overhead| overhead <= maximum_process_overhead)
         {
             return Err(checkpoint_soak_process_error(
                 "checkpoint soak parent timing does not bound the child report",
@@ -5972,8 +6006,11 @@ fn validate_checkpoint_soak_timeline(
     let last = samples.last().unwrap();
     let maximum_final_elapsed =
         u64::try_from(TARGET_DURATION.as_micros()).unwrap() + 2 * maximum_restart_gap + tolerance;
-    if first.elapsed_micros < cadence - tolerance
-        || first.elapsed_micros > cadence + tolerance
+    let first_elapsed = first
+        .elapsed_micros
+        .checked_sub(reports[0].sampling_started_micros);
+    if !first_elapsed
+        .is_some_and(|elapsed| elapsed >= cadence - tolerance && elapsed <= cadence + tolerance)
         || last.elapsed_micros < u64::try_from(TARGET_DURATION.as_micros()).unwrap()
         || last.elapsed_micros > maximum_final_elapsed
     {
@@ -6225,6 +6262,9 @@ fn checkpoint_soak_process_summary(
             "generation_started_seconds": Duration::from_micros(
                 process.generation_started_micros,
             ).as_secs_f64(),
+            "sampling_started_seconds": Duration::from_micros(
+                process.sampling_started_micros,
+            ).as_secs_f64(),
             "generation_finished_seconds": Duration::from_micros(
                 process.generation_finished_micros,
             ).as_secs_f64(),
@@ -6309,7 +6349,7 @@ fn checkpoint_soak_evidence_bundle(
     evidence: &CheckpointSoakProcessEvidence,
 ) -> serde_json::Value {
     json!({
-        "schema": "calc-flow.m5-checkpoint-soak-evidence.v2",
+        "schema": "calc-flow.m5-checkpoint-soak-evidence.v3",
         "type": "calc_flow_m5_checkpoint_soak_evidence",
         "commit": metadata["commit"],
         "executable_sha256": metadata["executable_sha256"],
@@ -6420,7 +6460,7 @@ async fn run_checkpoint_restart_linux_soak() {
     println!(
         "{}",
         json!({
-            "schema": "calc-flow.m5-checkpoint-soak-evidence-root.v2",
+            "schema": "calc-flow.m5-checkpoint-soak-evidence-root.v3",
             "type": "calc_flow_m5_checkpoint_soak_evidence_root",
             "commit": &commit,
             "path": &evidence_root,
@@ -7345,6 +7385,7 @@ fn checkpoint_soak_process_report_fixture(
         sample_start: plan.sample_start,
         sample_end: plan.sample_end,
         generation_started_micros,
+        sampling_started_micros: generation_started_micros,
         generation_finished_micros: samples
             .last()
             .map_or(generation_started_micros + 250_000, |sample| {
@@ -7409,6 +7450,57 @@ fn checkpoint_soak_cadence_tolerance_includes_exact_thirteen_second_boundary() {
 }
 
 #[test]
+fn checkpoint_soak_cadence_starts_after_child_startup() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut plan = checkpoint_soak_process_plans(
+        directory.path(),
+        &"a".repeat(40),
+        &"b".repeat(64),
+        CheckpointSoakProcessMode::Standard,
+    )
+    .remove(0);
+    bind_checkpoint_soak_parent_launch(&mut plan, Duration::ZERO).unwrap();
+    let mut delayed = checkpoint_soak_process_report_fixture(&plan, 10_000);
+    let startup_micros = 15_000_000;
+    delayed.sampling_started_micros += startup_micros;
+    delayed.generation_finished_micros += startup_micros;
+    for sample in &mut delayed.samples {
+        sample.elapsed_micros += startup_micros;
+    }
+
+    validate_checkpoint_soak_report(&plan, &delayed, 0).unwrap();
+
+    let additional_preflight =
+        u64::try_from(MAX_CHECKPOINT_SOAK_CHILD_PREFLIGHT.as_micros()).unwrap() - startup_micros;
+    delayed.sampling_started_micros += additional_preflight;
+    delayed.generation_finished_micros += additional_preflight;
+    for sample in &mut delayed.samples {
+        sample.elapsed_micros += additional_preflight;
+    }
+    validate_checkpoint_soak_report(&plan, &delayed, 0).unwrap();
+
+    delayed.sampling_started_micros += 1;
+    assert!(validate_checkpoint_soak_report(&plan, &delayed, 0).is_err());
+}
+
+#[test]
+fn checkpoint_soak_standard_watchdog_covers_startup_and_settle() {
+    let directory = tempfile::tempdir().unwrap();
+    let plan = checkpoint_soak_process_plans(
+        directory.path(),
+        &"a".repeat(40),
+        &"b".repeat(64),
+        CheckpointSoakProcessMode::Standard,
+    )
+    .remove(0);
+    let samples = u32::try_from(plan.sample_end - plan.sample_start).unwrap();
+    let minimum = CHECKPOINT_SOAK_CADENCE * samples
+        + MAX_CHECKPOINT_SOAK_CHILD_PREFLIGHT
+        + CHECKPOINT_SOAK_SETTLE_TIMEOUT;
+    assert!(checkpoint_soak_process_timeout(&plan) > minimum);
+}
+
+#[test]
 #[cfg(target_os = "linux")]
 fn checkpoint_soak_evidence_bundle_contains_all_raw_child_documents() {
     let directory = tempfile::tempdir().unwrap();
@@ -7463,7 +7555,7 @@ fn checkpoint_soak_evidence_bundle_contains_all_raw_child_documents() {
 
     let bundle = checkpoint_soak_evidence_bundle(&metadata, &summary, &evidence);
 
-    assert_eq!(bundle["schema"], "calc-flow.m5-checkpoint-soak-evidence.v2");
+    assert_eq!(bundle["schema"], "calc-flow.m5-checkpoint-soak-evidence.v3");
     assert_eq!(bundle["metadata"], metadata);
     assert_eq!(bundle["summary"], summary);
     assert_eq!(bundle["child_plans"].as_array().unwrap().len(), 3);
@@ -7544,6 +7636,51 @@ fn checkpoint_restart_process_evidence_fails_closed() {
         })
         .collect::<Vec<_>>();
     validate_checkpoint_soak_process_set(&plans, &reports, &exits, &parent_timings).unwrap();
+
+    let mut late_final_exit = parent_timings.clone();
+    late_final_exit[2].finish_micros = reports[2].generation_finished_micros
+        + u64::try_from(CHECKPOINT_SOAK_PROCESS_OVERHEAD_BUDGET.as_micros()).unwrap();
+    validate_checkpoint_soak_process_set(&plans, &reports, &exits, &late_final_exit).unwrap();
+    late_final_exit[2].finish_micros += 1;
+    assert!(
+        validate_checkpoint_soak_process_set(&plans, &reports, &exits, &late_final_exit).is_err()
+    );
+    late_final_exit[2].finish_micros = parent_timings[2].finish_micros + 100_000_000;
+    assert!(
+        validate_checkpoint_soak_process_set(&plans, &reports, &exits, &late_final_exit).is_err()
+    );
+
+    let startup_micros = 15_000_000;
+    let mut delayed_plans = plans.clone();
+    let mut delayed_reports = reports.clone();
+    let mut delayed_timings = parent_timings.clone();
+    for (generation, ((plan, report), timing)) in delayed_plans
+        .iter_mut()
+        .zip(&mut delayed_reports)
+        .zip(&mut delayed_timings)
+        .enumerate()
+    {
+        if generation > 0 {
+            plan.parent_launch_offset_micros += startup_micros;
+            plan.config_hash = checkpoint_soak_plan_hash(plan);
+            report.config_hash = plan.config_hash.clone();
+            report.generation_started_micros += startup_micros;
+            timing.launch_micros += startup_micros;
+        }
+        report.sampling_started_micros += startup_micros;
+        report.generation_finished_micros += startup_micros;
+        timing.finish_micros += startup_micros;
+        for sample in &mut report.samples {
+            sample.elapsed_micros += startup_micros;
+        }
+    }
+    validate_checkpoint_soak_process_set(
+        &delayed_plans,
+        &delayed_reports,
+        &exits,
+        &delayed_timings,
+    )
+    .unwrap();
 
     let mut bounded_scheduler_jitter = reports.clone();
     bounded_scheduler_jitter[0].samples[0].elapsed_micros += 2_250_000;
@@ -7815,13 +7952,17 @@ fn checkpoint_restart_soak_metadata_fixture() -> serde_json::Value {
 fn checkpoint_restart_soak_contract_is_exact_and_machine_readable() {
     let metadata = checkpoint_restart_soak_metadata_fixture();
 
-    assert_eq!(metadata["schema"], "calc-flow.m5-checkpoint-soak.v2");
+    assert_eq!(metadata["schema"], "calc-flow.m5-checkpoint-soak.v3");
     assert_eq!(metadata["target_duration_seconds"], 1_200);
     assert_eq!(metadata["sample_count"], 120);
     assert_eq!(metadata["cadence_seconds"], 10);
     assert_eq!(metadata["cadence_tolerance_seconds"], 3);
     assert_eq!(metadata["cadence_tolerance_boundary"], "inclusive");
     assert_eq!(metadata["maximum_restart_gap_seconds"], 60);
+    assert_eq!(metadata["maximum_child_preflight_seconds"], 60);
+    assert_eq!(metadata["maximum_process_overhead_seconds"], 10);
+    assert_eq!(metadata["sampling_clock_start"], "after_running_preflight");
+    assert_eq!(metadata["child_preflight_clock_start"], "child_test_entry");
     assert_eq!(
         metadata["timing_source"],
         "parent_std_instant_plus_child_local_instant"

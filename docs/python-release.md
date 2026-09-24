@@ -113,6 +113,16 @@ own cold exact-ref builds and paired cases. The two mandatory 20-minute soaks
 run alongside those jobs in `soak-gates`. The acceptance job merges the suite
 evidence and runs the security gate after collection. Benchmark thresholds and
 soak requirements still apply without `continue-on-error`.
+The checkpoint/restart soak records preflight time from entry into each child
+test function until its job reaches the running state. It starts that child's
+10-second sample cadence after preflight, bounds preflight at 60 seconds, and
+retains the same 120 samples, 3-second cadence tolerance, restart-gap limit,
+and whole-run duration check. The child-local preflight measurement excludes
+OS process and test-harness startup; the parent process watchdog separately
+budgets those startup costs, preflight, sampling, and settlement. Parent-observed
+completion must remain within 10 seconds of the child report's completion;
+this bounds the omitted process startup together with report publication and
+exit polling.
 
 ## First-release performance baseline
 
