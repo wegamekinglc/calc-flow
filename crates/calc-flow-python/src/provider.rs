@@ -1207,7 +1207,7 @@ mod tests {
                         .unwrap()
                         .str()
                         .unwrap()
-                        .to_str()
+                        .extract::<String>()
                         .unwrap(),
                     dtype,
                 );
@@ -1217,7 +1217,7 @@ mod tests {
                         .unwrap()
                         .repr()
                         .unwrap()
-                        .to_str()
+                        .extract::<String>()
                         .unwrap(),
                     expected,
                 );

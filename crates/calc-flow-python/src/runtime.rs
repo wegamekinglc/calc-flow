@@ -1091,7 +1091,7 @@ asyncio.run(exercise())
         Python::attach(|py| {
             assert!(error.is_instance_of::<PyRuntimeError>(py));
             assert_eq!(
-                error.value(py).str().unwrap().to_str().unwrap(),
+                error.value(py).str().unwrap().extract::<String>().unwrap(),
                 "Python awaitable completion channel closed unexpectedly"
             );
         });

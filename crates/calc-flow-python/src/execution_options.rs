@@ -684,7 +684,7 @@ mod tests {
                 let error = expect_error(strict_settings(py, &source));
                 assert!(error.is_instance_of::<PyValueError>(py));
                 let value = error.value(py);
-                assert_eq!(value.str().unwrap().to_str().unwrap(), message);
+                assert_eq!(value.str().unwrap().extract::<String>().unwrap(), message);
                 assert!(value.getattr("__cause__").unwrap().is_none());
                 assert!(value.getattr("__context__").unwrap().is_none());
             }

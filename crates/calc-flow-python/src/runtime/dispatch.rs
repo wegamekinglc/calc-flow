@@ -244,7 +244,7 @@ proxy = LoopProxy()
             dispatcher.call0().unwrap();
             let error = receiver.try_recv().unwrap().unwrap_err();
             assert_eq!(
-                error.value(py).str().unwrap().to_str().unwrap(),
+                error.value(py).str().unwrap().extract::<String>().unwrap(),
                 "context unavailable"
             );
             assert_eq!(registry.pending.load(Ordering::Acquire), 0);
