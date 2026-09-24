@@ -2,6 +2,8 @@
 
 [![Linux CI](https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-linux.yml/badge.svg?branch=main)](https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-linux.yml)
 [![Windows CI](https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-windows.yml/badge.svg?branch=main)](https://github.com/wegamekinglc/calc-flow/actions/workflows/ci-windows.yml)
+[![Scheduled Benchmarks](https://github.com/wegamekinglc/calc-flow/actions/workflows/benchmark-suite.yml/badge.svg?branch=main)](https://github.com/wegamekinglc/calc-flow/actions/workflows/benchmark-suite.yml)
+[![Codacy Grade](https://app.codacy.com/project/badge/Grade/7416ea8873544e599089cf63aba3717d)](https://app.codacy.com/gh/wegamekinglc/calc-flow/dashboard)
 [![Coverage Status](https://coveralls.io/repos/github/wegamekinglc/calc-flow/badge.svg?branch=main)](https://coveralls.io/github/wegamekinglc/calc-flow?branch=main)
 
 Calc Flow is a Python calculation library for Arrow tables and stateful streams.
