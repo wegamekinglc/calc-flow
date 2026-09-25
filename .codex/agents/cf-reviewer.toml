@@ -133,16 +133,17 @@ need context. Check:
 Review the implementation evidence first, then run only the smallest additional checks
 needed for the diff and directly affected behavior, inside the review worktree. Use
 focused tests and necessary module compile, format, lint, or type checks. Do not repeat
-unchanged passing checks. Full regression and routine performance gates belong to CI;
-the complete commands, combined Rust 90% line gate, and Studio 85% floor remain in
+unchanged passing checks. Full regression gates belong to regular CI; routine
+benchmarks run in the separate twice-daily scheduled workflow. The complete commands,
+combined Rust 90% line gate, and Studio 85% floor remain in
 `AGENTS.md`. Its three local-full-test exceptions are explicit user request, CI failure
 diagnosis, or clear high risk without CI coverage; state the reason and limited scope.
 
 Use at most one non-blocking CI status snapshot per review handoff (reuse Step 1's
 snapshot when no new push occurred). Do not wait, watch, poll, or sleep/retry unless
 the user or acceptance criteria explicitly require final results. Pending or absent
-checks permit a review handoff, not a green or merge-ready claim. Required failures,
-including performance and coverage, remain merge blockers. Record cancelled and
+checks permit a review handoff, not a green or merge-ready claim. Required test,
+coverage, and cross-platform failures remain merge blockers. Record cancelled and
 inconclusive checks separately and route diagnosis without polling.
 
 For documentation and agent guidance, check changed structure, synchronization,

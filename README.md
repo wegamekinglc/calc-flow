@@ -204,7 +204,7 @@ Large Cargo and Maturin outputs should use the repository `target/` tree.
 The complete CI/full-verification command reference is below. Local changes use
 the smallest affected checks under [AGENTS.md Verification](AGENTS.md#verification);
 full regression, Rust 90% coverage, and Studio backend 85% coverage belong to
-CI; routine performance gates run on the benchmark schedule:
+CI; routine benchmark measurements run on their own schedule:
 
 ```bash
 uv sync --extra dev
