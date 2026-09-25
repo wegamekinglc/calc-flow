@@ -8,7 +8,7 @@ on:
       mode:
         description: Standard benchmarks or a focused diagnostic
         type: choice
-        options: [standard, dal301-groupby, dal316-side-bias]
+        options: [standard, dal301-groupby, dal316-side-bias, dal316-installed-pairs]
         default: standard
 permissions:
   contents: read
@@ -18,7 +18,7 @@ concurrency:
 jobs:
   sql-datafusion-nightly:
     name: SQL and raw DataFusion paired evidence
-    if: inputs.mode != 'dal301-groupby' && inputs.mode != 'dal316-side-bias' && (github.event_name == 'workflow_dispatch' || github.event.schedule == '17 3 * * *')
+    if: inputs.mode != 'dal301-groupby' && inputs.mode != 'dal316-side-bias' && inputs.mode != 'dal316-installed-pairs' && (github.event_name == 'workflow_dispatch' || github.event.schedule == '17 3 * * *')
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -75,7 +75,7 @@ jobs:
           retention-days: 90
   sql-datafusion-weekly-matrix:
     name: SQL/DataFusion adaptive tuning matrix
-    if: inputs.mode != 'dal301-groupby' && inputs.mode != 'dal316-side-bias' && (github.event_name == 'workflow_dispatch' || github.event.schedule == '41 4 * * 0')
+    if: inputs.mode != 'dal301-groupby' && inputs.mode != 'dal316-side-bias' && inputs.mode != 'dal316-installed-pairs' && (github.event_name == 'workflow_dispatch' || github.event.schedule == '41 4 * * 0')
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
@@ -127,12 +127,12 @@ jobs:
           retention-days: 90
   benchmark:
     name: Complete benchmark suite
-    if: github.event_name == 'workflow_dispatch' && inputs.mode != 'dal301-groupby' && inputs.mode != 'dal316-side-bias'
+    if: github.event_name == 'workflow_dispatch' && inputs.mode != 'dal301-groupby' && inputs.mode != 'dal316-side-bias' && inputs.mode != 'dal316-installed-pairs'
     uses: ./.github/workflows/benchmark-suite.yml
   dal316-side-bias:
-    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'dal316-side-bias'
+    if: github.event_name == 'workflow_dispatch' && (inputs.mode == 'dal316-side-bias' || inputs.mode == 'dal316-installed-pairs')
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: ${{ inputs.mode == 'dal316-installed-pairs' && 180 || 30 }}
     permissions:
       actions: read
       contents: read
@@ -160,19 +160,36 @@ jobs:
           uv pip sync --python target/bench316-venv/bin/python \
             --require-hashes benchmarks/requirements.lock
       - name: Measure original and copied B trees at the same path
+        if: inputs.mode == 'dal316-side-bias'
         run: >-
           target/bench316-venv/bin/python -m scripts.benchmark_suite.tree_identity_diagnostic
           --baseline target/bench316-releases/baseline/release.json
           --candidate target/bench316-releases/candidate/release.json
           --output target/bench316-results
+      - name: Collect independently installed wheel pairs
+        if: inputs.mode == 'dal316-installed-pairs'
+        run: >-
+          target/bench316-venv/bin/python -m scripts.benchmark_suite.installed_pair_prototype
+          --baseline target/bench316-releases/baseline/release.json
+          --candidate target/bench316-releases/candidate/release.json
+          --output target/bench316-results
+      - name: Independently validate paired evidence
+        if: inputs.mode == 'dal316-installed-pairs'
+        run: >-
+          target/bench316-venv/bin/python -m scripts.benchmark_suite.installed_pair_validation
+          --report target/bench316-results/report.json
+          --baseline target/bench316-releases/baseline/release.json
+          --candidate target/bench316-releases/candidate/release.json
       - name: Retain focused diagnostic evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: dal316-side-bias-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ inputs.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             target/bench316-results/*.json
             target/bench316-results/**/stderr.log
+            target/bench316-results/**/install-*.log
+            target/bench316-results/**/install-*.command.json
           if-no-files-found: warn
           retention-days: 30
   dal301-profile-build:
