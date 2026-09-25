@@ -327,6 +327,72 @@ def test_decode_source_rejects_malformed_values(
         _decode_source(format, data, max_bytes=10_000)
 
 
+@pytest.mark.parametrize(
+    ("format", "data", "encoded_size", "values"),
+    [
+        ("records", [{"value": 1}], 13, [1]),
+        ("columns", {"value": [1]}, 13, [1]),
+        ("inline_json", [{"value": 1}], 13, [1]),
+        ("json", [{"value": 1}], 13, [1]),
+        ("json", '[{"value":1}]', 13, [1]),
+        ("csv", "value\n1\n", 8, [1]),
+        ("arrow_ipc", _ipc_data(), len(_ipc_data().encode("ascii")), [1, 2]),
+        (
+            "arrow_ipc",
+            _ipc_data(file=True),
+            len(_ipc_data(file=True).encode("ascii")),
+            [1, 2],
+        ),
+    ],
+)
+def test_decode_source_preserves_encoded_bounds_and_sizes(
+    format: str, data: object, encoded_size: int, values: list[int]
+) -> None:
+    table, actual_encoded, actual_decoded = _decode_source(
+        format, data, max_bytes=encoded_size
+    )
+
+    assert table.equals(pa.table({"value": values}))
+    assert actual_encoded == encoded_size
+    assert actual_decoded == table.nbytes == 8 * len(values)
+
+    with pytest.raises(RunManagerError) as error:
+        _decode_source(format, data, max_bytes=encoded_size - 1)
+    assert str(error.value) == (
+        f"encoded input exceeds the {encoded_size - 1} byte limit"
+    )
+
+
+@pytest.mark.parametrize(
+    ("format", "data", "max_bytes", "message"),
+    [
+        ("records", [1], 0, "encoded input exceeds the 0 byte limit"),
+        ("columns", {"value": 1}, 0, "encoded input exceeds the 0 byte limit"),
+        ("inline_json", [1], 0, "encoded input exceeds the 0 byte limit"),
+        ("json", [1], 0, "encoded input exceeds the 0 byte limit"),
+        ("csv", "bad", 0, "encoded input exceeds the 0 byte limit"),
+        ("json", "bad", 0, "encoded input exceeds the 0 byte limit"),
+        ("arrow_ipc", "not-base64!", 0, "encoded input exceeds the 0 byte limit"),
+        ("csv", [], 0, "CSV input data must be text"),
+        ("arrow_ipc", [], 0, "Arrow IPC input data must be base64 text"),
+        ("unsupported", [], 0, "unsupported input format 'unsupported'"),
+    ],
+)
+def test_decode_source_preserves_validation_order_and_error_text(
+    format: str, data: object, max_bytes: int, message: str
+) -> None:
+    with pytest.raises(RunManagerError) as error:
+        _decode_source(format, data, max_bytes=max_bytes)
+    assert str(error.value) == message
+
+
+def test_decode_source_checks_decoded_size_after_csv_parse() -> None:
+    data = "value\n1\n2\n"
+    with pytest.raises(RunManagerError) as error:
+        _decode_source("csv", data, max_bytes=len(data.encode("utf-8")))
+    assert str(error.value) == "decoded input exceeds the 10 byte limit"
+
+
 def test_prepare_run_enforces_combined_rows_and_exact_limit() -> None:
     request = RunRequest(
         inputs={

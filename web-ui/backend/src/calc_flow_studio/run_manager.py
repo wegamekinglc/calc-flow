@@ -355,6 +355,11 @@ def _json_size(value: JSONValue) -> int:
     )
 
 
+def _check_encoded_size(encoded_size: int, max_bytes: int) -> None:
+    if encoded_size > max_bytes:
+        raise RunManagerError(f"encoded input exceeds the {max_bytes} byte limit")
+
+
 def _records_table(value: object, *, columns_only: bool = False) -> pa.Table:
     try:
         if isinstance(value, dict):
@@ -397,65 +402,42 @@ def _decode_source(
     max_bytes: int,
 ) -> tuple[pa.Table, int, int]:
     """Decode one saved/request source and return table and both size domains."""
-    if format == "records":
+    if format in ("records", "columns", "inline_json") or (
+        format == "json" and not isinstance(data, str)
+    ):
         encoded_size = _json_size(data)  # type: ignore[arg-type]
-        if encoded_size > max_bytes:
-            raise RunManagerError(f"encoded input exceeds the {max_bytes} byte limit")
-        table = _records_table(data)
-    elif format == "columns":
-        encoded_size = _json_size(data)  # type: ignore[arg-type]
-        if encoded_size > max_bytes:
-            raise RunManagerError(f"encoded input exceeds the {max_bytes} byte limit")
-        table = _records_table(data, columns_only=True)
-    elif format == "inline_json":
-        encoded_size = _json_size(data)  # type: ignore[arg-type]
-        if encoded_size > max_bytes:
-            raise RunManagerError(f"encoded input exceeds the {max_bytes} byte limit")
-        table = _records_table(data)
+        _check_encoded_size(encoded_size, max_bytes)
+        table = _records_table(data, columns_only=format == "columns")
     elif format == "csv":
         if not isinstance(data, str):
             raise RunManagerError("CSV input data must be text")
         raw = data.encode("utf-8")
         encoded_size = len(raw)
-        if encoded_size > max_bytes:
-            raise RunManagerError(f"encoded input exceeds the {max_bytes} byte limit")
+        _check_encoded_size(encoded_size, max_bytes)
         try:
             table = pa_csv.read_csv(pa.BufferReader(raw))
         except pa.ArrowException as error:
             raise RunManagerError(f"CSV input is invalid: {error}") from error
     elif format == "json":
-        if not isinstance(data, str):
-            encoded_size = _json_size(data)  # type: ignore[arg-type]
-            if encoded_size > max_bytes:
-                raise RunManagerError(
-                    f"encoded input exceeds the {max_bytes} byte limit"
-                )
-            table = _records_table(data)
-        else:
-            raw = data.encode("utf-8")
-            encoded_size = len(raw)
-            if encoded_size > max_bytes:
-                raise RunManagerError(
-                    f"encoded input exceeds the {max_bytes} byte limit"
-                )
+        raw = data.encode("utf-8")
+        encoded_size = len(raw)
+        _check_encoded_size(encoded_size, max_bytes)
+        try:
+            decoded = json.loads(data)
+        except json.JSONDecodeError:
             try:
-                decoded = json.loads(data)
-            except json.JSONDecodeError:
-                try:
-                    table = pa_json.read_json(pa.BufferReader(raw))
-                except pa.ArrowException as error:
-                    raise RunManagerError(
-                        "JSON input must be an array, object, or "
-                        "newline-delimited records"
-                    ) from error
-            else:
-                table = _records_table(decoded)
+                table = pa_json.read_json(pa.BufferReader(raw))
+            except pa.ArrowException as error:
+                raise RunManagerError(
+                    "JSON input must be an array, object, or newline-delimited records"
+                ) from error
+        else:
+            table = _records_table(decoded)
     elif format == "arrow_ipc":
         if not isinstance(data, str):
             raise RunManagerError("Arrow IPC input data must be base64 text")
         encoded_size = len(data.encode("ascii", errors="ignore"))
-        if encoded_size > max_bytes:
-            raise RunManagerError(f"encoded input exceeds the {max_bytes} byte limit")
+        _check_encoded_size(encoded_size, max_bytes)
         try:
             raw = base64.b64decode(data, validate=True)
         except (binascii.Error, ValueError) as error:
