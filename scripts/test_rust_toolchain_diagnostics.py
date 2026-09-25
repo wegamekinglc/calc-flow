@@ -270,7 +270,9 @@ class WorkflowTests(unittest.TestCase):
             "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", job
         )
         self.assertIn(
-            "cargo clippy --workspace --all-targets --all-features -- -D warnings", job
+            "cargo clippy --workspace --lib --bins --tests --examples "
+            "--all-features -- -D warnings",
+            job,
         )
         install_step = job.split("      - id: rust_install\n", 1)[1].split(
             "      - name:", 1

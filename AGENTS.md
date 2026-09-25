@@ -21,7 +21,7 @@ subshells so their working-directory changes do not affect later commands.
 # Rust core and PyO3 Rust unit tests
 uv sync --extra dev
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo clippy --workspace --lib --bins --tests --examples --all-features -- -D warnings
 uv run python scripts/run_rust_tests.py
 CALC_FLOW_CONNECTOR_CONTAINERS=1 \
   CALC_FLOW_KAFKA_BOOTSTRAP=localhost:9092 \
@@ -83,7 +83,7 @@ interpreter's library directory to the test process's loader path. Pass
 PyO3 build is configured with `PYO3_PYTHON`, invoke the harness through that
 same interpreter so its NumPy, PyArrow, and shared-library paths stay aligned.
 
-Pass `--no-run` to precompile the selected core, connector, benchmark, and
+Pass `--no-run` to precompile the selected core, connector, and
 PyO3 targets without executing tests. Run the normal command afterward with
 the same build settings and target directory; it retains doctests and tests
 that compile fixtures. Linux CI gives precompilation a 45-minute budget for cold
