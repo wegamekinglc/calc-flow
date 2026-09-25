@@ -57,7 +57,14 @@ def test_ready_stream_repeated_samples_use_fresh_execution_plans(scenario, tmp_p
 
 
 @pytest.mark.parametrize("count", [64_001, 128_000])
-@pytest.mark.parametrize("scenario", STREAM_CASES)
+@pytest.mark.parametrize(
+    "scenario",
+    tuple(
+        scenario
+        for scenario in STREAM_CASES
+        if scenario not in ("window_sum", "asof_join")
+    ),
+)
 def test_ready_stream_finalizes_every_chunk_before_eof(count, scenario, tmp_path):
     # Boundary sizes are correctness fixtures, not suite tiers: the catalog's
     # stream-join evidence cap must not drop the chunk-finalization coverage,
@@ -88,6 +95,47 @@ def test_performance_prices_are_exact_eighths_with_bounded_magnitude():
     prices = workload(1_001).table["price"].to_numpy()
     assert np.all(prices * 8 == np.floor(prices * 8))
     assert np.all((prices >= 64) & (prices < 256))
+
+
+@pytest.mark.parametrize("window", [64, 256])
+def test_argmax_oracle_covers_full_periodic_windows(window):
+    data = workload(20_000)
+    actual = expected_output(data, f"argmax{window}")["value"].to_numpy()
+    prices = data.table["price"].to_numpy()
+    for entity in range(data.entities):
+        series = prices[entity :: data.entities]
+        for tick in (window - 1, window, 256, 257, 300):
+            index = entity + tick * data.entities
+            if index >= len(prices):
+                continue
+            trailing = series[max(0, tick - window + 1) : tick + 1]
+            expected_age = len(trailing) - 1 - np.argmax(trailing)
+            assert actual[index] == expected_age
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    (
+        "average",
+        "argmax64",
+        "argmax256",
+        "unique64",
+        "cs_mean",
+        "window_sum",
+        "asof_join",
+    ),
+)
+def test_new_stream_operators_match_independent_oracle(scenario, tmp_path):
+    case = next(
+        case
+        for case in engine_cases(101)
+        if case["backend"] == "calc-flow-stream" and case["scenario"] == scenario
+    )
+    runner = EngineCase(case, tmp_path)
+    try:
+        assert runner.sample()["correctness"]["passed"]
+    finally:
+        runner.close()
 
 
 @pytest.mark.parametrize(

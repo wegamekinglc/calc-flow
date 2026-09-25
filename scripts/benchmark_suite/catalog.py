@@ -12,13 +12,40 @@ ROLLING_CASES = SQL_CASES[-2:]
 # Keep this a literal tuple: the suite resolves baseline case ids by parsing
 # the baseline catalog's declarative forms, and derived assignments fail
 # closed to degraded gating.
-STREAM_CASES = ("projection", "filter", "group_by", "join", "sma20", "dual_sma")
+STREAM_CASES = (
+    "projection",
+    "filter",
+    "group_by",
+    "join",
+    "sma20",
+    "dual_sma",
+    "average",
+    "argmax64",
+    "argmax256",
+    "unique64",
+    "cs_mean",
+    "window_sum",
+    "asof_join",
+)
+FINANCE_CASES = (
+    "sma20",
+    "dual_sma",
+    "average",
+    "argmax64",
+    "argmax256",
+    "unique64",
+    "cs_mean",
+)
+REPORT_CASES = SQL_CASES + tuple(
+    scenario for scenario in STREAM_CASES if scenario not in SQL_CASES
+)
 CAPABILITIES = {
     "calc-flow-sql": SQL_CASES,
     "datafusion": SQL_CASES,
     "polars": SQL_CASES,
     "calc-flow-stream": STREAM_CASES,
     "ta-lib": ROLLING_CASES,
+    "finance-python": FINANCE_CASES,
 }
 # The native-stream join column carries evidence only through the 100k tier
 # (user-directed pacing constraint, DAL-290, 2026-09-20): per-sample
@@ -28,10 +55,13 @@ CAPABILITIES = {
 # unsupported in the catalog rather than being measured to fill the column;
 # see docs/benchmark-suite.md.
 STREAM_JOIN_MAX_ROWS = 100_000
+STREAM_ASOF_MAX_ROWS = 10_000
+STREAM_WINDOW_MAX_ROWS = 10_000
 THREADS = 32
 BATCH_ROWS = 64_000
 CONTRACT = "calc-flow-benchmark-suite-v3"
 STREAM_SCOPE = "ready-enqueue-to-arrow"
+FINANCE_SCOPE = "pandas-transform-to-numpy"
 
 
 def comparison_kind(case: dict, baseline_ids: frozenset[str] | None) -> str:
@@ -50,18 +80,22 @@ def comparison_kind(case: dict, baseline_ids: frozenset[str] | None) -> str:
     return "interleaved" if case["id"] in baseline_ids else "new"
 
 
-def _measured_stream_join(
+def _measured_stream_case(
     backend: str, scenario: str, size: int, cap: int | None
 ) -> bool:
-    """Whether one native-stream join scale stays in the measured catalog.
+    """Whether one bounded native-stream scale stays in the measured catalog.
 
     ``cap is None`` means the catalog declared no cap, so every declared
-    stream-join case is measured.
+    stream case is measured.
     """
 
     if cap is None:
         return True
-    return not (backend == "calc-flow-stream" and scenario == "join" and size > cap)
+    return not (
+        backend == "calc-flow-stream"
+        and scenario in ("join", "asof_join", "window_sum")
+        and size > cap
+    )
 
 
 def engine_cases(rows: int | None = None) -> list[dict]:
@@ -74,13 +108,28 @@ def engine_cases(rows: int | None = None) -> list[dict]:
             "scenario": scenario,
             "rows": size,
             "scope": (
-                STREAM_SCOPE if backend == "calc-flow-stream" else "execute-to-arrow"
+                STREAM_SCOPE
+                if backend == "calc-flow-stream"
+                else FINANCE_SCOPE
+                if backend == "finance-python"
+                else "execute-to-arrow"
             ),
         }
         for size in sizes
         for backend, scenarios in CAPABILITIES.items()
         for scenario in scenarios
-        if _measured_stream_join(backend, scenario, size, STREAM_JOIN_MAX_ROWS)
+        if _measured_stream_case(
+            backend,
+            scenario,
+            size,
+            (
+                STREAM_ASOF_MAX_ROWS
+                if scenario == "asof_join"
+                else STREAM_WINDOW_MAX_ROWS
+                if scenario == "window_sum"
+                else STREAM_JOIN_MAX_ROWS
+            ),
+        )
     ]
 
 
@@ -301,19 +350,33 @@ def _baseline_engine_ids(constants: dict[str, tuple[str, ...] | int]) -> frozens
     stream = constants.get("STREAM_CASES", rolling)
     join_cap = constants.get("STREAM_JOIN_MAX_ROWS")
     cap = join_cap if type(join_cap) is int else None
+    asof_cap = constants.get("STREAM_ASOF_MAX_ROWS")
+    asof_cap = asof_cap if type(asof_cap) is int else None
+    window_cap = constants.get("STREAM_WINDOW_MAX_ROWS")
+    window_cap = window_cap if type(window_cap) is int else None
     columns = (
         ("calc-flow-sql", sql),
         ("datafusion", sql),
         ("polars", sql),
         ("calc-flow-stream", stream),
         ("ta-lib", rolling),
+        ("finance-python", constants.get("FINANCE_CASES", ())),
     )
     return frozenset(
         f"engines/{rows}/{backend}/{scenario}"
         for rows in constants["ROW_SCALES"]
         for backend, scenarios in columns
         for scenario in scenarios
-        if _measured_stream_join(backend, scenario, int(rows), cap)
+        if _measured_stream_case(
+            backend,
+            scenario,
+            int(rows),
+            asof_cap
+            if scenario == "asof_join"
+            else window_cap
+            if scenario == "window_sum"
+            else cap,
+        )
     )
 
 

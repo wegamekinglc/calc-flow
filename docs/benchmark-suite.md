@@ -36,7 +36,7 @@ benchmark cases without a second hand-written case list.
 | Family          | Dimensions                                          | Cases per dimension                                       |
 |-----------------|-----------------------------------------------------|-----------------------------------------------------------|
 | Python          | overhead 1k, small 10k, standard 100k               | All collected non-lifecycle pytest benchmarks             |
-| Engines         | 10, 100, 1k, 10k, 100k, 1M, 10M rows                | 26 supported engine/scenario combinations                 |
+| Engines         | 10, 100, 1k, 10k, 100k, 1M, 10M rows                | 40 through 10k; 38 at 100k; 37 at 1M and 10M              |
 | Warm streaming  | 10, 100, 1k, 10k, 100k, 1M, 10M history; append 64  | SMA(20), SMA(5) minus SMA(20)                             |
 | Warm append     | History 1M; append 1, 4, 16, 64, 640, 6,400, 64,000 | Both indicators; append 64 shared with history matrix     |
 | Rust            | Every `[[bench]]` target in the core crate          | Core, allocation, state/window, Join/ASOF, SQL/DataFusion |
@@ -48,7 +48,7 @@ scale. The Rust `stream_union` target measures native Union forwarding. These
 cases extend the inventory without adding a new shard or changing the
 scheduled 06:00 and 18:00 runs.
 
-There are 180 engine cases and 26 warm cases, in addition to dynamically
+There are 272 engine cases and 26 warm cases, in addition to dynamically
 discovered cases. Warm cases use one entity to support one-row appends.
 Compare measurements only when entity count, history depth, append size,
 and timing boundaries match.
@@ -67,22 +67,44 @@ no regression verdict.
 | Polars           | Yes         | Yes         | Yes         | Yes         | Yes     | Yes      |
 | Native streaming | Yes         | Yes         | Yes         | Yes         | Yes     | Yes      |
 | TA-Lib           | Unsupported | Unsupported | Unsupported | Unsupported | Yes     | Yes      |
+| Finance-Python   | Unsupported | Unsupported | Unsupported | Unsupported | Yes     | Yes      |
+
+| Backend          | Average     | Argmax 64   | Argmax 256  | Unique 64   | CS mean     | Window sum  | ASOF join   |
+|------------------|-------------|-------------|-------------|-------------|-------------|-------------|-------------|
+| Native streaming | Yes         | Yes         | Yes         | Yes         | Yes         | Through 10k | Through 10k |
+| Finance-Python   | Yes         | Yes         | Yes         | Yes         | Yes         | Unsupported | Unsupported |
+| Other libraries  | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported |
 
 Unsupported operations are explicit cells, not silent dependency skips.
 Native streaming measures `join` through the bounded temporal join with the
 dimension side complete at the stream origin; its evidence stops at the
-100,000-row tier. The 1M and 10M tiers stay unsupported in the catalog for
+100,000-row tier. ASOF join stops at 10,000 rows because it retains
+two full input streams in the benchmark fixture. The ten-second tumbling sum
+also stops at 10,000 rows because its ready-stream finalization becomes slow at
+the next tier. The 1M and 10M join tiers
+stay unsupported in the catalog for
 performance (user-directed pacing constraint, 2026-09-20): the join retains
 one state row per matched input row for the whole run, so a sample needs
 roughly 5 seconds at 1M and 200 seconds at 10M on the dev machine, which
 would slow the whole suite's cadence. Missing
-DataFusion, Polars or TA-Lib fails its shard. DataFusion Python 54 matches
+DataFusion, Polars, TA-Lib, or Finance-Python fails its shard. DataFusion Python 54 matches
 the core's DataFusion major; the shared requirements file pins all Python
 build/benchmark/Studio dependencies with hashes.
 
+Finance-Python 0.9.10 runs from commit
+`3e33d3e70c3458b4c6dcf76b88df6148229b402c` in a separate Python 3.9
+environment. The scheduled engine shards install that commit and pin its build
+and runtime dependencies. Its worker checks each timed result against the
+untimed warm output with a SHA-256 digest; the parent checks that warm output
+against the independent Arrow oracle. The additional native and Finance-Python
+rolling and cross-section cases run at every tier through 10M rows. `window_sum`
+and `asof_join` have no equivalent Finance-Python operator in this comparison.
+
 ## Inputs, correctness and timing boundaries
 
-Engine comparisons use identical Arrow input bytes, deterministic entity and
+Engine comparisons use identical Arrow input bytes within Python 3.13; the
+isolated Python 3.9 Finance-Python worker reconstructs the same deterministic
+values in pandas. All cases use deterministic entity and
 timestamp ordering, up to 64 entities, and 64,000-row input batches. Prices are
 bounded exact eighths: `100 + sequence % 257 / 8 + sequence % entities / 8`.
 This controls decimal accumulation drift in long rolling performance runs;
@@ -108,6 +130,7 @@ on both sides. Warm cases retain the existing decimal input fixture.
 | Raw DataFusion         | Python `SessionContext`, table registration, SQL planning/collection, Arrow table          | Input construction, query text, warm-up, validation         |
 | Polars                 | Streaming-engine lazy-plan collection and Arrow output                                     | Arrow input conversion, lazy expression construction        |
 | TA-Lib                 | Per-entity contiguous copies, SMA calls, composition, Arrow output                         | Input construction and validation                           |
+| Finance-Python         | Public operator `transform` over a prepared pandas frame and NumPy extraction              | Frame construction, worker startup, warm-up, validation     |
 | Ready native streaming | Input enqueue, sources/tasks/channels, rolling, watermarks, sink and combined Arrow output | Plans, input events, runner startup/readiness, EOF/shutdown |
 | Warm native streaming  | Preconstructed data enqueue, live source/task/channel, rolling/finalization, sink to Arrow | Compilation, runner start, historical preload, validation   |
 
@@ -471,6 +494,8 @@ fails. The Python publishing workflow does not run this collector.
 Use clean candidate and baseline checkouts. Run the current candidate harness
 for both releases; it supplies the same workload to both engine revisions.
 Generated files stay under `target/`, not in `python/calc_flow/`.
+Before an engine shard, prepare the pinned Finance-Python 3.9 environment using
+the commands in [benchmarks/README.md](../benchmarks/README.md).
 
 ```bash
 UV_CACHE_DIR=target/uv-cache uv venv target/benchmark-venv
@@ -482,7 +507,8 @@ target/benchmark-venv/bin/python -m scripts.benchmark_suite build \
   --source target/base --output target/releases/baseline
 target/benchmark-venv/bin/python -m scripts.benchmark_suite build \
   --source . --output target/releases/candidate
-target/benchmark-venv/bin/python -m scripts.benchmark_suite run \
+FINANCE_PYTHON_PYTHON=target/finance-python-venv/bin/python \
+  target/benchmark-venv/bin/python -m scripts.benchmark_suite run \
   --shard engines-1000 \
   --baseline target/releases/baseline/release.json \
   --candidate target/releases/candidate/release.json \

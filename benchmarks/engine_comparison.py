@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
+import os
+import subprocess  # nosec B404
 import time
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 
 import numpy as np
@@ -22,7 +27,7 @@ from benchmarks.rolling_indicator_comparison import (
     ta_lib_expected_dual_sma_spread,
     ta_lib_expected_rolling_mean,
 )
-from benchmarks.warm_stream import _segment
+from benchmarks.warm_stream import BASE, _segment
 from calc_flow import Batch, PipelineBuilder
 from scripts.benchmark_suite.catalog import BATCH_ROWS, CAPABILITIES, THREADS
 
@@ -65,12 +70,94 @@ def _rolling_expected(data: Workload, scenario: str) -> np.ndarray:
     )
 
 
+def _average_expected(prices: np.ndarray, entities: int) -> np.ndarray:
+    result = np.empty(len(prices), dtype=np.float64)
+    for entity in range(entities):
+        series = prices[entity::entities]
+        result[entity::entities] = np.cumsum(series) / np.arange(1, len(series) + 1)
+    return result
+
+
+def _argmax_expected(prices: np.ndarray, entities: int, window: int) -> np.ndarray:
+    # The exact-eighth fixture repeats every 257 entity ticks. Precompute the
+    # complete-window answers for one cycle, then handle only the warm prefix.
+    from numpy.lib.stride_tricks import sliding_window_view
+
+    result = np.empty(len(prices), dtype=np.float64)
+    for entity in range(entities):
+        series = prices[entity::entities]
+        if not len(series):
+            continue
+        cycles = np.arange(-(window - 1), 257, dtype=np.int64)
+        periodic = 100 + ((entity + cycles * entities) % 257) / 8 + entity / 8
+        lookup = window - 1 - np.argmax(sliding_window_view(periodic, window), axis=1)
+        positions = np.arange(len(series))
+        values = lookup[positions % 257].astype(np.float64)
+        for index in range(min(len(series), window - 1)):
+            values[index] = float(index - np.argmax(series[: index + 1]))
+        result[entity::entities] = values
+    return result
+
+
+def _cross_section_mean(prices: np.ndarray, entities: int) -> np.ndarray:
+    starts = np.arange(0, len(prices), entities)
+    means = np.add.reduceat(prices, starts) / np.diff(np.append(starts, len(prices)))
+    return np.repeat(means, np.diff(np.append(starts, len(prices))))
+
+
+def _window_sum_expected(data: Workload) -> pa.Table:
+    prices = data.table["price"].to_numpy()
+    sequence = data.table["sequence"].to_numpy()
+    groups = (
+        sequence // data.entities // 10
+    ) * data.entities + sequence % data.entities
+    keys, inverse = np.unique(groups, return_inverse=True)
+    sums = np.bincount(inverse, weights=prices)
+    starts = [BASE + timedelta(seconds=int(key // data.entities * 10)) for key in keys]
+    symbols = [f"S{int(key % data.entities):03d}" for key in keys]
+    return pa.table(
+        {
+            "symbol": pa.array(symbols),
+            "window_start": pa.array(starts, type=pa.timestamp("us", tz="UTC")),
+            "value": pa.array(sums),
+        }
+    )
+
+
 def expected_output(data: Workload, scenario: str) -> pa.Table:
     table = data.table
     prices = table["price"].to_numpy()
     sequence = table["sequence"].to_numpy()
     if scenario in ("sma20", "dual_sma"):
         return table.append_column("value", pa.array(_rolling_expected(data, scenario)))
+    if scenario == "average":
+        return pa.table(
+            {
+                "sequence": table["sequence"],
+                "value": _average_expected(prices, data.entities),
+            }
+        )
+    if scenario in ("argmax64", "argmax256"):
+        return pa.table(
+            {
+                "sequence": table["sequence"],
+                "value": _argmax_expected(prices, data.entities, int(scenario[6:])),
+            }
+        )
+    if scenario == "unique64":
+        count = np.minimum(sequence // data.entities + 1, 64).astype(np.float64)
+        return pa.table({"sequence": table["sequence"], "value": count})
+    if scenario == "cs_mean":
+        return pa.table(
+            {
+                "sequence": table["sequence"],
+                "value": _cross_section_mean(prices, data.entities),
+            }
+        )
+    if scenario == "window_sum":
+        return _window_sum_expected(data)
+    if scenario == "asof_join":
+        return pa.table({"sequence": table["sequence"], "value": prices})
     if scenario == "group_by":
         sums = [
             float(np.sum(prices[index :: data.entities]))
@@ -200,6 +287,90 @@ def _ta_lib(data: Workload, scenario: str):
     return lambda: data.table.append_column("value", pa.array(method.run()))
 
 
+class _FinanceCase:
+    """Own the pinned Finance-Python interpreter and its timed transforms."""
+
+    def __init__(self, data: Workload, scenario: str, root: Path) -> None:
+        python = os.environ.get("FINANCE_PYTHON_PYTHON")
+        if not python:
+            raise RuntimeError("FINANCE_PYTHON_PYTHON must name the Python 3.9 worker")
+        root.mkdir(parents=True, exist_ok=True)
+        self.output = root / "finance-warm.npy"
+        runner = Path(__file__).with_name("finance_python_rolling_runner.py")
+        self.process = subprocess.Popen(  # nosec B603  # nosemgrep
+            [
+                python,
+                str(runner),
+                "--rows",
+                str(data.table.num_rows),
+                "--entities",
+                str(data.entities),
+                "--window",
+                "20",
+                "--warm-output",
+                str(self.output),
+                "--suite-scenario",
+                scenario,
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            self.identity = self._reply()
+            if (
+                self.identity.get("event") != "ready"
+                or self.identity.get("suite_scenario") != scenario
+                or self.identity.get("rows") != data.table.num_rows
+                or self.identity.get("finance_python_version") != "0.9.10"
+                or not str(self.identity.get("python_version", "")).startswith("3.9.")
+            ):
+                raise RuntimeError("Finance-Python prepared a different benchmark case")
+            self.values = np.load(self.output, allow_pickle=False)
+            if (
+                hashlib.sha256(self.values.tobytes()).hexdigest()
+                != self.identity["sha256"]
+            ):
+                raise RuntimeError("Finance-Python warm output checksum differs")
+        except BaseException:
+            self.close()
+            raise
+
+    def _reply(self) -> dict:
+        line = self.process.stdout.readline()
+        if line:
+            return json.loads(line)
+        error = self.process.stderr.read()
+        raise RuntimeError(f"Finance-Python worker exited: {error}")
+
+    def sample(self) -> float:
+        self.process.stdin.write('{"command":"run","iterations":1}\n')
+        self.process.stdin.flush()
+        reply = self._reply()
+        if (
+            reply.get("event") != "sample"
+            or reply.get("sha256") != self.identity["sha256"]
+            or reply.get("rows") != len(self.values)
+        ):
+            raise RuntimeError("Finance-Python timed output differs from warm output")
+        return float(reply["seconds"])
+
+    def close(self) -> None:
+        if self.process.poll() is not None:
+            return
+        try:
+            self.process.stdin.write('{"command":"stop"}\n')
+            self.process.stdin.flush()
+        except BrokenPipeError:
+            pass
+        try:
+            self.process.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.communicate()
+
+
 class EngineCase:
     """Own compiled plans, immutable inputs and a worker-local event loop."""
 
@@ -211,8 +382,13 @@ class EngineCase:
         self.data = workload(case["rows"])
         self.expected = expected_output(self.data, scenario)
         self.loop = None
+        self.finance = None
         if backend == "calc-flow-stream":
-            self.events = stream_events(self.data.table, self.data.entities)
+            self.events = stream_events(
+                self.data.table,
+                self.data.entities,
+                close_windows=scenario == "window_sum",
+            )
             # The join's dimension side is complete at the stream origin, so
             # its events are enqueued before the quote batches.
             self.streams = (
@@ -221,9 +397,28 @@ class EngineCase:
                     "left": self.events,
                 }
                 if scenario == "join"
-                else {"input": self.events}
+                else (
+                    {"reference.input": self.events, "quotes.input": self.events}
+                    if scenario == "asof_join"
+                    else {"input": self.events}
+                )
             )
             self.loop = asyncio.new_event_loop()
+        elif backend == "finance-python":
+            self.finance = _FinanceCase(self.data, scenario, root)
+            try:
+                values = self.finance.values
+                result = (
+                    self.data.table.append_column("value", pa.array(values))
+                    if scenario in ("sma20", "dual_sma")
+                    else pa.table(
+                        {"sequence": self.data.table["sequence"], "value": values}
+                    )
+                )
+                self.finance_correctness = self.validate(result)
+            except BaseException:
+                self.finance.close()
+                raise
         else:
             factory = {
                 "calc-flow-sql": _calc_flow,
@@ -252,7 +447,13 @@ class EngineCase:
             raise ValueError("engine output columns differ from the oracle")
         if result.num_rows != self.expected.num_rows:
             raise ValueError("engine output row count differs from the oracle")
-        key = "symbol" if self.case["scenario"] == "group_by" else "sequence"
+        key = (
+            [("window_start", "ascending"), ("symbol", "ascending")]
+            if self.case["scenario"] == "window_sum"
+            else "symbol"
+            if self.case["scenario"] == "group_by"
+            else "sequence"
+        )
         expected = self.expected.sort_by(key)
         result = result.sort_by(key)
         for name in expected.column_names:
@@ -279,6 +480,12 @@ class EngineCase:
         }
 
     def sample(self) -> dict:
+        if self.finance is not None:
+            return {
+                "seconds": self.finance.sample(),
+                "correctness": self.finance_correctness,
+                "finance_python": self.finance.identity,
+            }
         if self.loop is not None:
             result, seconds = self._stream()
         else:
@@ -291,6 +498,8 @@ class EngineCase:
         return {"state": "completed"}
 
     def close(self) -> None:
+        if self.finance is not None:
+            self.finance.close()
         if self.loop is not None:
             self.loop.run_until_complete(self.loop.shutdown_asyncgens())
             self.loop.close()

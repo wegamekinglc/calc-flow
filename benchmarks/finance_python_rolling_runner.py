@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import hashlib
 import json
 import platform
 import sys
@@ -21,7 +22,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from PyFin.api.Analysis import MA
+from PyFin.api.Analysis import AVG, MA, MARGMAX, MUCOUNT, CSMean
 
 _ROLLING_MEAN = "rolling_mean"
 _DUAL_SMA_SPREAD = "dual_sma_spread"
@@ -39,6 +40,18 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--fast-window", type=int, default=5)
     parser.add_argument("--warm-output", type=Path, required=True)
+    parser.add_argument(
+        "--suite-scenario",
+        choices=(
+            "sma20",
+            "dual_sma",
+            "average",
+            "argmax64",
+            "argmax256",
+            "unique64",
+            "cs_mean",
+        ),
+    )
     args = parser.parse_args()
     if args.fast_window <= 0:
         parser.error("fast-window must be positive")
@@ -47,13 +60,17 @@ def _parse_args() -> argparse.Namespace:
     return args
 
 
-def _input_frame(rows: int, entities: int) -> pd.DataFrame:
+def _input_frame(rows: int, entities: int, *, suite: bool = False) -> pd.DataFrame:
     sequence = np.arange(rows, dtype=np.uint64)
     entity_index = sequence % entities
     positions = sequence // entities
     symbol_names = np.asarray([f"S{index:03d}" for index in range(entities)])
     prices = (
         100.0
+        + (sequence % 257).astype(np.float64) / 8.0
+        + entity_index.astype(np.float64) / 8.0
+        if suite
+        else 100.0
         + ((sequence * np.uint64(17)) % np.uint64(1_000)).astype(np.float64) / 100.0
         + entity_index.astype(np.float64) / 100.0
     )
@@ -69,17 +86,33 @@ def _execute(
     *,
     indicator: str,
     fast_window: int,
+    suite_scenario: str | None = None,
 ) -> np.ndarray:
-    expression = MA(window, "price")
-    if indicator == _DUAL_SMA_SPREAD:
-        expression = MA(fast_window, "price") - expression
+    expression = {
+        "average": lambda: AVG("price"),
+        "argmax64": lambda: MARGMAX(64, "price"),
+        "argmax256": lambda: MARGMAX(256, "price"),
+        "unique64": lambda: MUCOUNT(64, "price"),
+        "cs_mean": lambda: CSMean("price"),
+    }.get(suite_scenario, lambda: MA(window, "price"))()
+    if indicator == _DUAL_SMA_SPREAD or suite_scenario == "dual_sma":
+        expression = MA(fast_window, "price") - MA(window, "price")
     result = expression.transform(
         frame,
         name="moving_average",
         category_field="symbol",
         dropna=False,
     )
-    return result["moving_average"].to_numpy(copy=False)
+    values = result["moving_average"].to_numpy(copy=False)
+    if suite_scenario in ("sma20", "dual_sma"):
+        values = np.array(values, copy=True)
+        positions = np.arange(len(values)) // len(frame["symbol"].unique())
+        values[positions < window - 1] = np.nan
+    return values
+
+
+def _digest(values: np.ndarray) -> str:
+    return hashlib.sha256(values.tobytes()).hexdigest()
 
 
 def _reply(payload: dict[str, object]) -> None:
@@ -113,6 +146,7 @@ def _timed_execute(
                 args.window,
                 indicator=args.indicator,
                 fast_window=args.fast_window,
+                suite_scenario=args.suite_scenario,
             )
         seconds = (time.perf_counter_ns() - started) / 1_000_000_000
     finally:
@@ -135,6 +169,7 @@ def _serve(frame: pd.DataFrame, args: argparse.Namespace) -> None:
                 "iterations": iterations,
                 "rows": len(output),
                 "seconds": seconds,
+                "sha256": _digest(output),
             }
         )
 
@@ -146,6 +181,7 @@ def _prepare(frame: pd.DataFrame, args: argparse.Namespace) -> None:
         args.window,
         indicator=args.indicator,
         fast_window=args.fast_window,
+        suite_scenario=args.suite_scenario,
     )
     np.save(args.warm_output, warm_output, allow_pickle=False)
     _reply(
@@ -158,13 +194,17 @@ def _prepare(frame: pd.DataFrame, args: argparse.Namespace) -> None:
             "pandas_version": pd.__version__,
             "python_version": platform.python_version(),
             "rows": len(warm_output),
+            "sha256": _digest(warm_output),
+            "suite_scenario": args.suite_scenario,
         }
     )
 
 
 def main() -> None:
     args = _parse_args()
-    frame = _input_frame(args.rows, args.entities)
+    frame = _input_frame(
+        args.rows, args.entities, suite=args.suite_scenario is not None
+    )
     _prepare(frame, args)
     _serve(frame, args)
 

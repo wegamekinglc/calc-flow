@@ -8,9 +8,11 @@ from collections import Counter
 
 from scripts.benchmark_suite.catalog import (
     CAPABILITIES,
-    SQL_CASES,
+    REPORT_CASES,
+    STREAM_ASOF_MAX_ROWS,
     STREAM_JOIN_MAX_ROWS,
     STREAM_SCOPE,
+    STREAM_WINDOW_MAX_ROWS,
 )
 from scripts.benchmark_suite.statistics import paired_round
 from scripts.toolkit import linear_percentile
@@ -342,7 +344,7 @@ def _cross_library_table(cases: list[dict]) -> str:
     rows = [
         _cross_library_row(size, scenario, index)
         for size in sorted({case["rows"] for case in selected})
-        for scenario in SQL_CASES
+        for scenario in REPORT_CASES
     ]
     return table(
         [
@@ -353,19 +355,30 @@ def _cross_library_table(cases: list[dict]) -> str:
             "DataFusion",
             "Polars",
             "TA-Lib",
+            "Finance-Python",
         ],
         rows,
     )
 
 
 def _cross_library_row(size: int, scenario: str, index: dict) -> list[object]:
-    backends = ("calc-flow-stream", "calc-flow-sql", "datafusion", "polars", "ta-lib")
+    backends = (
+        "calc-flow-stream",
+        "calc-flow-sql",
+        "datafusion",
+        "polars",
+        "ta-lib",
+        "finance-python",
+    )
 
     def cell(backend: str) -> object:
+        cap = {
+            "join": STREAM_JOIN_MAX_ROWS,
+            "asof_join": STREAM_ASOF_MAX_ROWS,
+            "window_sum": STREAM_WINDOW_MAX_ROWS,
+        }.get(scenario)
         if scenario not in CAPABILITIES[backend] or (
-            backend == "calc-flow-stream"
-            and scenario == "join"
-            and size > STREAM_JOIN_MAX_ROWS
+            backend == "calc-flow-stream" and cap is not None and size > cap
         ):
             return "unsupported"
         return _reference_cell(index.get((size, scenario, backend)))
