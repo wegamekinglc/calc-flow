@@ -41,23 +41,6 @@ def _non_utf8_read_text_calls(tree: ast.AST) -> list[int]:
 
 
 class ReleaseConfigTests(unittest.TestCase):
-    def test_warm_stream_regressions_run_in_both_python_ci_jobs(self) -> None:
-        for name in ("ci-linux.yml", "ci-windows.yml"):
-            workflow = (ROOT / ".github/workflows" / name).read_text(encoding="utf-8")
-            self.assertTrue(
-                "python/tests benchmarks/test_warm_stream.py" in workflow,
-                f"{name} must execute warm streaming scenario tests",
-            )
-            self.assertTrue(
-                "python -m unittest scripts.test_profile_warm_stream" in workflow,
-                f"{name} must execute warm profiling controller tests",
-            )
-            for module in (
-                "scripts.test_performance_plan",
-                "scripts.test_entity_parallel_inventory",
-            ):
-                self.assertIn(module, workflow, f"{name} must execute {module}")
-
     def test_current_python_surfaces_do_not_use_removed_compile_method(self) -> None:
         paths = [
             *sorted((ROOT / "benchmarks").glob("*.py")),
@@ -481,7 +464,10 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertNotIn("RUST_TEST_THREADS", rust_core_header)
         self.assertLess(
             rust_core.index(setup_python),
-            rust_core.index("cargo clippy --workspace --all-targets --all-features"),
+            rust_core.index(
+                "cargo clippy --workspace --lib --bins --tests --examples "
+                "--all-features"
+            ),
         )
         self.assertLess(
             rust_core.index(install_test_dependencies),
@@ -590,14 +576,15 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertNotIn("\n          uv build\n", studio_package)
 
     def test_ci_executes_script_unit_tests(self) -> None:
-        command = "python -m unittest discover -s scripts -p 'test_*.py' -t ."
         windows_test = (
             "scripts.test_run_rust_tests.RustTestHarnessTests."
             "test_timeout_cleans_up_the_test_binary_process_tree_on_windows"
         )
 
         workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
-        self.assertIn(command, workflow)
+        self.assertIn("python -m unittest \\", workflow)
+        self.assertIn("scripts.test_run_rust_tests", workflow)
+        self.assertIn("scripts.test_verify_python_release", workflow)
 
         windows_ci = (ROOT / ".github/workflows/ci-windows.yml").read_text(
             encoding="utf-8"

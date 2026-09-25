@@ -9,6 +9,13 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-25: Remove benchmark scenarios, performance controller checks,
+  benchmark support script tests, and benchmark target compilation from regular
+  Linux and Windows CI. The complete benchmark suite runs independently at
+  06:00 and 18:00 Asia/Shanghai, including its warm-stream correctness checks.
+  Supplemental SQL/DataFusion experiments remain available by manual dispatch
+  only.
+
 - 2026-09-25: Publish explicit Python 3.9–3.14 abi3 wheel files on Linux,
   macOS, and Windows. The release builds two native ABI tiers per platform,
   adds interpreter-specific wheel tags, and installs each tagged wheel in its

@@ -5,9 +5,11 @@
 The suite reports complete workloads and repeated base/head comparisons.
 `.github/workflows/benchmark-suite.yml` runs independently of regular CI at
 06:00 and 18:00 Asia/Shanghai every day (22:00 and 10:00 UTC), and also supports
-manual runs. Regular Linux and Windows CI retain their correctness gates. SQL
-adaptive tuning experiments remain supplemental nightly/weekly jobs; they are
-not missing required suite shards.
+manual runs. Regular Linux and Windows CI retain unit tests and coverage gates.
+Benchmark and performance support script tests, warm-stream scenario tests, and
+performance controller tests run in this scheduled workflow. Supplemental SQL
+adaptive tuning experiments run only by manual dispatch from `benchmarks.yml`;
+they are not required suite shards.
 
 On this page:
 
