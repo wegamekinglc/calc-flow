@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-import subprocess
+import subprocess  # nosec B404  # fixed rustup command, no shell or user input
 from pathlib import Path
 
 TOOLCHAIN = "1.88.0"

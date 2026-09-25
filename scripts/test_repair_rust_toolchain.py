@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import subprocess
+import subprocess  # nosec B404  # asserts fixed local rustup command behavior
 import tempfile
 import unittest
 from pathlib import Path
