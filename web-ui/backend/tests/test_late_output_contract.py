@@ -410,7 +410,7 @@ def test_old_runtime_cannot_claim_late_support_from_package_version(
     monkeypatch.setattr(Runtime, "validation_report", validation)
     with TestClient(create_app(runtime=runtime)) as client:
         response = client.get("/api/v3/capabilities")
-    assert response.json()["runtime"]["packageVersion"] == "2026.9.24"
+    assert response.json()["runtime"]["packageVersion"] == "2026.9.25"
     assert response.json()["runtime"]["lateOutput"]["operators"] == []
     assert validation.call_count == 2
 

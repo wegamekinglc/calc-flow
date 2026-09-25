@@ -246,7 +246,7 @@ it with the source installation steps before starting Studio.
 
 ## Verify the installation
 
-For a build from this checkout, confirm that Calc Flow reports version `2026.9.24`.
+For a build from this checkout, confirm that Calc Flow reports version `2026.9.25`.
 A published installation reports the release selected by the package manager,
 which can differ from the current source version. Confirm that the native
 extension loads from the environment rather than `python/calc_flow/`.
