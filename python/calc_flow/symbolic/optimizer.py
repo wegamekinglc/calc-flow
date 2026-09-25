@@ -10,8 +10,8 @@ deterministic functions of the declaration.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
 
+from calc_flow._compat import dataclass
 from calc_flow.symbolic._generated_rolling_kernels import (
     ROLLING_KERNEL_CAPABILITIES,
 )

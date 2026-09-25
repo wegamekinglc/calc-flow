@@ -145,7 +145,7 @@ class ReleaseRustBuildTests(unittest.IsolatedAsyncioTestCase):
 
             async def run(argv, *, cwd, log, **kwargs):
                 target = argv[argv.index("--bench") + 1]
-                called.append(target)
+                called.append((target, argv))
                 log.parent.mkdir(parents=True, exist_ok=True)
                 log.write_text(
                     json.dumps(
@@ -164,8 +164,42 @@ class ReleaseRustBuildTests(unittest.IsolatedAsyncioTestCase):
                     root / "shared",
                     targets=("core", "stream_join_perf"),
                 )
-            self.assertEqual(called, ["core", "stream_join_perf"])
-            self.assertEqual(set(result), set(called))
+            self.assertEqual(
+                [target for target, _ in called], ["core", "stream_join_perf"]
+            )
+            self.assertEqual(set(result), {target for target, _ in called})
+            self.assertEqual(
+                called[0][1],
+                [
+                    "cargo",
+                    "rustc",
+                    "--locked",
+                    "--profile",
+                    "bench",
+                    "-p",
+                    "calc-flow",
+                    "--bench",
+                    "core",
+                    "--message-format=json",
+                    "--",
+                    "-C",
+                    "llvm-args=--align-loops=64",
+                ],
+            )
+            self.assertEqual(
+                called[1][1],
+                [
+                    "cargo",
+                    "bench",
+                    "--locked",
+                    "-p",
+                    "calc-flow",
+                    "--bench",
+                    "stream_join_perf",
+                    "--no-run",
+                    "--message-format=json",
+                ],
+            )
 
 
 class ReleaseRawSampleTests(unittest.IsolatedAsyncioTestCase):

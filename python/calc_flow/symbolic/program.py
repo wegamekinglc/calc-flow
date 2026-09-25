@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Awaitable, Mapping, Sequence
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from calc_flow._compat import dataclass
 from calc_flow.symbolic.domains import type_name
 from calc_flow.symbolic.expr import ArrayExpr, ColumnExpr, Parameter, TableExpr
 from calc_flow.symbolic.nodes import (

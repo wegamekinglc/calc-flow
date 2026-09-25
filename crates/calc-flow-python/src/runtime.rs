@@ -290,10 +290,19 @@ impl PythonAwaitScheduler {
         kwargs.set_item(pyo3::intern!(py, "loop"), state.event_loop.object())?;
         // Task copies the dispatch context instead of re-entering it. A
         // queued cancellation cannot start an unstarted coroutine eagerly.
-        kwargs.set_item(
-            pyo3::intern!(py, "eager_start"),
-            !state.cancel_requested.load(Ordering::Acquire),
-        )?;
+        #[cfg(any(feature = "legacy-python", not(Py_3_13)))]
+        let supports_eager_start = *{
+            static SUPPORTS_EAGER_START: OnceLock<bool> = OnceLock::new();
+            SUPPORTS_EAGER_START.get_or_init(|| py.version_info() >= (3, 12))
+        };
+        #[cfg(all(not(feature = "legacy-python"), Py_3_13))]
+        let supports_eager_start = true;
+        if supports_eager_start {
+            kwargs.set_item(
+                pyo3::intern!(py, "eager_start"),
+                !state.cancel_requested.load(Ordering::Acquire),
+            )?;
+        }
         asyncio
             .getattr(pyo3::intern!(py, "Task"))?
             .call((awaitable,), Some(&kwargs))
@@ -1082,7 +1091,7 @@ asyncio.run(exercise())
         Python::attach(|py| {
             assert!(error.is_instance_of::<PyRuntimeError>(py));
             assert_eq!(
-                error.value(py).str().unwrap().to_str().unwrap(),
+                error.value(py).str().unwrap().extract::<String>().unwrap(),
                 "Python awaitable completion channel closed unexpectedly"
             );
         });

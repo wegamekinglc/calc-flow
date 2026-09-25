@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import json
 import math
-from typing import Any
+from typing import Any, Union
 
 from pydantic import GetJsonSchemaHandler, RootModel, ValidationError, model_validator
 from pydantic_core import CoreSchema, PydanticCustomError
 
 from calc_flow import _native
+from calc_flow._compat import TypeAliasType
 
-type JSONValue = (
-    None | bool | int | float | str | list[JSONValue] | dict[str, JSONValue]
+JSONValue = TypeAliasType(
+    "JSONValue",
+    Union[None, bool, int, float, str, list["JSONValue"], dict[str, "JSONValue"]],
 )
 _MAX_JSON_DEPTH = 32
 

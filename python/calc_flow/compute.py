@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import inspect
 from collections.abc import Awaitable, Callable, Mapping
+from typing import TypeVar, Union
 
 import pyarrow as pa
 
+from calc_flow._compat import TypeAliasType
 from calc_flow._native import Batch, ExecutionOptions, RunResult
 from calc_flow.pipeline import BatchExecutionPlan, Runtime, _canonical
 from calc_flow.symbolic import errors
@@ -15,7 +17,8 @@ from calc_flow.symbolic.expr import Parameter, TableExpr, table_input
 from calc_flow.symbolic.lower.bindings import _BatchBindings
 from calc_flow.symbolic.program import Program, _node_name, _selected_runtime
 
-type TableData = pa.Table | pa.RecordBatch | Batch
+TableData = TypeAliasType("TableData", Union[pa.Table, pa.RecordBatch, Batch])
+T = TypeVar("T")
 
 
 def _require_blocking(entry: str) -> None:
@@ -158,7 +161,7 @@ def _collect(
     return _tables(plan.execute(bound, options=options), outputs)
 
 
-def _as_input_mapping[T](
+def _as_input_mapping(
     program: Program, inputs: T | Mapping[str, T], error: str
 ) -> Mapping[str, T]:
     if isinstance(inputs, Mapping):

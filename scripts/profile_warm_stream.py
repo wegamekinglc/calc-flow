@@ -247,6 +247,8 @@ async def build(args: argparse.Namespace) -> None:
         "build",
         "--release",
         "--locked",
+        "--features",
+        "pyo3/abi3-py313",
         "--out",
         str(output),
     ]
@@ -258,6 +260,8 @@ async def build(args: argparse.Namespace) -> None:
             "build",
             "--release",
             "--locked",
+            "--features",
+            "pyo3/abi3-py313",
             "--out",
             str(output),
             cwd=source,

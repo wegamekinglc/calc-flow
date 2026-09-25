@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterable, AsyncIterator, Mapping
-from dataclasses import dataclass
 from datetime import timedelta
-from typing import NoReturn
+from typing import NoReturn, Union
 
 import pyarrow as pa
 import pyarrow.compute as pc
 
+from calc_flow._compat import TypeAliasType, dataclass
 from calc_flow.compute import TableData, _arrow_table, _table_batch
 from calc_flow.runtime import (
     BoundedOutOfOrderness,
@@ -31,7 +31,9 @@ from calc_flow.symbolic.expr import Parameter, TableExpr
 from calc_flow.symbolic.lower.schema import _arrow_schema
 from calc_flow.symbolic.nodes import CStr
 
-type StreamInput = AsyncIterable[TableData | Watermark] | SourceBinding
+StreamInput = TypeAliasType(
+    "StreamInput", Union[AsyncIterable[Union[TableData, Watermark]], SourceBinding]
+)
 
 _POLICIES = (SourceProvidedWatermarks, BoundedOutOfOrderness, DisabledWatermarks)
 
@@ -133,13 +135,13 @@ class _IterableSource:
         )
 
     async def open(self, cursor: Cursor | None) -> None:
-        self._iterator = aiter(self._source)
+        self._iterator = self._source.__aiter__()
 
     async def next(self) -> Data | Watermark | None:
         if self._iterator is None:
             raise RuntimeError(f"{self._path}: source is not open")
         try:
-            data = await anext(self._iterator)
+            data = await self._iterator.__anext__()
         except StopAsyncIteration:
             return None
         if isinstance(data, Watermark):

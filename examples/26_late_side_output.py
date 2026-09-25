@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pyarrow as pa
 
 import calc_flow as cf
 
-BASE = datetime(2026, 1, 1, tzinfo=UTC)
+BASE = datetime(2026, 1, 1, tzinfo=timezone.utc)
 schema = pa.schema(
     [
         pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),

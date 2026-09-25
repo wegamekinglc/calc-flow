@@ -1,16 +1,29 @@
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from typing import Any, Literal
 
-type BatchKind = Literal["table", "array"]
-type OptionValueType = Literal["string", "integer", "number", "boolean"]
-type ExecutionMode = Literal["batch", "stream"]
-type OutputFinality = Literal["per_row_final", "group_final_append_only", "unproven"]
-type CheckpointSupport = Literal["stateless", "checkpointed_stateful", "unproven"]
-type PartitionContract = Literal["none", "row_axis_independent"]
+from calc_flow._compat import TypeAliasType, dataclass
+
+if sys.version_info < (3, 10):
+    from calc_flow._compat import zip as zip
+
+BatchKind = TypeAliasType("BatchKind", Literal["table", "array"])
+OptionValueType = TypeAliasType(
+    "OptionValueType", Literal["string", "integer", "number", "boolean"]
+)
+ExecutionMode = TypeAliasType("ExecutionMode", Literal["batch", "stream"])
+OutputFinality = TypeAliasType(
+    "OutputFinality", Literal["per_row_final", "group_final_append_only", "unproven"]
+)
+CheckpointSupport = TypeAliasType(
+    "CheckpointSupport", Literal["stateless", "checkpointed_stateful", "unproven"]
+)
+PartitionContract = TypeAliasType(
+    "PartitionContract", Literal["none", "row_axis_independent"]
+)
 
 CAPABILITY_SCHEMA_VERSION = 3
 
@@ -708,15 +721,19 @@ def runtime_capabilities(
 # Connector capability surface (M6-08)
 # ---------------------------------------------------------------------------
 
-type DeliveryCapabilityKind = Literal["best_effort", "at_least_once", "exactly_once"]
-type ReplayCapabilityKind = Literal["replayable_exact", "unreplayable"]
-type WatermarkSupportKind = Literal["native", "generated_only"]
-type TransactionSupportKind = Literal[
-    "none",
-    "pre_commit_commit",
-    "ledger_idempotent",
-    "retry_deduplicated",
-]
+DeliveryCapabilityKind = TypeAliasType(
+    "DeliveryCapabilityKind", Literal["best_effort", "at_least_once", "exactly_once"]
+)
+ReplayCapabilityKind = TypeAliasType(
+    "ReplayCapabilityKind", Literal["replayable_exact", "unreplayable"]
+)
+WatermarkSupportKind = TypeAliasType(
+    "WatermarkSupportKind", Literal["native", "generated_only"]
+)
+TransactionSupportKind = TypeAliasType(
+    "TransactionSupportKind",
+    Literal["none", "pre_commit_commit", "ledger_idempotent", "retry_deduplicated"],
+)
 
 
 @dataclass(frozen=True, slots=True)

@@ -14,7 +14,7 @@ Calc Flow Studio is a separate local FastAPI and React application.
 
 ## Install
 
-Python 3.13 or newer:
+CPython 3.9 or newer:
 
 ```bash
 uv add calc-flow-python
@@ -237,10 +237,10 @@ npm run test:e2e
 npm audit --omit=dev
 ```
 
-Release gates also run `cargo audit`, `cargo deny --locked check`, package
-inspectors, isolated wheel smoke tests, `cargo package`, and
-`cargo publish --dry-run`. See [AGENTS.md](AGENTS.md) for the maintained
-repository commands and constraints.
+Regular CI runs `cargo audit`, `cargo deny --locked check`, core package
+inspectors, and isolated wheel smoke tests. The Python release workflow builds,
+verifies, and publishes core package artifacts. See [AGENTS.md](AGENTS.md) for
+the maintained repository commands and constraints.
 
 ## Documentation
 

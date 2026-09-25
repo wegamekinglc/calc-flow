@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
 from typing import Literal
 
+from calc_flow._compat import dataclass
 from calc_flow.symbolic.domains import namespace_error
 from calc_flow.symbolic.expr import ColumnExpr
 from calc_flow.symbolic.types import require_non_empty_str, require_positive_int

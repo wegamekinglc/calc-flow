@@ -33,6 +33,17 @@ fn settings_encode_error() -> PyErr {
     PyValueError::new_err("settings could not be encoded as strict JSON data")
 }
 
+fn portable_string(value: &Bound<'_, PyString>) -> PyResult<String> {
+    #[cfg(any(feature = "legacy-python", not(Py_3_13)))]
+    {
+        value.extract::<String>()
+    }
+    #[cfg(all(not(feature = "legacy-python"), Py_3_13))]
+    {
+        value.to_str().map(str::to_owned)
+    }
+}
+
 fn strict_string(value: &Bound<'_, PyAny>, path: &str) -> PyResult<String> {
     if !value.is_exact_instance_of::<PyString>() {
         return Err(settings_path_error(
@@ -40,12 +51,12 @@ fn strict_string(value: &Bound<'_, PyAny>, path: &str) -> PyResult<String> {
             "contains a non-string object key",
         ));
     }
-    value
-        .cast::<PyString>()
-        .map_err(|_| settings_copy_error())?
-        .to_str()
-        .map(str::to_owned)
-        .map_err(|_| settings_path_error(path, "contains a non-portable Unicode string"))
+    portable_string(
+        value
+            .cast::<PyString>()
+            .map_err(|_| settings_copy_error())?,
+    )
+    .map_err(|_| settings_path_error(path, "contains a non-portable Unicode string"))
 }
 
 struct StrictSettingsCopier<'py> {
@@ -184,12 +195,13 @@ impl<'py> StrictSettingsCopier<'py> {
             )?));
         }
         if value.is_exact_instance_of::<PyString>() {
-            return value
-                .cast::<PyString>()
-                .map_err(|_| settings_copy_error())?
-                .to_str()
-                .map(|text| Value::String(text.to_owned()))
-                .map_err(|_| settings_path_error(path, "contains a non-portable Unicode string"));
+            return portable_string(
+                value
+                    .cast::<PyString>()
+                    .map_err(|_| settings_copy_error())?,
+            )
+            .map(Value::String)
+            .map_err(|_| settings_path_error(path, "contains a non-portable Unicode string"));
         }
         if value.is_exact_instance_of::<PyList>() {
             return self
@@ -267,7 +279,8 @@ fn parse_deadline(
         return Err(invalid_deadline());
     }
     let utc = mapping
-        .getattr(pyo3::intern!(py, "UTC"))
+        .getattr(pyo3::intern!(py, "timezone"))
+        .and_then(|timezone| timezone.getattr(pyo3::intern!(py, "utc")))
         .map_err(|_| invalid_deadline())?;
     let normalized = value
         .call_method1(pyo3::intern!(py, "astimezone"), (&utc,))
@@ -332,7 +345,9 @@ fn deadline_to_python<'py>(
     let kwargs = PyDict::new(py);
     kwargs.set_item(
         pyo3::intern!(py, "tzinfo"),
-        datetime_module.getattr(pyo3::intern!(py, "UTC"))?,
+        datetime_module
+            .getattr(pyo3::intern!(py, "timezone"))?
+            .getattr(pyo3::intern!(py, "utc"))?,
     )?;
     datetime_module
         .getattr(pyo3::intern!(py, "datetime"))?
@@ -357,6 +372,19 @@ fn settings_to_python<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     let encoded = serde_json::to_string(settings).map_err(|_| settings_encode_error())?;
     crate::config::json_to_python(py, &encoded)
+}
+
+#[cfg(any(feature = "legacy-python", not(Py_3_13)))]
+fn signature_parameter<'py>(
+    py: Python<'py>,
+    parameter: &Bound<'py, PyAny>,
+    kind: &Bound<'py, PyAny>,
+    name: &str,
+    default: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let kwargs = PyDict::new(py);
+    kwargs.set_item(pyo3::intern!(py, "default"), default)?;
+    parameter.call((name, kind), Some(&kwargs))
 }
 
 #[pyclass(name = "ExecutionOptions", frozen, module = "calc_flow._native")]
@@ -385,6 +413,22 @@ impl PyExecutionOptions {
 
 #[pymethods]
 impl PyExecutionOptions {
+    #[cfg(any(feature = "legacy-python", not(Py_3_13)))]
+    #[classattr]
+    fn __signature__(py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let inspect = py.import(pyo3::intern!(py, "inspect"))?;
+        let parameter = inspect.getattr(pyo3::intern!(py, "Parameter"))?;
+        let kind = parameter.getattr(pyo3::intern!(py, "POSITIONAL_OR_KEYWORD"))?;
+        let settings_default = PyDict::new(py).into_any();
+        let settings = signature_parameter(py, &parameter, &kind, "settings", &settings_default)?;
+        let deadline = signature_parameter(py, &parameter, &kind, "deadline", py.None().bind(py))?;
+        let parameters = PyList::new(py, [settings, deadline])?;
+        inspect
+            .getattr(pyo3::intern!(py, "Signature"))?
+            .call1((parameters,))
+            .map(Bound::unbind)
+    }
+
     #[new]
     #[pyo3(
         signature = (*args, **kwargs),
@@ -640,7 +684,7 @@ mod tests {
                 let error = expect_error(strict_settings(py, &source));
                 assert!(error.is_instance_of::<PyValueError>(py));
                 let value = error.value(py);
-                assert_eq!(value.str().unwrap().to_str().unwrap(), message);
+                assert_eq!(value.str().unwrap().extract::<String>().unwrap(), message);
                 assert!(value.getattr("__cause__").unwrap().is_none());
                 assert!(value.getattr("__context__").unwrap().is_none());
             }
@@ -707,7 +751,7 @@ mod tests {
             let locals = PyDict::new(py);
             py.run(
                 c_str!(
-                    "import datetime\nvalid = datetime.datetime(\n    2027, 4, 5, 6, 7, 8, 123456,\n    tzinfo=datetime.timezone(datetime.timedelta(0), 'zero'),\n)\nnaive = datetime.datetime(2027, 4, 5)\nnonzero = datetime.datetime(\n    2027, 4, 5,\n    tzinfo=datetime.timezone(datetime.timedelta(hours=1)),\n)\nclass BrokenOffset(datetime.datetime):\n    def utcoffset(self):\n        raise RuntimeError('broken offset')\nbroken = BrokenOffset(2027, 4, 5, tzinfo=datetime.UTC)\nclass InvalidOffset(datetime.datetime):\n    def utcoffset(self):\n        return object()\ninvalid_offset = InvalidOffset(2027, 4, 5, tzinfo=datetime.UTC)"
+                    "import datetime\nvalid = datetime.datetime(\n    2027, 4, 5, 6, 7, 8, 123456,\n    tzinfo=datetime.timezone(datetime.timedelta(0), 'zero'),\n)\nnaive = datetime.datetime(2027, 4, 5)\nnonzero = datetime.datetime(\n    2027, 4, 5,\n    tzinfo=datetime.timezone(datetime.timedelta(hours=1)),\n)\nclass BrokenOffset(datetime.datetime):\n    def utcoffset(self):\n        raise RuntimeError('broken offset')\nbroken = BrokenOffset(2027, 4, 5, tzinfo=datetime.timezone.utc)\nclass InvalidOffset(datetime.datetime):\n    def utcoffset(self):\n        return object()\ninvalid_offset = InvalidOffset(2027, 4, 5, tzinfo=datetime.timezone.utc)"
                 ),
                 Some(&locals),
                 None,
@@ -743,7 +787,9 @@ mod tests {
                 round_trip.getattr("tzinfo").unwrap().is(py
                     .import("datetime")
                     .unwrap()
-                    .getattr("UTC")
+                    .getattr("timezone")
+                    .unwrap()
+                    .getattr("utc")
                     .unwrap())
             );
             assert_eq!(
@@ -769,7 +815,14 @@ mod tests {
             let datetime = py.import("datetime").unwrap();
             let kwargs = PyDict::new(py);
             kwargs
-                .set_item("tzinfo", datetime.getattr("UTC").unwrap())
+                .set_item(
+                    "tzinfo",
+                    datetime
+                        .getattr("timezone")
+                        .unwrap()
+                        .getattr("utc")
+                        .unwrap(),
+                )
                 .unwrap();
             let deadline = datetime
                 .getattr("datetime")

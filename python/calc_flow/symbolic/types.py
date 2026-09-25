@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Union
 
+from calc_flow._compat import TypeAliasType, dataclass
 from calc_flow.capabilities import PORTABLE_ARROW_TYPES
 from calc_flow.symbolic.domains import type_name
 
-type BatchKind = Literal["table", "array"]
-type CompileMode = Literal["batch", "stream"]
-type LatePolicy = Literal["error", "drop"]
-type ScalarLiteral = None | bool | int | float | str
+BatchKind = TypeAliasType("BatchKind", Literal["table", "array"])
+CompileMode = TypeAliasType("CompileMode", Literal["batch", "stream"])
+LatePolicy = TypeAliasType("LatePolicy", Literal["error", "drop"])
+ScalarLiteral = TypeAliasType("ScalarLiteral", Union[None, bool, int, float, str])
 
 # The initial portable field spelling adds ``timestamp[us, UTC]`` to the
 # current portable Arrow names (API note section 2.2).

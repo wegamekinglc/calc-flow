@@ -11,7 +11,7 @@ import weakref
 from collections import UserDict
 from collections.abc import Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime, timedelta, timezone, tzinfo
+from datetime import datetime, timedelta, timezone, tzinfo
 
 import numpy as np
 import pyarrow as pa
@@ -27,6 +27,8 @@ from calc_flow import (
     ProviderError,
     Runtime,
 )
+
+UTC = timezone.utc
 
 
 def _nested_settings(depth: int) -> dict[str, object]:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from tempfile import TemporaryDirectory
 
 import pyarrow as pa
@@ -118,7 +118,7 @@ class SegmentedSource:
             )
         if not self._watermark_emitted:
             self._watermark_emitted = True
-            return Watermark(datetime(2030, 1, 1, tzinfo=UTC))
+            return Watermark(datetime(2030, 1, 1, tzinfo=timezone.utc))
         return None
 
     async def close(self) -> None:
@@ -142,7 +142,7 @@ class CollectSink:
 
 
 def input_tables() -> tuple[pa.Table, pa.Table]:
-    base = datetime(2026, 1, 1, tzinfo=UTC)
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
     authorization_schema = pa.schema(
         [
             pa.field("account_id", pa.int64(), nullable=False),

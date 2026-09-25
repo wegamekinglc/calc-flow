@@ -124,7 +124,12 @@ mod tests {
             };
             assert!(matches);
             assert_eq!(
-                translated.value(py).str().unwrap().to_str().unwrap(),
+                translated
+                    .value(py)
+                    .str()
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
                 expected_message
             );
         });
@@ -268,12 +273,20 @@ mod tests {
             });
             assert!(translated.is_instance_of::<CheckpointError>(py));
             assert_eq!(
-                translated.value(py).str().unwrap().to_str().unwrap(),
+                translated
+                    .value(py)
+                    .str()
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
                 "I/O failed for /tmp/checkpoint: disk full"
             );
             let cause = translated.value(py).getattr("__cause__").unwrap();
             assert!(cause.is_instance_of::<PyOSError>());
-            assert_eq!(cause.str().unwrap().to_str().unwrap(), "disk full");
+            assert_eq!(
+                cause.str().unwrap().extract::<String>().unwrap(),
+                "disk full"
+            );
         });
     }
 }
