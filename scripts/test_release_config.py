@@ -344,6 +344,41 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertNotIn("initial-baseline:", workflow)
         self.assertNotIn("skip-existing", workflow)
 
+    def test_python_release_tags_and_tests_all_six_interpreters(self) -> None:
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        self.assertIn("python -m pip install wheel==0.46.3", workflow)
+        self.assertIn("cp39) tags=(cp310 cp311 cp312)", workflow)
+        self.assertIn("cp313) tags=(cp314)", workflow)
+        self.assertIn(
+            'python -m wheel tags --python-tag="$tag" "${wheels[0]}"', workflow
+        )
+        self.assertIn('test "${#wheels[@]}" -eq 1', workflow)
+
+        test_matrix = workflow.split("  wheel-python-versions:\n", 1)[1].split(
+            "    steps:\n", 1
+        )[0]
+        entries = re.findall(
+            r'python_version: "([0-9.]+)"\n'
+            r"\s+python_tag: (cp[0-9]+)\n"
+            r"\s+base_tag: (cp[0-9]+)",
+            test_matrix,
+        )
+        self.assertEqual(
+            entries,
+            [
+                ("3.9", "cp39", "cp39"),
+                ("3.10", "cp310", "cp39"),
+                ("3.11", "cp311", "cp39"),
+                ("3.12", "cp312", "cp39"),
+                ("3.13", "cp313", "cp313"),
+                ("3.14", "cp314", "cp313"),
+            ],
+        )
+        self.assertIn(
+            "dist/calc_flow_python-*-${{ matrix.python_tag }}-abi3-*.whl",
+            workflow,
+        )
+
     def test_python_release_guide_covers_rehearsal_and_trusted_publishers(self) -> None:
         guide = (ROOT / "docs/python-release.md").read_text(encoding="utf-8")
 

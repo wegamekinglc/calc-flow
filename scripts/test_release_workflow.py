@@ -80,7 +80,11 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
         self.assertIn("needs: [wheels, sdist]", unit_tests)
         self.assertIn(
-            "name: wheel-ubuntu-latest-x86_64-${{ matrix.python_tag }}", unit_tests
+            "name: wheel-ubuntu-latest-x86_64-${{ matrix.base_tag }}", unit_tests
+        )
+        self.assertIn(
+            "dist/calc_flow_python-*-${{ matrix.python_tag }}-abi3-*.whl",
+            unit_tests,
         )
         self.assertIn("python -m pytest -q", unit_tests)
         self.assertIn("needs: [wheels, sdist]", verification)

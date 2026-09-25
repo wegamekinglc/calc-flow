@@ -36,7 +36,7 @@ CORE_TARGETS = frozenset(
         "windows-amd64",
     }
 )
-CORE_PYTHON_TAGS = frozenset({"cp39", "cp313"})
+CORE_PYTHON_TAGS = frozenset({"cp39", "cp310", "cp311", "cp312", "cp313", "cp314"})
 _FINAL_VERSION_RE = re.compile(
     r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
 )

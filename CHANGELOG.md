@@ -9,6 +9,14 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-25: Publish explicit Python 3.9–3.14 abi3 wheel files on Linux,
+  macOS, and Windows. The release builds two native ABI tiers per platform,
+  adds interpreter-specific wheel tags, and installs each tagged wheel in its
+  corresponding Python unit-test job before publishing. Artifact verification
+  now requires all thirty wheels and the source distribution. The Python
+  release workflow remains focused on package build, verification, tests, and
+  PyPI upload.
+
 - 2026-09-24: Prepare `calc-flow-python` for CPython 3.9–3.14 with two
   abi3 wheel tiers on the existing five platform targets. The 3.13+ tier
   retains its direct Unicode extraction and eager asyncio task paths;
