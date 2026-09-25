@@ -26,6 +26,15 @@ from PyFin.api.Analysis import AVG, MA, MARGMAX, MUCOUNT, CSMean
 
 _ROLLING_MEAN = "rolling_mean"
 _DUAL_SMA_SPREAD = "dual_sma_spread"
+_SUITE_SCENARIOS = (
+    "sma20",
+    "dual_sma",
+    "average",
+    "argmax64",
+    "argmax256",
+    "unique64",
+    "cs_mean",
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -35,29 +44,24 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--window", type=int, required=True)
     parser.add_argument(
         "--indicator",
-        choices=(_ROLLING_MEAN, _DUAL_SMA_SPREAD),
+        choices=(_ROLLING_MEAN, _DUAL_SMA_SPREAD, *_SUITE_SCENARIOS),
         default=_ROLLING_MEAN,
     )
     parser.add_argument("--fast-window", type=int, default=5)
     parser.add_argument("--warm-output", type=Path, required=True)
-    parser.add_argument(
-        "--suite-scenario",
-        choices=(
-            "sma20",
-            "dual_sma",
-            "average",
-            "argmax64",
-            "argmax256",
-            "unique64",
-            "cs_mean",
-        ),
-    )
     args = parser.parse_args()
     if args.fast_window <= 0:
         parser.error("fast-window must be positive")
-    if args.indicator == _DUAL_SMA_SPREAD and args.fast_window >= args.window:
+    if (
+        args.indicator in (_DUAL_SMA_SPREAD, "dual_sma")
+        and args.fast_window >= args.window
+    ):
         parser.error("fast-window must be positive and smaller than window")
     return args
+
+
+def _suite_scenario(args: argparse.Namespace) -> str | None:
+    return args.indicator if args.indicator in _SUITE_SCENARIOS else None
 
 
 def _input_frame(rows: int, entities: int, *, suite: bool = False) -> pd.DataFrame:
@@ -146,7 +150,7 @@ def _timed_execute(
                 args.window,
                 indicator=args.indicator,
                 fast_window=args.fast_window,
-                suite_scenario=args.suite_scenario,
+                suite_scenario=_suite_scenario(args),
             )
         seconds = (time.perf_counter_ns() - started) / 1_000_000_000
     finally:
@@ -181,7 +185,7 @@ def _prepare(frame: pd.DataFrame, args: argparse.Namespace) -> None:
         args.window,
         indicator=args.indicator,
         fast_window=args.fast_window,
-        suite_scenario=args.suite_scenario,
+        suite_scenario=_suite_scenario(args),
     )
     np.save(args.warm_output, warm_output, allow_pickle=False)
     _reply(
@@ -195,7 +199,7 @@ def _prepare(frame: pd.DataFrame, args: argparse.Namespace) -> None:
             "python_version": platform.python_version(),
             "rows": len(warm_output),
             "sha256": _digest(warm_output),
-            "suite_scenario": args.suite_scenario,
+            "suite_scenario": _suite_scenario(args),
         }
     )
 
@@ -203,7 +207,7 @@ def _prepare(frame: pd.DataFrame, args: argparse.Namespace) -> None:
 def main() -> None:
     args = _parse_args()
     frame = _input_frame(
-        args.rows, args.entities, suite=args.suite_scenario is not None
+        args.rows, args.entities, suite=_suite_scenario(args) is not None
     )
     _prepare(frame, args)
     _serve(frame, args)

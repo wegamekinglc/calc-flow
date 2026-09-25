@@ -222,6 +222,8 @@ class FinancePythonWorker:
         reply = self._read_reply()
         if reply.get("event") != "sample" or reply.get("iterations") != iterations:
             raise RuntimeError(f"invalid Finance-Python sample reply: {reply!r}")
+        if reply.get("sha256") != self.identity.get("sha256"):
+            raise RuntimeError("Finance-Python timed output differs from warm output")
         return float(reply["seconds"])
 
     def close(self) -> None:

@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import os
-import subprocess  # nosec B404
 import time
 from dataclasses import dataclass
 from datetime import timedelta
@@ -23,6 +21,7 @@ from benchmarks.engine_stream import (
     stream_plan,
 )
 from benchmarks.rolling_indicator_comparison import (
+    FinancePythonWorker,
     TaLibMethod,
     ta_lib_expected_dual_sma_spread,
     ta_lib_expected_rolling_mean,
@@ -287,88 +286,39 @@ def _ta_lib(data: Workload, scenario: str):
     return lambda: data.table.append_column("value", pa.array(method.run()))
 
 
-class _FinanceCase:
-    """Own the pinned Finance-Python interpreter and its timed transforms."""
+def _finance_worker(
+    data: Workload, scenario: str, root: Path
+) -> tuple[FinancePythonWorker, np.ndarray]:
+    """Prepare a pinned legacy worker and verify its untimed output bytes."""
 
-    def __init__(self, data: Workload, scenario: str, root: Path) -> None:
-        python = os.environ.get("FINANCE_PYTHON_PYTHON")
-        if not python:
-            raise RuntimeError("FINANCE_PYTHON_PYTHON must name the Python 3.9 worker")
-        root.mkdir(parents=True, exist_ok=True)
-        self.output = root / "finance-warm.npy"
-        runner = Path(__file__).with_name("finance_python_rolling_runner.py")
-        self.process = subprocess.Popen(  # nosec B603  # nosemgrep
-            [
-                python,
-                str(runner),
-                "--rows",
-                str(data.table.num_rows),
-                "--entities",
-                str(data.entities),
-                "--window",
-                "20",
-                "--warm-output",
-                str(self.output),
-                "--suite-scenario",
-                scenario,
-            ],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        try:
-            self.identity = self._reply()
-            if (
-                self.identity.get("event") != "ready"
-                or self.identity.get("suite_scenario") != scenario
-                or self.identity.get("rows") != data.table.num_rows
-                or self.identity.get("finance_python_version") != "0.9.10"
-                or not str(self.identity.get("python_version", "")).startswith("3.9.")
-            ):
-                raise RuntimeError("Finance-Python prepared a different benchmark case")
-            self.values = np.load(self.output, allow_pickle=False)
-            if (
-                hashlib.sha256(self.values.tobytes()).hexdigest()
-                != self.identity["sha256"]
-            ):
-                raise RuntimeError("Finance-Python warm output checksum differs")
-        except BaseException:
-            self.close()
-            raise
-
-    def _reply(self) -> dict:
-        line = self.process.stdout.readline()
-        if line:
-            return json.loads(line)
-        error = self.process.stderr.read()
-        raise RuntimeError(f"Finance-Python worker exited: {error}")
-
-    def sample(self) -> float:
-        self.process.stdin.write('{"command":"run","iterations":1}\n')
-        self.process.stdin.flush()
-        reply = self._reply()
+    python = os.environ.get("FINANCE_PYTHON_PYTHON")
+    if not python:
+        raise RuntimeError("FINANCE_PYTHON_PYTHON must name the Python 3.9 worker")
+    root.mkdir(parents=True, exist_ok=True)
+    output = root / "finance-warm.npy"
+    worker = FinancePythonWorker(
+        Path(python),
+        rows=data.table.num_rows,
+        entities=data.entities,
+        window=20,
+        warm_output=output,
+        indicator=scenario,
+    )
+    try:
+        identity = worker.identity
         if (
-            reply.get("event") != "sample"
-            or reply.get("sha256") != self.identity["sha256"]
-            or reply.get("rows") != len(self.values)
+            identity.get("suite_scenario") != scenario
+            or identity.get("finance_python_version") != "0.9.10"
+            or not str(identity.get("python_version", "")).startswith("3.9.")
         ):
-            raise RuntimeError("Finance-Python timed output differs from warm output")
-        return float(reply["seconds"])
-
-    def close(self) -> None:
-        if self.process.poll() is not None:
-            return
-        try:
-            self.process.stdin.write('{"command":"stop"}\n')
-            self.process.stdin.flush()
-        except BrokenPipeError:
-            pass
-        try:
-            self.process.communicate(timeout=10)
-        except subprocess.TimeoutExpired:
-            self.process.kill()
-            self.process.communicate()
+            raise RuntimeError("Finance-Python prepared a different benchmark case")
+        values = np.load(output, allow_pickle=False)
+        if hashlib.sha256(values.tobytes()).hexdigest() != identity.get("sha256"):
+            raise RuntimeError("Finance-Python warm output checksum differs")
+        return worker, values
+    except BaseException:
+        worker.close()
+        raise
 
 
 class EngineCase:
@@ -405,9 +355,8 @@ class EngineCase:
             )
             self.loop = asyncio.new_event_loop()
         elif backend == "finance-python":
-            self.finance = _FinanceCase(self.data, scenario, root)
+            self.finance, values = _finance_worker(self.data, scenario, root)
             try:
-                values = self.finance.values
                 result = (
                     self.data.table.append_column("value", pa.array(values))
                     if scenario in ("sma20", "dual_sma")
@@ -482,7 +431,7 @@ class EngineCase:
     def sample(self) -> dict:
         if self.finance is not None:
             return {
-                "seconds": self.finance.sample(),
+                "seconds": self.finance.sample(1),
                 "correctness": self.finance_correctness,
                 "finance_python": self.finance.identity,
             }
