@@ -11,6 +11,7 @@ external project.
 
 from __future__ import annotations
 
+import asyncio
 import math
 
 import pyarrow as pa
@@ -481,3 +482,872 @@ def test_finance_style_cross_section_uses_calc_flow_frozen_semantics() -> None:
         math.isnan(by_symbol["F"][name])
         for name in ("rank", "percentile", "demean", "zscore", "filled")
     )
+
+
+def test_cross_section_mean_broadcasts_valid_group_sample() -> None:
+    quotes = _ordered_quotes()
+    group = exact_time(quotes["ts"])
+    program = Program(
+        "cross-section-mean",
+        inputs=(quotes,),
+        outputs=(
+            (
+                "signals",
+                quotes.with_columns(
+                    mean=cs.mean(quotes["price"], group=group, min_samples=3),
+                    insufficient=cs.mean(quotes["price"], group=group, min_samples=4),
+                ),
+            ),
+        ),
+    )
+    schema = pa.schema(
+        (
+            pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
+            pa.field("symbol", pa.string(), nullable=False),
+            pa.field("seq", pa.uint64(), nullable=False),
+            pa.field("price", pa.float64(), nullable=True),
+        )
+    )
+    table = pa.table(
+        {
+            "ts": [1_000_000] * 5,
+            "symbol": ["A", "B", "C", "D", "E"],
+            "seq": [1] * 5,
+            "price": [1.0, 2.0, 4.0, None, math.nan],
+        },
+        schema=schema,
+    )
+
+    output = _execute(program, table)
+    assert output["mean"].to_pylist() == pytest.approx([7.0 / 3.0] * 5)
+    assert output["insufficient"].to_pylist() == [None] * 5
+    program.compile_stream(Runtime())
+
+
+def test_cross_section_fraction_selection_uses_average_tie_rank() -> None:
+    quotes = _ordered_quotes()
+    group = exact_time(quotes["ts"])
+    program = Program(
+        "cross-section-fraction-selection",
+        inputs=(quotes,),
+        outputs=(
+            (
+                "signals",
+                quotes.with_columns(
+                    top_half=cs.top_quantile(
+                        quotes["price"], group=group, fraction=0.5
+                    ),
+                    bottom_half=cs.bottom_quantile(
+                        quotes["price"], group=group, fraction=0.5
+                    ),
+                ),
+            ),
+        ),
+    )
+    schema = pa.schema(
+        (
+            pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
+            pa.field("symbol", pa.string(), nullable=False),
+            pa.field("seq", pa.uint64(), nullable=False),
+            pa.field("price", pa.float64(), nullable=True),
+        )
+    )
+    table = pa.table(
+        {
+            "ts": [1_000_000] * 5,
+            "symbol": ["A", "B", "C", "D", "E"],
+            "seq": [1] * 5,
+            "price": [1.0, 2.0, 2.0, 4.0, None],
+        },
+        schema=schema,
+    )
+
+    output = _execute(program, table)
+    assert output["top_half"].to_pylist() == [False, False, False, True, None]
+    assert output["bottom_half"].to_pylist() == [True, False, False, False, None]
+    program.compile_stream(Runtime())
+
+
+def test_rolling_boolean_reductions_ignore_null_samples() -> None:
+    quotes = _ordered_quotes()
+    flag = quotes["price"] > 0.0
+    program = Program(
+        "rolling-boolean-reductions",
+        inputs=(quotes,),
+        outputs=(
+            (
+                "signals",
+                quotes.with_columns(
+                    all_true=ts.all_true(flag, window=rows(2)),
+                    any_true=ts.any_true(flag, window=rows(2)),
+                ),
+            ),
+        ),
+    )
+    schema = pa.schema(
+        (
+            pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
+            pa.field("symbol", pa.string(), nullable=False),
+            pa.field("seq", pa.uint64(), nullable=False),
+            pa.field("price", pa.float64(), nullable=True),
+        )
+    )
+    table = pa.table(
+        {
+            "ts": [1_000_000, 2_000_000, 3_000_000, 4_000_000, 5_000_000],
+            "symbol": ["A"] * 5,
+            "seq": [1, 2, 3, 4, 5],
+            "price": [0.0, None, None, 1.0, 2.0],
+        },
+        schema=schema,
+    )
+
+    output = _execute(program, table)
+    assert output["all_true"].to_pylist() == [False, False, None, True, True]
+    assert output["any_true"].to_pylist() == [False, False, None, True, True]
+    program.compile_stream(Runtime())
+
+
+def test_positive_window_reductions_ignore_nonpositive_and_missing_values() -> None:
+    quotes = _ordered_quotes()
+    price = quotes["price"]
+    program = Program(
+        "positive-window-reductions",
+        inputs=(quotes,),
+        outputs=(
+            (
+                "signals",
+                quotes.with_columns(
+                    positive_count=ts.count_positive(price, window=rows(3)),
+                    positive_mean=ts.mean_positive(price, window=rows(3)),
+                ),
+            ),
+        ),
+    )
+    table = pa.table(
+        {
+            "ts": [1_000_000, 2_000_000, 3_000_000, 4_000_000, 5_000_000, 6_000_000],
+            "symbol": ["A"] * 6,
+            "seq": [1, 2, 3, 4, 5, 6],
+            "price": [-2.0, None, 2.0, math.nan, 4.0, 0.0],
+        },
+        schema=pa.schema(
+            (
+                pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
+                pa.field("symbol", pa.string(), nullable=False),
+                pa.field("seq", pa.uint64(), nullable=False),
+                pa.field("price", pa.float64()),
+            )
+        ),
+    )
+    output = _execute(program, table)
+    assert output["positive_count"].to_pylist() == [0, 0, 1, 1, 2, 1]
+    _assert_optional_floats(
+        output["positive_mean"].to_pylist(),
+        [0.0, 0.0, 2.0, 2.0, 3.0, 4.0],
+    )
+    program.compile_stream(Runtime())
+
+
+def test_cross_section_regression_residual_uses_pairwise_valid_rows() -> None:
+    quotes = _ordered_quotes(with_sector=True)
+    group = exact_time(quotes["ts"], partition_by=(quotes["sector"],))
+    program = Program(
+        "cross-section-regression-residual",
+        inputs=(quotes,),
+        outputs=(
+            (
+                "signals",
+                quotes.with_columns(
+                    residual=cs.residual(quotes["price"], quotes["seq"], group=group),
+                ),
+            ),
+        ),
+    )
+    table = pa.table(
+        {
+            "ts": [1_000_000] * 6,
+            "symbol": ["A", "B", "C", "D", "E", "F"],
+            "seq": [1, 2, 3, 4, 5, 6],
+            "sector": ["tech"] * 6,
+            "price": [3.0, 5.0, 8.0, None, 11.0, math.nan],
+        },
+        schema=pa.schema(
+            (
+                pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
+                pa.field("symbol", pa.string(), nullable=False),
+                pa.field("seq", pa.uint64(), nullable=False),
+                pa.field("sector", pa.string(), nullable=False),
+                pa.field("price", pa.float64()),
+            )
+        ),
+    )
+    output = _execute(program, table)
+    _assert_optional_floats(
+        output["residual"].to_pylist(),
+        [-7 / 35, -8 / 35, 26 / 35, None, -11 / 35, None],
+    )
+    program.compile_stream(Runtime())
+
+    async def feed():
+        yield table.slice(0, 2)
+        yield table.slice(2)
+
+    async def stream_residuals() -> list[float | None]:
+        values: list[float | None] = []
+        async with program.stream({"quotes": feed()}) as results:
+            async for event in results:
+                values.extend(event.table["residual"].to_pylist())
+        return values
+
+    _assert_optional_floats(
+        asyncio.run(stream_residuals()), output["residual"].to_pylist()
+    )
+
+
+def test_cross_section_regression_residual_centers_large_predictors() -> None:
+    quotes = _ordered_quotes()
+    program = Program(
+        "cross-section-centered-regression",
+        inputs=(quotes,),
+        outputs=(
+            (
+                "signals",
+                quotes.with_columns(
+                    residual=cs.residual(
+                        quotes["seq"],
+                        quotes["price"],
+                        group=exact_time(quotes["ts"]),
+                    )
+                ),
+            ),
+        ),
+    )
+    table = pa.table(
+        {
+            "ts": [1_000_000] * 4,
+            "symbol": ["A", "B", "C", "D"],
+            "seq": [1, 2, 3, 4],
+            "price": [1e12 + 1, 1e12 + 2, 1e12 + 3, 1e12 + 5],
+        },
+        schema=pa.schema(
+            (
+                pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
+                pa.field("symbol", pa.string(), nullable=False),
+                pa.field("seq", pa.uint64(), nullable=False),
+                pa.field("price", pa.float64()),
+            )
+        ),
+    )
+    result = _execute(program, table)
+    _assert_optional_floats(
+        result["residual"].to_pylist(), [-7 / 35, 2 / 35, 11 / 35, -6 / 35]
+    )
+
+
+@pytest.mark.parametrize("magnitude", [1e308, 1e-200])
+def test_cross_section_regression_residual_handles_opposite_extreme_values(
+    magnitude: float,
+) -> None:
+    quotes = _ordered_quotes()
+    program = Program(
+        "cross-section-extreme-regression",
+        inputs=(quotes,),
+        outputs=(
+            (
+                "signals",
+                quotes.with_columns(
+                    residual=cs.residual(
+                        quotes["price"], quotes["price"], group=exact_time(quotes["ts"])
+                    )
+                ),
+            ),
+        ),
+    )
+    table = pa.table(
+        {
+            "ts": [1_000_000, 1_000_000],
+            "symbol": ["A", "B"],
+            "seq": [1, 2],
+            "price": [magnitude, -magnitude],
+        },
+        schema=pa.schema(
+            (
+                pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
+                pa.field("symbol", pa.string(), nullable=False),
+                pa.field("seq", pa.uint64(), nullable=False),
+                pa.field("price", pa.float64()),
+            )
+        ),
+    )
+    assert _execute(program, table)["residual"].to_pylist() == [0.0, 0.0]
+
+
+@pytest.mark.parametrize(
+    ("x_scale", "dependent_value"), [(1e-100, 1e-250), (1e-150, 1e308)]
+)
+def test_cross_section_regression_residual_handles_extreme_scales(
+    x_scale: float, dependent_value: float
+) -> None:
+    quotes = _ordered_quotes()
+    program = Program(
+        "cross-section-underflowed-covariance",
+        inputs=(quotes,),
+        outputs=(
+            (
+                "signals",
+                quotes.with_columns(
+                    residual=cs.residual(
+                        quotes["price"],
+                        row.cast(quotes["seq"], "float64") * x_scale,
+                        group=exact_time(quotes["ts"]),
+                    )
+                ),
+            ),
+        ),
+    )
+    table = pa.table(
+        {
+            "ts": [1_000_000, 1_000_000],
+            "symbol": ["A", "B"],
+            "seq": [1, 2],
+            "price": [0.0, dependent_value],
+        },
+        schema=pa.schema(
+            (
+                pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
+                pa.field("symbol", pa.string(), nullable=False),
+                pa.field("seq", pa.uint64(), nullable=False),
+                pa.field("price", pa.float64()),
+            )
+        ),
+    )
+    assert _execute(program, table)["residual"].to_pylist() == [0.0, 0.0]
+
+
+def test_rolling_order_unique_and_decay_match_reference() -> None:
+    quotes = _ordered_quotes()
+    value = quotes["price"]
+    frame = rows(3)
+    program = Program(
+        "rolling-order-unique-decay",
+        inputs=(quotes,),
+        outputs=(
+            (
+                "signals",
+                quotes.with_columns(
+                    argmax=ts.argmax(value, window=frame),
+                    argmin=ts.argmin(value, window=frame),
+                    rank=ts.rank(value, window=frame),
+                    quantile=ts.quantile(value, window=frame),
+                    unique_count=ts.unique_count(value, window=frame),
+                    decay=ts.decay(value, window=frame),
+                ),
+            ),
+        ),
+    )
+    table = pa.table(
+        {
+            "ts": [index * 1_000_000 for index in range(1, 7)],
+            "symbol": ["A"] * 6,
+            "seq": list(range(1, 7)),
+            "price": [2.0, 3.0, 3.0, 1.0, None, 4.0],
+        },
+        schema=pa.schema(
+            (
+                pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
+                pa.field("symbol", pa.string(), nullable=False),
+                pa.field("seq", pa.uint64(), nullable=False),
+                pa.field("price", pa.float64()),
+            )
+        ),
+    )
+    output = _execute(program, table)
+    assert output["argmax"].to_pylist() == [0, 0, 1, 2, 2, 0]
+    assert output["argmin"].to_pylist() == [0, 1, 2, 0, 1, 2]
+    assert output["rank"].to_pylist() == [0, 1, 1, 0, None, 1]
+    _assert_optional_floats(
+        output["quantile"].to_pylist(), [None, 1.0, 0.5, 0.0, None, 1.0]
+    )
+    assert output["unique_count"].to_pylist() == [1, 2, 2, 2, 2, 2]
+    _assert_optional_floats(
+        output["decay"].to_pylist(),
+        [2.0, 13 / 5, 17 / 6, 2.0, 9 / 5, 14 / 5],
+    )
+    program.compile_stream(Runtime())
+
+    async def feed():
+        yield table.slice(0, 2)
+        yield table.slice(2, 1)
+        yield table.slice(3)
+
+    async def stream_columns() -> dict[str, list[object]]:
+        columns = {
+            name: []
+            for name in (
+                "argmax",
+                "argmin",
+                "rank",
+                "quantile",
+                "unique_count",
+                "decay",
+            )
+        }
+        async with program.stream({"quotes": feed()}) as results:
+            async for event in results:
+                for name in columns:
+                    columns[name].extend(event.table[name].to_pylist())
+        return columns
+
+    streamed = asyncio.run(stream_columns())
+    for name in streamed:
+        _assert_optional_floats(streamed[name], output[name].to_pylist())
+
+
+def test_row_finance_math_functions_execute_in_batch_and_compile_stream() -> None:
+    quotes = _ordered_quotes()
+    price = quotes["price"]
+    program = Program(
+        "row-finance-math",
+        inputs=(quotes,),
+        outputs=(
+            (
+                "signals",
+                quotes.with_columns(
+                    sign=row.sign(price),
+                    maximum=row.maximum(price, 0.0),
+                    minimum=row.minimum(price, 0.0),
+                    square=row.pow(price, 2.0),
+                    acos=row.acos(price),
+                    acosh=row.acosh(price),
+                    asin=row.asin(price),
+                    asinh=row.asinh(price),
+                    ceil=row.ceil(price),
+                    floor=row.floor(price),
+                    rounded=row.round(price),
+                ),
+            ),
+        ),
+    )
+    table = pa.table(
+        {
+            "ts": [1_000_000, 2_000_000, 3_000_000, 4_000_000],
+            "symbol": ["A"] * 4,
+            "seq": [1, 2, 3, 4],
+            "price": [-2.0, 0.5, 2.0, None],
+        },
+        schema=pa.schema(
+            (
+                pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
+                pa.field("symbol", pa.string(), nullable=False),
+                pa.field("seq", pa.uint64(), nullable=False),
+                pa.field("price", pa.float64()),
+            )
+        ),
+    )
+    output = _execute(program, table)
+    assert output["sign"].to_pylist() == [-1.0, 1.0, 1.0, None]
+    assert output["maximum"].to_pylist() == [0.0, 0.5, 2.0, 0.0]
+    assert output["minimum"].to_pylist() == [-2.0, 0.0, 0.0, 0.0]
+    assert output["square"].to_pylist() == [4.0, 0.25, 4.0, None]
+    _assert_optional_floats(
+        output["acos"].to_pylist(), [math.nan, math.acos(0.5), math.nan, None]
+    )
+    _assert_optional_floats(
+        output["acosh"].to_pylist(), [math.nan, math.nan, math.acosh(2), None]
+    )
+    _assert_optional_floats(
+        output["asin"].to_pylist(), [math.nan, math.asin(0.5), math.nan, None]
+    )
+    _assert_optional_floats(
+        output["asinh"].to_pylist(),
+        [math.asinh(-2), math.asinh(0.5), math.asinh(2), None],
+    )
+    assert output["ceil"].to_pylist() == [-2.0, 1.0, 2.0, None]
+    assert output["floor"].to_pylist() == [-2.0, 0.0, 2.0, None]
+    assert output["rounded"].to_pylist() == [-2.0, 1.0, 2.0, None]
+    program.compile_stream(Runtime())
+
+
+def test_row_finance_math_accepts_integer_columns() -> None:
+    quotes = _ordered_quotes()
+    sequence = quotes["seq"]
+    program = Program(
+        "row-integer-math",
+        inputs=(quotes,),
+        outputs=(
+            (
+                "signals",
+                quotes.with_columns(
+                    ceiling=row.ceil(sequence),
+                    floor_value=row.floor(sequence),
+                    rounded=row.round(sequence),
+                    arccos=row.acos(sequence),
+                    arcsin=row.asin(sequence),
+                    arccosh=row.acosh(sequence),
+                    arcsinh=row.asinh(sequence),
+                ),
+            ),
+        ),
+    )
+    table = pa.table(
+        {
+            "ts": [1_000_000, 2_000_000],
+            "symbol": ["A", "A"],
+            "seq": [1, 2],
+            "price": [1.0, 2.0],
+        },
+        schema=pa.schema(
+            (
+                pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
+                pa.field("symbol", pa.string(), nullable=False),
+                pa.field("seq", pa.uint64(), nullable=False),
+                pa.field("price", pa.float64()),
+            )
+        ),
+    )
+    output = _execute(program, table)
+    for name in ("ceiling", "floor_value", "rounded"):
+        assert output[name].to_pylist() == [1.0, 2.0]
+    _assert_optional_floats(output["arccos"].to_pylist(), [0.0, math.nan])
+    _assert_optional_floats(output["arcsin"].to_pylist(), [math.pi / 2, math.nan])
+    _assert_optional_floats(output["arccosh"].to_pylist(), [0.0, math.acosh(2)])
+    _assert_optional_floats(
+        output["arcsinh"].to_pylist(), [math.asinh(1), math.asinh(2)]
+    )
+
+
+def test_inverse_normal_cdf_matches_reference_probabilities() -> None:
+    quotes = _ordered_quotes()
+    program = Program(
+        "inverse-normal-cdf",
+        inputs=(quotes,),
+        outputs=(
+            (
+                "signals",
+                quotes.with_columns(
+                    normal_score=row.norminv(quotes["price"]),
+                ),
+            ),
+        ),
+    )
+    table = pa.table(
+        {
+            "ts": [1_000_000, 2_000_000, 3_000_000, 4_000_000],
+            "symbol": ["A"] * 4,
+            "seq": [1, 2, 3, 4],
+            "price": [0.025, 0.5, 0.975, None],
+        },
+        schema=pa.schema(
+            (
+                pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
+                pa.field("symbol", pa.string(), nullable=False),
+                pa.field("seq", pa.uint64(), nullable=False),
+                pa.field("price", pa.float64()),
+            )
+        ),
+    )
+    result = _execute(program, table)["normal_score"].to_pylist()
+    assert result[0] == pytest.approx(-1.959963984540054, abs=1e-8)
+    assert result[1] == pytest.approx(0.0, abs=1e-12)
+    assert result[2] == pytest.approx(1.959963984540054, abs=1e-8)
+    assert result[3] is None
+    program.compile_stream(Runtime())
+
+
+def test_inverse_normal_cdf_handles_domain_edges_and_tails() -> None:
+    quotes = _ordered_quotes()
+    program = Program(
+        "inverse-normal-domain",
+        inputs=(quotes,),
+        outputs=(("signals", quotes.with_columns(score=row.norminv(quotes["price"]))),),
+    )
+    probabilities = [-0.1, 0.0, 0.001, 0.999, 1.0, 1.1, math.nan, None]
+    table = pa.table(
+        {
+            "ts": [index * 1_000_000 for index in range(1, 9)],
+            "symbol": ["A"] * 8,
+            "seq": list(range(1, 9)),
+            "price": probabilities,
+        },
+        schema=pa.schema(
+            (
+                pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
+                pa.field("symbol", pa.string(), nullable=False),
+                pa.field("seq", pa.uint64(), nullable=False),
+                pa.field("price", pa.float64()),
+            )
+        ),
+    )
+    actual = _execute(program, table)["score"].to_pylist()
+    assert actual[0] is None and actual[1] is None
+    assert actual[2] == pytest.approx(-3.090232306167813, abs=1e-8)
+    assert actual[3] == pytest.approx(3.090232306167813, abs=1e-8)
+    assert actual[4] is None and actual[5] is None
+    assert actual[6] is None and actual[7] is None
+
+
+def test_pairwise_extrema_skip_nan_and_null_on_either_side() -> None:
+    quotes = _ordered_quotes()
+    price = quotes["price"]
+    program = Program(
+        "pairwise-extrema",
+        inputs=(quotes,),
+        outputs=(
+            (
+                "signals",
+                quotes.with_columns(
+                    left_max=row.maximum(price, 0.0),
+                    right_max=row.maximum(0.0, price),
+                    left_min=row.minimum(price, 0.0),
+                    right_min=row.minimum(0.0, price),
+                    both_max=row.maximum(price, price),
+                    both_min=row.minimum(price, price),
+                ),
+            ),
+        ),
+    )
+    table = pa.table(
+        {
+            "ts": [1_000_000, 2_000_000, 3_000_000, 4_000_000],
+            "symbol": ["A"] * 4,
+            "seq": [1, 2, 3, 4],
+            "price": [math.nan, None, -2.0, 2.0],
+        },
+        schema=pa.schema(
+            (
+                pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
+                pa.field("symbol", pa.string(), nullable=False),
+                pa.field("seq", pa.uint64(), nullable=False),
+                pa.field("price", pa.float64()),
+            )
+        ),
+    )
+    result = _execute(program, table)
+    for name in ("left_max", "right_max"):
+        assert result[name].to_pylist() == [0.0, 0.0, 0.0, 2.0]
+    for name in ("left_min", "right_min"):
+        assert result[name].to_pylist() == [0.0, 0.0, -2.0, 0.0]
+    for name in ("both_max", "both_min"):
+        assert result[name].to_pylist() == [None, None, -2.0, 2.0]
+
+
+def test_isnan_and_sign_distinguish_nan_from_null() -> None:
+    quotes = _ordered_quotes()
+    program = Program(
+        "nan-sign",
+        inputs=(quotes,),
+        outputs=(
+            (
+                "signals",
+                quotes.with_columns(
+                    isnan=row.isnan(quotes["price"]),
+                    sign=row.sign(quotes["price"]),
+                ),
+            ),
+        ),
+    )
+    table = pa.table(
+        {
+            "ts": [1_000_000, 2_000_000, 3_000_000],
+            "symbol": ["A"] * 3,
+            "seq": [1, 2, 3],
+            "price": [math.nan, None, -1.0],
+        },
+        schema=pa.schema(
+            (
+                pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
+                pa.field("symbol", pa.string(), nullable=False),
+                pa.field("seq", pa.uint64(), nullable=False),
+                pa.field("price", pa.float64()),
+            )
+        ),
+    )
+    result = _execute(program, table)
+    assert result["isnan"].to_pylist() == [True, None, False]
+    assert result["sign"].to_pylist() == [None, None, -1.0]
+
+
+def test_boolean_windows_skip_nan_numeric_samples() -> None:
+    quotes = _ordered_quotes()
+    program = Program(
+        "boolean-numeric-nan",
+        inputs=(quotes,),
+        outputs=(
+            (
+                "signals",
+                quotes.with_columns(
+                    all_true=ts.all_true(quotes["price"], window=rows(2)),
+                    any_true=ts.any_true(quotes["price"], window=rows(2)),
+                ),
+            ),
+        ),
+    )
+    table = pa.table(
+        {
+            "ts": [1_000_000, 2_000_000, 3_000_000, 4_000_000, 5_000_000],
+            "symbol": ["A"] * 5,
+            "seq": [1, 2, 3, 4, 5],
+            "price": [1.0, math.nan, 0.0, None, 2.0],
+        },
+        schema=pa.schema(
+            (
+                pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
+                pa.field("symbol", pa.string(), nullable=False),
+                pa.field("seq", pa.uint64(), nullable=False),
+                pa.field("price", pa.float64()),
+            )
+        ),
+    )
+    result = _execute(program, table)
+    assert result["all_true"].to_pylist() == [True, True, False, False, True]
+    assert result["any_true"].to_pylist() == [True, True, False, False, True]
+
+
+def test_cumulative_average_and_last_valid_survive_missing_values() -> None:
+    quotes = _ordered_quotes()
+    price = quotes["price"]
+    program = Program(
+        "cumulative-average-and-last",
+        inputs=(quotes,),
+        outputs=(
+            (
+                "signals",
+                quotes.with_columns(
+                    average=ts.average(price),
+                    last_valid=ts.last(price),
+                ),
+            ),
+        ),
+    )
+    table = pa.table(
+        {
+            "ts": [1_000_000, 2_000_000, 3_000_000, 4_000_000, 5_000_000],
+            "symbol": ["A"] * 5,
+            "seq": [1, 2, 3, 4, 5],
+            "price": [2.0, None, 4.0, math.nan, 8.0],
+        },
+        schema=pa.schema(
+            (
+                pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
+                pa.field("symbol", pa.string(), nullable=False),
+                pa.field("seq", pa.uint64(), nullable=False),
+                pa.field("price", pa.float64()),
+            )
+        ),
+    )
+    output = _execute(program, table)
+    _assert_optional_floats(output["average"].to_pylist(), [2.0, 2.0, 3.0, 3.0, 14 / 3])
+    assert output["last_valid"].to_pylist() == [2.0, 2.0, 4.0, 4.0, 8.0]
+    program.compile_stream(Runtime())
+
+
+def test_cumulative_average_handles_opposite_extreme_values() -> None:
+    quotes = _ordered_quotes()
+    program = Program(
+        "cumulative-extreme-average",
+        inputs=(quotes,),
+        outputs=(
+            ("signals", quotes.with_columns(average=ts.average(quotes["price"]))),
+        ),
+    )
+    table = pa.table(
+        {
+            "ts": [1_000_000, 2_000_000],
+            "symbol": ["A", "A"],
+            "seq": [1, 2],
+            "price": [1e308, -1e308],
+        },
+        schema=pa.schema(
+            (
+                pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
+                pa.field("symbol", pa.string(), nullable=False),
+                pa.field("seq", pa.uint64(), nullable=False),
+                pa.field("price", pa.float64()),
+            )
+        ),
+    )
+    assert _execute(program, table)["average"].to_pylist() == [1e308, 0.0]
+
+
+def test_last_valid_replaces_infinity_with_new_finite_value() -> None:
+    quotes = _ordered_quotes()
+    program = Program(
+        "last-after-infinity",
+        inputs=(quotes,),
+        outputs=(
+            ("signals", quotes.with_columns(last_valid=ts.last(quotes["price"]))),
+        ),
+    )
+    table = pa.table(
+        {
+            "ts": [1_000_000, 2_000_000, 3_000_000, 4_000_000],
+            "symbol": ["A"] * 4,
+            "seq": [1, 2, 3, 4],
+            "price": [math.inf, 1.0, -math.inf, 2.0],
+        },
+        schema=pa.schema(
+            (
+                pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
+                pa.field("symbol", pa.string(), nullable=False),
+                pa.field("seq", pa.uint64(), nullable=False),
+                pa.field("price", pa.float64()),
+            )
+        ),
+    )
+    output = _execute(program, table)["last_valid"].to_pylist()
+    assert output == [math.inf, 1.0, -math.inf, 2.0]
+
+    async def feed():
+        for index in range(table.num_rows):
+            yield table.slice(index, 1)
+
+    async def stream_values() -> list[float | None]:
+        values: list[float | None] = []
+        async with program.stream({"quotes": feed()}) as results:
+            async for event in results:
+                values.extend(event.table["last_valid"].to_pylist())
+        return values
+
+    assert asyncio.run(stream_values()) == output
+
+
+def test_rolling_order_treats_signed_zeros_as_equal() -> None:
+    quotes = _ordered_quotes()
+    price = quotes["price"]
+    program = Program(
+        "rolling-signed-zero",
+        inputs=(quotes,),
+        outputs=(
+            (
+                "signals",
+                quotes.with_columns(
+                    argmax=ts.argmax(price, window=rows(2)),
+                    argmin=ts.argmin(price, window=rows(2)),
+                    rank=ts.rank(price, window=rows(2)),
+                    unique_count=ts.unique_count(price, window=rows(2)),
+                ),
+            ),
+        ),
+    )
+    table = pa.table(
+        {
+            "ts": [1_000_000, 2_000_000],
+            "symbol": ["A", "A"],
+            "seq": [1, 2],
+            "price": [-0.0, 0.0],
+        },
+        schema=pa.schema(
+            (
+                pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
+                pa.field("symbol", pa.string(), nullable=False),
+                pa.field("seq", pa.uint64(), nullable=False),
+                pa.field("price", pa.float64()),
+            )
+        ),
+    )
+    result = _execute(program, table)
+    assert result["argmax"].to_pylist() == [0, 1]
+    assert result["argmin"].to_pylist() == [0, 1]
+    assert result["rank"].to_pylist() == [0, 0]
+    assert result["unique_count"].to_pylist() == [1, 1]

@@ -213,7 +213,9 @@ fn history_projection(compiled: &CompiledRollingSpec) -> BTreeSet<usize> {
     for output in &compiled.outputs {
         if matches!(
             output.evaluation,
-            CompiledEvaluation::Lag { .. } | CompiledEvaluation::Delta { .. }
+            CompiledEvaluation::Lag { .. }
+                | CompiledEvaluation::Delta { .. }
+                | CompiledEvaluation::Scan(_)
         ) {
             projection.insert(output.input_index);
         }

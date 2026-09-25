@@ -696,6 +696,8 @@ jobs:
           RUST_TOOLCHAIN_EVIDENCE: ${{ runner.temp }}/rust-toolchain-install
           RUST_DIAGNOSTICS_UV: ${{ toJSON(steps.rust_uv) }}
         run: python scripts/rust_toolchain_diagnostics.py before
+      - name: Repair incomplete pinned Rust toolchain
+        run: python scripts/repair_rust_toolchain.py
       - id: rust_install
         uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
         with:
@@ -864,6 +866,8 @@ jobs:
           enable-cache: true
       - name: Install compatible Python test dependencies
         run: python -m pip install "numpy>=2.0.0" "pyarrow==24.0.0"
+      - name: Repair incomplete pinned Rust toolchain
+        run: python scripts/repair_rust_toolchain.py
       - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
         with:
           components: llvm-tools-preview

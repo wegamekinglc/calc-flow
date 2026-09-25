@@ -640,6 +640,12 @@ def _multi_stage_program() -> Program:
             ("ema_3", ts.ewma(quotes["x"], span=3, min_periods=2)),
             ("macd_2_4", macd),
             ("ema_macd_3", ts.ema(macd, span=3)),
+            ("argmax_3", ts.argmax(quotes["x"], window=rows(3))),
+            ("rank_3", ts.rank(quotes["x"], window=rows(3))),
+            ("unique_3", ts.unique_count(quotes["x"], window=rows(3))),
+            ("decay_3", ts.decay(quotes["x"], window=rows(3))),
+            ("average_all", ts.average(quotes["x"])),
+            ("last_valid", ts.last(quotes["x"])),
         ]
     )
 

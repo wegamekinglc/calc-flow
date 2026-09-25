@@ -234,7 +234,8 @@ declares ordered `partition_by` and `sequence_by` keys, a non-null UTC
 `timestamp[us]` `event_time` column, and one `RollingOutputSpec` per rolling
 column: kind `lag` or `delta` — `primitive_version` 1, input and output
 column names, and a positive `periods` distance; kind `count`, `sum`, `mean`,
-`min`, `max`, `variance`, or `stddev` — `primitive_version` 1, input and
+`min`, `max`, `variance`, `stddev`, `argmax`, `argmin`, `rank`, `quantile`,
+`unique_count`, or `decay` — `primitive_version` 1, input and
 output column names, a positive frame, and `min_periods`, with `variance` and
 `stddev` adding `ddof`; or the pair kinds `covariance` and `correlation` —
 `primitive_version` 1, left and right input column names, an output column
@@ -245,6 +246,14 @@ unadjusted `alpha = 2 / (span + 1)` recurrence and shares constant state by
 `ewma` readouts and one output name. The leaves create and share state but are
 not output columns; the operator writes their nullable `float64` difference
 directly.
+Kind `cumulative_mean` carries an input, output, and positive `min_periods`;
+it stores one count and arithmetic mean per entity. `argmax`, `argmin`,
+`rank`, and `unique_count` emit nullable `uint64`; `quantile` and `decay`
+emit nullable `float64`. Extrema positions count rows back from the current
+row and choose the oldest tie. Rank is zero-based ascending with the first
+rank for ties; signed zero values tie and a singleton quantile is null.
+Decay weights valid samples
+linearly, newest highest.
 
 A frame is `rows(size)` —
 the `size` rows through the current row of the entity total order — or
@@ -252,8 +261,8 @@ the `size` rows through the current row of the entity total order — or
 open at the lower bound and closed at the upper bound, with equal-time rows
 ordered by `sequence_by`. `configuration_version` and `state_layout_version`
 use their validated declaration constants. `configuration_version` is
-`ROLLING_CONFIGURATION_VERSION` (1). Non-EWMA declarations use
-`ROLLING_STATE_LAYOUT_VERSION` (1), while any EWMA declaration requires
+`ROLLING_CONFIGURATION_VERSION` (1). Declarations without EWMA or cumulative
+mean use `ROLLING_STATE_LAYOUT_VERSION` (1), while either recurrence requires
 `ROLLING_EWMA_STATE_LAYOUT_VERSION` (2). These values belong to project
 documents and configuration fingerprints. Current operators
 write `ROLLING_COLUMNAR_STATE_LAYOUT_VERSION` (3): one deterministic entity
@@ -394,6 +403,13 @@ exactly `0.5`, demean subtracts the valid-sample mean, and z-score divides
 by the standard deviation over the divisor `valid_count − ddof` — null when
 the divisor is not positive or the deviation is zero.
 
+`mean` broadcasts the valid-sample mean to every group row. `top_quantile`
+and `bottom_quantile` use the average descending or ascending rank divided
+by the valid sample size as an inclusive fraction threshold; both return
+nullable boolean masks. `residual` uses pairwise-valid dependent and
+independent columns, centers both before calculating a least-squares slope,
+and scales finite extreme values when centered statistics overflow or
+underflow. It returns null for missing pairs or a constant independent sample.
 `winsorize` accepts only float32/float64, carries finite `lower` and `upper`
 probabilities satisfying `0 <= lower <= upper <= 1`, and clamps to the
 Hyndman-Fan type-7 quantiles while preserving the input type. `top` and

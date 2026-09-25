@@ -725,6 +725,7 @@ class ReleaseConfigTests(unittest.TestCase):
             set(bench_targets(ROOT)),
             {
                 "core",
+                "stream_union",
                 "m4_state_window",
                 "stream_join_perf",
                 "stream_asof_perf",
@@ -733,6 +734,7 @@ class ReleaseConfigTests(unittest.TestCase):
                 "sql_datafusion_performance",
             },
         )
+
         self.assertEqual(
             pytest_arguments("lifecycle"),
             [
@@ -752,6 +754,24 @@ class ReleaseConfigTests(unittest.TestCase):
             "stream/backpressure_saturated",
         ):
             self.assertIn(case, core)
+
+    def test_checked_openapi_has_every_native_stream_operator_kind(self) -> None:
+        project = json.loads(
+            (ROOT / "schemas/project-v3.schema.json").read_text(encoding="utf-8")
+        )
+        openapi = json.loads((ROOT / "web-ui/openapi.json").read_text(encoding="utf-8"))
+        for component_name in ("ProjectCreateRequest", "ProjectDocument"):
+            embedded = openapi["components"]["schemas"][component_name]
+            for spec_name in ("RollingOutputSpec", "CrossSectionOutputSpec"):
+                expected = {
+                    variant["properties"]["kind"]["const"]
+                    for variant in project["$defs"][spec_name]["oneOf"]
+                }
+                actual = {
+                    variant["properties"]["kind"]["const"]
+                    for variant in embedded["$defs"][spec_name]["oneOf"]
+                }
+                self.assertEqual(actual, expected, f"{component_name}.{spec_name}")
 
     def test_benchmark_suite_isolates_stream_lifecycle_evidence(self) -> None:
         from scripts.benchmark_suite.catalog import shards

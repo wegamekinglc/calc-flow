@@ -478,6 +478,21 @@ impl RollingFloatPrimitiveSpec {
 }
 
 /// One declared rolling output and its output column name.
+///
+/// # Examples
+///
+/// ```
+/// use calc_flow::{RollingFrameSpec, RollingOutputSpec};
+///
+/// let output = RollingOutputSpec::Decay {
+///     primitive_version: 1,
+///     input: "price".into(),
+///     output: "weighted_price".into(),
+///     frame: RollingFrameSpec::Rows { size: 5 },
+///     min_periods: 1,
+/// };
+/// assert!(matches!(output, RollingOutputSpec::Decay { .. }));
+/// ```
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RollingOutputSpec {
@@ -518,6 +533,18 @@ pub enum RollingOutputSpec {
         /// Positive exponential span.
         #[schemars(range(min = 1))]
         span: u64,
+        /// Minimum valid samples for a non-null result.
+        #[schemars(range(min = 1))]
+        min_periods: u64,
+    },
+    /// Unbounded arithmetic mean of every valid sample seen for an entity.
+    CumulativeMean {
+        /// Primitive version; must equal `1`.
+        primitive_version: u32,
+        /// Numeric input column name.
+        input: String,
+        /// Output column name.
+        output: String,
         /// Minimum valid samples for a non-null result.
         #[schemars(range(min = 1))]
         min_periods: u64,
@@ -630,6 +657,90 @@ pub enum RollingOutputSpec {
         #[schemars(range(min = 1))]
         min_periods: u64,
     },
+    /// Number of row positions since the oldest maximum in the frame.
+    Argmax {
+        /// Primitive version; must equal `1`.
+        primitive_version: u32,
+        /// Numeric input column name.
+        input: String,
+        /// Output column name.
+        output: String,
+        /// Row-count or duration frame.
+        frame: RollingFrameSpec,
+        /// Minimum valid samples for a non-null result.
+        #[schemars(range(min = 1))]
+        min_periods: u64,
+    },
+    /// Number of row positions since the oldest minimum in the frame.
+    Argmin {
+        /// Primitive version; must equal `1`.
+        primitive_version: u32,
+        /// Numeric input column name.
+        input: String,
+        /// Output column name.
+        output: String,
+        /// Row-count or duration frame.
+        frame: RollingFrameSpec,
+        /// Minimum valid samples for a non-null result.
+        #[schemars(range(min = 1))]
+        min_periods: u64,
+    },
+    /// Zero-based ascending rank of the current value; ties take the first rank.
+    Rank {
+        /// Primitive version; must equal `1`.
+        primitive_version: u32,
+        /// Numeric input column name.
+        input: String,
+        /// Output column name.
+        output: String,
+        /// Row-count or duration frame.
+        frame: RollingFrameSpec,
+        /// Minimum valid samples for a non-null result.
+        #[schemars(range(min = 1))]
+        min_periods: u64,
+    },
+    /// Current value's zero-based rank divided by `valid_count - 1`.
+    Quantile {
+        /// Primitive version; must equal `1`.
+        primitive_version: u32,
+        /// Numeric input column name.
+        input: String,
+        /// Output column name.
+        output: String,
+        /// Row-count or duration frame.
+        frame: RollingFrameSpec,
+        /// Minimum valid samples for a non-null result.
+        #[schemars(range(min = 1))]
+        min_periods: u64,
+    },
+    /// Number of distinct valid samples in the frame.
+    UniqueCount {
+        /// Primitive version; must equal `1`.
+        primitive_version: u32,
+        /// Totally ordered input column name.
+        input: String,
+        /// Output column name.
+        output: String,
+        /// Row-count or duration frame.
+        frame: RollingFrameSpec,
+        /// Minimum valid samples for a non-null result.
+        #[schemars(range(min = 1))]
+        min_periods: u64,
+    },
+    /// Linearly weighted mean of valid samples, newest carrying the largest weight.
+    Decay {
+        /// Primitive version; must equal `1`.
+        primitive_version: u32,
+        /// Numeric input column name.
+        input: String,
+        /// Output column name.
+        output: String,
+        /// Row-count or duration frame.
+        frame: RollingFrameSpec,
+        /// Minimum valid samples for a non-null result.
+        #[schemars(range(min = 1))]
+        min_periods: u64,
+    },
     /// Float64 covariance of two columns over the frame, counting only
     /// pairwise-valid positions (SCE-00 D3, contract section 5.2; D5).
     Covariance {
@@ -696,6 +807,9 @@ impl RollingOutputSpec {
             | Self::Ewma {
                 primitive_version, ..
             }
+            | Self::CumulativeMean {
+                primitive_version, ..
+            }
             | Self::Count {
                 primitive_version, ..
             }
@@ -717,6 +831,24 @@ impl RollingOutputSpec {
             | Self::Max {
                 primitive_version, ..
             }
+            | Self::Argmax {
+                primitive_version, ..
+            }
+            | Self::Argmin {
+                primitive_version, ..
+            }
+            | Self::Rank {
+                primitive_version, ..
+            }
+            | Self::Quantile {
+                primitive_version, ..
+            }
+            | Self::UniqueCount {
+                primitive_version, ..
+            }
+            | Self::Decay {
+                primitive_version, ..
+            }
             | Self::Covariance {
                 primitive_version, ..
             }
@@ -735,13 +867,20 @@ impl RollingOutputSpec {
             Self::Lag { input, .. }
             | Self::Delta { input, .. }
             | Self::Ewma { input, .. }
+            | Self::CumulativeMean { input, .. }
             | Self::Count { input, .. }
             | Self::Sum { input, .. }
             | Self::Mean { input, .. }
             | Self::Variance { input, .. }
             | Self::Stddev { input, .. }
             | Self::Min { input, .. }
-            | Self::Max { input, .. } => input,
+            | Self::Max { input, .. }
+            | Self::Argmax { input, .. }
+            | Self::Argmin { input, .. }
+            | Self::Rank { input, .. }
+            | Self::Quantile { input, .. }
+            | Self::UniqueCount { input, .. }
+            | Self::Decay { input, .. } => input,
             Self::Covariance { left, .. } | Self::Correlation { left, .. } => left,
             Self::Difference { left, .. } => left.input(),
         }
@@ -760,6 +899,7 @@ impl RollingOutputSpec {
             Self::Lag { output, .. }
             | Self::Delta { output, .. }
             | Self::Ewma { output, .. }
+            | Self::CumulativeMean { output, .. }
             | Self::Count { output, .. }
             | Self::Sum { output, .. }
             | Self::Mean { output, .. }
@@ -767,6 +907,12 @@ impl RollingOutputSpec {
             | Self::Stddev { output, .. }
             | Self::Min { output, .. }
             | Self::Max { output, .. }
+            | Self::Argmax { output, .. }
+            | Self::Argmin { output, .. }
+            | Self::Rank { output, .. }
+            | Self::Quantile { output, .. }
+            | Self::UniqueCount { output, .. }
+            | Self::Decay { output, .. }
             | Self::Covariance { output, .. }
             | Self::Correlation { output, .. }
             | Self::Difference { output, .. } => output,
@@ -778,7 +924,7 @@ impl RollingOutputSpec {
     const fn retained_rows(&self) -> u64 {
         match self {
             Self::Lag { periods, .. } | Self::Delta { periods, .. } => *periods,
-            Self::Ewma { .. } => 0,
+            Self::Ewma { .. } | Self::CumulativeMean { .. } => 0,
             Self::Count { frame, .. }
             | Self::Sum { frame, .. }
             | Self::Mean { frame, .. }
@@ -786,6 +932,12 @@ impl RollingOutputSpec {
             | Self::Stddev { frame, .. }
             | Self::Min { frame, .. }
             | Self::Max { frame, .. }
+            | Self::Argmax { frame, .. }
+            | Self::Argmin { frame, .. }
+            | Self::Rank { frame, .. }
+            | Self::Quantile { frame, .. }
+            | Self::UniqueCount { frame, .. }
+            | Self::Decay { frame, .. }
             | Self::Covariance { frame, .. }
             | Self::Correlation { frame, .. } => frame.row_retention(),
             Self::Difference { left, right, .. } => {
@@ -800,7 +952,10 @@ impl RollingOutputSpec {
     /// retention.
     const fn retained_micros(&self) -> Option<u64> {
         match self {
-            Self::Lag { .. } | Self::Delta { .. } | Self::Ewma { .. } => None,
+            Self::Lag { .. }
+            | Self::Delta { .. }
+            | Self::Ewma { .. }
+            | Self::CumulativeMean { .. } => None,
             Self::Count { frame, .. }
             | Self::Sum { frame, .. }
             | Self::Mean { frame, .. }
@@ -808,6 +963,12 @@ impl RollingOutputSpec {
             | Self::Stddev { frame, .. }
             | Self::Min { frame, .. }
             | Self::Max { frame, .. }
+            | Self::Argmax { frame, .. }
+            | Self::Argmin { frame, .. }
+            | Self::Rank { frame, .. }
+            | Self::Quantile { frame, .. }
+            | Self::UniqueCount { frame, .. }
+            | Self::Decay { frame, .. }
             | Self::Covariance { frame, .. }
             | Self::Correlation { frame, .. } => {
                 if frame.is_duration() {
@@ -828,9 +989,11 @@ impl RollingOutputSpec {
 
     const fn frame(&self) -> Option<RollingFrameSpec> {
         match self {
-            Self::Lag { .. } | Self::Delta { .. } | Self::Ewma { .. } | Self::Difference { .. } => {
-                None
-            }
+            Self::Lag { .. }
+            | Self::Delta { .. }
+            | Self::Ewma { .. }
+            | Self::CumulativeMean { .. }
+            | Self::Difference { .. } => None,
             Self::Count { frame, .. }
             | Self::Sum { frame, .. }
             | Self::Mean { frame, .. }
@@ -838,6 +1001,12 @@ impl RollingOutputSpec {
             | Self::Stddev { frame, .. }
             | Self::Min { frame, .. }
             | Self::Max { frame, .. }
+            | Self::Argmax { frame, .. }
+            | Self::Argmin { frame, .. }
+            | Self::Rank { frame, .. }
+            | Self::Quantile { frame, .. }
+            | Self::UniqueCount { frame, .. }
+            | Self::Decay { frame, .. }
             | Self::Covariance { frame, .. }
             | Self::Correlation { frame, .. } => Some(*frame),
         }
@@ -847,6 +1016,7 @@ impl RollingOutputSpec {
         match self {
             Self::Lag { .. } | Self::Delta { .. } | Self::Difference { .. } => None,
             Self::Ewma { min_periods, .. }
+            | Self::CumulativeMean { min_periods, .. }
             | Self::Count { min_periods, .. }
             | Self::Sum { min_periods, .. }
             | Self::Mean { min_periods, .. }
@@ -854,6 +1024,12 @@ impl RollingOutputSpec {
             | Self::Stddev { min_periods, .. }
             | Self::Min { min_periods, .. }
             | Self::Max { min_periods, .. }
+            | Self::Argmax { min_periods, .. }
+            | Self::Argmin { min_periods, .. }
+            | Self::Rank { min_periods, .. }
+            | Self::Quantile { min_periods, .. }
+            | Self::UniqueCount { min_periods, .. }
+            | Self::Decay { min_periods, .. }
             | Self::Covariance { min_periods, .. }
             | Self::Correlation { min_periods, .. } => Some(*min_periods),
         }
@@ -878,7 +1054,7 @@ impl RollingOutputSpec {
 
     const fn requires_ewma_layout(&self) -> bool {
         match self {
-            Self::Ewma { .. } => true,
+            Self::Ewma { .. } | Self::CumulativeMean { .. } => true,
             Self::Difference { left, right, .. } => {
                 left.requires_ewma_layout() || right.requires_ewma_layout()
             }
@@ -3125,6 +3301,24 @@ enum CompiledEvaluation {
     Aggregate(CompiledAggregate),
     Pair(CompiledPairAggregate),
     Difference(CompiledDifference),
+    Scan(CompiledScan),
+}
+
+#[derive(Clone, Copy)]
+struct CompiledScan {
+    kind: ScanKind,
+    frame: CompiledFrame,
+    min_periods: u64,
+}
+
+#[derive(Clone, Copy)]
+enum ScanKind {
+    Argmax,
+    Argmin,
+    Rank,
+    Quantile,
+    UniqueCount,
+    Decay,
 }
 
 #[derive(Clone)]
@@ -3556,17 +3750,36 @@ struct EwmaAccumulator {
 }
 
 impl EwmaAccumulator {
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "cumulative mean is a Float64 readout"
+    )]
     fn add(&mut self, sample: &ScalarValue, alpha: f64, node_id: &str) -> Result<()> {
         let value = float_sample(sample);
-        self.value = if self.valid_count == 0 {
+        let next_count = self
+            .valid_count
+            .checked_add(1)
+            .ok_or_else(|| operator_error(node_id, "rolling sample count overflowed"))?;
+        self.value = if self.valid_count == 0 || alpha.to_bits() == 1.0_f64.to_bits() {
             value
+        } else if alpha == 0.0 {
+            if self.value.is_infinite() && value.is_finite() {
+                self.value
+            } else if value.is_infinite() {
+                value + self.value
+            } else {
+                let difference = value - self.value;
+                if difference.is_finite() {
+                    self.value + difference / next_count as f64
+                } else {
+                    let weight = 1.0 / next_count as f64;
+                    self.value * (1.0 - weight) + value * weight
+                }
+            }
         } else {
             self.value + alpha * (value - self.value)
         };
-        self.valid_count = self
-            .valid_count
-            .checked_add(1)
-            .ok_or_else(|| operator_error(node_id, "rolling EWMA sample count overflowed"))?;
+        self.valid_count = next_count;
         Ok(())
     }
 }
@@ -4810,6 +5023,9 @@ fn compute_output_value(
         CompiledEvaluation::Difference(difference) => {
             return evaluate_difference(difference, windows);
         }
+        CompiledEvaluation::Scan(scan) => {
+            return evaluate_scan(view, position, output, *scan, node_id);
+        }
     };
     let referenced = if position + view.history.len() < periods {
         None
@@ -4834,6 +5050,103 @@ fn compute_output_value(
             &format!("rolling delta failed with checked arithmetic: {error}"),
         )
     })
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "rank and linear weights are defined as Float64 readouts"
+)]
+fn evaluate_scan(
+    view: &EntityRowView<'_>,
+    position: usize,
+    output: &CompiledRollingOutput,
+    scan: CompiledScan,
+    node_id: &str,
+) -> Result<ScalarValue> {
+    let combined = view.history.len() + position;
+    let samples: Vec<(usize, &ScalarValue)> =
+        window_positions(view, combined, scan.frame, node_id)?
+            .filter_map(|index| {
+                let value = view.value(index, output.input_index);
+                is_valid_sample(value).then_some((index, value))
+            })
+            .collect();
+    if u64::try_from(samples.len()).unwrap_or(u64::MAX) < scan.min_periods {
+        return Ok(typed_null(&output.output_type));
+    }
+    let current = view.value(combined, output.input_index);
+    match scan.kind {
+        ScanKind::Argmax | ScanKind::Argmin => {
+            let mut extreme = samples[0];
+            for sample in &samples[1..] {
+                let ordering = compare_scan_samples(sample.1, extreme.1);
+                if (matches!(scan.kind, ScanKind::Argmax) && ordering == Ordering::Greater)
+                    || (matches!(scan.kind, ScanKind::Argmin) && ordering == Ordering::Less)
+                {
+                    extreme = *sample;
+                }
+            }
+            Ok(ScalarValue::UInt64(Some((combined - extreme.0) as u64)))
+        }
+        ScanKind::Rank | ScanKind::Quantile => {
+            if !is_valid_sample(current) {
+                return Ok(typed_null(&output.output_type));
+            }
+            let rank = samples
+                .iter()
+                .filter(|(_, value)| compare_scan_samples(value, current) == Ordering::Less)
+                .count();
+            if matches!(scan.kind, ScanKind::Rank) {
+                Ok(ScalarValue::UInt64(Some(rank as u64)))
+            } else if samples.len() == 1 {
+                Ok(ScalarValue::Float64(None))
+            } else {
+                Ok(ScalarValue::Float64(Some(
+                    rank as f64 / (samples.len() - 1) as f64,
+                )))
+            }
+        }
+        ScanKind::UniqueCount => {
+            let mut values: Vec<&ScalarValue> = samples.iter().map(|(_, value)| *value).collect();
+            values.sort_by(|left, right| compare_scan_samples(left, right));
+            values.dedup_by(|left, right| compare_scan_samples(left, right) == Ordering::Equal);
+            Ok(ScalarValue::UInt64(Some(values.len() as u64)))
+        }
+        ScanKind::Decay => {
+            let count = samples.len();
+            let size = match scan.frame {
+                CompiledFrame::Rows(size) => usize::try_from(size).map_err(|_| {
+                    operator_error(node_id, "rolling decay frame does not fit usize")
+                })?,
+                CompiledFrame::Duration(_) => count,
+            };
+            let first_weight = size - count + 1;
+            let (weighted_sum, total_weight) =
+                samples
+                    .iter()
+                    .enumerate()
+                    .fold((0.0, 0.0), |(sum, total), (index, (_, value))| {
+                        let weight = (first_weight + index) as f64;
+                        (sum + weight * float_sample(value), total + weight)
+                    });
+            Ok(ScalarValue::Float64(Some(weighted_sum / total_weight)))
+        }
+    }
+}
+
+/// Finance-style rank and set equality treats both IEEE zero signs as equal.
+/// NaN is excluded before this comparison; existing extrema queues keep their
+/// separate frozen total-order behavior.
+fn compare_scan_samples(left: &ScalarValue, right: &ScalarValue) -> Ordering {
+    match (left, right) {
+        (ScalarValue::Float32(Some(left)), ScalarValue::Float32(Some(right))) => {
+            left.partial_cmp(right).unwrap_or(Ordering::Equal)
+        }
+        (ScalarValue::Float64(Some(left)), ScalarValue::Float64(Some(right))) => {
+            left.partial_cmp(right).unwrap_or(Ordering::Equal)
+        }
+        _ => compare_samples(left, right),
+    }
 }
 
 fn evaluate_difference(
@@ -5154,7 +5467,10 @@ fn validate_outputs(outputs: &[RollingOutputSpec]) -> Result<()> {
             }
         } else if output.span().is_none()
             && output.retained_rows() == 0
-            && !matches!(output, RollingOutputSpec::Difference { .. })
+            && !matches!(
+                output,
+                RollingOutputSpec::Difference { .. } | RollingOutputSpec::CumulativeMean { .. }
+            )
         {
             return Err(invalid_argument(
                 &format!("{base}.periods"),
@@ -5458,6 +5774,14 @@ fn compile_output(
                 min_periods: *min_periods,
             })
         }
+        RollingOutputSpec::CumulativeMean { min_periods, .. } => {
+            require_numeric(output.input(), &input_type, "cumulative_mean")?;
+            let group = compile_ewma_group(input_index, 0, window_groups);
+            CompiledEvaluation::Ewma(CompiledEwma {
+                group,
+                min_periods: *min_periods,
+            })
+        }
         RollingOutputSpec::Covariance {
             left,
             right,
@@ -5495,16 +5819,39 @@ fn compile_output(
                 right: compile_float_readout(input_schema, right, window_groups)?,
             })
         }
+        RollingOutputSpec::Argmax { .. }
+        | RollingOutputSpec::Argmin { .. }
+        | RollingOutputSpec::Rank { .. }
+        | RollingOutputSpec::Quantile { .. }
+        | RollingOutputSpec::UniqueCount { .. }
+        | RollingOutputSpec::Decay { .. } => compile_scan_output(output, &input_type)?,
         aggregate => compile_aggregate_output(aggregate, input_index, &input_type, window_groups)?,
     };
-    let output_type = match &evaluation {
+    let output_type = compiled_output_type(&evaluation, &input_type);
+    Ok(CompiledRollingOutput {
+        input_index,
+        name: output.output().to_owned(),
+        output_type,
+        input_type,
+        evaluation,
+    })
+}
+
+fn compiled_output_type(evaluation: &CompiledEvaluation, input_type: &DataType) -> DataType {
+    match evaluation {
         CompiledEvaluation::Lag { .. } | CompiledEvaluation::Delta { .. } => input_type.clone(),
         CompiledEvaluation::Ewma(_)
         | CompiledEvaluation::Pair(_)
         | CompiledEvaluation::Difference(_) => DataType::Float64,
+        CompiledEvaluation::Scan(scan) => match scan.kind {
+            ScanKind::Argmax | ScanKind::Argmin | ScanKind::Rank | ScanKind::UniqueCount => {
+                DataType::UInt64
+            }
+            ScanKind::Quantile | ScanKind::Decay => DataType::Float64,
+        },
         CompiledEvaluation::Aggregate(aggregate) => match aggregate.statistic {
             Statistic::Count => DataType::UInt64,
-            Statistic::Sum => match SumClass::from_input(&input_type) {
+            Statistic::Sum => match SumClass::from_input(input_type) {
                 SumClass::Signed => DataType::Int64,
                 SumClass::Unsigned => DataType::UInt64,
                 _ => DataType::Float64,
@@ -5514,14 +5861,49 @@ fn compile_output(
             // section 5.2).
             Statistic::Min | Statistic::Max => input_type.clone(),
         },
+    }
+}
+
+fn compile_scan_output(
+    output: &RollingOutputSpec,
+    input_type: &DataType,
+) -> Result<CompiledEvaluation> {
+    let (kind, frame, min_periods) = match output {
+        RollingOutputSpec::Argmax {
+            frame, min_periods, ..
+        } => (ScanKind::Argmax, *frame, *min_periods),
+        RollingOutputSpec::Argmin {
+            frame, min_periods, ..
+        } => (ScanKind::Argmin, *frame, *min_periods),
+        RollingOutputSpec::Rank {
+            frame, min_periods, ..
+        } => (ScanKind::Rank, *frame, *min_periods),
+        RollingOutputSpec::Quantile {
+            frame, min_periods, ..
+        } => (ScanKind::Quantile, *frame, *min_periods),
+        RollingOutputSpec::UniqueCount {
+            frame, min_periods, ..
+        } => (ScanKind::UniqueCount, *frame, *min_periods),
+        RollingOutputSpec::Decay {
+            frame, min_periods, ..
+        } => (ScanKind::Decay, *frame, *min_periods),
+        _ => return Err(internal_error("non-scan output reached scan compiler")),
     };
-    Ok(CompiledRollingOutput {
-        input_index,
-        name: output.output().to_owned(),
-        output_type,
-        input_type,
-        evaluation,
-    })
+    if matches!(kind, ScanKind::UniqueCount) {
+        if !supports_total_order(input_type) {
+            return Err(compile_error(format!(
+                "rolling unique_count input {:?} has unsupported type {input_type}",
+                output.input()
+            )));
+        }
+    } else {
+        require_numeric(output.input(), input_type, "rolling scan")?;
+    }
+    Ok(CompiledEvaluation::Scan(CompiledScan {
+        kind,
+        frame: compiled_frame(frame),
+        min_periods,
+    }))
 }
 
 fn compile_float_readout(
@@ -5631,7 +6013,11 @@ fn compile_ewma_group(
             window_groups.push(CompiledWindowGroup::Ewma {
                 input_index,
                 span,
-                alpha: 2.0 / (span as f64 + 1.0),
+                alpha: if span == 0 {
+                    0.0
+                } else {
+                    2.0 / (span as f64 + 1.0)
+                },
             });
             window_groups.len() - 1
         })
@@ -5712,8 +6098,15 @@ fn compile_aggregate_output(
         RollingOutputSpec::Lag { .. }
         | RollingOutputSpec::Delta { .. }
         | RollingOutputSpec::Ewma { .. }
+        | RollingOutputSpec::CumulativeMean { .. }
         | RollingOutputSpec::Covariance { .. }
         | RollingOutputSpec::Correlation { .. }
+        | RollingOutputSpec::Argmax { .. }
+        | RollingOutputSpec::Argmin { .. }
+        | RollingOutputSpec::Rank { .. }
+        | RollingOutputSpec::Quantile { .. }
+        | RollingOutputSpec::UniqueCount { .. }
+        | RollingOutputSpec::Decay { .. }
         | RollingOutputSpec::Difference { .. } => {
             unreachable!("lag, delta, and pair outputs compile before aggregates")
         }
@@ -9169,6 +9562,92 @@ mod tests {
         assert_eq!(metrics.copied_entities, 1);
         assert_eq!(metrics.numeric_rows, 2);
         assert_eq!(metrics.output_rows_prepared, 2);
+    }
+
+    #[tokio::test]
+    async fn rolling_scan_retains_history_across_checkpoint() {
+        use crate::{CancellationToken, StreamJobContext};
+
+        for checkpoint in [false, true] {
+            let spec = kernel_spec(json!([{
+                "kind": "unique_count",
+                "primitive_version": 1,
+                "input": "price",
+                "output": "distinct_price",
+                "frame": {"kind": "rows", "size": 3},
+                "min_periods": 1
+            }]));
+            let mut operator =
+                RollingOperator::new("rolling", Arc::new(kernel_schema()), spec.clone()).unwrap();
+            let job = StreamJobContext::new(
+                7,
+                TEST_FINGERPRINT,
+                JsonMap::new(),
+                None,
+                CancellationToken::new(),
+            );
+            let mut collector = crate::EdgeCollector::new(operator.output_ports().to_vec());
+            let context = StreamOperatorContext::new(&job, "rolling", None);
+            let first = float64_fast_record(&[
+                (1, "a", 1, Some(1.0)),
+                (2, "a", 2, Some(2.0)),
+                (3, "a", 3, Some(3.0)),
+            ]);
+            operator
+                .process_data(
+                    "input",
+                    Batch::table(vec![first], BatchMetadata::default()).unwrap(),
+                    &context,
+                    &mut collector,
+                )
+                .await
+                .unwrap();
+            operator
+                .on_watermark(EventTime::from_micros(3), &context, &mut collector)
+                .await
+                .unwrap();
+            collector.drain("output");
+
+            if checkpoint {
+                let snapshot = operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
+                let mut restored =
+                    RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
+                StreamOperator::restore(&mut restored, &snapshot).unwrap();
+                operator = restored;
+            }
+
+            let context =
+                StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(3)));
+            let next = float64_fast_record(&[(4, "a", 4, Some(3.0))]);
+            operator
+                .process_data(
+                    "input",
+                    Batch::table(vec![next], BatchMetadata::default()).unwrap(),
+                    &context,
+                    &mut collector,
+                )
+                .await
+                .unwrap();
+            operator
+                .on_watermark(EventTime::from_micros(4), &context, &mut collector)
+                .await
+                .unwrap();
+            let emitted = collector.drain("output");
+            let record = &emitted[0]
+                .as_data()
+                .unwrap()
+                .table_payload()
+                .unwrap()
+                .batches()[0];
+            assert_eq!(record.num_rows(), 1);
+            let index = record.schema().index_of("distinct_price").unwrap();
+            let counts = record
+                .column(index)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap();
+            assert_eq!(counts.value(0), 2, "checkpoint={checkpoint}");
+        }
     }
 
     #[tokio::test]

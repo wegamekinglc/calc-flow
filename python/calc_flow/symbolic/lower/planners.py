@@ -177,22 +177,24 @@ def _plan_rolling_stage(
             )
             derived_fields.append(Field(name, operands[0][2].data_type, nullable=True))
             continue
-        if kind == "ewma":
+        if kind in ("ewma", "cumulative_mean"):
             declarations.append(
                 {
                     "kind": kind,
                     "primitive_version": 1,
                     "input": operands[0][1],
                     "output": name,
-                    "span": _cint(subtree.attr("span")),
                     "min_periods": _cint(subtree.attr("min_periods")) or 1,
+                    **({"span": _cint(subtree.attr("span"))} if kind == "ewma" else {}),
                 }
             )
             derived_fields.append(Field(name, "float64", nullable=True))
             continue
         frame = _rolling_frame(subtree, f"{path}.{name}", kind)
         declaration: dict[str, object] = {
-            "kind": kind,
+            "kind": {"rolling_rank": "rank", "rolling_quantile": "quantile"}.get(
+                kind, kind
+            ),
             "primitive_version": 1,
             "output": name,
             "frame": frame,
@@ -500,7 +502,11 @@ def _plan_cross_section(
         ),
         input_fields,
         used_names,
-        tuple((subtree.op.name, subtree.args[0]) for subtree in occurrences),
+        tuple(
+            (subtree.op.name, argument)
+            for subtree in occurrences
+            for argument in subtree.args[: (2 if subtree.op.name == "residual" else 1)]
+        ),
     )
     materializations = dict(materialization.names)
     state_input_fields = materialization.input_fields
@@ -537,7 +543,8 @@ def _plan_cross_section(
                 f"cross-section {kind} argument column {input_name!r} is not in"
                 " the input schema",
             )
-        event_time_argument = subtree.args[1]
+        group_offset = 2 if kind == "residual" else 1
+        event_time_argument = subtree.args[group_offset]
         if event_time_argument.op.name != "column_ref":
             errors.raise_compile(
                 f"{path}.{name}",
@@ -554,7 +561,7 @@ def _plan_cross_section(
                 " match the declared input event time",
             )
         group_partitions: list[str] = []
-        for group_argument in subtree.args[2:]:
+        for group_argument in subtree.args[group_offset + 1 :]:
             if group_argument.op.name != "column_ref":
                 errors.raise_compile(
                     f"{path}.{name}",
@@ -584,11 +591,26 @@ def _plan_cross_section(
                 " grouping declaration",
             )
         declaration: dict[str, object] = {
-            "kind": kind,
+            "kind": "mean" if kind == "cross_mean" else kind,
             "primitive_version": 1,
             "input": input_name,
             "output": name,
         }
+        if kind == "residual":
+            independent_argument = subtree.args[1]
+            independent_name = (
+                _cstr(independent_argument.attr("name"))
+                if independent_argument.op.name == "column_ref"
+                else materializations[independent_argument.digest]
+            )
+            if independent_name not in input_types:
+                errors.raise_compile(
+                    f"{path}.{name}",
+                    errors.SCHEMA_MISMATCH,
+                    f"cross-section residual independent column {independent_name!r}"
+                    " is not in the input schema",
+                )
+            declaration["independent"] = independent_name
         if kind in _CROSS_SECTION_ORDERING:
             declaration["direction"] = _enum_attr(subtree, "direction") or "ascending"
             declaration["tie_method"] = _enum_attr(subtree, "tie_method") or "average"
@@ -604,10 +626,12 @@ def _plan_cross_section(
         if kind in ("top", "bottom"):
             declaration["count"] = _cint(subtree.attr("count"))
             declaration["include_ties"] = _cbool(subtree.attr("include_ties"))
+        if kind in ("top_quantile", "bottom_quantile"):
+            declaration["fraction"] = _cnumber(subtree.attr("fraction"))
         declarations.append(declaration)
         output_type = (
             "bool"
-            if kind in ("top", "bottom")
+            if kind in ("top", "bottom", "top_quantile", "bottom_quantile")
             else input_types[input_name].data_type
             if kind in ("winsorize", "mean_fill")
             else "float64"

@@ -188,7 +188,9 @@ for the type matrix, composition limits, and lateness-option ownership.
 [RollingOperator](../crates/calc-flow/src/operator/rolling.rs) uses the same
 kernel for batch and stream execution. Compatible outputs share retained rows
 and accumulators; readout choices such as `min_periods` do not create duplicate
-state. EWMA retains its valid count and exact binary64 recurrence value.
+state. EWMA and cumulative mean retain a valid count and binary64 recurrence
+value. Order statistics, distinct counts, and linear decay scan only the
+retained frame history, which the existing checkpoint layout preserves.
 
 Project declarations carry the validated configuration and declaration layout
 versions. The current checkpoint writer uses columnar state layout `3`, with

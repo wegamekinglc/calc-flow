@@ -119,6 +119,21 @@ pub enum CrossSectionGroupingSpec {
 /// One declared cross-section output and its output column name. Ordering
 /// fields are valid only on the order-statistic primitives; the strict
 /// variant shapes reject them everywhere else (SCE-00 D6).
+///
+/// # Examples
+///
+/// ```
+/// use calc_flow::CrossSectionOutputSpec;
+///
+/// let output = CrossSectionOutputSpec::TopQuantile {
+///     primitive_version: 1,
+///     input: "price".into(),
+///     output: "top_quartile".into(),
+///     fraction: 0.25,
+///     min_samples: 1,
+/// };
+/// assert!(matches!(output, CrossSectionOutputSpec::TopQuantile { .. }));
+/// ```
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CrossSectionOutputSpec {
@@ -168,6 +183,32 @@ pub enum CrossSectionOutputSpec {
         /// Output column name.
         output: String,
         /// Minimum valid samples for a non-null result.
+        #[schemars(range(min = 1))]
+        min_samples: u64,
+    },
+    /// Complete-group arithmetic mean, repeated for every row in the group.
+    Mean {
+        /// Primitive version; must equal `1`.
+        primitive_version: u32,
+        /// Numeric input column name.
+        input: String,
+        /// Output column name.
+        output: String,
+        /// Minimum valid samples for a non-null result.
+        #[schemars(range(min = 1))]
+        min_samples: u64,
+    },
+    /// Pairwise-valid ordinary least-squares residual from an intercept model.
+    Residual {
+        /// Primitive version; must equal `1`.
+        primitive_version: u32,
+        /// Dependent numeric input column name.
+        input: String,
+        /// Independent numeric input column name.
+        independent: String,
+        /// Output column name.
+        output: String,
+        /// Minimum pairwise-valid samples for a non-null result.
         #[schemars(range(min = 1))]
         min_samples: u64,
     },
@@ -244,6 +285,38 @@ pub enum CrossSectionOutputSpec {
         #[schemars(range(min = 1))]
         min_samples: u64,
     },
+    /// Select values whose average descending rank divided by the valid
+    /// group size is at most `fraction`.
+    TopQuantile {
+        /// Primitive version; must equal `1`.
+        primitive_version: u32,
+        /// Input numeric column name.
+        input: String,
+        /// Output boolean column name.
+        output: String,
+        /// Inclusive fraction of the valid group in `[0, 1]`.
+        #[schemars(range(min = 0.0, max = 1.0))]
+        fraction: f64,
+        /// Minimum valid samples for a non-null result.
+        #[schemars(range(min = 1))]
+        min_samples: u64,
+    },
+    /// Select values whose average ascending rank divided by the valid
+    /// group size is at most `fraction`.
+    BottomQuantile {
+        /// Primitive version; must equal `1`.
+        primitive_version: u32,
+        /// Input numeric column name.
+        input: String,
+        /// Output boolean column name.
+        output: String,
+        /// Inclusive fraction of the valid group in `[0, 1]`.
+        #[schemars(range(min = 0.0, max = 1.0))]
+        fraction: f64,
+        /// Minimum valid samples for a non-null result.
+        #[schemars(range(min = 1))]
+        min_samples: u64,
+    },
     /// Floating input with null rows replaced by the complete group's mean;
     /// valid and NaN rows are preserved.
     MeanFill {
@@ -271,6 +344,12 @@ impl CrossSectionOutputSpec {
             | Self::Demean {
                 primitive_version, ..
             }
+            | Self::Mean {
+                primitive_version, ..
+            }
+            | Self::Residual {
+                primitive_version, ..
+            }
             | Self::Zscore {
                 primitive_version, ..
             }
@@ -281,6 +360,12 @@ impl CrossSectionOutputSpec {
                 primitive_version, ..
             }
             | Self::Bottom {
+                primitive_version, ..
+            }
+            | Self::TopQuantile {
+                primitive_version, ..
+            }
+            | Self::BottomQuantile {
                 primitive_version, ..
             }
             | Self::MeanFill {
@@ -294,10 +379,14 @@ impl CrossSectionOutputSpec {
             Self::Rank { input, .. }
             | Self::Percentile { input, .. }
             | Self::Demean { input, .. }
+            | Self::Mean { input, .. }
+            | Self::Residual { input, .. }
             | Self::Zscore { input, .. }
             | Self::Winsorize { input, .. }
             | Self::Top { input, .. }
             | Self::Bottom { input, .. }
+            | Self::TopQuantile { input, .. }
+            | Self::BottomQuantile { input, .. }
             | Self::MeanFill { input, .. } => input,
         }
     }
@@ -307,10 +396,14 @@ impl CrossSectionOutputSpec {
             Self::Rank { output, .. }
             | Self::Percentile { output, .. }
             | Self::Demean { output, .. }
+            | Self::Mean { output, .. }
+            | Self::Residual { output, .. }
             | Self::Zscore { output, .. }
             | Self::Winsorize { output, .. }
             | Self::Top { output, .. }
             | Self::Bottom { output, .. }
+            | Self::TopQuantile { output, .. }
+            | Self::BottomQuantile { output, .. }
             | Self::MeanFill { output, .. } => output,
         }
     }
@@ -320,10 +413,14 @@ impl CrossSectionOutputSpec {
             Self::Rank { min_samples, .. }
             | Self::Percentile { min_samples, .. }
             | Self::Demean { min_samples, .. }
+            | Self::Mean { min_samples, .. }
+            | Self::Residual { min_samples, .. }
             | Self::Zscore { min_samples, .. }
             | Self::Winsorize { min_samples, .. }
             | Self::Top { min_samples, .. }
             | Self::Bottom { min_samples, .. }
+            | Self::TopQuantile { min_samples, .. }
+            | Self::BottomQuantile { min_samples, .. }
             | Self::MeanFill { min_samples, .. } => *min_samples,
         }
     }
@@ -338,6 +435,13 @@ impl CrossSectionOutputSpec {
     fn count(&self) -> Option<u64> {
         match self {
             Self::Top { count, .. } | Self::Bottom { count, .. } => Some(*count),
+            _ => None,
+        }
+    }
+
+    fn independent(&self) -> Option<&str> {
+        match self {
+            Self::Residual { independent, .. } => Some(independent),
             _ => None,
         }
     }
@@ -1570,6 +1674,7 @@ struct CompiledKeyColumn {
 #[derive(Clone)]
 struct CompiledCrossSectionOutput {
     input_index: usize,
+    independent_index: Option<usize>,
     name: String,
     data_type: DataType,
     evaluation: CompiledEvaluation,
@@ -1593,6 +1698,12 @@ enum CompiledEvaluation {
         min_samples: u64,
         ddof: u8,
     },
+    Mean {
+        min_samples: u64,
+    },
+    Residual {
+        min_samples: u64,
+    },
     ZScore {
         min_samples: u64,
         ddof: u8,
@@ -1610,6 +1721,11 @@ enum CompiledEvaluation {
     BottomSelection {
         count: u64,
         include_ties: bool,
+        min_samples: u64,
+    },
+    FractionSelection {
+        fraction: f64,
+        top: bool,
         min_samples: u64,
     },
     MeanFill {
@@ -1900,6 +2016,18 @@ fn compute_group(
     let mut columns = Vec::with_capacity(compiled.outputs.len());
     let mut prepared = BTreeMap::new();
     for output in &compiled.outputs {
+        if let CompiledEvaluation::Residual { min_samples } = &output.evaluation {
+            let independent_index = output
+                .independent_index
+                .expect("compiled regression has an independent column");
+            columns.push(regression_residual_column(
+                rows,
+                output.input_index,
+                independent_index,
+                *min_samples,
+            ));
+            continue;
+        }
         let prepared = prepared
             .entry(output.input_index)
             .or_insert_with(|| PreparedCrossSectionColumn::new(rows, output.input_index));
@@ -1937,6 +2065,11 @@ fn compute_group(
                     zscore,
                 ))
             }
+            CompiledEvaluation::Mean { min_samples } => {
+                let mean = (prepared.accumulator.count >= *min_samples)
+                    .then(|| prepared.accumulator.classified_mean());
+                vec![ScalarValue::Float64(mean); prepared.samples.len()]
+            }
             CompiledEvaluation::Winsorize {
                 min_samples,
                 lower,
@@ -1958,10 +2091,169 @@ fn compute_group(
             CompiledEvaluation::MeanFill { min_samples } => {
                 mean_fill_column(prepared, *min_samples)
             }
+            CompiledEvaluation::FractionSelection {
+                fraction,
+                top,
+                min_samples,
+            } => fraction_selection_column(prepared, *fraction, *top, *min_samples),
+            CompiledEvaluation::Residual { .. } => {
+                unreachable!("handled before sample preparation")
+            }
         };
         columns.push(column);
     }
     columns
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "regression means and residuals use the declared Float64 domain"
+)]
+fn regression_residual_column(
+    rows: &BTreeMap<RowIdentity, BufferedRow>,
+    dependent_index: usize,
+    independent_index: usize,
+    min_samples: u64,
+) -> Vec<ScalarValue> {
+    let pairs = rows
+        .values()
+        .map(|row| {
+            match (
+                classify_sample(&row.values[independent_index]),
+                classify_sample(&row.values[dependent_index]),
+            ) {
+                (Sample::Valid(x), Sample::Valid(y)) => Some((x, y)),
+                _ => None,
+            }
+        })
+        .collect::<Vec<_>>();
+    let sample_count = pairs.iter().flatten().count();
+    if u64::try_from(sample_count).unwrap_or(u64::MAX) < min_samples {
+        return vec![ScalarValue::Float64(None); pairs.len()];
+    }
+    let (mean_x, mean_y, _) =
+        pairs
+            .iter()
+            .flatten()
+            .fold((0.0, 0.0, 0_u64), |(mean_x, mean_y, count), &(x, y)| {
+                let next_count = count + 1;
+                (
+                    regression_running_mean(mean_x, x, next_count),
+                    regression_running_mean(mean_y, y, next_count),
+                    next_count,
+                )
+            });
+    let (squared_deviation, cross_deviation) =
+        pairs
+            .iter()
+            .flatten()
+            .fold((0.0, 0.0), |(squared, cross), &(x, y)| {
+                let centered_x = x - mean_x;
+                (
+                    squared + centered_x * centered_x,
+                    cross + centered_x * (y - mean_y),
+                )
+            });
+    let (x_spread, y_spread) =
+        pairs
+            .iter()
+            .flatten()
+            .fold((0.0_f64, 0.0_f64), |(x_spread, y_spread), &(x, y)| {
+                (
+                    x_spread.max((x - mean_x).abs()),
+                    y_spread.max((y - mean_y).abs()),
+                )
+            });
+    let cross_scale = x_spread * y_spread;
+    if squared_deviation < f64::MIN_POSITIVE
+        || !squared_deviation.is_finite()
+        || !cross_deviation.is_finite()
+        || (x_spread > 0.0 && y_spread > 0.0 && cross_scale < f64::MIN_POSITIVE)
+    {
+        return scaled_regression_residual_column(&pairs);
+    }
+    let slope = cross_deviation / squared_deviation;
+    if !slope.is_finite() {
+        return scaled_regression_residual_column(&pairs);
+    }
+    pairs
+        .into_iter()
+        .map(|pair| ScalarValue::Float64(pair.map(|(x, y)| y - mean_y - slope * (x - mean_x))))
+        .collect()
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "regression means use the declared Float64 domain"
+)]
+fn regression_running_mean(mean: f64, value: f64, count: u64) -> f64 {
+    if count == 1 {
+        return value;
+    }
+    let difference = value - mean;
+    if difference.is_finite() {
+        mean + difference / count as f64
+    } else {
+        let weight = 1.0 / count as f64;
+        mean * (1.0 - weight) + value * weight
+    }
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "normalized regression values use the declared Float64 domain"
+)]
+fn scaled_regression_residual_column(pairs: &[Option<(f64, f64)>]) -> Vec<ScalarValue> {
+    let x_scale = pairs
+        .iter()
+        .flatten()
+        .map(|(x, _)| x.abs())
+        .fold(0.0_f64, f64::max);
+    if x_scale == 0.0 {
+        return vec![ScalarValue::Float64(None); pairs.len()];
+    }
+    let y_scale = pairs
+        .iter()
+        .flatten()
+        .map(|(_, y)| y.abs())
+        .fold(0.0_f64, f64::max);
+    let y_scale = if y_scale == 0.0 { 1.0 } else { y_scale };
+    let normalized = pairs
+        .iter()
+        .map(|pair| pair.map(|(x, y)| (x / x_scale, y / y_scale)))
+        .collect::<Vec<_>>();
+    let (mean_x, mean_y, _) = normalized.iter().flatten().fold(
+        (0.0, 0.0, 0_usize),
+        |(mean_x, mean_y, count), &(x, y)| {
+            let next_count = count + 1;
+            (
+                mean_x + (x - mean_x) / next_count as f64,
+                mean_y + (y - mean_y) / next_count as f64,
+                next_count,
+            )
+        },
+    );
+    let (squared, cross) =
+        normalized
+            .iter()
+            .flatten()
+            .fold((0.0, 0.0), |(squared, cross), &(x, y)| {
+                let centered_x = x - mean_x;
+                (
+                    squared + centered_x * centered_x,
+                    cross + centered_x * (y - mean_y),
+                )
+            });
+    if squared == 0.0 {
+        return vec![ScalarValue::Float64(None); pairs.len()];
+    }
+    let slope = cross / squared;
+    normalized
+        .into_iter()
+        .map(|pair| {
+            ScalarValue::Float64(pair.map(|(x, y)| ((y - mean_y) - slope * (x - mean_x)) * y_scale))
+        })
+        .collect()
 }
 
 struct PreparedCrossSectionColumn {
@@ -2362,6 +2654,45 @@ fn mean_fill_column(prepared: &PreparedCrossSectionColumn, min_samples: u64) -> 
         .collect()
 }
 
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "fraction selection uses the same float64 rank domain as cross-section percentile"
+)]
+fn fraction_selection_column(
+    prepared: &PreparedCrossSectionColumn,
+    fraction: f64,
+    top: bool,
+    min_samples: u64,
+) -> Vec<ScalarValue> {
+    let valid_count = prepared.ascending_value_indices.len();
+    if (valid_count as u64) < min_samples {
+        return vec![ScalarValue::Boolean(None); prepared.samples.len()];
+    }
+    let direction = if top {
+        SortDirection::Descending
+    } else {
+        SortDirection::Ascending
+    };
+    let indices = ordered_indices(prepared, direction, NullPlacement::Exclude);
+    let ranks = rank_order_indices(
+        &prepared.order_samples,
+        &indices,
+        prepared.samples.len(),
+        RankTieMethod::Average,
+    );
+    prepared
+        .samples
+        .iter()
+        .enumerate()
+        .map(|(index, sample)| match sample {
+            Sample::Valid(_) => {
+                ScalarValue::Boolean(ranks[index].map(|rank| rank / valid_count as f64 <= fraction))
+            }
+            Sample::Null | Sample::Nan => ScalarValue::Boolean(None),
+        })
+        .collect()
+}
+
 /// Applies the min-samples gate and the percentile transform to one rank
 /// (SCE-00 D3, contract section 5.2; D6): an unmet sample count nulls the
 /// whole statistic, and a single ordered value is exactly one half.
@@ -2641,6 +2972,15 @@ fn validate_output_version_and_counts(output: &CrossSectionOutputSpec, base: &st
             ));
         }
     }
+    if let CrossSectionOutputSpec::TopQuantile { fraction, .. }
+    | CrossSectionOutputSpec::BottomQuantile { fraction, .. } = output
+        && (!fraction.is_finite() || !(0.0..=1.0).contains(fraction))
+    {
+        return Err(invalid_argument(
+            &format!("{base}.fraction"),
+            "must be finite and between 0 and 1",
+        ));
+    }
     Ok(())
 }
 
@@ -2652,6 +2992,12 @@ fn validate_output_names(
     if output.input().is_empty() {
         return Err(invalid_argument(
             &format!("{base}.input"),
+            "must not be empty",
+        ));
+    }
+    if output.independent().is_some_and(str::is_empty) {
+        return Err(invalid_argument(
+            &format!("{base}.independent"),
             "must not be empty",
         ));
     }
@@ -2810,8 +3156,21 @@ fn compile_output(
     let input_index = exact_field_index(input_schema, output.input())?;
     let input_type = input_schema.field(input_index).data_type().clone();
     validate_output_input_type(output, &input_type)?;
+    let independent_index = output
+        .independent()
+        .map(|name| {
+            let index = exact_field_index(input_schema, name)?;
+            if !is_numeric(input_schema.field(index).data_type()) {
+                return Err(compile_error(format!(
+                    "cross-section residual independent column {name:?} must be numeric"
+                )));
+            }
+            Ok(index)
+        })
+        .transpose()?;
     Ok(CompiledCrossSectionOutput {
         input_index,
+        independent_index,
         name: output.output().to_owned(),
         data_type: output_data_type(output, input_type),
         evaluation: compile_evaluation(output),
@@ -2875,6 +3234,12 @@ fn compile_evaluation(output: &CrossSectionOutputSpec) -> CompiledEvaluation {
             min_samples: *min_samples,
             ddof: 0,
         },
+        CrossSectionOutputSpec::Mean { min_samples, .. } => CompiledEvaluation::Mean {
+            min_samples: *min_samples,
+        },
+        CrossSectionOutputSpec::Residual { min_samples, .. } => CompiledEvaluation::Residual {
+            min_samples: *min_samples,
+        },
         CrossSectionOutputSpec::Zscore {
             min_samples, ddof, ..
         } => CompiledEvaluation::ZScore {
@@ -2911,6 +3276,24 @@ fn compile_evaluation(output: &CrossSectionOutputSpec) -> CompiledEvaluation {
             include_ties: *include_ties,
             min_samples: *min_samples,
         },
+        CrossSectionOutputSpec::TopQuantile {
+            fraction,
+            min_samples,
+            ..
+        } => CompiledEvaluation::FractionSelection {
+            fraction: *fraction,
+            top: true,
+            min_samples: *min_samples,
+        },
+        CrossSectionOutputSpec::BottomQuantile {
+            fraction,
+            min_samples,
+            ..
+        } => CompiledEvaluation::FractionSelection {
+            fraction: *fraction,
+            top: false,
+            min_samples: *min_samples,
+        },
         CrossSectionOutputSpec::MeanFill { min_samples, .. } => CompiledEvaluation::MeanFill {
             min_samples: *min_samples,
         },
@@ -2922,12 +3305,15 @@ fn output_data_type(output: &CrossSectionOutputSpec, input_type: DataType) -> Da
         CrossSectionOutputSpec::Winsorize { .. } | CrossSectionOutputSpec::MeanFill { .. } => {
             input_type
         }
-        CrossSectionOutputSpec::Top { .. } | CrossSectionOutputSpec::Bottom { .. } => {
-            DataType::Boolean
-        }
+        CrossSectionOutputSpec::Top { .. }
+        | CrossSectionOutputSpec::Bottom { .. }
+        | CrossSectionOutputSpec::TopQuantile { .. }
+        | CrossSectionOutputSpec::BottomQuantile { .. } => DataType::Boolean,
         CrossSectionOutputSpec::Rank { .. }
         | CrossSectionOutputSpec::Percentile { .. }
         | CrossSectionOutputSpec::Demean { .. }
+        | CrossSectionOutputSpec::Mean { .. }
+        | CrossSectionOutputSpec::Residual { .. }
         | CrossSectionOutputSpec::Zscore { .. } => DataType::Float64,
     }
 }
@@ -2937,10 +3323,14 @@ fn output_kind(output: &CrossSectionOutputSpec) -> &'static str {
         CrossSectionOutputSpec::Rank { .. } => "rank",
         CrossSectionOutputSpec::Percentile { .. } => "percentile",
         CrossSectionOutputSpec::Demean { .. } => "demean",
+        CrossSectionOutputSpec::Mean { .. } => "mean",
+        CrossSectionOutputSpec::Residual { .. } => "residual",
         CrossSectionOutputSpec::Zscore { .. } => "zscore",
         CrossSectionOutputSpec::Winsorize { .. } => "winsorize",
         CrossSectionOutputSpec::Top { .. } => "top",
         CrossSectionOutputSpec::Bottom { .. } => "bottom",
+        CrossSectionOutputSpec::TopQuantile { .. } => "top_quantile",
+        CrossSectionOutputSpec::BottomQuantile { .. } => "bottom_quantile",
         CrossSectionOutputSpec::MeanFill { .. } => "mean_fill",
     }
 }

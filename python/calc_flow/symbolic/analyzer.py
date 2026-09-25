@@ -90,7 +90,7 @@ def _sum_output_type(input_type: str | None, /) -> str:
 
 
 def _rolling_output_type(primitive: str, input_type: str | None, /) -> str | None:
-    if primitive == "count":
+    if primitive in ("count", "argmax", "argmin", "rolling_rank", "unique_count"):
         return "uint64"
     if primitive == "sum":
         return _sum_output_type(input_type)
@@ -126,7 +126,9 @@ _FRAME_ATTRIBUTES: Final[dict[str, str]] = {"rows": "size", "duration": "micros"
 _ARITHMETIC: Final = frozenset({"add", "sub", "mul", "truediv"})
 _COMPARISONS: Final = frozenset({"eq", "ne", "lt", "le", "gt", "ge"})
 _BOOLEANS: Final = frozenset({"and", "or"})
-_UNARY_NUMERIC: Final = frozenset({"log", "exp", "sqrt"})
+_UNARY_NUMERIC: Final = frozenset(
+    {"log", "exp", "sqrt", "acos", "acosh", "asin", "asinh", "ceil", "floor", "round"}
+)
 _ROW_LOCAL_PRIMITIVES: Final = frozenset(
     {
         "column_ref",
@@ -151,26 +153,53 @@ _ROW_LOCAL_PRIMITIVES: Final = frozenset(
         "exp",
         "sqrt",
         "abs",
+        "power",
+        "acos",
+        "acosh",
+        "asin",
+        "asinh",
+        "ceil",
+        "floor",
+        "round",
+        "isnan",
         "clip",
         "cast",
     }
 )
 _ROLLING_AGGREGATES: Final = frozenset(
-    {"count", "sum", "mean", "min", "max", "variance", "stddev"}
+    {
+        "count",
+        "sum",
+        "mean",
+        "min",
+        "max",
+        "variance",
+        "stddev",
+        "argmax",
+        "argmin",
+        "rolling_rank",
+        "rolling_quantile",
+        "unique_count",
+        "decay",
+    }
 )
 _ROLLING_DDOF: Final = frozenset({"variance", "stddev"})
 _ROLLING_PRIMITIVES: Final = _ROLLING_AGGREGATES | frozenset(
-    {"lag", "delta", "ewma", "covariance", "correlation"}
+    {"lag", "delta", "ewma", "cumulative_mean", "covariance", "correlation"}
 )
 _CROSS_SECTION: Final = frozenset(
     {
         "rank",
         "percentile",
         "demean",
+        "cross_mean",
+        "residual",
         "zscore",
         "winsorize",
         "top",
         "bottom",
+        "top_quantile",
+        "bottom_quantile",
         "mean_fill",
     }
 )
@@ -1782,6 +1811,16 @@ class _Analyzer:
             return ColumnFacts(None, True, operand.lineage, operand.state)
         return ColumnFacts("float64", True, operand.lineage, operand.state)
 
+    def _isnan(self, node: Node, path: str, /) -> ColumnFacts:
+        operand = self._operand(node.args[0], f"{path}.isnan.value", None)
+        if operand.data_type not in (None, "float32", "float64"):
+            self.issue(
+                f"{path}.isnan.value.dtype",
+                "unsupported_type",
+                "isnan requires a floating operand",
+            )
+        return ColumnFacts("bool", operand.nullable, operand.lineage, operand.state)
+
     def _arithmetic_like_unary(self, node: Node, path: str, /) -> ColumnFacts:
         operand = self._operand(node.args[0], f"{path}.{node.op.name}.value", None)
         if operand.data_type is not None and operand.data_type not in (
@@ -1881,7 +1920,12 @@ class _Analyzer:
         )
         primitive = node.op.name
         input_type = operand.data_type
-        if primitive not in ("count", "min", "max") and not self._numeric_or_issue(
+        if primitive not in (
+            "count",
+            "min",
+            "max",
+            "unique_count",
+        ) and not self._numeric_or_issue(
             input_type, f"{path}.{primitive}.value", primitive
         ):
             return ColumnFacts(None, True, operand.lineage, states)
@@ -1908,6 +1952,23 @@ class _Analyzer:
             frozenset({f"constant(span={span})"}) if span is not None else frozenset()
         )
         if not self._numeric_or_issue(operand.data_type, f"{role}.value", "ewma"):
+            return ColumnFacts(None, True, operand.lineage, states)
+        return ColumnFacts("float64", True, operand.lineage, states)
+
+    def _cumulative_mean(self, node: Node, path: str, /) -> ColumnFacts:
+        role = f"{path}.cumulative_mean"
+        operand = self._operand(node.args[0], f"{role}.value", None)
+        self._require_rolling_operand(
+            node.args[0],
+            f"{role}.value",
+            "cumulative mean argument must be an input column or row-local expression",
+        )
+        if operand.lineage is not None:
+            self._temporal_lineages.add(operand.lineage)
+        states = operand.state | frozenset({"cumulative"})
+        if not self._numeric_or_issue(
+            operand.data_type, f"{role}.value", "cumulative_mean"
+        ):
             return ColumnFacts(None, True, operand.lineage, states)
         return ColumnFacts("float64", True, operand.lineage, states)
 
@@ -1947,20 +2008,41 @@ class _Analyzer:
         )
         if operand.lineage is not None:
             self._temporal_lineages.add(operand.lineage)
+        group_offset = 1
+        independent_state = frozenset()
+        if node.op.name == "residual":
+            independent = self._operand(
+                node.args[1], f"{role}.independent", operand.lineage
+            )
+            self._require_stageable_stateful_operand(
+                node.args[1],
+                f"{role}.independent",
+                "cross-section residual independent argument must be stageable",
+            )
+            self._numeric_or_issue(
+                independent.data_type, f"{role}.independent", "residual"
+            )
+            independent_state = independent.state
+            group_offset = 2
         group_paths = (
             f"{role}.event_time",
-            *(f"{role}.partition_by[{index}]" for index in range(len(node.args) - 2)),
+            *(
+                f"{role}.partition_by[{index}]"
+                for index in range(len(node.args) - group_offset - 1)
+            ),
         )
-        group = self._anchored_operands(node.args[1:], group_paths, operand.lineage)
+        group = self._anchored_operands(
+            node.args[group_offset:], group_paths, operand.lineage
+        )
         grouping_messages = (
             "cross-section grouping event time must be an input column in this release",
             *(
                 "cross-section group columns must be input columns in this release"
-                for _ in node.args[2:]
+                for _ in node.args[group_offset + 1 :]
             ),
         )
         for group_node, group_path, message in zip(
-            node.args[1:], group_paths, grouping_messages, strict=True
+            node.args[group_offset:], group_paths, grouping_messages, strict=True
         ):
             self._require_stateful_input_column(
                 group_node,
@@ -1968,7 +2050,10 @@ class _Analyzer:
                 message,
             )
         states = (
-            operand.state | _column_state_union(group) | frozenset({"cross_section"})
+            operand.state
+            | independent_state
+            | _column_state_union(group)
+            | frozenset({"cross_section"})
         )
         return self._cross_section_output(node.op.name, operand, role, states)
 
@@ -2034,15 +2119,18 @@ class _Analyzer:
                 )
                 return unresolved
             return ColumnFacts(operand.data_type, True, operand.lineage, states)
-        if primitive in ("top", "bottom"):
+        if primitive in ("top", "bottom", "top_quantile", "bottom_quantile"):
             if not self._numeric_or_issue(
                 operand.data_type, f"{role}.value", primitive
             ):
                 return unresolved
             return ColumnFacts("bool", True, operand.lineage, states)
-        if primitive in ("zscore", "demean") and not self._numeric_or_issue(
-            operand.data_type, f"{role}.value", primitive
-        ):
+        if primitive in (
+            "zscore",
+            "demean",
+            "cross_mean",
+            "residual",
+        ) and not self._numeric_or_issue(operand.data_type, f"{role}.value", primitive):
             return unresolved
         return ColumnFacts("float64", True, operand.lineage, states)
 
@@ -2461,7 +2549,7 @@ _ARRAY_HANDLERS: Final[dict[str, Callable[[_Analyzer, Node, str], ArrayFacts]]] 
 _COLUMN_HANDLERS: Final[dict[str, Callable[[_Analyzer, Node, str], ColumnFacts]]] = {
     "column_ref": _Analyzer._column_ref,
     "literal": _literal_column,
-    **dict.fromkeys(("add", "sub", "mul", "truediv"), _Analyzer._arithmetic),
+    **dict.fromkeys(("add", "sub", "mul", "truediv", "power"), _Analyzer._arithmetic),
     **dict.fromkeys(_COMPARISONS, _Analyzer._comparison),
     **dict.fromkeys(_BOOLEANS, _Analyzer._boolean_pair),
     **dict.fromkeys(("neg", "not"), _Analyzer._unary),
@@ -2471,8 +2559,10 @@ _COLUMN_HANDLERS: Final[dict[str, Callable[[_Analyzer, Node, str], ColumnFacts]]
     "abs": _Analyzer._arithmetic_like_unary,
     "clip": _Analyzer._clip,
     "cast": _Analyzer._cast,
+    "isnan": _Analyzer._isnan,
     **dict.fromkeys(("lag", "delta"), _Analyzer._lag_like),
     "ewma": _Analyzer._ewma,
+    "cumulative_mean": _Analyzer._cumulative_mean,
     **dict.fromkeys(_ROLLING_AGGREGATES, _Analyzer._rolling_aggregate),
     **dict.fromkeys(("covariance", "correlation"), _Analyzer._rolling_pair),
     **dict.fromkeys(_CROSS_SECTION, _Analyzer._cross_section),

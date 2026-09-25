@@ -15,6 +15,7 @@ On this page:
 
 - [Complete inventory](#complete-inventory)
 - [Inputs, correctness and timing boundaries](#inputs-correctness-and-timing-boundaries)
+- [Streaming operator examples](#streaming-operator-examples)
 - [ASOF settlement measurements](#asof-settlement-measurements)
 - [Join materialization measurements](#join-materialization-measurements)
 - [Revision comparisons and regression gate](#revision-comparisons-and-regression-gate)
@@ -41,6 +42,11 @@ benchmark cases without a second hand-written case list.
 | Rust            | Every `[[bench]]` target in the core crate          | Core, allocation, state/window, Join/ASOF, SQL/DataFusion |
 | Studio/frontend | Python HTTP benchmarks and Vitest benchmark files   | All collected benchmark cases                             |
 | Lifecycle       | Isolated checkpoint/recovery benchmark              | Existing minimum-20-round evidence validation             |
+
+The Python shard includes nine streaming operator examples at every Python
+scale. The Rust `stream_union` target measures native Union forwarding. These
+cases extend the inventory without adding a new shard or changing the
+scheduled 06:00 and 18:00 runs.
 
 There are 180 engine cases and 26 warm cases, in addition to dynamically
 discovered cases. Warm cases use one entity to support one-row appends.
@@ -124,6 +130,28 @@ sample statistics. Both revisions must be measured with the same scope;
 do not subtract a separately measured startup time from another report.
 These settings describe target/pool sizes, not measured CPU utilization;
 TA-Lib calls remain sequential per-series operations.
+
+## Streaming operator examples
+
+`benchmarks/test_stream_operators.py` exercises Expression, SQL, Rolling,
+CrossSection, WindowAggregate, StreamJoin, and StreamAsofJoin through fresh
+owned `Program.stream` jobs. Rolling has one incremental-state case and two
+scan cases with 64- and 256-row frames; each scan case requests argmax,
+argmin, rank, quantile, distinct count, and linear decay. CrossSection
+requests mean, residual, and top/bottom quantile masks. The native-only Union
+operator has a two-input forwarding case in the Rust `stream_union` Criterion
+target.
+
+The Python timing scope includes compilation, runner startup, prepared Arrow
+batch delivery, watermarks, output conversion, and job completion. Input
+construction, batch splitting, and output validation occur outside the timed
+call. Each case uses 16 entities and 640-row batches, with 10-tick aggregate
+windows. The input cap is 20,000 rows, giving 960, 9,920, and 20,000 rows at
+the overhead, small, and standard scales. Join and ASOF receive the same
+prepared table on two distinct bindings. The Python Join and ASOF cases cap
+each input at 3,200 and 1,920 rows; the engine matrix and dedicated Rust
+targets measure larger join workloads. These measurements are
+informational and have a different scope from the ready-runner engine matrix.
 
 ## ASOF settlement measurements
 

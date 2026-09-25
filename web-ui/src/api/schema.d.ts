@@ -692,6 +692,21 @@ export interface components {
                  * @description One declared cross-section output and its output column name. Ordering
                  *     fields are valid only on the order-statistic primitives; the strict
                  *     variant shapes reject them everywhere else (SCE-00 D6).
+                 *
+                 *     # Examples
+                 *
+                 *     ```
+                 *     use calc_flow::CrossSectionOutputSpec;
+                 *
+                 *     let output = CrossSectionOutputSpec::TopQuantile {
+                 *         primitive_version: 1,
+                 *         input: "price".into(),
+                 *         output: "top_quartile".into(),
+                 *         fraction: 0.25,
+                 *         min_samples: 1,
+                 *     };
+                 *     assert!(matches!(output, CrossSectionOutputSpec::TopQuantile { .. }));
+                 *     ```
                  */
                 CrossSectionOutputSpec: {
                     /** @description Sort direction of the measured value. */
@@ -747,6 +762,42 @@ export interface components {
                     /**
                      * Format: uint64
                      * @description Minimum valid samples for a non-null result.
+                     */
+                    min_samples: number;
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /** @description Numeric input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "mean";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_samples: number;
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /** @description Independent numeric input column name. */
+                    independent: string;
+                    /** @description Dependent numeric input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "residual";
+                    /**
+                     * Format: uint64
+                     * @description Minimum pairwise-valid samples for a non-null result.
                      */
                     min_samples: number;
                     /** @description Output column name. */
@@ -844,6 +895,50 @@ export interface components {
                     /**
                      * Format: uint64
                      * @description Minimum valid samples for a non-null selection result.
+                     */
+                    min_samples: number;
+                    /** @description Output boolean column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /**
+                     * Format: double
+                     * @description Inclusive fraction of the valid group in `[0, 1]`.
+                     */
+                    fraction: number;
+                    /** @description Input numeric column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "top_quantile";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_samples: number;
+                    /** @description Output boolean column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /**
+                     * Format: double
+                     * @description Inclusive fraction of the valid group in `[0, 1]`.
+                     */
+                    fraction: number;
+                    /** @description Input numeric column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "bottom_quantile";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
                      */
                     min_samples: number;
                     /** @description Output boolean column name. */
@@ -1330,7 +1425,24 @@ export interface components {
                  *     `stable_v2`; it may not replace the default without a separate migration.
                  */
                 RollingNumericalProfile: "stable_v1" | "stable_v2";
-                /** @description One declared rolling output and its output column name. */
+                /**
+                 * @description One declared rolling output and its output column name.
+                 *
+                 *     # Examples
+                 *
+                 *     ```
+                 *     use calc_flow::{RollingFrameSpec, RollingOutputSpec};
+                 *
+                 *     let output = RollingOutputSpec::Decay {
+                 *         primitive_version: 1,
+                 *         input: "price".into(),
+                 *         output: "weighted_price".into(),
+                 *         frame: RollingFrameSpec::Rows { size: 5 },
+                 *         min_periods: 1,
+                 *     };
+                 *     assert!(matches!(output, RollingOutputSpec::Decay { .. }));
+                 *     ```
+                 */
                 RollingOutputSpec: {
                     /** @description Input column name. */
                     input: string;
@@ -1387,6 +1499,23 @@ export interface components {
                      * @description Positive exponential span.
                      */
                     span: number;
+                } | {
+                    /** @description Numeric input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "cumulative_mean";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_periods: number;
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
                 } | {
                     /** @description Row-count frame. */
                     frame: components["schemas"]["ProjectCreateRequest"]["$defs"]["RollingFrameSpec"];
@@ -1518,6 +1647,120 @@ export interface components {
                     input: string;
                     /** @constant */
                     kind: "max";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_periods: number;
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /** @description Row-count or duration frame. */
+                    frame: components["schemas"]["ProjectCreateRequest"]["$defs"]["RollingFrameSpec"];
+                    /** @description Numeric input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "argmax";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_periods: number;
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /** @description Row-count or duration frame. */
+                    frame: components["schemas"]["ProjectCreateRequest"]["$defs"]["RollingFrameSpec"];
+                    /** @description Numeric input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "argmin";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_periods: number;
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /** @description Row-count or duration frame. */
+                    frame: components["schemas"]["ProjectCreateRequest"]["$defs"]["RollingFrameSpec"];
+                    /** @description Numeric input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "rank";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_periods: number;
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /** @description Row-count or duration frame. */
+                    frame: components["schemas"]["ProjectCreateRequest"]["$defs"]["RollingFrameSpec"];
+                    /** @description Numeric input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "quantile";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_periods: number;
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /** @description Row-count or duration frame. */
+                    frame: components["schemas"]["ProjectCreateRequest"]["$defs"]["RollingFrameSpec"];
+                    /** @description Totally ordered input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "unique_count";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_periods: number;
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /** @description Row-count or duration frame. */
+                    frame: components["schemas"]["ProjectCreateRequest"]["$defs"]["RollingFrameSpec"];
+                    /** @description Numeric input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "decay";
                     /**
                      * Format: uint64
                      * @description Minimum valid samples for a non-null result.
@@ -1896,6 +2139,21 @@ export interface components {
                  * @description One declared cross-section output and its output column name. Ordering
                  *     fields are valid only on the order-statistic primitives; the strict
                  *     variant shapes reject them everywhere else (SCE-00 D6).
+                 *
+                 *     # Examples
+                 *
+                 *     ```
+                 *     use calc_flow::CrossSectionOutputSpec;
+                 *
+                 *     let output = CrossSectionOutputSpec::TopQuantile {
+                 *         primitive_version: 1,
+                 *         input: "price".into(),
+                 *         output: "top_quartile".into(),
+                 *         fraction: 0.25,
+                 *         min_samples: 1,
+                 *     };
+                 *     assert!(matches!(output, CrossSectionOutputSpec::TopQuantile { .. }));
+                 *     ```
                  */
                 CrossSectionOutputSpec: {
                     /** @description Sort direction of the measured value. */
@@ -1951,6 +2209,42 @@ export interface components {
                     /**
                      * Format: uint64
                      * @description Minimum valid samples for a non-null result.
+                     */
+                    min_samples: number;
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /** @description Numeric input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "mean";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_samples: number;
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /** @description Independent numeric input column name. */
+                    independent: string;
+                    /** @description Dependent numeric input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "residual";
+                    /**
+                     * Format: uint64
+                     * @description Minimum pairwise-valid samples for a non-null result.
                      */
                     min_samples: number;
                     /** @description Output column name. */
@@ -2048,6 +2342,50 @@ export interface components {
                     /**
                      * Format: uint64
                      * @description Minimum valid samples for a non-null selection result.
+                     */
+                    min_samples: number;
+                    /** @description Output boolean column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /**
+                     * Format: double
+                     * @description Inclusive fraction of the valid group in `[0, 1]`.
+                     */
+                    fraction: number;
+                    /** @description Input numeric column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "top_quantile";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_samples: number;
+                    /** @description Output boolean column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /**
+                     * Format: double
+                     * @description Inclusive fraction of the valid group in `[0, 1]`.
+                     */
+                    fraction: number;
+                    /** @description Input numeric column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "bottom_quantile";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
                      */
                     min_samples: number;
                     /** @description Output boolean column name. */
@@ -2534,7 +2872,24 @@ export interface components {
                  *     `stable_v2`; it may not replace the default without a separate migration.
                  */
                 RollingNumericalProfile: "stable_v1" | "stable_v2";
-                /** @description One declared rolling output and its output column name. */
+                /**
+                 * @description One declared rolling output and its output column name.
+                 *
+                 *     # Examples
+                 *
+                 *     ```
+                 *     use calc_flow::{RollingFrameSpec, RollingOutputSpec};
+                 *
+                 *     let output = RollingOutputSpec::Decay {
+                 *         primitive_version: 1,
+                 *         input: "price".into(),
+                 *         output: "weighted_price".into(),
+                 *         frame: RollingFrameSpec::Rows { size: 5 },
+                 *         min_periods: 1,
+                 *     };
+                 *     assert!(matches!(output, RollingOutputSpec::Decay { .. }));
+                 *     ```
+                 */
                 RollingOutputSpec: {
                     /** @description Input column name. */
                     input: string;
@@ -2591,6 +2946,23 @@ export interface components {
                      * @description Positive exponential span.
                      */
                     span: number;
+                } | {
+                    /** @description Numeric input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "cumulative_mean";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_periods: number;
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
                 } | {
                     /** @description Row-count frame. */
                     frame: components["schemas"]["ProjectDocument"]["$defs"]["RollingFrameSpec"];
@@ -2722,6 +3094,120 @@ export interface components {
                     input: string;
                     /** @constant */
                     kind: "max";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_periods: number;
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /** @description Row-count or duration frame. */
+                    frame: components["schemas"]["ProjectDocument"]["$defs"]["RollingFrameSpec"];
+                    /** @description Numeric input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "argmax";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_periods: number;
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /** @description Row-count or duration frame. */
+                    frame: components["schemas"]["ProjectDocument"]["$defs"]["RollingFrameSpec"];
+                    /** @description Numeric input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "argmin";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_periods: number;
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /** @description Row-count or duration frame. */
+                    frame: components["schemas"]["ProjectDocument"]["$defs"]["RollingFrameSpec"];
+                    /** @description Numeric input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "rank";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_periods: number;
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /** @description Row-count or duration frame. */
+                    frame: components["schemas"]["ProjectDocument"]["$defs"]["RollingFrameSpec"];
+                    /** @description Numeric input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "quantile";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_periods: number;
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /** @description Row-count or duration frame. */
+                    frame: components["schemas"]["ProjectDocument"]["$defs"]["RollingFrameSpec"];
+                    /** @description Totally ordered input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "unique_count";
+                    /**
+                     * Format: uint64
+                     * @description Minimum valid samples for a non-null result.
+                     */
+                    min_periods: number;
+                    /** @description Output column name. */
+                    output: string;
+                    /**
+                     * Format: uint32
+                     * @description Primitive version; must equal `1`.
+                     */
+                    primitive_version: number;
+                } | {
+                    /** @description Row-count or duration frame. */
+                    frame: components["schemas"]["ProjectDocument"]["$defs"]["RollingFrameSpec"];
+                    /** @description Numeric input column name. */
+                    input: string;
+                    /** @constant */
+                    kind: "decay";
                     /**
                      * Format: uint64
                      * @description Minimum valid samples for a non-null result.
