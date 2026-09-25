@@ -228,22 +228,6 @@ def _run_cargo_tests(
             "calc-flow-connectors",
             "--all-features",
         ],
-        [
-            "--locked",
-            "-p",
-            "calc-flow",
-            "--bench",
-            "core",
-            "--all-features",
-        ],
-        [
-            "--locked",
-            "-p",
-            "calc-flow",
-            "--bench",
-            "sql_datafusion_performance",
-            "--all-features",
-        ],
     )
     for command in commands:
         status = _run([cargo, "test", *command, *compile_arguments])

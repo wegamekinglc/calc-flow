@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from calc_flow._compat import dataclass
 from calc_flow.symbolic.errors import RESERVED_FIELD
 from calc_flow.symbolic.expr import TableExpr, table_input
 from calc_flow.symbolic.nodes import CInt, Node, build

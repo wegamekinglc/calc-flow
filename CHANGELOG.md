@@ -9,6 +9,33 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-25: Remove benchmark scenarios, performance controller checks,
+  benchmark support script tests, and benchmark target compilation from regular
+  Linux and Windows CI. The complete benchmark suite runs independently at
+  06:00 and 18:00 Asia/Shanghai, including its warm-stream correctness checks.
+  Supplemental SQL/DataFusion experiments remain available by manual dispatch
+  only.
+
+- 2026-09-25: Publish explicit Python 3.9–3.14 abi3 wheel files on Linux,
+  macOS, and Windows. The release builds two native ABI tiers per platform,
+  adds interpreter-specific wheel tags, and installs each tagged wheel in its
+  corresponding Python unit-test job before publishing. Artifact verification
+  now requires all thirty wheels and the source distribution. The Python
+  release workflow remains focused on package build, verification, tests, and
+  PyPI upload.
+
+- 2026-09-24: Prepare `calc-flow-python` for CPython 3.9–3.14 with two
+  abi3 wheel tiers on the existing five platform targets. The 3.13+ tier
+  retains its direct Unicode extraction and eager asyncio task paths;
+  older interpreters use compatible fallbacks. Python 3.9 resolves PyArrow
+  21 and JAX 0.4.30 when the JAX extra is requested. Stream result ownership,
+  cancellation cleanup, and JAX device selection work across the supported
+  interpreter range. Release CI installs matching wheels on each version and
+  retains the paired performance acceptance gates. Source installs select the
+  build interpreter's CPython ABI, and pull request CI checks the 3.9 source
+  path and the 3.14 modern wheel path. User examples use the 3.9-compatible
+  UTC and timeout APIs.
+
 - 2026-09-23: Restore stream Join handler throughput after DAL-300. The
   bounded-chunk preflight scanned every matched pair through hashed per-row
   caches (a measured 26% release-gate regression on

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pyarrow as pa
 
@@ -13,7 +13,7 @@ import calc_flow as cf
 async def run() -> None:
     options = cf.ExecutionOptions(
         settings={"request": {"source": "async-example"}},
-        deadline=datetime.now(UTC) + timedelta(seconds=30),
+        deadline=datetime.now(timezone.utc) + timedelta(seconds=30),
     )
     heartbeat = asyncio.create_task(asyncio.sleep(0, result="event loop remained live"))
     execution = asyncio.create_task(

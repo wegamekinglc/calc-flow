@@ -1,14 +1,16 @@
 [project]
 name = "calc-flow-python"
-version = "2026.9.23"
+version = "2026.9.25"
 description = "Python expression API for batch and streaming calculations on a Rust runtime"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-requires-python = ">=3.13"
+requires-python = ">=3.9"
 dependencies = [
     "pydantic>=2.12.0,<3",
-    "pyarrow>=24.0.0,<25",
+    "pyarrow>=21.0.0,<22; python_version < '3.10'",
+    "pyarrow>=24.0.0,<25; python_version >= '3.10'",
+    "typing-extensions>=4.12",
 ]
 
 [project.urls]
@@ -16,8 +18,8 @@ Repository = "https://github.com/wegamekinglc/calc-flow"
 
 [project.optional-dependencies]
 numpy = ["numpy>=2.0.0"]
-jax = ["jax>=0.4"]
-array = ["jax>=0.4", "numpy>=2.0.0"]
+jax = ["jax>=0.4.30,<0.4.31; python_version < '3.10'", "jax>=0.4; python_version >= '3.10'"]
+array = ["jax>=0.4.30,<0.4.31; python_version < '3.10'", "jax>=0.4; python_version >= '3.10'", "numpy>=2.0.0"]
 benchmark = [
     "TA-Lib==0.7.1",
     "datafusion==54.0.0",
@@ -50,7 +52,6 @@ build-backend = "maturin"
 manifest-path = "crates/calc-flow-python/Cargo.toml"
 python-source = "python"
 module-name = "calc_flow._native"
-features = ["pyo3/abi3-py313"]
 strip = true
 
 [tool.uv.workspace]
@@ -76,7 +77,13 @@ extend-exclude = [
     ".codex/artifacts/**/*.md",
     "design/**/*.md",
 ]
-target-version = "py313"
+target-version = "py39"
+
+[tool.ruff.per-file-target-version]
+"scripts/*.py" = "py313"
+"python/tests/a6_cross_surface_worker.py" = "py312"
+"python/tests/test_asof_stream_results.py" = "py310"
+"python/tests/test_stream_results.py" = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]

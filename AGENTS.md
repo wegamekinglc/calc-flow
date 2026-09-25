@@ -21,7 +21,7 @@ subshells so their working-directory changes do not affect later commands.
 # Rust core and PyO3 Rust unit tests
 uv sync --extra dev
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo clippy --workspace --lib --bins --tests --examples --all-features -- -D warnings
 uv run python scripts/run_rust_tests.py
 CALC_FLOW_CONNECTOR_CONTAINERS=1 \
   CALC_FLOW_KAFKA_BOOTSTRAP=localhost:9092 \
@@ -83,7 +83,7 @@ interpreter's library directory to the test process's loader path. Pass
 PyO3 build is configured with `PYO3_PYTHON`, invoke the harness through that
 same interpreter so its NumPy, PyArrow, and shared-library paths stay aligned.
 
-Pass `--no-run` to precompile the selected core, connector, benchmark, and
+Pass `--no-run` to precompile the selected core, connector, and
 PyO3 targets without executing tests. Run the normal command afterward with
 the same build settings and target directory; it retains doctests and tests
 that compile fixtures. Linux CI gives precompilation a 45-minute budget for cold
@@ -148,7 +148,8 @@ Ordinary feature work must not rewrite either team definition.
 
 ### Python
 
-- Target Python 3.13 or newer, use four spaces and double quotes, and retain
+- Target CPython 3.9 or newer for `calc-flow-python`; Studio development uses
+  Python 3.13 or newer. Use four spaces and double quotes, and retain
   `from __future__ import annotations`.
 - Use built-in type syntax such as `list[str]`, `dict[str, object]`, and
   `A | B`.
@@ -338,9 +339,10 @@ changed structure, synchronization, links/anchors, and diff; run only necessary
 example checks that fit the requested scope, without building native code merely
 to validate prose.
 
-Full regression and routine performance gates belong to GitHub CI. The complete
-commands remain references for CI and explicitly scoped full verification. Keep
-the combined Rust 90% line floor (including connector services) and independent
+Full regression gates belong to GitHub CI. Routine benchmark measurements run
+independently at 06:00 and 18:00 Asia/Shanghai every day. The complete commands
+remain references for CI and explicitly scoped full verification. Keep the
+combined Rust 90% line floor (including connector services) and independent
 Studio backend 85% floor; a skipped local coverage run does not prove either gate.
 Expand local full testing only for an explicit user request, reproduction or
 diagnosis of a CI failure, or a clearly high-risk change without CI coverage.
@@ -356,8 +358,9 @@ After a commit/push or at review handoff, read at most one non-blocking CI statu
 snapshot. Do not wait, watch, poll, or sleep/retry unless the user or acceptance
 criteria explicitly require the final CI result. Pending or absent CI can be
 reported in a completed handoff; it is not green or merge-ready. Report failed,
-cancelled, and inconclusive checks accurately. Required test, coverage,
-cross-platform, and performance gates still block merge when failed or unresolved.
+cancelled, and inconclusive checks accurately. Required test, coverage, and
+cross-platform checks block merge when failed or unresolved. The Python package
+release requires its artifact verification and post-build unit tests to pass.
 The final specialist review remains required; merging also requires explicit
 authority and green required checks.
 
@@ -371,7 +374,8 @@ git diff --exit-code -- \
 git diff --check
 ```
 
-Release CI additionally builds the core wheel, source distribution, crate, and
-Studio wheel; inspects the artifacts; installs wheels in clean environments; and
-runs the core/Studio smoke checks. Select local release verification under the
-same scope and exception rules above.
+The Python release workflow builds and verifies the core wheels and source
+distribution, tests installed Linux wheels across supported Python versions,
+and publishes only the core package on release tags. Benchmarks, soaks, audits,
+crate and Studio packaging, and documentation checks do not run in that workflow.
+Select local release verification under the same scope and exception rules above.

@@ -32,14 +32,15 @@ execution model.
 The canonical command groups live in [AGENTS.md](AGENTS.md#commands) and are
 reproduced here for convenience as CI/full-verification references. Select the
 smallest local checks under [Verification](AGENTS.md#verification); full regression
-and routine performance gates belong to CI. Start at the repository root; the
-Studio subshells preserve that directory for subsequent groups.
+gates belong to CI, and routine benchmarks run twice daily on their own
+schedule. Start at the repository root; the Studio subshells preserve that
+directory for subsequent groups.
 
 ```bash
 # Rust core and PyO3 Rust unit tests
 uv sync --extra dev
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo clippy --workspace --lib --bins --tests --examples --all-features -- -D warnings
 uv run python scripts/run_rust_tests.py
 CALC_FLOW_CONNECTOR_CONTAINERS=1 \
   CALC_FLOW_KAFKA_BOOTSTRAP=localhost:9092 \
@@ -188,7 +189,7 @@ The frontend talks to the backend over the `/api/v3` REST contract only.
 | `web-ui/src/`                  | React + TypeScript + Vite + React Flow studio; API types generated from `web-ui/openapi.json`                                            |
 | `schemas/`                     | `project-v3.schema.json`, the canonical generated project contract                                                                       |
 | `examples/`                    | Executable Python expression and integration examples                                                                                    |
-| `benchmarks/`                  | Benchmark workloads; unified CI regression gates and informational comparisons                                                           |
+| `benchmarks/`                  | Benchmark workloads; scheduled regression gates and informational comparisons                                                            |
 | `docs/`                        | Published documentation                                                                                                                  |
 
 ### Python API boundary

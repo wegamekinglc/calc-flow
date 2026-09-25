@@ -12,6 +12,8 @@ while a compiled plan executes.
 
 from __future__ import annotations
 
+import sys
+
 from calc_flow.capabilities import RuntimeCapabilities
 from calc_flow.pipeline import (
     BatchExecutionPlan,
@@ -71,6 +73,9 @@ from calc_flow.symbolic.nodes import (
 )
 from calc_flow.symbolic.optimizer import expression_refs, extract_common
 from calc_flow.symbolic.program import Program
+
+if sys.version_info < (3, 10):
+    from calc_flow._compat import zip as zip
 
 
 def _edge(source_node: str, target_node: str, /) -> dict[str, object]:

@@ -6,9 +6,11 @@ Run commands from the repository root unless a working directory is shown.
 [AGENTS.md](../AGENTS.md#commands) maintains the complete CI/full-verification
 command groups and toolchain rules. Its [verification policy](../AGENTS.md#verification)
 defines the smallest local checks, three exceptions for local full testing, and
-one non-blocking CI snapshot. Full regression and routine performance gates run
-in CI; pending results permit handoff but do not permit merge. Keep build, coverage, release, and cache outputs
-under `target/` in a constrained checkout.
+one non-blocking CI snapshot. Full regression gates run in regular CI; routine
+benchmarks run twice daily on a separate schedule. The Python package release
+verifies artifacts and runs post-build unit tests. Pending required CI results
+permit handoff but do not permit merge. Keep build, coverage, release, and cache
+outputs under `target/` in a constrained checkout.
 
 ## Documentation and examples
 
@@ -119,9 +121,10 @@ and [warm-stream measurements](warm-stream-performance.md) for timing work.
 Do not run benchmarks alongside builds or tests. Preserve raw failed and
 inconclusive results as well as successful ones.
 
-Release CI builds the core wheel, sdist, crate, and Studio wheel, inspects each
-artifact, installs wheels in clean environments, and performs the smoke checks
-in the [release guide](python-release.md). Select local release checks under the
-same scope and exception policy.
+The [Python release workflow](python-release.md) builds and verifies the core
+wheels and sdist, tests the installed Linux wheels across supported Python
+versions, and publishes the core package on a pushed release tag. Benchmarks
+and other verification remain outside that workflow. Select local checks under
+the same scope and exception policy.
 
 Next: [benchmark suite](benchmark-suite.md).

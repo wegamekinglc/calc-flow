@@ -36,6 +36,7 @@ CORE_TARGETS = frozenset(
         "windows-amd64",
     }
 )
+CORE_PYTHON_TAGS = frozenset({"cp39", "cp310", "cp311", "cp312", "cp313", "cp314"})
 _FINAL_VERSION_RE = re.compile(
     r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
 )
@@ -51,6 +52,7 @@ _VERSION_RE = re.compile(
 class ReleaseConfig:
     version: str
     requires_python: str
+    studio_requires_python: str
     studio_requirement: str
 
 
@@ -131,10 +133,10 @@ def project_configuration(root: Path = ROOT) -> ReleaseConfig:
         studio.get("requires-python"),
         "studio.project.requires-python",
     )
-    if studio_requires_python != requires_python:
+    if requires_python != ">=3.9" or studio_requires_python != ">=3.13":
         raise ValueError(
-            "core and Studio requires-python values must match: "
-            f"{requires_python!r} != {studio_requires_python!r}"
+            "core requires-python must be '>=3.9' and Studio must be '>=3.13': "
+            f"{requires_python!r}, {studio_requires_python!r}"
         )
 
     dependencies = studio.get("dependencies")
@@ -159,7 +161,9 @@ def project_configuration(root: Path = ROOT) -> ReleaseConfig:
             f"Studio requirement {studio_requirement!r} does not cover "
             f"{version} within its calendar year"
         )
-    return ReleaseConfig(version, requires_python, studio_requirement)
+    return ReleaseConfig(
+        version, requires_python, studio_requires_python, studio_requirement
+    )
 
 
 def ensure_version_is_new_on_pypi(project: str, version: str) -> None:
@@ -236,12 +240,13 @@ def _validate_project_metadata(
     *,
     name: str,
     config: ReleaseConfig,
+    requires_python: str,
 ) -> None:
     expected = {
         "Name": name,
         "Version": config.version,
         "License-Expression": "Apache-2.0",
-        "Requires-Python": config.requires_python,
+        "Requires-Python": requires_python,
     }
     for key, value in expected.items():
         actual = _single_header(path, metadata, key)
@@ -323,15 +328,20 @@ def _validate_native_extension(path: Path, names: list[str], target: str) -> Non
         )
 
 
-def validate_core_wheel(path: Path, config: ReleaseConfig) -> tuple[str, str]:
+def validate_core_wheel(
+    path: Path, config: ReleaseConfig
+) -> tuple[tuple[str, str], str]:
     inspect_wheel(path)
     distribution, version, python_tag, abi_tag, platform_tag = _wheel_parts(path)
     if distribution != "calc_flow_python":
         raise ValueError(f"{path.name}: unexpected distribution {distribution!r}")
     if version != config.version:
         raise ValueError(f"{path.name}: version {version!r} != {config.version!r}")
-    if python_tag != "cp313":
-        raise ValueError(f"{path.name}: Python tag {python_tag!r} must equal 'cp313'")
+    if python_tag not in CORE_PYTHON_TAGS:
+        raise ValueError(
+            f"{path.name}: Python tag {python_tag!r} must be one of "
+            f"{sorted(CORE_PYTHON_TAGS)}"
+        )
     if abi_tag != "abi3":
         raise ValueError(f"{path.name}: ABI {abi_tag!r} must equal 'abi3'")
     target = _core_target(platform_tag)
@@ -344,7 +354,13 @@ def validate_core_wheel(path: Path, config: ReleaseConfig) -> tuple[str, str]:
         _validate_native_extension(path, names, target)
         metadata = _metadata_from_wheel(path, archive, dist_info, "METADATA")
         wheel_metadata = _metadata_from_wheel(path, archive, dist_info, "WHEEL")
-    _validate_project_metadata(path, metadata, name="calc-flow-python", config=config)
+    _validate_project_metadata(
+        path,
+        metadata,
+        name="calc-flow-python",
+        config=config,
+        requires_python=config.requires_python,
+    )
     expected_tags = tuple(
         f"{python_tag}-{abi_tag}-{platform}" for platform in platform_tag.split(".")
     )
@@ -354,7 +370,7 @@ def validate_core_wheel(path: Path, config: ReleaseConfig) -> tuple[str, str]:
         pure=False,
         tags=expected_tags,
     )
-    return target, sha256(path.read_bytes()).hexdigest()
+    return (target, python_tag), sha256(path.read_bytes()).hexdigest()
 
 
 def _normalized_requirement(requirement: str) -> tuple[str, tuple[str, ...]]:
@@ -386,6 +402,7 @@ def validate_studio_wheel(path: Path, config: ReleaseConfig) -> str:
         metadata,
         name="calc-flow-studio",
         config=config,
+        requires_python=config.studio_requires_python,
     )
     requirements = metadata.get_all("Requires-Dist", [])
     expected_requirement = _normalized_requirement(config.studio_requirement)
@@ -420,31 +437,40 @@ def _relative_name(path: Path, dist_dir: Path) -> str:
     return str(PurePosixPath(path.relative_to(dist_dir)))
 
 
-def validate_release(
-    dist_dir: Path,
-    root: Path = ROOT,
-    tag: str | None = None,
-    check_pypi: bool = False,
-) -> list[str]:
-    config = validate_versions(root, tag, check_pypi)
-    dist_dir = dist_dir.resolve()
-    if not dist_dir.is_dir():
-        raise ValueError(f"release directory does not exist: {dist_dir}")
-
-    wheels = sorted(dist_dir.rglob("*.whl"))
-    sdists = sorted(dist_dir.rglob("*.tar.gz"))
-    core_wheels = [path for path in wheels if path.name.startswith("calc_flow_python-")]
-    studio_wheels = [
-        path for path in wheels if path.name.startswith("calc_flow_studio-")
-    ]
-    unknown_wheels = [
-        path for path in wheels if path not in core_wheels and path not in studio_wheels
-    ]
+def _wheel_artifacts(dist_dir: Path) -> tuple[list[Path], list[Path]]:
+    core_wheels = sorted(dist_dir.rglob("calc_flow_python-*.whl"))
+    studio_wheels = sorted(dist_dir.rglob("calc_flow_studio-*.whl"))
+    unknown_wheels = sorted(
+        set(dist_dir.rglob("*.whl")) - set(core_wheels) - set(studio_wheels)
+    )
     if unknown_wheels:
         raise ValueError(
             f"unexpected wheel artifacts: {[path.name for path in unknown_wheels]}"
         )
-    if len(studio_wheels) != 1:
+    return core_wheels, studio_wheels
+
+
+def _reject_extra_artifacts(
+    dist_dir: Path, core_wheels: list[Path], sdists: list[Path]
+) -> None:
+    allowed = set(core_wheels) | set(sdists)
+    unexpected = sorted(
+        path.name
+        for path in dist_dir.rglob("*")
+        if path.is_file() and path not in allowed
+    )
+    if unexpected:
+        raise ValueError(f"unexpected release artifacts: {unexpected}")
+
+
+def _release_artifacts(
+    dist_dir: Path, core_only: bool
+) -> tuple[list[Path], list[Path], list[Path]]:
+    core_wheels, studio_wheels = _wheel_artifacts(dist_dir)
+    sdists = sorted(dist_dir.rglob("*.tar.gz"))
+    if core_only:
+        _reject_extra_artifacts(dist_dir, core_wheels, sdists)
+    elif len(studio_wheels) != 1:
         raise ValueError(
             f"expected one Studio wheel, found {[path.name for path in studio_wheels]}"
         )
@@ -452,26 +478,48 @@ def validate_release(
         raise ValueError(
             f"expected one source distribution, found {[path.name for path in sdists]}"
         )
+    return core_wheels, studio_wheels, sdists
+
+
+def validate_release(
+    dist_dir: Path,
+    root: Path = ROOT,
+    tag: str | None = None,
+    check_pypi: bool = False,
+    core_only: bool = False,
+) -> list[str]:
+    config = validate_versions(root, tag, check_pypi)
+    dist_dir = dist_dir.resolve()
+    if not dist_dir.is_dir():
+        raise ValueError(f"release directory does not exist: {dist_dir}")
+
+    core_wheels, studio_wheels, sdists = _release_artifacts(dist_dir, core_only)
 
     manifest_by_name: dict[str, str] = {}
-    actual_targets: set[str] = set()
+    actual_targets: set[tuple[str, str]] = set()
     for wheel in core_wheels:
         target, digest = validate_core_wheel(wheel, config)
         if target in actual_targets:
             raise ValueError(f"duplicate core wheel target {target!r}")
         actual_targets.add(target)
         manifest_by_name[_relative_name(wheel, dist_dir)] = digest
-    if actual_targets != CORE_TARGETS:
-        missing = sorted(CORE_TARGETS - actual_targets)
-        unexpected = sorted(actual_targets - CORE_TARGETS)
+    expected_targets = {
+        (target, python_tag)
+        for target in CORE_TARGETS
+        for python_tag in CORE_PYTHON_TAGS
+    }
+    if actual_targets != expected_targets:
+        missing = sorted(expected_targets - actual_targets)
+        unexpected = sorted(actual_targets - expected_targets)
         raise ValueError(
             f"core wheel matrix mismatch: missing={missing}, unexpected={unexpected}"
         )
 
-    studio = studio_wheels[0]
-    manifest_by_name[_relative_name(studio, dist_dir)] = validate_studio_wheel(
-        studio, config
-    )
+    if not core_only:
+        studio = studio_wheels[0]
+        manifest_by_name[_relative_name(studio, dist_dir)] = validate_studio_wheel(
+            studio, config
+        )
     sdist = sdists[0]
     manifest_by_name[_relative_name(sdist, dist_dir)] = validate_sdist(sdist, config)
     return [f"{manifest_by_name[name]}  {name}" for name in sorted(manifest_by_name)]
@@ -485,6 +533,7 @@ def main() -> int:
     parser.add_argument("--tag")
     parser.add_argument("--check-pypi", action="store_true")
     parser.add_argument("--version-only", action="store_true")
+    parser.add_argument("--core-only", action="store_true")
     args = parser.parse_args()
     try:
         if args.version_only:
@@ -497,6 +546,7 @@ def main() -> int:
             args.dist_dir,
             tag=args.tag,
             check_pypi=args.check_pypi,
+            core_only=args.core_only,
         )
     except (OSError, ValueError) as error:
         print(f"Python release verification failed: {error}", file=sys.stderr)

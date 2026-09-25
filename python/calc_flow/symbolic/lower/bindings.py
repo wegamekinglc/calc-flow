@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import field
 
+from calc_flow._compat import TypeAliasType, dataclass
 from calc_flow.pipeline import _node_inputs
 
-type Endpoint = tuple[str, str]
+Endpoint = TypeAliasType("Endpoint", tuple[str, str])
 
 
 @dataclass(slots=True)

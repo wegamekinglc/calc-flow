@@ -300,16 +300,12 @@ jobs:
         run: uv run --no-sync ruff check .
       - name: Verify complexity gates
         run: uv run --no-sync python scripts/verify_complexity_gates.py
-      - name: Verify streaming performance controllers
-        run: >-
-          uv run --no-sync python -m unittest scripts.test_profile_warm_stream
-          scripts.test_performance_plan scripts.test_entity_parallel_inventory
       - name: Run unit, property, and coverage tests
         env:
           PYTEST_XDIST_AUTO_NUM_WORKERS: 2
         run: >-
           uv run --no-sync pytest -q -n auto --dist load -p no:benchmark
-          python/tests benchmarks/test_warm_stream.py
+          python/tests
           --cov=calc_flow --cov-report=term-missing --cov-report=xml
       - name: Upload coverage report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -487,8 +483,29 @@ jobs:
           enable-cache: true
       - name: Build wheel and source distribution
         run: |
-          python -m unittest discover -s scripts -p 'test_*.py' -t .
-          uv build
+          python -m unittest \
+            scripts.test_build_python_release \
+            scripts.test_cargo_features \
+            scripts.test_check_spec_references \
+            scripts.test_classify_ci_changes \
+            scripts.test_codex_agents \
+            scripts.test_generate_rolling_kernel_manifest \
+            scripts.test_inspect_wheel \
+            scripts.test_native_checkpoint_compatibility \
+            scripts.test_python_compatibility \
+            scripts.test_release_config \
+            scripts.test_release_workflow \
+            scripts.test_resolve_coverage_baseline \
+            scripts.test_run_examples \
+            scripts.test_run_rust_coverage \
+            scripts.test_run_rust_tests \
+            scripts.test_rust_toolchain_diagnostics \
+            scripts.test_toolkit \
+            scripts.test_verify_complexity_gates \
+            scripts.test_verify_python_release \
+            scripts.test_verify_security_gates
+          uv build --sdist
+          uv build --wheel --config-setting 'build-args=--features pyo3/abi3-py313'
           python scripts/inspect_wheel.py core-wheel dist/calc_flow_python-*.whl
           python scripts/inspect_wheel.py sdist dist/calc_flow_python-*.tar.gz
       - name: Install and execute the wheel in isolation
@@ -505,6 +522,50 @@ jobs:
           path: dist/*
           if-no-files-found: error
           retention-days: 30
+  python-compatibility:
+    name: Python compatibility (${{ matrix.python-version }})
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.14']
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+      - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+      - name: Build source fallback or modern abi3 wheel
+        run: |
+          if [ "${{ matrix.python-version }}" = "3.9" ]; then
+            uvx maturin==1.14.1 build --release --locked \
+              --interpreter python --out target/compat-wheel
+          else
+            uvx maturin==1.14.1 build --release --locked \
+              --interpreter python --out target/compat-wheel \
+              --features pyo3/abi3-py313
+          fi
+      - name: Verify installed compatibility wheel
+        run: |
+          uv pip install --system target/compat-wheel/calc_flow_python-*.whl pytest numpy
+          python scripts/smoke_wheel.py
+          python -m pytest -q \
+            python/tests/test_import.py \
+            python/tests/test_python_version_contract.py \
+            python/tests/test_stream_entrypoints.py \
+            python/tests/test_execution_options.py \
+            python/tests/test_compute.py
   studio-package:
     name: Build + isolated studio wheel smoke test
     needs:
@@ -584,11 +645,6 @@ jobs:
           path: dist/calc_flow_studio-*.whl
           if-no-files-found: error
           retention-days: 30
-  benchmark-smoke:
-    name: Complete benchmark suite
-    needs: changes
-    if: needs.changes.outputs.docs_only != 'true'
-    uses: ./.github/workflows/benchmark-suite.yml
   rust-core:
     name: Rust core parity
     needs: changes
@@ -659,7 +715,7 @@ jobs:
         id: rust_cache
         uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo clippy --workspace --lib --bins --tests --examples --all-features -- -D warnings
       - name: Compile Rust tests
         # Cache misses must not consume the runtime test step's budget.
         timeout-minutes: 45
@@ -667,20 +723,6 @@ jobs:
       - name: Run Rust tests
         timeout-minutes: 30
         run: python3.13 scripts/run_rust_tests.py --python-stress-runs 3
-      - name: Validate SQL/DataFusion comparison smoke
-        run: |
-          mkdir -p "${GITHUB_WORKSPACE}/benchmark-results"
-          cargo bench --locked -p calc-flow --bench sql_datafusion_performance -- \
-            --profile serial-control \
-            --rows 10000 \
-            --entities 4 \
-            --partitions 1 \
-            --samples 3 \
-            --warmups 1 \
-            --output "${GITHUB_WORKSPACE}/benchmark-results/sql-datafusion-smoke.json"
-          python3.13 scripts/verify_sql_datafusion_performance.py \
-            "${GITHUB_WORKSPACE}/benchmark-results/sql-datafusion-smoke.json" \
-            --minimum-samples 3
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
       - name: Record Rust installation and cache step results
         if: ${{ always() }}
@@ -900,8 +942,8 @@ jobs:
       - studio-backend
       - browser-e2e
       - package
+      - python-compatibility
       - studio-package
-      - benchmark-smoke
       - rust-core
       - rust-coverage
       - rust-supply-chain
@@ -921,8 +963,8 @@ jobs:
       STUDIO_BACKEND_RESULT: ${{ needs.studio-backend.result }}
       BROWSER_RESULT: ${{ needs.browser-e2e.result }}
       PACKAGE_RESULT: ${{ needs.package.result }}
+      PYTHON_COMPATIBILITY_RESULT: ${{ needs.python-compatibility.result }}
       STUDIO_PACKAGE_RESULT: ${{ needs.studio-package.result }}
-      BENCHMARK_RESULT: ${{ needs.benchmark-smoke.result }}
       RUST_CORE_RESULT: ${{ needs.rust-core.result }}
       RUST_COVERAGE_RESULT: ${{ needs.rust-coverage.result }}
       RUST_SUPPLY_CHAIN_RESULT: ${{ needs.rust-supply-chain.result }}
@@ -946,8 +988,8 @@ jobs:
             "$STUDIO_BACKEND_RESULT" \
             "$BROWSER_RESULT" \
             "$PACKAGE_RESULT" \
+            "$PYTHON_COMPATIBILITY_RESULT" \
             "$STUDIO_PACKAGE_RESULT" \
-            "$BENCHMARK_RESULT" \
             "$RUST_CORE_RESULT" \
             "$RUST_COVERAGE_RESULT" \
             "$RUST_SUPPLY_CHAIN_RESULT" \

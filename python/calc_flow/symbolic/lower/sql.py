@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
@@ -29,6 +30,9 @@ from calc_flow.symbolic.types import Field
 
 if TYPE_CHECKING:
     import pyarrow as pa
+
+if sys.version_info < (3, 10):
+    from calc_flow._compat import zip as zip
 
 
 def _walk_nodes(node: Node) -> tuple[Node, ...]:

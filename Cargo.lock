@@ -553,7 +553,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "calc-flow"
-version = "2026.9.23"
+version = "2026.9.25"
 dependencies = [
  "allocation-counter",
  "async-trait",
@@ -582,7 +582,7 @@ dependencies = [
 
 [[package]]
 name = "calc-flow-connectors"
-version = "2026.9.23"
+version = "2026.9.25"
 dependencies = [
  "allocation-counter",
  "arrow",
@@ -622,7 +622,7 @@ dependencies = [
 
 [[package]]
 name = "calc-flow-python"
-version = "2026.9.23"
+version = "2026.9.25"
 dependencies = [
  "async-trait",
  "calc-flow",
@@ -636,6 +636,7 @@ dependencies = [
  "pyo3",
  "pyo3-arrow",
  "pyo3-async-runtimes",
+ "pyo3-build-config",
  "rdkafka",
  "serde_json",
  "tempfile",

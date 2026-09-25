@@ -13,7 +13,8 @@ Markdown, tests, and verification.
 
 ## Python
 
-- Target Python 3.13 or newer. Do not add compatibility shims for the removed
+- Target CPython 3.9 or newer for the core Python package; Studio targets 3.13
+  or newer. Do not add compatibility shims for the removed
   pure-Python v1 implementation (`src/calc_flow/` is gone).
 - Keep `from __future__ import annotations` in Python modules unless the project
   explicitly removes it everywhere.
@@ -89,8 +90,10 @@ Markdown, tests, and verification.
 Follow the local scope, CI responsibilities, and three full-test exceptions in
 [AGENTS.md](../../../AGENTS.md#verification). Use the smallest checks for the
 change and necessary formatter/linter/type checks for directly affected modules.
-Full regression and routine performance gates belong to CI; the complete command
-groups in AGENTS.md remain CI or explicitly scoped full-verification references.
+Full regression gates belong to regular CI; routine benchmarks run twice daily
+on their own schedule. The Python package release verifies artifacts and runs
+post-build unit tests. The complete command groups in AGENTS.md remain CI or
+explicitly scoped full-verification references.
 Preserve the Rust 90% line and Studio backend 85% coverage floors. Do not repeat
 unchanged passing checks or rebuild native code only to review documentation.
 For Markdown and agent guidance, check changed structure, synchronization,

@@ -6,12 +6,13 @@ import asyncio
 import shutil
 import tempfile
 from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass, fields, replace
+from dataclasses import fields, replace
 from types import TracebackType
-from typing import cast
+from typing import Generic, TypeVar, cast
 
 import pyarrow as pa
 
+from calc_flow._compat import dataclass
 from calc_flow._native import Batch, StreamingRuntimeError
 from calc_flow._stream_inputs import (
     StreamInput as StreamInput,
@@ -137,7 +138,10 @@ def _outcome_error(
     return error
 
 
-class StreamResults[T]:
+T = TypeVar("T")
+
+
+class StreamResults(Generic[T]):
     """One-shot stream owned by ``async with``; iterate only inside its context.
 
     Ordinary iterables have best-effort delivery and temporary checkpoints, with
@@ -154,8 +158,8 @@ class StreamResults[T]:
         self._starting: asyncio.Task[None] | None = None
         self._waiter: asyncio.Task[JobOutcome] | None = None
         self._closing: asyncio.Task[None] | None = None
-        self._queue: asyncio.Queue[StreamOutput] = asyncio.Queue(maxsize=1)
-        self._ready = asyncio.Event()
+        self._queue: asyncio.Queue[StreamOutput]
+        self._ready: asyncio.Event
         self._adapters: list[_IterableSource] = []
         self._root: str | None = None
 
@@ -170,6 +174,8 @@ class StreamResults[T]:
         if self._entered or self._closed:
             raise RuntimeError("stream: a result context may be entered only once")
         self._entered = True
+        self._queue = asyncio.Queue(maxsize=1)
+        self._ready = asyncio.Event()
         self._starting = asyncio.create_task(self._start())
         try:
             await asyncio.shield(self._starting)

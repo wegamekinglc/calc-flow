@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from typing import TYPE_CHECKING
 
 from calc_flow.capabilities import ProviderPort
@@ -11,6 +12,9 @@ if TYPE_CHECKING:
     from calc_flow.asof_join_spec import AsofJoinSide, AsofJoinSpec
     from calc_flow.symbolic.analyzer import TableFacts, _Analyzer
     from calc_flow.symbolic.nodes import Node
+
+if sys.version_info < (3, 10):
+    from calc_flow._compat import zip as zip
 
 _SEQUENCE_TYPES = frozenset(
     {

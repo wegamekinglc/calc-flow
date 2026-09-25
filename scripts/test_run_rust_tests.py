@@ -196,24 +196,6 @@ if arguments[:3] == ["test", "-p", "calc-flow-python"]:
                     ],
                     [
                         "test",
-                        "--locked",
-                        "-p",
-                        "calc-flow",
-                        "--bench",
-                        "core",
-                        "--all-features",
-                    ],
-                    [
-                        "test",
-                        "--locked",
-                        "-p",
-                        "calc-flow",
-                        "--bench",
-                        "sql_datafusion_performance",
-                        "--all-features",
-                    ],
-                    [
-                        "test",
                         "-p",
                         "calc-flow-python",
                         "--lib",
@@ -273,24 +255,6 @@ if arguments[:3] == ["test", "-p", "calc-flow-python"]:
                     ],
                     [
                         "test",
-                        "--locked",
-                        "-p",
-                        "calc-flow",
-                        "--bench",
-                        "core",
-                        "--all-features",
-                    ],
-                    [
-                        "test",
-                        "--locked",
-                        "-p",
-                        "calc-flow",
-                        "--bench",
-                        "sql_datafusion_performance",
-                        "--all-features",
-                    ],
-                    [
-                        "test",
                         "-p",
                         "calc-flow-python",
                         "--lib",
@@ -337,26 +301,6 @@ if arguments[:3] == ["test", "-p", "calc-flow-python"]:
                         "--locked",
                         "-p",
                         "calc-flow-connectors",
-                        "--all-features",
-                        "--no-run",
-                    ],
-                    [
-                        "test",
-                        "--locked",
-                        "-p",
-                        "calc-flow",
-                        "--bench",
-                        "core",
-                        "--all-features",
-                        "--no-run",
-                    ],
-                    [
-                        "test",
-                        "--locked",
-                        "-p",
-                        "calc-flow",
-                        "--bench",
-                        "sql_datafusion_performance",
                         "--all-features",
                         "--no-run",
                     ],
@@ -413,7 +357,7 @@ if arguments[:3] == ["test", "-p", "calc-flow-python"]:
             self.assertFalse(test_log.exists())
 
     def test_no_run_propagates_each_compile_failure(self) -> None:
-        for failing_call in range(1, 5):
+        for failing_call in range(1, 4):
             with (
                 self.subTest(failing_call=failing_call),
                 tempfile.TemporaryDirectory() as raw_directory,

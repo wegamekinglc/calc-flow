@@ -1,5 +1,9 @@
 name: Complete benchmark suite
 on:
+  schedule:
+    # 06:00 and 18:00 Asia/Shanghai (UTC+8).
+    - cron: "0 22 * * *"
+    - cron: "0 10 * * *"
   workflow_call:
     inputs:
       baseline_sha:
@@ -57,6 +61,28 @@ jobs:
           scripts.test_benchmark_worker
           scripts.test_benchmark_frontend
           scripts.test_benchmark_pytest
+      - name: Test benchmark and performance support scripts
+        run: >-
+          python -m unittest
+          scripts.test_analyze_sql_datafusion_attribution
+          scripts.test_benchmark_asof
+          scripts.test_benchmark_join_materialization
+          scripts.test_dal301_groupby
+          scripts.test_dal301_imports
+          scripts.test_dal301_rustc
+          scripts.test_m5_checkpoint_benchmark
+          scripts.test_native_memory_profile
+          scripts.test_native_slow_sink_diagnostics
+          scripts.test_release_collectors
+          scripts.test_release_evidence
+          scripts.test_release_pairs
+          scripts.test_release_performance
+          scripts.test_run_sql_datafusion_matrix
+          scripts.test_verify_perf_gates
+          scripts.test_verify_sql_datafusion_performance
+          scripts.test_verify_stream_lifecycle_evidence
+          scripts.test_verify_symbolic_milestone_perf
+          scripts.test_write_criterion_provenance
 
   build:
     name: Release benchmark wheel (${{ matrix.side }})
@@ -171,6 +197,17 @@ jobs:
             TOKIO_WORKER_THREADS=32 JAX_PLATFORMS=cpu \
             target/benchmark-venv/bin/python -m pytest \
             benchmarks/test_engine_comparison.py benchmarks/test_engine_stream.py -q
+      - name: Verify benchmark controllers and warm-stream scenarios
+        if: matrix.id == 'warm-10'
+        run: |
+          uv pip install --python target/benchmark-venv/bin/python --no-deps \
+            --target target/adapter-site target/releases/candidate/*.whl
+          PYTHONPATH=target/adapter-site:. JAX_PLATFORMS=cpu \
+            target/benchmark-venv/bin/python -m unittest \
+            scripts.test_profile_warm_stream scripts.test_performance_plan \
+            scripts.test_entity_parallel_inventory
+          PYTHONPATH=target/adapter-site:. JAX_PLATFORMS=cpu \
+            target/benchmark-venv/bin/python -m pytest benchmarks/test_warm_stream.py -q
       - name: Run all cases and compare versions on this runner
         env:
           BENCHMARK_SHARD: ${{ matrix.id }}

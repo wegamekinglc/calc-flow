@@ -4,9 +4,11 @@ Moved verbatim from ``symbolic/lower.py``."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
+import sys
+from dataclasses import replace
+from typing import TYPE_CHECKING, TypeVar
 
+from calc_flow._compat import dataclass
 from calc_flow.pipeline import (
     _canonical,
 )
@@ -53,6 +55,9 @@ from calc_flow.symbolic.types import Field
 
 if TYPE_CHECKING:
     from calc_flow.symbolic.program import Program
+
+if sys.version_info < (3, 10):
+    from calc_flow._compat import zip as zip
 
 
 # Rolling planning validates every lag/delta/aggregate occurrence with
@@ -691,7 +696,10 @@ def _plan_outputs(plan: _RollingPlan | _CrossSectionPlan, /) -> list[dict[str, o
     return plan.node["operator"]["spec"]["outputs"]  # type: ignore[index,return-value]
 
 
-def _required_state_plan[StatePlanT: (_RollingPlan, _CrossSectionPlan)](
+StatePlanT = TypeVar("StatePlanT", _RollingPlan, _CrossSectionPlan)
+
+
+def _required_state_plan(
     plans: dict[str, StatePlanT | None], output_name: str, /
 ) -> StatePlanT:
     plan = plans[output_name]
@@ -700,7 +708,7 @@ def _required_state_plan[StatePlanT: (_RollingPlan, _CrossSectionPlan)](
     return plan
 
 
-def _merge_state_outputs[StatePlanT: (_RollingPlan, _CrossSectionPlan)](
+def _merge_state_outputs(
     members: list[str],
     plans: dict[str, StatePlanT | None],
     prefix: str,
@@ -772,7 +780,7 @@ def _unique_shared_node_id(stem: str, reserved: set[str], /) -> str:
     return candidate
 
 
-def _reserved_state_node_ids[StatePlanT: (_RollingPlan, _CrossSectionPlan)](
+def _reserved_state_node_ids(
     segments: list[tuple[str, _Segment]],
     plans: dict[str, StatePlanT | None],
     /,
@@ -783,7 +791,7 @@ def _reserved_state_node_ids[StatePlanT: (_RollingPlan, _CrossSectionPlan)](
     return reserved
 
 
-def _shared_group_plans[StatePlanT: (_RollingPlan, _CrossSectionPlan)](
+def _shared_group_plans(
     members: list[str],
     by_name: dict[str, _Segment],
     first: StatePlanT,
@@ -815,7 +823,7 @@ def _shared_group_plans[StatePlanT: (_RollingPlan, _CrossSectionPlan)](
     return shared
 
 
-def _share_state_groups[StatePlanT: (_RollingPlan, _CrossSectionPlan)](
+def _share_state_groups(
     groups: list[list[str]],
     segments: list[tuple[str, _Segment]],
     plans: dict[str, StatePlanT | None],

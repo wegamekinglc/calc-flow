@@ -31,7 +31,7 @@ else:
 
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "2026.9.23"
+VERSION = "2026.9.25"
 PLATFORMS = {
     "linux-aarch64": "manylinux_2_28_aarch64",
     "linux-x86_64": "manylinux_2_28_x86_64",
@@ -39,6 +39,7 @@ PLATFORMS = {
     "macos-x86_64": "macosx_10_12_x86_64",
     "windows-amd64": "win_amd64",
 }
+PYTHON_TAGS = ("cp39", "cp310", "cp311", "cp312", "cp313", "cp314")
 
 
 class VerifyPythonReleaseTests(unittest.TestCase):
@@ -53,7 +54,9 @@ class VerifyPythonReleaseTests(unittest.TestCase):
         metadata["Name"] = name
         metadata["Version"] = VERSION
         metadata["License-Expression"] = "Apache-2.0"
-        metadata["Requires-Python"] = ">=3.13"
+        metadata["Requires-Python"] = (
+            ">=3.9" if name == "calc-flow-python" else ">=3.13"
+        )
         if requires_dist is not None:
             metadata["Requires-Dist"] = requires_dist
         metadata.set_payload("Calc Flow release fixture\n")
@@ -69,14 +72,17 @@ class VerifyPythonReleaseTests(unittest.TestCase):
             metadata["Tag"] = tag
         return metadata.as_bytes()
 
-    def _core_wheel(self, target: str, *, abi: str = "abi3") -> Path:
+    def _core_wheel(
+        self, target: str, *, python_tag: str = "cp313", abi: str = "abi3"
+    ) -> Path:
         platform = PLATFORMS[target]
         wheel = (
-            self.directory / f"calc_flow_python-{VERSION}-cp313-{abi}-{platform}.whl"
+            self.directory
+            / f"calc_flow_python-{VERSION}-{python_tag}-{abi}-{platform}.whl"
         )
         dist_info = f"calc_flow_python-{VERSION}.dist-info"
         extension = "_native.pyd" if target == "windows-amd64" else "_native.abi3.so"
-        tags = tuple(f"cp313-{abi}-{part}" for part in platform.split("."))
+        tags = tuple(f"{python_tag}-{abi}-{part}" for part in platform.split("."))
         with ZipFile(wheel, "w") as archive:
             archive.writestr("calc_flow/__init__.py", f'__version__ = "{VERSION}"\n')
             archive.writestr(f"calc_flow/{extension}", b"native")
@@ -103,7 +109,7 @@ class VerifyPythonReleaseTests(unittest.TestCase):
                 f"{dist_info}/METADATA",
                 self._metadata(
                     "calc-flow-studio",
-                    requires_dist="calc-flow-python<2027,>=2026.9.23",
+                    requires_dist="calc-flow-python<2027,>=2026.9.25",
                 ),
             )
             archive.writestr(
@@ -126,6 +132,7 @@ class VerifyPythonReleaseTests(unittest.TestCase):
             "crates/calc-flow/Cargo.toml": b"fixture",
             "crates/calc-flow/src/lib.rs": b"fixture",
             "crates/calc-flow-python/Cargo.toml": b"fixture",
+            "crates/calc-flow-python/build.rs": b"fixture",
             "python/calc_flow/__init__.py": b"fixture",
         }
         with open_tar(sdist, "w:gz") as archive:
@@ -137,22 +144,24 @@ class VerifyPythonReleaseTests(unittest.TestCase):
 
     def _complete_release(self) -> None:
         for target in sorted(CORE_TARGETS):
-            self._core_wheel(target)
+            for python_tag in PYTHON_TAGS:
+                self._core_wheel(target, python_tag=python_tag)
         self._studio_wheel()
         self._sdist()
 
     def test_versions_match_the_release_tag(self) -> None:
-        config = validate_versions(root=ROOT, tag="calc-flow-python-v2026.9.23")
+        config = validate_versions(root=ROOT, tag="calc-flow-python-v2026.9.25")
 
         self.assertEqual(config.version, VERSION)
-        self.assertEqual(config.requires_python, ">=3.13")
+        self.assertEqual(config.requires_python, ">=3.9")
+        self.assertEqual(config.studio_requires_python, ">=3.13")
 
     def test_pypi_preflight_checks_only_the_published_core_project(self) -> None:
         with patch(
             "scripts.verify_python_release.ensure_version_is_new_on_pypi"
         ) as check:
             validate_versions(
-                root=ROOT, tag="calc-flow-python-v2026.9.23", check_pypi=True
+                root=ROOT, tag="calc-flow-python-v2026.9.25", check_pypi=True
             )
 
         check.assert_called_once_with("calc-flow-python", VERSION)
@@ -174,15 +183,72 @@ class VerifyPythonReleaseTests(unittest.TestCase):
 
         manifest = validate_release(self.directory, root=ROOT)
 
-        self.assertEqual(len(manifest), 7)
+        self.assertEqual(len(manifest), 32)
         self.assertEqual(
             manifest, sorted(manifest, key=lambda line: line.split("  ", 1)[1])
         )
         self.assertTrue(all("  calc_flow" in line for line in manifest))
 
+    def test_release_requires_explicit_wheels_for_every_python_version(self) -> None:
+        for target in sorted(CORE_TARGETS):
+            for python_tag in ("cp39", "cp313"):
+                self._core_wheel(target, python_tag=python_tag)
+        self._studio_wheel()
+        self._sdist()
+
+        with self.assertRaisesRegex(ValueError, "cp310"):
+            validate_release(self.directory, root=ROOT)
+
+    def test_core_only_release_validates_the_complete_python_artifact_set(self) -> None:
+        for target in sorted(CORE_TARGETS):
+            for python_tag in PYTHON_TAGS:
+                self._core_wheel(target, python_tag=python_tag)
+        self._sdist()
+
+        manifest = validate_release(self.directory, root=ROOT, core_only=True)
+
+        self.assertEqual(len(manifest), 31)
+        self.assertEqual(
+            manifest, sorted(manifest, key=lambda line: line.split("  ", 1)[1])
+        )
+
+    def test_core_only_release_rejects_non_core_artifacts(self) -> None:
+        for target in sorted(CORE_TARGETS):
+            for python_tag in PYTHON_TAGS:
+                self._core_wheel(target, python_tag=python_tag)
+        self._sdist()
+        self._studio_wheel()
+
+        with self.assertRaisesRegex(ValueError, "unexpected release artifacts"):
+            validate_release(self.directory, root=ROOT, core_only=True)
+
+    def test_core_only_release_requires_linux_and_windows_wheels(self) -> None:
+        for missing_target in ("linux-x86_64", "windows-amd64"):
+            with self.subTest(missing_target=missing_target):
+                for target in sorted(CORE_TARGETS - {missing_target}):
+                    for python_tag in PYTHON_TAGS:
+                        self._core_wheel(target, python_tag=python_tag)
+                self._sdist()
+
+                with self.assertRaisesRegex(ValueError, missing_target):
+                    validate_release(self.directory, root=ROOT, core_only=True)
+
+                for artifact in self.directory.iterdir():
+                    artifact.unlink()
+
+    def test_release_requires_legacy_and_modern_abi3_wheels(self) -> None:
+        for target in sorted(CORE_TARGETS):
+            self._core_wheel(target)
+        self._studio_wheel()
+        self._sdist()
+
+        with self.assertRaisesRegex(ValueError, "cp39"):
+            validate_release(self.directory, root=ROOT)
+
     def test_release_rejects_a_missing_core_target(self) -> None:
         for target in sorted(CORE_TARGETS - {"linux-aarch64"}):
-            self._core_wheel(target)
+            for python_tag in PYTHON_TAGS:
+                self._core_wheel(target, python_tag=python_tag)
         self._studio_wheel()
         self._sdist()
 
@@ -191,7 +257,9 @@ class VerifyPythonReleaseTests(unittest.TestCase):
 
     def test_release_rejects_a_non_abi3_core_wheel(self) -> None:
         for target in sorted(CORE_TARGETS - {"windows-amd64"}):
-            self._core_wheel(target)
+            for python_tag in PYTHON_TAGS:
+                self._core_wheel(target, python_tag=python_tag)
+        self._core_wheel("windows-amd64", python_tag="cp39")
         self._core_wheel("windows-amd64", abi="cp313")
         self._studio_wheel()
         self._sdist()
@@ -207,12 +275,12 @@ class VerifyPythonReleaseTests(unittest.TestCase):
             "scripts.verify_python_release.HTTPSConnection",
             return_value=connection,
         ) as constructor:
-            ensure_version_is_new_on_pypi("calc-flow-python", "2026.9.23+candidate")
+            ensure_version_is_new_on_pypi("calc-flow-python", "2026.9.25+candidate")
 
         constructor.assert_called_once_with("pypi.org", timeout=20)
         connection.request.assert_called_once_with(
             "GET",
-            "/pypi/calc-flow-python/2026.9.23%2Bcandidate/json",
+            "/pypi/calc-flow-python/2026.9.25%2Bcandidate/json",
             headers={"Accept": "application/json"},
         )
         response.read.assert_called_once_with()
@@ -264,20 +332,21 @@ class ReleaseBaselineTests(unittest.TestCase):
             resolve_release_baseline(self.directory)
 
     def test_tag_must_be_annotated_and_point_at_candidate(self) -> None:
-        self.git("tag", "calc-flow-python-v2026.9.23")
+        self.git("tag", "calc-flow-python-v2026.9.25")
         with self.assertRaisesRegex(ValueError, "annotated"):
-            resolve_release_baseline(self.directory, tag="calc-flow-python-v2026.9.23")
+            resolve_release_baseline(self.directory, tag="calc-flow-python-v2026.9.25")
 
+        self.git("tag", "-d", "calc-flow-python-v2026.9.25")
         self.git(
             "tag",
             "-a",
-            "calc-flow-python-v2026.9.24",
+            "calc-flow-python-v2026.9.25",
             self.baseline,
             "-m",
             "Wrong head",
         )
         with self.assertRaisesRegex(ValueError, "candidate HEAD"):
-            resolve_release_baseline(self.directory, tag="calc-flow-python-v2026.9.24")
+            resolve_release_baseline(self.directory, tag="calc-flow-python-v2026.9.25")
 
     def test_rehearsal_accepts_an_explicit_ancestor_sha(self) -> None:
         self.assertEqual(
@@ -289,12 +358,12 @@ class ReleaseBaselineTests(unittest.TestCase):
         self.git(
             "tag",
             "-a",
-            "calc-flow-python-v2026.9.23",
+            "calc-flow-python-v2026.9.25",
             "-m",
-            f"Release 2026.9.23\n\nBenchmark-Baseline: {self.baseline}",
+            f"Release 2026.9.25\n\nBenchmark-Baseline: {self.baseline}",
         )
         self.assertEqual(
-            resolve_release_baseline(self.directory, tag="calc-flow-python-v2026.9.23"),
+            resolve_release_baseline(self.directory, tag="calc-flow-python-v2026.9.25"),
             self.baseline,
         )
 
@@ -345,13 +414,13 @@ class ReleaseBaselineTests(unittest.TestCase):
         self.git(
             "tag",
             "-a",
-            "calc-flow-python-v2026.9.23",
+            "calc-flow-python-v2026.9.25",
             "-m",
             f"Benchmark-Baseline: {self.baseline}",
         )
         with self.assertRaisesRegex(ValueError, "disagree"):
             resolve_release_baseline(
-                self.directory, initial="f" * 40, tag="calc-flow-python-v2026.9.23"
+                self.directory, initial="f" * 40, tag="calc-flow-python-v2026.9.25"
             )
 
 

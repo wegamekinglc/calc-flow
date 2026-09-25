@@ -6,35 +6,50 @@ import inspect
 import os
 import threading
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
-from enum import StrEnum
+from dataclasses import field
+from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Literal, NoReturn, Protocol, TypedDict
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Literal,
+    NoReturn,
+    Protocol,
+    TypedDict,
+    TypeVar,
+    Union,
+)
 
 from calc_flow import _native
+from calc_flow._compat import StrEnum, TypeAliasType, dataclass
 from calc_flow.store import _copy_json_value
 
 if TYPE_CHECKING:
     from calc_flow.pipeline import StreamExecutionPlan
 
-type JSONValue = (
-    None | bool | int | float | str | list[JSONValue] | dict[str, JSONValue]
+JSONValue = TypeAliasType(
+    "JSONValue",
+    Union[None, bool, int, float, str, list["JSONValue"], dict[str, "JSONValue"]],
 )
-type StreamingFailureReasonCode = Literal[
-    "join_state_limit_exceeded",
-    "join_match_limit_exceeded",
-    "join_counter_overflow",
-    "join_time_conversion_failed",
-    "asof_invalid_input",
-    "asof_duplicate_identity",
-    "asof_late_row",
-    "asof_state_limit_exceeded",
-    "asof_workspace_limit_exceeded",
-    "asof_output_limit_exceeded",
-    "asof_counter_overflow",
-    "asof_protocol_error",
-]
+StreamingFailureReasonCode = TypeAliasType(
+    "StreamingFailureReasonCode",
+    Literal[
+        "join_state_limit_exceeded",
+        "join_match_limit_exceeded",
+        "join_counter_overflow",
+        "join_time_conversion_failed",
+        "asof_invalid_input",
+        "asof_duplicate_identity",
+        "asof_late_row",
+        "asof_state_limit_exceeded",
+        "asof_workspace_limit_exceeded",
+        "asof_output_limit_exceeded",
+        "asof_counter_overflow",
+        "asof_protocol_error",
+    ],
+)
+T = TypeVar("T")
+UTC = timezone.utc
 
 
 async def _raise_after_cancellation_cleanup(
@@ -69,7 +84,7 @@ async def _finish_cleanup(cleanup: Awaitable[object]) -> None:
         try:
             await asyncio.shield(cleanup_task)
         except asyncio.CancelledError:
-            if owner is not None:
+            if owner is not None and hasattr(owner, "uncancel"):
                 while owner.cancelling():
                     owner.uncancel()
             continue
@@ -117,8 +132,9 @@ class DisabledWatermarks:
     idle_timeout: timedelta | None = None
 
 
-type WatermarkPolicy = (
-    SourceProvidedWatermarks | BoundedOutOfOrderness | DisabledWatermarks
+WatermarkPolicy = TypeAliasType(
+    "WatermarkPolicy",
+    Union[SourceProvidedWatermarks, BoundedOutOfOrderness, DisabledWatermarks],
 )
 
 
@@ -138,7 +154,10 @@ class TransactionalDelivery:
     pass
 
 
-type SinkDelivery = OrdinaryDelivery | EpochIdempotentDelivery | TransactionalDelivery
+SinkDelivery = TypeAliasType(
+    "SinkDelivery",
+    Union[OrdinaryDelivery, EpochIdempotentDelivery, TransactionalDelivery],
+)
 
 
 def _frozen_json_mapping(value: Mapping[str, object], label: str) -> Mapping[str, Any]:
@@ -227,7 +246,7 @@ class Idle:
     pass
 
 
-type SourceEvent = Data | Watermark | Idle
+SourceEvent = TypeAliasType("SourceEvent", Union[Data, Watermark, Idle])
 
 
 @dataclass(frozen=True, slots=True)
@@ -765,20 +784,20 @@ class _BlockingEventLoop:
             self._loop.close()
             self._closed.set()
 
-    async def _invoke[T](self, factory: Callable[[], Awaitable[T]]) -> T:
+    async def _invoke(self, factory: Callable[[], Awaitable[T]]) -> T:
         return await factory()
 
-    def _submit[T](
+    def _submit(
         self, factory: Callable[[], Awaitable[T]]
     ) -> concurrent.futures.Future[T]:
         if self._closed.is_set():
             raise RuntimeError("the calc-flow continuous event loop is closed")
         return asyncio.run_coroutine_threadsafe(self._invoke(factory), self._loop)
 
-    def run[T](self, factory: Callable[[], Awaitable[T]]) -> T:
+    def run(self, factory: Callable[[], Awaitable[T]]) -> T:
         return self._submit(factory).result()
 
-    async def run_async[T](self, factory: Callable[[], Awaitable[T]]) -> T:
+    async def run_async(self, factory: Callable[[], Awaitable[T]]) -> T:
         if self.owns_current_thread():
             return await factory()
         return await asyncio.wrap_future(self._submit(factory))
@@ -841,7 +860,7 @@ class StreamingJob:
         self._inner = inner
         self._blocking_loop = blocking_loop
 
-    def _run_blocking[T](
+    def _run_blocking(
         self,
         factory: Callable[[], Awaitable[T]],
         method: str,

@@ -113,7 +113,7 @@ class WorkflowTests(unittest.TestCase):
             Path(__file__).resolve().parents[1] / ".github/workflows/benchmarks.yml"
         ).read_text()
         self.assertIn("dal301-groupby", source)
-        self.assertEqual(source.count("inputs.mode != 'dal301-groupby'"), 3)
+        self.assertEqual(source.count("inputs.mode != 'dal301-groupby'"), 2)
         self.assertIn("artifact-ids: 10636839917", source)
         self.assertIn("artifact-ids: 10637665772", source)
         self.assertIn("run-id: 35596885420", source)

@@ -100,9 +100,14 @@ async def run(directory: Path, format_name: str) -> None:
     plan = Runtime().compile_stream_project(project.canonical_json())
     job = None
     try:
-        async with asyncio.timeout(60):
+
+        async def wait_for_completion():
+            nonlocal job
             job = await StreamingRunner(plan).start_async()
             outcome = await job.wait_async()
+            return outcome
+
+        outcome = await asyncio.wait_for(wait_for_completion(), 60)
         if outcome.state != "completed":
             raise RuntimeError(f"unexpected file job outcome: {outcome}")
         totals = await asyncio.to_thread(read_totals, directory)

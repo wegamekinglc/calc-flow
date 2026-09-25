@@ -4,11 +4,13 @@ import ast
 import math
 import operator
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, Never
+from typing import TYPE_CHECKING, Any
+
+from typing_extensions import Never
 
 from calc_flow import _native
+from calc_flow._compat import dataclass
 from calc_flow.capabilities import (
     CapabilityRule,
     ProviderArrayRules,
@@ -733,6 +735,17 @@ class _ArrayProvider:
         )
 
 
+def _jax_device(array: Any) -> object:
+    try:
+        device = array.device
+    except AttributeError:
+        devices = array.devices()
+        if len(devices) != 1:
+            raise ValueError("JAX array must be resident on one device") from None
+        return next(iter(devices))
+    return device() if callable(device) else device
+
+
 def _jax_table_matmul(
     table: object,
     columns: tuple[str, ...],
@@ -743,7 +756,7 @@ def _jax_table_matmul(
     import jax.numpy as jnp
 
     host = _numpy_table_matrix(table, columns, dtype)
-    dense = jax.device_put(host, device=weights.device)
+    dense = jax.device_put(host, device=_jax_device(weights))
     expected_dtype = jnp.dtype(dtype)
     if dense.dtype != expected_dtype:
         raise ValueError(
@@ -1167,7 +1180,7 @@ class _SymbolicMatrixProvider:
         if self.backend == "jax":
             import jax
 
-            dense = jax.device_put(host, device=weights.device)
+            dense = jax.device_put(host, device=_jax_device(weights))
         else:
             dense = host
         result = _evaluate_symbolic_tree(

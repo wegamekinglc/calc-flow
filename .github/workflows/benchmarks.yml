@@ -1,8 +1,5 @@
 name: Benchmarks
 on:
-  schedule:
-    - cron: "17 3 * * *"
-    - cron: "41 4 * * 0"
   workflow_dispatch:
     inputs:
       mode:
@@ -16,9 +13,9 @@ concurrency:
   group: benchmarks-${{ github.ref }}
   cancel-in-progress: false
 jobs:
-  sql-datafusion-nightly:
+  sql-datafusion-paired:
     name: SQL and raw DataFusion paired evidence
-    if: inputs.mode != 'dal301-groupby' && (github.event_name == 'workflow_dispatch' || github.event.schedule == '17 3 * * *')
+    if: inputs.mode != 'dal301-groupby'
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -73,9 +70,9 @@ jobs:
           path: benchmark-results/sql-datafusion/*.json
           if-no-files-found: error
           retention-days: 90
-  sql-datafusion-weekly-matrix:
+  sql-datafusion-matrix:
     name: SQL/DataFusion adaptive tuning matrix
-    if: inputs.mode != 'dal301-groupby' && (github.event_name == 'workflow_dispatch' || github.event.schedule == '41 4 * * 0')
+    if: inputs.mode != 'dal301-groupby'
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
@@ -125,10 +122,6 @@ jobs:
           path: benchmark-results/sql-datafusion/matrix
           if-no-files-found: error
           retention-days: 90
-  benchmark:
-    name: Complete benchmark suite
-    if: inputs.mode != 'dal301-groupby'
-    uses: ./.github/workflows/benchmark-suite.yml
   dal301-profile-build:
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'dal301-groupby'
     runs-on: ubuntu-latest

@@ -39,13 +39,13 @@ the dominant failure mode and refuse to cry wolf on single-run swings.
     --benchmark-json=target/benchmark-results/<scale>.json
   ```
 - `docs/benchmark-suite.md`, `scripts/benchmark_suite/`, and
-  `.github/workflows/benchmark-suite.yml` — the unified suite used by non-documentation
-  Linux PR/main CI and daily/manual benchmark runs. Engine/warm comparisons fail when
+  `.github/workflows/benchmark-suite.yml` — the complete suite run at 06:00 and 18:00
+  Asia/Shanghai every day and available by manual dispatch. Engine/warm comparisons fail when
   both rounds' paired-median confidence lower bounds exceed +5%. Whole-suite
   pytest/Criterion/Vitest timing deltas remain informational; specialized correctness,
-  allocation, lifecycle, and release gates still apply.
-- `.github/workflows/benchmarks.yml` also owns the supplemental SQL/DataFusion
-  nightly and weekly tuning measurements.
+  allocation, and lifecycle gates still apply.
+- `.github/workflows/benchmarks.yml` owns manually dispatched supplemental
+  SQL/DataFusion tuning measurements.
 - Contract-v2 rule: every report records machine, dependency, and workload SHA-256
   fingerprints. **Classify performance only between reports with matching fingerprints.**
   Never compare across machines, dependency versions, power modes, or scales.

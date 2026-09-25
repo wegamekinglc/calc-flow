@@ -10,8 +10,9 @@ no longer imports runtime-side helpers.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from datetime import timedelta
+
+from calc_flow._compat import dataclass
 
 STREAM_JOIN_MAX_SAFE_JSON_INTEGER = 9_007_199_254_740_991
 

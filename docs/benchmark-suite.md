@@ -3,10 +3,13 @@
 [Documentation](README.md) / 5.2 Benchmark suite
 
 The suite reports complete workloads and repeated base/head comparisons.
-`.github/workflows/benchmark-suite.yml` is the shared entrypoint for ordinary
-non-documentation Linux PR/main CI and daily/manual benchmarks. Windows keeps
-its existing correctness gates. SQL adaptive tuning experiments remain
-supplemental nightly/weekly jobs; they are not missing required suite shards.
+`.github/workflows/benchmark-suite.yml` runs independently of regular CI at
+06:00 and 18:00 Asia/Shanghai every day (22:00 and 10:00 UTC), and also supports
+manual runs. Regular Linux and Windows CI retain unit tests and coverage gates.
+Benchmark and performance support script tests, warm-stream scenario tests, and
+performance controller tests run in this scheduled workflow. Supplemental SQL
+adaptive tuning experiments run only by manual dispatch from `benchmarks.yml`;
+they are not required suite shards.
 
 On this page:
 
@@ -15,7 +18,7 @@ On this page:
 - [ASOF settlement measurements](#asof-settlement-measurements)
 - [Join materialization measurements](#join-materialization-measurements)
 - [Revision comparisons and regression gate](#revision-comparisons-and-regression-gate)
-- [Release acceptance measurements](#release-acceptance-measurements)
+- [Standalone paired measurements](#standalone-paired-measurements)
 - [Reports and failure behavior](#reports-and-failure-behavior)
 - [Local reproduction](#local-reproduction)
 - [Performance-plan diagnostics](#performance-plan-diagnostics)
@@ -23,11 +26,11 @@ On this page:
 ## Complete inventory
 
 The catalog is executable: `python -m scripts.benchmark_suite catalog` emits
-the same 21 shards consumed by CI. The slow Python `nightly` scale is
-excluded from this suite, including its daily/manual workflow calls; overhead,
-small and standard remain. The separate engine and warm-state matrices still
-run every decade through 10M rows. Dynamic pytest, Criterion and Vitest
-inventories preserve benchmark cases without a second hand-written case list.
+the same 21 shards consumed by the scheduled and manual suite. The slow Python
+`nightly` scale is excluded from this suite; overhead, small and standard
+remain. The separate engine and warm-state matrices still run every decade
+through 10M rows. Dynamic pytest, Criterion and Vitest inventories preserve
+benchmark cases without a second hand-written case list.
 
 | Family          | Dimensions                                          | Cases per dimension                                       |
 |-----------------|-----------------------------------------------------|-----------------------------------------------------------|
@@ -263,11 +266,10 @@ a later head does not inherit measurements from an earlier build.
 
 ## Revision comparisons and regression gate
 
-CI resolves immutable base/head commits before building clean release wheels.
-PRs compare the event's base SHA with its head SHA. Pushes use `before`;
-scheduled/manual runs default to the head's first parent. A manual full
-baseline SHA can override that choice. There is no silent fallback to a
-different successful run or debug wheel.
+The benchmark workflow resolves immutable base/head commits before building
+clean release wheels. Scheduled and manual runs default to the head's first
+parent. A manual full baseline SHA can override that choice. There is no silent
+fallback to a different successful run or debug wheel.
 
 For every Calc Flow engine/warm case:
 
@@ -296,7 +298,7 @@ otherwise the result is `no-confirmed-regression`, not proof of equivalence.
 Minimum ratios remain diagnostic: comparing unrelated best samples can signal
 a slowdown even with identical binaries and nearly unchanged P50 values.
 The fixed +5% threshold, two-round sample budget and correctness checks remain
-unchanged; CI does not retry measurements to select a passing timing result.
+unchanged; the suite does not retry measurements to select a passing timing result.
 External libraries are measured references, never fake historical baselines.
 The pytest/Criterion/Vitest suites run ABBA whole-suite
 blocks. Their deltas remain informational because those blocks are not
@@ -356,20 +358,28 @@ documents keep their real differing workload identities, and the applied
 migrations are listed in the shard's JSON artifact. Undeclared or mismatched
 workload changes still fail closed, now scoped to the changed target.
 
-## Release acceptance measurements
+## Standalone paired measurements
 
-The release workflow uses `python -m scripts.release_performance` for ordinary
-Python cases and the Rust `core` and `stream_join_perf` targets. It builds and
-installs sealed baseline/candidate wheels separately and records the loaded
+The optional `python -m scripts.release_performance` command measures ordinary
+Python cases and the Rust `core` and `stream_join_perf` targets outside the
+Python package release workflow. It builds and installs sealed
+baseline/candidate wheels separately and records the loaded
 Python native hash and each Rust benchmark binary hash. The formal baseline
-and candidate commits must differ; baseline selection follows the
-[release baseline contract](python-release.md#first-release-performance-baseline).
+and candidate commits must differ; `scripts/release_baseline.py` selects the
+baseline for a manual comparison.
 
-Python release collection runs the current candidate's benchmark declarations
-against both sealed native builds at `overhead` scale. Rust runs each
+The standalone Python collector runs the current candidate's benchmark
+declarations against both sealed native builds at `overhead` scale. Rust runs each
 revision's compiled cases with the compiled-dependency and target-scoped
 workload identities described above. Both sides must have matching, nonempty,
-duplicate-free inventories; this release path has no `new-coverage` exemption.
+duplicate-free inventories; this collector has no `new-coverage` exemption.
+
+The `core` Criterion target uses `cargo rustc --profile bench` with 64-byte
+loop alignment applied only to the bench target. This keeps its sub-nanosecond
+plan getter check from changing when a version-only binary layout shift places
+the loop across an instruction-cache line. The product library retains the
+ordinary bench profile, and the other Rust targets keep their existing build
+command. The baseline and candidate use the same alignment setting.
 
 Each case receives two rounds of ten adjacent baseline/candidate invocation
 pairs, alternating AB/BA. Every invocation starts a fresh isolated process.
@@ -383,7 +393,7 @@ All observations must match the expected sealed native/binary hash and have
 compatible machine, dependency, and workload identities. Raw identity objects
 must reproduce their fingerprints. Missing pairs, reused worker identities,
 incorrect execution order, invalid samples, or failed correctness checks are
-evidence errors and block acceptance.
+evidence errors and invalidate the comparison.
 
 The collector applies the same two-round paired-median interval and +5%
 verdict rules as the engine/warm gate. A timing-only `inconclusive` result does
@@ -391,11 +401,9 @@ not itself fail this gate, but is not proof of equivalence or improvement.
 Invalid or incomparable evidence fails regardless of timing. The separate
 stream lifecycle quantile, rolling-kernel, and allocation gates still apply.
 `--allow-dependency-drift` records acknowledgement only; it does not permit
-classification across incompatible dependencies or waive release acceptance.
+classification across incompatible dependencies or waive identity checks.
 `scripts/verify_perf_gates.py` rejects independent pytest/Criterion summaries
-as release pairing evidence. See the
-[release command and retained evidence](python-release.md#performance-acceptance-and-failure-evidence)
-for execution and failure inspection.
+as paired evidence.
 
 ## Reports and failure behavior
 
@@ -417,10 +425,9 @@ is explicitly shown rather than invented. The complete Markdown/JSON remains
 an artifact if it exceeds GitHub's step-summary size limit; overflow fails
 instead of silently truncating rows.
 
-Release CI collects the Python, Rust core, and stream join suites in parallel.
-Each suite writes `results.json` and `summary.md`; the acceptance job downloads
-all three artifacts, checks their sealed release manifests, Rust build
-provenance, inventories, and raw pairs, and writes the merged verdict. Each
+The standalone collector writes `results.json` and `summary.md` for each suite.
+Its merge command checks sealed release manifests, Rust build provenance,
+inventories, and raw pairs, then writes the combined verdict. Each
 Rust build records its binary SHA-256 in `binary-sha256.json`; suite reports
 retain the same digest so the merge can check every case seal against its
 build. Each case retains `pairs.json`,
@@ -429,9 +436,7 @@ raw pytest/Criterion data, and a `failure.json` when an invocation fails.
 Command records beside logs include arguments, working directory, thread
 settings, exit code, and errors. Build records, dependency provenance, and
 harness hashes remain available with collected samples when a later step
-fails. Release CI's always-run summary and 30-day artifact also record
-performance/security/soak outcomes and why a downstream step was skipped;
-see [release failure evidence](python-release.md#performance-acceptance-and-failure-evidence).
+fails. The Python publishing workflow does not run this collector.
 
 ## Local reproduction
 
@@ -456,11 +461,11 @@ target/benchmark-venv/bin/python -m scripts.benchmark_suite run \
   --baseline-source target/base --output target/results/engines-1000
 ```
 
-Run every emitted catalog shard to reproduce the complete CI gate. A single
+Run every emitted catalog shard to reproduce the complete benchmark gate. A single
 shard's own `summary.md` is useful locally; the complete summarizer deliberately
 fails when shards are missing. To update dependencies, regenerate and commit
-`benchmarks/requirements.lock` using the command in its header. CI checks lock
-drift before its adapter tests.
+`benchmarks/requirements.lock` using the command in its header. The suite
+checks lock drift before its adapter tests.
 
 ## Performance-plan diagnostics
 
