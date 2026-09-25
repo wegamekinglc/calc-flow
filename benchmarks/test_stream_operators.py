@@ -51,6 +51,14 @@ SCENARIOS = (
     "stream_join",
     "stream_asof_join",
 )
+NONNULL_OUTPUTS = {
+    "rolling_state": ("mean", "average", "ewma"),
+    "cross_section": ("mean", "residual", "top", "bottom"),
+    "window_aggregate": ("value",),
+    "stream_join": ("right__price",),
+    "stream_asof_join": ("right__price",),
+}
+ROLLING_SCAN_NONNULL = ("argmax", "argmin", "rank", "unique_count", "decay")
 
 
 def _source(name: str):
@@ -194,21 +202,14 @@ def _validate(scenario: str, output: pa.Table, source: pa.Table) -> None:
     if scenario in ("expression", "sql"):
         ordered = output.sort_by("sequence")
         assert ordered["value"][0].as_py() == source["price"][0].as_py() * 2 + 1
-    elif scenario == "rolling_state":
-        assert output["mean"].null_count == 0
-        assert output["average"].null_count == 0
-        assert output["ewma"].null_count == 0
-    elif scenario.startswith("rolling_scan_"):
-        for name in ("argmax", "argmin", "rank", "unique_count", "decay"):
-            assert output[name].null_count == 0
+        return
+    if scenario.startswith("rolling_scan_"):
+        names = ROLLING_SCAN_NONNULL
         assert 0 < output["quantile"].null_count < output.num_rows
-    elif scenario == "cross_section":
-        for name in ("mean", "residual", "top", "bottom"):
-            assert output[name].null_count == 0
-    elif scenario == "window_aggregate":
-        assert output["value"].null_count == 0
     else:
-        assert output["right__price"].null_count == 0
+        names = NONNULL_OUTPUTS[scenario]
+    for name in names:
+        assert output[name].null_count == 0
 
 
 @pytest.mark.benchmark(

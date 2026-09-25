@@ -1082,7 +1082,7 @@
             ]
           },
           "CrossSectionOutputSpec": {
-            "description": "One declared cross-section output and its output column name. Ordering\nfields are valid only on the order-statistic primitives; the strict\nvariant shapes reject them everywhere else (SCE-00 D6).",
+            "description": "One declared cross-section output and its output column name. Ordering\nfields are valid only on the order-statistic primitives; the strict\nvariant shapes reject them everywhere else (SCE-00 D6).\n\n# Examples\n\n```\nuse calc_flow::CrossSectionOutputSpec;\n\nlet output = CrossSectionOutputSpec::TopQuantile {\n    primitive_version: 1,\n    input: \"price\".into(),\n    output: \"top_quartile\".into(),\n    fraction: 0.25,\n    min_samples: 1,\n};\nassert!(matches!(output, CrossSectionOutputSpec::TopQuantile { .. }));\n```",
             "oneOf": [
               {
                 "additionalProperties": false,
@@ -1223,6 +1223,87 @@
                   "kind",
                   "primitive_version",
                   "input",
+                  "output",
+                  "min_samples"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Complete-group arithmetic mean, repeated for every row in the group.",
+                "properties": {
+                  "input": {
+                    "description": "Numeric input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "mean",
+                    "type": "string"
+                  },
+                  "min_samples": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "output": {
+                    "description": "Output column name.",
+                    "type": "string"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "output",
+                  "min_samples"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Pairwise-valid ordinary least-squares residual from an intercept model.",
+                "properties": {
+                  "independent": {
+                    "description": "Independent numeric input column name.",
+                    "type": "string"
+                  },
+                  "input": {
+                    "description": "Dependent numeric input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "residual",
+                    "type": "string"
+                  },
+                  "min_samples": {
+                    "description": "Minimum pairwise-valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "output": {
+                    "description": "Output column name.",
+                    "type": "string"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "independent",
                   "output",
                   "min_samples"
                 ],
@@ -1424,6 +1505,98 @@
                   "output",
                   "count",
                   "include_ties",
+                  "min_samples"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Select values whose average descending rank divided by the valid\ngroup size is at most `fraction`.",
+                "properties": {
+                  "fraction": {
+                    "description": "Inclusive fraction of the valid group in `[0, 1]`.",
+                    "format": "double",
+                    "maximum": 1.0,
+                    "minimum": 0.0,
+                    "type": "number"
+                  },
+                  "input": {
+                    "description": "Input numeric column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "top_quantile",
+                    "type": "string"
+                  },
+                  "min_samples": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "output": {
+                    "description": "Output boolean column name.",
+                    "type": "string"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "output",
+                  "fraction",
+                  "min_samples"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Select values whose average ascending rank divided by the valid\ngroup size is at most `fraction`.",
+                "properties": {
+                  "fraction": {
+                    "description": "Inclusive fraction of the valid group in `[0, 1]`.",
+                    "format": "double",
+                    "maximum": 1.0,
+                    "minimum": 0.0,
+                    "type": "number"
+                  },
+                  "input": {
+                    "description": "Input numeric column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "bottom_quantile",
+                    "type": "string"
+                  },
+                  "min_samples": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "output": {
+                    "description": "Output boolean column name.",
+                    "type": "string"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "output",
+                  "fraction",
                   "min_samples"
                 ],
                 "type": "object"
@@ -2635,7 +2808,7 @@
             ]
           },
           "RollingOutputSpec": {
-            "description": "One declared rolling output and its output column name.",
+            "description": "One declared rolling output and its output column name.\n\n# Examples\n\n```\nuse calc_flow::{RollingFrameSpec, RollingOutputSpec};\n\nlet output = RollingOutputSpec::Decay {\n    primitive_version: 1,\n    input: \"price\".into(),\n    output: \"weighted_price\".into(),\n    frame: RollingFrameSpec::Rows { size: 5 },\n    min_periods: 1,\n};\nassert!(matches!(output, RollingOutputSpec::Decay { .. }));\n```",
             "oneOf": [
               {
                 "additionalProperties": false,
@@ -2754,6 +2927,44 @@
                   "input",
                   "output",
                   "span",
+                  "min_periods"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Unbounded arithmetic mean of every valid sample seen for an entity.",
+                "properties": {
+                  "input": {
+                    "description": "Numeric input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "cumulative_mean",
+                    "type": "string"
+                  },
+                  "min_periods": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "output": {
+                    "description": "Output column name.",
+                    "type": "string"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "output",
                   "min_periods"
                 ],
                 "type": "object"
@@ -3046,6 +3257,264 @@
                   },
                   "kind": {
                     "const": "max",
+                    "type": "string"
+                  },
+                  "min_periods": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "output": {
+                    "description": "Output column name.",
+                    "type": "string"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "output",
+                  "frame",
+                  "min_periods"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Number of row positions since the oldest maximum in the frame.",
+                "properties": {
+                  "frame": {
+                    "$ref": "#/components/schemas/ProjectCreateRequest/$defs/RollingFrameSpec",
+                    "description": "Row-count or duration frame."
+                  },
+                  "input": {
+                    "description": "Numeric input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "argmax",
+                    "type": "string"
+                  },
+                  "min_periods": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "output": {
+                    "description": "Output column name.",
+                    "type": "string"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "output",
+                  "frame",
+                  "min_periods"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Number of row positions since the oldest minimum in the frame.",
+                "properties": {
+                  "frame": {
+                    "$ref": "#/components/schemas/ProjectCreateRequest/$defs/RollingFrameSpec",
+                    "description": "Row-count or duration frame."
+                  },
+                  "input": {
+                    "description": "Numeric input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "argmin",
+                    "type": "string"
+                  },
+                  "min_periods": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "output": {
+                    "description": "Output column name.",
+                    "type": "string"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "output",
+                  "frame",
+                  "min_periods"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Zero-based ascending rank of the current value; ties take the first rank.",
+                "properties": {
+                  "frame": {
+                    "$ref": "#/components/schemas/ProjectCreateRequest/$defs/RollingFrameSpec",
+                    "description": "Row-count or duration frame."
+                  },
+                  "input": {
+                    "description": "Numeric input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "rank",
+                    "type": "string"
+                  },
+                  "min_periods": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "output": {
+                    "description": "Output column name.",
+                    "type": "string"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "output",
+                  "frame",
+                  "min_periods"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Current value's zero-based rank divided by `valid_count - 1`.",
+                "properties": {
+                  "frame": {
+                    "$ref": "#/components/schemas/ProjectCreateRequest/$defs/RollingFrameSpec",
+                    "description": "Row-count or duration frame."
+                  },
+                  "input": {
+                    "description": "Numeric input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "quantile",
+                    "type": "string"
+                  },
+                  "min_periods": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "output": {
+                    "description": "Output column name.",
+                    "type": "string"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "output",
+                  "frame",
+                  "min_periods"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Number of distinct valid samples in the frame.",
+                "properties": {
+                  "frame": {
+                    "$ref": "#/components/schemas/ProjectCreateRequest/$defs/RollingFrameSpec",
+                    "description": "Row-count or duration frame."
+                  },
+                  "input": {
+                    "description": "Totally ordered input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "unique_count",
+                    "type": "string"
+                  },
+                  "min_periods": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "output": {
+                    "description": "Output column name.",
+                    "type": "string"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "output",
+                  "frame",
+                  "min_periods"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Linearly weighted mean of valid samples, newest carrying the largest weight.",
+                "properties": {
+                  "frame": {
+                    "$ref": "#/components/schemas/ProjectCreateRequest/$defs/RollingFrameSpec",
+                    "description": "Row-count or duration frame."
+                  },
+                  "input": {
+                    "description": "Numeric input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "decay",
                     "type": "string"
                   },
                   "min_periods": {
@@ -4071,7 +4540,7 @@
             ]
           },
           "CrossSectionOutputSpec": {
-            "description": "One declared cross-section output and its output column name. Ordering\nfields are valid only on the order-statistic primitives; the strict\nvariant shapes reject them everywhere else (SCE-00 D6).",
+            "description": "One declared cross-section output and its output column name. Ordering\nfields are valid only on the order-statistic primitives; the strict\nvariant shapes reject them everywhere else (SCE-00 D6).\n\n# Examples\n\n```\nuse calc_flow::CrossSectionOutputSpec;\n\nlet output = CrossSectionOutputSpec::TopQuantile {\n    primitive_version: 1,\n    input: \"price\".into(),\n    output: \"top_quartile\".into(),\n    fraction: 0.25,\n    min_samples: 1,\n};\nassert!(matches!(output, CrossSectionOutputSpec::TopQuantile { .. }));\n```",
             "oneOf": [
               {
                 "additionalProperties": false,
@@ -4212,6 +4681,87 @@
                   "kind",
                   "primitive_version",
                   "input",
+                  "output",
+                  "min_samples"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Complete-group arithmetic mean, repeated for every row in the group.",
+                "properties": {
+                  "input": {
+                    "description": "Numeric input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "mean",
+                    "type": "string"
+                  },
+                  "min_samples": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "output": {
+                    "description": "Output column name.",
+                    "type": "string"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "output",
+                  "min_samples"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Pairwise-valid ordinary least-squares residual from an intercept model.",
+                "properties": {
+                  "independent": {
+                    "description": "Independent numeric input column name.",
+                    "type": "string"
+                  },
+                  "input": {
+                    "description": "Dependent numeric input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "residual",
+                    "type": "string"
+                  },
+                  "min_samples": {
+                    "description": "Minimum pairwise-valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "output": {
+                    "description": "Output column name.",
+                    "type": "string"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "independent",
                   "output",
                   "min_samples"
                 ],
@@ -4413,6 +4963,98 @@
                   "output",
                   "count",
                   "include_ties",
+                  "min_samples"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Select values whose average descending rank divided by the valid\ngroup size is at most `fraction`.",
+                "properties": {
+                  "fraction": {
+                    "description": "Inclusive fraction of the valid group in `[0, 1]`.",
+                    "format": "double",
+                    "maximum": 1.0,
+                    "minimum": 0.0,
+                    "type": "number"
+                  },
+                  "input": {
+                    "description": "Input numeric column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "top_quantile",
+                    "type": "string"
+                  },
+                  "min_samples": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "output": {
+                    "description": "Output boolean column name.",
+                    "type": "string"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "output",
+                  "fraction",
+                  "min_samples"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Select values whose average ascending rank divided by the valid\ngroup size is at most `fraction`.",
+                "properties": {
+                  "fraction": {
+                    "description": "Inclusive fraction of the valid group in `[0, 1]`.",
+                    "format": "double",
+                    "maximum": 1.0,
+                    "minimum": 0.0,
+                    "type": "number"
+                  },
+                  "input": {
+                    "description": "Input numeric column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "bottom_quantile",
+                    "type": "string"
+                  },
+                  "min_samples": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "output": {
+                    "description": "Output boolean column name.",
+                    "type": "string"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "output",
+                  "fraction",
                   "min_samples"
                 ],
                 "type": "object"
@@ -5624,7 +6266,7 @@
             ]
           },
           "RollingOutputSpec": {
-            "description": "One declared rolling output and its output column name.",
+            "description": "One declared rolling output and its output column name.\n\n# Examples\n\n```\nuse calc_flow::{RollingFrameSpec, RollingOutputSpec};\n\nlet output = RollingOutputSpec::Decay {\n    primitive_version: 1,\n    input: \"price\".into(),\n    output: \"weighted_price\".into(),\n    frame: RollingFrameSpec::Rows { size: 5 },\n    min_periods: 1,\n};\nassert!(matches!(output, RollingOutputSpec::Decay { .. }));\n```",
             "oneOf": [
               {
                 "additionalProperties": false,
@@ -5743,6 +6385,44 @@
                   "input",
                   "output",
                   "span",
+                  "min_periods"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Unbounded arithmetic mean of every valid sample seen for an entity.",
+                "properties": {
+                  "input": {
+                    "description": "Numeric input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "cumulative_mean",
+                    "type": "string"
+                  },
+                  "min_periods": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "output": {
+                    "description": "Output column name.",
+                    "type": "string"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "output",
                   "min_periods"
                 ],
                 "type": "object"
@@ -6035,6 +6715,264 @@
                   },
                   "kind": {
                     "const": "max",
+                    "type": "string"
+                  },
+                  "min_periods": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "output": {
+                    "description": "Output column name.",
+                    "type": "string"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "output",
+                  "frame",
+                  "min_periods"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Number of row positions since the oldest maximum in the frame.",
+                "properties": {
+                  "frame": {
+                    "$ref": "#/components/schemas/ProjectDocument/$defs/RollingFrameSpec",
+                    "description": "Row-count or duration frame."
+                  },
+                  "input": {
+                    "description": "Numeric input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "argmax",
+                    "type": "string"
+                  },
+                  "min_periods": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "output": {
+                    "description": "Output column name.",
+                    "type": "string"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "output",
+                  "frame",
+                  "min_periods"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Number of row positions since the oldest minimum in the frame.",
+                "properties": {
+                  "frame": {
+                    "$ref": "#/components/schemas/ProjectDocument/$defs/RollingFrameSpec",
+                    "description": "Row-count or duration frame."
+                  },
+                  "input": {
+                    "description": "Numeric input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "argmin",
+                    "type": "string"
+                  },
+                  "min_periods": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "output": {
+                    "description": "Output column name.",
+                    "type": "string"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "output",
+                  "frame",
+                  "min_periods"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Zero-based ascending rank of the current value; ties take the first rank.",
+                "properties": {
+                  "frame": {
+                    "$ref": "#/components/schemas/ProjectDocument/$defs/RollingFrameSpec",
+                    "description": "Row-count or duration frame."
+                  },
+                  "input": {
+                    "description": "Numeric input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "rank",
+                    "type": "string"
+                  },
+                  "min_periods": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "output": {
+                    "description": "Output column name.",
+                    "type": "string"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "output",
+                  "frame",
+                  "min_periods"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Current value's zero-based rank divided by `valid_count - 1`.",
+                "properties": {
+                  "frame": {
+                    "$ref": "#/components/schemas/ProjectDocument/$defs/RollingFrameSpec",
+                    "description": "Row-count or duration frame."
+                  },
+                  "input": {
+                    "description": "Numeric input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "quantile",
+                    "type": "string"
+                  },
+                  "min_periods": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "output": {
+                    "description": "Output column name.",
+                    "type": "string"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "output",
+                  "frame",
+                  "min_periods"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Number of distinct valid samples in the frame.",
+                "properties": {
+                  "frame": {
+                    "$ref": "#/components/schemas/ProjectDocument/$defs/RollingFrameSpec",
+                    "description": "Row-count or duration frame."
+                  },
+                  "input": {
+                    "description": "Totally ordered input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "unique_count",
+                    "type": "string"
+                  },
+                  "min_periods": {
+                    "description": "Minimum valid samples for a non-null result.",
+                    "format": "uint64",
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "output": {
+                    "description": "Output column name.",
+                    "type": "string"
+                  },
+                  "primitive_version": {
+                    "description": "Primitive version; must equal `1`.",
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "primitive_version",
+                  "input",
+                  "output",
+                  "frame",
+                  "min_periods"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Linearly weighted mean of valid samples, newest carrying the largest weight.",
+                "properties": {
+                  "frame": {
+                    "$ref": "#/components/schemas/ProjectDocument/$defs/RollingFrameSpec",
+                    "description": "Row-count or duration frame."
+                  },
+                  "input": {
+                    "description": "Numeric input column name.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "decay",
                     "type": "string"
                   },
                   "min_periods": {

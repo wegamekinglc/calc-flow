@@ -238,6 +238,17 @@ class SnapshotTests(unittest.TestCase):
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_incomplete_toolchain_repair_precedes_component_setup(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
+        for start, end in (
+            ("  rust-core:\n", "  rust-coverage:\n"),
+            ("  rust-coverage:\n", "  rust-supply-chain:\n"),
+        ):
+            job = workflow.split(start, 1)[1].split(end, 1)[0]
+            repair = job.index("python scripts/repair_rust_toolchain.py")
+            install = job.index("uses: dtolnay/rust-toolchain@")
+            self.assertLess(repair, install)
+
     def test_failed_install_keeps_snapshots_exit_code_and_artifact_upload(self) -> None:
         workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
         job = workflow.split("  rust-core:\n", 1)[1].split("  rust-coverage:\n", 1)[0]

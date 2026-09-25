@@ -9565,6 +9565,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rolling_scan_retains_history_across_checkpoint() {
+        use crate::{CancellationToken, StreamJobContext};
+
+        for checkpoint in [false, true] {
+            let spec = kernel_spec(json!([{
+                "kind": "unique_count",
+                "primitive_version": 1,
+                "input": "price",
+                "output": "distinct_price",
+                "frame": {"kind": "rows", "size": 3},
+                "min_periods": 1
+            }]));
+            let mut operator =
+                RollingOperator::new("rolling", Arc::new(kernel_schema()), spec.clone()).unwrap();
+            let job = StreamJobContext::new(
+                7,
+                TEST_FINGERPRINT,
+                JsonMap::new(),
+                None,
+                CancellationToken::new(),
+            );
+            let mut collector = crate::EdgeCollector::new(operator.output_ports().to_vec());
+            let context = StreamOperatorContext::new(&job, "rolling", None);
+            let first = float64_fast_record(&[
+                (1, "a", 1, Some(1.0)),
+                (2, "a", 2, Some(2.0)),
+                (3, "a", 3, Some(3.0)),
+            ]);
+            operator
+                .process_data(
+                    "input",
+                    Batch::table(vec![first], BatchMetadata::default()).unwrap(),
+                    &context,
+                    &mut collector,
+                )
+                .await
+                .unwrap();
+            operator
+                .on_watermark(EventTime::from_micros(3), &context, &mut collector)
+                .await
+                .unwrap();
+            collector.drain("output");
+
+            if checkpoint {
+                let snapshot = operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
+                let mut restored =
+                    RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
+                StreamOperator::restore(&mut restored, &snapshot).unwrap();
+                operator = restored;
+            }
+
+            let context =
+                StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(3)));
+            let next = float64_fast_record(&[(4, "a", 4, Some(3.0))]);
+            operator
+                .process_data(
+                    "input",
+                    Batch::table(vec![next], BatchMetadata::default()).unwrap(),
+                    &context,
+                    &mut collector,
+                )
+                .await
+                .unwrap();
+            operator
+                .on_watermark(EventTime::from_micros(4), &context, &mut collector)
+                .await
+                .unwrap();
+            let emitted = collector.drain("output");
+            let record = &emitted[0]
+                .as_data()
+                .unwrap()
+                .table_payload()
+                .unwrap()
+                .batches()[0];
+            assert_eq!(record.num_rows(), 1);
+            let index = record.schema().index_of("distinct_price").unwrap();
+            let counts = record
+                .column(index)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap();
+            assert_eq!(counts.value(0), 2, "checkpoint={checkpoint}");
+        }
+    }
+
+    #[tokio::test]
     async fn columnar_history_compacts_input_and_survives_checkpoint_or_fallback() {
         use crate::{CancellationToken, StreamJobContext};
 
