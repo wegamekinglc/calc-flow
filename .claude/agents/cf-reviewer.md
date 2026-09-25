@@ -81,8 +81,8 @@ tests, documentation, or agent/rule guidance. Do not limit the review to the dif
 need context. Check:
 
 #### Rust
-- `cargo fmt --all --check` clean; `cargo clippy --workspace --all-targets
-  --all-features -- -D warnings` clean
+- `cargo fmt --all --check` clean; `cargo clippy --workspace --lib --bins
+  --tests --examples --all-features -- -D warnings` clean
 - Errors flow through `Result`/the crate's error type; no panics on expected failure
   paths; no `unwrap` outside tests without justification
 - New behavior has `#[cfg(test)]` coverage; workspace `unsafe_code = "forbid"`

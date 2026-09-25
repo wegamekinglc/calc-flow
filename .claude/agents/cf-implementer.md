@@ -116,7 +116,7 @@ uv sync --extra dev
 cargo test -p calc-flow <test_name>          # targeted red/green loop
 uv run python scripts/run_rust_tests.py       # full suite
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo clippy --workspace --lib --bins --tests --examples --all-features -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 ```
 

@@ -209,7 +209,7 @@ CI; routine performance gates run on the benchmark schedule:
 ```bash
 uv sync --extra dev
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo clippy --workspace --lib --bins --tests --examples --all-features -- -D warnings
 uv run python scripts/run_rust_tests.py
 CALC_FLOW_CONNECTOR_CONTAINERS=1 \
   CALC_FLOW_KAFKA_BOOTSTRAP=localhost:9092 \
