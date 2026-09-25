@@ -105,6 +105,21 @@ jobs:
           target: ${{ matrix.target }}
           args: --release --locked --out dist --find-interpreter --features legacy-python
           manylinux: ${{ matrix.manylinux }}
+      - name: Add explicit Python version tags
+        shell: bash
+        run: |
+          python -m pip install wheel==0.46.3
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          test "${#wheels[@]}" -eq 1
+          case "${{ matrix.python_tag }}" in
+            cp39) tags=(cp310 cp311 cp312) ;;
+            cp313) tags=(cp314) ;;
+            *) exit 1 ;;
+          esac
+          for tag in "${tags[@]}"; do
+            python -m wheel tags --python-tag="$tag" "${wheels[0]}"
+          done
       - name: Upload wheel
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -147,16 +162,22 @@ jobs:
         include:
           - python_version: "3.9"
             python_tag: cp39
+            base_tag: cp39
           - python_version: "3.10"
-            python_tag: cp39
+            python_tag: cp310
+            base_tag: cp39
           - python_version: "3.11"
-            python_tag: cp39
+            python_tag: cp311
+            base_tag: cp39
           - python_version: "3.12"
-            python_tag: cp39
+            python_tag: cp312
+            base_tag: cp39
           - python_version: "3.13"
             python_tag: cp313
+            base_tag: cp313
           - python_version: "3.14"
-            python_tag: cp313
+            python_tag: cp314
+            base_tag: cp313
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -165,11 +186,11 @@ jobs:
       - name: Download matching Linux wheel
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: wheel-ubuntu-latest-x86_64-${{ matrix.python_tag }}
+          name: wheel-ubuntu-latest-x86_64-${{ matrix.base_tag }}
           path: dist
       - name: Run installed wheel unit tests
         run: |
-          python -m pip install dist/*.whl pytest numpy
+          python -m pip install dist/calc_flow_python-*-${{ matrix.python_tag }}-abi3-*.whl pytest numpy
           python -m pytest -q \
             python/tests/test_import.py \
             python/tests/test_python_version_contract.py \

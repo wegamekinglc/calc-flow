@@ -17,16 +17,20 @@ head. The version must not already exist on PyPI.
 The workflow builds the following artifacts for every manual or tagged release
 run:
 
-| Package            | Artifacts                                    | PyPI upload |
-|--------------------|----------------------------------------------|-------------|
-| `calc-flow-python` | Ten abi3 wheels and one source distribution  | Tagged runs |
+| Package            | Artifacts                                      | PyPI upload |
+|--------------------|------------------------------------------------|-------------|
+| `calc-flow-python` | Thirty abi3 wheels and one source distribution | Tagged runs |
 
 Each of the five platform targets (Linux x86-64 and AArch64, macOS x86-64 and
-ARM64, and Windows AMD64) gets a `cp39-abi3` wheel for Python 3.9–3.12 and a
-`cp313-abi3` wheel for Python 3.13 and newer. The source distribution builds
-against the installing interpreter. The artifact verifier accepts only the ten
-versioned wheels and one versioned source distribution from the same workflow
-run. Linux and Windows wheels are required together, alongside macOS wheels.
+ARM64, and Windows AMD64) gets wheels with explicit `cp39`, `cp310`, `cp311`,
+`cp312`, `cp313`, and `cp314` Python tags. The workflow compiles two native
+abi3 tiers per platform: Python 3.9–3.12 share the 3.9-compatible binary, and
+Python 3.13–3.14 share the 3.13-compatible binary. The `wheel tags` command
+creates the additional version-specific wheel files and updates their WHEEL
+metadata and RECORD. The source distribution builds against the installing
+interpreter. The artifact verifier requires all thirty versioned wheels and
+one versioned source distribution from the same workflow run. Linux and
+Windows wheels are required together, alongside macOS wheels.
 It checks each wheel's platform, ABI, metadata, and contents, checks the source
 distribution's contents, and records artifact hashes.
 
@@ -36,10 +40,12 @@ The workflow:
 
 1. Checks the package version and, on a tag run, confirms the annotated tag is
    at the current `main` head and the PyPI version is unused.
-2. Builds ten core wheels and one source distribution.
-3. Installs the matching Linux wheel on Python 3.9–3.14 and runs the selected
-   package unit tests. Python 3.9 also runs the optional JAX array unit test.
-4. Verifies the eleven built artifacts and saves their hash manifest.
+2. Builds ten native wheel binaries, creates thirty explicitly tagged core
+   wheels, and builds one source distribution.
+3. Installs each version's matching Linux wheel on Python 3.9–3.14 and runs
+   the selected package unit tests. Python 3.9 also runs the optional JAX
+   array unit test.
+4. Verifies the thirty-one built artifacts and saves their hash manifest.
 5. On a pushed release tag only, checks the downloaded artifacts against that
    manifest and publishes the Linux, Windows, and macOS wheels together with the
    source distribution through the `pypi` environment using Trusted Publishing.
@@ -68,7 +74,7 @@ No long-lived PyPI token or `skip-existing` option is used.
    git push origin calc-flow-python-v<version>
    ```
 
-4. Approve the `pypi` deployment when prompted and confirm PyPI lists the ten
+4. Approve the `pypi` deployment when prompted and confirm PyPI lists the thirty
    wheels and source distribution for that version.
 
 PyPI versions and files are immutable. If an upload is incomplete, resolve the

@@ -8,7 +8,7 @@ expression catalog has its own [reference](symbolic-api.md).
 
 The `calc-flow-python` package exposes Python expressions and Arrow
 execution over the internal Rust runtime through PyO3. CPython 3.9 or newer
-is required. This page describes version `2026.9.24` in the current checkout;
+is required. This page describes version `2026.9.25` in the current checkout;
 use a source build when the published package has a different version.
 
 On this page:
