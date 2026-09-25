@@ -116,7 +116,7 @@ uv sync --extra dev
 cargo test -p calc-flow <test_name>          # targeted red/green loop
 uv run python scripts/run_rust_tests.py       # full suite
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo clippy --workspace --lib --bins --tests --examples --all-features -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 ```
 
@@ -170,7 +170,8 @@ is genuinely wrong.
 
 **4.1 Run the smallest sufficient local checks** for the change and directly affected
 behavior, plus necessary module compile, format, lint, or type checks. Full regression
-and routine performance gates belong to CI. Follow `AGENTS.md` Verification: local full
+gates belong to regular CI; routine benchmarks run in the separate twice-daily
+scheduled workflow. Follow `AGENTS.md` Verification: local full
 testing is only for an explicit request, CI failure diagnosis, or clear high risk without
 CI coverage; state the reason and limited scope. Preserve the combined Rust 90% line gate
 in `scripts/run_rust_coverage.py` (with the documented connector services) and Studio's

@@ -49,9 +49,10 @@ or acceptance failures; other findings are caveats. Routine documentation alignm
 does not require a new concept critique. Final specialist review remains required.
 
 Follow [AGENTS.md Verification](../../AGENTS.md#verification): smallest local tests and
-necessary module checks; full regression and routine performance gates in CI; local
-full runs only by explicit request, CI failure diagnosis, or clear high risk without
-CI coverage. State the reason and limited scope. Keep the Rust 90% line and Studio
+necessary module checks; full regression gates in regular CI; routine benchmarks in
+the separate twice-daily scheduled workflow; local full runs only by explicit request,
+CI failure diagnosis, or clear high risk without CI coverage. State the reason and
+limited scope. Keep the Rust 90% line and Studio
 backend 85% coverage floors. Do not repeat unchanged passing checks. Take at most one
 non-blocking CI snapshot after a commit/push or at review handoff; do not wait or poll
 unless final results were explicitly requested. Pending permits handoff, not merge;

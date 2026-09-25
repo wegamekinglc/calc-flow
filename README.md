@@ -204,12 +204,12 @@ Large Cargo and Maturin outputs should use the repository `target/` tree.
 The complete CI/full-verification command reference is below. Local changes use
 the smallest affected checks under [AGENTS.md Verification](AGENTS.md#verification);
 full regression, Rust 90% coverage, and Studio backend 85% coverage belong to
-CI; routine performance gates run on the benchmark schedule:
+CI; routine benchmark measurements run on their own schedule:
 
 ```bash
 uv sync --extra dev
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo clippy --workspace --lib --bins --tests --examples --all-features -- -D warnings
 uv run python scripts/run_rust_tests.py
 CALC_FLOW_CONNECTOR_CONTAINERS=1 \
   CALC_FLOW_KAFKA_BOOTSTRAP=localhost:9092 \

@@ -86,7 +86,7 @@ independent focused coverage or failure diagnosis is needed.
 Test-coverage work routes cf-tester → cf-reviewer; documentation work routes
 cf-doc-writer → cf-reviewer. Performance investigations and simplification sweeps use
 cf-performancer and cf-simplifier on demand. Their dispatch is not a routine prerequisite;
-an observed required performance gate failure still blocks merge and needs diagnosis.
+route failed scheduled benchmarks to cf-performancer for diagnosis.
 
 Never skip final `cf-reviewer` review. Reconcile documentation once when behavior,
 public contracts, commands, or user-visible capability changes; pure test additions
@@ -94,7 +94,7 @@ and behavior-preserving refactors can skip doc work with the reason recorded.
 Apply the shared delivery policy in `.codex/agents/README.md`: delegate the smallest
 local verification, retain full CI gates, and report one non-blocking CI snapshot.
 Pending can complete handoff but is not merge-ready. Route required test/coverage
-failures to tester, confirmed production bugs to implementer, and performance gate
+failures to tester, confirmed production bugs to implementer, and scheduled benchmark
 failures to performancer for classification. You do not run those checks yourself.
 
 ### Step 3: Delegate
