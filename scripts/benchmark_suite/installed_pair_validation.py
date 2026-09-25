@@ -114,6 +114,43 @@ def _validate_side(side: dict, role: str, slot: str, report: dict, index: int) -
         raise ValueError("installation command differs from the sealed wheel")
     if len(side["replay"]) != index:
         raise ValueError("missing or extra cursor replay")
+    modules = {
+        "calc_flow": "calc_flow/__init__.py",
+        "calc_flow.runtime": "calc_flow/runtime.py",
+        "calc_flow.pipeline": "calc_flow/pipeline.py",
+        "calc_flow._native": "calc_flow/_native.abi3.so",
+    }
+    if set(side["loaded_modules"]) != set(modules):
+        raise ValueError("loaded Python/native module inventory changed")
+    for module, relative_path in modules.items():
+        loaded = side["loaded_modules"][module]
+        if (
+            loaded["path"] != side["site"] + "/" + relative_path
+            or loaded["sha256"] != tree["files"][relative_path]
+        ):
+            raise ValueError("worker imported code outside the installed tree")
+    phases = (
+        "install",
+        "fingerprint",
+        "worker_start",
+        "hello",
+        "prepare_warmup",
+        "replay",
+        "formal",
+    )
+    if set(side["phase_ns"]) != set(phases):
+        raise ValueError("missing measurement phase")
+    prior_end = side["started_ns"]
+    for phase in phases:
+        bounds = side["phase_ns"][phase]
+        if not (
+            prior_end
+            <= bounds["started_ns"]
+            < bounds["finished_ns"]
+            <= side["finished_ns"]
+        ):
+            raise ValueError("measurement phase timestamps are invalid")
+        prior_end = bounds["finished_ns"]
     for item in (side["warmup"], *side["replay"], side["sample"]):
         _sample(item)
     if side["finished_ns"] <= side["started_ns"]:

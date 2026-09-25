@@ -120,28 +120,61 @@ async def collect_side(
 ) -> dict:
     """Install one fresh wheel and replay to the matching logical sample."""
     started_ns = time.monotonic_ns()
+    phase_ns = {}
     install_id = uuid.uuid4().hex
     install_log = root / f"install-{role}.log"
     install_record = await install_fresh(release, site, install_log)
+    phase_ns["install"] = {"started_ns": started_ns, "finished_ns": time.monotonic_ns()}
+    phase_start = time.monotonic_ns()
     tree = _tree_evidence(site)
+    phase_ns["fingerprint"] = {
+        "started_ns": phase_start,
+        "finished_ns": time.monotonic_ns(),
+    }
     if tree["native_sha256"] != release["native_sha256"]:
         raise ValueError("installed native file differs from sealed wheel")
+    phase_start = time.monotonic_ns()
     worker = await Worker.start(site, root / f"worker-{role}")
+    phase_ns["worker_start"] = {
+        "started_ns": phase_start,
+        "finished_ns": time.monotonic_ns(),
+    }
     try:
+        phase_start = time.monotonic_ns()
         environment = validate_environment(
             await worker.request(operation="hello"), release
         )
+        phase_ns["hello"] = {
+            "started_ns": phase_start,
+            "finished_ns": time.monotonic_ns(),
+        }
+        phase_start = time.monotonic_ns()
         prepared = await worker.request(operation="prepare", case=case)
+        phase_ns["prepare_warmup"] = {
+            "started_ns": phase_start,
+            "finished_ns": time.monotonic_ns(),
+        }
         if prepared["case"] != case:
             raise ValueError("worker prepared a different workload")
         warmup = prepared["warmup"]
         validate_sample(warmup)
+        loaded_modules = await worker.request(operation="provenance")
         replay = []
+        phase_start = time.monotonic_ns()
         for _ in range(index):
             sample = await worker.request(operation="sample")
             validate_sample(sample)
             replay.append(sample)
+        phase_ns["replay"] = {
+            "started_ns": phase_start,
+            "finished_ns": time.monotonic_ns(),
+        }
+        phase_start = time.monotonic_ns()
         formal = await worker.request(operation="sample")
+        phase_ns["formal"] = {
+            "started_ns": phase_start,
+            "finished_ns": time.monotonic_ns(),
+        }
         validate_sample(formal)
         loaded_inode, loaded_path, native_maps = native_mapping(
             worker.process.pid, site
@@ -162,6 +195,8 @@ async def collect_side(
         "native_maps": native_maps,
         "worker_pid": worker.process.pid,
         "environment": environment,
+        "loaded_modules": loaded_modules,
+        "phase_ns": phase_ns,
         "warmup": warmup,
         "replay": replay,
         "sample": formal,

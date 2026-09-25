@@ -8,7 +8,7 @@ on:
       mode:
         description: Standard benchmarks or a focused diagnostic
         type: choice
-        options: [standard, dal301-groupby, dal316-side-bias, dal316-installed-pairs]
+        options: [standard, dal301-groupby, dal316-side-bias, dal316-installed-pairs, dal316-three-arm]
         default: standard
 permissions:
   contents: read
@@ -18,7 +18,7 @@ concurrency:
 jobs:
   sql-datafusion-nightly:
     name: SQL and raw DataFusion paired evidence
-    if: inputs.mode != 'dal301-groupby' && inputs.mode != 'dal316-side-bias' && inputs.mode != 'dal316-installed-pairs' && (github.event_name == 'workflow_dispatch' || github.event.schedule == '17 3 * * *')
+    if: inputs.mode != 'dal301-groupby' && inputs.mode != 'dal316-side-bias' && inputs.mode != 'dal316-installed-pairs' && inputs.mode != 'dal316-three-arm' && (github.event_name == 'workflow_dispatch' || github.event.schedule == '17 3 * * *')
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -75,7 +75,7 @@ jobs:
           retention-days: 90
   sql-datafusion-weekly-matrix:
     name: SQL/DataFusion adaptive tuning matrix
-    if: inputs.mode != 'dal301-groupby' && inputs.mode != 'dal316-side-bias' && inputs.mode != 'dal316-installed-pairs' && (github.event_name == 'workflow_dispatch' || github.event.schedule == '41 4 * * 0')
+    if: inputs.mode != 'dal301-groupby' && inputs.mode != 'dal316-side-bias' && inputs.mode != 'dal316-installed-pairs' && inputs.mode != 'dal316-three-arm' && (github.event_name == 'workflow_dispatch' || github.event.schedule == '41 4 * * 0')
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
@@ -127,21 +127,29 @@ jobs:
           retention-days: 90
   benchmark:
     name: Complete benchmark suite
-    if: github.event_name == 'workflow_dispatch' && inputs.mode != 'dal301-groupby' && inputs.mode != 'dal316-side-bias' && inputs.mode != 'dal316-installed-pairs'
+    if: github.event_name == 'workflow_dispatch' && inputs.mode != 'dal301-groupby' && inputs.mode != 'dal316-side-bias' && inputs.mode != 'dal316-installed-pairs' && inputs.mode != 'dal316-three-arm'
     uses: ./.github/workflows/benchmark-suite.yml
   dal316-side-bias:
-    if: github.event_name == 'workflow_dispatch' && (inputs.mode == 'dal316-side-bias' || inputs.mode == 'dal316-installed-pairs')
+    if: github.event_name == 'workflow_dispatch' && (inputs.mode == 'dal316-side-bias' || inputs.mode == 'dal316-installed-pairs' || inputs.mode == 'dal316-three-arm')
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ inputs.mode == 'dal316-installed-pairs' && 180 || 30 }}
+    timeout-minutes: ${{ (inputs.mode == 'dal316-installed-pairs' || inputs.mode == 'dal316-three-arm') && 180 || 30 }}
     permissions:
       actions: read
       contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Check out sealed baseline source for native injection
+        if: inputs.mode == 'dal316-three-arm'
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: 508fd9fe702a809e22ce37bbfe3b134fb28db626
+          path: target/bench316-base-source
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: 3.13.15
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
+        if: inputs.mode == 'dal316-three-arm'
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: benchmark-release-baseline-36035893209-1
@@ -149,6 +157,7 @@ jobs:
           github-token: ${{ github.token }}
           path: target/bench316-releases/baseline
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: inputs.mode != 'dal316-three-arm'
         with:
           name: benchmark-release-candidate-36035893209-1
           run-id: 36035893209
@@ -180,16 +189,43 @@ jobs:
           --report target/bench316-results/report.json
           --baseline target/bench316-releases/baseline/release.json
           --candidate target/bench316-releases/candidate/release.json
+      - name: Pre-register three-arm schedule
+        if: inputs.mode == 'dal316-three-arm'
+        run: >-
+          target/bench316-venv/bin/python -m scripts.benchmark_suite.three_arm_qualification
+          plan --baseline target/bench316-releases/baseline/release.json
+          --output target/bench316-results
+      - name: Build Python hot-path wheel
+        if: inputs.mode == 'dal316-three-arm'
+        run: >-
+          target/bench316-venv/bin/python -m scripts.benchmark_suite.three_arm_qualification
+          python --baseline target/bench316-releases/baseline/release.json
+          --output target/bench316-results
+      - name: Build native hot-path wheel
+        if: inputs.mode == 'dal316-three-arm'
+        run: >-
+          target/bench316-venv/bin/python -m scripts.benchmark_suite.three_arm_qualification
+          native --baseline target/bench316-releases/baseline/release.json
+          --source target/bench316-base-source --output target/bench316-results
+      - name: Collect three-arm installed pairs
+        if: inputs.mode == 'dal316-three-arm'
+        run: >-
+          target/bench316-venv/bin/python -m scripts.benchmark_suite.three_arm_qualification
+          collect --baseline target/bench316-releases/baseline/release.json
+          --output target/bench316-results
+      - name: Validate three-arm evidence
+        if: inputs.mode == 'dal316-three-arm'
+        run: >-
+          target/bench316-venv/bin/python -m scripts.benchmark_suite.three_arm_qualification
+          validate --baseline target/bench316-releases/baseline/release.json
+          --output target/bench316-results
       - name: Retain focused diagnostic evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ inputs.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            target/bench316-results/*.json
-            target/bench316-results/**/stderr.log
-            target/bench316-results/**/install-*.log
-            target/bench316-results/**/install-*.command.json
+            target/bench316-results/
           if-no-files-found: warn
           retention-days: 30
   dal301-profile-build:

@@ -39,7 +39,9 @@ def fixture(*, slowdown: float = 0.0, source: str = "none") -> dict:
     }
     for release in releases.values():
         release["package_files"] = {
+            "calc_flow/__init__.py": release["wheel_sha256"],
             "calc_flow/_native.abi3.so": release["native_sha256"],
+            "calc_flow/pipeline.py": release["wheel_sha256"],
             "calc_flow/runtime.py": release["wheel_sha256"],
         }
     blocks = []
@@ -57,7 +59,9 @@ def fixture(*, slowdown: float = 0.0, source: str = "none") -> dict:
                 seconds = base_seconds if side == "baseline" else candidate_seconds
                 site = slots[slot]
                 files = {
+                    "calc_flow/__init__.py": releases[side]["wheel_sha256"],
                     "calc_flow/_native.abi3.so": releases[side]["native_sha256"],
+                    "calc_flow/pipeline.py": releases[side]["wheel_sha256"],
                     "calc_flow/runtime.py": releases[side]["wheel_sha256"],
                 }
                 sides[side] = {
@@ -94,6 +98,32 @@ def fixture(*, slowdown: float = 0.0, source: str = "none") -> dict:
                     ],
                     "worker_pid": identity + 2000,
                     "environment": {"machine": "same"},
+                    "loaded_modules": {
+                        module: {"path": f"{site}/{path}", "sha256": files[path]}
+                        for module, path in (
+                            ("calc_flow", "calc_flow/__init__.py"),
+                            ("calc_flow.runtime", "calc_flow/runtime.py"),
+                            ("calc_flow.pipeline", "calc_flow/pipeline.py"),
+                            ("calc_flow._native", "calc_flow/_native.abi3.so"),
+                        )
+                    },
+                    "phase_ns": {
+                        phase: {
+                            "started_ns": identity * 1_000_000 + offset * 10_000,
+                            "finished_ns": identity * 1_000_000 + (offset + 1) * 10_000,
+                        }
+                        for offset, phase in enumerate(
+                            (
+                                "install",
+                                "fingerprint",
+                                "worker_start",
+                                "hello",
+                                "prepare_warmup",
+                                "replay",
+                                "formal",
+                            )
+                        )
+                    },
                     "warmup": {"seconds": 0.1, "correctness": {"passed": True}},
                     "replay": [
                         {
@@ -140,8 +170,8 @@ class InstalledPairPrototypeTests(unittest.TestCase):
             "  dal301-profile-build:\n", 1
         )[0]
         self.assertIn(
-            "timeout-minutes: ${{ inputs.mode == 'dal316-installed-pairs' "
-            "&& 180 || 30 }}",
+            "inputs.mode == 'dal316-installed-pairs' || "
+            "inputs.mode == 'dal316-three-arm'",
             job,
         )
 
@@ -258,6 +288,11 @@ class InstalledPairPrototypeTests(unittest.TestCase):
             json.dumps(changed_tree["files"], sort_keys=True).encode()
         ).hexdigest()
         mutations.append(changed_python)
+        wrong_loaded_python = copy.deepcopy(original)
+        wrong_loaded_python["blocks"][0][0]["sides"]["candidate"]["loaded_modules"][
+            "calc_flow.runtime"
+        ]["path"] = "/other/runtime.py"
+        mutations.append(wrong_loaded_python)
         for index, report in enumerate(mutations):
             with self.subTest(mutation=index), self.assertRaises(ValueError):
                 validate_report(report)
@@ -352,6 +387,8 @@ class InstalledPairCollectionTests(unittest.IsolatedAsyncioTestCase):
                             "correctness": {"passed": True},
                             "start_row": None,
                         }
+                    if operation == "provenance":
+                        return {"calc_flow.runtime": {"path": "/test/runtime.py"}}
                     return {"state": "completed"}
 
                 async def close(self):
@@ -395,6 +432,7 @@ class InstalledPairCollectionTests(unittest.IsolatedAsyncioTestCase):
                 [
                     "hello",
                     "prepare",
+                    "provenance",
                     "sample",
                     "sample",
                     "sample",
@@ -405,6 +443,8 @@ class InstalledPairCollectionTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(len(evidence["replay"]), 3)
             self.assertEqual(evidence["sample"]["seconds"], 1.0)
+            self.assertIn("install", evidence["phase_ns"])
+            self.assertIn("formal", evidence["phase_ns"])
 
 
 if __name__ == "__main__":

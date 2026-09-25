@@ -6,10 +6,25 @@ from pathlib import Path
 from types import ModuleType
 from unittest.mock import Mock, patch
 
-from scripts.benchmark_suite.worker import dispatch
+from scripts.benchmark_suite.worker import dispatch, module_provenance
 
 
 class BenchmarkWorkerTests(unittest.TestCase):
+    def test_module_provenance_uses_loaded_file_paths_and_hashes(self):
+        import hashlib
+
+        module = ModuleType("calc_flow.runtime")
+        path = self.root / "runtime.py"
+        path.write_bytes(b"loaded")
+        module.__file__ = str(path)
+        with patch.dict("sys.modules", {"calc_flow.runtime": module}):
+            observed = module_provenance(("calc_flow.runtime",))
+        self.assertEqual(observed["calc_flow.runtime"]["path"], str(path))
+        self.assertEqual(
+            observed["calc_flow.runtime"]["sha256"],
+            hashlib.sha256(b"loaded").hexdigest(),
+        )
+
     def setUp(self):
         engine = ModuleType("benchmarks.engine_comparison")
         self.factory = Mock()

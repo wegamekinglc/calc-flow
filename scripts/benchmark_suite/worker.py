@@ -3,11 +3,34 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import sys
 from importlib.metadata import version
 from pathlib import Path
+
+
+def module_provenance(
+    names: tuple[str, ...] = (
+        "calc_flow",
+        "calc_flow.runtime",
+        "calc_flow.pipeline",
+        "calc_flow._native",
+    ),
+) -> dict[str, dict[str, str]]:
+    observed = {}
+    for name in names:
+        module = sys.modules.get(name)
+        if module is None or not getattr(module, "__file__", None):
+            raise ValueError(f"worker did not load {name}")
+        path = Path(module.__file__).resolve()
+        digest = hashlib.sha256()
+        with path.open("rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+        observed[name] = {"path": str(path), "sha256": digest.hexdigest()}
+    return observed
 
 
 def environment(scope: str = "all") -> dict:
@@ -118,7 +141,7 @@ def finish_case(active) -> dict:
 
 
 def _require_prepared(operation: str, active) -> None:
-    if operation in ("sample", "finish") and active is None:
+    if operation in ("sample", "finish", "provenance") and active is None:
         raise ValueError("no active benchmark; prepare a case first")
 
 
@@ -134,6 +157,8 @@ def dispatch(message: dict, active, root: Path):
             return prepare_case(message["case"], root)
         case "sample":
             return active.sample(), active
+        case "provenance":
+            return module_provenance(), active
         case "finish":
             return finish_case(active), None
         case _:
