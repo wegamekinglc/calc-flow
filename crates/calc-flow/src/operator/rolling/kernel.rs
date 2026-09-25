@@ -1337,8 +1337,13 @@ fn compile_typed_group(
             frame,
         } => compile_pair_group(input_schema, *left_index, *right_index, *frame),
         CompiledWindowGroup::Ewma {
-            input_index, alpha, ..
+            input_index,
+            alpha,
+            span,
         } => {
+            if *span == 0 {
+                return Err("cumulative means use the stateful scalar transition".into());
+            }
             require_numeric_type(input_schema, *input_index)?;
             Ok(TypedGroupPlan::Ewma {
                 input_index: *input_index,
@@ -2343,7 +2348,7 @@ impl TypedEwmaState {
         let Some(sample) = sample else {
             return Ok(());
         };
-        self.value = if self.valid_count == 0 {
+        self.value = if self.valid_count == 0 || self.alpha.to_bits() == 1.0_f64.to_bits() {
             sample
         } else {
             self.value + self.alpha * (sample - self.value)

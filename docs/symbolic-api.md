@@ -194,8 +194,10 @@ topology, and fingerprint validation. No data object, source, sink, or runner
 is accepted, and no symbolic Python runs while a compiled plan executes.
 
 Row-local declarations — literals, fields, arithmetic, comparison, boolean
-composition, `where`, `coalesce`, `log`/`exp`/`sqrt`/`abs`/`clip`/`cast`, and
-the `table.project`/`table.filter`/`with_columns` table operations — fuse into
+composition, `where`, `coalesce`, `log`/`exp`/`sqrt`/`abs`/`clip`/`cast`,
+`sign`/`isnan`/`maximum`/`minimum`/`pow`, inverse trigonometric functions,
+`norminv`, `ceil`/`floor`/`round`, and the
+`table.project`/`table.filter`/`with_columns` table operations — fuse into
 one `expression` node per program output; a `where`/filter predicate becomes
 the node's `WHERE` clause. Structurally identical non-trivial subexpressions
 referenced at least twice are computed exactly once: they materialize as
@@ -210,6 +212,11 @@ preserves its floating input type. Lowering inserts explicit conversions for
 `float32` expressions so native results match the analyzed schema, including
 at an event-window boundary. Unsigned column negation is rejected during
 analysis; use `row.cast` to select a supported signed or floating type first.
+`row.maximum` and `row.minimum` skip null and NaN operands and return
+`float64`; `row.isnan` distinguishes NaN from Arrow null. `row.norminv`
+approximates the standard normal quantile for probabilities strictly between
+zero and one and returns null outside that interval. Inverse trigonometric,
+`ceil`, `floor`, and `round` inputs are promoted to `float64`.
 
 Optimization runs over the complete program after analysis. Identical,
 connected pure expression materializations are emitted once and fan out to
@@ -541,9 +548,12 @@ float64 path when x64 is disabled and accepts it when `JAX_ENABLE_X64=true`.
 Runtime-dependent schema, null, weight backend/shape, and output row-count
 checks happen before attachment and report the failing provider field.
 
-`ts.lag`, `ts.delta`, `ts.ewma` (with identity alias `ts.ema`), and the
+`ts.lag`, `ts.delta`, `ts.ewma` (with identity alias `ts.ema`), `ts.last`,
+`ts.average`, and the
 rolling aggregates `ts.count`, `ts.sum`, `ts.mean`, `ts.min`, `ts.max`,
-`ts.variance`, `ts.stddev`, `ts.covariance`, and `ts.correlation` lower to one
+`ts.variance`, `ts.stddev`, `ts.covariance`, `ts.correlation`, `ts.argmax`,
+`ts.argmin`, `ts.rank`, `ts.quantile`, `ts.unique_count`, and `ts.decay`
+lower to one
 or more native `rolling` stages per program output, placed ahead of the fused
 row-local stages. Rolling requires the input table to declare its `entity_by`,
 `event_time`, and `sequence_by` ordering keys, with non-null
@@ -588,6 +598,21 @@ IEEE arithmetic. The result is nullable `float64`. `ts.macd` defaults to
 `fast_span=12` and `slow_span=26`, requires the fast span to be smaller, and
 is only the row-local difference of those two EWMA declarations, so ordinary
 CSE and native state sharing apply.
+`ts.last(value)` is `ts.ewma(value, span=1)` and keeps the latest valid numeric
+value. `ts.average(value)` keeps a cumulative valid count and arithmetic mean
+per entity without retaining every historical row. Both use declaration state
+layout 2. `ts.argmax`/`ts.argmin` return the number of row positions since the
+oldest frame extremum; `ts.rank` returns the current value's zero-based
+ascending rank with ties taking the first rank. `ts.quantile` divides that
+rank by `valid_count - 1` and returns null for a singleton or invalid current
+value. `ts.unique_count` counts distinct valid samples. `ts.decay` applies
+linearly increasing weights to valid samples, with the newest weighted
+highest. The scans treat `-0.0` and `+0.0` as equal for ranking, ties, and
+distinct counts. They use the retained row history and remain correct
+across input batches and checkpoints. `ts.all_true` and `ts.any_true` reduce
+valid truth values over a frame. `ts.count_positive` and `ts.mean_positive`
+ignore null and NaN, return zero when a frame has valid nonpositive values but
+no positive values, and return null below `min_periods` valid input samples.
 
 A filter declared below every rolling feature becomes a deterministic
 `<output>__cf_prefilter` expression node feeding the rolling node; a filter
@@ -603,13 +628,14 @@ rejection and `drop` to a metrics-recorded drop — and the
 referenced value. Batch lowering writes the default lateness values, batch
 evaluation classifies no late rows. Cross-section stages consume the same
 options; event-window programs apply the option checks described above.
-Non-EWMA declarations
-use `state_layout_version` 1; a declaration containing EWMA uses version 2.
+Declarations without EWMA or cumulative mean use `state_layout_version` 1;
+either recurrence kind requires version 2.
 The native checkpoint writer uses columnar layout 3 and persists exponential
 accumulators exactly; see [native rolling state](symbolic-design.md#native-rolling-state).
 
-`cs.rank`, `cs.percentile`, `cs.demean`, `cs.zscore`, `cs.winsorize`,
-`cs.top`, `cs.bottom`, and `cs.mean_fill` lower to one shared native
+`cs.rank`, `cs.percentile`, `cs.demean`, `cs.mean`, `cs.zscore`, `cs.winsorize`,
+`cs.top`, `cs.bottom`, `cs.top_quantile`, `cs.bottom_quantile`, and
+`cs.mean_fill` lower to one shared native
 `cross_section` node per compatible grouping, placed ahead of the fused
 row-local stages. The measured value may be a source column, alias, row-local
 expression, or rolling result; row-local values materialize once immediately
@@ -624,7 +650,8 @@ the same partition columns and the same grouping shape — exact time, or one
 bucket width — or compilation fails with `schema_mismatch` rooted at the
 output. `rank` and `percentile` carry `direction` (default `ascending`),
 `tie_method` (default `average`), and `null_placement` (default `exclude`);
-every primitive carries `min_samples` (default `1`), and `zscore` adds `ddof`
+every primitive carries `min_samples` (default `1`, except `residual` defaults
+to `2`), and `zscore` adds `ddof`
 of `0` or `1` (default `0`). `winsorize` requires finite `lower`/`upper`
 probabilities with `0 <= lower <= upper <= 1`. `top` and `bottom` require a
 positive `count`, default `include_ties` to true, and return nullable boolean
@@ -638,9 +665,17 @@ materializes as a deterministically named `<output>__cf_cs_<index>` column,
 and a filter below every cross-section feature becomes the shared
 `<output>__cf_prefilter` node. Rank, percentile, demean, and z-score are
 nullable float64; winsorize and mean-fill preserve float32/float64; top/bottom
-are nullable boolean. The engine evaluates the frozen complete-group semantics
-described in the [Rust runtime reference](rust-api.md). The lowered node's frozen
-spec carries `configuration_version` and `state_layout_version` 1, the
+are nullable boolean. `cs.mean` broadcasts the valid-sample mean to every
+group row. The quantile selection masks include rows whose average rank,
+divided by the valid group size, does not exceed the declared fraction.
+`cs.residual(dependent, independent, group=...)` uses a two-pass,
+pairwise-valid ordinary least-squares fit with an intercept; centering avoids
+large-offset variance cancellation, and extreme values use a scaled fit when
+centered statistics overflow or underflow. It returns null for missing
+operands or a constant independent sample. The engine evaluates the frozen
+complete-group semantics described in the [Rust runtime reference](rust-api.md).
+The lowered node's frozen spec carries `configuration_version` and
+`state_layout_version` 1, the
 declared ordering and partition keys, the shared grouping, one entry per
 output, the `allowed_lateness_micros` and `late_policy` values validated by
 `compile_stream`, and the `nan_exclude_preserve_v1` value policy.

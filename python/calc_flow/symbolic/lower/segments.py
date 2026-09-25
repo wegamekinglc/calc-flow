@@ -77,11 +77,18 @@ _ROLLING_PRIMITIVES: Final = frozenset(
         "lag",
         "delta",
         "ewma",
+        "cumulative_mean",
         "count",
         "sum",
         "mean",
         "min",
         "max",
+        "argmax",
+        "argmin",
+        "rolling_rank",
+        "rolling_quantile",
+        "unique_count",
+        "decay",
         "variance",
         "stddev",
         "covariance",
@@ -100,10 +107,14 @@ _CROSS_SECTION_PRIMITIVES: Final = frozenset(
         "rank",
         "percentile",
         "demean",
+        "cross_mean",
+        "residual",
         "zscore",
         "winsorize",
         "top",
         "bottom",
+        "top_quantile",
+        "bottom_quantile",
         "mean_fill",
     }
 )
@@ -129,7 +140,20 @@ _BINARY_SQL: Final = {
     "or": "OR",
 }
 
-_FUNCTION_SQL: Final = {"log": "ln", "exp": "exp", "sqrt": "sqrt", "abs": "abs"}
+_FUNCTION_SQL: Final = {
+    "log": "ln",
+    "exp": "exp",
+    "sqrt": "sqrt",
+    "abs": "abs",
+    "acos": "acos",
+    "acosh": "acosh",
+    "asin": "asin",
+    "asinh": "asinh",
+    "ceil": "ceil",
+    "floor": "floor",
+    "round": "round",
+    "isnan": "isnan",
+}
 
 _CAST_TYPES: Final = {
     "bool": "BOOLEAN",
@@ -408,6 +432,8 @@ def _sql(node: Node, /) -> str:
         )
     if name == "coalesce":
         return "COALESCE(" + ", ".join(_sql(argument) for argument in node.args) + ")"
+    if name == "power":
+        return f"power({_sql(node.args[0])}, {_sql(node.args[1])})"
     if name in _FUNCTION_SQL:
         return f"{_FUNCTION_SQL[name]}({_sql(node.args[0])})"
     if name == "clip":
@@ -861,7 +887,7 @@ def _fused_float_leaf(
 
 
 def _rolling_declaration_requires_ewma(declaration: dict[str, object], /) -> bool:
-    if declaration["kind"] == "ewma":
+    if declaration["kind"] in ("ewma", "cumulative_mean"):
         return True
     if declaration["kind"] != "difference":
         return False

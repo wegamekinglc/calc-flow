@@ -34,6 +34,7 @@ historical samples.
 | `requirements.lock`                                | Hash-pinned shared Linux benchmark dependencies                  |
 | `array_support.py`, `test_array_*.py`              | Array API kernel, provider, plan, and ownership scopes           |
 | `symbolic_support.py`, `test_symbolic_baseline.py` | Symbolic baselines, milestone pairs, and stream lifecycle        |
+| `test_stream_operators.py`                         | End-to-end coverage of principal native stream operators         |
 | `test_datafusion.py`, `test_runtime.py`            | DataFusion operator scenarios and graph fan-out                  |
 | `test_rolling_kernel.py`                           | Paired rolling-kernel gate against a DataFusion window reference |
 | `rolling_indicator_comparison.py`                  | Standalone cross-library rolling comparison driver               |
@@ -51,6 +52,25 @@ CALC_FLOW_BENCHMARK_SCALE=overhead \
   uv run pytest benchmarks --benchmark-only \
   --benchmark-json=target/benchmark-results/overhead.json
 ```
+
+Run only the streaming operator examples with the same scheduled collector:
+
+```bash
+CALC_FLOW_BENCHMARK_SCALE=overhead JAX_PLATFORMS=cpu \
+  uv run --extra benchmark pytest benchmarks/test_stream_operators.py \
+  --benchmark-only
+```
+
+The nine cases cover expression, SQL, rolling state, 64- and 256-row rolling
+scans, cross section, tumbling aggregation, bounded stream join, and backward
+ASOF join. The Rust `stream_union` Criterion target measures native Union
+forwarding, which has no symbolic Python declaration. The Python cases time a
+fresh `Program.stream` lifecycle through Arrow output; source tables and batch
+splits are prepared before timing. They use 16 entities and 640-row batches,
+with input capped at 20,000 rows to keep the scheduled suite bounded. The
+Python Join and ASOF examples have 3,200- and 1,920-row caps; the engine
+matrix and dedicated Rust targets measure larger join workloads. Actual input
+and output row counts are recorded with each result.
 
 Standalone scales (`nightly` is manual-only, not a CI suite shard):
 

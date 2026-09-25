@@ -41,6 +41,10 @@ name = "core"
 harness = false
 
 [[bench]]
+name = "stream_union"
+harness = false
+
+[[bench]]
 name = "allocation_regression"
 harness = false
 

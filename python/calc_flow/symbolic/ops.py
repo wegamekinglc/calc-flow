@@ -160,6 +160,13 @@ def _enum_value(
     return CEnum(family, value)
 
 
+def _horner(value: ColumnExpr, coefficients: tuple[float, ...], /) -> ColumnExpr:
+    result = row.cast(coefficients[0], "float64")
+    for coefficient in coefficients[1:]:
+        result = result * value + coefficient
+    return result
+
+
 class RowNamespace:
     """Row-local expressions over column operands."""
 
@@ -235,6 +242,170 @@ class RowNamespace:
                 (_column_operand(value, "row.abs", "value"),),
                 {},
             )
+        )
+
+    def sign(self, value: object, /) -> ColumnExpr:
+        """Return -1, 0, or 1 for a valid numeric value."""
+
+        numeric = self.cast(
+            ColumnExpr(_column_operand(value, "row.sign", "value")), "float64"
+        )
+        signed = self.where(
+            numeric > 0.0,
+            1.0,
+            self.where(numeric < 0.0, -1.0, 0.0),
+        )
+        valid = (numeric == numeric) & ~self.isnan(numeric)
+        return self.where(valid, signed, self.cast(None, "float64"))
+
+    def isnan(self, value: object, /) -> ColumnExpr:
+        """Test whether a numeric value is NaN, preserving Arrow nulls."""
+
+        numeric = self.cast(
+            ColumnExpr(_column_operand(value, "row.isnan", "value")), "float64"
+        )
+        return ColumnExpr(build("isnan", (numeric._node,), {}))
+
+    def maximum(self, left: object, right: object, /) -> ColumnExpr:
+        """Choose the larger value, accepting a valid value on either side."""
+
+        first = self.cast(
+            ColumnExpr(_column_operand(left, "row.maximum", "left")), "float64"
+        )
+        second = self.cast(
+            ColumnExpr(_column_operand(right, "row.maximum", "right")), "float64"
+        )
+        first = self.where(self.isnan(first), self.cast(None, "float64"), first)
+        second = self.where(self.isnan(second), self.cast(None, "float64"), second)
+        return self.where(first >= second, first, self.coalesce(second, first))
+
+    def minimum(self, left: object, right: object, /) -> ColumnExpr:
+        """Choose the smaller value, accepting a valid value on either side."""
+
+        first = self.cast(
+            ColumnExpr(_column_operand(left, "row.minimum", "left")), "float64"
+        )
+        second = self.cast(
+            ColumnExpr(_column_operand(right, "row.minimum", "right")), "float64"
+        )
+        first = self.where(self.isnan(first), self.cast(None, "float64"), first)
+        second = self.where(self.isnan(second), self.cast(None, "float64"), second)
+        return self.where(first <= second, first, self.coalesce(second, first))
+
+    def pow(self, value: object, exponent: object, /) -> ColumnExpr:
+        """Raise a floating value to a floating exponent."""
+
+        return ColumnExpr(
+            build(
+                "power",
+                (
+                    self.cast(
+                        ColumnExpr(_column_operand(value, "row.pow", "value")),
+                        "float64",
+                    )._node,
+                    self.cast(
+                        ColumnExpr(_column_operand(exponent, "row.pow", "exponent")),
+                        "float64",
+                    )._node,
+                ),
+                {},
+            )
+        )
+
+    def _float_unary(self, kind: str, value: object) -> ColumnExpr:
+        numeric = self.cast(
+            ColumnExpr(_column_operand(value, f"row.{kind}", "value")), "float64"
+        )
+        return ColumnExpr(build(kind, (numeric._node,), {}))
+
+    def acos(self, value: object, /) -> ColumnExpr:
+        return self._float_unary("acos", value)
+
+    def acosh(self, value: object, /) -> ColumnExpr:
+        return self._float_unary("acosh", value)
+
+    def asin(self, value: object, /) -> ColumnExpr:
+        return self._float_unary("asin", value)
+
+    def asinh(self, value: object, /) -> ColumnExpr:
+        return self._float_unary("asinh", value)
+
+    def ceil(self, value: object, /) -> ColumnExpr:
+        return self._float_unary("ceil", value)
+
+    def floor(self, value: object, /) -> ColumnExpr:
+        return self._float_unary("floor", value)
+
+    def round(self, value: object, /) -> ColumnExpr:
+        return self._float_unary("round", value)
+
+    def norminv(self, value: object, /) -> ColumnExpr:
+        """Approximate the standard normal quantile on the open unit interval."""
+
+        probability = self.cast(
+            ColumnExpr(_column_operand(value, "row.norminv", "value")), "float64"
+        )
+        lower_tail = self.sqrt(-2.0 * self.log(probability))
+        upper_tail = self.sqrt(-2.0 * self.log(1.0 - probability))
+        tail_numerator = (
+            -0.007784894002430293,
+            -0.3223964580411365,
+            -2.400758277161838,
+            -2.549732539343734,
+            4.374664141464968,
+            2.938163982698783,
+        )
+        tail_denominator = (
+            0.007784695709041462,
+            0.3224671290700398,
+            2.445134137142996,
+            3.754408661907416,
+        )
+        lower = _horner(lower_tail, tail_numerator) / (
+            _horner(lower_tail, tail_denominator) * lower_tail + 1.0
+        )
+        upper = -_horner(upper_tail, tail_numerator) / (
+            _horner(upper_tail, tail_denominator) * upper_tail + 1.0
+        )
+        q = probability - 0.5
+        r = q * q
+        middle = (
+            _horner(
+                r,
+                (
+                    -39.69683028665376,
+                    220.9460984245205,
+                    -275.9285104469687,
+                    138.3577518672690,
+                    -30.66479806614716,
+                    2.506628277459239,
+                ),
+            )
+            * q
+            / (
+                _horner(
+                    r,
+                    (
+                        -54.47609879822406,
+                        161.5858368580409,
+                        -155.6989798598866,
+                        66.80131188771972,
+                        -13.28068155288572,
+                    ),
+                )
+                * r
+                + 1.0
+            )
+        )
+        estimate = self.where(
+            probability < 0.02425,
+            lower,
+            self.where(probability > 0.97575, upper, middle),
+        )
+        return self.where(
+            (probability > 0.0) & (probability < 1.0),
+            estimate,
+            self.cast(None, "float64"),
         )
 
     def clip(
@@ -359,6 +530,29 @@ class TsNamespace:
 
         return self.ewma(value, span=span, min_periods=min_periods)
 
+    def average(self, value: ColumnExpr, /, *, min_periods: int = 1) -> ColumnExpr:
+        """Arithmetic mean of every valid sample seen for each entity."""
+
+        function = "ts.average"
+        return ColumnExpr(
+            build(
+                "cumulative_mean",
+                (_column(value, function, "value")._node,),
+                {
+                    "min_periods": CInt(
+                        require_positive_int(
+                            min_periods, f"calc_flow.symbolic.{function}.min_periods"
+                        )
+                    )
+                },
+            )
+        )
+
+    def last(self, value: ColumnExpr, /) -> ColumnExpr:
+        """Latest valid numeric sample for each entity."""
+
+        return self.ewma(_column(value, "ts.last", "value"), span=1)
+
     def macd(
         self,
         value: ColumnExpr,
@@ -445,6 +639,91 @@ class TsNamespace:
     ) -> ColumnExpr:
         return self._rolling("count", value, window, min_periods)
 
+    def count_positive(
+        self,
+        value: ColumnExpr,
+        /,
+        *,
+        window: RowFrame | DurationFrame,
+        min_periods: int = 1,
+    ) -> ColumnExpr:
+        """Count positive samples, returning zero for valid nonpositive frames."""
+
+        column = row.cast(_column(value, "ts.count_positive", "value"), "float64")
+        valid = (column == column) & ~row.isnan(column)
+        indicator = row.where(
+            valid, row.cast(column > 0.0, "int64"), row.cast(None, "int64")
+        )
+        return self.sum(indicator, window=window, min_periods=min_periods)
+
+    def mean_positive(
+        self,
+        value: ColumnExpr,
+        /,
+        *,
+        window: RowFrame | DurationFrame,
+        min_periods: int = 1,
+    ) -> ColumnExpr:
+        """Average positive samples, returning zero when none are positive."""
+
+        column = row.cast(_column(value, "ts.mean_positive", "value"), "float64")
+        valid = (column == column) & ~row.isnan(column)
+        contribution = row.where(
+            valid,
+            row.where(column > 0.0, column, 0.0),
+            row.cast(None, "float64"),
+        )
+        positive_count = self.count_positive(
+            value, window=window, min_periods=min_periods
+        )
+        positive_sum = self.sum(contribution, window=window, min_periods=min_periods)
+        zero = row.where(
+            positive_count == positive_count, 0.0, row.cast(None, "float64")
+        )
+        return row.where(
+            positive_count > 0,
+            positive_sum / row.cast(positive_count, "float64"),
+            zero,
+        )
+
+    def all_true(
+        self,
+        value: ColumnExpr,
+        /,
+        *,
+        window: RowFrame | DurationFrame,
+        min_periods: int = 1,
+    ) -> ColumnExpr:
+        """Require every valid sample in the frame to be truthy."""
+
+        column = _column(value, "ts.all_true", "value")
+        truthy = row.where(
+            row.isnan(column), row.cast(None, "bool"), row.cast(column, "bool")
+        )
+        numeric = row.cast(truthy, "int64")
+        true_count = row.cast(
+            self.sum(numeric, window=window, min_periods=min_periods), "uint64"
+        )
+        valid_count = self.count(numeric, window=window, min_periods=min_periods)
+        return true_count == valid_count
+
+    def any_true(
+        self,
+        value: ColumnExpr,
+        /,
+        *,
+        window: RowFrame | DurationFrame,
+        min_periods: int = 1,
+    ) -> ColumnExpr:
+        """Report whether at least one valid sample in the frame is truthy."""
+
+        column = _column(value, "ts.any_true", "value")
+        truthy = row.where(
+            row.isnan(column), row.cast(None, "bool"), row.cast(column, "bool")
+        )
+        numeric = row.cast(truthy, "int64")
+        return self.sum(numeric, window=window, min_periods=min_periods) > 0
+
     def sum(
         self,
         value: ColumnExpr,
@@ -484,6 +763,78 @@ class TsNamespace:
         min_periods: int = 1,
     ) -> ColumnExpr:
         return self._rolling("max", value, window, min_periods)
+
+    def argmax(
+        self,
+        value: ColumnExpr,
+        /,
+        *,
+        window: RowFrame | DurationFrame,
+        min_periods: int = 1,
+    ) -> ColumnExpr:
+        """Age in rows of the oldest maximum in the frame."""
+
+        return self._rolling("argmax", value, window, min_periods)
+
+    def argmin(
+        self,
+        value: ColumnExpr,
+        /,
+        *,
+        window: RowFrame | DurationFrame,
+        min_periods: int = 1,
+    ) -> ColumnExpr:
+        """Age in rows of the oldest minimum in the frame."""
+
+        return self._rolling("argmin", value, window, min_periods)
+
+    def rank(
+        self,
+        value: ColumnExpr,
+        /,
+        *,
+        window: RowFrame | DurationFrame,
+        min_periods: int = 1,
+    ) -> ColumnExpr:
+        """Zero-based ascending rank of the current valid value."""
+
+        return self._rolling("rolling_rank", value, window, min_periods)
+
+    def quantile(
+        self,
+        value: ColumnExpr,
+        /,
+        *,
+        window: RowFrame | DurationFrame,
+        min_periods: int = 1,
+    ) -> ColumnExpr:
+        """Current value's rank divided by valid sample count minus one."""
+
+        return self._rolling("rolling_quantile", value, window, min_periods)
+
+    def unique_count(
+        self,
+        value: ColumnExpr,
+        /,
+        *,
+        window: RowFrame | DurationFrame,
+        min_periods: int = 1,
+    ) -> ColumnExpr:
+        """Count distinct valid values in the frame."""
+
+        return self._rolling("unique_count", value, window, min_periods)
+
+    def decay(
+        self,
+        value: ColumnExpr,
+        /,
+        *,
+        window: RowFrame | DurationFrame,
+        min_periods: int = 1,
+    ) -> ColumnExpr:
+        """Linearly weighted mean with the newest sample weighted highest."""
+
+        return self._rolling("decay", value, window, min_periods)
 
     def variance(
         self,
@@ -709,6 +1060,64 @@ class CsNamespace:
             )
         )
 
+    def mean(
+        self,
+        value: ColumnExpr,
+        /,
+        *,
+        group: CrossSectionGroup,
+        min_samples: int = 1,
+    ) -> ColumnExpr:
+        """Repeat the complete group's valid-sample mean for every member."""
+
+        function = "cs.mean"
+        validated = self._group(group, function)
+        return ColumnExpr(
+            build(
+                "cross_mean",
+                (
+                    _column(value, function, "value")._node,
+                    *self._group_args(validated),
+                ),
+                {
+                    "grouping": self._grouping(validated),
+                    "min_samples": CInt(_min_samples(min_samples, function)),
+                },
+            )
+        )
+
+    def residual(
+        self,
+        dependent: ColumnExpr,
+        independent: ColumnExpr,
+        /,
+        *,
+        group: CrossSectionGroup,
+        min_samples: int = 2,
+    ) -> ColumnExpr:
+        """Residual from an ordinary least-squares line within each group.
+
+        Only rows with both numeric operands contribute to the fitted line.
+        A constant independent sample produces null residuals.
+        """
+
+        function = "cs.residual"
+        validated = self._group(group, function)
+        return ColumnExpr(
+            build(
+                "residual",
+                (
+                    _column(dependent, function, "dependent")._node,
+                    _column(independent, function, "independent")._node,
+                    *self._group_args(validated),
+                ),
+                {
+                    "grouping": self._grouping(validated),
+                    "min_samples": CInt(_min_samples(min_samples, function)),
+                },
+            )
+        )
+
     def zscore(
         self,
         value: ColumnExpr,
@@ -833,6 +1242,68 @@ class CsNamespace:
         """Select the smallest valid values in each complete group."""
 
         return self._selection("bottom", value, group, count, include_ties, min_samples)
+
+    def _quantile_selection(
+        self,
+        kind: Literal["top_quantile", "bottom_quantile"],
+        value: ColumnExpr,
+        group: CrossSectionGroup,
+        fraction: float,
+        min_samples: int,
+        /,
+    ) -> ColumnExpr:
+        function = f"cs.{kind}"
+        validated = self._group(group, function)
+        threshold = _finite_bound(fraction, function, "fraction")
+        if not 0 <= threshold <= 1:
+            raise ValueError(
+                f"calc_flow.symbolic.{function}.fraction: invalid_literal:"
+                " fraction must be between 0 and 1"
+            )
+        return ColumnExpr(
+            build(
+                kind,
+                (
+                    _column(value, function, "value")._node,
+                    *self._group_args(validated),
+                ),
+                {
+                    "grouping": self._grouping(validated),
+                    "fraction": _number_value(threshold),
+                    "min_samples": CInt(_min_samples(min_samples, function)),
+                },
+            )
+        )
+
+    def top_quantile(
+        self,
+        value: ColumnExpr,
+        /,
+        *,
+        group: CrossSectionGroup,
+        fraction: float,
+        min_samples: int = 1,
+    ) -> ColumnExpr:
+        """Select by average descending rank divided by valid group size."""
+
+        return self._quantile_selection(
+            "top_quantile", value, group, fraction, min_samples
+        )
+
+    def bottom_quantile(
+        self,
+        value: ColumnExpr,
+        /,
+        *,
+        group: CrossSectionGroup,
+        fraction: float,
+        min_samples: int = 1,
+    ) -> ColumnExpr:
+        """Select by average ascending rank divided by valid group size."""
+
+        return self._quantile_selection(
+            "bottom_quantile", value, group, fraction, min_samples
+        )
 
     def mean_fill(
         self,

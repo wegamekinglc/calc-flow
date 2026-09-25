@@ -320,6 +320,15 @@ _NO_ATTRS: dict[str, PrimitiveSpec] = {
         "truediv",
         "where",
         "abs",
+        "power",
+        "acos",
+        "acosh",
+        "asin",
+        "asinh",
+        "ceil",
+        "floor",
+        "round",
+        "isnan",
     )
 }
 
@@ -389,12 +398,28 @@ _PRIMITIVES: dict[str, PrimitiveSpec] = {
         frozenset({"span", "min_periods"}),
         CMap.from_mapping({"min_periods": CInt(1)}),
     ),
+    "cumulative_mean": PrimitiveSpec(
+        frozenset({"min_periods"}),
+        CMap.from_mapping({"min_periods": CInt(1)}),
+    ),
     **{
         name: PrimitiveSpec(
             frozenset({"frame", "min_periods"}),
             CMap.from_mapping({"min_periods": CInt(1)}),
         )
-        for name in ("count", "sum", "mean", "min", "max")
+        for name in (
+            "count",
+            "sum",
+            "mean",
+            "min",
+            "max",
+            "argmax",
+            "argmin",
+            "rolling_rank",
+            "rolling_quantile",
+            "unique_count",
+            "decay",
+        )
     },
     **{
         name: PrimitiveSpec(
@@ -429,6 +454,14 @@ _PRIMITIVES: dict[str, PrimitiveSpec] = {
         frozenset({"grouping", "min_samples"}),
         CMap.from_mapping({"min_samples": CInt(1)}),
     ),
+    "cross_mean": PrimitiveSpec(
+        frozenset({"grouping", "min_samples"}),
+        CMap.from_mapping({"min_samples": CInt(1)}),
+    ),
+    "residual": PrimitiveSpec(
+        frozenset({"grouping", "min_samples"}),
+        CMap.from_mapping({"min_samples": CInt(2)}),
+    ),
     "zscore": PrimitiveSpec(
         frozenset({"grouping", "min_samples", "ddof"}),
         CMap.from_mapping({"min_samples": CInt(1), "ddof": CInt(0)}),
@@ -443,6 +476,13 @@ _PRIMITIVES: dict[str, PrimitiveSpec] = {
             CMap.from_mapping({"include_ties": CBool(True), "min_samples": CInt(1)}),
         )
         for name in ("top", "bottom")
+    },
+    **{
+        name: PrimitiveSpec(
+            frozenset({"grouping", "fraction", "min_samples"}),
+            CMap.from_mapping({"min_samples": CInt(1)}),
+        )
+        for name in ("top_quantile", "bottom_quantile")
     },
     "mean_fill": PrimitiveSpec(
         frozenset({"grouping", "min_samples"}),
