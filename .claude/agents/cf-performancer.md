@@ -43,7 +43,7 @@ the dominant failure mode and refuse to cry wolf on single-run swings.
   Asia/Shanghai every day and available by manual dispatch. Engine/warm comparisons fail when
   both rounds' paired-median confidence lower bounds exceed +5%. Whole-suite
   pytest/Criterion/Vitest timing deltas remain informational; specialized correctness,
-  allocation, lifecycle, and release gates still apply.
+  allocation, and lifecycle gates still apply.
 - `.github/workflows/benchmarks.yml` owns manually dispatched supplemental
   SQL/DataFusion tuning measurements.
 - Contract-v2 rule: every report records machine, dependency, and workload SHA-256
