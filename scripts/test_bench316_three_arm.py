@@ -90,6 +90,11 @@ class ThreeArmQualificationTests(unittest.TestCase):
         injected = native_injection_source(original)
         self.assertIn("BENCH316_NATIVE_DATA_DELAY_NS", injected)
         self.assertIn("Some(calc_flow::SourceEvent::Data { .. })", injected)
+        hot_path = injected.split("const BENCH316_NATIVE_DATA_DELAY_NS", 1)[1].split(
+            "async fn close", 1
+        )[0]
+        self.assertIn("Duration::from_nanos(BENCH316_NATIVE_DATA_DELAY_NS)", hot_path)
+        self.assertNotIn("std::time::Duration::from_nanos", hot_path)
         self.assertEqual(injected.count("BENCH316_NATIVE_DATA_DELAY_NS"), 2)
 
     def test_python_wheel_repack_seals_changed_file_and_keeps_native(self):

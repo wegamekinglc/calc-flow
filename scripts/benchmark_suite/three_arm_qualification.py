@@ -146,7 +146,7 @@ def native_injection_source(original: str) -> str:
         "        if matches!(&event, Some(calc_flow::SourceEvent::Data { .. })) {\n"
         "            let started = std::time::Instant::now();\n"
         "            while started.elapsed()\n"
-        "                < std::time::Duration::from_nanos("
+        "                < Duration::from_nanos("
         "BENCH316_NATIVE_DATA_DELAY_NS)\n"
         "            {\n"
         "                std::hint::spin_loop();\n"
