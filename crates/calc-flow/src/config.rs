@@ -1182,7 +1182,7 @@ impl DeferredProjectTransactionalSink {
 #[async_trait]
 impl TransactionalStreamSink for DeferredProjectTransactionalSink {
     async fn open(&mut self) -> Result<()> {
-        let mut sink = self
+        let sink = self
             .factory
             .open_transactional(&self.options, &self.secrets)
             .await?
@@ -1190,12 +1190,15 @@ impl TransactionalStreamSink for DeferredProjectTransactionalSink {
                 message: "connector declared transaction support without a transactional factory"
                     .into(),
             })?;
-        if let Err(error) = sink.open().await {
-            let _cleanup = sink.close().await;
-            return Err(error);
-        }
         self.inner = Some(sink);
-        Ok(())
+        self.inner()?.open().await
+    }
+
+    async fn settle_open(&mut self) -> Result<()> {
+        match self.inner.as_mut() {
+            Some(sink) => sink.settle_open().await,
+            None => Ok(()),
+        }
     }
 
     async fn begin_epoch(&mut self, epoch: Epoch) -> Result<()> {

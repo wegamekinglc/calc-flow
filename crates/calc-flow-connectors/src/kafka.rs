@@ -9,6 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -51,6 +52,95 @@ fn fail(operation: &str, detail: &str) -> CalcFlowError {
         ConnectorOperation::new(operation).expect("operation name is non-empty"),
         detail,
     ))
+}
+
+type ProducerCall =
+    Box<dyn FnOnce(&FutureProducer) -> rdkafka::error::KafkaResult<()> + Send + 'static>;
+
+struct ProducerCommand {
+    producer: FutureProducer,
+    call: ProducerCall,
+    response: tokio::sync::oneshot::Sender<std::result::Result<(), String>>,
+}
+
+struct ProducerLifecycle(tokio::sync::mpsc::UnboundedSender<ProducerCommand>);
+
+impl ProducerLifecycle {
+    fn new() -> Self {
+        Self(spawn_producer_actor())
+    }
+}
+
+fn spawn_producer_actor() -> tokio::sync::mpsc::UnboundedSender<ProducerCommand> {
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<ProducerCommand>();
+    tokio::spawn(async move {
+        while let Some(command) = receiver.recv().await {
+            let ProducerCommand {
+                producer,
+                call,
+                response,
+            } = command;
+            let result = tokio::task::spawn_blocking(move || call(&producer))
+                .await
+                .map_err(|error| format!("Kafka worker failed: {error}"))
+                .and_then(|result| result.map_err(|error| error.to_string()));
+            let _ = response.send(result);
+        }
+    });
+    sender
+}
+
+async fn send_producer_call(
+    sender: &tokio::sync::mpsc::UnboundedSender<ProducerCommand>,
+    producer: &FutureProducer,
+    operation: &'static str,
+    call: impl FnOnce(&FutureProducer) -> rdkafka::error::KafkaResult<()> + Send + 'static,
+) -> Result<()> {
+    let (response, completed) = tokio::sync::oneshot::channel();
+    sender
+        .send(ProducerCommand {
+            producer: producer.clone(),
+            call: Box::new(call),
+            response,
+        })
+        .map_err(|_| fail(operation, "Kafka lifecycle worker stopped"))?;
+    completed
+        .await
+        .map_err(|error| fail(operation, &format!("Kafka worker stopped: {error}")))?
+        .map_err(|error| fail(operation, &error))
+}
+
+fn start_transaction_init(
+    producer: &FutureProducer,
+) -> tokio::sync::oneshot::Receiver<std::result::Result<(), String>> {
+    let producer = producer.clone();
+    let (response, completed) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let result = producer
+            .init_transactions(Duration::from_secs(30))
+            .map_err(|error| error.to_string());
+        let _ = response.send(result);
+    });
+    completed
+}
+
+async fn finish_transaction_init(
+    completion: &mut tokio::sync::oneshot::Receiver<std::result::Result<(), String>>,
+) -> Result<()> {
+    completion
+        .await
+        .map_err(|error| fail("open", &format!("Kafka init worker stopped: {error}")))?
+        .map_err(|error| fail("open", &error))
+}
+
+async fn blocking_producer_call(
+    producer: &FutureProducer,
+    lifecycle: &OnceLock<ProducerLifecycle>,
+    operation: &'static str,
+    call: impl FnOnce(&FutureProducer) -> rdkafka::error::KafkaResult<()> + Send + 'static,
+) -> Result<()> {
+    let lifecycle = lifecycle.get_or_init(ProducerLifecycle::new);
+    send_producer_call(&lifecycle.0, producer, operation, call).await
 }
 
 /// Attaches one record's coordinates to its decode failure.
@@ -1162,6 +1252,8 @@ pub struct TransactionalKafkaSink {
     config: KafkaSinkConfig,
     password: Option<SecretHandle>,
     producer: FutureProducer,
+    lifecycle: OnceLock<ProducerLifecycle>,
+    init_inflight: Option<tokio::sync::oneshot::Receiver<std::result::Result<(), String>>>,
     active: bool,
     delivered: u64,
     pending_records: Vec<Vec<u8>>,
@@ -1172,12 +1264,11 @@ pub struct TransactionalKafkaSink {
 const PREPARED_RECORDS_SEGMENT: &str = "records";
 
 impl TransactionalKafkaSink {
-    /// Builds the sink and fences stale transactional producers.
+    /// Builds the sink. [`TransactionalStreamSink::open`] fences stale producers.
     ///
     /// # Errors
     ///
-    /// Returns the connector error when the producer cannot be created
-    /// or transaction initialization is rejected by the broker.
+    /// Returns the connector error when the producer cannot be created.
     pub fn new(config: KafkaSinkConfig) -> Result<Self> {
         Self::new_with_password(config, None)
     }
@@ -1195,13 +1286,12 @@ impl TransactionalKafkaSink {
         let producer: FutureProducer = client
             .create()
             .map_err(|error| fail("open", &error.to_string()))?;
-        producer
-            .init_transactions(Duration::from_secs(30))
-            .map_err(|error| fail("open", &format!("transaction init failed: {error}")))?;
         Ok(Self {
             config,
             password,
             producer,
+            lifecycle: OnceLock::new(),
+            init_inflight: None,
             active: false,
             delivered: 0,
             pending_records: Vec::new(),
@@ -1508,7 +1598,20 @@ fn validate_prepared_evidence(
 #[async_trait]
 impl TransactionalStreamSink for TransactionalKafkaSink {
     async fn open(&mut self) -> Result<()> {
+        let completion = self
+            .init_inflight
+            .get_or_insert_with(|| start_transaction_init(&self.producer));
+        let initialized = finish_transaction_init(completion).await;
+        self.init_inflight = None;
+        initialized?;
         self.preflight_ledger().await
+    }
+
+    async fn settle_open(&mut self) -> Result<()> {
+        if let Some(mut completion) = self.init_inflight.take() {
+            finish_transaction_init(&mut completion).await?;
+        }
+        Ok(())
     }
 
     async fn begin_epoch(&mut self, _epoch: calc_flow::Epoch) -> Result<()> {
@@ -1518,10 +1621,11 @@ impl TransactionalStreamSink for TransactionalKafkaSink {
                 "a transaction is already active; the runtime owns epoch sequencing",
             ));
         }
-        self.producer
-            .begin_transaction()
-            .map_err(|error| fail("begin_epoch", &error.to_string()))?;
         self.active = true;
+        blocking_producer_call(&self.producer, &self.lifecycle, "begin_epoch", |producer| {
+            producer.begin_transaction()
+        })
+        .await?;
         self.delivered = 0;
         self.pending_records.clear();
         self.pending_bytes = 0;
@@ -1581,9 +1685,10 @@ impl TransactionalStreamSink for TransactionalKafkaSink {
         if !self.active {
             return Err(fail("pre_commit", "pre_commit before begin_epoch"));
         }
-        self.producer
-            .flush(Duration::from_secs(30))
-            .map_err(|error| fail("pre_commit", &error.to_string()))?;
+        blocking_producer_call(&self.producer, &self.lifecycle, "pre_commit", |producer| {
+            producer.flush(Duration::from_secs(30))
+        })
+        .await?;
         let segment = encode_records(&self.pending_records)?;
         Ok(BTreeMap::from([
             (
@@ -1653,9 +1758,10 @@ impl TransactionalStreamSink for TransactionalKafkaSink {
             Some(&live_schema_hash),
         )?;
         self.write_ledger_marker(epoch, pre_commit).await?;
-        self.producer
-            .commit_transaction(Duration::from_secs(30))
-            .map_err(|error| fail("commit", &error.to_string()))?;
+        blocking_producer_call(&self.producer, &self.lifecycle, "commit", |producer| {
+            producer.commit_transaction(Duration::from_secs(30))
+        })
+        .await?;
         self.active = false;
         self.pending_records.clear();
         self.pending_bytes = 0;
@@ -1669,9 +1775,10 @@ impl TransactionalStreamSink for TransactionalKafkaSink {
         _pre_commit: Option<&JsonMap>,
     ) -> Result<()> {
         if self.active {
-            self.producer
-                .abort_transaction(Duration::from_secs(30))
-                .map_err(|error| fail("abort", &error.to_string()))?;
+            blocking_producer_call(&self.producer, &self.lifecycle, "abort", |producer| {
+                producer.abort_transaction(Duration::from_secs(30))
+            })
+            .await?;
             self.active = false;
         }
         self.pending_records.clear();
@@ -1727,9 +1834,10 @@ impl TransactionalStreamSink for TransactionalKafkaSink {
                 return Ok(());
             }
         }
-        self.producer
-            .begin_transaction()
-            .map_err(|error| fail("recover", &error.to_string()))?;
+        blocking_producer_call(&self.producer, &self.lifecycle, "recover", |producer| {
+            producer.begin_transaction()
+        })
+        .await?;
         for payload in &records {
             let record = FutureRecord::<Vec<u8>, Vec<u8>>::to(&self.config.topic).payload(payload);
             self.producer
@@ -1739,15 +1847,17 @@ impl TransactionalStreamSink for TransactionalKafkaSink {
         }
         self.write_ledger_marker(recovery.epoch(), recovery.pre_commit())
             .await?;
-        self.producer
-            .commit_transaction(Duration::from_secs(30))
-            .map_err(|error| fail("recover", &error.to_string()))
+        blocking_producer_call(&self.producer, &self.lifecycle, "recover", |producer| {
+            producer.commit_transaction(Duration::from_secs(30))
+        })
+        .await
     }
 
     async fn close(&mut self) -> Result<()> {
-        self.producer
-            .flush(Duration::from_secs(30))
-            .map_err(|error| fail("close", &error.to_string()))?;
+        blocking_producer_call(&self.producer, &self.lifecycle, "close", |producer| {
+            producer.flush(Duration::from_secs(30))
+        })
+        .await?;
         Ok(())
     }
 }
@@ -1756,6 +1866,7 @@ impl TransactionalStreamSink for TransactionalKafkaSink {
 pub struct OrdinaryKafkaSink {
     config: KafkaSinkConfig,
     producer: FutureProducer,
+    lifecycle: OnceLock<ProducerLifecycle>,
     sequence: u64,
 }
 
@@ -1780,6 +1891,7 @@ impl OrdinaryKafkaSink {
         Ok(Self {
             config,
             producer,
+            lifecycle: OnceLock::new(),
             sequence: 0,
         })
     }
@@ -1803,9 +1915,10 @@ impl StreamSink for OrdinaryKafkaSink {
     }
 
     async fn close(&mut self) -> Result<()> {
-        self.producer
-            .flush(Duration::from_secs(30))
-            .map_err(|error| fail("close", &error.to_string()))?;
+        blocking_producer_call(&self.producer, &self.lifecycle, "close", |producer| {
+            producer.flush(Duration::from_secs(30))
+        })
+        .await?;
         Ok(())
     }
 }
@@ -2043,6 +2156,79 @@ pub fn register_kafka_connectors_with_decoders(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn producer_lifecycle_call_runs_off_the_async_worker() {
+        let producer: FutureProducer = rdkafka::config::ClientConfig::new()
+            .set("bootstrap.servers", "127.0.0.1:1")
+            .create()
+            .unwrap();
+        let async_worker = std::thread::current().id();
+        let lifecycle = OnceLock::new();
+        blocking_producer_call(&producer, &lifecycle, "test", move |_| {
+            assert_ne!(std::thread::current().id(), async_worker);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropped_lifecycle_wait_keeps_late_begin_before_abort() {
+        let producer: FutureProducer = rdkafka::config::ClientConfig::new()
+            .set("bootstrap.servers", "127.0.0.1:1")
+            .create()
+            .unwrap();
+        let lifecycle = OnceLock::new();
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (started, started_rx) = std::sync::mpsc::channel();
+        let begin_order = Arc::clone(&order);
+        let mut begin = Box::pin(blocking_producer_call(
+            &producer,
+            &lifecycle,
+            "begin",
+            move |_| {
+                started.send(()).unwrap();
+                std::thread::sleep(Duration::from_millis(50));
+                begin_order.lock().unwrap().push("begin");
+                Ok(())
+            },
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), begin.as_mut())
+                .await
+                .is_err()
+        );
+        started_rx.recv().unwrap();
+        drop(begin);
+        let abort_order = Arc::clone(&order);
+        blocking_producer_call(&producer, &lifecycle, "abort", move |_| {
+            abort_order.lock().unwrap().push("abort");
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(&*order.lock().unwrap(), &["begin", "abort"]);
+    }
+
+    #[tokio::test]
+    async fn cancelled_open_retains_native_init_until_settled() {
+        let config = KafkaSinkConfig::from_options(&sink_options("json")).unwrap();
+        let mut sink = TransactionalKafkaSink::new(config).unwrap();
+        let (response, completion) = tokio::sync::oneshot::channel();
+        sink.init_inflight = Some(completion);
+        {
+            let settlement = sink.settle_open();
+            tokio::pin!(settlement);
+            tokio::select! {
+                result = &mut settlement => panic!("init settled before its native worker: {result:?}"),
+                () = tokio::task::yield_now() => {}
+            }
+            response.send(Ok(())).unwrap();
+            settlement.await.unwrap();
+        }
+        assert!(sink.init_inflight.is_none());
+    }
 
     fn source_options(format: &str) -> JsonMap {
         BTreeMap::from([

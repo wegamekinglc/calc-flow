@@ -102,6 +102,8 @@ pub(crate) use super::test_seams::{
     TerminalCommitTestSeam, TestLaunchCheckpoint, TestLaunchProbe,
 };
 
+const CONNECTOR_OPEN_TIMEOUT: Duration = Duration::from_secs(30);
+const CONNECTOR_OPEN_SETTLE_TIMEOUT: Duration = Duration::from_secs(35);
 const CONNECTOR_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(test)]
 use super::registry::ABANDONED_RUNNER_WARNING;
@@ -1880,6 +1882,13 @@ impl ConnectorResource {
         }
     }
 
+    async fn settle_open(&mut self) -> crate::Result<()> {
+        match self {
+            Self::Source { .. } => Ok(()),
+            Self::Sink { binding, .. } => binding.settle_open().await,
+        }
+    }
+
     async fn close(&mut self) -> crate::Result<()> {
         match self {
             Self::Source { binding, .. } => binding.close().await,
@@ -3424,6 +3433,11 @@ fn register_boundary_tasks(
                 metrics: core.metrics.clone(),
                 data_gate: runtime.data_gate.subscribe(),
                 launch_cancel: core.launch_cancel.clone(),
+                lifecycle_timeout: checkpoint
+                    .as_ref()
+                    .map_or(CONNECTOR_CLOSE_TIMEOUT, |checkpoint| {
+                        checkpoint.config.checkpoint_timeout
+                    }),
                 checkpoint: sink_checkpoint,
                 epoch_owner: SinkEpochOwner::default(),
                 #[cfg(test)]
@@ -3867,6 +3881,13 @@ async fn run_live_checkpoint_task(inputs: LiveCheckpointTaskInputs) -> crate::Re
         assembly.operators.keys(),
     );
     let publication_unknown = assembly.manifest_installed_unknown;
+    if !assembly.manifest_durable
+        && !publication_unknown
+        && assembly.finalized_sink_outputs.is_empty()
+        && let Some(epoch) = assembly.epoch
+    {
+        notify_sink_abort(&channels.sink_commands, epoch).await;
+    }
     let sink_commit_incomplete =
         assembly.manifest_durable && assembly.finalized_sink_outputs != expected_sinks;
     let sink_commit_failure = sink_commit_incomplete
@@ -4346,6 +4367,20 @@ async fn notify_sink_preserve(
         Some(error) => Err(error),
         None => Ok(()),
     }
+}
+
+async fn notify_sink_abort(
+    sink_commands: &BTreeMap<String, mpsc::Sender<SinkCheckpointCommand>>,
+    epoch: Epoch,
+) {
+    futures::future::join_all(sink_commands.values().map(|sender| async move {
+        let _ = tokio::time::timeout(
+            CONNECTOR_CLOSE_TIMEOUT,
+            sender.send(SinkCheckpointCommand::Abort(epoch)),
+        )
+        .await;
+    }))
+    .await;
 }
 
 async fn wait_for_terminal_source_cuts(
@@ -4943,18 +4978,41 @@ fn spawn_open_unit(
 ) {
     units.spawn(async move {
         let origin = resource.open_origin();
-        let result = tokio::select! {
+        let mut result = tokio::select! {
             biased;
             () = cancellation.cancelled() => OpenResult::Cancelled,
-            result = AssertUnwindSafe(resource.open()).catch_unwind() => match result {
-                Ok(Ok(())) => OpenResult::Opened,
-                Ok(Err(error)) => OpenResult::Failed(error),
-                Err(payload) => OpenResult::Failed(CalcFlowError::TaskPanicked {
+            result = tokio::time::timeout(
+                CONNECTOR_OPEN_TIMEOUT,
+                AssertUnwindSafe(resource.open()).catch_unwind(),
+            ) => match result {
+                Ok(Ok(Ok(()))) => OpenResult::Opened,
+                Ok(Ok(Err(error))) => OpenResult::Failed(error),
+                Ok(Err(payload)) => OpenResult::Failed(CalcFlowError::TaskPanicked {
                     task_id,
                     message: panic_message(payload.as_ref()),
                 }),
+                Err(_) => OpenResult::Failed(CalcFlowError::Internal {
+                    message: "connector open exceeded private 30-second bound".into(),
+                }),
             },
         };
+        if !matches!(&result, OpenResult::Opened) {
+            // A connector may have started bounded native work before its open
+            // future was cancelled. Keep lineage ownership until that work ends.
+            match tokio::time::timeout(CONNECTOR_OPEN_SETTLE_TIMEOUT, resource.settle_open()).await
+            {
+                Ok(Err(error)) if matches!(&result, OpenResult::Cancelled) => {
+                    result = OpenResult::Failed(error);
+                }
+                Ok(_) => {}
+                Err(_) => {
+                    result = OpenResult::Failed(CalcFlowError::Internal {
+                        message: "connector open settlement exceeded private 35-second bound"
+                            .into(),
+                    });
+                }
+            }
+        }
         OpenExit {
             origin,
             resource,
@@ -5054,7 +5112,7 @@ mod tests {
         LaunchId, OneShotContinuousRunner, OneShotStartObserver, RunnerCore, RunnerDiagnostics,
         RunnerRegistryState, RunnerShutdownObserver, RuntimeFailure, RuntimeTaskProgress,
         TerminalCause, classify_failure_state, finish_running_report,
-        maybe_request_terminal_checkpoint, notify_sink_manifest_durable,
+        maybe_request_terminal_checkpoint, notify_sink_abort, notify_sink_manifest_durable,
         sanitize_managed_preflight_error, settle_durable_manifest, source_cuts_are_terminal,
     };
     use crate::{
@@ -8485,6 +8543,17 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn unpublished_checkpoint_notifies_prepared_sinks_to_abort() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let senders = BTreeMap::from([("output".into(), sender)]);
+        notify_sink_abort(&senders, crate::Epoch::INITIAL).await;
+        assert!(matches!(
+            receiver.recv().await,
+            Some(SinkCheckpointCommand::Abort(crate::Epoch::INITIAL))
+        ));
+    }
+
     fn durable_notification_manifest() -> crate::CheckpointManifest {
         crate::CheckpointManifest::new(CheckpointManifestFields {
             pipeline_name: "durable-notification-order".into(),
@@ -8658,6 +8727,180 @@ mod tests {
             assert!(opening.as_mut().await.is_empty());
         }
         assert_eq!(sink.opened.load(Ordering::SeqCst), 1);
+        assert!(super::close_resources(&mut resources).await.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn blocked_connector_open_expires_and_keeps_resource_owned() {
+        let source = LifecycleProbe::default();
+        source.block_open.store(true, Ordering::SeqCst);
+        let mut resources = super::connector_resources(
+            BTreeMap::from([(
+                "input".into(),
+                SourceBinding::new(Box::new(ProbeSource(source.clone())), None, 0).unwrap(),
+            )]),
+            BTreeMap::new(),
+        );
+        let cancellation = CancellationToken::new();
+        let opened = source.open_started.notified();
+        tokio::pin!(opened);
+        {
+            let opening = super::open_connector_resources(&mut resources, &cancellation);
+            tokio::pin!(opening);
+            tokio::select! {
+                failures = &mut opening => panic!("connector open completed early: {failures:?}"),
+                () = &mut opened => {}
+            }
+            tokio::time::advance(StdDuration::from_secs(30)).await;
+            let failures = tokio::time::timeout(StdDuration::from_millis(1), &mut opening)
+                .await
+                .expect("connector open must expire");
+            assert_eq!(failures.len(), 1);
+        }
+        assert_eq!(resources.len(), 1);
+        source.open_release.notify_waiters();
+        assert!(super::close_resources(&mut resources).await.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one synthetic sink proves both completed and hung open settlement paths"
+    )]
+    async fn failed_open_waits_for_native_settlement_before_releasing_resource() {
+        struct SettlingSink {
+            entered: Arc<Notify>,
+            settling: Arc<Notify>,
+            release: Arc<Notify>,
+        }
+
+        #[async_trait]
+        impl TransactionalStreamSink for SettlingSink {
+            async fn open(&mut self) -> Result<()> {
+                self.entered.notify_one();
+                std::future::pending().await
+            }
+
+            async fn settle_open(&mut self) -> Result<()> {
+                self.settling.notify_one();
+                self.release.notified().await;
+                Ok(())
+            }
+
+            async fn begin_epoch(&mut self, _epoch: crate::Epoch) -> Result<()> {
+                Ok(())
+            }
+
+            async fn write(&mut self, _batch: &Batch) -> Result<()> {
+                Ok(())
+            }
+
+            async fn pre_commit(&mut self, _epoch: crate::Epoch) -> Result<JsonMap> {
+                Ok(JsonMap::new())
+            }
+
+            async fn commit(&mut self, _epoch: crate::Epoch, _state: &JsonMap) -> Result<()> {
+                Ok(())
+            }
+
+            async fn abort(
+                &mut self,
+                _epoch: crate::Epoch,
+                _state: Option<&JsonMap>,
+            ) -> Result<()> {
+                Ok(())
+            }
+
+            async fn recover(&mut self, _manifest: &crate::CheckpointManifest) -> Result<()> {
+                Ok(())
+            }
+
+            async fn close(&mut self) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let entered = Arc::new(Notify::new());
+        let settling = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let sink = SettlingSink {
+            entered: Arc::clone(&entered),
+            settling: Arc::clone(&settling),
+            release: Arc::clone(&release),
+        };
+        let mut resources = super::connector_resources(
+            BTreeMap::new(),
+            BTreeMap::from([(
+                "output".into(),
+                vec![ValidatedOrdinarySink {
+                    sink_id: "sink".into(),
+                    binding: OrdinarySinkBinding::new_transactional(Box::new(sink)),
+                }],
+            )]),
+        );
+        let cancellation = CancellationToken::new();
+        let entered_wait = entered.notified();
+        tokio::pin!(entered_wait);
+        {
+            let opening = super::open_connector_resources(&mut resources, &cancellation);
+            tokio::pin!(opening);
+            tokio::select! {
+                failures = &mut opening => panic!("open completed early: {failures:?}"),
+                () = &mut entered_wait => {}
+            }
+            let settling_wait = settling.notified();
+            tokio::pin!(settling_wait);
+            tokio::time::advance(StdDuration::from_secs(30)).await;
+            tokio::select! {
+                failures = &mut opening => panic!("resource released before native settlement: {failures:?}"),
+                () = &mut settling_wait => {}
+            }
+            release.notify_one();
+            assert_eq!(opening.await.len(), 1);
+        }
+        assert_eq!(resources.len(), 1);
+        assert!(super::close_resources(&mut resources).await.is_empty());
+
+        let entered = Arc::new(Notify::new());
+        let settling = Arc::new(Notify::new());
+        let sink = SettlingSink {
+            entered: Arc::clone(&entered),
+            settling: Arc::clone(&settling),
+            release: Arc::new(Notify::new()),
+        };
+        let mut resources = super::connector_resources(
+            BTreeMap::new(),
+            BTreeMap::from([(
+                "output".into(),
+                vec![ValidatedOrdinarySink {
+                    sink_id: "hung-settlement".into(),
+                    binding: OrdinarySinkBinding::new_transactional(Box::new(sink)),
+                }],
+            )]),
+        );
+        let cancellation = CancellationToken::new();
+        let entered_wait = entered.notified();
+        tokio::pin!(entered_wait);
+        {
+            let opening = super::open_connector_resources(&mut resources, &cancellation);
+            tokio::pin!(opening);
+            tokio::select! {
+                failures = &mut opening => panic!("open completed early: {failures:?}"),
+                () = &mut entered_wait => {}
+            }
+            let settling_wait = settling.notified();
+            tokio::pin!(settling_wait);
+            tokio::time::advance(StdDuration::from_secs(30)).await;
+            tokio::select! {
+                failures = &mut opening => panic!("settlement did not begin: {failures:?}"),
+                () = &mut settling_wait => {}
+            }
+            tokio::time::advance(StdDuration::from_secs(35)).await;
+            let failures = opening.await;
+            assert_eq!(failures.len(), 1);
+            assert!(failures[0].error.to_string().contains("settlement"));
+        }
+        assert_eq!(resources.len(), 1);
         assert!(super::close_resources(&mut resources).await.is_empty());
     }
 
@@ -13309,6 +13552,12 @@ mod tests {
                     .exists(),
                 "{name} fault published a manifest"
             );
+            if name != "barrier" {
+                assert!(
+                    log.lock().iter().any(|entry| entry == "sink-abort:1"),
+                    "{name} fault left a prepared sink without a manifest"
+                );
+            }
             drop(job);
             runner.shutdown().await.unwrap();
             assert_eq!(runner.registry_counts(), (0, 0), "{name}");

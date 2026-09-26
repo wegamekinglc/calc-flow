@@ -244,8 +244,8 @@ fn kafka_roundtrip_and_transactional_exactly_once() {
         let batch = sample_batch();
         let mut sink =
             calc_flow_connectors::kafka::TransactionalKafkaSink::new(sink_config.clone())
-                .expect("transactional producer initializes");
-        sink.open().await.expect("opens");
+                .expect("transactional producer is constructed");
+        sink.open().await.expect("initializes and opens");
         sink.begin_epoch(calc_flow::Epoch::INITIAL)
             .await
             .expect("begins");
@@ -268,8 +268,11 @@ fn kafka_roundtrip_and_transactional_exactly_once() {
 
         let mut recovery_sink =
             calc_flow_connectors::kafka::TransactionalKafkaSink::new(sink_config.clone())
-                .expect("new producer fences stale ownership");
-        recovery_sink.open().await.expect("recovery sink opens");
+                .expect("new producer is constructed");
+        recovery_sink
+            .open()
+            .await
+            .expect("recovery sink fences and opens");
         recovery_sink
             .recover(
                 &calc_flow::SinkRecovery::from_parts(

@@ -1421,12 +1421,18 @@ fn classify_failed_publication(
             parent_synced,
             error,
         }),
-        Ok(_) => Err(CalcFlowError::Conflict {
-            resource: "checkpoint manifest".into(),
-            key: destination.display().to_string(),
+        Ok(_) => Ok(ManifestPublication::Installed {
+            parent_synced: false,
+            error: CalcFlowError::Conflict {
+                resource: "checkpoint manifest".into(),
+                key: destination.display().to_string(),
+            },
         }),
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => Err(error),
-        Err(source) => Err(io_error(destination, source)),
+        Err(source) => Ok(ManifestPublication::Installed {
+            parent_synced: false,
+            error: io_error(destination, source),
+        }),
     }
 }
 
@@ -1631,6 +1637,50 @@ mod tests {
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     const RUNTIME_CONFIG_HASH: &str =
         "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+
+    #[test]
+    fn unreadable_post_rename_destination_requires_preservation() {
+        let directory = TempDir::new().unwrap();
+        let publication = super::classify_failed_publication(
+            directory.path(),
+            b"expected",
+            false,
+            CalcFlowError::Internal {
+                message: "rename result unknown".into(),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            publication,
+            ManifestPublication::Installed {
+                parent_synced: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn mismatched_post_rename_destination_requires_preservation() {
+        let directory = TempDir::new().unwrap();
+        let destination = directory.path().join("manifest.json");
+        std::fs::write(&destination, b"different").unwrap();
+        let publication = super::classify_failed_publication(
+            &destination,
+            b"expected",
+            false,
+            CalcFlowError::Internal {
+                message: "rename result unknown".into(),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            publication,
+            ManifestPublication::Installed {
+                parent_synced: false,
+                error: CalcFlowError::Conflict { .. },
+            }
+        ));
+    }
 
     #[cfg(unix)]
     #[test]
