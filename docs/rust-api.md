@@ -690,6 +690,10 @@ capabilities, then implements async `open`, `next`, and `close`. An ordinary
 also expose epoch commit and recovery. Managed checkpoints bind source cursors,
 operator state, and sink evidence to the plan fingerprint.
 
+The managed local backend's crash-durability guarantee applies on Unix;
+on Windows, parent directory updates are not synced, so recovery after a
+power loss is not guaranteed.
+
 Run the checked examples:
 
 ```bash

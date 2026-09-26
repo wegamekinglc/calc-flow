@@ -943,6 +943,8 @@ fn sync_directory(directory: &Path) -> Result<()> {
     )
 )]
 fn sync_directory(_directory: &Path) -> Result<()> {
+    // Non-Unix targets lack a portable directory fsync. Managed crash
+    // durability is documented as Unix-only; file contents are still synced.
     Ok(())
 }
 

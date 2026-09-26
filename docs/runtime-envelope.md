@@ -501,6 +501,13 @@ outside the managed roots fail closed. Regular abandoned `.tmp*` manifest
 files are removed during a serialized scan; links and directories are never
 followed or removed as temporary files.
 
+The managed filesystem durability guarantee applies on Unix platforms. On
+non-Unix platforms, including Windows, file contents are synced but parent
+directory changes are not synced; an operating-system crash or power loss can
+lose a recently published segment or manifest. Process restart recovery still
+validates the files that remain, but do not rely on the managed local backend
+for durable exactly-once recovery across a Windows crash.
+
 Every transactional sink pre-commits before manifest publication. A failure
 before manifest installation aborts prepared transactions. After rename, an
 installed manifest remains recovery intent even when parent-directory sync or

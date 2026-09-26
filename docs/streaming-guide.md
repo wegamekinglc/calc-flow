@@ -987,9 +987,11 @@ epoch = await job.trigger_checkpoint_async()
 assert job.status()["checkpoint"]["last_completed_epoch"] == epoch
 ```
 
-The returned epoch is durable. Operator segments have been published, the
-manifest is durable, and the runtime has completed the required post-manifest
-protocol before returning success.
+On Unix platforms, the returned epoch is durable. Operator segments have
+been published, the manifest is durable, and the runtime has completed the
+required post-manifest protocol before returning success. On Windows, this
+acknowledgement does not guarantee recovery after an operating-system crash or
+power loss; see [manifest publication and recovery](runtime-envelope.md#manifest-publication-and-recovery).
 
 Starting a compatible plan on the same root selects the latest complete
 manifest and validates pipeline fingerprint, source/operator/sink identities,
