@@ -828,6 +828,12 @@ per non-empty window before runtime-owned control forwarding, chunk outputs to
 the effective edge budget, and preserve checked operator-owned sequences
 across snapshot/restore.
 
+Floating `sum` and `avg` use compensated accumulation. Window checkpoint
+segments use a version 2 physical layout with separate sum and correction
+columns; the public operator state capability remains version 1. Recovery
+accepts existing version 1 segments, initializes their missing correction to
+zero, and rewrites live windows as a version 2 base at the next checkpoint.
+
 The public state surface consists of immutable `StateHandle` values,
 lineage-exclusive `StateBackend` sessions, `LocalStateBackend`, and the strict
 canonical `CheckpointManifest` v3 data model. The local backend stages,
