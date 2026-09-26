@@ -14,6 +14,10 @@ uv run --no-sync --package calc-flow-studio calc-flow-web
 ```
 
 Open `http://127.0.0.1:8765`. The server rejects non-loopback hosts by default.
+HTTP clients can read a launch-specific token from `GET /api/v3/session` and
+send it as `X-Calc-Flow-Token` on `POST`, `PUT`, `PATCH`, and `DELETE` requests.
+The browser client handles this automatically. Cross-origin requests must come
+from the local Studio development origin.
 See the repository
 [getting-started guide](https://github.com/wegamekinglc/calc-flow/blob/main/docs/getting-started.md)
 for installation, lifecycle, and verification details.

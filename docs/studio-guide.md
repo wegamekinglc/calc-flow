@@ -95,7 +95,10 @@ provide simultaneous cross-system visibility.
 
 Studio binds to loopback and is a local single-user application. Jobs run in
 workers with concurrency, resident-memory, checkpoint-disk, and lifecycle
-limits. The REST job API accepts connector-backed stream projects. A project
+limits. The API accepts only loopback Host headers. Mutating requests require
+the launch token from `GET /api/v3/session` in `X-Calc-Flow-Token`; the browser
+client obtains it automatically. The REST job API accepts connector-backed
+stream projects. A project
 declaring static inputs can be inspected, but job creation returns `422`
 because the REST contract has no field for live static values. Run such a
 project through Python with explicit `static_inputs`, as in

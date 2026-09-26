@@ -17,6 +17,7 @@ import {
 export { ApiContractError };
 
 const API_PREFIX = '/api/v3';
+const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 export class ApiError extends Error {
   constructor(
@@ -56,12 +57,27 @@ const detailMessage = (detail: unknown): string | null => {
   return null;
 };
 
+async function launchToken(): Promise<string> {
+  const session = await fetch(`${API_PREFIX}/session`, { cache: 'no-store' });
+  if (!session.ok) throw new ApiError('Could not get Studio launch token', session.status);
+  const body: unknown = await session.json();
+  if (!body || typeof body !== 'object' || !('token' in body)
+      || typeof body.token !== 'string' || body.token.length === 0) {
+    throw new ApiContractError('Studio launch token response is invalid');
+  }
+  return body.token;
+}
+
 async function response(path: string, init?: RequestInit): Promise<Response> {
+  const token = MUTATING_METHODS.has(init?.method?.toUpperCase() ?? 'GET')
+    ? await launchToken()
+    : null;
   const response = await fetch(path, {
     ...init,
     headers: {
       'Content-Type': 'application/json',
       ...init?.headers,
+      ...(token === null ? {} : { 'X-Calc-Flow-Token': token }),
     },
   });
   if (!response.ok) {

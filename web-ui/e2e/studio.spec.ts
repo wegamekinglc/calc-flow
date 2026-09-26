@@ -13,6 +13,8 @@ import {
 } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
+import { deleteWithLaunchToken, postWithLaunchToken } from './session';
+
 const projectsUrl = 'http://127.0.0.1:8765/api/v3/projects';
 const twoSourceProjectUrl = `${projectsUrl}/two_source_e2e`;
 const streamProjectUrl = `${projectsUrl}/stream_job_e2e`;
@@ -160,7 +162,7 @@ const streamProject = {
 };
 
 async function deleteTwoSourceProject(request: APIRequestContext): Promise<number> {
-  const response = await request.delete(twoSourceProjectUrl);
+  const response = await deleteWithLaunchToken(request, twoSourceProjectUrl);
   expect([204, 404]).toContain(response.status());
   return response.status();
 }
@@ -457,7 +459,8 @@ test('persists and validates a DataFusion UDF graph without browser code', async
   ]);
   expect(JSON.stringify(document)).not.toContain('def double_value');
 
-  const validation = await page.request.post(
+  const validation = await postWithLaunchToken(
+    page.request,
     `http://127.0.0.1:8765/api/v3/projects/${summary.id}/validate`,
   );
   expect(validation.ok()).toBeTruthy();
@@ -493,10 +496,10 @@ test('starts and observes a persistent continuous file job', async ({ page, requ
   await rm(streamFixtureDirectory, { recursive: true, force: true });
   await mkdir(streamSinkPath, { recursive: true });
   await writeFile(streamSourcePath, '{"value":1}\n{"value":2}\n', 'utf8');
-  await request.delete(streamProjectUrl);
+  await deleteWithLaunchToken(request, streamProjectUrl);
 
   try {
-    const created = await request.post(projectsUrl, { data: streamProject });
+    const created = await postWithLaunchToken(request, projectsUrl, { data: streamProject });
     expect(created.status()).toBe(201);
 
     await page.goto('/');
@@ -520,7 +523,7 @@ test('starts and observes a persistent continuous file job', async ({ page, requ
       return entries.some((entry) => entry.endsWith('.parquet'));
     }).toBe(true);
   } finally {
-    await request.delete(streamProjectUrl);
+    await deleteWithLaunchToken(request, streamProjectUrl);
     await rm(streamFixtureDirectory, { recursive: true, force: true });
   }
 });
@@ -535,7 +538,7 @@ test.describe('persisted two-source SQL join', () => {
   });
 
   test('edits and validates through two saved sources', async ({ page, request }) => {
-    const created = await request.post(projectsUrl, { data: twoSourceProject });
+    const created = await postWithLaunchToken(request, projectsUrl, { data: twoSourceProject });
     expect(created.status()).toBe(201);
 
     await page.goto('/');
