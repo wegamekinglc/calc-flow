@@ -5153,12 +5153,27 @@ impl IncrementalScanState {
                 recent_valid,
                 candidates,
                 ..
-            } => {
-                recent_valid.len() * size_of::<bool>()
-                    + candidates.len() * size_of::<(usize, f64)>()
-            }
+            } => recent_valid
+                .capacity()
+                .saturating_mul(size_of::<bool>())
+                .saturating_add(
+                    candidates
+                        .capacity()
+                        .saturating_mul(size_of::<(usize, f64)>()),
+                ),
             Self::UniqueFloat64 { recent, counts, .. } => {
-                recent.len() * size_of::<Option<u64>>() + counts.len() * size_of::<(u64, usize)>()
+                let buckets = counts.capacity().saturating_mul(8).div_ceil(7);
+                let table_bytes = if buckets == 0 {
+                    0
+                } else {
+                    buckets
+                        .saturating_mul(size_of::<(u64, usize)>() + 1)
+                        .saturating_add(16)
+                };
+                recent
+                    .capacity()
+                    .saturating_mul(size_of::<Option<u64>>())
+                    .saturating_add(table_bytes)
             }
         }
     }
@@ -9954,6 +9969,32 @@ mod tests {
             (7, "a", 7, Some(2.0)),
         ]);
         assert_typed_matches_general(&spec, &kernel_schema(), &input);
+    }
+
+    #[test]
+    fn incremental_scan_memory_estimate_covers_allocated_capacity() {
+        let mut extrema = IncrementalScanState::new(ScanKind::Argmax, 64, 1).unwrap();
+        extrema.advance_float(0, Some(1.0));
+        let IncrementalScanState::Extrema {
+            recent_valid,
+            candidates,
+            ..
+        } = &extrema
+        else {
+            unreachable!()
+        };
+        let extrema_minimum = recent_valid.capacity() * size_of::<bool>()
+            + candidates.capacity() * size_of::<(usize, f64)>();
+        assert!(extrema.estimated_bytes() >= extrema_minimum);
+
+        let mut unique = IncrementalScanState::new(ScanKind::UniqueCount, 64, 1).unwrap();
+        unique.advance_float(0, Some(1.0));
+        let IncrementalScanState::UniqueFloat64 { recent, counts, .. } = &unique else {
+            unreachable!()
+        };
+        let unique_minimum = recent.capacity() * size_of::<Option<u64>>()
+            + counts.capacity() * size_of::<(u64, usize)>();
+        assert!(unique.estimated_bytes() >= unique_minimum);
     }
 
     #[test]
