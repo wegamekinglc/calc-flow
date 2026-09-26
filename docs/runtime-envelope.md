@@ -539,9 +539,9 @@ active calls use blocking workers, leaving Tokio executor threads free. Queued
 calls remain ordered after the outer wait expires: a later pre-publication
 abort cannot overtake a late begin or flush. Kafka transaction initialization
 runs on a bounded native thread. If connector open is cancelled or times out,
-the runner retains the
-sink and lineage until initialization settles or the private settlement bound
-expires. A connector that does not settle within that bound fails its launch.
+the runner retains the sink and lineage until initialization settles or the
+private settlement bound expires. A connector that does not settle within that
+bound fails its launch.
 If the Kafka native call exceeds its own timeout and finishes after the
 settlement bound, a late transaction fence remains possible; operators must
 resolve that failed launch before reusing its transactional identity. Durable

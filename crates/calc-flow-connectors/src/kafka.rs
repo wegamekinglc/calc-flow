@@ -2159,7 +2159,7 @@ mod tests {
 
     #[tokio::test]
     async fn producer_lifecycle_call_runs_off_the_async_worker() {
-        let producer: FutureProducer = rdkafka::config::ClientConfig::new()
+        let producer: FutureProducer = ClientConfig::new()
             .set("bootstrap.servers", "127.0.0.1:1")
             .create()
             .unwrap();
@@ -2175,7 +2175,7 @@ mod tests {
 
     #[tokio::test]
     async fn dropped_lifecycle_wait_keeps_late_begin_before_abort() {
-        let producer: FutureProducer = rdkafka::config::ClientConfig::new()
+        let producer: FutureProducer = ClientConfig::new()
             .set("bootstrap.servers", "127.0.0.1:1")
             .create()
             .unwrap();
