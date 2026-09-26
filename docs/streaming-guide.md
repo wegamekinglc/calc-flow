@@ -1039,6 +1039,10 @@ Choose an `EdgeBudget` large enough for the largest admitted source batch and
 the number of simultaneous control envelopes. Rows and envelopes each have an
 independent `max_rows` bound; bytes have `max_bytes`. A source declaration that
 can exceed the effective edge budget fails before open.
+Every stream edge budget and source batch declaration is capped at 1,000,000
+rows and 256 MiB. Project-v3 stream runtime options follow the same caps.
+Each stream SQL or expression node has its own 1 GiB DataFusion memory pool;
+this is not a job-wide memory limit.
 
 Backpressure is expected. A slow sink eventually awaits upstream sends. Do not
 hide that signal behind an unbounded queue inside a connector. If the external

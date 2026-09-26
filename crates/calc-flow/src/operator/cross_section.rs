@@ -4918,7 +4918,7 @@ mod tests {
                 &record,
                 "cross_section",
                 u64::MAX,
-                crate::EdgeBudget::new(1, usize::MAX).unwrap(),
+                crate::EdgeBudget::new(1, crate::EdgeBudget::MAX_BYTES).unwrap(),
             )
             .is_err()
         );

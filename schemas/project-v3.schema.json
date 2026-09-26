@@ -3254,13 +3254,15 @@
         "max_batch_bytes": {
           "default": 67108864,
           "format": "uint",
-          "minimum": 0,
+          "maximum": 268435456,
+          "minimum": 1,
           "type": "integer"
         },
         "max_batch_rows": {
           "default": 10000,
           "format": "uint",
-          "minimum": 0,
+          "maximum": 1000000,
+          "minimum": 1,
           "type": "integer"
         }
       },

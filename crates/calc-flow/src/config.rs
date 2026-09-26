@@ -90,7 +90,9 @@ impl Default for RuntimeSpec {
 #[serde(default, deny_unknown_fields)]
 pub struct StreamRunOptions {
     pub checkpoint_interval_ms: u64,
+    #[schemars(range(min = 1, max = 1_000_000))]
     pub max_batch_rows: usize,
+    #[schemars(range(min = 1, max = 268_435_456))]
     pub max_batch_bytes: usize,
 }
 
@@ -1745,11 +1747,25 @@ fn validate_runtime(project: &ProjectSpec, mode: CompileMode, issues: &mut Vec<V
                     "must be greater than zero",
                 ));
             }
+            if options.max_batch_rows > crate::EdgeBudget::MAX_ROWS {
+                issues.push(issue(
+                    "runtime.options.max_batch_rows",
+                    "out_of_range",
+                    format!("must not exceed {}", crate::EdgeBudget::MAX_ROWS),
+                ));
+            }
             if options.max_batch_bytes == 0 {
                 issues.push(issue(
                     "runtime.options.max_batch_bytes",
                     "out_of_range",
                     "must be greater than zero",
+                ));
+            }
+            if options.max_batch_bytes > crate::EdgeBudget::MAX_BYTES {
+                issues.push(issue(
+                    "runtime.options.max_batch_bytes",
+                    "out_of_range",
+                    format!("must not exceed {}", crate::EdgeBudget::MAX_BYTES),
                 ));
             }
         }
@@ -3164,8 +3180,8 @@ fn default_output() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ArrowFieldSpec, ProjectBindingSecretResolver, canonical_arrow_field_type, field_from_spec,
-        validate_join_event_time,
+        ArrowFieldSpec, CompileMode, ProjectBindingSecretResolver, ProjectSpec,
+        canonical_arrow_field_type, field_from_spec, validate_join_event_time, validate_runtime,
     };
     use crate::{SecretReference, SecretResolver, SecretResolverKind};
     use std::collections::BTreeMap;
@@ -3185,6 +3201,36 @@ mod tests {
         let absent =
             SecretReference::new(SecretResolverKind::Registered, "other").expect("absent slot");
         assert_eq!(resolver.has_reference(&absent), Some(false));
+    }
+
+    #[test]
+    fn project_stream_runtime_rejects_oversized_batch_budget() {
+        let project: ProjectSpec = serde_json::from_value(serde_json::json!({
+            "format_version": 3,
+            "id": "bounded",
+            "name": "bounded",
+            "runtime": {
+                "mode": "stream",
+                "options": {
+                    "max_batch_rows": 1_000_001,
+                    "max_batch_bytes": (256 << 20) + 1
+                }
+            },
+            "graph": {"name": "bounded", "nodes": []}
+        }))
+        .unwrap();
+        let mut issues = Vec::new();
+        validate_runtime(&project, CompileMode::Stream, &mut issues);
+        assert_eq!(
+            issues
+                .iter()
+                .map(|issue| issue.path.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "runtime.options.max_batch_rows",
+                "runtime.options.max_batch_bytes"
+            ]
+        );
     }
 
     #[test]

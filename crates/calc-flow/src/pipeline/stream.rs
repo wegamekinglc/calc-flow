@@ -55,7 +55,12 @@ pub struct EdgeBudget {
 }
 
 impl EdgeBudget {
-    /// Creates a budget; both limits must be positive (S10.1).
+    /// Largest admitted row count for one stream batch or edge budget.
+    pub const MAX_ROWS: usize = 1_000_000;
+    /// Largest admitted byte count for one stream batch or edge budget.
+    pub const MAX_BYTES: usize = 256 << 20;
+
+    /// Creates a budget with positive, bounded limits (S10.1).
     ///
     /// # Errors
     ///
@@ -71,6 +76,18 @@ impl EdgeBudget {
             return Err(CalcFlowError::InvalidArgument {
                 field: "max_bytes".into(),
                 message: "must be greater than zero".into(),
+            });
+        }
+        if max_rows > Self::MAX_ROWS {
+            return Err(CalcFlowError::InvalidArgument {
+                field: "max_rows".into(),
+                message: format!("must not exceed {}", Self::MAX_ROWS),
+            });
+        }
+        if max_bytes > Self::MAX_BYTES {
+            return Err(CalcFlowError::InvalidArgument {
+                field: "max_bytes".into(),
+                message: format!("must not exceed {}", Self::MAX_BYTES),
             });
         }
         Ok(Self {
@@ -1344,6 +1361,13 @@ mod runtime_projection_tests {
         CompiledStreamOperator, EdgeBudget, OperatorCheckpointCapability, RuntimeEdgeKind,
         RuntimeProducer,
     };
+
+    #[test]
+    fn edge_budget_rejects_unbounded_runtime_limits() {
+        assert!(EdgeBudget::new(1_000_001, 1).is_err());
+        assert!(EdgeBudget::new(1, (256 << 20) + 1).is_err());
+        assert!(EdgeBudget::new(EdgeBudget::MAX_ROWS, EdgeBudget::MAX_BYTES).is_ok());
+    }
 
     fn endpoint(node_id: &str, port: &str) -> PortEndpoint {
         PortEndpoint::new(node_id, port).unwrap()

@@ -10195,7 +10195,7 @@ mod tests {
                 &input,
                 "rolling",
                 0,
-                crate::EdgeBudget::new(8192, usize::MAX).unwrap(),
+                crate::EdgeBudget::new(8192, crate::EdgeBudget::MAX_BYTES).unwrap(),
             )
             .unwrap();
             assert_eq!(chunks.len(), 1);
@@ -10370,7 +10370,7 @@ mod tests {
         assert!(
             matches!(error, CalcFlowError::InvalidArgument { field, .. } if field == "message.bytes")
         );
-        let budget = crate::EdgeBudget::new(2, usize::MAX).unwrap();
+        let budget = crate::EdgeBudget::new(2, crate::EdgeBudget::MAX_BYTES).unwrap();
         assert!(
             chunk_output_record(&input, "rolling", u64::MAX, budget)
                 .unwrap_err()
@@ -11749,7 +11749,7 @@ mod tests {
             None,
             CancellationToken::new(),
         );
-        let budget = EdgeBudget::new(2, usize::MAX).unwrap();
+        let budget = EdgeBudget::new(2, EdgeBudget::MAX_BYTES).unwrap();
         let context = StreamOperatorContext::for_task(
             &job,
             "rolling",

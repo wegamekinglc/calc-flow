@@ -260,6 +260,8 @@ fails before enqueue, a closed receiver wakes blocked senders, and each fan-out
 edge is charged independently even though immutable payload buffers are
 shared. The default `Block` path therefore propagates a slow consumer through
 sink, operator, source task, prefetch slot, and source pump. FIFO order, close wakeup, and single-producer ownership apply to every edge.
+An edge budget or source batch declaration cannot exceed 1,000,000 rows or
+256 MiB; project-v3 stream runtime options use the same bounds.
 
 ## Stream plan compilation
 
