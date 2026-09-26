@@ -207,7 +207,7 @@ async fn test_native_late_cross_section_exact_and_bucket_boundaries_match_drop()
         assert_eq!(events, vec![late, late, older]);
         assert_eq!(actual_closing, closing);
         let groups = std::mem::take(&mut side.state.groups);
-        side.emit_groups(groups, &context, &mut side_output)
+        side.emit_groups(&groups, &context, &mut side_output)
             .await
             .unwrap();
         drop.on_end(&context, &mut drop_output).await.unwrap();

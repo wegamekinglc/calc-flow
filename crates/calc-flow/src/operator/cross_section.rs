@@ -934,7 +934,12 @@ impl StreamOperator for CrossSectionOperator {
             self.materialize_pending_mean(context.operator_id())?;
         }
         let closing = self.take_closing_groups(watermark.as_micros(), context.operator_id())?;
-        self.emit_groups(closing, context, output).await?;
+        if let Err(error) = self.emit_groups(&closing, context, output).await {
+            // Keep the state for checkpoint recovery. A collector may have
+            // accepted earlier chunks, so the runtime must fail this job.
+            self.restore_groups(closing);
+            return Err(error);
+        }
         self.install_context_identity(context);
         self.state.last_input_watermark = Some(watermark);
         Ok(())
@@ -961,8 +966,13 @@ impl StreamOperator for CrossSectionOperator {
             return Ok(());
         }
         let groups = std::mem::take(&mut self.state.groups);
-        self.state.identity_groups.clear();
-        self.emit_groups(groups, context, output).await?;
+        let identity_groups = std::mem::take(&mut self.state.identity_groups);
+        if let Err(error) = self.emit_groups(&groups, context, output).await {
+            // Preserve the open groups even if the collector accepted a prefix.
+            self.state.groups = groups;
+            self.state.identity_groups = identity_groups;
+            return Err(error);
+        }
         self.install_context_identity(context);
         self.state.ended = true;
         Ok(())
@@ -1218,13 +1228,24 @@ impl CrossSectionOperator {
         Ok(closing)
     }
 
+    fn restore_groups(&mut self, groups: Groups) {
+        for (key, rows) in groups {
+            for identity in rows.keys() {
+                self.state
+                    .identity_groups
+                    .insert(identity.clone(), key.clone());
+            }
+            self.state.groups.insert(key, rows);
+        }
+    }
+
     // Final emission keeps compute, record building, chunking, and sequence
     // accounting in one ordered pass so a partial failure leaves consistent
     // in-memory state.
     // #lizard forgives
     async fn emit_groups(
         &mut self,
-        groups: Groups,
+        groups: &Groups,
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
@@ -1232,7 +1253,7 @@ impl CrossSectionOperator {
             return Ok(());
         }
         let record = build_grouped_record(
-            &groups,
+            groups,
             &self.compiled,
             self.output_ports[0]
                 .schema()
@@ -3766,6 +3787,81 @@ mod tests {
             .downcast_ref::<Float64Array>()
             .unwrap();
         assert_eq!(means.values().as_ref(), expected);
+    }
+
+    struct RejectOutput;
+
+    #[async_trait]
+    impl StreamCollector for RejectOutput {
+        async fn emit(&mut self, _port: &str, _batch: Batch) -> Result<()> {
+            Err(operator_error("sink", "injected output failure"))
+        }
+    }
+
+    #[tokio::test]
+    async fn closing_groups_survive_a_failed_watermark_emit() {
+        let mut operator =
+            CrossSectionOperator::new("features", Arc::new(input_schema()), valid_spec()).unwrap();
+        let job = mean_job();
+        let context = StreamOperatorContext::new(&job, "features", None);
+        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data(
+                "input",
+                mean_batch(mean_input_record()),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap();
+        assert_eq!(operator.state.groups.len(), 2);
+
+        let error = operator
+            .on_watermark(EventTime::from_micros(2), &context, &mut RejectOutput)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("injected output failure"));
+        assert_eq!(operator.state.groups.len(), 2);
+        assert_eq!(operator.state.identity_groups.len(), 4);
+        assert!(operator.state.last_input_watermark.is_none());
+
+        operator
+            .on_watermark(EventTime::from_micros(2), &context, &mut output)
+            .await
+            .unwrap();
+        assert_eq!(output.drain("output").len(), 1);
+        assert!(operator.state.groups.is_empty());
+    }
+
+    #[tokio::test]
+    async fn open_groups_survive_a_failed_end_emit() {
+        let mut operator =
+            CrossSectionOperator::new("features", Arc::new(input_schema()), valid_spec()).unwrap();
+        let job = mean_job();
+        let context = StreamOperatorContext::new(&job, "features", None);
+        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data(
+                "input",
+                mean_batch(mean_input_record()),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap();
+
+        let error = operator
+            .on_end(&context, &mut RejectOutput)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("injected output failure"));
+        assert_eq!(operator.state.groups.len(), 2);
+        assert_eq!(operator.state.identity_groups.len(), 4);
+        assert!(!operator.state.ended);
+
+        operator.on_end(&context, &mut output).await.unwrap();
+        assert_eq!(output.drain("output").len(), 1);
+        assert!(operator.state.groups.is_empty());
     }
 
     #[tokio::test]

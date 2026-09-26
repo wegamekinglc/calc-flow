@@ -4695,18 +4695,14 @@ fn evict_opposite(
         );
         rows.clear();
     } else if let Some(watermark) = progress.watermark() {
-        let mut index = 0;
-        while index < rows.len() {
-            let expired = i128::from(rows[index].event_time.as_micros())
-                + i128::from(extension_micros)
+        rows.retain(|row| {
+            let expired = i128::from(row.event_time.as_micros()) + i128::from(extension_micros)
                 < i128::from(watermark.as_micros());
             if expired {
-                let row = rows.remove(index);
                 evicted_identities.push((row.row_id, row.event_time, Arc::clone(&row.encoded_key)));
-            } else {
-                index += 1;
             }
-        }
+            !expired
+        });
     }
     record_tombstones(pending, side, evicted_identities);
     let evicted = u64::try_from(before - rows.len())
