@@ -445,8 +445,8 @@ def _rolling_group_key(output: dict[str, object], /) -> tuple[object, ...] | Non
         return "extrema", kind, output.get("input"), *frame
     if kind in {"covariance", "correlation"}:
         return "pair", output.get("left"), output.get("right"), *frame
-    if kind == "ewma":
-        return "ewma", output.get("input"), output.get("span")
+    if kind in {"ewma", "cumulative_mean"}:
+        return "ewma", output.get("input"), output.get("span", 0)
     if kind in {"argmax", "argmin", "unique_count"}:
         return "scan", kind, output.get("input"), *frame
     return None

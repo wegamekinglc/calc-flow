@@ -124,6 +124,14 @@ pub(super) const GENERATED_KERNEL_CAPABILITIES: &[GeneratedKernelCapability] = &
         complexity: GeneratedComplexity::AmortizedConstant,
     },
     GeneratedKernelCapability {
+        primitive: "cumulative_mean",
+        batch: true,
+        stream: true,
+        datafusion: false,
+        typed_transition: Some(GeneratedTransition::Ewma),
+        complexity: GeneratedComplexity::AmortizedConstant,
+    },
+    GeneratedKernelCapability {
         primitive: "difference",
         batch: true,
         stream: true,

@@ -220,6 +220,13 @@ def test_rolling_kernel_explain_helpers_fail_closed_on_unknown_shapes() -> None:
     assert _rolling_kernel_line(malformed) is None
 
 
+def test_cumulative_mean_explain_uses_typed_ewma_transition() -> None:
+    output = {"kind": "cumulative_mean", "input": "x"}
+
+    assert _rolling_kernel_fallback(output, {"x": "float64"}) is None
+    assert _rolling_group_key(output) == ("ewma", "x", 0)
+
+
 def test_filter_is_not_moved_across_a_rolling_finality_boundary() -> None:
     quotes = _ordered()
     filtered = table.filter(quotes, quotes["x"] > 0.0)

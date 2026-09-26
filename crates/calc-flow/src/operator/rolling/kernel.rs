@@ -1527,7 +1527,7 @@ fn compile_typed_output(
     match &output.evaluation {
         CompiledEvaluation::Aggregate(aggregate) => compile_aggregate_output(aggregate, groups),
         CompiledEvaluation::Pair(pair) => compile_pair_output(pair),
-        CompiledEvaluation::Ewma(ewma) => compile_ewma_output(ewma),
+        CompiledEvaluation::Ewma(ewma) => compile_ewma_output(ewma, groups),
         CompiledEvaluation::Difference(difference) => compile_difference_output(difference),
         CompiledEvaluation::Scan(scan) => compile_scan_output(output, *scan, groups),
         _ => Err("requires aggregate, pair, EWMA, or fused difference outputs".into()),
@@ -1539,12 +1539,7 @@ fn compile_scan_output(
     scan: super::CompiledScan,
     groups: &[TypedGroupPlan],
 ) -> std::result::Result<TypedOutputPlan, String> {
-    let primitive = match scan.kind {
-        ScanKind::Argmax => "argmax",
-        ScanKind::Argmin => "argmin",
-        ScanKind::UniqueCount => "unique_count",
-        _ => return Err("unsupported typed scan".into()),
-    };
+    let primitive = scan_primitive(scan.kind)?;
     require_generated_transition(primitive, GeneratedTransition::Scan)?;
     let CompiledFrame::Rows(rows) = scan.frame else {
         return Err("typed scan requires a row frame".into());
@@ -1554,12 +1549,7 @@ fn compile_scan_output(
         .max(1);
     let group = groups
         .iter()
-        .position(|group| {
-            matches!(group,
-                TypedGroupPlan::Scan { input_index, kind, window: existing }
-                if *input_index == output.input_index && *kind == scan.kind && *existing == window
-            )
-        })
+        .position(|group| scan_group_matches(group, output.input_index, scan.kind, window))
         .ok_or_else(|| "typed scan group is missing".to_owned())?;
     Ok(TypedOutputPlan {
         group,
@@ -1568,6 +1558,27 @@ fn compile_scan_output(
         min_periods: scan.min_periods,
         ddof: 0,
     })
+}
+
+fn scan_primitive(kind: ScanKind) -> std::result::Result<&'static str, String> {
+    Ok(match kind {
+        ScanKind::Argmax => "argmax",
+        ScanKind::Argmin => "argmin",
+        ScanKind::UniqueCount => "unique_count",
+        _ => return Err("unsupported typed scan".into()),
+    })
+}
+
+fn scan_group_matches(
+    group: &TypedGroupPlan,
+    input_index: usize,
+    kind: ScanKind,
+    window: usize,
+) -> bool {
+    matches!(group,
+        TypedGroupPlan::Scan { input_index: existing_input, kind: existing_kind, window: existing_window }
+        if *existing_input == input_index && *existing_kind == kind && *existing_window == window
+    )
 }
 
 fn compile_aggregate_output(
@@ -1611,8 +1622,18 @@ fn compile_pair_output(
     })
 }
 
-fn compile_ewma_output(ewma: &CompiledEwma) -> std::result::Result<TypedOutputPlan, String> {
-    require_generated_transition("ewma", GeneratedTransition::Ewma)?;
+fn compile_ewma_output(
+    ewma: &CompiledEwma,
+    groups: &[TypedGroupPlan],
+) -> std::result::Result<TypedOutputPlan, String> {
+    let primitive = match groups.get(ewma.group) {
+        Some(TypedGroupPlan::Ewma {
+            cumulative: true, ..
+        }) => "cumulative_mean",
+        Some(TypedGroupPlan::Ewma { .. }) => "ewma",
+        _ => return Err("typed EWMA group is missing".into()),
+    };
+    require_generated_transition(primitive, GeneratedTransition::Ewma)?;
     Ok(TypedOutputPlan {
         group: ewma.group,
         kind: TypedOutputKind::Ewma,

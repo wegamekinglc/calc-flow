@@ -35,6 +35,7 @@ EXPECTED_PRIMITIVES = (
     "covariance",
     "correlation",
     "ewma",
+    "cumulative_mean",
     "difference",
     "argmax",
     "argmin",

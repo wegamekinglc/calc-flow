@@ -398,12 +398,16 @@ struct PreparedOrderedOutput {
 impl PreparedOrderedOutput {
     fn commit(self, operator: &mut RollingOperator) {
         let retention = usize::try_from(operator.compiled.max_row_retention).unwrap_or(usize::MAX);
-        for (tail, seeds) in self.touched.into_iter().zip(self.ewma_seeds) {
+        for tail in self.touched {
+            let seeds = self
+                .ewma_seeds
+                .get(tail.entity_id)
+                .expect("every touched entity has a prepared EWMA seed");
             tail.commit(
                 &mut operator.state.histories,
                 retention,
                 &operator.compiled,
-                &seeds,
+                seeds,
             );
         }
         self.update.commit(
@@ -418,6 +422,7 @@ impl PreparedOrderedOutput {
 }
 
 struct EntityTail {
+    entity_id: usize,
     first: usize,
     transitions: u64,
     rows: VecDeque<usize>,
@@ -426,6 +431,7 @@ struct EntityTail {
 /// Stage only newly retained rows. Existing tails remain owned and untouched
 /// until all output chunks have been emitted successfully.
 struct RetainedHistoryAppend {
+    entity_id: usize,
     entity: Vec<Option<KeyValue>>,
     rows: RetainedRows,
     prepared_front: Option<RecordBatch>,
@@ -602,6 +608,7 @@ fn entity_tails(
     for (row, &entity_id) in entity_ids.iter().enumerate() {
         if entity_id == tails.len() {
             tails.push(EntityTail {
+                entity_id,
                 first: row,
                 transitions: 0,
                 rows: VecDeque::new(),
@@ -687,6 +694,7 @@ impl EntityTail {
             .transpose()?
             .flatten();
         Ok(RetainedHistoryAppend {
+            entity_id: self.entity_id,
             entity,
             rows,
             prepared_front,

@@ -10690,7 +10690,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ordered_cumulative_mean_restores_its_running_state() {
+    async fn ordered_cumulative_mean_restores_seeds_for_the_correct_entity() {
         use crate::{CancellationToken, StreamJobContext};
 
         let spec = exponential_kernel_spec(json!([{
@@ -10710,8 +10710,24 @@ mod tests {
             CancellationToken::new(),
         );
         let mut collector = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        let drain_means = |collector: &mut crate::EdgeCollector| {
+            let output = collector.drain("output");
+            output[0]
+                .as_data()
+                .unwrap()
+                .table_payload()
+                .unwrap()
+                .batches()[0]
+                .column(kernel_schema().fields().len())
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .values()
+                .as_ref()
+                .to_vec()
+        };
         let context = StreamOperatorContext::new(&job, "rolling", None);
-        let first = float64_fast_record(&[(1, "a", 1, Some(10.0)), (2, "a", 2, Some(14.0))]);
+        let first = float64_fast_record(&[(1, "a", 1, Some(10.0)), (1, "b", 1, Some(100.0))]);
         operator
             .process_data(
                 "input",
@@ -10722,28 +10738,34 @@ mod tests {
             .await
             .unwrap();
         operator
+            .on_watermark(EventTime::from_micros(1), &context, &mut collector)
+            .await
+            .unwrap();
+        assert_eq!(drain_means(&mut collector), [10.0, 100.0]);
+
+        let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(1)));
+        let second = float64_fast_record(&[(2, "b", 2, Some(200.0))]);
+        operator
+            .process_data(
+                "input",
+                Batch::table(vec![second], BatchMetadata::default()).unwrap(),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        operator
             .on_watermark(EventTime::from_micros(2), &context, &mut collector)
             .await
             .unwrap();
-        let output = collector.drain("output");
-        let averages = output[0]
-            .as_data()
-            .unwrap()
-            .table_payload()
-            .unwrap()
-            .batches()[0]
-            .column(kernel_schema().fields().len())
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap();
-        assert_eq!(averages.values().as_ref(), &[10.0, 12.0]);
+        assert_eq!(drain_means(&mut collector), [150.0]);
 
         let snapshot = operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
         let mut restored =
             RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
         StreamOperator::restore(&mut restored, &snapshot).unwrap();
         let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(2)));
-        let next = float64_fast_record(&[(3, "a", 3, Some(18.0)), (4, "a", 4, Some(10.0))]);
+        let next = float64_fast_record(&[(3, "a", 3, Some(30.0)), (3, "b", 3, Some(300.0))]);
         restored
             .process_data(
                 "input",
@@ -10754,21 +10776,10 @@ mod tests {
             .await
             .unwrap();
         restored
-            .on_watermark(EventTime::from_micros(4), &context, &mut collector)
+            .on_watermark(EventTime::from_micros(3), &context, &mut collector)
             .await
             .unwrap();
-        let output = collector.drain("output");
-        let averages = output[0]
-            .as_data()
-            .unwrap()
-            .table_payload()
-            .unwrap()
-            .batches()[0]
-            .column(kernel_schema().fields().len())
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap();
-        assert_eq!(averages.values().as_ref(), &[14.0, 13.0]);
+        assert_eq!(drain_means(&mut collector), [20.0, 200.0]);
     }
 
     #[test]

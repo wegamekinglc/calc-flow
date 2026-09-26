@@ -98,6 +98,14 @@
       "complexity": "amortized_constant"
     },
     {
+      "primitive": "cumulative_mean",
+      "batch": true,
+      "stream": true,
+      "datafusion": false,
+      "typed_transition": "ewma",
+      "complexity": "amortized_constant"
+    },
+    {
       "primitive": "difference",
       "batch": true,
       "stream": true,
