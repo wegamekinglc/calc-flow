@@ -288,9 +288,9 @@ export default function App() {
     const initialize = async () => {
       try {
         const [loadedCatalog, loadedCapabilities, loadedProjects] = await Promise.all([
-          api.catalog(),
-          api.capabilities(),
-          api.projects(),
+          api.catalog(controller.signal),
+          api.capabilities(controller.signal),
+          api.projects(controller.signal),
         ]);
         if (aborted()) return;
         setCatalog(loadedCatalog);
@@ -298,7 +298,7 @@ export default function App() {
         setProjects(loadedProjects);
         const firstProject = firstOf(loadedProjects);
         if (firstProject !== undefined) {
-          const loaded = await api.project(firstProject.id);
+          const loaded = await api.project(firstProject.id, controller.signal);
           if (aborted()) return;
           replaceEditableProject(loaded, true);
         }

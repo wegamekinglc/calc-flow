@@ -131,20 +131,30 @@ async function requestText(
 }
 
 export const api = {
-  catalog: () => request<CatalogResponse>(`${API_PREFIX}/catalog`, null),
-  capabilities: () => request<CapabilitiesResponse>(
+  catalog: (signal?: AbortSignal) => request<CatalogResponse>(
+    `${API_PREFIX}/catalog`,
+    null,
+    { signal },
+  ),
+  capabilities: (signal?: AbortSignal) => request<CapabilitiesResponse>(
     `${API_PREFIX}/capabilities`,
     decodeCapabilitiesResponse,
+    { signal },
   ),
-  projects: () => request<ProjectSummary[]>(`${API_PREFIX}/projects`, null),
+  projects: (signal?: AbortSignal) => request<ProjectSummary[]>(
+    `${API_PREFIX}/projects`,
+    null,
+    { signal },
+  ),
   createProject: (project: ProjectCreateRequest) =>
     request<ProjectDocument>(`${API_PREFIX}/projects`, null, {
       method: 'POST',
       body: JSON.stringify(project),
     }),
-  project: (id: string) => request<ProjectDocument>(
+  project: (id: string, signal?: AbortSignal) => request<ProjectDocument>(
     `${API_PREFIX}/projects/${id}`,
     null,
+    { signal },
   ),
   saveProject: (project: ProjectDocument) =>
     request<ProjectDocument>(`${API_PREFIX}/projects/${project.id}`, null, {

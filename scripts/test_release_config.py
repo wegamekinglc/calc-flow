@@ -285,12 +285,32 @@ class ReleaseConfigTests(unittest.TestCase):
         self.assertIn("--find-interpreter --features pyo3/abi3-py313", workflow)
         self.assertIn("--find-interpreter --features legacy-python", workflow)
 
-    def test_pr_ci_checks_python_39_source_and_314_abi3_wheel(self) -> None:
+    def test_pr_ci_checks_all_supported_python_versions(self) -> None:
         workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
+        compatibility = workflow.split("  python-compatibility:\n", 1)[1].split(
+            "  studio-package:\n", 1
+        )[0]
         self.assertIn("  python-compatibility:\n", workflow)
-        self.assertIn("python-version: ['3.9', '3.14']", workflow)
-        self.assertIn("--interpreter python --out target/compat-wheel", workflow)
-        self.assertIn("--features pyo3/abi3-py313", workflow)
+        self.assertIn(
+            "python-version: ['3.9', '3.10', '3.11', '3.12', '3.13', '3.14']",
+            compatibility,
+        )
+        self.assertIn("  legacy-python-wheel:\n", workflow)
+        self.assertIn("--features legacy-python", workflow)
+        self.assertIn("      - legacy-python-wheel", compatibility)
+        self.assertIn("      - package", compatibility)
+        self.assertIn("actions/download-artifact@", compatibility)
+        self.assertNotIn("maturin build", compatibility)
+
+    def test_pr_ci_has_a_macos_core_smoke_job(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci-macos.yml").read_text(encoding="utf-8")
+        self.assertIn("  pull_request:\n", workflow)
+        self.assertIn("runs-on: macos-latest", workflow)
+        self.assertIn("cargo check -p calc-flow --lib", workflow)
+        self.assertIn(
+            "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10",
+            workflow,
+        )
 
     def test_pr_ci_core_wheel_uses_explicit_abi3_feature(self) -> None:
         workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
