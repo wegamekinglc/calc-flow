@@ -3089,7 +3089,11 @@ fn seed_typed_restored_state(
     let seeds = histories
         .by_entity
         .values()
-        .map(|entity| typed_ewma_seeds(entity, compiled))
+        .map(|entity| {
+            let mut seeds = typed_ewma_seeds(entity, compiled)?;
+            seeds.resize(compiled.kernel_plan.typed_group_count(), None);
+            Ok(seeds)
+        })
         .collect::<Result<Vec<_>>>()?;
     let transition_counts = histories
         .by_entity
@@ -3311,7 +3315,7 @@ struct CompiledScan {
     min_periods: u64,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ScanKind {
     Argmax,
     Argmin,
@@ -4352,6 +4356,11 @@ fn compute_output_columns_observed(
                 history: &entity_state.rows,
                 event_time_index: compiled.event_time_index,
             };
+            let mut incremental_scans = compiled
+                .outputs
+                .iter()
+                .map(|output| IncrementalScanState::from_history(output, &view))
+                .collect::<Vec<_>>();
             for (position, &row_index) in indices.iter().enumerate() {
                 entity_state.transition_count = entity_state
                     .transition_count
@@ -4372,14 +4381,22 @@ fn compute_output_columns_observed(
                     node_id,
                 )?;
                 for (ordinal, output) in compiled.outputs.iter().enumerate() {
-                    derived[ordinal][row_index] = Some(compute_output_value(
-                        &view,
-                        position,
-                        row_index,
-                        output,
-                        &entity_state.windows,
-                        node_id,
-                    )?);
+                    let value = if let Some(scan) = &mut incremental_scans[ordinal] {
+                        scan.advance(
+                            view.history.len() + position,
+                            view.value(view.history.len() + position, output.input_index),
+                        )
+                    } else {
+                        compute_output_value(
+                            &view,
+                            position,
+                            row_index,
+                            output,
+                            &entity_state.windows,
+                            node_id,
+                        )?
+                    };
+                    derived[ordinal][row_index] = Some(value);
                 }
             }
         }
@@ -5052,6 +5069,194 @@ fn compute_output_value(
     })
 }
 
+/// Batch-local scan state is rebuilt from the retained entity tail. The tail
+/// is already part of the durable checkpoint, so no second scan-state format
+/// or cross-callback mutable cache is required.
+#[derive(Clone, Debug)]
+enum IncrementalScanState {
+    Extrema {
+        window: usize,
+        min_periods: u64,
+        descending: bool,
+        recent_valid: VecDeque<bool>,
+        candidates: VecDeque<(usize, f64)>,
+        valid_count: usize,
+    },
+    UniqueFloat64 {
+        window: usize,
+        min_periods: u64,
+        recent: VecDeque<Option<u64>>,
+        counts: HashMap<u64, usize>,
+        valid_count: usize,
+    },
+}
+
+impl IncrementalScanState {
+    fn new(kind: ScanKind, window: usize, min_periods: u64) -> Option<Self> {
+        match kind {
+            ScanKind::Argmax | ScanKind::Argmin => Some(Self::Extrema {
+                window,
+                min_periods,
+                descending: matches!(kind, ScanKind::Argmax),
+                recent_valid: VecDeque::new(),
+                candidates: VecDeque::new(),
+                valid_count: 0,
+            }),
+            ScanKind::UniqueCount => Some(Self::UniqueFloat64 {
+                window,
+                min_periods,
+                recent: VecDeque::new(),
+                counts: HashMap::new(),
+                valid_count: 0,
+            }),
+            ScanKind::Rank | ScanKind::Quantile | ScanKind::Decay => None,
+        }
+    }
+
+    fn from_history(output: &CompiledRollingOutput, view: &EntityRowView<'_>) -> Option<Self> {
+        let CompiledEvaluation::Scan(scan) = &output.evaluation else {
+            return None;
+        };
+        if output.input_type != DataType::Float64 {
+            return None;
+        }
+        let CompiledFrame::Rows(rows) = scan.frame else {
+            return None;
+        };
+        let window = usize::try_from(rows).ok()?.max(1);
+        let mut state = Self::new(scan.kind, window, scan.min_periods)?;
+        for index in view.history.len().saturating_sub(window - 1)..view.history.len() {
+            state.advance(index, view.value(index, output.input_index));
+        }
+        Some(state)
+    }
+
+    fn advance(&mut self, index: usize, value: &ScalarValue) -> ScalarValue {
+        let sample = match value {
+            ScalarValue::Float64(Some(value)) if !value.is_nan() => Some(*value),
+            _ => None,
+        };
+        ScalarValue::UInt64(self.advance_float(index, sample))
+    }
+
+    fn valid_count(&self) -> usize {
+        match self {
+            Self::Extrema { valid_count, .. } | Self::UniqueFloat64 { valid_count, .. } => {
+                *valid_count
+            }
+        }
+    }
+
+    fn estimated_bytes(&self) -> usize {
+        match self {
+            Self::Extrema {
+                recent_valid,
+                candidates,
+                ..
+            } => recent_valid
+                .capacity()
+                .saturating_mul(size_of::<bool>())
+                .saturating_add(
+                    candidates
+                        .capacity()
+                        .saturating_mul(size_of::<(usize, f64)>()),
+                ),
+            Self::UniqueFloat64 { recent, counts, .. } => {
+                let buckets = counts.capacity().saturating_mul(8).div_ceil(7);
+                let table_bytes = if buckets == 0 {
+                    0
+                } else {
+                    buckets
+                        .saturating_mul(size_of::<(u64, usize)>() + 1)
+                        .saturating_add(16)
+                };
+                recent
+                    .capacity()
+                    .saturating_mul(size_of::<Option<u64>>())
+                    .saturating_add(table_bytes)
+            }
+        }
+    }
+
+    fn advance_float(&mut self, index: usize, sample: Option<f64>) -> Option<u64> {
+        let sample = sample.filter(|value| !value.is_nan());
+        match self {
+            Self::Extrema {
+                window,
+                min_periods,
+                descending,
+                recent_valid,
+                candidates,
+                valid_count,
+            } => {
+                recent_valid.push_back(sample.is_some());
+                if let Some(sample) = sample {
+                    *valid_count += 1;
+                    while candidates.back().is_some_and(|(_, previous)| {
+                        if *descending {
+                            *previous < sample
+                        } else {
+                            *previous > sample
+                        }
+                    }) {
+                        candidates.pop_back();
+                    }
+                    candidates.push_back((index, sample));
+                }
+                if recent_valid.len() > *window {
+                    if recent_valid.pop_front() == Some(true) {
+                        *valid_count -= 1;
+                    }
+                    let leaving = index - *window;
+                    if candidates
+                        .front()
+                        .is_some_and(|(position, _)| *position == leaving)
+                    {
+                        candidates.pop_front();
+                    }
+                }
+                if u64::try_from(*valid_count).unwrap_or(u64::MAX) < *min_periods {
+                    return None;
+                }
+                candidates
+                    .front()
+                    .and_then(|(position, _)| u64::try_from(index - *position).ok())
+            }
+            Self::UniqueFloat64 {
+                window,
+                min_periods,
+                recent,
+                counts,
+                valid_count,
+            } => {
+                // IEEE zero signs compare equal in the public unique-count
+                // contract. NaNs were excluded with the other invalid samples.
+                let key = sample.map(|value| if value == 0.0 { 0 } else { value.to_bits() });
+                recent.push_back(key);
+                if let Some(key) = key {
+                    *counts.entry(key).or_default() += 1;
+                    *valid_count += 1;
+                }
+                if recent.len() > *window
+                    && let Some(leaving) = recent.pop_front().flatten()
+                {
+                    *valid_count -= 1;
+                    let count = counts.get_mut(&leaving).expect("recent key is counted");
+                    *count -= 1;
+                    if *count == 0 {
+                        counts.remove(&leaving);
+                    }
+                }
+                if u64::try_from(*valid_count).unwrap_or(u64::MAX) < *min_periods {
+                    None
+                } else {
+                    u64::try_from(counts.len()).ok()
+                }
+            }
+        }
+    }
+}
+
 #[allow(
     clippy::cast_precision_loss,
     reason = "rank and linear weights are defined as Float64 readouts"
@@ -5138,6 +5343,8 @@ fn evaluate_scan(
 /// NaN is excluded before this comparison; existing extrema queues keep their
 /// separate frozen total-order behavior.
 fn compare_scan_samples(left: &ScalarValue, right: &ScalarValue) -> Ordering {
+    #[cfg(test)]
+    SCAN_COMPARE_COUNT.with(|count| count.set(count.get() + 1));
     match (left, right) {
         (ScalarValue::Float32(Some(left)), ScalarValue::Float32(Some(right))) => {
             left.partial_cmp(right).unwrap_or(Ordering::Equal)
@@ -5147,6 +5354,11 @@ fn compare_scan_samples(left: &ScalarValue, right: &ScalarValue) -> Ordering {
         }
         _ => compare_samples(left, right),
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static SCAN_COMPARE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn evaluate_difference(
@@ -9650,6 +9862,228 @@ mod tests {
         }
     }
 
+    #[test]
+    fn rolling_scans_bound_comparisons_independently_of_window_width() {
+        let spec = kernel_spec(json!([
+            {
+                "kind": "argmax",
+                "primitive_version": 1,
+                "input": "price",
+                "output": "maximum_age",
+                "frame": {"kind": "rows", "size": 256},
+                "min_periods": 1
+            },
+            {
+                "kind": "unique_count",
+                "primitive_version": 1,
+                "input": "price",
+                "output": "distinct",
+                "frame": {"kind": "rows", "size": 64},
+                "min_periods": 1
+            },
+            {
+                "kind": "argmin",
+                "primitive_version": 1,
+                "input": "price",
+                "output": "minimum_age",
+                "frame": {"kind": "rows", "size": 64},
+                "min_periods": 1
+            }
+        ]));
+        let input_rows = (0..1024_u64)
+            .map(|index| {
+                (
+                    i64::try_from(index + 1).unwrap(),
+                    "a",
+                    index + 1,
+                    Some(f64::from(u32::try_from(index % 127).unwrap())),
+                )
+            })
+            .collect::<Vec<_>>();
+        let input = float64_fast_record(&input_rows);
+        let compiled = compile_spec(&spec, &kernel_schema()).unwrap();
+        let rows = (0..input.num_rows())
+            .map(|index| read_buffered_row(&input, index, &compiled, "rolling").unwrap())
+            .collect::<Vec<_>>();
+        SCAN_COMPARE_COUNT.with(|count| count.set(0));
+        let result =
+            compute_output_columns(&rows, &RollingHistories::default(), &compiled, "rolling")
+                .unwrap();
+        let comparisons = SCAN_COMPARE_COUNT.with(std::cell::Cell::get);
+        assert!(comparisons < 8 * rows.len(), "{comparisons} comparisons");
+        let ages = result.columns[0]
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        let distinct = result.columns[1]
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        assert_eq!(ages.value(0), 0);
+        assert_eq!(ages.value(126), 0);
+        assert_eq!(ages.value(255), 129);
+        assert_eq!(distinct.value(63), 64);
+        assert_eq!(distinct.value(1023), 64);
+    }
+
+    #[test]
+    fn numeric_scans_compile_to_ordered_columnar_kernel() {
+        let spec = kernel_spec(json!([
+            {
+                "kind": "argmax",
+                "primitive_version": 1,
+                "input": "price",
+                "output": "maximum_age",
+                "frame": {"kind": "rows", "size": 64},
+                "min_periods": 1
+            },
+            {
+                "kind": "unique_count",
+                "primitive_version": 1,
+                "input": "price",
+                "output": "distinct",
+                "frame": {"kind": "rows", "size": 64},
+                "min_periods": 1
+            },
+            {
+                "kind": "argmin",
+                "primitive_version": 1,
+                "input": "price",
+                "output": "minimum_age",
+                "frame": {"kind": "rows", "size": 64},
+                "min_periods": 1
+            }
+        ]));
+        let compiled = compile_spec(&spec, &kernel_schema()).unwrap();
+        assert_eq!(
+            compiled.kernel_plan.selection(),
+            KernelSelection::OrderedPrimitive
+        );
+        let input = float64_fast_record(&[
+            (1, "a", 1, Some(0.0)),
+            (2, "a", 2, Some(-0.0)),
+            (3, "a", 3, Some(f64::NAN)),
+            (4, "a", 4, Some(1.0)),
+            (5, "a", 5, Some(1.0)),
+            (6, "a", 6, None),
+            (7, "a", 7, Some(2.0)),
+        ]);
+        assert_typed_matches_general(&spec, &kernel_schema(), &input);
+    }
+
+    #[test]
+    fn incremental_scan_memory_estimate_covers_allocated_capacity() {
+        let mut extrema = IncrementalScanState::new(ScanKind::Argmax, 64, 1).unwrap();
+        extrema.advance_float(0, Some(1.0));
+        let IncrementalScanState::Extrema {
+            recent_valid,
+            candidates,
+            ..
+        } = &extrema
+        else {
+            unreachable!()
+        };
+        let extrema_minimum = recent_valid.capacity() * size_of::<bool>()
+            + candidates.capacity() * size_of::<(usize, f64)>();
+        assert!(extrema.estimated_bytes() >= extrema_minimum);
+
+        let mut unique = IncrementalScanState::new(ScanKind::UniqueCount, 64, 1).unwrap();
+        unique.advance_float(0, Some(1.0));
+        let IncrementalScanState::UniqueFloat64 { recent, counts, .. } = &unique else {
+            unreachable!()
+        };
+        let unique_minimum = recent.capacity() * size_of::<Option<u64>>()
+            + counts.capacity() * size_of::<(u64, usize)>();
+        assert!(unique.estimated_bytes() >= unique_minimum);
+    }
+
+    #[test]
+    fn incremental_scans_keep_ties_zero_signs_and_invalid_rows_across_batches() {
+        let spec = kernel_spec(json!([
+            {
+                "kind": "argmax",
+                "primitive_version": 1,
+                "input": "price",
+                "output": "maximum_age",
+                "frame": {"kind": "rows", "size": 4},
+                "min_periods": 1
+            },
+            {
+                "kind": "unique_count",
+                "primitive_version": 1,
+                "input": "price",
+                "output": "distinct",
+                "frame": {"kind": "rows", "size": 4},
+                "min_periods": 1
+            }
+        ]));
+        let compiled = compile_spec(&spec, &kernel_schema()).unwrap();
+        let input = float64_fast_record(&[
+            (1, "a", 1, Some(0.0)),
+            (2, "a", 2, Some(-0.0)),
+            (3, "a", 3, Some(f64::NAN)),
+            (4, "a", 4, Some(1.0)),
+            (5, "a", 5, Some(1.0)),
+            (6, "a", 6, None),
+            (7, "a", 7, Some(2.0)),
+            (8, "a", 8, Some(2.0)),
+        ]);
+        let rows = (0..input.num_rows())
+            .map(|index| read_buffered_row(&input, index, &compiled, "rolling").unwrap())
+            .collect::<Vec<_>>();
+        let first = compute_output_columns(
+            &rows[..4],
+            &RollingHistories::default(),
+            &compiled,
+            "rolling",
+        )
+        .unwrap();
+        let mut histories = RollingHistories::default();
+        histories.apply(first.touched);
+        let second = compute_output_columns(&rows[4..], &histories, &compiled, "rolling").unwrap();
+        let values = |column: usize| {
+            first.columns[column]
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap()
+                .iter()
+                .chain(
+                    second.columns[column]
+                        .as_any()
+                        .downcast_ref::<UInt64Array>()
+                        .unwrap()
+                        .iter(),
+                )
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            values(0),
+            vec![
+                Some(0),
+                Some(1),
+                Some(2),
+                Some(0),
+                Some(1),
+                Some(2),
+                Some(0),
+                Some(1)
+            ]
+        );
+        assert_eq!(
+            values(1),
+            vec![
+                Some(1),
+                Some(1),
+                Some(1),
+                Some(2),
+                Some(2),
+                Some(1),
+                Some(2),
+                Some(2)
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn columnar_history_compacts_input_and_survives_checkpoint_or_fallback() {
         use crate::{CancellationToken, StreamJobContext};
@@ -10209,95 +10643,245 @@ mod tests {
     }
 
     #[test]
-    fn typed_ewma_resumes_from_a_columnar_checkpoint_without_replaying_history() {
-        let spec = exponential_kernel_spec(json!([ewma_price(3, 1, "ema")]));
+    fn cumulative_mean_uses_typed_transition_with_general_numeric_parity() {
+        let spec = exponential_kernel_spec(json!([{
+            "kind": "cumulative_mean",
+            "primitive_version": 1,
+            "input": "price",
+            "output": "average",
+            "min_periods": 1
+        }]));
+        let input = float64_fast_record(&[
+            (1, "a", 1, Some(1.0)),
+            (1, "b", 1, Some(10.0)),
+            (2, "a", 2, None),
+            (3, "a", 3, Some(3.0)),
+            (4, "a", 4, Some(f64::NAN)),
+            (5, "a", 5, Some(5.0)),
+        ]);
+
+        assert_typed_matches_general(&spec, &kernel_schema(), &input);
         let compiled = compile_spec(&spec, &kernel_schema()).unwrap();
-        let output_schema = Arc::new(output_schema(&kernel_schema(), &compiled.outputs));
-        let rows = vec![
-            full_row(1, "a", 1, vec![ScalarValue::Float64(Some(10.0))]),
-            full_row(2, "a", 2, vec![ScalarValue::Float64(Some(14.0))]),
-            full_row(3, "a", 3, vec![ScalarValue::Float64(Some(18.0))]),
-            full_row(4, "a", 4, vec![ScalarValue::Float64(Some(10.0))]),
-        ];
-        let expected =
-            compute_output_columns(&rows, &RollingHistories::default(), &compiled, "rolling")
-                .unwrap();
-
-        let (first, _, touched) = build_typed_stream_output(
-            &rows[..2],
-            &RollingHistories::default(),
-            None,
-            &compiled,
-            &output_schema,
-            "rolling",
-            None,
-        )
-        .unwrap()
-        .unwrap();
-        let mut histories = RollingHistories::default();
-        histories.apply(touched);
-        let bytes = encode_state_segment(
-            &histories,
-            &BTreeMap::new(),
-            &kernel_schema(),
-            &compiled,
-            TEST_FINGERPRINT,
-            "rolling",
-        )
-        .unwrap();
-        let metadata = RollingSnapshotMetadata {
-            late_output: None,
-            state_layout_version: ROLLING_COLUMNAR_STATE_LAYOUT_VERSION,
-            configuration_hash: compiled.configuration_hash.clone(),
-            state_schema_fingerprint: compiled.state_schema_fingerprint.clone(),
-            kernel_fingerprint: Some(compiled.kernel_plan.fingerprint().to_owned()),
-            numerical_profile: Some(compiled.kernel_plan.numerical_profile().to_owned()),
-            epoch: Epoch::new(1).unwrap(),
-            pipeline_fingerprint: Some(TEST_FINGERPRINT.into()),
-            operator_id: Some("rolling".into()),
-            last_input_watermark: None,
-            next_output_sequence: 0,
-            ended: false,
-            metrics: LateMetricDelta::default(),
-            segment_inventory: Vec::new(),
-        };
-        let restored =
-            decode_state_segment(&bytes, &kernel_schema(), &compiled, &metadata).unwrap();
-        assert!(
-            restored
-                .histories
-                .by_entity
-                .values()
-                .all(|state| state.rows.is_empty())
+        assert_eq!(
+            compiled.kernel_plan.selection(),
+            KernelSelection::OrderedPrimitive
         );
-        let (second, _, _) = build_typed_stream_output(
-            &rows[2..],
-            &restored.histories,
-            None,
-            &compiled,
-            &output_schema,
-            "rolling",
-            None,
-        )
-        .unwrap()
-        .unwrap();
+    }
 
-        let actual = first
-            .column(kernel_schema().fields().len())
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap()
-            .iter()
-            .chain(
-                second
-                    .column(kernel_schema().fields().len())
-                    .as_any()
-                    .downcast_ref::<Float64Array>()
-                    .unwrap()
-                    .iter(),
+    #[test]
+    fn cumulative_mean_accepts_ordered_columnar_stream_input() {
+        let spec = exponential_kernel_spec(json!([{
+            "kind": "cumulative_mean",
+            "primitive_version": 1,
+            "input": "price",
+            "output": "average",
+            "min_periods": 1
+        }]));
+        let mut operator =
+            RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
+        let input = float64_fast_record(&[(1, "a", 1, Some(10.0)), (2, "a", 2, Some(14.0))]);
+        let batch = Batch::table(vec![input], BatchMetadata::default()).unwrap();
+        assert!(
+            operator
+                .try_buffer_ordered(batch.table_payload().unwrap(), None, None)
+                .unwrap()
+        );
+        assert!(!operator.state.ordered.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ordered_cumulative_mean_restores_seeds_for_the_correct_entity() {
+        use crate::{CancellationToken, StreamJobContext};
+
+        let spec = exponential_kernel_spec(json!([{
+            "kind": "cumulative_mean",
+            "primitive_version": 1,
+            "input": "price",
+            "output": "average",
+            "min_periods": 1
+        }]));
+        let mut operator =
+            RollingOperator::new("rolling", Arc::new(kernel_schema()), spec.clone()).unwrap();
+        let job = StreamJobContext::new(
+            7,
+            TEST_FINGERPRINT,
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        );
+        let mut collector = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        let drain_means = |collector: &mut crate::EdgeCollector| {
+            let output = collector.drain("output");
+            output[0]
+                .as_data()
+                .unwrap()
+                .table_payload()
+                .unwrap()
+                .batches()[0]
+                .column(kernel_schema().fields().len())
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .values()
+                .as_ref()
+                .to_vec()
+        };
+        let context = StreamOperatorContext::new(&job, "rolling", None);
+        let first = float64_fast_record(&[(1, "a", 1, Some(10.0)), (1, "b", 1, Some(100.0))]);
+        operator
+            .process_data(
+                "input",
+                Batch::table(vec![first], BatchMetadata::default()).unwrap(),
+                &context,
+                &mut collector,
             )
-            .collect::<Vec<_>>();
-        assert_eq!(actual, float_column(&expected, 0));
+            .await
+            .unwrap();
+        operator
+            .on_watermark(EventTime::from_micros(1), &context, &mut collector)
+            .await
+            .unwrap();
+        assert_eq!(drain_means(&mut collector), [10.0, 100.0]);
+
+        let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(1)));
+        let second = float64_fast_record(&[(2, "b", 2, Some(200.0))]);
+        operator
+            .process_data(
+                "input",
+                Batch::table(vec![second], BatchMetadata::default()).unwrap(),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        operator
+            .on_watermark(EventTime::from_micros(2), &context, &mut collector)
+            .await
+            .unwrap();
+        assert_eq!(drain_means(&mut collector), [150.0]);
+
+        let snapshot = operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
+        let mut restored =
+            RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
+        StreamOperator::restore(&mut restored, &snapshot).unwrap();
+        let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(2)));
+        let next = float64_fast_record(&[(3, "a", 3, Some(30.0)), (3, "b", 3, Some(300.0))]);
+        restored
+            .process_data(
+                "input",
+                Batch::table(vec![next], BatchMetadata::default()).unwrap(),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        restored
+            .on_watermark(EventTime::from_micros(3), &context, &mut collector)
+            .await
+            .unwrap();
+        assert_eq!(drain_means(&mut collector), [20.0, 200.0]);
+    }
+
+    #[test]
+    fn typed_exponential_means_resume_from_columnar_checkpoints() {
+        for spec in [
+            exponential_kernel_spec(json!([ewma_price(3, 1, "ema")])),
+            exponential_kernel_spec(json!([{
+                "kind": "cumulative_mean",
+                "primitive_version": 1,
+                "input": "price",
+                "output": "average",
+                "min_periods": 1
+            }])),
+        ] {
+            let compiled = compile_spec(&spec, &kernel_schema()).unwrap();
+            let output_schema = Arc::new(output_schema(&kernel_schema(), &compiled.outputs));
+            let rows = vec![
+                full_row(1, "a", 1, vec![ScalarValue::Float64(Some(10.0))]),
+                full_row(2, "a", 2, vec![ScalarValue::Float64(Some(14.0))]),
+                full_row(3, "a", 3, vec![ScalarValue::Float64(Some(18.0))]),
+                full_row(4, "a", 4, vec![ScalarValue::Float64(Some(10.0))]),
+            ];
+            let expected =
+                compute_output_columns(&rows, &RollingHistories::default(), &compiled, "rolling")
+                    .unwrap();
+
+            let (first, _, touched) = build_typed_stream_output(
+                &rows[..2],
+                &RollingHistories::default(),
+                None,
+                &compiled,
+                &output_schema,
+                "rolling",
+                None,
+            )
+            .unwrap()
+            .unwrap();
+            let mut histories = RollingHistories::default();
+            histories.apply(touched);
+            let bytes = encode_state_segment(
+                &histories,
+                &BTreeMap::new(),
+                &kernel_schema(),
+                &compiled,
+                TEST_FINGERPRINT,
+                "rolling",
+            )
+            .unwrap();
+            let metadata = RollingSnapshotMetadata {
+                late_output: None,
+                state_layout_version: ROLLING_COLUMNAR_STATE_LAYOUT_VERSION,
+                configuration_hash: compiled.configuration_hash.clone(),
+                state_schema_fingerprint: compiled.state_schema_fingerprint.clone(),
+                kernel_fingerprint: Some(compiled.kernel_plan.fingerprint().to_owned()),
+                numerical_profile: Some(compiled.kernel_plan.numerical_profile().to_owned()),
+                epoch: Epoch::new(1).unwrap(),
+                pipeline_fingerprint: Some(TEST_FINGERPRINT.into()),
+                operator_id: Some("rolling".into()),
+                last_input_watermark: None,
+                next_output_sequence: 0,
+                ended: false,
+                metrics: LateMetricDelta::default(),
+                segment_inventory: Vec::new(),
+            };
+            let restored =
+                decode_state_segment(&bytes, &kernel_schema(), &compiled, &metadata).unwrap();
+            assert!(
+                restored
+                    .histories
+                    .by_entity
+                    .values()
+                    .all(|state| state.rows.is_empty())
+            );
+            let (second, _, _) = build_typed_stream_output(
+                &rows[2..],
+                &restored.histories,
+                None,
+                &compiled,
+                &output_schema,
+                "rolling",
+                None,
+            )
+            .unwrap()
+            .unwrap();
+
+            let actual = first
+                .column(kernel_schema().fields().len())
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .iter()
+                .chain(
+                    second
+                        .column(kernel_schema().fields().len())
+                        .as_any()
+                        .downcast_ref::<Float64Array>()
+                        .unwrap()
+                        .iter(),
+                )
+                .collect::<Vec<_>>();
+            assert_eq!(actual, float_column(&expected, 0));
+        }
     }
 
     #[test]
