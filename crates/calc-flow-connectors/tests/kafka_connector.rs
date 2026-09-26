@@ -540,6 +540,10 @@ async fn factories_register_and_resolve_offline() {
 struct NoSecrets;
 
 impl calc_flow::SecretResolver for NoSecrets {
+    fn has_reference(&self, _reference: &calc_flow::SecretReference) -> Option<bool> {
+        Some(false)
+    }
+
     fn resolve(
         &self,
         reference: &calc_flow::SecretReference,

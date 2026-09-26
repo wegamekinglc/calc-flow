@@ -89,6 +89,7 @@ parquet = { version = "=58.3.0", default-features = false, features = [
 rdkafka = { version = "=0.39.0", default-features = false, features = [
     "cmake-build",
     "libz-static",
+    "ssl-vendored",
     "tokio",
 ], optional = true }
 pgwire-replication = { version = "=0.4.0", default-features = false, features = [

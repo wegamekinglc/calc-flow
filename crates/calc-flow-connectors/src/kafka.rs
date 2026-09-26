@@ -14,16 +14,17 @@ use std::time::Duration;
 use async_trait::async_trait;
 use calc_flow::{
     ArrowFieldSpec, Batch, CalcFlowError, ConnectorError, ConnectorIdentity, ConnectorOperation,
-    Cursor, DecodeBounds, FormatDecoder, JsonMap, Result, SinkRecovery, SourceCapabilities,
-    SourceEvent, SourceSchema, StreamSink, StreamSource, TransactionalStreamSink,
+    Cursor, DecodeBounds, FormatDecoder, JsonMap, Result, SecretHandle, SecretReference,
+    SecretResolver, SecretResolverKind, SinkRecovery, SourceCapabilities, SourceEvent,
+    SourceSchema, StreamSink, StreamSource, TransactionalStreamSink,
 };
-use rdkafka::Offset;
 use rdkafka::admin::{AdminClient, AdminOptions, ResourceSpecifier};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::message::Message;
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
 use rdkafka::topic_partition_list::TopicPartitionList;
+use rdkafka::{Offset, config::ClientConfig};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
@@ -108,11 +109,227 @@ impl KafkaFormat {
     }
 }
 
+/// Transport security selected for every Kafka client in one binding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum KafkaSecurityProtocol {
+    /// No TLS or SASL authentication.
+    Plaintext,
+    /// TLS transport without SASL authentication.
+    Ssl,
+    /// SASL authentication over an unencrypted transport.
+    SaslPlaintext,
+    /// SASL authentication over TLS.
+    SaslSsl,
+}
+
+impl KafkaSecurityProtocol {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "plaintext" => Ok(Self::Plaintext),
+            "ssl" => Ok(Self::Ssl),
+            "sasl_plaintext" => Ok(Self::SaslPlaintext),
+            "sasl_ssl" => Ok(Self::SaslSsl),
+            _ => Err(security_option_error(
+                "security_protocol",
+                "expected plaintext, ssl, sasl_plaintext, or sasl_ssl",
+            )),
+        }
+    }
+
+    fn librdkafka_value(self) -> &'static str {
+        match self {
+            Self::Plaintext => "plaintext",
+            Self::Ssl => "ssl",
+            Self::SaslPlaintext => "sasl_plaintext",
+            Self::SaslSsl => "sasl_ssl",
+        }
+    }
+
+    fn uses_sasl(self) -> bool {
+        matches!(self, Self::SaslPlaintext | Self::SaslSsl)
+    }
+
+    fn uses_tls(self) -> bool {
+        matches!(self, Self::Ssl | Self::SaslSsl)
+    }
+}
+
+/// Data-only Kafka security options; passwords arrive through secret slots.
+#[derive(Clone, Debug)]
+pub struct KafkaSecurityConfig {
+    /// Transport security mode.
+    pub protocol: KafkaSecurityProtocol,
+    /// Optional trusted CA bundle path for TLS connections.
+    pub ssl_ca_location: Option<String>,
+    /// SASL mechanism: `PLAIN`, `SCRAM-SHA-256`, or `SCRAM-SHA-512`.
+    pub sasl_mechanism: Option<String>,
+    /// SASL username; the password uses the `sasl_password` secret slot.
+    pub sasl_username: Option<String>,
+}
+
+impl KafkaSecurityConfig {
+    fn from_options(options: &JsonMap) -> Result<Self> {
+        if options.contains_key("sasl_password") {
+            return Err(security_option_error(
+                "sasl_password",
+                "passwords must use the sasl_password secret slot",
+            ));
+        }
+        let protocol = KafkaSecurityProtocol::parse(
+            optional_security_string(options, "security_protocol")?
+                .as_deref()
+                .unwrap_or("plaintext"),
+        )?;
+        let ssl_ca_location = optional_security_string(options, "ssl_ca_location")?;
+        let sasl_mechanism = optional_security_string(options, "sasl_mechanism")?;
+        let sasl_username = optional_security_string(options, "sasl_username")?;
+        let config = Self {
+            protocol,
+            ssl_ca_location,
+            sasl_mechanism,
+            sasl_username,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self
+            .ssl_ca_location
+            .as_ref()
+            .is_some_and(|path| path.trim().is_empty())
+        {
+            return Err(security_option_error(
+                "ssl_ca_location",
+                "must be a non-empty string",
+            ));
+        }
+        if self.ssl_ca_location.is_some() && !self.protocol.uses_tls() {
+            return Err(security_option_error(
+                "ssl_ca_location",
+                "a CA path requires ssl or sasl_ssl",
+            ));
+        }
+        if self.protocol.uses_sasl() {
+            if !matches!(
+                self.sasl_mechanism.as_deref(),
+                Some("PLAIN" | "SCRAM-SHA-256" | "SCRAM-SHA-512")
+            ) {
+                return Err(security_option_error(
+                    "sasl_mechanism",
+                    "SASL requires PLAIN, SCRAM-SHA-256, or SCRAM-SHA-512",
+                ));
+            }
+            if self
+                .sasl_username
+                .as_ref()
+                .is_none_or(|value| value.trim().is_empty())
+            {
+                return Err(security_option_error(
+                    "sasl_username",
+                    "SASL requires a username",
+                ));
+            }
+        } else if self.sasl_mechanism.is_some() || self.sasl_username.is_some() {
+            return Err(security_option_error(
+                "sasl_mechanism",
+                "SASL options require sasl_plaintext or sasl_ssl",
+            ));
+        }
+        Ok(())
+    }
+
+    fn resolve_password(&self, secrets: &dyn SecretResolver) -> Result<Option<SecretHandle>> {
+        let reference = SecretReference::new(SecretResolverKind::Registered, "sasl_password")
+            .map_err(|_| fail("open", "the SASL password reference is invalid"))?;
+        if !self.protocol.uses_sasl() {
+            return match secrets.has_reference(&reference) {
+                Some(true) => Err(fail(
+                    "open",
+                    "sasl_password was supplied for a non-SASL Kafka binding",
+                )),
+                Some(false) => Ok(None),
+                None => Err(fail(
+                    "open",
+                    "the resolver cannot confirm whether sasl_password was supplied",
+                )),
+            };
+        }
+        secrets
+            .resolve(&reference)
+            .map(Some)
+            .map_err(|_| fail("open", "the SASL password secret could not be resolved"))
+    }
+}
+
+fn security_option_error(field: &str, message: &str) -> CalcFlowError {
+    CalcFlowError::InvalidArgument {
+        field: field.into(),
+        message: message.into(),
+    }
+}
+
+fn optional_security_string(options: &JsonMap, key: &str) -> Result<Option<String>> {
+    match options.get(key) {
+        None => Ok(None),
+        Some(Value::String(value)) if !value.trim().is_empty() => Ok(Some(value.clone())),
+        _ => Err(security_option_error(key, "must be a non-empty string")),
+    }
+}
+
+fn kafka_client_config(
+    bootstrap_servers: &str,
+    security: &KafkaSecurityConfig,
+    password: Option<&SecretHandle>,
+) -> Result<ClientConfig> {
+    security.validate()?;
+    let mut client = ClientConfig::new();
+    client.set("bootstrap.servers", bootstrap_servers);
+    client.set("security.protocol", security.protocol.librdkafka_value());
+    if let Some(path) = &security.ssl_ca_location {
+        client.set("ssl.ca.location", path);
+    }
+    if security.protocol.uses_sasl() {
+        let password = password.ok_or_else(|| {
+            fail(
+                "open",
+                "the SASL password secret is required for this Kafka binding",
+            )
+        })?;
+        let password = std::str::from_utf8(password.expose())
+            .map_err(|_| fail("open", "the SASL password secret is not valid UTF-8"))?;
+        if password.is_empty() {
+            return Err(fail("open", "the SASL password secret is empty"));
+        }
+        client.set(
+            "sasl.mechanism",
+            security.sasl_mechanism.as_deref().ok_or_else(|| {
+                security_option_error("sasl_mechanism", "SASL mechanism is missing")
+            })?,
+        );
+        client.set(
+            "sasl.username",
+            security.sasl_username.as_deref().ok_or_else(|| {
+                security_option_error("sasl_username", "SASL username is missing")
+            })?,
+        );
+        client.set("sasl.password", password);
+    } else if password.is_some() {
+        return Err(fail(
+            "open",
+            "SASL password supplied for a non-SASL Kafka binding",
+        ));
+    }
+    Ok(client)
+}
+
 /// Data-only configuration for one Kafka source.
 #[derive(Clone, Debug)]
 pub struct KafkaSourceConfig {
     /// Comma-separated bootstrap broker list.
     pub bootstrap_servers: String,
+    /// Transport security shared by the source consumer.
+    pub security: KafkaSecurityConfig,
     /// Topic to read.
     pub topic: String,
     /// Explicitly owned partitions in ascending order.
@@ -168,6 +385,7 @@ impl KafkaSourceConfig {
         let (descriptor_set, message, decoder) = parse_format_companions(options, format, &schema)?;
         Ok(Self {
             bootstrap_servers,
+            security: KafkaSecurityConfig::from_options(options)?,
             topic,
             partitions: parse_partitions(options)?,
             auto_offset_reset: parse_offset_reset(options)?,
@@ -385,6 +603,14 @@ impl KafkaSource {
         config: KafkaSourceConfig,
         decoders: &KafkaDecoderRegistry,
     ) -> Result<Self> {
+        Self::with_decoders_and_password(config, decoders, None)
+    }
+
+    fn with_decoders_and_password(
+        config: KafkaSourceConfig,
+        decoders: &KafkaDecoderRegistry,
+        password: Option<&SecretHandle>,
+    ) -> Result<Self> {
         let schema = if config.schema.is_empty() {
             SourceSchema::DynamicOrUnknown
         } else {
@@ -392,8 +618,8 @@ impl KafkaSource {
         };
         let bounds = DecodeBounds::new(config.max_batch_rows, config.max_batch_bytes)?;
         let decoder = config.decoder(decoders)?;
-        let mut client = rdkafka::config::ClientConfig::new();
-        client.set("bootstrap.servers", &config.bootstrap_servers);
+        let mut client =
+            kafka_client_config(&config.bootstrap_servers, &config.security, password)?;
         client.set("group.id", "calc-flow-kafka-source");
         client.set("enable.auto.commit", "false");
         client.set(
@@ -653,6 +879,8 @@ pub fn transactional_id(pipeline: &str, output: &str) -> String {
 pub struct KafkaSinkConfig {
     /// Comma-separated bootstrap broker list.
     pub bootstrap_servers: String,
+    /// Transport security shared by producers and recovery clients.
+    pub security: KafkaSecurityConfig,
     /// Target topic.
     pub topic: String,
     /// Dedicated, one-partition compacted epoch-ledger topic.
@@ -686,6 +914,7 @@ impl KafkaSinkConfig {
         let output = required_string(options, "output")?;
         Ok(Self {
             bootstrap_servers: required_string(options, "bootstrap_servers")?,
+            security: KafkaSecurityConfig::from_options(options)?,
             topic: required_string(options, "topic")?,
             ledger_topic: required_string(options, "ledger_topic")?,
             transactional_id: transactional_id(&pipeline, &output),
@@ -931,6 +1160,7 @@ fn required_decoder_field<'a>(decoder: &'a Value, key: &str) -> Result<&'a str> 
 /// The transactional Kafka sink.
 pub struct TransactionalKafkaSink {
     config: KafkaSinkConfig,
+    password: Option<SecretHandle>,
     producer: FutureProducer,
     active: bool,
     delivered: u64,
@@ -949,8 +1179,15 @@ impl TransactionalKafkaSink {
     /// Returns the connector error when the producer cannot be created
     /// or transaction initialization is rejected by the broker.
     pub fn new(config: KafkaSinkConfig) -> Result<Self> {
-        let mut client = rdkafka::config::ClientConfig::new();
-        client.set("bootstrap.servers", &config.bootstrap_servers);
+        Self::new_with_password(config, None)
+    }
+
+    fn new_with_password(config: KafkaSinkConfig, password: Option<SecretHandle>) -> Result<Self> {
+        let mut client = kafka_client_config(
+            &config.bootstrap_servers,
+            &config.security,
+            password.as_ref(),
+        )?;
         client.set("transactional.id", &config.transactional_id);
         client.set("enable.idempotence", "true");
         client.set("message.timeout.ms", "30000");
@@ -963,6 +1200,7 @@ impl TransactionalKafkaSink {
             .map_err(|error| fail("open", &format!("transaction init failed: {error}")))?;
         Ok(Self {
             config,
+            password,
             producer,
             active: false,
             delivered: 0,
@@ -1012,8 +1250,11 @@ impl TransactionalKafkaSink {
     // termination branches would obscure which Kafka event closes recovery.
     // #lizard forgives
     async fn latest_ledger_marker(&self) -> Result<Option<KafkaLedgerMarker>> {
-        let mut client = rdkafka::config::ClientConfig::new();
-        client.set("bootstrap.servers", &self.config.bootstrap_servers);
+        let mut client = kafka_client_config(
+            &self.config.bootstrap_servers,
+            &self.config.security,
+            self.password.as_ref(),
+        )?;
         client.set(
             "group.id",
             format!("{}-recovery", self.config.transactional_id),
@@ -1082,10 +1323,13 @@ impl TransactionalKafkaSink {
                 "Kafka ledger topic must have exactly one partition",
             ));
         }
-        let admin: AdminClient<DefaultClientContext> = rdkafka::config::ClientConfig::new()
-            .set("bootstrap.servers", &self.config.bootstrap_servers)
-            .create()
-            .map_err(|error| fail("open", &error.to_string()))?;
+        let admin: AdminClient<DefaultClientContext> = kafka_client_config(
+            &self.config.bootstrap_servers,
+            &self.config.security,
+            self.password.as_ref(),
+        )?
+        .create()
+        .map_err(|error| fail("open", &error.to_string()))?;
         let results = admin
             .describe_configs(
                 &[ResourceSpecifier::Topic(&self.config.ledger_topic)],
@@ -1522,8 +1766,12 @@ impl OrdinaryKafkaSink {
     ///
     /// Returns the connector error when the producer cannot be created.
     pub fn new(config: KafkaSinkConfig) -> Result<Self> {
-        let mut client = rdkafka::config::ClientConfig::new();
-        client.set("bootstrap.servers", &config.bootstrap_servers);
+        Self::new_with_password(config, None)
+    }
+
+    fn new_with_password(config: KafkaSinkConfig, password: Option<&SecretHandle>) -> Result<Self> {
+        let mut client =
+            kafka_client_config(&config.bootstrap_servers, &config.security, password)?;
         client.set("enable.idempotence", "true");
         client.set("message.timeout.ms", "30000");
         let producer: FutureProducer = client
@@ -1568,7 +1816,7 @@ use std::sync::Arc;
 use calc_flow::{
     ConnectorCapabilities, ConnectorDescriptor, ConnectorFactories, ConnectorKind,
     ConnectorRegistry, ConnectorSinkFactory, ConnectorSourceFactory, DeliveryCapability,
-    FormatDescriptor, FormatIdentity, SecretResolver, TransactionSupport, WatermarkSupport,
+    FormatDescriptor, FormatIdentity, TransactionSupport, WatermarkSupport,
 };
 
 use crate::{csv, json_lines};
@@ -1635,12 +1883,14 @@ impl ConnectorSourceFactory for KafkaSourceFactory {
     async fn open(
         &self,
         options: &JsonMap,
-        _secrets: &dyn SecretResolver,
+        secrets: &dyn SecretResolver,
     ) -> Result<Box<dyn StreamSource>> {
         let config = KafkaSourceConfig::from_options(options)?;
-        Ok(Box::new(KafkaSource::with_decoders(
+        let password = config.security.resolve_password(secrets)?;
+        Ok(Box::new(KafkaSource::with_decoders_and_password(
             config,
             &self.decoders,
+            password.as_ref(),
         )?))
     }
 }
@@ -1678,19 +1928,26 @@ impl ConnectorSinkFactory for KafkaSinkFactory {
     async fn open(
         &self,
         options: &JsonMap,
-        _secrets: &dyn SecretResolver,
+        secrets: &dyn SecretResolver,
     ) -> Result<Box<dyn StreamSink>> {
         let config = KafkaSinkConfig::from_options(options)?;
-        Ok(Box::new(OrdinaryKafkaSink::new(config)?))
+        let password = config.security.resolve_password(secrets)?;
+        Ok(Box::new(OrdinaryKafkaSink::new_with_password(
+            config,
+            password.as_ref(),
+        )?))
     }
 
     async fn open_transactional(
         &self,
         options: &JsonMap,
-        _secrets: &dyn SecretResolver,
+        secrets: &dyn SecretResolver,
     ) -> Result<Option<Box<dyn TransactionalStreamSink>>> {
         let config = KafkaSinkConfig::from_options(options)?;
-        Ok(Some(Box::new(TransactionalKafkaSink::new(config)?)))
+        let password = config.security.resolve_password(secrets)?;
+        Ok(Some(Box::new(TransactionalKafkaSink::new_with_password(
+            config, password,
+        )?)))
     }
 }
 
@@ -1720,6 +1977,10 @@ fn kafka_connector_descriptor() -> ConnectorDescriptor {
         ],
         config_schema: JsonMap::from([
             ("bootstrap_servers".to_string(), serde_json::json!("string")),
+            ("security_protocol".to_string(), serde_json::json!("string")),
+            ("ssl_ca_location".to_string(), serde_json::json!("string")),
+            ("sasl_mechanism".to_string(), serde_json::json!("string")),
+            ("sasl_username".to_string(), serde_json::json!("string")),
             ("topic".to_string(), serde_json::json!("string")),
             ("partitions".to_string(), serde_json::json!("array")),
             ("auto_offset_reset".to_string(), serde_json::json!("string")),
@@ -1736,7 +1997,7 @@ fn kafka_connector_descriptor() -> ConnectorDescriptor {
             ("max_epoch_rows".to_string(), serde_json::json!("u64")),
             ("max_epoch_bytes".to_string(), serde_json::json!("u64")),
         ]),
-        secret_slots: BTreeSet::new(),
+        secret_slots: ["sasl_password".to_string()].into_iter().collect(),
         required_secret_slots: BTreeSet::new(),
     }
 }
@@ -2230,6 +2491,150 @@ mod tests {
             kafka_schema_hash(KafkaFormat::Json, Some(&narrow)),
             kafka_schema_hash(KafkaFormat::Json, Some(&wide)),
         );
+    }
+
+    #[test]
+    fn sasl_tls_options_use_a_secret_and_configure_librdkafka() {
+        let mut options = sink_options("json");
+        options.insert("security_protocol".into(), Value::String("sasl_ssl".into()));
+        options.insert(
+            "sasl_mechanism".into(),
+            Value::String("SCRAM-SHA-512".into()),
+        );
+        options.insert("sasl_username".into(), Value::String("worker".into()));
+        options.insert(
+            "ssl_ca_location".into(),
+            Value::String("/tmp/ca.pem".into()),
+        );
+        calc_flow::validate_connector_options(&kafka_connector_descriptor(), &options)
+            .expect("security options are declared");
+        let config = KafkaSinkConfig::from_options(&options).expect("SASL over TLS parses");
+        let password = SecretHandle::from_bytes(b"private-password");
+        let client =
+            kafka_client_config(&config.bootstrap_servers, &config.security, Some(&password))
+                .expect("resolved password configures client");
+        assert_eq!(client.get("security.protocol"), Some("sasl_ssl"));
+        assert_eq!(client.get("sasl.mechanism"), Some("SCRAM-SHA-512"));
+        assert_eq!(client.get("sasl.username"), Some("worker"));
+        assert_eq!(client.get("sasl.password"), Some("private-password"));
+        assert_eq!(client.get("ssl.ca.location"), Some("/tmp/ca.pem"));
+        assert!(kafka_client_config(&config.bootstrap_servers, &config.security, None).is_err());
+
+        options.insert("sasl_password".into(), Value::String("literal".into()));
+        assert!(
+            calc_flow::validate_connector_options(&kafka_connector_descriptor(), &options).is_err(),
+            "passwords are secret references, never project options"
+        );
+        assert!(KafkaSinkConfig::from_options(&options).is_err());
+    }
+
+    #[test]
+    fn security_options_reject_incomplete_or_incompatible_combinations() {
+        let mut options = sink_options("json");
+        options.insert("security_protocol".into(), Value::String("sasl_ssl".into()));
+        assert!(KafkaSinkConfig::from_options(&options).is_err());
+        options.insert("sasl_mechanism".into(), Value::String("PLAIN".into()));
+        options.insert("sasl_username".into(), Value::String("worker".into()));
+        assert!(KafkaSinkConfig::from_options(&options).is_ok());
+        options.insert(
+            "security_protocol".into(),
+            Value::String("plaintext".into()),
+        );
+        assert!(KafkaSinkConfig::from_options(&options).is_err());
+        options.remove("sasl_mechanism");
+        options.remove("sasl_username");
+        options.insert(
+            "ssl_ca_location".into(),
+            Value::String("/tmp/ca.pem".into()),
+        );
+        assert!(KafkaSinkConfig::from_options(&options).is_err());
+
+        let mut public_config = KafkaSinkConfig::from_options(&sink_options("json")).unwrap();
+        public_config.security.protocol = KafkaSecurityProtocol::SaslSsl;
+        assert!(OrdinaryKafkaSink::new(public_config).is_err());
+    }
+
+    struct PasswordResolver;
+
+    impl SecretResolver for PasswordResolver {
+        fn has_reference(&self, reference: &SecretReference) -> Option<bool> {
+            Some(reference.key == "sasl_password")
+        }
+
+        fn resolve(&self, reference: &SecretReference) -> Result<SecretHandle> {
+            assert_eq!(reference.key, "sasl_password");
+            Ok(SecretHandle::from_bytes(b"private-password"))
+        }
+    }
+
+    struct UnresolvedPasswordReference;
+
+    impl SecretResolver for UnresolvedPasswordReference {
+        fn has_reference(&self, reference: &SecretReference) -> Option<bool> {
+            Some(reference.key == "sasl_password")
+        }
+
+        fn resolve(&self, _reference: &SecretReference) -> Result<SecretHandle> {
+            Err(CalcFlowError::NotFound {
+                resource: "secret".into(),
+                key: "sasl_password".into(),
+            })
+        }
+    }
+
+    struct UnknownPasswordReference;
+
+    impl SecretResolver for UnknownPasswordReference {
+        fn resolve(&self, _reference: &SecretReference) -> Result<SecretHandle> {
+            Err(CalcFlowError::NotFound {
+                resource: "secret".into(),
+                key: "sasl_password".into(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn factories_resolve_sasl_password_for_source_and_sink() {
+        let security = [
+            ("security_protocol".into(), Value::String("sasl_ssl".into())),
+            ("sasl_mechanism".into(), Value::String("PLAIN".into())),
+            ("sasl_username".into(), Value::String("worker".into())),
+        ];
+        let mut source = source_options("json");
+        source.extend(security.clone());
+        KafkaSourceFactory::new()
+            .open(&source, &PasswordResolver)
+            .await
+            .expect("source factory uses password secret");
+
+        let mut sink = sink_options("json");
+        sink.extend(security);
+        KafkaSinkFactory::new()
+            .open(&sink, &PasswordResolver)
+            .await
+            .expect("sink factory uses password secret");
+    }
+
+    #[tokio::test]
+    async fn plaintext_binding_rejects_supplied_password_secret() {
+        let error = KafkaSinkFactory::new()
+            .open(&sink_options("json"), &PasswordResolver)
+            .await
+            .err()
+            .expect("plaintext must reject a supplied SASL password");
+        assert!(error.to_string().contains("sasl_password"), "{error}");
+        let error = KafkaSinkFactory::new()
+            .open(&sink_options("json"), &UnresolvedPasswordReference)
+            .await
+            .err()
+            .expect("an unresolved declared password still blocks plaintext");
+        assert!(error.to_string().contains("sasl_password"), "{error}");
+        let error = KafkaSinkFactory::new()
+            .open(&sink_options("json"), &UnknownPasswordReference)
+            .await
+            .err()
+            .expect("unknown secret presence cannot allow plaintext");
+        assert!(error.to_string().contains("sasl_password"), "{error}");
     }
 
     fn sample_batch() -> Batch {

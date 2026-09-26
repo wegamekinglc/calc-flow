@@ -1046,6 +1046,10 @@ impl ProjectBindingSecretResolver {
 }
 
 impl SecretResolver for ProjectBindingSecretResolver {
+    fn has_reference(&self, requested: &SecretReference) -> Option<bool> {
+        Some(self.references.contains_key(&requested.key))
+    }
+
     fn resolve(&self, requested: &SecretReference) -> Result<SecretHandle> {
         let reference =
             self.references
@@ -3160,8 +3164,28 @@ fn default_output() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ArrowFieldSpec, canonical_arrow_field_type, field_from_spec, validate_join_event_time,
+        ArrowFieldSpec, ProjectBindingSecretResolver, canonical_arrow_field_type, field_from_spec,
+        validate_join_event_time,
     };
+    use crate::{SecretReference, SecretResolver, SecretResolverKind};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn declared_secret_slot_is_present_even_when_its_value_is_unavailable() {
+        let reference = SecretReference::new(SecretResolverKind::Registered, "backing-secret")
+            .expect("reference");
+        let resolver = ProjectBindingSecretResolver::new(
+            BTreeMap::from([("sasl_password".into(), reference)]),
+            None,
+        );
+        let requested =
+            SecretReference::new(SecretResolverKind::Registered, "sasl_password").expect("slot");
+        assert_eq!(resolver.has_reference(&requested), Some(true));
+        assert!(resolver.resolve(&requested).is_err());
+        let absent =
+            SecretReference::new(SecretResolverKind::Registered, "other").expect("absent slot");
+        assert_eq!(resolver.has_reference(&absent), Some(false));
+    }
 
     #[test]
     fn stream_join_event_time_accepts_naive_and_utc_timestamps() {
