@@ -59,7 +59,7 @@ SOURCE_CONTRACT_FILES = (
     Path("scripts/m5_checkpoint_benchmark_harness/Cargo.toml"),
     Path("scripts/m5_checkpoint_benchmark_harness/src/main.rs"),
     Path("crates/calc-flow/src/runtime/streaming/operator_task.rs"),
-    Path("crates/calc-flow/src/runtime/streaming/soak.rs"),
+    Path("crates/calc-flow/benches/support/streaming_soak.rs"),
 )
 COMMON_SOURCE_FILES = (
     Path("crates/calc-flow/src/runtime/streaming/channel.rs"),

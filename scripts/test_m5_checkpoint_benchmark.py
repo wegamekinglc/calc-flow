@@ -968,6 +968,15 @@ class OuterManifestTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "symbolic link"):
                 benchmark.validate_rooted_directory(root, linked, "run")
 
+    def test_source_contract_paths_exist_in_candidate_tree(self) -> None:
+        repository = Path(__file__).resolve().parent.parent
+        missing = [
+            str(path)
+            for path in benchmark.SOURCE_CONTRACT_FILES
+            if not (repository / path).is_file()
+        ]
+        self.assertEqual(missing, [])
+
     def test_source_contract_recomputes_exact_candidate_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

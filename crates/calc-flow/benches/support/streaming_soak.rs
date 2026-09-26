@@ -8570,7 +8570,7 @@ fn private_benchmark_contract_uses_honest_cases_and_batched_setup() {
             "m5/private_full_path/checkpoint_enabled",
         ]
     );
-    let source = include_str!("soak.rs");
+    let source = include_str!("streaming_soak.rs");
     assert_eq!(
         source
             .lines()
