@@ -122,10 +122,15 @@ def _collect_batches(
 def _prepare_collect(
     program: Program, inputs: Mapping[str, TableData], runtime: Runtime | None
 ) -> tuple[BatchExecutionPlan, dict[str, Batch], dict[str, str]]:
+    batches = _collect_batches(program, inputs)
+    return _prepare_collect_batches(program, batches, _selected_runtime(runtime))
+
+
+def _prepare_collect_batches(
+    program: Program, batches: Mapping[str, Batch], selected: Runtime
+) -> tuple[BatchExecutionPlan, dict[str, Batch], dict[str, str]]:
     from calc_flow.symbolic.lower.program import lower_program_document
 
-    batches = _collect_batches(program, inputs)
-    selected = _selected_runtime(runtime)
     bindings = _BatchBindings()
     document = lower_program_document(program, selected, "batch", _bindings=bindings)
     input_names, output_names = bindings.names()
@@ -224,9 +229,31 @@ def _collect_async(
     runtime: Runtime | None,
     options: ExecutionOptions | None,
 ) -> Awaitable[dict[str, pa.Table]]:
-    plan, bound, outputs = _prepare_collect(program, inputs, runtime)
+    batches = _collect_batches(program, inputs)
+    selected = _selected_runtime(runtime)
     _validate_options(options)
-    return _execute_collect(plan, bound, outputs, options)
+
+    async def execute() -> dict[str, pa.Table]:
+        plan, bound, outputs = await _run_blocking_compile(
+            _prepare_collect_batches, program, batches, selected
+        )
+        return await _execute_collect(plan, bound, outputs, options)
+
+    return execute()
+
+
+async def _run_blocking_compile(compile_plan: Callable[..., T], *args: object) -> T:
+    task = asyncio.create_task(asyncio.to_thread(compile_plan, *args))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        from calc_flow.runtime import _finish_cleanup
+
+        async def drain() -> None:
+            await asyncio.gather(task, return_exceptions=True)
+
+        await _finish_cleanup(drain())
+        raise
 
 
 def _validate_options(options: ExecutionOptions | None) -> None:
@@ -249,10 +276,14 @@ def _collect_table_async(
     runtime: Runtime | None,
     options: ExecutionOptions | None,
 ) -> Awaitable[pa.Table]:
-    plan, bound, outputs = _prepare_collect(program, inputs, runtime)
+    batches = _collect_batches(program, inputs)
+    selected = _selected_runtime(runtime)
     _validate_options(options)
 
     async def execute() -> pa.Table:
+        plan, bound, outputs = await _run_blocking_compile(
+            _prepare_collect_batches, program, batches, selected
+        )
         return (await _execute_collect(plan, bound, outputs, options))["output"]
 
     return execute()
