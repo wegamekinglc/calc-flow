@@ -274,6 +274,8 @@ impl StreamSource for GatedTwoBatchSource {
 struct ManifestInspectingAcknowledger {
     manifest_root: PathBuf,
     log: Arc<Mutex<Vec<&'static str>>>,
+    sink_committed: Arc<Notify>,
+    fail: bool,
 }
 
 #[async_trait]
@@ -287,6 +289,20 @@ impl DurableCursorAcknowledger for ManifestInspectingAcknowledger {
         {
             return Err(CalcFlowError::Internal {
                 message: "durable source ack preceded manifest publication".into(),
+            });
+        }
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.sink_committed.notified(),
+        )
+        .await
+        .map_err(|_| CalcFlowError::Internal {
+            message: "sink commit did not follow durable manifest publication".into(),
+        })?;
+        if self.fail {
+            self.log.lock().unwrap().push("source-ack-failed");
+            return Err(CalcFlowError::Internal {
+                message: "injected durable source acknowledgement failure".into(),
             });
         }
         self.log.lock().unwrap().push("source-ack");
@@ -342,13 +358,14 @@ impl StreamSource for AckingSource {
     }
 }
 
-struct AckOrderingSink {
+struct CommitSignalingSink {
     log: Arc<Mutex<Vec<&'static str>>>,
     writes: Arc<AtomicUsize>,
+    committed: Arc<Notify>,
 }
 
 #[async_trait]
-impl TransactionalStreamSink for AckOrderingSink {
+impl TransactionalStreamSink for CommitSignalingSink {
     async fn open(&mut self) -> Result<()> {
         Ok(())
     }
@@ -367,20 +384,22 @@ impl TransactionalStreamSink for AckOrderingSink {
     }
 
     async fn commit(&mut self, _epoch: calc_flow::Epoch, _pre_commit: &JsonMap) -> Result<()> {
-        if self.log.lock().unwrap().last() != Some(&"source-ack") {
-            return Err(CalcFlowError::Internal {
-                message: "sink commit preceded durable source ack".into(),
-            });
-        }
         self.log.lock().unwrap().push("sink-commit");
+        self.committed.notify_one();
         Ok(())
     }
 
     async fn abort(
         &mut self,
-        _epoch: calc_flow::Epoch,
+        epoch: calc_flow::Epoch,
         _pre_commit: Option<&JsonMap>,
     ) -> Result<()> {
+        let event = if epoch == calc_flow::Epoch::INITIAL {
+            "sink-abort-initial"
+        } else {
+            "sink-abort-later"
+        };
+        self.log.lock().unwrap().push(event);
         Ok(())
     }
 
@@ -777,62 +796,76 @@ async fn public_job_checkpoints_and_cancel_settles_connectors() {
 }
 
 #[tokio::test]
-async fn durable_source_cursor_is_acknowledged_after_manifest_and_before_sink_commit() {
-    let plan = continuous_plan();
-    let source_id = plan.source_binding_ids()[0].to_owned();
-    let output_id = plan.sink_binding_ids()[0].to_owned();
-    let directory = tempfile::tempdir().unwrap();
-    let managed_root = directory.path().join("managed");
-    let log = Arc::new(Mutex::new(Vec::new()));
-    let emitted = Arc::new(AtomicUsize::new(0));
-    let writes = Arc::new(AtomicUsize::new(0));
-    let acknowledger = Arc::new(ManifestInspectingAcknowledger {
-        manifest_root: managed_root.join("manifests"),
-        log: Arc::clone(&log),
-    });
-    let runner = StreamingRunner::new(
-        plan,
-        BTreeMap::from([(
-            source_id,
-            SourceBinding::new(AckingSource {
-                acknowledger,
-                emitted: false,
-                emitted_count: Arc::clone(&emitted),
-            }),
-        )]),
-        BTreeMap::from([(
-            output_id,
-            vec![
-                SinkBinding::transactional(
-                    "sink",
-                    AckOrderingSink {
-                        log: Arc::clone(&log),
-                        writes: Arc::clone(&writes),
-                    },
-                )
-                .unwrap(),
-            ],
-        )]),
-        ManagedCheckpointRuntime::new(&managed_root).unwrap(),
-    )
-    .unwrap();
+async fn durable_source_ack_follows_sink_commit_even_when_ack_fails() {
+    for fail in [false, true] {
+        let plan = continuous_plan();
+        let source_id = plan.source_binding_ids()[0].to_owned();
+        let output_id = plan.sink_binding_ids()[0].to_owned();
+        let directory = tempfile::tempdir().unwrap();
+        let managed_root = directory.path().join("managed");
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let committed = Arc::new(Notify::new());
+        let emitted = Arc::new(AtomicUsize::new(0));
+        let writes = Arc::new(AtomicUsize::new(0));
+        let acknowledger = Arc::new(ManifestInspectingAcknowledger {
+            manifest_root: managed_root.join("manifests"),
+            log: Arc::clone(&log),
+            sink_committed: Arc::clone(&committed),
+            fail,
+        });
+        let runner = StreamingRunner::new(
+            plan,
+            BTreeMap::from([(
+                source_id,
+                SourceBinding::new(AckingSource {
+                    acknowledger,
+                    emitted: false,
+                    emitted_count: Arc::clone(&emitted),
+                }),
+            )]),
+            BTreeMap::from([(
+                output_id,
+                vec![
+                    SinkBinding::transactional(
+                        "sink",
+                        CommitSignalingSink {
+                            log: Arc::clone(&log),
+                            writes: Arc::clone(&writes),
+                            committed,
+                        },
+                    )
+                    .unwrap(),
+                ],
+            )]),
+            ManagedCheckpointRuntime::new(&managed_root).unwrap(),
+        )
+        .unwrap();
 
-    let job = runner.start().await.unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while writes.load(Ordering::SeqCst) == 0 {
-            tokio::task::yield_now().await;
+        let job = runner.start().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while writes.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the data row should reach the sink before checkpointing");
+        assert_eq!(emitted.load(Ordering::SeqCst), 1);
+
+        if fail {
+            assert!(job.trigger_checkpoint().await.is_err());
+            assert_eq!(job.wait().await.state, JobState::RecoveryRequired);
+            let events = log.lock().unwrap();
+            assert!(events.starts_with(&["sink-commit", "source-ack-failed"]));
+            assert!(!events.contains(&"sink-abort-initial"));
+        } else {
+            assert_eq!(
+                job.trigger_checkpoint().await.unwrap(),
+                calc_flow::Epoch::INITIAL
+            );
+            assert_eq!(&*log.lock().unwrap(), &["sink-commit", "source-ack"]);
+            assert_eq!(job.cancel().await.state, JobState::Cancelled);
         }
-    })
-    .await
-    .expect("the data row should reach the sink before checkpointing");
-    assert_eq!(emitted.load(Ordering::SeqCst), 1);
-
-    assert_eq!(
-        job.trigger_checkpoint().await.unwrap(),
-        calc_flow::Epoch::INITIAL
-    );
-    assert_eq!(&*log.lock().unwrap(), &["source-ack", "sink-commit"]);
-    assert_eq!(job.cancel().await.state, JobState::Cancelled);
+    }
 }
 
 #[tokio::test]
