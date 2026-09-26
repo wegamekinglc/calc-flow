@@ -4250,9 +4250,9 @@ async fn settle_durable_manifest(
     epoch: Epoch,
     terminal: bool,
 ) -> crate::Result<()> {
-    acknowledge_durable_source_cursors(sources, source_entries).await?;
     notify_sink_manifest_durable(sink_commands, epoch, terminal).await?;
-    coordinator.manifest_durable(epoch).await
+    coordinator.manifest_durable(epoch).await?;
+    acknowledge_durable_source_cursors(sources, source_entries).await
 }
 
 async fn acknowledge_durable_source_cursors(

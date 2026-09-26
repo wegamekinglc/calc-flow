@@ -509,6 +509,11 @@ not aborted. A durable manifest authorizes idempotent external commit, and a
 partial multi-sink commit completes forward during recovery. No second durable
 completion record competes with the manifest. Retention failure after commit
 fails the live job but does not invalidate the completed epoch.
+Once publication is durable, the runtime sends sink commit commands before
+acknowledging source cursors. A source acknowledgement failure can therefore
+leave an already committed sink; the durable manifest remains the recovery
+intent, and the live job reports recovery required rather than aborting that
+sink transaction.
 
 Checkpointed startup remains gated: pure preflight completes before the runtime
 opens the lineage, strictly selects and validates the manifest, reloads
