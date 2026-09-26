@@ -293,13 +293,11 @@ fn entity_parallel_qualification_checks_frame_profile_columns_and_actual_queues(
             }
             "three_aliases" => plan.outputs = vec![plan.outputs[0]; 3],
             "wrong_state" => {
-                state.states[0].groups[0] = TypedWindowState::Exact(ExactNumericState::new(
-                    TypedFrame::Rows(20),
-                    SumClass::Signed,
-                    20,
-                ));
+                Arc::make_mut(&mut state.states[0]).groups[0] = TypedWindowState::Exact(
+                    ExactNumericState::new(TypedFrame::Rows(20), SumClass::Signed, 20),
+                );
             }
-            _ => match &mut state.states[0].groups[0] {
+            _ => match &mut Arc::make_mut(&mut state.states[0]).groups[0] {
                 TypedWindowState::Numeric(numeric) => numeric.samples.push(0, None),
                 _ => unreachable!(),
             },
@@ -593,8 +591,7 @@ fn entity_parallel_transition_error_counts_only_prior_attempts() {
         original_row: 0,
         lane_entity: 0,
     };
-    request.entities[usize::try_from(first.lane_entity).unwrap()]
-        .state
+    Arc::make_mut(&mut request.entities[usize::try_from(first.lane_entity).unwrap()].state)
         .transition_count = u64::MAX;
     let actual = exit(request, &AtomicBool::new(false));
     let NumericLaneOutcome::OrdinaryError(error) = actual.outcome else {
@@ -623,7 +620,9 @@ fn entity_parallel_group_error_is_not_erased_by_the_post_cancel_check() {
     let plan = lane_plan(false);
     let state = warm(&plan, &input);
     let (_, [mut request, _]) = pair(&plan, &state, &input);
-    let TypedWindowState::Numeric(numeric) = &mut request.entities[0].state.groups[0] else {
+    let TypedWindowState::Numeric(numeric) =
+        &mut Arc::make_mut(&mut request.entities[0].state).groups[0]
+    else {
         unreachable!()
     };
     numeric.accumulator.valid_count = u64::MAX;
@@ -653,7 +652,7 @@ fn entity_parallel_earlier_panic_resumes_its_original_payload_after_both_lanes()
             std::panic::panic_any(417_u32);
         }
     }));
-    second.entities[0].state.transition_count = u64::MAX;
+    Arc::make_mut(&mut second.entities[0].state).transition_count = u64::MAX;
     let token = AtomicBool::new(false);
     let mut results = [exit(first, &token), exit(second, &token)];
     let panic = std::panic::catch_unwind(AssertUnwindSafe(|| {
@@ -702,7 +701,7 @@ fn entity_parallel_original_error_order_beats_later_speculative_panic() {
     let plan = lane_plan(false);
     let state = warm(&plan, &input);
     let (seed, [mut first, mut second]) = pair(&plan, &state, &input);
-    first.entities[0].state.transition_count = u64::MAX;
+    Arc::make_mut(&mut first.entities[0].state).transition_count = u64::MAX;
     second.test_hook = Some(Arc::new(|point| {
         if matches!(point, NumericTestPoint::BeforeGroup(_)) {
             panic!("later lane panic");
@@ -817,7 +816,7 @@ fn entity_parallel_route_panic_without_site_precedes_an_earlier_row_error() {
     let plan = lane_plan(false);
     let state = warm(&plan, &batch);
     let (seed, [mut first, mut second]) = pair(&plan, &state, &batch);
-    first.entities[0].state.transition_count = u64::MAX;
+    Arc::make_mut(&mut first.entities[0].state).transition_count = u64::MAX;
     second.entities.truncate(1);
     let token = AtomicBool::new(false);
     let mut results = [exit(first, &token), exit(second, &token)];
@@ -1525,9 +1524,11 @@ fn entity_parallel_readout_compatibility_difference_reads_right_after_left_null(
             left.min_periods = 1;
         }
         let (_, [mut request, _]) = pair(&plan, &RollingKernelState::default(), &input);
-        request.entities[0].state.groups.truncate(1);
+        Arc::make_mut(&mut request.entities[0].state)
+            .groups
+            .truncate(1);
         if left_error {
-            request.entities[0].state.groups[0] =
+            Arc::make_mut(&mut request.entities[0].state).groups[0] =
                 TypedWindowState::Extrema(TypedExtremaState::new(TypedFrame::Rows(5), false, 20));
         }
         let trace = readout_trace(&mut request);
@@ -1911,12 +1912,13 @@ fn entity_parallel_readout_compatibility_short_zip_and_extra_state_keep_sites() 
     for groups in [0, 1, 3] {
         let (_, [mut request, _]) = pair(&plan, &state, &input);
         if groups < 2 {
-            request.entities[0].state.groups.truncate(groups);
+            Arc::make_mut(&mut request.entities[0].state)
+                .groups
+                .truncate(groups);
         } else {
             let mut extra = TypedEwmaState::new(0.5, false);
             extra.update(Some(73.0), "r").unwrap();
-            request.entities[0]
-                .state
+            Arc::make_mut(&mut request.entities[0].state)
                 .groups
                 .push(TypedWindowState::Ewma(extra));
         }
@@ -1983,7 +1985,7 @@ fn entity_parallel_readout_compatibility_non_numeric_state_preserves_first_error
     plan.outputs[0].min_periods = 1;
     for exact in [false, true] {
         let (_, [mut request, _]) = pair(&plan, &RollingKernelState::default(), &input);
-        request.entities[0].state.groups[0] = TypedWindowState::new(
+        Arc::make_mut(&mut request.entities[0].state).groups[0] = TypedWindowState::new(
             if exact {
                 TypedGroupPlan::Signed {
                     input_index: 3,
@@ -2095,7 +2097,7 @@ fn private_readout_input(
 ) -> TypedGroupInput {
     if signed {
         for entity in &mut request.entities {
-            entity.state.groups[0] = TypedWindowState::new(
+            Arc::make_mut(&mut entity.state).groups[0] = TypedWindowState::new(
                 TypedGroupPlan::Signed {
                     input_index: 3,
                     frame: TypedFrame::Rows(20),
@@ -2110,7 +2112,9 @@ fn private_readout_input(
             extra
                 .update(-1, Some(73.0), RollingNumericalProfile::StableV1, 1, "r")
                 .unwrap();
-            entity.state.groups.push(TypedWindowState::Numeric(extra));
+            Arc::make_mut(&mut entity.state)
+                .groups
+                .push(TypedWindowState::Numeric(extra));
         }
         output.group = 1;
         TypedGroupInput::Single(
