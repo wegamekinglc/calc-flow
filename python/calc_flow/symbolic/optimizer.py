@@ -447,6 +447,8 @@ def _rolling_group_key(output: dict[str, object], /) -> tuple[object, ...] | Non
         return "pair", output.get("left"), output.get("right"), *frame
     if kind == "ewma":
         return "ewma", output.get("input"), output.get("span")
+    if kind in {"argmax", "argmin", "unique_count"}:
+        return "scan", kind, output.get("input"), *frame
     return None
 
 
@@ -493,6 +495,17 @@ def _rolling_kernel_fallback(
         return f"primitive_{kind}_has_no_typed_transition"
     if kind == "difference":
         return _first_rolling_fallback(_rolling_leaf_outputs(output), field_types)
+    if transition == "scan":
+        column = output.get("input")
+        frame = output.get("frame")
+        if (
+            not isinstance(column, str)
+            or field_types.get(column) != "float64"
+            or not isinstance(frame, dict)
+            or frame.get("kind") != "rows"
+        ):
+            return f"primitive_{kind}_requires_float64_row_frame"
+        return None
     return _rolling_numeric_fallback(
         kind, _rolling_input_columns(output, transition), field_types
     )

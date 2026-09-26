@@ -14,11 +14,11 @@ use crate::operator::rolling_metrics::{RollingMetricsRecorder, RollingStage, Rol
 use crate::runtime::streaming::entity_work::ReservePair;
 
 use super::{
-    Arc, Array, BTreeMap, Batch, BufferedRow, CompiledRollingSpec, CompiledWindowGroup, EventTime,
-    KeyValue, RecordBatch, Result, RollingHistories, RollingOperator, RowIdentity, ScalarValue,
-    StreamCollector, StreamOperatorContext, TableBatch, VecDeque, chunk_output_record,
-    closing_coordinate, concat_batches, internal_error, operator_error, read_buffered_row,
-    reconstruct_typed_state,
+    Arc, Array, BTreeMap, Batch, BufferedRow, CompiledRollingSpec, EventTime, KeyValue,
+    RecordBatch, Result, RollingHistories, RollingOperator, RowIdentity, ScalarValue,
+    StreamCollector, StreamOperatorContext, TableBatch, VecDeque, WindowState, chunk_output_record,
+    closing_coordinate, concat_batches, fresh_windows, internal_error, operator_error,
+    read_buffered_row, reconstruct_typed_state,
 };
 
 #[derive(Default)]
@@ -110,11 +110,6 @@ impl RollingOperator {
     fn supports_ordered_buffer(&self) -> bool {
         self.compiled.kernel_plan.supports_typed_transition()
             && self.compiled.max_duration_micros.is_none()
-            && !self
-                .compiled
-                .window_groups
-                .iter()
-                .any(|group| matches!(group, CompiledWindowGroup::Ewma { .. }))
             && self.state.buffer.is_empty()
     }
 
@@ -296,10 +291,12 @@ impl RollingOperator {
                 observer,
             )?
         };
+        let ewma_seeds = update.ewma_seeds();
         let (batches, next_sequence) = self.ordered_output_chunks(input, &mut update, context)?;
         Ok(PreparedOrderedOutput {
             update,
             touched,
+            ewma_seeds,
             batches,
             next_sequence,
         })
@@ -393,6 +390,7 @@ fn combine_ordered_records(records: &[RecordBatch], node_id: &str) -> Result<Opt
 struct PreparedOrderedOutput {
     update: StreamKernelUpdate,
     touched: Vec<RetainedHistoryAppend>,
+    ewma_seeds: Vec<Vec<Option<(u64, f64)>>>,
     batches: Vec<Batch>,
     next_sequence: u64,
 }
@@ -400,8 +398,13 @@ struct PreparedOrderedOutput {
 impl PreparedOrderedOutput {
     fn commit(self, operator: &mut RollingOperator) {
         let retention = usize::try_from(operator.compiled.max_row_retention).unwrap_or(usize::MAX);
-        for tail in self.touched {
-            tail.commit(&mut operator.state.histories, retention);
+        for (tail, seeds) in self.touched.into_iter().zip(self.ewma_seeds) {
+            tail.commit(
+                &mut operator.state.histories,
+                retention,
+                &operator.compiled,
+                &seeds,
+            );
         }
         self.update.commit(
             operator
@@ -554,7 +557,13 @@ impl RollingHistories {
 }
 
 impl RetainedHistoryAppend {
-    fn commit(self, histories: &mut RollingHistories, retention: usize) {
+    fn commit(
+        self,
+        histories: &mut RollingHistories,
+        retention: usize,
+        compiled: &CompiledRollingSpec,
+        seeds: &[Option<(u64, f64)>],
+    ) {
         let state = histories.by_entity.entry(self.entity).or_default();
         let keep = retention.saturating_sub(self.rows.len());
         let discard = (state.rows.len() + state.columnar.rows).saturating_sub(keep);
@@ -566,10 +575,20 @@ impl RetainedHistoryAppend {
             .columnar
             .discard_front(discard - scalar_discard, self.prepared_front);
         match self.rows {
-            RetainedRows::Columnar(record) => state.columnar.push(record),
+            RetainedRows::Columnar(record) if record.num_rows() != 0 => state.columnar.push(record),
+            RetainedRows::Columnar(_) => {}
             RetainedRows::Scalar(rows) => state.rows.extend(rows),
         }
         state.windows.clear();
+        if seeds.iter().any(Option::is_some) {
+            state.windows = fresh_windows(compiled);
+            for (window, seed) in state.windows.iter_mut().zip(seeds) {
+                if let (WindowState::Ewma(window), Some((valid_count, value))) = (window, seed) {
+                    window.valid_count = *valid_count;
+                    window.value = *value;
+                }
+            }
+        }
         state.transition_count = self.transition_count;
     }
 }
@@ -630,7 +649,9 @@ impl EntityTail {
             .map_or(0, |state| state.transition_count)
             .checked_add(self.transitions)
             .ok_or_else(|| operator_error(node_id, "rolling entity transition count overflowed"))?;
-        let rows = if columnar {
+        let rows = if self.rows.is_empty() {
+            RetainedRows::Scalar(VecDeque::new())
+        } else if columnar {
             let indices = UInt64Array::from_iter_values(
                 self.rows
                     .into_iter()

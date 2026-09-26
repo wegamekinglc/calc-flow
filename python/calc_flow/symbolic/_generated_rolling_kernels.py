@@ -19,5 +19,8 @@ ROLLING_KERNEL_CAPABILITIES = MappingProxyType(
         "correlation": ("pair", "amortized_constant", False),
         "ewma": ("ewma", "amortized_constant", False),
         "difference": ("fused_difference", "amortized_constant", False),
+        "argmax": ("scan", "amortized_constant", False),
+        "argmin": ("scan", "amortized_constant", False),
+        "unique_count": ("scan", "amortized_constant", False),
     }
 )

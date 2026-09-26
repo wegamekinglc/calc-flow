@@ -187,6 +187,24 @@ def test_rolling_kernel_explain_helpers_fail_closed_on_unknown_shapes() -> None:
     )
     assert (
         _rolling_kernel_fallback(
+            {"kind": "argmax", "input": "x", "frame": {"kind": "duration", "size": 10}},
+            field_types,
+        )
+        == "primitive_argmax_requires_float64_row_frame"
+    )
+    assert (
+        _rolling_kernel_fallback(
+            {
+                "kind": "unique_count",
+                "input": "integer",
+                "frame": {"kind": "rows", "size": 3},
+            },
+            {**field_types, "integer": "int64"},
+        )
+        == "primitive_unique_count_requires_float64_row_frame"
+    )
+    assert (
+        _rolling_kernel_fallback(
             {
                 "kind": "difference",
                 "left": {"kind": "mean", "input": "x"},

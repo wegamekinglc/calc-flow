@@ -26,8 +26,8 @@ use sha2::{Digest, Sha256};
 use super::{
     CompiledAggregate, CompiledDifference, CompiledEvaluation, CompiledEwma, CompiledFloatReadout,
     CompiledFrame, CompiledKeyColumn, CompiledPairAggregate, CompiledRollingOutput,
-    CompiledWindowGroup, PairAccumulator, RollingNumericalProfile, Statistic, SumClass, SumState,
-    WindowAccumulator,
+    CompiledWindowGroup, IncrementalScanState, PairAccumulator, RollingNumericalProfile, ScanKind,
+    Statistic, SumClass, SumState, WindowAccumulator,
     generated_kernel_manifest::{
         GeneratedComplexity, GeneratedTransition, generated_kernel_capability,
     },
@@ -111,6 +111,12 @@ enum TypedGroupPlan {
     Ewma {
         input_index: usize,
         alpha: f64,
+        cumulative: bool,
+    },
+    Scan {
+        input_index: usize,
+        kind: ScanKind,
+        window: usize,
     },
 }
 
@@ -122,6 +128,7 @@ impl TypedGroupPlan {
             | Self::Unsigned { frame, .. }
             | Self::Extrema { frame, .. }
             | Self::Pair { frame, .. } => Some(frame),
+            Self::Scan { window, .. } => Some(TypedFrame::Rows(window)),
             Self::Ewma { .. } => None,
         }
     }
@@ -170,6 +177,7 @@ enum TypedOutputKind {
     Covariance,
     Correlation,
     Ewma,
+    Scan(ScanKind),
     Difference {
         left: TypedFloatReadout,
         right: TypedFloatReadout,
@@ -291,6 +299,26 @@ impl StreamKernelUpdate {
 
     pub(super) fn take_columns(&mut self) -> Vec<ArrayRef> {
         std::mem::take(&mut self.execution.columns)
+    }
+
+    pub(super) fn ewma_seeds(&self) -> Vec<Vec<Option<(u64, f64)>>> {
+        self.execution
+            .state
+            .states
+            .iter()
+            .map(|entity| {
+                entity
+                    .groups
+                    .iter()
+                    .map(|group| match group {
+                        TypedWindowState::Ewma(state) if state.valid_count > 0 => {
+                            Some((state.valid_count, state.value))
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .collect()
     }
 
     pub(super) fn commit(self, base: &mut RollingKernelState) {
@@ -586,6 +614,10 @@ impl RollingKernelPlan {
         matches!(self.selection, KernelSelection::OrderedPrimitive)
     }
 
+    pub(super) fn typed_group_count(&self) -> usize {
+        self.groups.len()
+    }
+
     /// Executes one already-final, canonical-order candidate batch.
     ///
     /// `Ok(None)` means ordering was not proven and the caller must use the
@@ -655,7 +687,10 @@ impl RollingKernelPlan {
             ));
         }
         for ((group, state), seed) in self.groups.iter().zip(&mut entity.groups).zip(seeds) {
-            let TypedGroupPlan::Ewma { alpha, .. } = group else {
+            let TypedGroupPlan::Ewma {
+                alpha, cumulative, ..
+            } = group
+            else {
                 if seed.is_some() {
                     return Err(internal_error(
                         "typed EWMA restore populated a non-EWMA group",
@@ -666,7 +701,7 @@ impl RollingKernelPlan {
             let TypedWindowState::Ewma(state) = state else {
                 return Err(internal_error("typed EWMA restore state mismatch"));
             };
-            *state = TypedEwmaState::new(*alpha);
+            *state = TypedEwmaState::new(*alpha, *cumulative);
             if let Some((valid_count, value)) = seed {
                 if *valid_count == 0 {
                     return Err(internal_error(
@@ -1052,10 +1087,9 @@ fn typed_group_input(
             cast_float64(input.column(left_index), node_id)?,
             cast_float64(input.column(right_index), node_id)?,
         )),
-        TypedGroupPlan::Ewma { input_index, .. } => Ok(TypedGroupInput::Single(cast_float64(
-            input.column(input_index),
-            node_id,
-        )?)),
+        TypedGroupPlan::Ewma { input_index, .. } | TypedGroupPlan::Scan { input_index, .. } => Ok(
+            TypedGroupInput::Single(cast_float64(input.column(input_index), node_id)?),
+        ),
     }
 }
 
@@ -1297,7 +1331,39 @@ fn compile_typed_plan(
     outputs: &[CompiledRollingOutput],
     window_groups: &[CompiledWindowGroup],
 ) -> std::result::Result<(Vec<TypedGroupPlan>, Vec<TypedOutputPlan>), String> {
-    let groups = compile_typed_groups(input_schema, window_groups)?;
+    let mut groups = compile_typed_groups(input_schema, window_groups)?;
+    for output in outputs {
+        let CompiledEvaluation::Scan(scan) = output.evaluation else {
+            continue;
+        };
+        if output.input_type != DataType::Float64 {
+            return Err("typed scan requires Float64 input".into());
+        }
+        let CompiledFrame::Rows(rows) = scan.frame else {
+            return Err("typed scan requires a row frame".into());
+        };
+        let window = usize::try_from(rows)
+            .map_err(|_| "scan row window does not fit the platform usize")?
+            .max(1);
+        if !matches!(
+            scan.kind,
+            ScanKind::Argmax | ScanKind::Argmin | ScanKind::UniqueCount
+        ) {
+            return Err("typed scan requires argmax, argmin, or unique_count".into());
+        }
+        if !groups.iter().any(|group| {
+            matches!(group,
+                TypedGroupPlan::Scan { input_index, kind, window: existing }
+                if *input_index == output.input_index && *kind == scan.kind && *existing == window
+            )
+        }) {
+            groups.push(TypedGroupPlan::Scan {
+                input_index: output.input_index,
+                kind: scan.kind,
+                window,
+            });
+        }
+    }
     let typed_outputs = compile_typed_outputs(outputs, &groups)?;
     if groups.is_empty() || typed_outputs.is_empty() {
         return Err("requires at least one typed rolling output".into());
@@ -1341,13 +1407,11 @@ fn compile_typed_group(
             alpha,
             span,
         } => {
-            if *span == 0 {
-                return Err("cumulative means use the stateful scalar transition".into());
-            }
             require_numeric_type(input_schema, *input_index)?;
             Ok(TypedGroupPlan::Ewma {
                 input_index: *input_index,
                 alpha: *alpha,
+                cumulative: *span == 0,
             })
         }
     }
@@ -1465,8 +1529,45 @@ fn compile_typed_output(
         CompiledEvaluation::Pair(pair) => compile_pair_output(pair),
         CompiledEvaluation::Ewma(ewma) => compile_ewma_output(ewma),
         CompiledEvaluation::Difference(difference) => compile_difference_output(difference),
+        CompiledEvaluation::Scan(scan) => compile_scan_output(output, *scan, groups),
         _ => Err("requires aggregate, pair, EWMA, or fused difference outputs".into()),
     }
+}
+
+fn compile_scan_output(
+    output: &CompiledRollingOutput,
+    scan: super::CompiledScan,
+    groups: &[TypedGroupPlan],
+) -> std::result::Result<TypedOutputPlan, String> {
+    let primitive = match scan.kind {
+        ScanKind::Argmax => "argmax",
+        ScanKind::Argmin => "argmin",
+        ScanKind::UniqueCount => "unique_count",
+        _ => return Err("unsupported typed scan".into()),
+    };
+    require_generated_transition(primitive, GeneratedTransition::Scan)?;
+    let CompiledFrame::Rows(rows) = scan.frame else {
+        return Err("typed scan requires a row frame".into());
+    };
+    let window = usize::try_from(rows)
+        .map_err(|_| "scan row window does not fit the platform usize")?
+        .max(1);
+    let group = groups
+        .iter()
+        .position(|group| {
+            matches!(group,
+                TypedGroupPlan::Scan { input_index, kind, window: existing }
+                if *input_index == output.input_index && *kind == scan.kind && *existing == window
+            )
+        })
+        .ok_or_else(|| "typed scan group is missing".to_owned())?;
+    Ok(TypedOutputPlan {
+        group,
+        kind: TypedOutputKind::Scan(scan.kind),
+        storage: OutputStorage::Count,
+        min_periods: scan.min_periods,
+        ddof: 0,
+    })
 }
 
 fn compile_aggregate_output(
@@ -1769,6 +1870,34 @@ enum TypedWindowState {
     Extrema(TypedExtremaState),
     Pair(Float64PairState),
     Ewma(TypedEwmaState),
+    Scan(TypedScanState),
+}
+
+#[derive(Clone, Debug)]
+struct TypedScanState {
+    scan: IncrementalScanState,
+    next_index: usize,
+    latest: Option<u64>,
+}
+
+impl TypedScanState {
+    fn new(kind: ScanKind, window: usize) -> Self {
+        Self {
+            scan: IncrementalScanState::new(kind, window, 1)
+                .expect("typed scan kind was validated at compilation"),
+            next_index: 0,
+            latest: None,
+        }
+    }
+
+    fn update(&mut self, value: Option<f64>, node_id: &str) -> Result<()> {
+        self.latest = self.scan.advance_float(self.next_index, value);
+        self.next_index = self
+            .next_index
+            .checked_add(1)
+            .ok_or_else(|| operator_error(node_id, "typed rolling scan index overflowed"))?;
+        Ok(())
+    }
 }
 
 impl TypedWindowState {
@@ -1791,7 +1920,12 @@ impl TypedWindowState {
             TypedGroupPlan::Pair { frame, .. } => {
                 Self::Pair(Float64PairState::new(frame, entity_rows))
             }
-            TypedGroupPlan::Ewma { alpha, .. } => Self::Ewma(TypedEwmaState::new(alpha)),
+            TypedGroupPlan::Ewma {
+                alpha, cumulative, ..
+            } => Self::Ewma(TypedEwmaState::new(alpha, cumulative)),
+            TypedGroupPlan::Scan { kind, window, .. } => {
+                Self::Scan(TypedScanState::new(kind, window))
+            }
         }
     }
 
@@ -1860,6 +1994,9 @@ impl TypedWindowState {
             (Self::Ewma(state), TypedGroupInput::Single(input)) => {
                 state.update(valid_float64(input, row_index, false), node_id)
             }
+            (Self::Scan(state), TypedGroupInput::Single(input)) => {
+                state.update(valid_float64(input, row_index, false), node_id)
+            }
             _ => Err(internal_error(
                 "typed rolling group state does not match its input plan",
             )),
@@ -1870,7 +2007,7 @@ impl TypedWindowState {
         match self {
             Self::Numeric(state) => state.rebase_stable_v2(node_id),
             Self::Pair(state) => state.rebase_stable_v2(node_id),
-            Self::Exact(_) | Self::Extrema(_) | Self::Ewma(_) => Ok(()),
+            Self::Exact(_) | Self::Extrema(_) | Self::Ewma(_) | Self::Scan(_) => Ok(()),
         }
     }
 
@@ -1881,6 +2018,9 @@ impl TypedWindowState {
             Self::Extrema(state) => state.estimated_bytes(),
             Self::Pair(state) => state.estimated_bytes(),
             Self::Ewma(_) => TypedEwmaState::estimated_bytes(),
+            Self::Scan(state) => {
+                size_of::<TypedScanState>().saturating_add(state.scan.estimated_bytes())
+            }
         }
     }
 }
@@ -2331,32 +2471,53 @@ impl Float64PairState {
 #[derive(Clone, Copy, Debug)]
 struct TypedEwmaState {
     alpha: f64,
+    cumulative: bool,
     valid_count: u64,
     value: f64,
 }
 
 impl TypedEwmaState {
-    const fn new(alpha: f64) -> Self {
+    const fn new(alpha: f64, cumulative: bool) -> Self {
         Self {
             alpha,
+            cumulative,
             valid_count: 0,
             value: 0.0,
         }
     }
 
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "cumulative mean uses the released Float64 sample count conversion"
+    )]
     fn update(&mut self, sample: Option<f64>, node_id: &str) -> Result<()> {
         let Some(sample) = sample else {
             return Ok(());
         };
-        self.value = if self.valid_count == 0 || self.alpha.to_bits() == 1.0_f64.to_bits() {
-            sample
-        } else {
-            self.value + self.alpha * (sample - self.value)
-        };
-        self.valid_count = self
+        let next_count = self
             .valid_count
             .checked_add(1)
             .ok_or_else(|| operator_error(node_id, "rolling EWMA sample count overflowed"))?;
+        self.value = if self.valid_count == 0 || self.alpha.to_bits() == 1.0_f64.to_bits() {
+            sample
+        } else if self.cumulative {
+            if self.value.is_infinite() && sample.is_finite() {
+                self.value
+            } else if sample.is_infinite() {
+                sample + self.value
+            } else {
+                let difference = sample - self.value;
+                if difference.is_finite() {
+                    self.value + difference / next_count as f64
+                } else {
+                    let weight = 1.0 / next_count as f64;
+                    self.value * (1.0 - weight) + sample * weight
+                }
+            }
+        } else {
+            self.value + self.alpha * (sample - self.value)
+        };
+        self.valid_count = next_count;
         Ok(())
     }
 
@@ -2880,6 +3041,7 @@ impl DerivedBuilder {
             TypedWindowState::Extrema(state) => self.append_extrema(state, output),
             TypedWindowState::Pair(state) => self.append_pair(state, output),
             TypedWindowState::Ewma(state) => self.append_ewma(state, output),
+            TypedWindowState::Scan(state) => self.append_scan(state, output),
         }
     }
 
@@ -2957,6 +3119,16 @@ impl DerivedBuilder {
         match (self, output.kind) {
             (Self::Float(builder, _), TypedOutputKind::Ewma) => {
                 builder.append_value(state.value);
+                Ok(())
+            }
+            _ => Err(typed_output_mismatch()),
+        }
+    }
+
+    fn append_scan(&mut self, state: &TypedScanState, output: &TypedOutputPlan) -> Result<()> {
+        match (self, output.kind) {
+            (Self::Count(builder), TypedOutputKind::Scan(_)) => {
+                builder.append_option(state.latest);
                 Ok(())
             }
             _ => Err(typed_output_mismatch()),
@@ -3068,6 +3240,9 @@ fn typed_valid_count(state: &TypedWindowState) -> u64 {
         TypedWindowState::Extrema(state) => state.valid_count,
         TypedWindowState::Pair(state) => state.accumulator.valid_count,
         TypedWindowState::Ewma(state) => state.valid_count,
+        TypedWindowState::Scan(state) => {
+            u64::try_from(state.scan.valid_count()).unwrap_or(u64::MAX)
+        }
     }
 }
 
@@ -3216,6 +3391,9 @@ fn append_pair(
         }
         TypedOutputKind::Ewma => {
             return Err(internal_error("typed pair state received an EWMA output"));
+        }
+        TypedOutputKind::Scan(_) => {
+            return Err(internal_error("typed pair state received a scan output"));
         }
         TypedOutputKind::Difference { .. } => {
             return Err(internal_error(
@@ -3572,6 +3750,7 @@ mod tests {
                 TypedGroupPlan::Ewma {
                     input_index: 3,
                     alpha: 0.5,
+                    cumulative: false,
                 },
             ],
             Vec::new(),
@@ -3801,7 +3980,7 @@ mod tests {
                 .is_err()
         );
 
-        let mut ewma = TypedEwmaState::new(0.5);
+        let mut ewma = TypedEwmaState::new(0.5, false);
         ewma.update(None, "r").unwrap();
         ewma.update(Some(10.0), "r").unwrap();
         ewma.update(Some(14.0), "r").unwrap();
@@ -3831,6 +4010,7 @@ mod tests {
     fn accumulator_boundaries_fail_closed_without_wraparound() {
         let mut ewma = TypedEwmaState {
             alpha: 0.5,
+            cumulative: false,
             valid_count: u64::MAX,
             value: 1.0,
         };
