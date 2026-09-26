@@ -14,13 +14,110 @@ from calc_flow import (
     Runtime,
     project_json_schema,
 )
-from fastapi.testclient import TestClient
+from fastapi.testclient import TestClient as NativeTestClient
 from starlette.requests import Request as StarletteRequest
+from studio_client import TestClient
 
 import calc_flow_studio.routes as routes_module
 from calc_flow_studio.app import API_PREFIX, create_app, validate_bind_host
 from calc_flow_studio.models import RunEvent, RunResponse, RunStatus
 from calc_flow_studio.run_manager import CapabilitySnapshotError, RunManagerError
+
+
+def test_local_api_rejects_rebound_hosts_origins_and_missing_launch_tokens() -> None:
+    app = create_app(run_manager=FakeManager())
+    with NativeTestClient(app, base_url="http://127.0.0.1") as client:
+        assert (
+            client.get(
+                "/api/v3/catalog", headers={"Host": "rebound.example"}
+            ).status_code
+            == 400
+        )
+        assert client.post("/api/v3/projects", json={}).status_code == 403
+        assert (
+            client.get(
+                "/api/v3/session", headers={"Origin": "http://rebound.example"}
+            ).status_code
+            == 403
+        )
+        token_response = client.get("/api/v3/session")
+        assert token_response.status_code == 200
+        token = token_response.json()["token"]
+        assert isinstance(token, str) and len(token) >= 32
+        assert (
+            client.post(
+                "/api/v3/projects",
+                json={},
+                headers={"X-Calc-Flow-Token": token},
+            ).status_code
+            == 422
+        )
+        preflight = client.options(
+            "/api/v3/projects",
+            headers={
+                "Origin": "http://127.0.0.1:5173",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "X-Calc-Flow-Token, Content-Type",
+            },
+        )
+        assert preflight.status_code == 200
+        assert (
+            client.post(
+                "/api/v3/projects",
+                json={},
+                headers={
+                    "X-Calc-Flow-Token": token,
+                    "Origin": "http://127.0.0.1:5173",
+                },
+            ).status_code
+            == 422
+        )
+        assert (
+            client.post(
+                "/api/v3/projects",
+                json={},
+                headers={
+                    "X-Calc-Flow-Token": token,
+                    "Origin": "http://rebound.example",
+                },
+            ).status_code
+            == 403
+        )
+
+    second_app = create_app(run_manager=FakeManager())
+    with NativeTestClient(second_app, base_url="http://127.0.0.1") as client:
+        assert (
+            client.post(
+                "/api/v3/projects",
+                json={},
+                headers={"X-Calc-Flow-Token": token},
+            ).status_code
+            == 403
+        )
+
+
+def test_ipv6_loopback_host_remains_allowed() -> None:
+    app = create_app(run_manager=FakeManager(), bind_host="::1")
+    with NativeTestClient(app, base_url="http://127.0.0.1") as client:
+        assert (
+            client.get("/api/v3/catalog", headers={"Host": "[::1]:8765"}).status_code
+            == 200
+        )
+        assert (
+            client.get("/api/v3/catalog", headers={"Host": "[::1].evil"}).status_code
+            == 400
+        )
+        assert (
+            client.get("/api/v3/catalog", headers={"Host": "[::1]:99999"}).status_code
+            == 400
+        )
+        assert (
+            client.get(
+                "/api/v3/catalog",
+                headers=[("Host", "rebound.example"), ("Host", "[::1]:8765")],
+            ).status_code
+            == 400
+        )
 
 
 def _project(

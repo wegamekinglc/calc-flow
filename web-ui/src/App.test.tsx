@@ -12,6 +12,14 @@ const response = (body: unknown, status = 200) =>
     }),
   );
 
+const withSession = (requestMock: ReturnType<typeof vi.fn>) => {
+  const request = requestMock as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+  return vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
+    String(input) === '/api/v3/session'
+      ? response({ token: 'launch-token' })
+      : request(input, init));
+};
+
 const catalog = [
   {
     provider: 'server',
@@ -348,7 +356,7 @@ describe('Calc Flow Studio', () => {
       }
       throw new Error(`Unexpected request ${path}`);
     });
-    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('fetch', withSession(fetchMock));
     render(<App />);
 
     const right = await screen.findByLabelText('Input alias 2');
@@ -401,7 +409,7 @@ describe('Calc Flow Studio', () => {
       }
       throw new Error(`Unexpected request ${path}`);
     });
-    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('fetch', withSession(fetchMock));
     render(<App />);
     await screen.findByText('Build the flow');
 
@@ -459,7 +467,7 @@ describe('Calc Flow Studio', () => {
       }
       throw new Error(`Unexpected request ${path}`);
     });
-    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('fetch', withSession(fetchMock));
     render(<App />);
 
     await waitFor(() =>
@@ -564,7 +572,7 @@ describe('Calc Flow Studio', () => {
       }
       throw new Error(`Unexpected request ${path}`);
     });
-    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('fetch', withSession(fetchMock));
     vi.stubGlobal('EventSource', FakeEventSource);
     const { container } = render(<App />);
 
@@ -593,7 +601,7 @@ describe('Calc Flow Studio', () => {
       if (path.endsWith('/projects') && !init?.method) return response([]);
       throw new Error(`Unexpected request ${path}`);
     });
-    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('fetch', withSession(fetchMock));
     render(<App />);
 
     const edit = await screen.findByRole('button', {
@@ -750,7 +758,7 @@ describe('Calc Flow Studio', () => {
       }
       throw new Error(`Unexpected request ${path}`);
     });
-    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('fetch', withSession(fetchMock));
     render(<App />);
 
     await waitFor(() =>
@@ -816,7 +824,7 @@ describe('Calc Flow Studio', () => {
       }
       throw new Error(`Unexpected request ${path}`);
     });
-    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('fetch', withSession(fetchMock));
     render(<App />);
 
     const edit = await screen.findByRole('button', {
@@ -917,7 +925,7 @@ describe('Calc Flow Studio', () => {
       }
       throw new Error(`Unexpected request ${path}`);
     });
-    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('fetch', withSession(fetchMock));
     render(<App />);
 
     const edit = await screen.findByRole('button', {
