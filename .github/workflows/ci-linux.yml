@@ -493,6 +493,7 @@ jobs:
             scripts.test_inspect_wheel \
             scripts.test_native_checkpoint_compatibility \
             scripts.test_python_compatibility \
+            scripts.test_repair_rust_toolchain \
             scripts.test_release_config \
             scripts.test_release_workflow \
             scripts.test_resolve_coverage_baseline \

@@ -35,7 +35,11 @@ EXPECTED_PRIMITIVES = (
     "covariance",
     "correlation",
     "ewma",
+    "cumulative_mean",
     "difference",
+    "argmax",
+    "argmin",
+    "unique_count",
 )
 TRANSITIONS = {
     "numeric": "Numeric",
@@ -43,6 +47,7 @@ TRANSITIONS = {
     "pair": "Pair",
     "ewma": "Ewma",
     "fused_difference": "FusedDifference",
+    "scan": "Scan",
 }
 COMPLEXITIES = {
     "amortized_constant": "AmortizedConstant",
@@ -168,6 +173,7 @@ pub(super) enum GeneratedTransition {{
     Pair,
     Ewma,
     FusedDifference,
+    Scan,
 }}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

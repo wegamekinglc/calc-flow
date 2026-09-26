@@ -1614,7 +1614,7 @@ fn entity_parallel_difference_readout_keeps_minimum_and_builder_error_order() {
         min_periods: 1,
         ddof: 0,
     };
-    let nonaggregate = [TypedWindowState::Ewma(TypedEwmaState::new(0.5))];
+    let nonaggregate = [TypedWindowState::Ewma(TypedEwmaState::new(0.5, false))];
     assert_eq!(read_typed_float(&nonaggregate, readout).unwrap(), None);
     assert!(matches!(
         read_typed_float(&nonaggregate, TypedFloatReadout { min_periods: 0, ..readout }),
@@ -1913,7 +1913,7 @@ fn entity_parallel_readout_compatibility_short_zip_and_extra_state_keep_sites() 
         if groups < 2 {
             request.entities[0].state.groups.truncate(groups);
         } else {
-            let mut extra = TypedEwmaState::new(0.5);
+            let mut extra = TypedEwmaState::new(0.5, false);
             extra.update(Some(73.0), "r").unwrap();
             request.entities[0]
                 .state

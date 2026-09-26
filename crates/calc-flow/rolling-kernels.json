@@ -98,11 +98,43 @@
       "complexity": "amortized_constant"
     },
     {
+      "primitive": "cumulative_mean",
+      "batch": true,
+      "stream": true,
+      "datafusion": false,
+      "typed_transition": "ewma",
+      "complexity": "amortized_constant"
+    },
+    {
       "primitive": "difference",
       "batch": true,
       "stream": true,
       "datafusion": false,
       "typed_transition": "fused_difference",
+      "complexity": "amortized_constant"
+    },
+    {
+      "primitive": "argmax",
+      "batch": true,
+      "stream": true,
+      "datafusion": false,
+      "typed_transition": "scan",
+      "complexity": "amortized_constant"
+    },
+    {
+      "primitive": "argmin",
+      "batch": true,
+      "stream": true,
+      "datafusion": false,
+      "typed_transition": "scan",
+      "complexity": "amortized_constant"
+    },
+    {
+      "primitive": "unique_count",
+      "batch": true,
+      "stream": true,
+      "datafusion": false,
+      "typed_transition": "scan",
       "complexity": "amortized_constant"
     }
   ]

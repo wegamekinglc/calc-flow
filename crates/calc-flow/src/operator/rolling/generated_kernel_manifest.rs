@@ -7,6 +7,7 @@ pub(super) enum GeneratedTransition {
     Pair,
     Ewma,
     FusedDifference,
+    Scan,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -123,11 +124,43 @@ pub(super) const GENERATED_KERNEL_CAPABILITIES: &[GeneratedKernelCapability] = &
         complexity: GeneratedComplexity::AmortizedConstant,
     },
     GeneratedKernelCapability {
+        primitive: "cumulative_mean",
+        batch: true,
+        stream: true,
+        datafusion: false,
+        typed_transition: Some(GeneratedTransition::Ewma),
+        complexity: GeneratedComplexity::AmortizedConstant,
+    },
+    GeneratedKernelCapability {
         primitive: "difference",
         batch: true,
         stream: true,
         datafusion: false,
         typed_transition: Some(GeneratedTransition::FusedDifference),
+        complexity: GeneratedComplexity::AmortizedConstant,
+    },
+    GeneratedKernelCapability {
+        primitive: "argmax",
+        batch: true,
+        stream: true,
+        datafusion: false,
+        typed_transition: Some(GeneratedTransition::Scan),
+        complexity: GeneratedComplexity::AmortizedConstant,
+    },
+    GeneratedKernelCapability {
+        primitive: "argmin",
+        batch: true,
+        stream: true,
+        datafusion: false,
+        typed_transition: Some(GeneratedTransition::Scan),
+        complexity: GeneratedComplexity::AmortizedConstant,
+    },
+    GeneratedKernelCapability {
+        primitive: "unique_count",
+        batch: true,
+        stream: true,
+        datafusion: false,
+        typed_transition: Some(GeneratedTransition::Scan),
         complexity: GeneratedComplexity::AmortizedConstant,
     },
 ];
