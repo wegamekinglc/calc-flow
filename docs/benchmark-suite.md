@@ -461,7 +461,7 @@ as paired evidence.
 The final always-run job publishes all result rows, with dimensions, timing
 scope, base/head P50, P95, rows/s, percentage change, diagnostic round minima,
 paired round medians with confidence bounds, and verdict.
-A second table places all five engine implementations side by side. No top-N
+A second table places every supported engine implementation side by side. No top-N
 filtering is applied. Build, measurement and summary artifacts retain raw
 JSON/JSONL samples, original runner formats, stdout/stderr, release/native and
 harness hashes, exact source refs and environment identities for 30 days.
@@ -518,8 +518,9 @@ FINANCE_PYTHON_PYTHON=target/finance-python-venv/bin/python \
 Run every emitted catalog shard to reproduce the complete benchmark gate. A single
 shard's own `summary.md` is useful locally; the complete summarizer deliberately
 fails when shards are missing. To update dependencies, regenerate and commit
-`benchmarks/requirements.lock` using the command in its header. The suite
-checks lock drift before its adapter tests.
+`benchmarks/requirements.lock` and `benchmarks/finance-python-requirements.lock`
+using the commands in their headers. The suite checks both locks for drift
+before its adapter tests.
 
 ## Performance-plan diagnostics
 

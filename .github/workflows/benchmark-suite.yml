@@ -179,16 +179,15 @@ jobs:
         run: |
           uv python install 3.9
           uv venv target/finance-python-venv --python 3.9
-          uv pip install --python target/finance-python-venv/bin/python \
-            'setuptools==69.5.1' 'wheel==0.48.0' 'Cython==0.29.37' \
-            'numpy==1.26.4' 'pandas==1.5.3' 'scipy==1.13.1' \
-            'simpleutils==0.2.6' 'six==1.17.0'
+          uv pip sync --python target/finance-python-venv/bin/python \
+            --require-hashes benchmarks/finance-python-requirements.lock
           git clone https://github.com/alpha-miner/Finance-Python.git \
             target/third-party/finance-python
           git -C target/third-party/finance-python checkout \
             3e33d3e70c3458b4c6dcf76b88df6148229b402c
           test "$(git -C target/third-party/finance-python rev-parse HEAD)" = \
             3e33d3e70c3458b4c6dcf76b88df6148229b402c
+          # Install only the verified checkout; registry dependencies came from the hash lock.
           uv pip install --python target/finance-python-venv/bin/python \
             --no-build-isolation --no-deps target/third-party/finance-python
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -208,7 +207,11 @@ jobs:
             --all-extras --no-emit-package calc-flow-python \
             --no-emit-package calc-flow-studio --generate-hashes \
             --output-file benchmarks/requirements.lock
-          git diff --exit-code -- benchmarks/requirements.lock
+          uv pip compile benchmarks/finance-python-requirements.in \
+            --python-version 3.9 --generate-hashes \
+            --output-file benchmarks/finance-python-requirements.lock
+          git diff --exit-code -- benchmarks/requirements.lock \
+            benchmarks/finance-python-requirements.lock
           target/benchmark-venv/bin/python -m unittest scripts.test_benchmark_release
           uv pip install --python target/benchmark-venv/bin/python --no-deps \
             --target target/adapter-site target/releases/candidate/*.whl

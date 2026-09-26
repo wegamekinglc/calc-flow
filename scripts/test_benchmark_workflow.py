@@ -22,6 +22,27 @@ class BenchmarkWorkflowTests(unittest.TestCase):
         self.assertIn(f"--no-emit-package {project} ", lock)
         self.assertFalse(any(line.startswith("-e ") for line in lock.splitlines()))
 
+    def test_finance_python_dependencies_use_a_python_39_hash_lock(self):
+        suite = (ROOT / ".github/workflows/benchmark-suite.yml").read_text(
+            encoding="utf-8"
+        )
+        finance_install = suite.split(
+            "- name: Install pinned Finance-Python in Python 3.9\n", 1
+        )[1].split("      - uses: actions/download-artifact@", 1)[0]
+        self.assertIn(
+            "uv pip sync --python target/finance-python-venv/bin/python",
+            finance_install,
+        )
+        self.assertIn(
+            "--require-hashes benchmarks/finance-python-requirements.lock",
+            finance_install,
+        )
+        self.assertNotIn("uv pip install", finance_install.split("git clone", 1)[0])
+        lock = (ROOT / "benchmarks/finance-python-requirements.lock").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("--hash=sha256:", lock)
+
     def test_paired_outputs_anchor_at_workspace_root(self):
         workflow = (ROOT / ".github/workflows/benchmarks.yml").read_text(
             encoding="utf-8"

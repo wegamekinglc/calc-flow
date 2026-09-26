@@ -136,17 +136,9 @@ def _join_stream_output(table: pa.Table, dimension: pa.Table, quotes):
     return output, (quotes, factors)
 
 
-def stream_plan(
-    scenario: str, table: pa.Table | None = None, dimension: pa.Table | None = None
-):
-    quotes = table_input(
-        "quotes",
-        schema=QUOTE_FIELDS,
-        entity_by=("symbol",),
-        event_time="event_time",
-        sequence_by=("sequence",),
-    )
-    inputs = (quotes,)
+def _scalar_stream_output(scenario: str, quotes):
+    """Build row-local and scalar indicator benchmark outputs."""
+
     if scenario in ("sma20", "dual_sma"):
         slow = ts.mean(quotes["price"], window=rows(20), min_periods=20)
         value = (
@@ -169,7 +161,35 @@ def stream_plan(
             "sequence",
             value=cs.mean(quotes["price"], group=exact_time(quotes["event_time"])),
         )
-    elif scenario == "window_sum":
+    elif scenario == "projection":
+        output = quotes.with_columns(
+            FeatureSet((("value", quotes["price"] * lit(2.0) + lit(1.0)),))
+        ).select("sequence", "value")
+    elif scenario == "filter":
+        # The row-local expression language has no modulo primitive, so the
+        # filter scenario runs through the native stream SQL stage; the
+        # predicate is row-local, making per-batch execution equivalent to the
+        # suite's shared `filter` query in engine_comparison.sql_query.
+        output = quotes.sql(
+            "SELECT sequence, price AS value FROM input WHERE sequence % 4 = 0"
+        )
+    else:
+        raise ValueError("unsupported stream benchmark scenario")
+    return output
+
+
+def stream_plan(
+    scenario: str, table: pa.Table | None = None, dimension: pa.Table | None = None
+):
+    quotes = table_input(
+        "quotes",
+        schema=QUOTE_FIELDS,
+        entity_by=("symbol",),
+        event_time="event_time",
+        sequence_by=("sequence",),
+    )
+    inputs = (quotes,)
+    if scenario == "window_sum":
         output = window.tumbling(
             quotes,
             event_time="event_time",
@@ -197,18 +217,6 @@ def stream_plan(
             sequence=joined["left__sequence"], value=joined["right__price"]
         )
         inputs = (quotes, reference)
-    elif scenario == "projection":
-        output = quotes.with_columns(
-            FeatureSet((("value", quotes["price"] * lit(2.0) + lit(1.0)),))
-        ).select("sequence", "value")
-    elif scenario == "filter":
-        # The row-local expression language has no modulo primitive, so the
-        # filter scenario runs through the native stream SQL stage; the
-        # predicate is row-local, making per-batch execution equivalent to the
-        # suite's shared `filter` query in engine_comparison.sql_query.
-        output = quotes.sql(
-            "SELECT sequence, price AS value FROM input WHERE sequence % 4 = 0"
-        )
     elif scenario == "group_by":
         if table is None:
             raise ValueError("group_by stream plans require the workload table")
@@ -225,7 +233,7 @@ def stream_plan(
     elif scenario == "join":
         output, inputs = _join_stream_output(table, dimension, quotes)
     else:
-        raise ValueError("unsupported stream benchmark scenario")
+        output = _scalar_stream_output(scenario, quotes)
     return Program(
         "suite-stream", inputs=inputs, outputs=(("result", output),)
     ).compile_stream(Runtime())

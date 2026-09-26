@@ -279,11 +279,9 @@ git -C target/third-party/finance-python checkout \
 UV_CACHE_DIR=target/uv-cache uv python install 3.9
 UV_CACHE_DIR=target/uv-cache uv venv \
   target/finance-python-venv --python 3.9
-UV_CACHE_DIR=target/uv-cache uv pip install \
+UV_CACHE_DIR=target/uv-cache uv pip sync \
   --python target/finance-python-venv/bin/python \
-  'setuptools==69.5.1' 'wheel==0.48.0' 'Cython==0.29.37' \
-  'numpy==1.26.4' 'pandas==1.5.3' 'scipy==1.13.1' \
-  'simpleutils==0.2.6' 'six==1.17.0'
+  --require-hashes benchmarks/finance-python-requirements.lock
 UV_CACHE_DIR=target/uv-cache uv pip install \
   --python target/finance-python-venv/bin/python \
   --no-build-isolation --no-deps target/third-party/finance-python

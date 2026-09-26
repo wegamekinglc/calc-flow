@@ -1,0 +1,8 @@
+Cython==0.29.37
+numpy==1.26.4
+pandas==1.5.3
+scipy==1.13.1
+setuptools==69.5.1
+simpleutils==0.2.6
+six==1.17.0
+wheel==0.48.0
