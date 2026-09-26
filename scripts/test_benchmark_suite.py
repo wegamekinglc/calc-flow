@@ -60,8 +60,48 @@ class BenchmarkSuiteTests(unittest.TestCase):
         self.assertEqual({c["rows"] for c in cases}, {10**n for n in range(1, 8)})
         self.assertEqual(
             {c["backend"] for c in cases},
-            {"calc-flow-stream", "calc-flow-sql", "datafusion", "polars", "ta-lib"},
+            {
+                "calc-flow-stream",
+                "calc-flow-sql",
+                "datafusion",
+                "polars",
+                "ta-lib",
+                "finance-python",
+            },
         )
+        for scenario in (
+            "average",
+            "argmax64",
+            "argmax256",
+            "unique64",
+            "cs_mean",
+        ):
+            with self.subTest(scenario=scenario):
+                self.assertIn(
+                    f"engines/10000000/calc-flow-stream/{scenario}",
+                    {case["id"] for case in cases},
+                )
+        self.assertIn(
+            "engines/10000000/finance-python/argmax256",
+            {case["id"] for case in cases},
+        )
+        self.assertNotIn(
+            "engines/10000000/calc-flow-stream/asof_join",
+            {case["id"] for case in cases},
+        )
+        self.assertNotIn(
+            "engines/10000000/calc-flow-stream/window_sum",
+            {case["id"] for case in cases},
+        )
+        for scenario in ("window_sum", "asof_join"):
+            self.assertIn(
+                f"engines/10000/calc-flow-stream/{scenario}",
+                {case["id"] for case in cases},
+            )
+            self.assertNotIn(
+                f"engines/100000/calc-flow-stream/{scenario}",
+                {case["id"] for case in cases},
+            )
         self.assertEqual(len({c["id"] for c in cases}), len(cases))
         self.assertTrue(all(c["rows"] > 0 for c in cases))
 
@@ -92,6 +132,10 @@ class BenchmarkSuiteTests(unittest.TestCase):
     def test_native_stream_matrix_excludes_runner_startup(self):
         cases = [c for c in engine_cases() if c["backend"] == "calc-flow-stream"]
         self.assertEqual({c["scope"] for c in cases}, {"ready-enqueue-to-arrow"})
+
+    def test_finance_matrix_declares_its_pandas_output_boundary(self):
+        cases = [c for c in engine_cases() if c["backend"] == "finance-python"]
+        self.assertEqual({c["scope"] for c in cases}, {"pandas-transform-to-numpy"})
 
     def test_baseline_case_ids_match_the_real_catalog(self):
         root = Path(__file__).resolve().parents[1]
@@ -517,6 +561,24 @@ class BenchmarkSuiteTests(unittest.TestCase):
         self.assertIn("unsupported", report)
         self.assertIn("Polars", report)
         self.assertIn("missing", report)
+
+    def test_cross_library_table_includes_finance_and_new_stream_scenarios(self):
+        from scripts.benchmark_suite.report import _cross_library_table
+
+        cases = [
+            measured_case(
+                id="engines/100/finance-python/average",
+                backend="finance-python",
+                scenario="average",
+                comparison="external",
+                baseline=[],
+            )
+        ]
+        rendered = _cross_library_table(cases)
+        self.assertIn("Finance-Python", rendered)
+        average = next(line for line in rendered.splitlines() if "| average " in line)
+        self.assertNotEqual(average.split("|")[-2].strip(), "unsupported")
+        self.assertIn("| window_sum ", rendered)
 
     def test_cross_library_table_declares_ready_runner_measurement(self):
         report = render_report(

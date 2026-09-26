@@ -13,6 +13,12 @@ The separate 10-to-10M engine and warm-state matrices remain enabled. Native
 streaming in the cross-library table starts from an already-ready runner with
 empty rolling state; runner startup and EOF/shutdown are outside its timer.
 Source/task/channel, rolling, watermarks and Arrow output remain included.
+The same matrix now includes Finance-Python 0.9.10 in an isolated Python 3.9
+worker. Its row values match the Arrow fixture; its supported rolling and
+cross-section operators are checked against independent oracles before timing
+is accepted. The report includes new average, 64/256-row argmax, 64-row unique
+count, cross-section mean, ten-second tumbling sum, and backward ASOF cases.
+Unsupported library/scenario combinations remain explicit cells.
 
 New engine/warm base/head measurements have a same-runner, two-round +5%
 regression gate using paired-median confidence lower bounds; cases the
@@ -38,7 +44,7 @@ historical samples.
 | `test_datafusion.py`, `test_runtime.py`            | DataFusion operator scenarios and graph fan-out                  |
 | `test_rolling_kernel.py`                           | Paired rolling-kernel gate against a DataFusion window reference |
 | `rolling_indicator_comparison.py`                  | Standalone cross-library rolling comparison driver               |
-| `finance_python_rolling_runner.py`                 | Isolated legacy Finance-Python worker subprocess                 |
+| `finance_python_rolling_runner.py`                 | Isolated Finance-Python worker for rolling and engine cases      |
 | `test_rolling_indicator_comparison.py`             | Correctness tests for the comparison harness                     |
 | `rolling/`, `symbolic/`                            | Frozen JSON and Markdown evidence referenced by this README      |
 
@@ -270,12 +276,12 @@ git clone https://github.com/alpha-miner/Finance-Python.git \
   target/third-party/finance-python
 git -C target/third-party/finance-python checkout \
   3e33d3e70c3458b4c6dcf76b88df6148229b402c
+UV_CACHE_DIR=target/uv-cache uv python install 3.9
 UV_CACHE_DIR=target/uv-cache uv venv \
   target/finance-python-venv --python 3.9
-UV_CACHE_DIR=target/uv-cache uv pip install \
+UV_CACHE_DIR=target/uv-cache uv pip sync \
   --python target/finance-python-venv/bin/python \
-  'setuptools<70' wheel 'Cython==0.29.37' 'numpy==1.26.4' \
-  'pandas==1.5.3' 'scipy==1.13.1' 'simpleutils>=0.1.0' 'six>=1.10.0'
+  --require-hashes benchmarks/finance-python-requirements.lock
 UV_CACHE_DIR=target/uv-cache uv pip install \
   --python target/finance-python-venv/bin/python \
   --no-build-isolation --no-deps target/third-party/finance-python

@@ -11,6 +11,7 @@ import pyarrow as pa
 
 from benchmarks.warm_stream import BASE, BASE_MICROS, _InteractiveSource
 from calc_flow import (
+    AsofStateLimits,
     Batch,
     Cursor,
     Data,
@@ -30,6 +31,8 @@ from calc_flow.symbolic import (
     FeatureSet,
     Field,
     Program,
+    cs,
+    exact_time,
     lit,
     rows,
     table_input,
@@ -40,6 +43,13 @@ from calc_flow.symbolic import (
     table as tables,
 )
 from scripts.benchmark_suite.catalog import BATCH_ROWS
+
+QUOTE_FIELDS = (
+    Field("event_time", "timestamp[us, UTC]", nullable=False),
+    Field("sequence", "uint64", nullable=False),
+    Field("symbol", "string", nullable=False),
+    Field("price", "float64", nullable=False),
+)
 
 
 def stream_dimension(dimension: pa.Table) -> pa.Table:
@@ -126,22 +136,9 @@ def _join_stream_output(table: pa.Table, dimension: pa.Table, quotes):
     return output, (quotes, factors)
 
 
-def stream_plan(
-    scenario: str, table: pa.Table | None = None, dimension: pa.Table | None = None
-):
-    quotes = table_input(
-        "quotes",
-        schema=(
-            Field("event_time", "timestamp[us, UTC]", nullable=False),
-            Field("sequence", "uint64", nullable=False),
-            Field("symbol", "string", nullable=False),
-            Field("price", "float64", nullable=False),
-        ),
-        entity_by=("symbol",),
-        event_time="event_time",
-        sequence_by=("sequence",),
-    )
-    inputs = (quotes,)
+def _scalar_stream_output(scenario: str, quotes):
+    """Build row-local and scalar indicator benchmark outputs."""
+
     if scenario in ("sma20", "dual_sma"):
         slow = ts.mean(quotes["price"], window=rows(20), min_periods=20)
         value = (
@@ -150,6 +147,20 @@ def stream_plan(
             else ts.mean(quotes["price"], window=rows(5), min_periods=5) - slow
         )
         output = quotes.with_columns(FeatureSet((("value", value),)))
+    elif scenario in ("average", "argmax64", "argmax256", "unique64"):
+        price = quotes["price"]
+        value = {
+            "average": lambda: ts.average(price),
+            "argmax64": lambda: ts.argmax(price, window=rows(64)),
+            "argmax256": lambda: ts.argmax(price, window=rows(256)),
+            "unique64": lambda: ts.unique_count(price, window=rows(64)),
+        }[scenario]()
+        output = quotes.select("sequence", value=value)
+    elif scenario == "cs_mean":
+        output = quotes.select(
+            "sequence",
+            value=cs.mean(quotes["price"], group=exact_time(quotes["event_time"])),
+        )
     elif scenario == "projection":
         output = quotes.with_columns(
             FeatureSet((("value", quotes["price"] * lit(2.0) + lit(1.0)),))
@@ -162,6 +173,50 @@ def stream_plan(
         output = quotes.sql(
             "SELECT sequence, price AS value FROM input WHERE sequence % 4 = 0"
         )
+    else:
+        raise ValueError("unsupported stream benchmark scenario")
+    return output
+
+
+def stream_plan(
+    scenario: str, table: pa.Table | None = None, dimension: pa.Table | None = None
+):
+    quotes = table_input(
+        "quotes",
+        schema=QUOTE_FIELDS,
+        entity_by=("symbol",),
+        event_time="event_time",
+        sequence_by=("sequence",),
+    )
+    inputs = (quotes,)
+    if scenario == "window_sum":
+        output = window.tumbling(
+            quotes,
+            event_time="event_time",
+            size_micros=10_000_000,
+            group_by=("symbol",),
+            aggregates=(window.sum("price", output="value"),),
+        ).select("symbol", "window_start", "value")
+    elif scenario == "asof_join":
+        if table is None:
+            raise ValueError("asof_join stream plans require the workload table")
+        reference = table_input(
+            "reference",
+            schema=QUOTE_FIELDS,
+            entity_by=("symbol",),
+            event_time="event_time",
+            sequence_by=("sequence",),
+        )
+        joined = tables.stream_asof_join(
+            quotes,
+            reference,
+            tolerance=timedelta(),
+            limits=AsofStateLimits(2 * table.num_rows + BATCH_ROWS, 1 << 30),
+        )
+        output = joined.select(
+            sequence=joined["left__sequence"], value=joined["right__price"]
+        )
+        inputs = (quotes, reference)
     elif scenario == "group_by":
         if table is None:
             raise ValueError("group_by stream plans require the workload table")
@@ -178,13 +233,15 @@ def stream_plan(
     elif scenario == "join":
         output, inputs = _join_stream_output(table, dimension, quotes)
     else:
-        raise ValueError("unsupported stream benchmark scenario")
+        output = _scalar_stream_output(scenario, quotes)
     return Program(
         "suite-stream", inputs=inputs, outputs=(("result", output),)
     ).compile_stream(Runtime())
 
 
-def stream_events(table: pa.Table, entities: int) -> tuple:
+def stream_events(
+    table: pa.Table, entities: int, *, close_windows: bool = False
+) -> tuple:
     # Never finalize half an entity tick before the next data batch.
     size = max(entities, BATCH_ROWS // entities * entities)
     events = []
@@ -198,6 +255,10 @@ def stream_events(table: pa.Table, entities: int) -> tuple:
         )
         micros = part["event_time"][-1].value - int(BASE_MICROS) + 1
         events.append(Watermark(BASE + timedelta(microseconds=micros)))
+    if close_windows:
+        # Close the final ten-second tumbling window before awaiting its output.
+        final_tick = (table.num_rows - 1) // entities
+        events.append(Watermark(BASE + timedelta(seconds=(final_tick // 10 + 1) * 10)))
     return (*events, None)
 
 
