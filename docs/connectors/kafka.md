@@ -362,7 +362,12 @@ to supply physical graph bindings and explicit runtime/state settings.
 The ledger topic must be dedicated, have exactly one partition, and use only
 `cleanup.policy=compact`. Calc Flow derives the transactional ID from pipeline
 and output identity; a project cannot supply it. Recovery validates the exact
-prepared record bytes and checks the committed epoch marker before replay.
+prepared record bytes, target topic, wire format, and Arrow schema identity,
+then checks the committed epoch marker before replay. Older markers lack the
+topic and schema identity and cannot authenticate a recovery attempt. Reconcile
+the pending epoch against the target topic and durable checkpoint before
+starting a fresh sink identity and ledger; do not delete the old marker to
+force replay.
 
 See the [connector overview](README.md) for shared delivery, secret,
 and recovery rules.

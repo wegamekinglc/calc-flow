@@ -335,6 +335,24 @@ fn snapshot_reads_and_transactional_sink_commits() {
             .expect("clean ledger");
         client
             .execute(
+                "CREATE TABLE calc_flow_epoch_ledger (\
+                 pipeline TEXT NOT NULL, output TEXT NOT NULL, epoch BIGINT NOT NULL, \
+                 rows_written BIGINT NOT NULL, committed_at timestamptz NOT NULL DEFAULT now(), \
+                 PRIMARY KEY (pipeline, output, epoch))",
+                &[],
+            )
+            .await
+            .expect("create legacy ledger schema for migration");
+        client
+            .execute(
+                "INSERT INTO calc_flow_epoch_ledger \
+                 (pipeline, output, epoch, rows_written) VALUES ('pg_test', 'out', 2, 0)",
+                &[],
+            )
+            .await
+            .expect("seed populated legacy ledger before migration");
+        client
+            .execute(
                 "CREATE TABLE orders (id BIGSERIAL PRIMARY KEY, amount BIGINT NOT NULL, label TEXT NOT NULL)",
                 &[],
             )
@@ -393,8 +411,9 @@ fn snapshot_reads_and_transactional_sink_commits() {
             arrow::datatypes::Field::new("amount", arrow::datatypes::DataType::Int64, false),
             arrow::datatypes::Field::new("label", arrow::datatypes::DataType::Utf8, false),
         ]);
+        let schema = std::sync::Arc::new(schema);
         let record = arrow::record_batch::RecordBatch::try_new(
-            std::sync::Arc::new(schema),
+            schema.clone(),
             vec![
                 std::sync::Arc::new(arrow::array::Int64Array::from(vec![100, 200])),
                 std::sync::Arc::new(arrow::array::Int64Array::from(vec![5, 6])),
@@ -431,13 +450,47 @@ fn snapshot_reads_and_transactional_sink_commits() {
 
         let ledger: i64 = client
             .query_one(
-                "SELECT COUNT(*) FROM calc_flow_epoch_ledger WHERE pipeline = 'pg_test'",
+                "SELECT COUNT(*) FROM calc_flow_epoch_ledger \
+                 WHERE pipeline = 'pg_test' AND output = 'out' AND epoch = 1",
                 &[],
             )
             .await
             .expect("ledger count")
             .get(0);
         assert_eq!(ledger, 1, "the epoch ledger entry committed");
+
+        // A replay with the same row count but a different prepared payload
+        // must not be accepted as an idempotent commit.
+        sink.begin_epoch(calc_flow::Epoch::INITIAL)
+            .await
+            .expect("begins conflicting replay");
+        let changed = arrow::record_batch::RecordBatch::try_new(
+            schema,
+            vec![
+                std::sync::Arc::new(arrow::array::Int64Array::from(vec![100, 200])),
+                std::sync::Arc::new(arrow::array::Int64Array::from(vec![50, 60])),
+                std::sync::Arc::new(arrow::array::StringArray::from(vec!["x", "y"])),
+            ],
+        )
+        .expect("changed batch");
+        let changed = calc_flow::Batch::table(
+            vec![changed],
+            calc_flow::BatchMetadata::new("test", 2, BTreeMap::new()).unwrap(),
+        )
+        .unwrap();
+        sink.write(&changed).await.expect("stages conflicting rows");
+        let conflicting = sink
+            .pre_commit(calc_flow::Epoch::INITIAL)
+            .await
+            .expect("prepares conflicting rows");
+        let error = sink
+            .commit(calc_flow::Epoch::INITIAL, &conflicting)
+            .await
+            .expect_err("same row count cannot hide another payload");
+        assert!(error.to_string().contains("conflicts"), "{error}");
+        sink.abort(calc_flow::Epoch::INITIAL, Some(&conflicting))
+            .await
+            .expect("discards conflicting replay");
 
         // Reconcile a lost commit ack in a newly opened sink with
         // the exact durable manifest metadata and committed state segment.
@@ -462,12 +515,44 @@ fn snapshot_reads_and_transactional_sink_commits() {
             .recover(&recovery)
             .await
             .expect("reconciles");
+        for (column, changed) in [
+            ("target", "another_target".to_string()),
+            ("schema_hash", "0".repeat(64)),
+        ] {
+            let original = recovery.pre_commit()
+                .get(column)
+                .and_then(Value::as_str)
+                .expect("original ledger identity");
+            let change_sql = format!(
+                "UPDATE calc_flow_epoch_ledger SET {column} = $1 \
+                 WHERE pipeline = 'pg_test' AND output = 'out' AND epoch = 1"
+            );
+            client.execute(&change_sql, &[&changed]).await.expect("change ledger field");
+            let error = recovered
+                .recover(&recovery)
+                .await
+                .expect_err("foreign ledger identity cannot suppress replay");
+            assert!(error.to_string().contains("conflicts"), "{column}: {error}");
+            client.execute(&change_sql, &[&original]).await.expect("restore ledger field");
+        }
         let count: i64 = client
             .query_one("SELECT COUNT(*) FROM orders_out", &[])
             .await
             .expect("recounts")
             .get(0);
         assert_eq!(count, 2, "replay adds no duplicates");
+
+        // Rows from the old ledger schema have no payload identity. Migration
+        // adds nullable columns and must not treat these rows as verified.
+        let legacy_epoch = calc_flow::Epoch::new(2).expect("epoch");
+        recovered.begin_epoch(legacy_epoch).await.expect("begin replay");
+        let legacy_evidence = recovered.pre_commit(legacy_epoch).await.expect("prepare replay");
+        let error = recovered
+            .commit(legacy_epoch, &legacy_evidence)
+            .await
+            .expect_err("unverified legacy entry cannot suppress replay");
+        assert!(error.to_string().contains("conflicts"), "{error}");
+        recovered.abort(legacy_epoch, Some(&legacy_evidence)).await.expect("abort replay");
         recovered.close().await.expect("closes recovered sink");
     });
 }

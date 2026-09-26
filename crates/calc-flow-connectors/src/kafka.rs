@@ -735,6 +735,38 @@ fn encode_kafka_payload(format: KafkaFormat, batch: &Batch) -> Result<Vec<u8>> {
     }
 }
 
+fn kafka_format_name(format: KafkaFormat) -> &'static str {
+    match format {
+        KafkaFormat::Json => "json",
+        KafkaFormat::Csv => "csv",
+        KafkaFormat::Protobuf => "protobuf",
+        KafkaFormat::Custom => "custom",
+    }
+}
+
+fn kafka_schema_hash(format: KafkaFormat, schema: Option<&arrow::datatypes::Schema>) -> String {
+    let fields = schema
+        .map(|schema| {
+            schema
+                .fields()
+                .iter()
+                .map(|field| {
+                    (
+                        field.name(),
+                        format!("{:?}", field.data_type()),
+                        field.is_nullable(),
+                        field.metadata().iter().collect::<BTreeMap<_, _>>(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let metadata = schema.map(|schema| schema.metadata().iter().collect::<BTreeMap<_, _>>());
+    let bytes = serde_json::to_vec(&(kafka_format_name(format), fields, metadata))
+        .expect("data-only Kafka schema identity serializes");
+    crate::evidence::sha256_hex(&bytes)
+}
+
 fn positive_kafka_option(options: &JsonMap, key: &str, default: u64) -> Result<u64> {
     let value = u64_option(options, key)?.unwrap_or(default);
     if value == 0 {
@@ -904,6 +936,7 @@ pub struct TransactionalKafkaSink {
     delivered: u64,
     pending_records: Vec<Vec<u8>>,
     pending_bytes: u64,
+    pending_schema_hash: Option<String>,
 }
 
 const PREPARED_RECORDS_SEGMENT: &str = "records";
@@ -935,6 +968,7 @@ impl TransactionalKafkaSink {
             delivered: 0,
             pending_records: Vec::new(),
             pending_bytes: 0,
+            pending_schema_hash: None,
         })
     }
 
@@ -943,12 +977,22 @@ impl TransactionalKafkaSink {
             .get("segment_sha256")
             .and_then(Value::as_str)
             .ok_or_else(|| fail("commit", "prepared segment hash is missing"))?;
+        let schema_hash = evidence
+            .get("schema_hash")
+            .and_then(Value::as_str)
+            .ok_or_else(|| fail("commit", "prepared schema hash is missing"))?;
         let payload = serde_json::to_vec(&BTreeMap::from([
             ("epoch", Value::from(epoch.as_u64())),
             (
                 "transactional_id",
                 Value::String(self.config.transactional_id.clone()),
             ),
+            ("topic", Value::String(self.config.topic.clone())),
+            (
+                "format",
+                Value::String(kafka_format_name(self.config.format).into()),
+            ),
+            ("schema_hash", Value::String(schema_hash.into())),
             ("segment_sha256", Value::String(segment_sha256.to_string())),
         ]))
         .map_err(|error| fail("commit", &error.to_string()))?;
@@ -1072,7 +1116,33 @@ impl TransactionalKafkaSink {
 struct KafkaLedgerMarker {
     epoch: u64,
     transactional_id: String,
+    topic: Option<String>,
+    format: Option<String>,
+    schema_hash: Option<String>,
     segment_sha256: String,
+}
+
+fn validate_ledger_marker_target(marker: &KafkaLedgerMarker, target: &str) -> Result<()> {
+    match marker.topic.as_deref() {
+        Some(recorded) if recorded == target => Ok(()),
+        _ => Err(fail(
+            "recover",
+            "Kafka ledger marker target topic differs from this sink",
+        )),
+    }
+}
+
+fn validate_ledger_marker_schema(marker: &KafkaLedgerMarker, evidence: &JsonMap) -> Result<()> {
+    if marker.schema_hash.as_deref() == evidence.get("schema_hash").and_then(Value::as_str)
+        && marker.schema_hash.is_some()
+    {
+        Ok(())
+    } else {
+        Err(fail(
+            "recover",
+            "Kafka ledger marker schema differs from durable evidence",
+        ))
+    }
 }
 
 fn encode_records(records: &[Vec<u8>]) -> Result<Vec<u8>> {
@@ -1149,6 +1219,7 @@ fn validate_prepared_evidence(
     epoch: calc_flow::Epoch,
     evidence: &JsonMap,
     records: &[Vec<u8>],
+    live_schema_hash: Option<&str>,
 ) -> Result<()> {
     validate_recovery_evidence(&config.transactional_id, evidence)?;
     let protocol = |message: String| fail("recover", &message);
@@ -1159,6 +1230,29 @@ fn validate_prepared_evidence(
         return Err(fail(
             "recover",
             "prepared Kafka evidence names another sink",
+        ));
+    }
+    if crate::evidence::string_field(evidence, "topic").map_err(protocol)? != config.topic {
+        return Err(fail(
+            "recover",
+            "prepared Kafka evidence names another target topic",
+        ));
+    }
+    if crate::evidence::string_field(evidence, "format").map_err(protocol)?
+        != kafka_format_name(config.format)
+    {
+        return Err(fail(
+            "recover",
+            "prepared Kafka evidence names another wire format",
+        ));
+    }
+    crate::evidence::check_schema_hash(evidence).map_err(protocol)?;
+    if live_schema_hash
+        .is_some_and(|hash| evidence.get("schema_hash").and_then(Value::as_str) != Some(hash))
+    {
+        return Err(fail(
+            "commit",
+            "prepared Kafka schema differs from the active epoch",
         ));
     }
     crate::evidence::check_segment_id(evidence, PREPARED_RECORDS_SEGMENT).map_err(protocol)?;
@@ -1187,6 +1281,7 @@ impl TransactionalStreamSink for TransactionalKafkaSink {
         self.delivered = 0;
         self.pending_records.clear();
         self.pending_bytes = 0;
+        self.pending_schema_hash = None;
         Ok(())
     }
 
@@ -1195,6 +1290,20 @@ impl TransactionalStreamSink for TransactionalKafkaSink {
             return Err(fail("write", "write before begin_epoch"));
         }
         let payload = encode_kafka_payload(self.config.format, batch)?;
+        let table = batch
+            .table_payload()
+            .map_err(|_| fail("write", "the Kafka sink writes table batches only"))?;
+        let schema_hash = kafka_schema_hash(self.config.format, Some(table.schema().as_ref()));
+        if self
+            .pending_schema_hash
+            .as_ref()
+            .is_some_and(|pending| pending != &schema_hash)
+        {
+            return Err(fail(
+                "write",
+                "all batches in one epoch must use the same Arrow schema",
+            ));
+        }
         let rows = u64::try_from(batch.num_rows()).unwrap_or(u64::MAX);
         let next_rows = self
             .delivered
@@ -1219,6 +1328,7 @@ impl TransactionalStreamSink for TransactionalKafkaSink {
         self.pending_records.push(payload);
         self.pending_bytes = next_bytes;
         self.delivered = next_rows;
+        self.pending_schema_hash = Some(schema_hash);
         let _ = delivery;
         Ok(())
     }
@@ -1241,6 +1351,22 @@ impl TransactionalStreamSink for TransactionalKafkaSink {
             (
                 "ledger_topic".to_string(),
                 Value::String(self.config.ledger_topic.clone()),
+            ),
+            (
+                "topic".to_string(),
+                Value::String(self.config.topic.clone()),
+            ),
+            (
+                "format".to_string(),
+                Value::String(kafka_format_name(self.config.format).into()),
+            ),
+            (
+                "schema_hash".to_string(),
+                Value::String(
+                    self.pending_schema_hash
+                        .clone()
+                        .unwrap_or_else(|| kafka_schema_hash(self.config.format, None)),
+                ),
             ),
             (
                 "segment_id".to_string(),
@@ -1271,7 +1397,17 @@ impl TransactionalStreamSink for TransactionalKafkaSink {
         if !self.active {
             return Err(fail("commit", "commit without an active transaction"));
         }
-        validate_prepared_evidence(&self.config, epoch, pre_commit, &self.pending_records)?;
+        let live_schema_hash = self
+            .pending_schema_hash
+            .clone()
+            .unwrap_or_else(|| kafka_schema_hash(self.config.format, None));
+        validate_prepared_evidence(
+            &self.config,
+            epoch,
+            pre_commit,
+            &self.pending_records,
+            Some(&live_schema_hash),
+        )?;
         self.write_ledger_marker(epoch, pre_commit).await?;
         self.producer
             .commit_transaction(Duration::from_secs(30))
@@ -1279,6 +1415,7 @@ impl TransactionalStreamSink for TransactionalKafkaSink {
         self.active = false;
         self.pending_records.clear();
         self.pending_bytes = 0;
+        self.pending_schema_hash = None;
         Ok(())
     }
 
@@ -1295,6 +1432,7 @@ impl TransactionalStreamSink for TransactionalKafkaSink {
         }
         self.pending_records.clear();
         self.pending_bytes = 0;
+        self.pending_schema_hash = None;
         Ok(())
     }
 
@@ -1310,12 +1448,29 @@ impl TransactionalStreamSink for TransactionalKafkaSink {
             recovery.epoch(),
             recovery.pre_commit(),
             &records,
+            None,
         )?;
         if let Some(marker) = self.latest_ledger_marker().await? {
+            validate_ledger_marker_target(&marker, &self.config.topic)?;
+            if marker.format.as_deref() != Some(kafka_format_name(self.config.format)) {
+                return Err(fail(
+                    "recover",
+                    "Kafka ledger marker wire format differs from this sink",
+                ));
+            }
+            if !marker.schema_hash.as_ref().is_some_and(|hash| {
+                hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+            }) {
+                return Err(fail(
+                    "recover",
+                    "Kafka ledger marker schema hash is missing or invalid",
+                ));
+            }
             if marker.epoch > recovery.epoch().as_u64() {
                 return Ok(());
             }
             if marker.epoch == recovery.epoch().as_u64() {
+                validate_ledger_marker_schema(&marker, recovery.pre_commit())?;
                 let expected_hash = recovery.pre_commit()["segment_sha256"]
                     .as_str()
                     .ok_or_else(|| fail("recover", "prepared segment hash is missing"))?;
@@ -1945,6 +2100,136 @@ mod tests {
             ("output".into(), Value::String("events".into())),
             ("format".into(), Value::String(format.into())),
         ])
+    }
+
+    #[test]
+    fn prepared_recovery_evidence_binds_target_topic() {
+        let config = KafkaSinkConfig::from_options(&sink_options("json")).expect("config");
+        let records = vec![b"one".to_vec()];
+        let segment = encode_records(&records).expect("segment");
+        let evidence = BTreeMap::from([
+            (
+                "transactional_id".into(),
+                Value::String(config.transactional_id.clone()),
+            ),
+            (
+                "epoch".into(),
+                Value::from(calc_flow::Epoch::INITIAL.as_u64()),
+            ),
+            (
+                "ledger_topic".into(),
+                Value::String(config.ledger_topic.clone()),
+            ),
+            ("topic".into(), Value::String(config.topic.clone())),
+            ("format".into(), Value::String("json".into())),
+            ("schema_hash".into(), Value::String("a".repeat(64))),
+            (
+                "segment_id".into(),
+                Value::String(PREPARED_RECORDS_SEGMENT.into()),
+            ),
+            ("segment_bytes".into(), Value::from(segment.len() as u64)),
+            (
+                "segment_sha256".into(),
+                Value::String(hex::encode(Sha256::digest(&segment))),
+            ),
+        ]);
+        validate_prepared_evidence(
+            &config,
+            calc_flow::Epoch::INITIAL,
+            &evidence,
+            &records,
+            Some(&"a".repeat(64)),
+        )
+        .expect("matching topic is recoverable");
+        let mut wrong_schema = evidence.clone();
+        wrong_schema.insert("schema_hash".into(), Value::String("b".repeat(64)));
+        assert!(
+            validate_prepared_evidence(
+                &config,
+                calc_flow::Epoch::INITIAL,
+                &wrong_schema,
+                &records,
+                Some(&"a".repeat(64)),
+            )
+            .is_err(),
+            "live evidence cannot claim another Arrow schema"
+        );
+        let mut foreign = evidence.clone();
+        foreign.insert("topic".into(), Value::String("other-topic".into()));
+        assert!(
+            validate_prepared_evidence(
+                &config,
+                calc_flow::Epoch::INITIAL,
+                &foreign,
+                &records,
+                None
+            )
+            .is_err(),
+            "another target topic must fail closed"
+        );
+        let mut missing = evidence;
+        missing.remove("topic");
+        assert!(
+            validate_prepared_evidence(
+                &config,
+                calc_flow::Epoch::INITIAL,
+                &missing,
+                &records,
+                None
+            )
+            .is_err(),
+            "missing target topic must fail closed"
+        );
+        missing.insert("topic".into(), Value::String(config.topic.clone()));
+        missing.insert("format".into(), Value::String("csv".into()));
+        assert!(
+            validate_prepared_evidence(
+                &config,
+                calc_flow::Epoch::INITIAL,
+                &missing,
+                &records,
+                None
+            )
+            .is_err(),
+            "a different wire format must fail closed"
+        );
+    }
+
+    #[test]
+    fn ledger_marker_binds_target_topic() {
+        let marker = |topic: Option<&str>| {
+            let mut payload = serde_json::json!({
+                "epoch": 1,
+                "transactional_id": "calc-flow-test",
+                "schema_hash": "a".repeat(64),
+                "segment_sha256": "a".repeat(64),
+            });
+            if let Some(topic) = topic {
+                payload["topic"] = Value::String(topic.into());
+            }
+            serde_json::from_value::<KafkaLedgerMarker>(payload).expect("marker parses")
+        };
+        validate_ledger_marker_target(&marker(Some("events")), "events")
+            .expect("matching target recovers");
+        assert!(validate_ledger_marker_target(&marker(Some("other")), "events").is_err());
+        assert!(validate_ledger_marker_target(&marker(None), "events").is_err());
+        let expected = BTreeMap::from([("schema_hash".into(), Value::String("a".repeat(64)))]);
+        validate_ledger_marker_schema(&marker(Some("events")), &expected)
+            .expect("matching schema recovers");
+        let changed = BTreeMap::from([("schema_hash".into(), Value::String("b".repeat(64)))]);
+        assert!(validate_ledger_marker_schema(&marker(Some("events")), &changed).is_err());
+    }
+
+    #[test]
+    fn schema_hash_distinguishes_equal_wire_payloads() {
+        use arrow::datatypes::{DataType, Field, Schema};
+
+        let narrow = Schema::new(vec![Field::new("a", DataType::Int32, false)]);
+        let wide = Schema::new(vec![Field::new("a", DataType::Int64, false)]);
+        assert_ne!(
+            kafka_schema_hash(KafkaFormat::Json, Some(&narrow)),
+            kafka_schema_hash(KafkaFormat::Json, Some(&wide)),
+        );
     }
 
     fn sample_batch() -> Batch {

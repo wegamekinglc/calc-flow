@@ -1,12 +1,11 @@
 //! Shared pre-commit evidence protocol checks.
 //!
-//! The `PostgreSQL`, `ClickHouse`, and `Kafka` transactional sinks all validate
-//! the same data-only evidence contract before committing a prepared
-//! segment: identity fields, epoch, segment id, schema hash, byte count,
-//! SHA-256 checksum, and row count. The helpers here implement each check
-//! once and return the standard failure message; the transport call sites
-//! wrap that message with their own operation-specific error constructor.
-//! Every check fails closed.
+//! Transactional sinks validate data-only evidence before committing a
+//! prepared segment. `PostgreSQL` and `ClickHouse` bind pipeline, output, target,
+//! schema, epoch, row count, segment size, and SHA-256 checksum. `Kafka` binds
+//! transactional ID, ledger topic, target topic, wire format, Arrow schema,
+//! epoch, and segment checksum.
+//! Shared checks live here; each sink wraps errors with its operation context.
 
 use calc_flow::{Epoch, JsonMap};
 use serde_json::Value;
