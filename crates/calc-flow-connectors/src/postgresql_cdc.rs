@@ -141,9 +141,23 @@ impl PostgresCdcSource {
         if replace_existing {
             self.drop_inactive_slot().await?;
         }
+        self.ensure_slot_absent().await?;
+        let snapshot_time_unix_micros = unix_time_micros()?;
         let replication = replication_config(&self.endpoint_url, &self.config, 0)?;
-        let export = create_exported_slot(&replication).await?;
-        let (client, driver) = crate::postgresql::connect_postgres(&self.endpoint_url).await?;
+        let export = match create_exported_slot(&replication).await {
+            Ok(export) => export,
+            Err(failure) if failure.cleanup_needed => {
+                return self.cleanup_failed_snapshot(failure.error).await;
+            }
+            Err(failure) => return Err(failure.error),
+        };
+        let (client, driver) = match crate::postgresql::connect_postgres(&self.endpoint_url).await {
+            Ok(connection) => connection,
+            Err(error) => {
+                drop(export.stream);
+                return self.cleanup_failed_snapshot(error).await;
+            }
+        };
         let import = async {
             client
                 .batch_execute("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
@@ -174,7 +188,7 @@ impl PostgresCdcSource {
                 self.snapshot_driver = Some(driver);
                 self.snapshot_offset = 0;
                 self.snapshot_lsn = Some(export.consistent_lsn);
-                self.snapshot_time_unix_micros = unix_time_micros()?;
+                self.snapshot_time_unix_micros = snapshot_time_unix_micros;
                 self.last_commit_lsn = export.consistent_lsn;
                 Ok(())
             }
@@ -184,8 +198,21 @@ impl PostgresCdcSource {
                     driver.abort();
                 }
                 let _ = driver.await;
-                Err(error)
+                self.cleanup_failed_snapshot(error).await
             }
+        }
+    }
+
+    async fn cleanup_failed_snapshot(&self, bootstrap_error: CalcFlowError) -> Result<()> {
+        match self.drop_inactive_slot().await {
+            Ok(()) => Err(bootstrap_error),
+            Err(cleanup_error) => Err(cdc_error(
+                "slot_bootstrap",
+                format!(
+                    "{bootstrap_error}; newly created replication slot cleanup failed: \
+                     {cleanup_error}; remove the slot manually before retrying"
+                ),
+            )),
         }
     }
 
@@ -198,6 +225,31 @@ impl PostgresCdcSource {
         }
         let _ = driver.await;
         result
+    }
+
+    async fn ensure_slot_absent(&self) -> Result<()> {
+        let (client, driver) = crate::postgresql::connect_postgres(&self.endpoint_url).await?;
+        let result = client
+            .query_opt(
+                "SELECT 1 FROM pg_replication_slots WHERE slot_name = $1",
+                &[&self.slot()],
+            )
+            .await
+            .map(|row| row.is_none())
+            .map_err(|error| cdc_error("slot_policy", safe_replication_error(&error.to_string())));
+        drop(client);
+        if !driver.is_finished() {
+            driver.abort();
+        }
+        let _ = driver.await;
+        if result? {
+            Ok(())
+        } else {
+            Err(cdc_error(
+                "slot_policy",
+                "snapshot bootstrap requires a replication slot that does not already exist",
+            ))
+        }
     }
 
     async fn drop_inactive_slot(&self) -> Result<()> {
@@ -1005,7 +1057,16 @@ struct SlotExport {
     snapshot_name: String,
 }
 
-async fn create_exported_slot(config: &ReplicationConfig) -> Result<SlotExport> {
+struct SlotBootstrapFailure {
+    error: CalcFlowError,
+    cleanup_needed: bool,
+}
+
+async fn create_exported_slot(
+    config: &ReplicationConfig,
+) -> std::result::Result<SlotExport, SlotBootstrapFailure> {
+    let mut creation_attempted = false;
+    let mut creation_confirmed = false;
     let result = async {
         let mut stream = connect_bootstrap_stream(config).await?;
         let params = [
@@ -1017,6 +1078,9 @@ async fn create_exported_slot(config: &ReplicationConfig) -> Result<SlotExport> 
         ];
         write_startup_message(&mut stream, 196_608, &params).await?;
         authenticate_bootstrap(&mut stream, config).await?;
+        // A transport failure after this point leaves creation ambiguous until
+        // the server confirms the new slot in a DataRow.
+        creation_attempted = true;
         write_query(
             &mut stream,
             &format!(
@@ -1029,7 +1093,10 @@ async fn create_exported_slot(config: &ReplicationConfig) -> Result<SlotExport> 
         loop {
             let message = read_backend_message(&mut stream).await?;
             match message.tag {
-                b'D' => export = Some(parse_slot_export_row(&message.payload)?),
+                b'D' => {
+                    creation_confirmed = true;
+                    export = Some(parse_slot_export_row(&message.payload)?);
+                }
                 b'E' => {
                     return Err(PgWireError::Server(parse_error_response(&message.payload)));
                 }
@@ -1051,7 +1118,23 @@ async fn create_exported_slot(config: &ReplicationConfig) -> Result<SlotExport> 
     }
     .await;
     result.map_err(|error: PgWireError| {
-        cdc_error("slot_bootstrap", safe_replication_error(&error.to_string()))
+        let ambiguous =
+            creation_attempted && !creation_confirmed && !matches!(&error, PgWireError::Server(_));
+        let detail = safe_replication_error(&error.to_string());
+        SlotBootstrapFailure {
+            cleanup_needed: creation_confirmed,
+            error: cdc_error(
+                "slot_bootstrap",
+                if ambiguous {
+                    format!(
+                        "{detail}; replication slot creation outcome is unknown; inspect the slot \
+                         and remove it manually if this bootstrap created it"
+                    )
+                } else {
+                    detail
+                },
+            ),
+        }
     })
 }
 
