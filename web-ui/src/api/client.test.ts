@@ -62,6 +62,13 @@ const capabilities = {
   },
 };
 
+const withSession = (requestMock: ReturnType<typeof vi.fn>) => {
+  const request = requestMock as (path: string, init?: RequestInit) => Promise<Response>;
+  return vi.fn((path: string, init?: RequestInit) => path === '/api/v3/session'
+    ? Promise.resolve(new Response(JSON.stringify({ token: 'launch-token' })))
+    : request(path, init));
+};
+
 afterEach(() => vi.unstubAllGlobals());
 
 describe('API client', () => {
@@ -124,7 +131,7 @@ describe('API client', () => {
         status: 422,
         statusText: 'Unprocessable Content',
       }));
-    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('fetch', withSession(fetchMock));
 
     await expect(api.validateProject('bad')).rejects.toEqual(
       new ApiError('invalid graph', 422),
@@ -159,7 +166,7 @@ describe('API client', () => {
       .mockResolvedValueOnce(new Response(JSON.stringify(job('running'))))
       .mockResolvedValueOnce(new Response(JSON.stringify(job('running'))))
       .mockResolvedValueOnce(new Response(JSON.stringify(job('cancelled'))));
-    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('fetch', withSession(fetchMock));
 
     await api.startJob('project-1');
     await api.job('job-1');
@@ -188,16 +195,18 @@ describe('API client', () => {
 
   it('creates a v3 project with the full client-owned document', async () => {
     const created = blankProject();
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify(created), { status: 201 }),
-    );
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ token: 'launch-token' })))
+      .mockResolvedValueOnce(new Response(JSON.stringify(created), { status: 201 }));
     vi.stubGlobal('fetch', fetchMock);
 
     await api.createProject(created);
 
-    const init = at(fetchMock.mock.calls)[1] as RequestInit;
-    expect(at(fetchMock.mock.calls)[0]).toBe('/api/v3/projects');
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/v3/session');
+    const init = fetchMock.mock.calls[1]?.[1] as RequestInit;
+    expect(fetchMock.mock.calls[1]?.[0]).toBe('/api/v3/projects');
     expect(init.method).toBe('POST');
+    expect((init.headers as Record<string, string>)['X-Calc-Flow-Token']).toBe('launch-token');
     expect(JSON.parse(String(init.body))).toEqual(created);
   });
 
@@ -210,7 +219,7 @@ describe('API client', () => {
           'Content-Disposition': "attachment; filename*=UTF-8''project_%E2%9C%93.json",
         },
       }));
-    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('fetch', withSession(fetchMock));
 
     await api.importProject('name: Imported\n', 'yaml', true);
     await expect(api.exportProject('imported', 'json')).resolves.toEqual({

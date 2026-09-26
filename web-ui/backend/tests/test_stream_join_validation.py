@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from fastapi.testclient import TestClient
+from studio_client import TestClient
 
 from calc_flow_studio.app import create_app
 
