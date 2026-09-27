@@ -12,4 +12,4 @@ class TestClient(FastAPITestClient):
     def __init__(self, app: FastAPI, **kwargs: Any) -> None:
         kwargs.setdefault("base_url", "http://127.0.0.1")
         super().__init__(app, **kwargs)
-        self.headers["X-Calc-Flow-Token"] = app.state.launch_token
+        self.headers["X-Calc-Flow-Session"] = app.state.launch_token

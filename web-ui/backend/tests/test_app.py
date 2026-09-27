@@ -48,7 +48,7 @@ def test_local_api_rejects_rebound_hosts_origins_and_missing_launch_tokens() -> 
             client.post(
                 "/api/v3/projects",
                 json={},
-                headers={"X-Calc-Flow-Token": token},
+                headers={"X-Calc-Flow-Session": token},
             ).status_code
             == 422
         )
@@ -57,7 +57,7 @@ def test_local_api_rejects_rebound_hosts_origins_and_missing_launch_tokens() -> 
             headers={
                 "Origin": "http://127.0.0.1:5173",
                 "Access-Control-Request-Method": "POST",
-                "Access-Control-Request-Headers": "X-Calc-Flow-Token, Content-Type",
+                "Access-Control-Request-Headers": "X-Calc-Flow-Session, Content-Type",
             },
         )
         assert preflight.status_code == 200
@@ -66,7 +66,7 @@ def test_local_api_rejects_rebound_hosts_origins_and_missing_launch_tokens() -> 
                 "/api/v3/projects",
                 json={},
                 headers={
-                    "X-Calc-Flow-Token": token,
+                    "X-Calc-Flow-Session": token,
                     "Origin": "http://127.0.0.1:5173",
                 },
             ).status_code
@@ -77,7 +77,7 @@ def test_local_api_rejects_rebound_hosts_origins_and_missing_launch_tokens() -> 
                 "/api/v3/projects",
                 json={},
                 headers={
-                    "X-Calc-Flow-Token": token,
+                    "X-Calc-Flow-Session": token,
                     "Origin": "http://rebound.example",
                 },
             ).status_code
@@ -90,7 +90,7 @@ def test_local_api_rejects_rebound_hosts_origins_and_missing_launch_tokens() -> 
             client.post(
                 "/api/v3/projects",
                 json={},
-                headers={"X-Calc-Flow-Token": token},
+                headers={"X-Calc-Flow-Session": token},
             ).status_code
             == 403
         )
@@ -104,13 +104,25 @@ def test_ipv6_loopback_host_remains_allowed() -> None:
             == 200
         )
         assert (
-            client.get("/api/v3/catalog", headers={"Host": "[::1].evil"}).status_code
-            == 400
+            client.get(
+                "/api/v3/catalog",
+                headers={"Host": "[0:0:0:0:0:0:0:1]:8765"},
+            ).status_code
+            == 200
         )
-        assert (
-            client.get("/api/v3/catalog", headers={"Host": "[::1]:99999"}).status_code
-            == 400
-        )
+        for authority in (
+            "[::1].evil",
+            "[::1]:99999",
+            "[::1]:0",
+            "[::1]:not-a-port",
+            "[::1%eth0]",
+            "localhost:99999",
+            "127.0.0.1:99999",
+        ):
+            assert (
+                client.get("/api/v3/catalog", headers={"Host": authority}).status_code
+                == 400
+            )
         assert (
             client.get(
                 "/api/v3/catalog",

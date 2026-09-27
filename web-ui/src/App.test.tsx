@@ -13,7 +13,7 @@ const response = (body: unknown, status = 200) =>
   );
 
 const withSession = (requestMock: ReturnType<typeof vi.fn>) => {
-  const request = requestMock as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+  const request = requestMock as typeof fetch;
   return vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
     String(input) === '/api/v3/session'
       ? response({ token: 'launch-token' })
