@@ -61,6 +61,16 @@ afterEach(() => {
 });
 
 describe('useJobEvents', () => {
+  it('encodes the job ID in the event stream URL', () => {
+    vi.stubGlobal('EventSource', FakeEventSource);
+
+    renderHook(() => {
+      useJobEvents('a/b?c#d', vi.fn(), vi.fn(), vi.fn());
+    });
+
+    expect(at(FakeEventSource.instances).url).toBe('/api/v3/jobs/a%2Fb%3Fc%23d/events');
+  });
+
   it('preserves full ASOF integer strings and refreshes authoritative job state', async () => {
     const onUpdate = vi.fn();
     const onEvent = vi.fn();

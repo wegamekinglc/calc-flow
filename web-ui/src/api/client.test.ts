@@ -159,6 +159,22 @@ describe('API client', () => {
     await expect(api.job('job-1')).rejects.toBeInstanceOf(ApiContractError);
   });
 
+  it('encodes project and job IDs as single path segments', async () => {
+    const id = 'a/b?c#d';
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(blankProject())))
+      .mockResolvedValueOnce(new Response(JSON.stringify(job('running'))));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await api.project(id);
+    await api.job(id);
+
+    expect(fetchMock.mock.calls.map(([path]) => path)).toEqual([
+      '/api/v3/projects/a%2Fb%3Fc%23d',
+      '/api/v3/jobs/a%2Fb%3Fc%23d',
+    ]);
+  });
+
   it('uses only the exact continuous job lifecycle routes', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify(job('pending'))))

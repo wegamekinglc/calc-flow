@@ -24,7 +24,7 @@ export function useJobEvents(
     let consecutiveErrors = 0;
     let refreshRevision = 0;
     let pollTimer: number | undefined;
-    const source = new EventSource(`/api/v3/jobs/${jobId}/events`);
+    const source = new EventSource(`/api/v3/jobs/${encodeURIComponent(jobId)}/events`);
 
     const closeSource = () => {
       if (closed) return;
