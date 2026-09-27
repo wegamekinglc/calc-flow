@@ -18,7 +18,12 @@ measurements. Use the current guides for supported behavior.
   operators skip the null-state rollback snapshot on each execute. Table
   batches measure their Arrow byte cost once and share it with clones. Native
   batch and stream compilation releases the GIL, and multi-output `collect`
-  reads native outputs once.
+  reads native outputs once. Repeated `compute` and `collect` calls reuse the
+  program's lowered project document within one runtime registration
+  revision. A DataFusion runtime rebinds a recorded single-table
+  projection/filter plan to new rows when the same query, alias, and exact
+  schema repeat, which removes per-batch planning from stream SQL and
+  expression nodes; such reuses report `physical_planning_count == 0`.
 
 - 2026-09-25: Remove benchmark scenarios, performance controller checks,
   benchmark support script tests, and benchmark target compilation from regular

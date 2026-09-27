@@ -12,6 +12,7 @@ use datafusion::{
     dataframe::DataFrame,
     datasource::MemTable,
     execution::{
+        TaskContext,
         context::{SessionConfig, SessionContext},
         memory_pool::GreedyMemoryPool,
         runtime_env::{RuntimeEnv, RuntimeEnvBuilder},
@@ -32,6 +33,7 @@ use crate::{
     Batch, BatchMetadata, CalcFlowError, Result, UdfKind, UdfReference, UdfRegistrySnapshot,
     datafusion_predicate::UInt64ModuloPredicate,
     datafusion_rolling::{CalcFlowQueryPlanner, RollingRewriteAudit, RollingRewriteAuditSnapshot},
+    datafusion_template::{QueryTemplate, QueryTemplates, TemplateCandidate},
     expression::{ValidatedQuery, parse_select_query, sql_projection},
     validate_selected_udfs,
 };
@@ -204,6 +206,7 @@ pub struct DataFusionRuntime {
     effective_target_partitions: AtomicUsize,
     parallelism_decision: OnceLock<DataFusionParallelismDecision>,
     rolling_rewrite_audit: Arc<RollingRewriteAudit>,
+    templates: QueryTemplates,
     runtime_acquire_ns: u64,
     closed: AtomicBool,
 }
@@ -234,6 +237,7 @@ impl DataFusionRuntime {
             effective_target_partitions: AtomicUsize::new(0),
             parallelism_decision: OnceLock::new(),
             rolling_rewrite_audit: Arc::new(RollingRewriteAudit::default()),
+            templates: QueryTemplates::default(),
             runtime_acquire_ns,
             closed: AtomicBool::new(false),
         })
@@ -401,20 +405,15 @@ impl DataFusionRuntime {
         let context = self.context_for_rows(input_rows, active_entities, active_entities_source);
         let session_state_create_ns =
             u64::from(!context_preexisting) * nanos(session_state_create_start.elapsed());
-        let (_registrations, input_adapter_ns, table_register_ns) =
-            register_tables(context, tables, node_id)?;
-        let planned = self.plan_query(context, query, node_id).await?;
+        let planned = self.prepare_query(context, query, tables, node_id).await?;
         let planning_ns = sql_parse_ns
             .saturating_add(planned.logical_planning_ns)
             .saturating_add(planned.physical_planning_ns);
 
         let execution_start = Instant::now();
         let metrics_plan = Arc::clone(&planned.physical_plan);
-        let stream = execute_stream(
-            planned.physical_plan,
-            Arc::new(planned.dataframe.task_ctx()),
-        )
-        .map_err(|error| datafusion_error(node_id, error))?;
+        let stream = execute_stream(planned.physical_plan, Arc::clone(&planned.task_ctx))
+            .map_err(|error| datafusion_error(node_id, error))?;
         let stream_open_ns = nanos(execution_start.elapsed());
         let collected =
             collect_bounded(stream, metrics_plan.schema(), execution_start, node_id).await?;
@@ -433,8 +432,11 @@ impl DataFusionRuntime {
             physical_plan_text,
             physical_plan_string_ns,
             physical_planning_ns,
+            physical_planning_count,
             rolling_audit,
             audit_ns,
+            input_adapter_ns,
+            table_register_ns,
             ..
         } = planned;
         let CollectedOutput {
@@ -454,7 +456,7 @@ impl DataFusionRuntime {
             sql_parse_ns,
             logical_planning_ns,
             physical_planning_ns,
-            physical_planning_count: 1,
+            physical_planning_count,
             planning_ns,
             stream_open_ns,
             execution_to_first_batch_ns,
@@ -518,14 +520,70 @@ impl DataFusionRuntime {
         self.closed.store(true, Ordering::Release);
     }
 
+    /// Binds a cached template when one matches; otherwise registers the
+    /// tables and plans the query.
+    async fn prepare_query<'a>(
+        &self,
+        context: &'a SessionContext,
+        query: &ValidatedQuery,
+        tables: &BTreeMap<String, Batch>,
+        node_id: Option<&str>,
+    ) -> Result<PlannedQuery<'a>> {
+        if let Some((template, batches)) = self.templates.find(query.text(), tables) {
+            return self.bind_template(context, &template, batches, node_id);
+        }
+        let (registrations, input_adapter_ns, table_register_ns) =
+            register_tables(context, tables, node_id)?;
+        let planned = self.plan_query(context, query, tables, node_id).await?;
+        Ok(PlannedQuery {
+            input_adapter_ns,
+            table_register_ns,
+            _registrations: Some(registrations),
+            ..planned
+        })
+    }
+
+    fn bind_template<'a>(
+        &self,
+        context: &'a SessionContext,
+        template: &QueryTemplate,
+        batches: &[RecordBatch],
+        node_id: Option<&str>,
+    ) -> Result<PlannedQuery<'a>> {
+        let physical_planning_start = Instant::now();
+        let physical_plan = template
+            .bind(batches)
+            .map_err(|error| datafusion_error(node_id, error))?;
+        let audit_start = Instant::now();
+        let rolling_audit = self.rolling_rewrite_audit.snapshot();
+        let audit_ns = nanos(audit_start.elapsed());
+        Ok(PlannedQuery {
+            task_ctx: context.task_ctx(),
+            physical_plan,
+            logical_plan: template.logical_plan.clone(),
+            logical_plan_string_ns: 0,
+            logical_planning_ns: 0,
+            physical_plan_text: template.physical_plan_text.clone(),
+            physical_plan_string_ns: 0,
+            physical_planning_ns: nanos(physical_planning_start.elapsed()),
+            physical_planning_count: 0,
+            rolling_audit,
+            audit_ns,
+            input_adapter_ns: 0,
+            table_register_ns: 0,
+            _registrations: None,
+        })
+    }
+
     /// Plans one query, timing the logical and physical phases exactly as
     /// the benchmark attribution defines them.
-    async fn plan_query(
+    async fn plan_query<'a>(
         &self,
-        context: &SessionContext,
+        context: &'a SessionContext,
         query: &ValidatedQuery,
+        tables: &BTreeMap<String, Batch>,
         node_id: Option<&str>,
-    ) -> Result<PlannedQuery> {
+    ) -> Result<PlannedQuery<'a>> {
         let diagnostics = self.config.collect_diagnostics;
         let logical_planning_start = Instant::now();
         let dataframe = plan_statement(context, query)
@@ -548,8 +606,16 @@ impl DataFusionRuntime {
         let rolling_audit = self.rolling_rewrite_audit.snapshot();
         let audit_ns = nanos(audit_start.elapsed());
         let physical_planning_ns = nanos(physical_planning_start.elapsed());
+        self.templates.capture(&TemplateCandidate {
+            query: query.text(),
+            tables,
+            logical: dataframe.logical_plan(),
+            physical: &physical_plan,
+            logical_plan: &logical_plan,
+            physical_plan_text: &physical_plan_text,
+        });
         Ok(PlannedQuery {
-            dataframe,
+            task_ctx: Arc::new(dataframe.task_ctx()),
             physical_plan,
             logical_plan,
             logical_plan_string_ns,
@@ -557,8 +623,12 @@ impl DataFusionRuntime {
             physical_plan_text,
             physical_plan_string_ns,
             physical_planning_ns,
+            physical_planning_count: 1,
             rolling_audit,
             audit_ns,
+            input_adapter_ns: 0,
+            table_register_ns: 0,
+            _registrations: None,
         })
     }
 
@@ -992,8 +1062,8 @@ impl Drop for TableRegistrations<'_> {
 }
 
 /// Planned query state carried from the planning phases to execution.
-struct PlannedQuery {
-    dataframe: DataFrame,
+struct PlannedQuery<'a> {
+    task_ctx: Arc<TaskContext>,
     physical_plan: Arc<dyn datafusion::physical_plan::ExecutionPlan>,
     logical_plan: String,
     logical_plan_string_ns: u64,
@@ -1001,8 +1071,13 @@ struct PlannedQuery {
     physical_plan_text: String,
     physical_plan_string_ns: u64,
     physical_planning_ns: u64,
+    physical_planning_count: u32,
     rolling_audit: RollingRewriteAuditSnapshot,
     audit_ns: u64,
+    input_adapter_ns: u64,
+    table_register_ns: u64,
+    /// Registered aliases are deregistered when the planned query drops.
+    _registrations: Option<TableRegistrations<'a>>,
 }
 
 /// Bounded query output with its collection-phase timings.

@@ -852,3 +852,109 @@ async fn sql_normalizes_a_zero_row_result_to_one_empty_batch() {
     assert_eq!(payload.batches().len(), 1);
     assert_eq!(payload.batches()[0].num_rows(), 0);
 }
+
+fn column_values(batch: &Batch, name: &str) -> Vec<i64> {
+    let table = batch.table_payload().unwrap();
+    let merged = concat_batches(table.schema(), table.batches()).unwrap();
+    merged
+        .column_by_name(name)
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap()
+        .values()
+        .to_vec()
+}
+
+async fn run(runtime: &DataFusionRuntime, query: &str, values: Vec<i64>) -> Batch {
+    let tables = BTreeMap::from([("input".into(), input(values))]);
+    runtime.sql(query, &tables, Some("node")).await.unwrap()
+}
+
+#[tokio::test]
+async fn repeated_row_local_query_rebinds_its_physical_plan_template() {
+    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+    let query = "SELECT a * 2 AS doubled FROM input WHERE a > 1";
+
+    let first = run(&runtime, query, vec![1, 2, 3]).await;
+    let second = run(&runtime, query, vec![5, 0, 7, 9]).await;
+
+    assert_eq!(column_values(&first, "doubled"), [4, 6]);
+    assert_eq!(column_values(&second, "doubled"), [10, 14, 18]);
+    let metrics = runtime.metrics();
+    assert_eq!(metrics[0].physical_planning_count, 1);
+    assert_eq!(metrics[1].physical_planning_count, 0);
+    assert_eq!(metrics[1].logical_planning_ns, 0);
+    assert_eq!(metrics[1].output_rows, 3);
+    assert_eq!(metrics[1].physical_plan, metrics[0].physical_plan);
+    assert_eq!(
+        metrics[1].output_partition_rows.iter().sum::<usize>(),
+        3,
+        "a rebound plan reports fresh execution metrics"
+    );
+}
+
+#[tokio::test]
+async fn data_dependent_queries_are_planned_for_every_batch() {
+    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+    for query in [
+        "SELECT count(*) AS rows FROM input",
+        "SELECT a FROM input ORDER BY a DESC",
+        "SELECT a, CAST(now() AS BIGINT) * 0 AS zero FROM input",
+    ] {
+        let first = run(&runtime, query, vec![1, 2]).await;
+        let second = run(&runtime, query, vec![3, 4, 5]).await;
+        assert_eq!(
+            first.num_rows(),
+            if query.contains("count") { 1 } else { 2 }
+        );
+        assert_eq!(
+            second.num_rows(),
+            if query.contains("count") { 1 } else { 3 }
+        );
+    }
+    assert_eq!(
+        column_values(
+            &run(&runtime, "SELECT count(*) AS rows FROM input", vec![7; 4]).await,
+            "rows"
+        ),
+        [4]
+    );
+    assert!(
+        runtime
+            .metrics()
+            .iter()
+            .all(|metric| metric.physical_planning_count == 1)
+    );
+}
+
+#[tokio::test]
+async fn templates_require_the_exact_alias_schema_and_query() {
+    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+    run(&runtime, "SELECT a FROM input LIMIT 1", vec![1, 2]).await;
+    let limited = run(&runtime, "SELECT a FROM input LIMIT 1", vec![8, 9]).await;
+    assert_eq!(column_values(&limited, "a"), [8]);
+
+    let record =
+        RecordBatch::try_from_iter(vec![("a", Arc::new(Float64Array::from(vec![1.5])) as _)])
+            .unwrap();
+    let float_tables = BTreeMap::from([(
+        "input".into(),
+        Batch::table(vec![record], BatchMetadata::default()).unwrap(),
+    )]);
+    let float = runtime
+        .sql("SELECT a FROM input LIMIT 1", &float_tables, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        float.table_payload().unwrap().schema().field(0).data_type(),
+        &DataType::Float64
+    );
+
+    let counts = runtime
+        .metrics()
+        .iter()
+        .map(|metric| metric.physical_planning_count)
+        .collect::<Vec<_>>();
+    assert_eq!(counts, [1, 0, 1]);
+}

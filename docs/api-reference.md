@@ -173,8 +173,13 @@ planning duration is the saturating sum of its three planning stages, while
 the aggregate execution duration is the saturating sum of stream opening and
 collection. Built-in SQL and expression nodes parse their query once when the
 operator is built, so their `sql_parse_ns` is `0`. Calc Flow executes the
-recorded physical plan directly, so a successful query reports
-`physical_planning_count == 1`.
+recorded physical plan directly, so a freshly planned query reports
+`physical_planning_count == 1`. A runtime that repeats one single-table query
+built only from projections, filters, and immutable functions over the same
+alias and exact schema, such as a stream SQL or expression node, rebinds the
+recorded plan to the new rows. That query reports
+`physical_planning_count == 0`, zero logical-planning, input-adapter, and
+table-registration time, and the recorded plan text.
 
 `ExecutionOptions` and `ProviderContext` are frozen native classes exported
 from the package root. The `ExecutionOptions(settings={}, deadline=None)`
