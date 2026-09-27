@@ -302,6 +302,8 @@ jobs:
         run: uv run --no-sync python scripts/verify_complexity_gates.py
       - name: Run unit, property, and coverage tests
         env:
+          # Python callbacks now run on Rust worker threads; sysmon traces them.
+          COVERAGE_CORE: sysmon
           PYTEST_XDIST_AUTO_NUM_WORKERS: 2
         run: >-
           uv run --no-sync pytest -q -n auto --dist load -p no:benchmark
