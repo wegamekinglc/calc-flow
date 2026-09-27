@@ -114,9 +114,9 @@ merge.
   runtime-only timeout. Pass `--no-run` to precompile the selected native
   targets without executing tests, then run the normal command with the same
   build settings and target directory. The normal command retains doctests
-  and tests that compile fixtures. Linux CI gives precompilation and normal
-  execution separate 30-minute steps; the three serial PyO3 runs retain their
-  five-minute limit per run. Enforce the 90% line floor with
+  and tests that compile fixtures. Linux CI gives precompilation a 45-minute
+  budget and normal execution a separate 30-minute budget; three serial PyO3
+  runs retain their five-minute limit per run. Enforce the 90% line floor with
   `scripts/run_rust_coverage.py` while the documented connector containers are
   available; it combines the ordinary workspace and real connector paths in
   one llvm-cov profile set.
@@ -147,7 +147,8 @@ The full conventions are in [AGENTS.md](AGENTS.md#coding-style) and
   stores, sources, sinks, and runner lifecycles in async code; never block
   Tokio executor threads. Add rustdoc and examples for new public APIs and keep
   `RUSTDOCFLAGS="-D warnings"` green.
-- **Python** — Python 3.13+, four spaces, double quotes, retain
+- **Python** — CPython 3.9+ for the core package and Python 3.13+ for Studio,
+  four spaces, double quotes, retain
   `from __future__ import annotations`. Use built-in type syntax
   (`list[str]`, `dict[str, object]`, `A | B`). Prefer functions and frozen/slot
   containers; add a class only for identity, protocol, lifecycle, resource
