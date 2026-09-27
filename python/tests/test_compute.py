@@ -529,3 +529,52 @@ def test_multi_output_conversion_reads_native_outputs_once() -> None:
         [1],
         [2],
     ]
+
+
+def test_repeated_collect_reuses_the_lowered_document(monkeypatch) -> None:
+    import calc_flow.symbolic.lower.program as lowering
+
+    calls = 0
+    original = lowering.lower_program_document
+
+    def counting(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(lowering, "lower_program_document", counting)
+    runtime = cf.Runtime()
+    table = pa.table({"a": [1, 2], "b": [3, 4]})
+
+    first = cf.compute(
+        table, lambda t: t.select(total=t["a"] + t["b"]), runtime=runtime
+    )
+    second = cf.compute(
+        table.slice(1), lambda t: t.select(total=t["a"] + t["b"]), runtime=runtime
+    )
+
+    assert calls == 1
+    assert first.column("total").to_pylist() == [4, 6]
+    assert second.column("total").to_pylist() == [6]
+
+
+def test_registration_invalidates_the_lowered_collect_document(monkeypatch) -> None:
+    import calc_flow.symbolic.lower.program as lowering
+
+    calls = 0
+    original = lowering.lower_program_document
+
+    def counting(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(lowering, "lower_program_document", counting)
+    runtime = cf.Runtime()
+    table = pa.table({"a": [1, 2]})
+
+    cf.compute(table, lambda t: t.select(double=t["a"] * 2), runtime=runtime)
+    runtime._invalidate_symbolic_compile_cache()
+    cf.compute(table, lambda t: t.select(double=t["a"] * 2), runtime=runtime)
+
+    assert calls == 2
