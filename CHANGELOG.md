@@ -9,6 +9,13 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-28: Stop cloning resident typed rolling state on every stream
+  batch. The typed stream transition now copies only the entities a batch
+  touches into a private update and commits it after output emission
+  succeeds, as the ordered stream path already did. Failed batches still leave
+  the resident state untouched. With 50,000 resident entities, a 64-row batch
+  touching eight of them fell from about 5–13 ms to 9–11 µs in a local probe.
+
 - 2026-09-28: Share batch metadata across stream fanout. `BatchMetadata`
   clones share their source and attributes, so each fanout branch copies
   reference counts instead of the source string and attribute map; its JSON

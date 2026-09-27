@@ -5,6 +5,7 @@
 //! rows that are safe to process.
 
 use std::{
+    borrow::Cow,
     cmp::Ordering,
     collections::{HashMap, VecDeque},
     mem::size_of,
@@ -344,6 +345,37 @@ impl StreamKernelUpdate {
     }
 }
 
+/// A stream update paired with the reconstructed state it was prepared
+/// against, if the resident state was not warm.
+pub(super) struct TypedStreamTransition {
+    restored: Option<RollingKernelState>,
+    update: StreamKernelUpdate,
+}
+
+impl TypedStreamTransition {
+    /// An owned `prior` was reconstructed for this update and becomes resident.
+    pub(super) fn new(prior: Cow<'_, RollingKernelState>, update: StreamKernelUpdate) -> Self {
+        let restored = match prior {
+            Cow::Owned(restored) => Some(restored),
+            Cow::Borrowed(_) => None,
+        };
+        Self { restored, update }
+    }
+
+    /// Installs `next` as the resident state; `None` clears the typed state.
+    pub(super) fn replace(next: Option<Self>, resident: &mut Option<Box<RollingKernelState>>) {
+        let Some(transition) = next else {
+            *resident = None;
+            return;
+        };
+        let base = match transition.restored {
+            Some(restored) => resident.insert(Box::new(restored)),
+            None => resident.get_or_insert_with(Box::default),
+        };
+        transition.update.commit(base);
+    }
+}
+
 /// Opaque, cloneable transition state for one typed kernel plan.
 #[derive(Clone, Debug, Default)]
 pub(super) struct RollingKernelState {
@@ -358,6 +390,38 @@ struct PreparedStreamState {
     entity_ids: Vec<usize>,
     last_identity: Option<Vec<u8>>,
     metrics: RollingKernelMetrics,
+}
+
+/// Entity routing for one batch over the state that will absorb it.
+struct ResolvedEntities {
+    state: RollingKernelState,
+    entity_ids: Vec<usize>,
+    elapsed_ns: u64,
+}
+
+/// Input validation and canonical-order facts for one typed batch.
+struct BatchProof {
+    input_validation_ns: u64,
+    order: OrderProof,
+}
+
+impl BatchProof {
+    fn prepare(self, resolved: ResolvedEntities, input: &RecordBatch) -> PreparedStreamState {
+        PreparedStreamState {
+            state: resolved.state,
+            entity_ids: resolved.entity_ids,
+            last_identity: self.order.last_identity,
+            metrics: RollingKernelMetrics {
+                input_validation_ns: self.input_validation_ns,
+                order_proof_ns: self.order.elapsed_ns,
+                entity_encode_ns: resolved.elapsed_ns,
+                order_proof_rows: input.num_rows(),
+                input_rows: input.num_rows(),
+                output_rows: input.num_rows(),
+                ..RollingKernelMetrics::default()
+            },
+        }
+    }
 }
 
 struct PreparedTypedFill {
@@ -392,17 +456,14 @@ impl RollingKernelPlan {
         observer: Option<&RollingMetricsRecorder>,
     ) -> Result<PreparedStreamState> {
         self.validate_state(state, node_id)?;
-        let started = Instant::now();
-        let entity_stage = observer.map(|recorder| recorder.stage(RollingStage::EntityResolution));
-        let rows = encode_rows(input, &self.partition_columns, node_id)?;
-        let keys = encoded_keys(&rows, input.num_rows());
-        let (local, entity_ids) =
-            state.prepare_stream_entities(keys, &self.groups, &self.fingerprint, observer);
-        let entity_encode_ns = nanos(started.elapsed());
-        drop(entity_stage);
+        let ResolvedEntities {
+            state,
+            entity_ids,
+            elapsed_ns: entity_encode_ns,
+        } = self.prepare_touched_entities(state, input, node_id, observer)?;
         let last_identity = self.last_ordered_identity(input, node_id)?;
         Ok(PreparedStreamState {
-            state: local,
+            state,
             entity_ids,
             last_identity,
             metrics: RollingKernelMetrics {
@@ -718,82 +779,68 @@ impl RollingKernelPlan {
 
     /// Applies one canonical micro-batch to a scratch clone and returns the
     /// next state only after every transition and output succeeds.
-    // Validation, ordering, entity routing, and scratch-state construction
-    // deliberately remain one atomic preparation boundary.
-    // #lizard forgives
     pub(super) fn update_and_fill(
         &self,
         state: &RollingKernelState,
         input: &RecordBatch,
         node_id: &str,
     ) -> Result<Option<RollingKernelExecution>> {
-        self.update_and_fill_with_prior_order(state, input, true, node_id, None)
+        let Some(proof) = self.prove_batch(state, input, true, node_id, None)? else {
+            return Ok(None);
+        };
+        let resolved = self.resolve_batch_entities(state, input, node_id)?;
+        self.fill_typed(input, proof.prepare(resolved, input), node_id, None)
+            .map(Some)
     }
 
-    /// Applies one finalized stream micro-batch.
+    /// Applies one finalized stream micro-batch to private copies of only the
+    /// entities it touches; the caller commits the update after success.
     ///
     /// Watermark delivery can split equal event-time peers across envelopes,
     /// so only the current finalized batch has a global canonical-order proof.
     /// Per-entity transition order remains guaranteed by the rolling buffer.
-    pub(super) fn update_stream_and_fill(
+    pub(super) fn prepare_stream(
         &self,
         state: &RollingKernelState,
         input: &RecordBatch,
         node_id: &str,
         observer: Option<&RollingMetricsRecorder>,
-    ) -> Result<Option<RollingKernelExecution>> {
-        self.update_and_fill_with_prior_order(state, input, false, node_id, observer)
+    ) -> Result<Option<StreamKernelUpdate>> {
+        let Some(proof) = self.prove_batch(state, input, false, node_id, observer)? else {
+            return Ok(None);
+        };
+        let resolved = self.prepare_touched_entities(state, input, node_id, observer)?;
+        self.fill_typed(input, proof.prepare(resolved, input), node_id, observer)
+            .map(|execution| Some(StreamKernelUpdate { execution }))
     }
 
-    fn update_and_fill_with_prior_order(
+    /// Validates required values and proves canonical order; `Ok(None)` asks
+    /// the caller to use the general sort-capable path.
+    fn prove_batch(
         &self,
         state: &RollingKernelState,
         input: &RecordBatch,
         compare_prior_order: bool,
         node_id: &str,
         observer: Option<&RollingMetricsRecorder>,
-    ) -> Result<Option<RollingKernelExecution>> {
+    ) -> Result<Option<BatchProof>> {
         if self.selection != KernelSelection::OrderedPrimitive {
             return Ok(None);
         }
         self.validate_state(state, node_id)?;
-
         let input_validation_ns = {
             let _stage = observer.map(|recorder| recorder.stage(RollingStage::InputValidation));
             self.validate_input_timed(input, node_id)?
         };
-        let Some(order_proof) = ({
-            let _stage = observer.map(|recorder| recorder.stage(RollingStage::OrderingProof));
-            if let Some(recorder) = observer {
-                recorder.add(RollingWork::OrderProofRows, input.num_rows());
-            }
-            self.prove_input_order(input, compare_prior_order.then_some(state), node_id)?
-        }) else {
-            return Ok(None);
-        };
-        let (next_state, entity_ids, entity_encode_ns) =
-            self.resolve_batch_entities(state, input, node_id, observer)?;
-
-        self.fill_typed(
-            input,
-            PreparedStreamState {
-                entity_ids,
-                state: next_state,
-                last_identity: order_proof.last_identity,
-                metrics: RollingKernelMetrics {
-                    input_validation_ns,
-                    order_proof_ns: order_proof.elapsed_ns,
-                    entity_encode_ns,
-                    order_proof_rows: input.num_rows(),
-                    input_rows: input.num_rows(),
-                    output_rows: input.num_rows(),
-                    ..RollingKernelMetrics::default()
-                },
-            },
-            node_id,
-            observer,
-        )
-        .map(Some)
+        let _stage = observer.map(|recorder| recorder.stage(RollingStage::OrderingProof));
+        if let Some(recorder) = observer {
+            recorder.add(RollingWork::OrderProofRows, input.num_rows());
+        }
+        let order = self.prove_input_order(input, compare_prior_order.then_some(state), node_id)?;
+        Ok(order.map(|order| BatchProof {
+            input_validation_ns,
+            order,
+        }))
     }
 
     fn validate_input_timed(&self, input: &RecordBatch, node_id: &str) -> Result<u64> {
@@ -828,29 +875,40 @@ impl RollingKernelPlan {
         state: &RollingKernelState,
         input: &RecordBatch,
         node_id: &str,
+    ) -> Result<ResolvedEntities> {
+        let started = Instant::now();
+        let rows = encode_rows(input, &self.partition_columns, node_id)?;
+        let keys = encoded_keys(&rows, input.num_rows());
+        let mut state = state.clone();
+        state
+            .kernel_fingerprint
+            .get_or_insert_with(|| self.fingerprint.clone());
+        let entity_ids = state.resolve_entities(keys, &self.groups);
+        Ok(ResolvedEntities {
+            state,
+            entity_ids,
+            elapsed_ns: nanos(started.elapsed()),
+        })
+    }
+
+    fn prepare_touched_entities(
+        &self,
+        state: &RollingKernelState,
+        input: &RecordBatch,
+        node_id: &str,
         observer: Option<&RollingMetricsRecorder>,
-    ) -> Result<(RollingKernelState, Vec<usize>, u64)> {
+    ) -> Result<ResolvedEntities> {
         let started = Instant::now();
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::EntityResolution));
         let rows = encode_rows(input, &self.partition_columns, node_id)?;
         let keys = encoded_keys(&rows, input.num_rows());
-        let mut next_state = {
-            let _stage = observer.map(|recorder| recorder.stage(RollingStage::StatePreparation));
-            state.clone()
-        };
-        next_state
-            .kernel_fingerprint
-            .get_or_insert_with(|| self.fingerprint.clone());
-        let entity_ids = next_state.resolve_entities(keys, &self.groups);
-        if let Some(recorder) = observer {
-            recorder.add(RollingWork::ResolvedRows, entity_ids.len());
-            let touched = entity_ids
-                .iter()
-                .copied()
-                .collect::<std::collections::HashSet<_>>();
-            recorder.add(RollingWork::TouchedEntities, touched.len());
-        }
-        Ok((next_state, entity_ids, nanos(started.elapsed())))
+        let (state, entity_ids) =
+            state.prepare_stream_entities(keys, &self.groups, &self.fingerprint, observer);
+        Ok(ResolvedEntities {
+            state,
+            entity_ids,
+            elapsed_ns: nanos(started.elapsed()),
+        })
     }
 
     fn validate_state(&self, state: &RollingKernelState, node_id: &str) -> Result<()> {
@@ -3546,6 +3604,52 @@ mod tests {
     }
 
     #[test]
+    fn stream_update_copies_only_touched_entities_until_commit() {
+        let kernel = numeric_plan(RollingNumericalProfile::StableV1);
+        let first = batch(
+            vec![Some(1), Some(2)],
+            vec![Some(1), Some(2)],
+            vec!["a", "b"],
+            vec![Some(1.0), Some(2.0)],
+        );
+        let mut resident = kernel.open_and_fill(&first, "r").unwrap().unwrap().state;
+        let second = batch(
+            vec![Some(3), Some(4), Some(5)],
+            vec![Some(3), Some(4), Some(5)],
+            vec!["a", "c", "a"],
+            vec![Some(3.0), Some(4.0), Some(5.0)],
+        );
+        let expected = kernel
+            .update_and_fill(&resident, &second, "r")
+            .unwrap()
+            .unwrap();
+        let untouched = Arc::clone(&resident.states[1]);
+
+        let mut update = kernel
+            .prepare_stream(&resident, &second, "r", None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(update.entity_ids(), [0, 1, 0]);
+        assert_eq!(update.execution.state.states.len(), 2);
+        assert_eq!(update.take_columns(), expected.columns);
+        assert_eq!(resident.states[0].transition_count, 1);
+        assert_eq!(resident.states.len(), 2);
+
+        update.commit(&mut resident);
+        assert_eq!(resident.entities, expected.state.entities);
+        assert_eq!(
+            format!("{:?}", resident.states),
+            format!("{:?}", expected.state.states)
+        );
+        assert_eq!(resident.last_identity, expected.state.last_identity);
+        assert_eq!(
+            resident.kernel_fingerprint,
+            expected.state.kernel_fingerprint
+        );
+        assert!(Arc::ptr_eq(&resident.states[1], &untouched));
+    }
+
+    #[test]
     fn prepared_stream_entities_are_owned_before_parallel_admission() {
         let kernel = numeric_plan(RollingNumericalProfile::StableV1);
         let first = batch(
@@ -3929,7 +4033,7 @@ mod tests {
         assert!(duplicate.is_err());
         assert!(
             kernel
-                .update_stream_and_fill(&first_output.state, &first, "r", None)
+                .prepare_stream(&first_output.state, &first, "r", None)
                 .unwrap()
                 .is_some()
         );
