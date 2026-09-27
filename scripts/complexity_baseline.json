@@ -114,7 +114,7 @@
     "python/tests/test_udf.py": {
       "PLR0913": 1
     },
-    "scripts/m5_checkpoint_benchmark.py": {
+    "scripts/checkpoint_benchmark.py": {
       "PLR0913": 2
     },
     "scripts/run_sql_datafusion_matrix.py": {

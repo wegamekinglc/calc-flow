@@ -48,16 +48,16 @@ PRIVATE_TEST = (
     "runtime::streaming::soak::private_m5_epoch_checkpoint_absolute_benchmark"
 )
 SCRIPT_ROOT = Path(__file__).resolve().parent
-COMMON_HARNESS_ROOT = SCRIPT_ROOT / "m5_checkpoint_benchmark_harness"
+COMMON_HARNESS_ROOT = SCRIPT_ROOT / "checkpoint_benchmark_harness"
 COMMON_HARNESS_SOURCE = COMMON_HARNESS_ROOT / "src" / "main.rs"
 COMMON_HARNESS_MANIFEST = COMMON_HARNESS_ROOT / "Cargo.toml"
 COMMON_HARNESS_FILES = (Path("Cargo.toml"), Path("src/main.rs"))
 SOURCE_CONTRACT_FILES = (
     Path("Cargo.toml"),
     Path("Cargo.lock"),
-    Path("scripts/m5_checkpoint_benchmark.py"),
-    Path("scripts/m5_checkpoint_benchmark_harness/Cargo.toml"),
-    Path("scripts/m5_checkpoint_benchmark_harness/src/main.rs"),
+    Path("scripts/checkpoint_benchmark.py"),
+    Path("scripts/checkpoint_benchmark_harness/Cargo.toml"),
+    Path("scripts/checkpoint_benchmark_harness/src/main.rs"),
     Path("crates/calc-flow/src/runtime/streaming/operator_task.rs"),
     Path("crates/calc-flow/benches/support/streaming_soak.rs"),
 )

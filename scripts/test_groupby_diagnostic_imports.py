@@ -21,7 +21,7 @@ class NoSitePackagesTests(unittest.IsolatedAsyncioTestCase):
                         "-S",
                         "-m",
                         "unittest",
-                        "scripts.test_dal301_groupby",
+                        "scripts.test_groupby_diagnostic",
                         "scripts.test_benchmark_release",
                     ],
                     cwd=ROOT,
@@ -36,7 +36,7 @@ class NoSitePackagesTests(unittest.IsolatedAsyncioTestCase):
     async def test_cli_plan_and_runtime_failure_without_site_packages(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "report 空格"
-            argv = [sys.executable, "-E", "-S", "-m", "scripts.dal301_groupby"]
+            argv = [sys.executable, "-E", "-S", "-m", "scripts.groupby_diagnostic"]
             try:
                 await command(
                     [*argv, "plan", "--output", str(root)],
@@ -69,7 +69,7 @@ class NoSitePackagesTests(unittest.IsolatedAsyncioTestCase):
                         "-E",
                         "-S",
                         "-m",
-                        "scripts.dal301_groupby",
+                        "scripts.groupby_diagnostic",
                         "build",
                         "--side",
                         "A",

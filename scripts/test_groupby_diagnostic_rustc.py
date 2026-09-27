@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from scripts.dal301_groupby import profile
+from scripts.groupby_diagnostic import profile
 
 # Byte-identical rustc.log from run 35616026184, jobs 106386841092/106386841296.
 RUSTC_LOG = """info: syncing channel updates for 1.88.0-x86_64-unknown-linux-gnu

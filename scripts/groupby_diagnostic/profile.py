@@ -12,8 +12,8 @@ from pathlib import Path
 
 from scripts.benchmark_suite.measure import _prepare, validate_sample
 from scripts.benchmark_suite.process import ROOT, command, install
-from scripts.dal301_groupby.contract import SEALS, cases
-from scripts.dal301_groupby.runtime import AuditWorker
+from scripts.groupby_diagnostic.contract import SEALS, cases
+from scripts.groupby_diagnostic.runtime import AuditWorker
 from scripts.toolkit import sha256_file, write_json
 
 PROFILE_ENV = {

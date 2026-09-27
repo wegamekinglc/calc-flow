@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts import m5_checkpoint_benchmark as benchmark
+from scripts import checkpoint_benchmark as benchmark
 
 
 def _is_subprocess_run(node: ast.AST) -> bool:

@@ -10,8 +10,8 @@ from scripts.benchmark_suite.measure import _measured_row, _prepare, _samples
 from scripts.benchmark_suite.process import install
 from scripts.benchmark_suite.provenance import harness_sha256
 from scripts.benchmark_suite.report import ROUNDS, comparison
-from scripts.dal301_groupby.contract import cases, host, plan, require_host, sealed
-from scripts.dal301_groupby.runtime import AuditWorker, monitor, resource_sample
+from scripts.groupby_diagnostic.contract import cases, host, plan, require_host, sealed
+from scripts.groupby_diagnostic.runtime import AuditWorker, monitor, resource_sample
 from scripts.toolkit import git_output, sha256_file, write_json
 
 
@@ -115,14 +115,14 @@ async def run(root: Path, release_root: Path, profiles: Path | None) -> int:
                 "harness_sha256": harness_sha256(),
                 "diagnostic_files": {
                     str(path): sha256_file(path)
-                    for path in sorted(Path("scripts/dal301_groupby").glob("*.py"))
+                    for path in sorted(Path("scripts/groupby_diagnostic").glob("*.py"))
                 },
                 "checkout": git_output(Path.cwd(), "rev-parse", "HEAD"),
             },
         )
         await observed_collect(root, partial(collect, root, releases))
         if profiles is not None:
-            from scripts.dal301_groupby.profile import collect_profiles
+            from scripts.groupby_diagnostic.profile import collect_profiles
 
             await observed_collect(
                 root / "profiles",

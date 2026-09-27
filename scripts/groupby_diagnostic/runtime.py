@@ -21,7 +21,7 @@ class AuditWorker(Worker):
             process = await asyncio.create_subprocess_exec(
                 sys.executable,
                 "-m",
-                "scripts.dal301_groupby",
+                "scripts.groupby_diagnostic",
                 "worker",
                 "--output",
                 str(root),
@@ -88,7 +88,7 @@ def input_hashes(active, root: Path) -> dict:
 
 def worker(root: Path) -> None:
     from scripts.benchmark_suite.worker import dispatch
-    from scripts.dal301_groupby.contract import cases
+    from scripts.groupby_diagnostic.contract import cases
 
     active = None
     try:

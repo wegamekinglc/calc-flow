@@ -10,7 +10,7 @@ from unittest import mock
 
 class ContractTests(unittest.TestCase):
     def test_plan_is_only_two_fixed_cases_and_three_fixed_comparisons(self):
-        from scripts.dal301_groupby import contract
+        from scripts.groupby_diagnostic import contract
 
         plan = contract.plan()
         self.assertEqual([case["rows"] for case in plan["cases"]], [10_000, 100_000])
@@ -23,7 +23,7 @@ class ContractTests(unittest.TestCase):
         )
 
     def test_preflight_rejects_wsl_affinity_substitutes_and_wrong_cpu_count(self):
-        from scripts.dal301_groupby import contract
+        from scripts.groupby_diagnostic import contract
 
         valid = {
             "system": "Linux",
@@ -43,7 +43,7 @@ class ContractTests(unittest.TestCase):
                 contract.require_host({**valid, **patch})
 
     def test_release_claim_cannot_substitute_current_pr_or_another_native(self):
-        from scripts.dal301_groupby import contract
+        from scripts.groupby_diagnostic import contract
 
         original = contract.SEALS["A"]
         with mock.patch.object(contract, "load_release", return_value=original):
@@ -118,12 +118,12 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("artifact-ids: 10637665772", source)
         self.assertIn("run-id: 35596885420", source)
         self.assertIn("name: dal301-evidence-", source)
-        self.assertIn("python -m scripts.dal301_groupby run", source)
+        self.assertIn("python -m scripts.groupby_diagnostic run", source)
 
 
 class FailureTests(unittest.IsolatedAsyncioTestCase):
     async def test_profile_command_keeps_original_signal_exit_and_full_log(self):
-        from scripts.dal301_groupby import profile
+        from scripts.groupby_diagnostic import profile
 
         async def killed(*args, **kwargs):
             kwargs["log"].write_text("raw failure\n")
@@ -142,7 +142,7 @@ class FailureTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((root / "probe.log").read_text(), "raw failure\n")
 
     async def test_profile_stops_at_fixed_window_without_expanding_workload(self):
-        from scripts.dal301_groupby.profile import profile_workload
+        from scripts.groupby_diagnostic.profile import profile_workload
 
         worker = SimpleNamespace(
             request=mock.AsyncMock(
@@ -154,7 +154,7 @@ class FailureTests(unittest.IsolatedAsyncioTestCase):
         worker.request.assert_awaited_once_with(operation="sample")
 
     async def test_malformed_worker_stdout_and_nonzero_exit_are_retained(self):
-        from scripts.dal301_groupby.runtime import AuditWorker
+        from scripts.groupby_diagnostic.runtime import AuditWorker
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -177,7 +177,7 @@ class FailureTests(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_failed_profile_permission_stops_before_profile_samples(self):
-        from scripts.dal301_groupby import profile
+        from scripts.groupby_diagnostic import profile
 
         worker = SimpleNamespace(request=mock.AsyncMock(), close=mock.AsyncMock())
         with tempfile.TemporaryDirectory() as temporary:
@@ -202,8 +202,8 @@ class FailureTests(unittest.IsolatedAsyncioTestCase):
             worker.close.assert_awaited_once()
 
     async def test_pairing_keeps_two_rounds_ten_pairs_and_rejects_input_drift(self):
-        from scripts.dal301_groupby import controller
-        from scripts.dal301_groupby.contract import cases
+        from scripts.groupby_diagnostic import controller
+        from scripts.groupby_diagnostic.contract import cases
 
         events = []
 
@@ -259,7 +259,7 @@ class FailureTests(unittest.IsolatedAsyncioTestCase):
         import tempfile
         from pathlib import Path
 
-        from scripts.dal301_groupby import controller
+        from scripts.groupby_diagnostic import controller
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -282,7 +282,7 @@ class FailureTests(unittest.IsolatedAsyncioTestCase):
 
 class ProfileTests(unittest.TestCase):
     def test_profile_rejects_lost_throttled_or_unresolved_traces(self):
-        from scripts.dal301_groupby.profile import validate_trace
+        from scripts.groupby_diagnostic.profile import validate_trace
 
         symbols = "calc_flow::operator::window::execute"
         validate_trace("PERF_RECORD_SAMPLE", symbols)
@@ -296,7 +296,7 @@ class ProfileTests(unittest.TestCase):
                 validate_trace(raw, decoded)
 
     def test_profile_rejects_drift_in_declared_build_settings(self):
-        from scripts.dal301_groupby.profile import (
+        from scripts.groupby_diagnostic.profile import (
             PROFILE_ENV,
             ROOT,
             validate_build_settings,
@@ -314,8 +314,8 @@ class ProfileTests(unittest.TestCase):
                 validate_build_settings({**valid, field: "different"})
 
     def test_profile_manifest_cannot_claim_original_release_or_missing_symbols(self):
-        from scripts.dal301_groupby.contract import SEALS
-        from scripts.dal301_groupby.profile import validate_profile
+        from scripts.groupby_diagnostic.contract import SEALS
+        from scripts.groupby_diagnostic.profile import validate_profile
 
         valid = {
             "contract": "dal301-profile-only-v1",

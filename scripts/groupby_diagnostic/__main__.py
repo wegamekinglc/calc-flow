@@ -18,15 +18,15 @@ def main() -> int:
     args = parser.parse_args()
     match args.operation:
         case "plan":
-            from scripts.dal301_groupby.contract import plan
+            from scripts.groupby_diagnostic.contract import plan
 
             write_json(args.output / "plan.json", plan())
         case "worker":
-            from scripts.dal301_groupby.runtime import worker
+            from scripts.groupby_diagnostic.runtime import worker
 
             worker(args.output)
         case "build":
-            from scripts.dal301_groupby.profile import build
+            from scripts.groupby_diagnostic.profile import build
 
             if args.source is None or args.side is None:
                 parser.error("build requires --source and --side")
@@ -34,7 +34,7 @@ def main() -> int:
                 build(args.side, args.source.resolve(), args.output.resolve())
             )
         case "run":
-            from scripts.dal301_groupby.controller import run
+            from scripts.groupby_diagnostic.controller import run
 
             if args.releases is None:
                 parser.error("run requires --releases")

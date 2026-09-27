@@ -92,6 +92,6 @@ unmerged PR #319 harness boundary all remain.
 For a local selection-only check, without building or sampling:
 
 ```bash
-python -m scripts.dal301_groupby plan --output target/dal301-plan
-python -m unittest scripts.test_dal301_groupby scripts.test_rust_toolchain_diagnostics
+python -m scripts.groupby_diagnostic plan --output target/dal301-plan
+python -m unittest scripts.test_groupby_diagnostic scripts.test_rust_toolchain_diagnostics
 ```
