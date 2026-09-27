@@ -230,9 +230,98 @@ fn window_execution_and_restore(c: &mut Criterion) {
     });
 }
 
+fn dense_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new(
+            "event_time",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            false,
+        ),
+        Field::new("group", DataType::Int64, false),
+        Field::new("value", DataType::Float64, true),
+        Field::new("ivalue", DataType::Int64, false),
+    ]))
+}
+
+fn dense_input(rows: usize) -> Batch {
+    let n = i64::try_from(rows).unwrap();
+    let record = RecordBatch::try_new(
+        dense_schema(),
+        vec![
+            Arc::new(TimestampMicrosecondArray::from_iter_values(0..n)) as ArrayRef,
+            Arc::new(Int64Array::from_iter_values((0..n).map(|i| i % 16))),
+            Arc::new(
+                (0..n)
+                    .map(|i| (i % 7 != 0).then_some(f64::from(i32::try_from(i).unwrap()) * 0.5))
+                    .collect::<datafusion::arrow::array::Float64Array>(),
+            ),
+            Arc::new(Int64Array::from_iter_values((0..n).map(|i| i * 3 - 7))),
+        ],
+    )
+    .unwrap();
+    Batch::table(vec![record], BatchMetadata::default()).unwrap()
+}
+
+fn dense_operator(hopping: bool) -> WindowAggregateOperator {
+    let spec = if hopping {
+        WindowSpec::hopping(
+            "event_time",
+            Duration::from_micros(1_000),
+            Duration::from_micros(100),
+        )
+        .unwrap()
+    } else {
+        WindowSpec::tumbling("event_time", Duration::from_micros(1_000)).unwrap()
+    }
+    .group_by(["group"])
+    .unwrap()
+    .aggregate(AggregateFunction::Sum, "value", "s")
+    .unwrap()
+    .aggregate(AggregateFunction::Count, "value", "c")
+    .unwrap()
+    .aggregate(AggregateFunction::Min, "ivalue", "mn")
+    .unwrap()
+    .aggregate(AggregateFunction::Max, "value", "mx")
+    .unwrap()
+    .aggregate(AggregateFunction::Avg, "ivalue", "a")
+    .unwrap();
+    WindowAggregateOperator::new("window", dense_schema(), spec).unwrap()
+}
+
+fn dense_window(c: &mut Criterion) {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let job = StreamJobContext::new(
+        1,
+        STATE_PIPELINE_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        CancellationToken::new(),
+    );
+    let input = dense_input(65_536);
+    for (name, hopping) in [("tumbling", false), ("hopping", true)] {
+        let operator = dense_operator(hopping);
+        let collector = EdgeCollector::new(operator.output_ports().to_vec());
+        let state = tokio::sync::Mutex::new((operator, collector));
+        c.bench_function(&format!("dense/{name}_65536_rows_16_groups"), |b| {
+            b.to_async(&runtime).iter(|| async {
+                let context = StreamOperatorContext::new(&job, "window", None);
+                let mut state = state.lock().await;
+                let (operator, collector) = &mut *state;
+                operator.reset().unwrap();
+                operator
+                    .process_data("input", input.clone(), &context, collector)
+                    .await
+                    .unwrap();
+                black_box(());
+            });
+        });
+    }
+}
+
 criterion_group!(
     m4_state_window,
     state_backend_io,
-    window_execution_and_restore
+    window_execution_and_restore,
+    dense_window
 );
 criterion_main!(m4_state_window);
