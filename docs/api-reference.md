@@ -179,7 +179,8 @@ built only from projections, filters, and immutable functions over the same
 alias and exact schema, such as a stream SQL or expression node, rebinds the
 recorded plan to the new rows. That query reports
 `physical_planning_count == 0`, zero logical-planning, input-adapter, and
-table-registration time, and the recorded plan text.
+table-registration time, empty rolling-rewrite audit fields, and the recorded
+plan text.
 
 `ExecutionOptions` and `ProviderContext` are frozen native classes exported
 from the package root. The `ExecutionOptions(settings={}, deadline=None)`

@@ -958,3 +958,45 @@ async fn templates_require_the_exact_alias_schema_and_query() {
         .collect::<Vec<_>>();
     assert_eq!(counts, [1, 0, 1]);
 }
+
+#[tokio::test]
+async fn reused_plans_report_no_rolling_rewrite_from_other_queries() {
+    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+    let rolling = BTreeMap::from([("input".to_owned(), rolling_input())]);
+    let row_local = "SELECT price * 2 AS doubled FROM input";
+
+    runtime.sql(row_local, &rolling, None).await.unwrap();
+    runtime
+        .sql(
+            "SELECT avg(price) OVER (PARTITION BY symbol ORDER BY event_time, sequence \
+             ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS sma_2 FROM input",
+            &rolling,
+            None,
+        )
+        .await
+        .unwrap();
+    runtime.sql(row_local, &rolling, None).await.unwrap();
+
+    let metrics = runtime.metrics();
+    assert_eq!(metrics[1].rolling_rewritten_windows, 1);
+    assert_eq!(metrics[2].physical_planning_count, 0);
+    assert_eq!(metrics[2].rolling_candidate_windows, 0);
+    assert_eq!(metrics[2].rolling_rewritten_windows, 0);
+    assert!(metrics[2].rolling_fallback_reasons.is_empty());
+}
+
+#[tokio::test]
+async fn volatile_functions_are_planned_for_every_batch() {
+    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+    let query = "SELECT a, random() AS noise FROM input";
+
+    run(&runtime, query, vec![1, 2]).await;
+    run(&runtime, query, vec![3]).await;
+
+    let counts = runtime
+        .metrics()
+        .iter()
+        .map(|metric| metric.physical_planning_count)
+        .collect::<Vec<_>>();
+    assert_eq!(counts, [1, 1]);
+}

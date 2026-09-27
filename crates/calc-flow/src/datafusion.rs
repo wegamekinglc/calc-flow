@@ -530,7 +530,7 @@ impl DataFusionRuntime {
         node_id: Option<&str>,
     ) -> Result<PlannedQuery<'a>> {
         if let Some((template, batches)) = self.templates.find(query.text(), tables) {
-            return self.bind_template(context, &template, batches, node_id);
+            return bind_template(context, &template, batches, node_id);
         }
         let (registrations, input_adapter_ns, table_register_ns) =
             register_tables(context, tables, node_id)?;
@@ -540,38 +540,6 @@ impl DataFusionRuntime {
             table_register_ns,
             _registrations: Some(registrations),
             ..planned
-        })
-    }
-
-    fn bind_template<'a>(
-        &self,
-        context: &'a SessionContext,
-        template: &QueryTemplate,
-        batches: &[RecordBatch],
-        node_id: Option<&str>,
-    ) -> Result<PlannedQuery<'a>> {
-        let physical_planning_start = Instant::now();
-        let physical_plan = template
-            .bind(batches)
-            .map_err(|error| datafusion_error(node_id, error))?;
-        let audit_start = Instant::now();
-        let rolling_audit = self.rolling_rewrite_audit.snapshot();
-        let audit_ns = nanos(audit_start.elapsed());
-        Ok(PlannedQuery {
-            task_ctx: context.task_ctx(),
-            physical_plan,
-            logical_plan: template.logical_plan.clone(),
-            logical_plan_string_ns: 0,
-            logical_planning_ns: 0,
-            physical_plan_text: template.physical_plan_text.clone(),
-            physical_plan_string_ns: 0,
-            physical_planning_ns: nanos(physical_planning_start.elapsed()),
-            physical_planning_count: 0,
-            rolling_audit,
-            audit_ns,
-            input_adapter_ns: 0,
-            table_register_ns: 0,
-            _registrations: None,
         })
     }
 
@@ -1174,6 +1142,35 @@ async fn collect_bounded(
     })
 }
 
+fn bind_template<'a>(
+    context: &'a SessionContext,
+    template: &QueryTemplate,
+    batches: &[RecordBatch],
+    node_id: Option<&str>,
+) -> Result<PlannedQuery<'a>> {
+    let physical_planning_start = Instant::now();
+    let physical_plan = template
+        .bind(batches)
+        .map_err(|error| datafusion_error(node_id, error))?;
+    Ok(PlannedQuery {
+        task_ctx: context.task_ctx(),
+        physical_plan,
+        logical_plan: template.logical_plan.clone(),
+        logical_plan_string_ns: 0,
+        logical_planning_ns: 0,
+        physical_plan_text: template.physical_plan_text.clone(),
+        physical_plan_string_ns: 0,
+        physical_planning_ns: nanos(physical_planning_start.elapsed()),
+        physical_planning_count: 0,
+        // Reusable plans contain no window functions, so no rewrite ran.
+        rolling_audit: RollingRewriteAuditSnapshot::default(),
+        audit_ns: 0,
+        input_adapter_ns: 0,
+        table_register_ns: 0,
+        _registrations: None,
+    })
+}
+
 fn require_tables(tables: &BTreeMap<String, Batch>) -> Result<()> {
     if tables.is_empty() {
         return Err(CalcFlowError::InvalidArgument {
@@ -1256,6 +1253,28 @@ fn is_identifier(value: &str) -> bool {
 mod tests {
     use super::*;
     use crate::UdfRegistry;
+
+    #[tokio::test]
+    async fn cached_templates_do_not_retain_input_rows() {
+        let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+        let record = RecordBatch::try_from_iter(vec![(
+            "a",
+            Arc::new(datafusion::arrow::array::Int64Array::from(vec![1, 2, 3])) as _,
+        )])
+        .unwrap();
+        let tables = BTreeMap::from([(
+            "input".to_owned(),
+            Batch::table(vec![record], BatchMetadata::default()).unwrap(),
+        )]);
+
+        runtime
+            .sql("SELECT a + 1 AS b FROM input", &tables, None)
+            .await
+            .unwrap();
+
+        assert_eq!(runtime.templates.len(), 1);
+        assert_eq!(runtime.templates.retained_rows(), 0);
+    }
     use datafusion::{
         arrow::{array::Int32Array, datatypes::DataType, record_batch::RecordBatch},
         common::ScalarValue,

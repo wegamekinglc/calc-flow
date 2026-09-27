@@ -206,7 +206,10 @@ fn window_execution_and_restore(c: &mut Criterion) {
                     .process_data("input", input.clone(), &context, collector)
                     .await
                     .unwrap();
-                black_box(());
+                // Drain every port so each iteration measures one fresh batch.
+                for port in operator.output_ports() {
+                    black_box(collector.drain(port.name()));
+                }
             });
         });
     }
@@ -312,7 +315,10 @@ fn dense_window(c: &mut Criterion) {
                     .process_data("input", input.clone(), &context, collector)
                     .await
                     .unwrap();
-                black_box(());
+                // Drain every port so each iteration measures one fresh batch.
+                for port in operator.output_ports() {
+                    black_box(collector.drain(port.name()));
+                }
             });
         });
     }

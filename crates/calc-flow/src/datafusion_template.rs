@@ -96,6 +96,38 @@ impl QueryTemplates {
     }
 }
 
+#[cfg(test)]
+impl QueryTemplates {
+    /// Rows held by cached scans; templates never retain input rows.
+    pub(crate) fn retained_rows(&self) -> usize {
+        self.entries
+            .lock()
+            .iter()
+            .filter_map(|template| {
+                let mut rows = 0;
+                Arc::clone(&template.plan)
+                    .apply(|node| {
+                        if let Some(scan) = memory_scan(node.as_ref()) {
+                            rows += scan
+                                .partitions()
+                                .iter()
+                                .flatten()
+                                .map(RecordBatch::num_rows)
+                                .sum::<usize>();
+                        }
+                        Ok(TreeNodeRecursion::Continue)
+                    })
+                    .ok()
+                    .map(|_| rows)
+            })
+            .sum()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.entries.lock().len()
+    }
+}
+
 fn single_table(tables: &BTreeMap<String, Batch>) -> Option<(&str, &Batch)> {
     let mut entries = tables.iter();
     let (alias, batch) = entries.next()?;
@@ -107,11 +139,19 @@ fn template_for(candidate: &TemplateCandidate<'_>) -> Option<QueryTemplate> {
     let schema = Arc::clone(batch.table_payload().ok()?.schema());
     let eligible = only_immutable_functions(candidate.logical)
         && reusable_tree(candidate.physical.as_ref(), &schema);
-    eligible.then(|| QueryTemplate {
+    if !eligible {
+        return None;
+    }
+    // An empty scan keeps the cached tree from retaining the first input rows.
+    let plan = Arc::clone(candidate.physical)
+        .transform_up(|node| rebind_scan(node, &[]))
+        .ok()?
+        .data;
+    Some(QueryTemplate {
         query: candidate.query.to_owned(),
         alias: alias.to_owned(),
         schema,
-        plan: Arc::clone(candidate.physical),
+        plan,
         logical_plan: candidate.logical_plan.to_owned(),
         physical_plan_text: candidate.physical_plan_text.to_owned(),
     })
@@ -135,14 +175,42 @@ fn only_immutable_functions(plan: &LogicalPlan) -> bool {
     immutable
 }
 
+/// Registered scalar UDFs are `Expr::ScalarFunction` in `DataFusion` 54. Any
+/// expression kind outside the known row-local set is treated as mutable.
 fn mutable_function(expr: &Expr) -> bool {
     match expr {
         Expr::ScalarFunction(function) => {
             function.func.signature().volatility != Volatility::Immutable
         }
-        Expr::AggregateFunction(_) | Expr::WindowFunction(_) => true,
-        _ => false,
+        _ => !row_local_expression(expr),
     }
+}
+
+fn row_local_expression(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Alias(_)
+            | Expr::Column(_)
+            | Expr::Literal(..)
+            | Expr::BinaryExpr(_)
+            | Expr::Not(_)
+            | Expr::IsNotNull(_)
+            | Expr::IsNull(_)
+            | Expr::IsTrue(_)
+            | Expr::IsFalse(_)
+            | Expr::IsUnknown(_)
+            | Expr::IsNotTrue(_)
+            | Expr::IsNotFalse(_)
+            | Expr::IsNotUnknown(_)
+            | Expr::Negative(_)
+            | Expr::Between(_)
+            | Expr::Case(_)
+            | Expr::Cast(_)
+            | Expr::TryCast(_)
+            | Expr::InList(_)
+            | Expr::Like(_)
+            | Expr::SimilarTo(_)
+    )
 }
 
 /// Accepts only data-independent row-local operators over exactly one
