@@ -77,7 +77,7 @@ async function response(path: string, init?: RequestInit): Promise<Response> {
     headers: {
       'Content-Type': 'application/json',
       ...init?.headers,
-      ...(token === null ? {} : { 'X-Calc-Flow-Token': token }),
+      ...(token === null ? {} : { 'X-Calc-Flow-Session': token }),
     },
   });
   if (!response.ok) {

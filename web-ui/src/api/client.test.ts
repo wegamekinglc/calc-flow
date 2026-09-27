@@ -63,7 +63,7 @@ const capabilities = {
 };
 
 const withSession = (requestMock: ReturnType<typeof vi.fn>) => {
-  const request = requestMock as (path: string, init?: RequestInit) => Promise<Response>;
+  const request = requestMock as typeof fetch;
   return vi.fn((path: string, init?: RequestInit) => path === '/api/v3/session'
     ? Promise.resolve(new Response(JSON.stringify({ token: 'launch-token' })))
     : request(path, init));
@@ -206,7 +206,7 @@ describe('API client', () => {
     const init = fetchMock.mock.calls[1]?.[1] as RequestInit;
     expect(fetchMock.mock.calls[1]?.[0]).toBe('/api/v3/projects');
     expect(init.method).toBe('POST');
-    expect((init.headers as Record<string, string>)['X-Calc-Flow-Token']).toBe('launch-token');
+    expect((init.headers as Record<string, string>)['X-Calc-Flow-Session']).toBe('launch-token');
     expect(JSON.parse(String(init.body))).toEqual(created);
   });
 

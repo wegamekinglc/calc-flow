@@ -14,7 +14,7 @@ async function launchTokenHeaders(
       || typeof body.token !== 'string' || body.token.length === 0) {
     throw new Error('Studio session response has no launch token');
   }
-  return { 'X-Calc-Flow-Token': body.token };
+  return { 'X-Calc-Flow-Session': body.token };
 }
 
 export async function postWithLaunchToken(
