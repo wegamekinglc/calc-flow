@@ -9,6 +9,7 @@ use std::{
 
 use datafusion::{
     arrow::{datatypes::SchemaRef, record_batch::RecordBatch},
+    dataframe::DataFrame,
     datasource::MemTable,
     execution::{
         context::{SessionConfig, SessionContext},
@@ -29,7 +30,7 @@ use crate::{
     Batch, BatchMetadata, CalcFlowError, Result, UdfKind, UdfReference, UdfRegistrySnapshot,
     datafusion_predicate::UInt64ModuloPredicate,
     datafusion_rolling::{CalcFlowQueryPlanner, RollingRewriteAudit},
-    expression::{sql_projection, validate_select_query},
+    expression::{ValidatedQuery, parse_select_query, sql_projection},
     validate_selected_udfs,
 };
 
@@ -325,7 +326,7 @@ impl DataFusionRuntime {
         node_id: &str,
     ) -> Result<SchemaRef> {
         self.ensure_open()?;
-        let query = validate_select_query(query)?;
+        let query = parse_select_query(query)?;
         let _query_guard = self.query_lock.lock().await;
         self.ensure_open()?;
         let context = self.context_for_rows(0, None, "not_evaluated");
@@ -347,10 +348,6 @@ impl DataFusionRuntime {
     /// Returns an error when the runtime is closed, the input map is empty, an
     /// alias or query is invalid, an input is not a table batch, or `DataFusion`
     /// cannot plan or execute the query.
-    #[allow(
-        clippy::too_many_lines,
-        reason = "the ordered phase boundaries are kept together so benchmark attribution cannot drift"
-    )]
     pub async fn sql(
         &self,
         query: &str,
@@ -358,15 +355,38 @@ impl DataFusionRuntime {
         node_id: Option<&str>,
     ) -> Result<Batch> {
         self.ensure_open()?;
-        if tables.is_empty() {
-            return Err(CalcFlowError::InvalidArgument {
-                field: "tables".into(),
-                message: "must not be empty".into(),
-            });
-        }
+        require_tables(tables)?;
         let parse_start = Instant::now();
-        let query = validate_select_query(query)?;
+        let query = parse_select_query(query)?;
         let sql_parse_ns = nanos(parse_start.elapsed());
+        self.execute_query(&query, sql_parse_ns, tables, node_id)
+            .await
+    }
+
+    /// Executes one query that was validated and parsed when its operator was
+    /// built, so the per-call parse phase is skipped.
+    pub(crate) async fn sql_validated(
+        &self,
+        query: &ValidatedQuery,
+        tables: &BTreeMap<String, Batch>,
+        node_id: Option<&str>,
+    ) -> Result<Batch> {
+        self.ensure_open()?;
+        require_tables(tables)?;
+        self.execute_query(query, 0, tables, node_id).await
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the ordered phase boundaries are kept together so benchmark attribution cannot drift"
+    )]
+    async fn execute_query(
+        &self,
+        query: &ValidatedQuery,
+        sql_parse_ns: u64,
+        tables: &BTreeMap<String, Batch>,
+        node_id: Option<&str>,
+    ) -> Result<Batch> {
         // Declared before registrations so alias cleanup runs before unlock.
         let _query_guard = self.query_lock.lock().await;
         self.ensure_open()?;
@@ -392,8 +412,7 @@ impl DataFusionRuntime {
         }
 
         let logical_planning_start = Instant::now();
-        let dataframe = context
-            .sql(&query)
+        let dataframe = plan_statement(context, query)
             .await
             .map_err(|error| datafusion_error(node_id, error))?;
         let logical_plan_string_start = Instant::now();
@@ -989,13 +1008,32 @@ impl Drop for TableRegistrations<'_> {
     }
 }
 
+fn require_tables(tables: &BTreeMap<String, Batch>) -> Result<()> {
+    if tables.is_empty() {
+        return Err(CalcFlowError::InvalidArgument {
+            field: "tables".into(),
+            message: "must not be empty".into(),
+        });
+    }
+    Ok(())
+}
+
+/// Plans a pre-parsed statement exactly as `SessionContext::sql` would after
+/// its own parse; validation already rejected every non-query statement.
+async fn plan_statement(
+    context: &SessionContext,
+    query: &ValidatedQuery,
+) -> datafusion::error::Result<DataFrame> {
+    let plan = context.state().statement_to_plan(query.statement()).await?;
+    context.execute_logical_plan(plan).await
+}
+
 async fn physical_query_schema(
     context: &SessionContext,
-    query: &str,
+    query: &ValidatedQuery,
     node_id: &str,
 ) -> Result<SchemaRef> {
-    let dataframe = context
-        .sql(query)
+    let dataframe = plan_statement(context, query)
         .await
         .map_err(|error| datafusion_error(Some(node_id), error))?;
     let plan = dataframe

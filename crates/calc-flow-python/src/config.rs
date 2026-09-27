@@ -656,9 +656,11 @@ impl PyRuntime {
         project_json: &str,
     ) -> PyResult<PyExecutionPlan> {
         let runtime = slf.snapshot()?;
-        let project = calc_flow::import_project_json(project_json.as_bytes())
-            .map_err(crate::error::to_py_err)?;
-        let plan = calc_flow::compile_project(&project, &runtime.providers, &runtime.udfs)
+        let plan = py
+            .detach(|| {
+                let project = calc_flow::import_project_json(project_json.as_bytes())?;
+                calc_flow::compile_project(&project, &runtime.providers, &runtime.udfs)
+            })
             .map_err(crate::error::to_py_err)?;
         let owner = slf.into_pyobject(py)?.into_any().unbind();
         Ok(PyExecutionPlan::new_with_owner(
@@ -675,17 +677,21 @@ impl PyRuntime {
         delivery: BTreeMap<String, String>,
     ) -> PyResult<PyStreamExecutionPlan> {
         let runtime = slf.snapshot()?;
-        let project = calc_flow::import_project_json(project_json.as_bytes())
+        let project = py
+            .detach(|| calc_flow::import_project_json(project_json.as_bytes()))
             .map_err(crate::error::to_py_err)?;
         let requirements = stream_requirements(delivery)?;
-        let plan = calc_flow::compile_stream_project(
-            &project,
-            &runtime.providers,
-            &runtime.udfs,
-            &runtime.connectors,
-            &requirements,
-        )
-        .map_err(crate::error::to_py_err)?;
+        let plan = py
+            .detach(|| {
+                calc_flow::compile_stream_project(
+                    &project,
+                    &runtime.providers,
+                    &runtime.udfs,
+                    &runtime.connectors,
+                    &requirements,
+                )
+            })
+            .map_err(crate::error::to_py_err)?;
         let owner = slf.into_pyobject(py)?.into_any().unbind();
         Ok(PyStreamExecutionPlan::new(plan, owner))
     }
@@ -697,16 +703,20 @@ impl PyRuntime {
         delivery: BTreeMap<String, String>,
     ) -> PyResult<PyStreamExecutionPlan> {
         let runtime = slf.snapshot()?;
-        let project = calc_flow::import_project_json(project_json.as_bytes())
+        let project = py
+            .detach(|| calc_flow::import_project_json(project_json.as_bytes()))
             .map_err(crate::error::to_py_err)?;
         let requirements = stream_requirements(delivery)?;
-        let plan = calc_flow::compile_stream_project_graph(
-            &project,
-            &runtime.providers,
-            &runtime.udfs,
-            &requirements,
-        )
-        .map_err(crate::error::to_py_err)?;
+        let plan = py
+            .detach(|| {
+                calc_flow::compile_stream_project_graph(
+                    &project,
+                    &runtime.providers,
+                    &runtime.udfs,
+                    &requirements,
+                )
+            })
+            .map_err(crate::error::to_py_err)?;
         let owner = slf.into_pyobject(py)?.into_any().unbind();
         Ok(PyStreamExecutionPlan::new(plan, owner))
     }

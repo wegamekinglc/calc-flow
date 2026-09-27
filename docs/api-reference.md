@@ -171,8 +171,10 @@ consumed by `StreamingRunner` rather than executed directly.
 `physical_planning_count`, `stream_open_ns`, and `collect_ns`. The aggregate
 planning duration is the saturating sum of its three planning stages, while
 the aggregate execution duration is the saturating sum of stream opening and
-collection. Calc Flow executes the recorded physical plan directly, so a
-successful query reports `physical_planning_count == 1`.
+collection. Built-in SQL and expression nodes parse their query once when the
+operator is built, so their `sql_parse_ns` is `0`. Calc Flow executes the
+recorded physical plan directly, so a successful query reports
+`physical_planning_count == 1`.
 
 `ExecutionOptions` and `ProviderContext` are frozen native classes exported
 from the package root. The `ExecutionOptions(settings={}, deadline=None)`

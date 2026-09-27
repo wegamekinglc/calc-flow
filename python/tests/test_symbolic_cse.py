@@ -2,16 +2,34 @@ from __future__ import annotations
 
 import pyarrow as pa
 
-from calc_flow import Batch, Runtime
+from calc_flow import Batch, Runtime, compute
 from calc_flow.symbolic import (
+    ColumnExpr,
     FeatureSet,
     Field,
     Program,
     TableExpr,
+    rows,
     table,
     table_input,
+    ts,
 )
-from calc_flow.symbolic.lower import lower_program_document
+from calc_flow.symbolic.lower import lower_program_document, segments
+
+
+def _ordered() -> TableExpr:
+    return table_input(
+        "quotes",
+        schema=[
+            Field("ts", "timestamp[us, UTC]", nullable=False),
+            Field("symbol", "string", nullable=False),
+            Field("seq", "uint64", nullable=False),
+            Field("x", "float64", nullable=True),
+        ],
+        entity_by=["symbol"],
+        event_time="ts",
+        sequence_by=["seq"],
+    )
 
 
 def _xy() -> TableExpr:
@@ -237,3 +255,47 @@ def test_identical_features_share_one_materialized_column() -> None:
         '"__cf_cse_0" AS "a"',
         '"__cf_cse_0" AS "b"',
     ]
+
+
+def _diamond(expr: ColumnExpr, depth: int) -> ColumnExpr:
+    for _ in range(depth):
+        expr = expr + expr
+    return expr
+
+
+def test_inlining_builds_each_shared_subexpression_once(monkeypatch) -> None:
+    calls = 0
+    original = segments.build
+
+    def counting_build(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(segments, "build", counting_build)
+    quotes = _xy()
+    signals = quotes.with_columns(FeatureSet([("z", _diamond(quotes["x"], 16))]))
+
+    segments._resolve_table(signals._node, "signals")
+
+    assert calls <= 2 * 16
+
+
+def test_primitive_search_yields_each_shared_subtree_once() -> None:
+    quotes = _ordered()
+    mean = ts.mean(quotes["x"], window=rows(3))
+
+    found = list(segments._find_rolling(_diamond(mean, 16)._node))
+
+    assert [node.digest for node in found] == [mean._node.digest]
+
+
+def test_deep_shared_subexpression_diamond_lowers_and_computes() -> None:
+    depth = 64
+    table = pa.table({"x": [1.0, 2.0]})
+
+    result = compute(
+        table, lambda source: source.select(y=_diamond(source["x"], depth))
+    )
+
+    assert result.column("y").to_pylist() == [2.0**depth, 2.0 ** (depth + 1)]

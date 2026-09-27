@@ -1946,6 +1946,7 @@ use crate::{
     Batch, BatchKind, BatchMetadata, CalcFlowError, DataFusionConfig, Epoch, EventTime,
     IngressProgress, JsonMap, OperatorStateSnapshot, Port, Result, StateSegment, StreamCollector,
     StreamOperator, StreamOperatorContext, UdfRegistrySnapshot,
+    expression::{ValidatedQuery, parse_select_query},
 };
 
 use super::{OperatorMetadata, StreamRuntimeState, is_portable_identifier, validate_operator_name};
@@ -2366,7 +2367,7 @@ struct CompiledJoin {
     right_key_indices: Vec<usize>,
     left_event_time_index: usize,
     right_event_time_index: usize,
-    equality_query: String,
+    equality_query: ValidatedQuery,
 }
 
 /// Scratch-table alias holding the admitted rows of the current input batch.
@@ -2872,7 +2873,7 @@ impl StreamJoinOperator {
         let probe = probe_key_batch(admitted, &plan.key_indices)?;
         let tables = equality_tables(probe, state_keys)?;
         let result = runtime
-            .sql(&self.compiled.equality_query, &tables, Some(&self.name))
+            .sql_validated(&self.compiled.equality_query, &tables, Some(&self.name))
             .await?;
         let equal_pairs = decode_key_pairs(&result)?;
         let matched =
@@ -3876,7 +3877,7 @@ fn compile_schemas(
             right_key_indices,
             left_event_time_index,
             right_event_time_index,
-            equality_query: equality_query(spec.left_keys.len()),
+            equality_query: parse_select_query(&equality_query(spec.left_keys.len()))?,
         },
     ))
 }

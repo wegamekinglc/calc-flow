@@ -9,7 +9,8 @@ use serde_json::Value;
 
 use crate::{
     Batch, BatchKind, CalcFlowError, DataFusionConfig, DataFusionRuntime, EventTime, JsonMap, Port,
-    Result, RunContext, UdfReference, UdfRegistrySnapshot, expression::validate_select_query,
+    Result, RunContext, UdfReference, UdfRegistrySnapshot,
+    expression::{ValidatedQuery, parse_select_query},
 };
 
 use super::{
@@ -29,6 +30,7 @@ use super::expression::required_input;
 pub struct SqlOperator {
     name: String,
     query: String,
+    validated: ValidatedQuery,
     aliases: Vec<String>,
     udfs: Vec<UdfReference>,
     input_ports: Vec<Port>,
@@ -43,6 +45,7 @@ impl Clone for SqlOperator {
         Self {
             name: self.name.clone(),
             query: self.query.clone(),
+            validated: self.validated.clone(),
             aliases: self.aliases.clone(),
             udfs: self.udfs.clone(),
             input_ports: self.input_ports.clone(),
@@ -98,10 +101,11 @@ impl SqlOperator {
             .iter()
             .map(|alias| table_port(alias))
             .collect::<Result<Vec<_>>>()?;
-        validate_select_query(query)?;
+        let validated = parse_select_query(query)?;
         Ok(Self {
             name: name.into(),
             query: query.into(),
+            validated,
             aliases,
             udfs,
             input_ports,
@@ -201,7 +205,9 @@ impl SqlOperator {
     ) -> Result<BTreeMap<String, Batch>> {
         run.check_cancelled()?;
         let tables = self.collect_tables(inputs, run.node_id())?;
-        let output = datafusion.sql(&self.query, &tables, run.node_id()).await?;
+        let output = datafusion
+            .sql_validated(&self.validated, &tables, run.node_id())
+            .await?;
         run.check_cancelled()?;
         Ok(BTreeMap::from([("output".into(), output)]))
     }
@@ -267,7 +273,9 @@ impl BatchOperator for SqlOperator {
     ) -> Result<BTreeMap<String, Batch>> {
         let tables = self.collect_tables(inputs, None)?;
         let runtime = self.stream_state.runtime()?;
-        let output = runtime.sql(&self.query, &tables, Some(&self.name)).await?;
+        let output = runtime
+            .sql_validated(&self.validated, &tables, Some(&self.name))
+            .await?;
         Ok(BTreeMap::from([("output".into(), output)]))
     }
 }
@@ -297,7 +305,9 @@ impl StreamOperator for SqlOperator {
         self.input_ports[0].validate(&batch, &format!("{}.{alias}", self.name))?;
         let tables = BTreeMap::from([(alias.clone(), batch)]);
         let runtime = self.stream_state.runtime()?;
-        let produced = runtime.sql(&self.query, &tables, Some(&self.name)).await?;
+        let produced = runtime
+            .sql_validated(&self.validated, &tables, Some(&self.name))
+            .await?;
         context.check_cancelled()?;
         output.emit("output", produced).await
     }

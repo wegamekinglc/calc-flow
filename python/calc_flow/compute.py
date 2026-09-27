@@ -151,7 +151,9 @@ def _prepare_collect_batches(
 
 
 def _tables(result: RunResult, outputs: dict[str, str]) -> dict[str, pa.Table]:
-    return {name: result.outputs[port].to_pyarrow() for name, port in outputs.items()}
+    # Each RunResult.outputs read rebuilds every Batch wrapper; read it once.
+    batches = result.outputs
+    return {name: batches[port].to_pyarrow() for name, port in outputs.items()}
 
 
 def _collect(

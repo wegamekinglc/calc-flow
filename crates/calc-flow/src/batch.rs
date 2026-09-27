@@ -1,4 +1,9 @@
-use std::{any::Any, collections::BTreeMap, fmt::Debug, sync::Arc};
+use std::{
+    any::Any,
+    collections::BTreeMap,
+    fmt::Debug,
+    sync::{Arc, OnceLock},
+};
 
 use datafusion::arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 use schemars::JsonSchema;
@@ -75,11 +80,24 @@ impl BatchMetadata {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct TableBatch {
     schema: SchemaRef,
     batches: Arc<[RecordBatch]>,
     rows: usize,
+    /// Immutable payloads are measured once; clones share the outcome.
+    estimated_bytes_cache: Arc<OnceLock<std::result::Result<usize, String>>>,
+}
+
+impl Debug for TableBatch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TableBatch")
+            .field("schema", &self.schema)
+            .field("batches", &self.batches)
+            .field("rows", &self.rows)
+            .finish_non_exhaustive()
+    }
 }
 
 impl TableBatch {
@@ -103,6 +121,7 @@ impl TableBatch {
             schema,
             batches: batches.into(),
             rows,
+            estimated_bytes_cache: Arc::new(OnceLock::new()),
         })
     }
 
@@ -126,15 +145,24 @@ impl TableBatch {
     /// Returns [`CalcFlowError::InvalidArgument`] when Arrow cannot measure a
     /// column or the summed size overflows `usize`.
     pub fn estimated_bytes(&self) -> Result<usize> {
+        self.estimated_bytes_cache
+            .get_or_init(|| self.measure_bytes())
+            .clone()
+            .map_err(|message| CalcFlowError::InvalidArgument {
+                field: "batch".into(),
+                message,
+            })
+    }
+
+    fn measure_bytes(&self) -> std::result::Result<usize, String> {
         self.batches.iter().try_fold(0_usize, |total, batch| {
             batch.columns().iter().try_fold(total, |total, column| {
                 let bytes = column.to_data().get_slice_memory_size().map_err(|error| {
-                    CalcFlowError::InvalidArgument {
-                        field: "batch".into(),
-                        message: format!("Arrow slice memory could not be measured: {error}"),
-                    }
+                    format!("Arrow slice memory could not be measured: {error}")
                 })?;
-                checked_accumulate(total, bytes, "batch")
+                total
+                    .checked_add(bytes)
+                    .ok_or_else(|| "size sum overflowed usize".to_owned())
             })
         })
     }
@@ -1217,5 +1245,26 @@ mod tests {
         )
         .unwrap();
         assert!(table.static_array_snapshot().is_none());
+    }
+
+    #[test]
+    fn table_byte_estimate_is_measured_once_and_shared_by_clones() {
+        use datafusion::arrow::array::{ArrayRef, Int64Array};
+
+        let record = RecordBatch::try_from_iter(vec![(
+            "value",
+            Arc::new(Int64Array::from(vec![1, 2, 3])) as ArrayRef,
+        )])
+        .unwrap();
+        let batch = Batch::table(vec![record], BatchMetadata::default()).unwrap();
+        let clone = batch.clone();
+        let table = clone.table_payload().unwrap();
+        assert!(table.estimated_bytes_cache.get().is_none());
+
+        let bytes = batch.estimated_bytes().unwrap();
+
+        assert_eq!(table.estimated_bytes_cache.get(), Some(&Ok(bytes)));
+        assert_eq!(clone.estimated_bytes().unwrap(), bytes);
+        assert_eq!(bytes, 3 * size_of::<i64>());
     }
 }

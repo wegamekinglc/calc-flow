@@ -257,21 +257,24 @@ impl MultiInputProgress {
     }
 
     fn next_watermark(&self) -> Option<EventTime> {
-        let active = self
-            .ingresses
+        // Allocation-free minimum: `None` when no ingress is active or any
+        // active ingress is still unprimed.
+        self.ingresses
             .values()
             .filter_map(|activity| match activity {
                 IngressActivity::Active { watermark } => Some(*watermark),
                 IngressActivity::Idle { .. } | IngressActivity::Ended { .. } => None,
             })
-            .collect::<Vec<_>>();
-        if active.is_empty() || active.iter().any(Option::is_none) {
-            return None;
-        }
-        active.into_iter().flatten().min().filter(|minimum| {
-            self.last_emitted_watermark
-                .is_none_or(|previous| *minimum > previous)
-        })
+            .try_fold(None, |minimum: Option<EventTime>, watermark| {
+                watermark.map(|watermark| {
+                    Some(minimum.map_or(watermark, |minimum| minimum.min(watermark)))
+                })
+            })
+            .flatten()
+            .filter(|minimum| {
+                self.last_emitted_watermark
+                    .is_none_or(|previous| *minimum > previous)
+            })
     }
 
     fn all_ended(&self) -> bool {
