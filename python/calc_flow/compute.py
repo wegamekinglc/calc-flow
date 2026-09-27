@@ -5,11 +5,11 @@ from __future__ import annotations
 import asyncio
 import inspect
 from collections.abc import Awaitable, Callable, Mapping
-from typing import TypeVar, Union
+from typing import TypeVar, Union, cast
 
 import pyarrow as pa
 
-from calc_flow._compat import TypeAliasType
+from calc_flow._compat import TypeAliasType, dataclass
 from calc_flow._native import Batch, ExecutionOptions, RunResult
 from calc_flow.pipeline import BatchExecutionPlan, Runtime, _canonical
 from calc_flow.symbolic import errors
@@ -126,14 +126,49 @@ def _prepare_collect(
     return _prepare_collect_batches(program, batches, _selected_runtime(runtime))
 
 
-def _prepare_collect_batches(
-    program: Program, batches: Mapping[str, Batch], selected: Runtime
-) -> tuple[BatchExecutionPlan, dict[str, Batch], dict[str, str]]:
+@dataclass(frozen=True, slots=True)
+class _LoweredCollect:
+    """Immutable lowering template shared by repeated collects of one program."""
+
+    project_json: str
+    input_names: tuple[tuple[str, tuple[str, ...]], ...]
+    output_names: tuple[tuple[str, str], ...]
+
+
+def _lower_collect(program: Program, selected: Runtime) -> _LoweredCollect:
     from calc_flow.symbolic.lower.program import lower_program_document
 
     bindings = _BatchBindings()
     document = lower_program_document(program, selected, "batch", _bindings=bindings)
     input_names, output_names = bindings.names()
+    return _LoweredCollect(
+        _canonical(document),
+        tuple(input_names.items()),
+        tuple(output_names.items()),
+    )
+
+
+def _lowered_collect(program: Program, selected: Runtime) -> _LoweredCollect:
+    # Registrations clear the runtime cache, so the key needs only the program.
+    key = (
+        "collect",
+        program.fingerprint,
+        tuple(value._node.node_bytes for value in program.inputs),
+    )
+    return cast(
+        _LoweredCollect,
+        selected._cached_symbolic_compile(
+            key, lambda: _lower_collect(program, selected)
+        ),
+    )
+
+
+def _prepare_collect_batches(
+    program: Program, batches: Mapping[str, Batch], selected: Runtime
+) -> tuple[BatchExecutionPlan, dict[str, Batch], dict[str, str]]:
+    lowered = _lowered_collect(program, selected)
+    input_names = dict(lowered.input_names)
+    output_names = dict(lowered.output_names)
     for name in batches:
         if name not in input_names:
             errors.raise_compile(
@@ -141,7 +176,8 @@ def _prepare_collect_batches(
                 errors.INVALID_LITERAL,
                 "unconsumed explicit input; remove it from Program.inputs",
             )
-    plan = selected.compile_batch_project(_canonical(document))
+    # Each call still compiles a fresh native plan from the immutable template.
+    plan = selected.compile_batch_project(lowered.project_json)
     physical = {
         endpoint: batches[name]
         for name, endpoints in input_names.items()
