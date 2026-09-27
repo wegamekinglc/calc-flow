@@ -3554,23 +3554,44 @@ async fn assert_durable_notification_precedes_failed_bookkeeping(
     coordinator: &CheckpointCoordinatorHandle,
 ) {
     let (sink_sender, mut sink_receiver) = mpsc::channel(1);
+    let mut phase = super::DurableSettlementPhase::Published;
     let error = settle_durable_manifest(
         coordinator,
         &BTreeMap::new(),
         &BTreeMap::new(),
         &BTreeMap::from([("output".into(), sink_sender)]),
-        crate::Epoch::INITIAL,
-        false,
+        super::DurableSettlementRequest {
+            epoch: crate::Epoch::INITIAL,
+            terminal: false,
+            acknowledgement_timeout: StdDuration::from_secs(1),
+            phase: &mut phase,
+        },
     )
     .await
     .unwrap_err();
     assert!(matches!(error, CalcFlowError::Internal { .. }));
+    assert_eq!(phase, super::DurableSettlementPhase::SinksCommanded);
     assert!(matches!(
         sink_receiver.try_recv(),
         Ok(SinkCheckpointCommand::ManifestDurable(
             crate::Epoch::INITIAL
         ))
     ));
+}
+
+#[test]
+fn durable_settlement_rejects_skipped_phase() {
+    let mut phase = super::DurableSettlementPhase::Published;
+    assert!(
+        phase
+            .advance(
+                super::DurableSettlementPhase::Published,
+                super::DurableSettlementPhase::CoordinatorDurable,
+                crate::Epoch::INITIAL,
+            )
+            .is_err()
+    );
+    assert_eq!(phase, super::DurableSettlementPhase::Published);
 }
 
 #[tokio::test]

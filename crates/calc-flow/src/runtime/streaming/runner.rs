@@ -3521,11 +3521,47 @@ impl Drop for ManualCheckpointRegistration {
     }
 }
 
+/// The durable side of one checkpoint advances in this order. A failed step
+/// retains the last completed phase for recovery diagnostics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DurableSettlementPhase {
+    Published,
+    SinksCommanded,
+    CoordinatorDurable,
+    SourceAcked,
+}
+
+impl DurableSettlementPhase {
+    fn advance(&mut self, expected: Self, next: Self, epoch: Epoch) -> crate::Result<()> {
+        let adjacent = matches!(
+            (*self, next),
+            (Self::Published, Self::SinksCommanded)
+                | (Self::SinksCommanded, Self::CoordinatorDurable)
+                | (Self::CoordinatorDurable, Self::SourceAcked)
+        );
+        if *self != expected || !adjacent {
+            return Err(checkpoint_protocol_error(
+                epoch,
+                "durable manifest settlement advanced out of order",
+            ));
+        }
+        *self = next;
+        Ok(())
+    }
+}
+
+struct DurableSettlementRequest<'a> {
+    epoch: Epoch,
+    terminal: bool,
+    acknowledgement_timeout: Duration,
+    phase: &'a mut DurableSettlementPhase,
+}
+
 #[derive(Default)]
 struct EpochManifestAssembly {
     epoch: Option<Epoch>,
     terminal: bool,
-    manifest_durable: bool,
+    settlement_phase: Option<DurableSettlementPhase>,
     manifest_installed_unknown: bool,
     deferred_publication_error: Option<CalcFlowError>,
     sources: BTreeMap<String, SourceManifestEntry>,
@@ -3538,6 +3574,10 @@ struct EpochManifestAssembly {
 }
 
 impl EpochManifestAssembly {
+    const fn manifest_durable(&self) -> bool {
+        self.settlement_phase.is_some()
+    }
+
     fn start(&mut self, epoch: Epoch, terminal: bool) -> crate::Result<()> {
         if self.epoch.replace(epoch).is_some() {
             return Err(checkpoint_protocol_error(
@@ -3550,7 +3590,7 @@ impl EpochManifestAssembly {
         self.sink_outputs.clear();
         self.finalized_sink_outputs.clear();
         self.terminal = terminal;
-        self.manifest_durable = false;
+        self.settlement_phase = None;
         self.manifest_installed_unknown = false;
         self.deferred_publication_error = None;
         Ok(())
@@ -3576,7 +3616,7 @@ impl EpochManifestAssembly {
     fn complete(&mut self, epoch: Epoch) -> crate::Result<()> {
         self.expect_epoch(epoch)?;
         self.epoch = None;
-        self.manifest_durable = false;
+        self.settlement_phase = None;
         self.manifest_installed_unknown = false;
         Ok(())
     }
@@ -3700,7 +3740,7 @@ async fn run_live_checkpoint_task(inputs: LiveCheckpointTaskInputs) -> crate::Re
     let result = loop {
         tokio::select! {
             biased;
-            () = cancellation.cancelled(), if !assembly.manifest_durable => break Ok(()),
+            () = cancellation.cancelled(), if !assembly.manifest_durable() => break Ok(()),
             event = events.recv() => {
                 let Some(event) = event else {
                     break Err(CalcFlowError::Internal {
@@ -3744,7 +3784,7 @@ async fn run_live_checkpoint_task(inputs: LiveCheckpointTaskInputs) -> crate::Re
                 }
             }
             terminal = &mut terminal_sources,
-                if !terminal_sources_observed && !assembly.manifest_durable => {
+                if !terminal_sources_observed && !assembly.manifest_durable() => {
                 match terminal {
                     Ok(mut cuts) => {
                         if let Err(error) = add_restored_ended_source_cuts(&checkpoint, &mut cuts) {
@@ -3768,7 +3808,7 @@ async fn run_live_checkpoint_task(inputs: LiveCheckpointTaskInputs) -> crate::Re
                     break Err(error);
                 }
             }
-            ready = channels.operator_terminal_ready.recv(), if !assembly.manifest_durable => {
+            ready = channels.operator_terminal_ready.recv(), if !assembly.manifest_durable() => {
                 let Some(ready) = ready else {
                     break Err(checkpoint_channel_closed("operator terminal readiness"));
                 };
@@ -3791,7 +3831,7 @@ async fn run_live_checkpoint_task(inputs: LiveCheckpointTaskInputs) -> crate::Re
                     break Err(error);
                 }
             }
-            ready = channels.sink_terminal_ready.recv(), if !assembly.manifest_durable => {
+            ready = channels.sink_terminal_ready.recv(), if !assembly.manifest_durable() => {
                 let Some(ready) = ready else {
                     break Err(checkpoint_channel_closed("sink terminal readiness"));
                 };
@@ -3815,7 +3855,7 @@ async fn run_live_checkpoint_task(inputs: LiveCheckpointTaskInputs) -> crate::Re
                 }
             }
             ack = channels.operator_acks.recv(),
-                if !assembly.manifest_durable => {
+                if !assembly.manifest_durable() => {
                 let Some(ack) = ack else {
                     break Err(checkpoint_channel_closed("operator acks"));
                 };
@@ -3829,7 +3869,7 @@ async fn run_live_checkpoint_task(inputs: LiveCheckpointTaskInputs) -> crate::Re
                 }
             }
             ack = channels.sink_acks.recv(),
-                if !assembly.manifest_durable => {
+                if !assembly.manifest_durable() => {
                 let Some(ack) = ack else {
                     break Err(checkpoint_channel_closed("sink acks"));
                 };
@@ -3881,7 +3921,7 @@ async fn run_live_checkpoint_task(inputs: LiveCheckpointTaskInputs) -> crate::Re
         assembly.operators.keys(),
     );
     let publication_unknown = assembly.manifest_installed_unknown;
-    if !assembly.manifest_durable
+    if !assembly.manifest_durable()
         && !publication_unknown
         && assembly.finalized_sink_outputs.is_empty()
         && let Some(epoch) = assembly.epoch
@@ -3889,7 +3929,14 @@ async fn run_live_checkpoint_task(inputs: LiveCheckpointTaskInputs) -> crate::Re
         notify_sink_abort(&channels.sink_commands, epoch).await;
     }
     let sink_commit_incomplete =
-        assembly.manifest_durable && assembly.finalized_sink_outputs != expected_sinks;
+        assembly.manifest_durable() && assembly.finalized_sink_outputs != expected_sinks;
+    let settlement_incomplete = assembly.manifest_durable()
+        && assembly.settlement_phase != Some(DurableSettlementPhase::SourceAcked);
+    let sink_completion_note = if sink_commit_incomplete {
+        "; sink completion was not observed"
+    } else {
+        ""
+    };
     let sink_commit_failure = sink_commit_incomplete
         .then(|| {
             sinks
@@ -3906,6 +3953,13 @@ async fn run_live_checkpoint_task(inputs: LiveCheckpointTaskInputs) -> crate::Re
                     .epoch
                     .expect("indeterminate publication retains its active epoch")
                     .as_u64()
+            ),
+        }),
+        Err(error) if settlement_incomplete => Err(CalcFlowError::RecoveryRequired {
+            pipeline_name: checkpoint.identity.pipeline_name.clone(),
+            message: format!(
+                "checkpoint manifest settlement stopped at {:?}: {error}{sink_completion_note}",
+                assembly.settlement_phase
             ),
         }),
         Err(error) if sink_commit_incomplete => Err(CalcFlowError::RecoveryRequired {
@@ -3927,7 +3981,7 @@ async fn run_live_checkpoint_task(inputs: LiveCheckpointTaskInputs) -> crate::Re
     } else {
         match &result {
             _ if core.operation_cancel_requested.load(Ordering::Acquire)
-                && !assembly.manifest_durable
+                && !assembly.manifest_durable()
                 && !publication_unknown =>
             {
                 ManualCheckpointFailure::Cancelled
@@ -4119,7 +4173,7 @@ async fn handle_checkpoint_event(
         CheckpointEvent::Completed(epoch) => {
             #[cfg(test)]
             if checkpoint.inject_fault(CheckpointFaultPoint::CompletedCommit, cancellation)? {
-                assembly.manifest_durable = false;
+                assembly.settlement_phase = None;
                 return Ok(false);
             }
             if let Some(error) = assembly.deferred_publication_error.take() {
@@ -4147,8 +4201,12 @@ async fn handle_checkpoint_event(
             ));
         }
         CheckpointEvent::PhaseAdvanced(epoch, phase) => {
-            checkpoint.status.advance(epoch, phase);
-            assembly.advance_metrics(metrics, phase)?;
+            // Publication records this phase synchronously because settlement
+            // can block on source acknowledgement before this event is read.
+            if phase != CheckpointPhase::ManifestDurable || !assembly.manifest_durable() {
+                checkpoint.status.advance(epoch, phase);
+                assembly.advance_metrics(metrics, phase)?;
+            }
         }
     }
     Ok(false)
@@ -4219,14 +4277,25 @@ async fn publish_epoch_manifest(
     };
     match publication {
         ManifestPublication::Durable => {
-            assembly.manifest_durable = true;
+            assembly.settlement_phase = Some(DurableSettlementPhase::Published);
+            checkpoint
+                .status
+                .advance(epoch, CheckpointPhase::ManifestDurable);
+            assembly.advance_metrics(metrics, CheckpointPhase::ManifestDurable)?;
             settle_durable_manifest(
                 coordinator,
                 sources,
                 &assembly.sources,
                 sink_commands,
-                epoch,
-                assembly.terminal,
+                DurableSettlementRequest {
+                    epoch,
+                    terminal: assembly.terminal,
+                    acknowledgement_timeout: checkpoint.config.checkpoint_timeout,
+                    phase: assembly
+                        .settlement_phase
+                        .as_mut()
+                        .expect("durable publication starts settlement"),
+                },
             )
             .await
         }
@@ -4235,7 +4304,11 @@ async fn publish_epoch_manifest(
             error,
         } => {
             if parent_synced {
-                assembly.manifest_durable = true;
+                assembly.settlement_phase = Some(DurableSettlementPhase::Published);
+                checkpoint
+                    .status
+                    .advance(epoch, CheckpointPhase::ManifestDurable);
+                assembly.advance_metrics(metrics, CheckpointPhase::ManifestDurable)?;
                 if !cancellation.is_cancelled() {
                     assembly.deferred_publication_error = Some(error);
                 }
@@ -4244,8 +4317,15 @@ async fn publish_epoch_manifest(
                     sources,
                     &assembly.sources,
                     sink_commands,
-                    epoch,
-                    assembly.terminal,
+                    DurableSettlementRequest {
+                        epoch,
+                        terminal: assembly.terminal,
+                        acknowledgement_timeout: checkpoint.config.checkpoint_timeout,
+                        phase: assembly
+                            .settlement_phase
+                            .as_mut()
+                            .expect("durable publication starts settlement"),
+                    },
                 )
                 .await?;
             } else {
@@ -4268,12 +4348,48 @@ async fn settle_durable_manifest(
     sources: &BTreeMap<String, SourceProgress>,
     source_entries: &BTreeMap<String, SourceManifestEntry>,
     sink_commands: &BTreeMap<String, mpsc::Sender<SinkCheckpointCommand>>,
-    epoch: Epoch,
-    terminal: bool,
+    request: DurableSettlementRequest<'_>,
 ) -> crate::Result<()> {
+    let DurableSettlementRequest {
+        epoch,
+        terminal,
+        acknowledgement_timeout,
+        phase,
+    } = request;
+    if *phase != DurableSettlementPhase::Published {
+        return Err(checkpoint_protocol_error(
+            epoch,
+            "durable manifest settlement did not start at publication",
+        ));
+    }
     notify_sink_manifest_durable(sink_commands, epoch, terminal).await?;
+    phase.advance(
+        DurableSettlementPhase::Published,
+        DurableSettlementPhase::SinksCommanded,
+        epoch,
+    )?;
     coordinator.manifest_durable(epoch).await?;
-    acknowledge_durable_source_cursors(sources, source_entries).await
+    phase.advance(
+        DurableSettlementPhase::SinksCommanded,
+        DurableSettlementPhase::CoordinatorDurable,
+        epoch,
+    )?;
+    tokio::time::timeout(
+        acknowledgement_timeout,
+        acknowledge_durable_source_cursors(sources, source_entries),
+    )
+    .await
+    .map_err(|_| CalcFlowError::Internal {
+        message: format!(
+            "durable source acknowledgement timed out for checkpoint epoch {}",
+            epoch.as_u64()
+        ),
+    })??;
+    phase.advance(
+        DurableSettlementPhase::CoordinatorDurable,
+        DurableSettlementPhase::SourceAcked,
+        epoch,
+    )
 }
 
 async fn acknowledge_durable_source_cursors(

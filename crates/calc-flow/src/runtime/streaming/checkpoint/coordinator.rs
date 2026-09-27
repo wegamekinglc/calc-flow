@@ -409,7 +409,8 @@ async fn receive_command(
     tokio::select! {
         biased;
         () = cancellation.cancelled() => Ok(None),
-        () = tokio::time::sleep_until(state.deadline) => {
+        () = tokio::time::sleep_until(state.deadline),
+            if state.phase != CheckpointPhase::ManifestDurable => {
             send_event(
                 events,
                 CheckpointEvent::Failed(state.epoch, "timeout".into()),
@@ -1006,6 +1007,72 @@ mod tests {
             "internal invariant failed: checkpoint epoch 1 timed out"
         );
         assert!(cancellation.is_cancelled());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn durable_manifest_disables_the_prepublication_coordinator_deadline() {
+        let cancellation = CancellationToken::new();
+        let (handle, mut events, task) = spawn_checkpoint_coordinator(
+            participants(),
+            Epoch::INITIAL,
+            2,
+            Duration::from_secs(5),
+            cancellation.clone(),
+        )
+        .unwrap();
+        handle.request(CheckpointRequest::Periodic).await.unwrap();
+        assert_eq!(
+            events.recv().await.unwrap(),
+            CheckpointEvent::Started(Epoch::INITIAL)
+        );
+        handle
+            .ack(CheckpointAck::source(
+                "source",
+                Epoch::INITIAL,
+                "source-state",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            events.recv().await.unwrap(),
+            CheckpointEvent::PhaseAdvanced(Epoch::INITIAL, CheckpointPhase::SourcesCut)
+        );
+        handle
+            .ack(CheckpointAck::operator(
+                "operator",
+                Epoch::INITIAL,
+                "operator-state",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            events.recv().await.unwrap(),
+            CheckpointEvent::PhaseAdvanced(Epoch::INITIAL, CheckpointPhase::OperatorsSnapshotted)
+        );
+        handle
+            .ack(CheckpointAck::sink_precommit(
+                "sink",
+                Epoch::INITIAL,
+                "sink-state",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            events.recv().await.unwrap(),
+            CheckpointEvent::ReadyToPublish(Epoch::INITIAL)
+        );
+        handle.manifest_durable(Epoch::INITIAL).await.unwrap();
+        assert_eq!(
+            events.recv().await.unwrap(),
+            CheckpointEvent::PhaseAdvanced(Epoch::INITIAL, CheckpointPhase::ManifestDurable)
+        );
+
+        tokio::time::advance(Duration::from_secs(5)).await;
+        tokio::task::yield_now().await;
+        assert!(!cancellation.is_cancelled());
+        assert!(events.try_recv().is_err());
+        cancellation.cancel();
+        task.await.unwrap().unwrap();
     }
 
     #[tokio::test]

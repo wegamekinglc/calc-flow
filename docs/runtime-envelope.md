@@ -522,10 +522,11 @@ commit, and a partial multi-sink commit completes forward during recovery. No
 second durable completion record competes with the manifest. Retention failure
 after commit fails the live job but does not invalidate the completed epoch.
 Once publication is durable, the runtime sends sink commit commands before
-acknowledging source cursors. A source acknowledgement failure can therefore
-leave an already committed sink; the durable manifest remains the recovery
-intent, and the live job reports recovery required rather than aborting that
-sink transaction.
+acknowledging source cursors. Settlement records the ordered phases Published,
+SinksCommanded, CoordinatorDurable, and SourceAcked. Source acknowledgement
+has the configured checkpoint timeout. A failure or timeout can leave an
+already committed sink; the durable manifest remains the recovery intent.
+The live job reports recovery required rather than aborting that transaction.
 
 Sink checkpoint lifecycle calls and checkpoint-channel waits have the configured
 checkpoint timeout; connector open has a private 30-second bound and a separate
