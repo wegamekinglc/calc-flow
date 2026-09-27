@@ -18,7 +18,12 @@ export { ApiContractError };
 
 const API_PREFIX = '/api/v3';
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
-const pathId = (id: string): string => encodeURIComponent(id);
+export const pathId = (id: string): string => {
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(id)) {
+    throw new ApiContractError('Resource ID contains unsupported path characters');
+  }
+  return encodeURIComponent(id);
+};
 
 export class ApiError extends Error {
   constructor(
@@ -163,7 +168,7 @@ export const api = {
       body: JSON.stringify(project),
     }),
   deleteProject: (id: string) =>
-    request<void>(`${API_PREFIX}/projects/${pathId(id)}`, null, { method: 'DELETE' }),
+    request<undefined>(`${API_PREFIX}/projects/${pathId(id)}`, null, { method: 'DELETE' }),
   importProject: (document: string, format: 'json' | 'yaml', replace = false) =>
     request<ProjectDocument>(
       `${API_PREFIX}/projects/import?format=${format}&replace=${String(replace)}`,

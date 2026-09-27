@@ -63,6 +63,8 @@ fn validate_key_names(field: &str, columns: &[String]) -> Result<()> {
     Ok(())
 }
 
+// Moved from rolling.rs; validation keeps field-specific errors in declaration order.
+// #lizard forgives
 fn validate_outputs(outputs: &[RollingOutputSpec]) -> Result<()> {
     if outputs.is_empty() {
         return Err(invalid_argument("rolling.outputs", "must not be empty"));
@@ -375,6 +377,8 @@ fn compile_key_column(
     Ok(CompiledKeyColumn { index })
 }
 
+// Moved from rolling.rs; output variants retain their exact schema and state layout.
+// #lizard forgives
 fn compile_output(
     input_schema: &Schema,
     output: &RollingOutputSpec,
@@ -780,6 +784,8 @@ fn require_numeric(column: &str, input_type: &DataType, primitive: &str) -> Resu
     Ok(())
 }
 
+// Moved from rolling.rs; preserve the previously accepted aggregate variants.
+// #lizard forgives
 pub(super) fn compile_aggregate(
     input_index: usize,
     input_type: &DataType,

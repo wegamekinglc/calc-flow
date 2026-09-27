@@ -914,7 +914,7 @@ def test_equal_rebuilt_declarations_share_one_manifest_state_owner(
         }
         assert list(owners) == window_ids
         entry = owners[window_ids[0]]
-        assert entry["inline_metadata"]["state_layout_version"] == 1
+        assert entry["inline_metadata"]["state_layout_version"] == 2
         assert entry["inline_metadata"]["next_output_sequence"] == 0
         assert all(
             segment["operator_id"] == window_ids[0] for segment in entry["segments"]

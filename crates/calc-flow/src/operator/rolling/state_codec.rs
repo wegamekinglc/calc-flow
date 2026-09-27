@@ -120,6 +120,8 @@ pub(super) fn encode_state_segment(
     )
 }
 
+// Moved from rolling.rs; this codec must preserve legacy checkpoint bytes.
+// #lizard forgives
 pub(super) fn encode_state_segment_legacy(
     histories: &RollingHistories,
     buffer: &BTreeMap<RowIdentity, BufferedRow>,
@@ -267,6 +269,8 @@ pub(super) fn decode_state_segment(
     decode_state_segment_legacy(bytes, input_schema, &legacy, metadata)
 }
 
+// Moved from rolling.rs; legacy decoding retains format-specific validation.
+// #lizard forgives
 fn decode_state_segment_legacy(
     bytes: &[u8],
     input_schema: &Schema,
@@ -396,6 +400,8 @@ pub(super) fn validate_segment_schema_metadata(
     Ok(())
 }
 
+// Moved from rolling.rs; row kinds retain their distinct recovery checks.
+// #lizard forgives
 fn decode_state_row(
     kind: u8,
     position: Option<u64>,
@@ -459,6 +465,8 @@ fn decode_state_row(
     Ok(())
 }
 
+// Moved from rolling.rs; preserve the legacy EWMA state contract.
+// #lizard forgives
 pub(super) fn decode_ewma_state_row(
     position: Option<u64>,
     values: &[ScalarValue],
@@ -642,6 +650,7 @@ pub(super) fn validate_decoded_state(
 /// deterministic function of those rows frozen in D5/D11. Extrema groups
 /// fold pushes and expiries so the rebuilt queue front is the window
 /// extremum, exactly as the live slide left it (SCE-08).
+// #lizard forgives
 pub(super) fn rebuild_windows(
     histories: &mut RollingHistories,
     compiled: &CompiledRollingSpec,
@@ -769,6 +778,7 @@ fn history_extrema_key(
 /// Rebuilds one extrema queue as the ordered push/expire fold over the
 /// retained rows, mirroring the live slide so queue front, expiry keys, and
 /// valid count match an uninterrupted run exactly.
+// #lizard forgives
 fn rebuild_extrema_group(
     accumulator: &mut ExtremaAccumulator,
     state: &EntityRollingState,

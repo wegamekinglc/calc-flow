@@ -4154,6 +4154,24 @@ async fn run_checkpoint_restart_fault_case(
                     Some("sink-a"),
                 )
         }
+        (CheckpointFaultPoint::SinkPreCommit, CheckpointFaultMode::Panic) => {
+            // A checkpoint-task panic can close the command channel before
+            // the prepared sink learns whether its epoch is abortable. That
+            // path must conservatively request recovery; an observed abort
+            // can still settle the epoch as an ordinary failure.
+            matches!(
+                first_outcome.state,
+                PublicJobState::Failed | PublicJobState::RecoveryRequired
+            ) && first_outcome.cause == PublicTerminalCause::Failure
+                && checkpoint_status_matches
+                && exact_error(
+                    PublicStreamingErrorCategory::TaskPanicked,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+        }
         (_, CheckpointFaultMode::Cancel) => {
             let cancel_phase = match point {
                 CheckpointFaultPoint::PartialAlignment => PublicCheckpointPhase::Requested,
@@ -9222,9 +9240,23 @@ async fn assert_named_checkpoint_fault_case(
             component_id: None,
         },
     };
-    assert_eq!(
-        report.manual_observation, expected_manual,
-        "{case_id}: public manual observer classification mismatch"
+    // At partial sink commit, cancellation and the sink's structured failure
+    // can race to complete the manual waiter. Both outcomes retain the same
+    // durable epoch and require recovery.
+    let cancellation_raced_sink_failure = point == CheckpointFaultPoint::PartialSinkCommit
+        && mode == CheckpointFaultMode::Cancel
+        && report.manual_observation
+            == CheckpointManualObservation::Failed {
+                category: PublicStreamingErrorCategory::Internal,
+                epoch: Some(Epoch::INITIAL),
+                phase: Some(PublicCheckpointPhase::ManifestDurable),
+                component_kind: Some(PublicComponentKind::Checkpoint),
+                component_id: None,
+            };
+    assert!(
+        report.manual_observation == expected_manual || cancellation_raced_sink_failure,
+        "{case_id}: public manual observer classification mismatch: actual={:?}, expected={expected_manual:?}",
+        report.manual_observation,
     );
     assert_eq!(
         report.selected_before_restart,

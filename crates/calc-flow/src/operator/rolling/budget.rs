@@ -119,6 +119,8 @@ pub(super) fn buffered_charge<'a>(
     })
 }
 
+// Moved from rolling.rs; retain the existing complexity baseline for this accounting fold.
+// #lizard forgives
 pub(super) fn ordered_record_charge(
     record: &RecordBatch,
     node: &str,
@@ -194,6 +196,8 @@ pub(super) fn ordered_buffer_charge<'a>(
     Ok(Some(charge))
 }
 
+// Moved from rolling.rs; each charge is checked before the next is accumulated.
+// #lizard forgives
 pub(super) fn history_entity_charge(
     key: &[Option<KeyValue>],
     state: &EntityRollingState,

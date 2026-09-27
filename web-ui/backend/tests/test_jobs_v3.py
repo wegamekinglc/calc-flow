@@ -206,6 +206,13 @@ def test_openapi_exposes_only_project_v3_and_continuous_job_routes(
     )
 
 
+def test_job_event_route_rejects_encoded_slash_id(tmp_path: Path) -> None:
+    with TestClient(create_app(project_directory=tmp_path)) as client:
+        events = client.get("/api/v3/jobs/team%2Falpha/events")
+
+    assert events.status_code == 404
+
+
 def test_resource_limits_use_exact_byte_contract(tmp_path: Path) -> None:
     with TestClient(create_app(project_directory=tmp_path / "projects")) as client:
         response = client.get("/api/v3/resource-limits")

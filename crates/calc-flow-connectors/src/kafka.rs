@@ -284,6 +284,11 @@ impl KafkaSecurityConfig {
     }
 
     fn validate(&self) -> Result<()> {
+        self.validate_tls()?;
+        self.validate_sasl()
+    }
+
+    fn validate_tls(&self) -> Result<()> {
         if self
             .ssl_ca_location
             .as_ref()
@@ -300,6 +305,10 @@ impl KafkaSecurityConfig {
                 "a CA path requires ssl or sasl_ssl",
             ));
         }
+        Ok(())
+    }
+
+    fn validate_sasl(&self) -> Result<()> {
         if self.protocol.uses_sasl() {
             if !matches!(
                 self.sasl_mechanism.as_deref(),
@@ -379,38 +388,57 @@ fn kafka_client_config(
     if let Some(path) = &security.ssl_ca_location {
         client.set("ssl.ca.location", path);
     }
-    if security.protocol.uses_sasl() {
-        let password = password.ok_or_else(|| {
-            fail(
-                "open",
-                "the SASL password secret is required for this Kafka binding",
-            )
-        })?;
-        let password = std::str::from_utf8(password.expose())
-            .map_err(|_| fail("open", "the SASL password secret is not valid UTF-8"))?;
-        if password.is_empty() {
-            return Err(fail("open", "the SASL password secret is empty"));
-        }
-        client.set(
-            "sasl.mechanism",
-            security.sasl_mechanism.as_deref().ok_or_else(|| {
-                security_option_error("sasl_mechanism", "SASL mechanism is missing")
-            })?,
-        );
-        client.set(
-            "sasl.username",
-            security.sasl_username.as_deref().ok_or_else(|| {
-                security_option_error("sasl_username", "SASL username is missing")
-            })?,
-        );
-        client.set("sasl.password", password);
-    } else if password.is_some() {
-        return Err(fail(
-            "open",
-            "SASL password supplied for a non-SASL Kafka binding",
-        ));
-    }
+    configure_sasl(&mut client, security, password)?;
     Ok(client)
+}
+
+fn configure_sasl(
+    client: &mut ClientConfig,
+    security: &KafkaSecurityConfig,
+    password: Option<&SecretHandle>,
+) -> Result<()> {
+    if !security.protocol.uses_sasl() {
+        return if password.is_some() {
+            Err(fail(
+                "open",
+                "SASL password supplied for a non-SASL Kafka binding",
+            ))
+        } else {
+            Ok(())
+        };
+    }
+    let password = sasl_password_text(password)?;
+    client.set(
+        "sasl.mechanism",
+        security
+            .sasl_mechanism
+            .as_deref()
+            .ok_or_else(|| security_option_error("sasl_mechanism", "SASL mechanism is missing"))?,
+    );
+    client.set(
+        "sasl.username",
+        security
+            .sasl_username
+            .as_deref()
+            .ok_or_else(|| security_option_error("sasl_username", "SASL username is missing"))?,
+    );
+    client.set("sasl.password", password);
+    Ok(())
+}
+
+fn sasl_password_text(password: Option<&SecretHandle>) -> Result<&str> {
+    let password = password.ok_or_else(|| {
+        fail(
+            "open",
+            "the SASL password secret is required for this Kafka binding",
+        )
+    })?;
+    let password = std::str::from_utf8(password.expose())
+        .map_err(|_| fail("open", "the SASL password secret is not valid UTF-8"))?;
+    if password.is_empty() {
+        return Err(fail("open", "the SASL password secret is empty"));
+    }
+    Ok(password)
 }
 
 /// Data-only configuration for one Kafka source.

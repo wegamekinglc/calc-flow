@@ -61,14 +61,16 @@ afterEach(() => {
 });
 
 describe('useJobEvents', () => {
-  it('encodes the job ID in the event stream URL', () => {
+  it('rejects a job ID that cannot match the backend event route', () => {
     vi.stubGlobal('EventSource', FakeEventSource);
+    const onError = vi.fn();
 
     renderHook(() => {
-      useJobEvents('a/b?c#d', vi.fn(), vi.fn(), vi.fn());
+      useJobEvents('a/b?c#d', vi.fn(), vi.fn(), onError);
     });
 
-    expect(at(FakeEventSource.instances).url).toBe('/api/v3/jobs/a%2Fb%3Fc%23d/events');
+    expect(FakeEventSource.instances).toEqual([]);
+    expect(onError).toHaveBeenCalledWith(expect.any(ApiContractError));
   });
 
   it('preserves full ASOF integer strings and refreshes authoritative job state', async () => {

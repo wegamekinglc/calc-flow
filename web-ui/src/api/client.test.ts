@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { blankProject } from '../types';
-import { api, ApiContractError, ApiError } from './client';
+import { api, ApiContractError, ApiError, pathId } from './client';
 import { at } from '../types';
 
 const job = (status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled') => ({
@@ -159,20 +159,15 @@ describe('API client', () => {
     await expect(api.job('job-1')).rejects.toBeInstanceOf(ApiContractError);
   });
 
-  it('encodes project and job IDs as single path segments', async () => {
-    const id = 'a/b?c#d';
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify(blankProject())))
-      .mockResolvedValueOnce(new Response(JSON.stringify(job('running'))));
+  it('rejects IDs that the backend cannot store or issue', () => {
+    const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
 
-    await api.project(id);
-    await api.job(id);
+    expect(() => api.project('a/b?c#d')).toThrow(ApiContractError);
+    expect(() => api.job('a/b?c#d')).toThrow(ApiContractError);
 
-    expect(fetchMock.mock.calls.map(([path]) => path)).toEqual([
-      '/api/v3/projects/a%2Fb%3Fc%23d',
-      '/api/v3/jobs/a%2Fb%3Fc%23d',
-    ]);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(pathId('1a2b3c4d')).toBe('1a2b3c4d');
   });
 
   it('uses only the exact continuous job lifecycle routes', async () => {

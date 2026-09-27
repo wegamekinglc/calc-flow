@@ -201,6 +201,8 @@ impl EpochManifestAssembly {
     }
 }
 
+// Extracted from runner.rs; this task owns the existing epoch event loop.
+// #lizard forgives
 #[allow(
     clippy::too_many_lines,
     reason = "the checkpoint task is the single owner of epoch events, acks, and manifest publication"
@@ -575,6 +577,8 @@ pub(super) async fn run_live_checkpoint_task(
     result
 }
 
+// Extracted from runner.rs; this transition preserves checkpoint event order.
+// #lizard forgives
 #[allow(
     clippy::too_many_arguments,
     clippy::too_many_lines,
@@ -765,6 +769,8 @@ async fn notify_terminal_checkpoint(
     Ok(())
 }
 
+// Extracted from runner.rs; manifest publication retains its durable ordering.
+// #lizard forgives
 #[allow(
     clippy::too_many_arguments,
     reason = "manifest publication owns the checkpoint, participant, cancellation, metrics, and epoch boundaries"

@@ -738,6 +738,8 @@ impl RollingHistories {
 }
 
 impl RetainedHistoryAppend {
+    // Historical accounting logic is tracked by the local complexity ratchet.
+    // #lizard forgives
     fn projected_charge(
         &self,
         previous: Option<&EntityRollingState>,

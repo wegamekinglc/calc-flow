@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
 import type { Dispatch } from 'react';
 
-import { api, ApiContractError } from '../api/client';
+import { api, ApiContractError, pathId } from '../api/client';
 import { isTerminalJobStatus } from '../jobStatusModel';
 import type { JobEvent, JobResponse } from '../types';
 
@@ -24,7 +24,14 @@ export function useJobEvents(
     let consecutiveErrors = 0;
     let refreshRevision = 0;
     let pollTimer: number | undefined;
-    const source = new EventSource(`/api/v3/jobs/${encodeURIComponent(jobId)}/events`);
+    let encodedJobId: string;
+    try {
+      encodedJobId = pathId(jobId);
+    } catch (error) {
+      if (error instanceof ApiContractError) onError(error);
+      return;
+    }
+    const source = new EventSource(`/api/v3/jobs/${encodedJobId}/events`);
 
     const closeSource = () => {
       if (closed) return;

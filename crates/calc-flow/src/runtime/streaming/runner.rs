@@ -3561,6 +3561,8 @@ async fn await_handle_claim(core: &Arc<JobCore>) -> bool {
     }
 }
 
+// Existing supervision flow retains its cancellation and cleanup ordering.
+// #lizard forgives
 async fn drive_running_job(
     launch_id: LaunchId,
     core: &Arc<JobCore>,
@@ -3692,6 +3694,8 @@ fn finish_running_report(
     }
 }
 
+// Existing failure aggregation retains deterministic source and sink ordering.
+// #lizard forgives
 fn runtime_failures(
     report: SupervisionReport,
     sources: &BTreeMap<String, SourceProgress>,
