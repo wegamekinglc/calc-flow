@@ -124,6 +124,11 @@ read-only `SELECT` or CTE. Batch SQL supports multiple aliases; streaming SQL
 accepts one alias and evaluates it separately for each native batch. SQL output
 has a new row lineage and does not inherit temporal ordering. Row-local
 expressions may follow SQL; compute rolling features before a SQL stage.
+Recursive CTEs and the `generate_series` and `range` table generators are
+rejected. SQL execution uses a 1 GiB DataFusion memory pool per runtime and
+stops collecting a result above 100 million rows or 1 GiB of visible Arrow
+slices. These limits do not cap process RSS; DataFusion can allocate one output
+batch before the result-size check runs.
 Array providers are registered explicitly and use
 a bounded expression language. Graphs exchange `Batch` values rather than
 raw tables or arrays, and configuration contains data and registration

@@ -302,6 +302,8 @@ jobs:
         run: uv run --no-sync python scripts/verify_complexity_gates.py
       - name: Run unit, property, and coverage tests
         env:
+          # Python callbacks now run on Rust worker threads; sysmon traces them.
+          COVERAGE_CORE: sysmon
           PYTEST_XDIST_AUTO_NUM_WORKERS: 2
         run: >-
           uv run --no-sync pytest -q -n auto --dist load -p no:benchmark
@@ -523,16 +525,57 @@ jobs:
           path: dist/*
           if-no-files-found: error
           retention-days: 30
+  legacy-python-wheel:
+    name: Build legacy Python abi3 wheel once
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+      - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+      - name: Build and tag the legacy wheel
+        run: |
+          uv build --wheel --out-dir target/legacy-wheel \
+            --config-setting 'build-args=--features legacy-python'
+          python -m pip install wheel==0.46.3
+          shopt -s nullglob
+          wheels=(target/legacy-wheel/*.whl)
+          test "${#wheels[@]}" -eq 1
+          for tag in cp310 cp311 cp312; do
+            python -m wheel tags --python-tag="$tag" "${wheels[0]}"
+          done
+      - name: Upload legacy compatibility wheels
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: legacy-python-wheel
+          path: target/legacy-wheel/*.whl
+          if-no-files-found: error
+          retention-days: 30
   python-compatibility:
     name: Python compatibility (${{ matrix.python-version }})
-    needs: changes
+    needs:
+      - changes
+      - package
+      - legacy-python-wheel
     if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.9', '3.14']
+        python-version: ['3.9', '3.10', '3.11', '3.12', '3.13', '3.14']
     steps:
       - name: Check out repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -544,22 +587,29 @@ jobs:
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           enable-cache: true
-      - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
-      - name: Build source fallback or modern abi3 wheel
+      - name: Select the published Python ABI family
+        id: wheel
         run: |
-          if [ "${{ matrix.python-version }}" = "3.9" ]; then
-            uvx maturin==1.14.1 build --release --locked \
-              --interpreter python --out target/compat-wheel
-          else
-            uvx maturin==1.14.1 build --release --locked \
-              --interpreter python --out target/compat-wheel \
-              --features pyo3/abi3-py313
-          fi
+          case "${{ matrix.python-version }}" in
+            3.9) artifact=legacy-python-wheel; tag=cp39 ;;
+            3.10) artifact=legacy-python-wheel; tag=cp310 ;;
+            3.11) artifact=legacy-python-wheel; tag=cp311 ;;
+            3.12) artifact=legacy-python-wheel; tag=cp312 ;;
+            3.13|3.14) artifact=python-distributions; tag=cp313 ;;
+            *) exit 1 ;;
+          esac
+          echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: Download the built wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ steps.wheel.outputs.artifact }}
+          path: target/compat-wheel
       - name: Verify installed compatibility wheel
         run: |
-          uv pip install --system target/compat-wheel/calc_flow_python-*.whl pytest numpy
+          uv pip install --system \
+            target/compat-wheel/calc_flow_python-*-${{ steps.wheel.outputs.tag }}-abi3-*.whl \
+            pytest numpy
           python scripts/smoke_wheel.py
           python -m pytest -q \
             python/tests/test_import.py \
@@ -947,6 +997,7 @@ jobs:
       - studio-backend
       - browser-e2e
       - package
+      - legacy-python-wheel
       - python-compatibility
       - studio-package
       - rust-core
@@ -968,6 +1019,7 @@ jobs:
       STUDIO_BACKEND_RESULT: ${{ needs.studio-backend.result }}
       BROWSER_RESULT: ${{ needs.browser-e2e.result }}
       PACKAGE_RESULT: ${{ needs.package.result }}
+      LEGACY_PYTHON_WHEEL_RESULT: ${{ needs.legacy-python-wheel.result }}
       PYTHON_COMPATIBILITY_RESULT: ${{ needs.python-compatibility.result }}
       STUDIO_PACKAGE_RESULT: ${{ needs.studio-package.result }}
       RUST_CORE_RESULT: ${{ needs.rust-core.result }}
@@ -993,6 +1045,7 @@ jobs:
             "$STUDIO_BACKEND_RESULT" \
             "$BROWSER_RESULT" \
             "$PACKAGE_RESULT" \
+            "$LEGACY_PYTHON_WHEEL_RESULT" \
             "$PYTHON_COMPATIBILITY_RESULT" \
             "$STUDIO_PACKAGE_RESULT" \
             "$RUST_CORE_RESULT" \

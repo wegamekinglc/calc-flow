@@ -95,7 +95,7 @@ pub(super) struct LaneRow {
 
 pub(super) struct OwnedLaneEntity {
     pub(super) local_id: usize,
-    pub(super) state: TypedEntityState,
+    pub(super) state: Arc<TypedEntityState>,
 }
 
 struct PreparedNumericInput {
@@ -231,7 +231,11 @@ impl ScratchPlan {
 
     fn routing_capacity(rows: usize, entities: usize) -> Option<usize> {
         let schedules = rows.checked_mul(size_of::<LaneRow>())?;
-        let moved = entities.checked_mul(size_of::<OwnedLaneEntity>())?;
+        // Charge the lane slot and a conservative Arc owner allowance; the
+        // prepared entity payload is shared with the serial fallback.
+        let moved = entities.checked_mul(
+            size_of::<OwnedLaneEntity>() + size_of::<TypedEntityState>() + 2 * size_of::<usize>(),
+        )?;
         let assignment = entities.checked_mul(size_of::<EntityAssignment>())?;
         schedules.checked_add(moved)?.checked_add(assignment)
     }
@@ -942,9 +946,10 @@ fn run_prepared_numeric_lane<const GROUPS: usize>(
         }
         let row =
             context.record_row(&mut request.rows, original_row, assignment.local, progress)?;
-        let entity = &mut request.entities
-            [usize::try_from(row.lane_entity).expect("u32 fits platform")]
-        .state;
+        let entity = Arc::make_mut(
+            &mut request.entities[usize::try_from(row.lane_entity).expect("u32 fits platform")]
+                .state,
+        );
         context.update_entity(entity, row, progress)?;
         context.append_outputs(&mut builders, entity, row, progress, &mut append)?;
         progress.active_site = None;
@@ -1188,7 +1193,7 @@ pub(crate) fn merge_numeric_results(
         .state
         .states
         .iter()
-        .map(TypedEntityState::estimated_bytes)
+        .map(|entity| entity.estimated_bytes())
         .sum();
     // Lane buffers/schedules and moved containers drop here, before the caller's
     // JoinedNumericPair releases its permit; only original serial state/output escape.

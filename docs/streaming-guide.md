@@ -680,6 +680,12 @@ let plan = PipelineBuilder::new("orders")?
     .compile_stream(&udfs, &StreamRequirements::default())?;
 ```
 
+The window operator bounds retained accumulators by default to one million
+window groups and 256 MiB of logical charge. Rust callers can adjust this
+with `WindowAggregateOperator::set_state_budget` before graph compilation;
+recovery rejects a snapshot that exceeds the selected budget. The budget does
+not include checkpoint segment copies or process RSS.
+
 Run the complete source-watermark-window-sink example with:
 
 ```bash
@@ -946,6 +952,10 @@ checkpoint formats are unchanged.
 The working set includes retained state, admitted input references,
 `O(matches)` pair descriptors, equality-probe scratch space, preflight
 allocations, the current output chunk, and chunks held by edges or sinks.
+An unchanged opposite side reuses its assembled equality-key batch across
+input batches. The cache retains a side only when its estimated key-array and
+row-ID storage is at most 32 MiB. It is released when that side gains or loses
+retained rows, or when the operator ends or restores.
 Per-side state limits and `max_matches_per_input_batch` remain separate from
 the edge's logical row/byte limits. Chunking removes the need to hold one
 complete materialized output, but neither bounds total process RSS by
@@ -987,9 +997,11 @@ epoch = await job.trigger_checkpoint_async()
 assert job.status()["checkpoint"]["last_completed_epoch"] == epoch
 ```
 
-The returned epoch is durable. Operator segments have been published, the
-manifest is durable, and the runtime has completed the required post-manifest
-protocol before returning success.
+On Unix platforms, the returned epoch is durable. Operator segments have
+been published, the manifest is durable, and the runtime has completed the
+required post-manifest protocol before returning success. On Windows, this
+acknowledgement does not guarantee recovery after an operating-system crash or
+power loss; see [manifest publication and recovery](runtime-envelope.md#manifest-publication-and-recovery).
 
 Starting a compatible plan on the same root selects the latest complete
 manifest and validates pipeline fingerprint, source/operator/sink identities,
@@ -1037,6 +1049,18 @@ Choose an `EdgeBudget` large enough for the largest admitted source batch and
 the number of simultaneous control envelopes. Rows and envelopes each have an
 independent `max_rows` bound; bytes have `max_bytes`. A source declaration that
 can exceed the effective edge budget fails before open.
+Every stream edge budget and source batch declaration is capped at 1,000,000
+rows and 256 MiB. Project-v3 stream runtime options follow the same caps.
+Each stream SQL or expression node has its own 1 GiB DataFusion memory pool;
+this is not a job-wide memory limit.
+
+Each rolling node also bounds its accepted buffer and retained history to
+1,000,000 logical rows and 256 MiB by default. Rust callers can set a different
+`StateBudget` on `RollingOperator` before compiling the stream. Project-created
+rolling nodes use the default. A callback that exceeds either limit fails
+before it commits new state; recovery rejects snapshots above the selected
+limit. These logical charges do not count checkpoint copies or total process
+memory.
 
 Backpressure is expected. A slow sink eventually awaits upstream sends. Do not
 hide that signal behind an unbounded queue inside a connector. If the external

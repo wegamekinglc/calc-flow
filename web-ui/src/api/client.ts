@@ -18,6 +18,12 @@ export { ApiContractError };
 
 const API_PREFIX = '/api/v3';
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+export const pathId = (id: string): string => {
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(id)) {
+    throw new ApiContractError('Resource ID contains unsupported path characters');
+  }
+  return encodeURIComponent(id);
+};
 
 export class ApiError extends Error {
   constructor(
@@ -131,28 +137,38 @@ async function requestText(
 }
 
 export const api = {
-  catalog: () => request<CatalogResponse>(`${API_PREFIX}/catalog`, null),
-  capabilities: () => request<CapabilitiesResponse>(
+  catalog: (signal?: AbortSignal) => request<CatalogResponse>(
+    `${API_PREFIX}/catalog`,
+    null,
+    { signal },
+  ),
+  capabilities: (signal?: AbortSignal) => request<CapabilitiesResponse>(
     `${API_PREFIX}/capabilities`,
     decodeCapabilitiesResponse,
+    { signal },
   ),
-  projects: () => request<ProjectSummary[]>(`${API_PREFIX}/projects`, null),
+  projects: (signal?: AbortSignal) => request<ProjectSummary[]>(
+    `${API_PREFIX}/projects`,
+    null,
+    { signal },
+  ),
   createProject: (project: ProjectCreateRequest) =>
     request<ProjectDocument>(`${API_PREFIX}/projects`, null, {
       method: 'POST',
       body: JSON.stringify(project),
     }),
-  project: (id: string) => request<ProjectDocument>(
-    `${API_PREFIX}/projects/${id}`,
+  project: (id: string, signal?: AbortSignal) => request<ProjectDocument>(
+    `${API_PREFIX}/projects/${pathId(id)}`,
     null,
+    { signal },
   ),
   saveProject: (project: ProjectDocument) =>
-    request<ProjectDocument>(`${API_PREFIX}/projects/${project.id}`, null, {
+    request<ProjectDocument>(`${API_PREFIX}/projects/${pathId(project.id)}`, null, {
       method: 'PUT',
       body: JSON.stringify(project),
     }),
   deleteProject: (id: string) =>
-    request<void>(`${API_PREFIX}/projects/${id}`, null, { method: 'DELETE' }),
+    request<undefined>(`${API_PREFIX}/projects/${pathId(id)}`, null, { method: 'DELETE' }),
   importProject: (document: string, format: 'json' | 'yaml', replace = false) =>
     request<ProjectDocument>(
       `${API_PREFIX}/projects/import?format=${format}&replace=${String(replace)}`,
@@ -166,10 +182,10 @@ export const api = {
       },
     ),
   exportProject: (id: string, format: 'json' | 'yaml') =>
-    requestText(`${API_PREFIX}/projects/${id}/export?format=${format}`),
+    requestText(`${API_PREFIX}/projects/${pathId(id)}/export?format=${format}`),
   validateProject: (id: string) =>
     request<ValidationReport>(
-      `${API_PREFIX}/projects/${id}/validate`,
+      `${API_PREFIX}/projects/${pathId(id)}/validate`,
       decodeValidationReport,
       { method: 'POST' },
     ),
@@ -179,24 +195,24 @@ export const api = {
       body: JSON.stringify({ project_id: projectId }),
     }),
   job: (id: string) => request<JobResponse>(
-    `${API_PREFIX}/jobs/${id}`,
+    `${API_PREFIX}/jobs/${pathId(id)}`,
     decodeJobResponse,
   ),
   checkpointJob: (id: string) =>
     request<JobResponse>(
-      `${API_PREFIX}/jobs/${id}/checkpoint`,
+      `${API_PREFIX}/jobs/${pathId(id)}/checkpoint`,
       decodeJobResponse,
       { method: 'POST' },
     ),
   shutdownJob: (id: string) =>
     request<JobResponse>(
-      `${API_PREFIX}/jobs/${id}/shutdown`,
+      `${API_PREFIX}/jobs/${pathId(id)}/shutdown`,
       decodeJobResponse,
       { method: 'POST' },
     ),
   cancelJob: (id: string) =>
     request<JobResponse>(
-      `${API_PREFIX}/jobs/${id}/cancel`,
+      `${API_PREFIX}/jobs/${pathId(id)}/cancel`,
       decodeJobResponse,
       { method: 'POST' },
     ),

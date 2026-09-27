@@ -43,6 +43,62 @@ def _source() -> cf.TableExpr:
     return cf.table_input("events", schema=pa.schema([("value", pa.int64())]))
 
 
+def test_stream_compiles_off_the_event_loop(monkeypatch) -> None:
+    seen: list[int] = []
+
+    def record(_request) -> None:
+        seen.append(threading.get_ident())
+        raise RuntimeError("compile placement probe")
+
+    monkeypatch.setattr(stream_module, "_compile_stream", record)
+
+    async def run() -> None:
+        event_loop_thread = threading.get_ident()
+        with pytest.raises(RuntimeError, match="compile placement probe"):
+            async with _source().stream(_Feed([])):
+                pass
+        assert len(seen) == 1
+        assert seen[0] != event_loop_thread
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("fail_compile", [False, True])
+def test_stream_close_waits_for_compile_worker(monkeypatch, fail_compile) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def blocked(_request):
+        started.set()
+        try:
+            assert release.wait(5)
+            if fail_compile:
+                raise ValueError("compile failed after close")
+            return None, {}, {}
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(stream_module, "_compile_stream", blocked)
+
+    async def run() -> None:
+        results = _source().stream(_Feed([]))
+        entry = asyncio.create_task(results.__aenter__())
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            close = asyncio.create_task(results.aclose())
+            await asyncio.sleep(0)
+            assert not close.done()
+        finally:
+            release.set()
+        await asyncio.wait_for(close, 5)
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(entry, 5)
+        assert finished.is_set()
+
+    asyncio.run(run())
+
+
 def test_stream_enters_lazily_and_releases_source_at_eof() -> None:
     source = _source()
     feed = _Feed([pa.table({"value": [1, 2]}), pa.table({"value": [3]})])

@@ -28,6 +28,7 @@ from calc_flow.compute import (
     _as_input_mapping,
     _check_input_names,
     _input_batch,
+    _run_blocking_compile,
 )
 from calc_flow.pipeline import Runtime, StreamExecutionPlan, _canonical
 from calc_flow.runtime import (
@@ -193,7 +194,9 @@ class StreamResults(Generic[T]):
         )
         config = _runner_config(self._request.config)
         config._native()
-        plan, names, outputs = _compile_stream(self._request)
+        plan, names, outputs = await _run_blocking_compile(
+            _compile_stream, self._request
+        )
         sources, static = self._bindings(expected, names, config.edge_budget, policies)
         sinks = {
             outputs[name][0]: [

@@ -36,12 +36,15 @@ use crate::{
 };
 
 use super::checkpoint::{checkpoint_mismatch, compile_error, internal_error, state_format};
-use super::{LateMetricDelta, OperatorMetadata, accumulate_late_metrics, validate_operator_name};
+use super::{
+    LateMetricDelta, OperatorMetadata, StateBudget, accumulate_late_metrics, validate_operator_name,
+};
 
 /// Maximum number of concrete hopping-window assignments for one input row.
 pub const MAX_WINDOW_OVERLAP: u64 = 1_024;
 
 pub(crate) const WINDOW_STATE_LAYOUT_VERSION: u32 = 1;
+const WINDOW_SEGMENT_LAYOUT_VERSION: u32 = 2;
 const MAX_GROUP_KEY_BYTES: usize = 65_536;
 const MAX_WINDOW_DELTA_SEGMENTS: usize = 32;
 
@@ -262,6 +265,7 @@ pub struct WindowAggregateOperator {
     output_ports: [Port; 1],
     compiled: CompiledWindowSpec,
     state: WindowState,
+    state_budget: StateBudget,
 }
 
 #[derive(Clone)]
@@ -301,6 +305,7 @@ struct CompiledWindowGeometry {
 #[derive(Default)]
 struct WindowState {
     accumulators: BTreeMap<WindowKey, AccumulatorRow>,
+    accumulator_bytes: u64,
     dirty: BTreeSet<WindowKey>,
     emitted_pending_snapshot: BTreeSet<WindowKey>,
     last_input_watermark: Option<EventTime>,
@@ -347,12 +352,46 @@ enum AccumulatorValue {
     Count(u64),
     SignedSum(Option<i128>),
     UnsignedSum(Option<u128>),
-    FloatSum(Option<f64>),
+    FloatSum(Option<CompensatedSum>),
     Min(Option<ScalarValue>),
     Max(Option<ScalarValue>),
     SignedAverage { sum: i128, count: u64 },
     UnsignedAverage { sum: u128, count: u64 },
-    FloatAverage { sum: f64, count: u64 },
+    FloatAverage { sum: CompensatedSum, count: u64 },
+}
+
+#[derive(Clone, Copy)]
+struct CompensatedSum {
+    sum: f64,
+    correction: f64,
+}
+
+impl CompensatedSum {
+    const fn new(sum: f64) -> Self {
+        Self {
+            sum,
+            correction: 0.0,
+        }
+    }
+
+    fn add(&mut self, value: f64) {
+        let next = canonicalize_float(self.sum + value);
+        if self.sum.is_finite() && value.is_finite() && next.is_finite() {
+            let correction = if self.sum.abs() >= value.abs() {
+                (self.sum - next) + value
+            } else {
+                (value - next) + self.sum
+            };
+            self.correction = canonicalize_float(self.correction + correction);
+        } else {
+            self.correction = 0.0;
+        }
+        self.sum = next;
+    }
+
+    fn total(self) -> f64 {
+        canonicalize_float(self.sum + self.correction)
+    }
 }
 
 #[derive(Clone)]
@@ -393,7 +432,75 @@ struct WindowSnapshotMetadata {
 
 struct InputBatchUpdate {
     accumulators: BTreeMap<WindowKey, AccumulatorRow>,
+    usage: WindowStateUsage,
     metrics: LateMetricDelta,
+}
+
+#[derive(Clone, Copy)]
+struct WindowStateUsage {
+    rows: u64,
+    bytes: u64,
+}
+
+// Stable logical prices for retained map entries and scalar slots; variable
+// key and string lengths are charged separately from these fixed costs.
+const WINDOW_ENTRY_BASE_BYTES: u64 = 128;
+const WINDOW_GROUP_VALUE_BYTES: u64 = 64;
+const WINDOW_AGGREGATE_BYTES: u64 = 64;
+
+fn logical_length(length: usize) -> u64 {
+    u64::try_from(length).unwrap_or(u64::MAX)
+}
+
+fn scalar_dynamic_bytes(value: &ScalarValue) -> u64 {
+    match value {
+        ScalarValue::String(value) => logical_length(value.len()),
+        _ => 0,
+    }
+}
+
+fn aggregate_dynamic_bytes(entry: &AccumulatorRow) -> u64 {
+    entry
+        .aggregates
+        .iter()
+        .filter_map(|aggregate| match aggregate {
+            AccumulatorValue::Min(value) | AccumulatorValue::Max(value) => value.as_ref(),
+            _ => None,
+        })
+        .map(scalar_dynamic_bytes)
+        .fold(0_u64, u64::saturating_add)
+}
+
+fn window_entry_bytes(key_bytes: u64, entry: &AccumulatorRow) -> u64 {
+    let group_bytes = logical_length(entry.group_values.len())
+        .saturating_mul(WINDOW_GROUP_VALUE_BYTES)
+        .saturating_add(
+            entry
+                .group_values
+                .iter()
+                .flatten()
+                .map(scalar_dynamic_bytes)
+                .fold(0_u64, u64::saturating_add),
+        );
+    let aggregate_bytes = logical_length(entry.aggregates.len())
+        .saturating_mul(WINDOW_AGGREGATE_BYTES)
+        .saturating_add(aggregate_dynamic_bytes(entry));
+    WINDOW_ENTRY_BASE_BYTES
+        .saturating_add(key_bytes)
+        .saturating_add(group_bytes)
+        .saturating_add(aggregate_bytes)
+}
+
+fn window_state_usage(accumulators: &BTreeMap<WindowKey, AccumulatorRow>) -> WindowStateUsage {
+    WindowStateUsage {
+        rows: logical_length(accumulators.len()),
+        bytes: accumulators
+            .iter()
+            .map(|(key, entry)| {
+                window_entry_bytes(logical_length(key.stable_group_key.len()), entry)
+            })
+            .fold(0_u64, u64::saturating_add),
+    }
 }
 
 #[derive(Default)]
@@ -458,7 +565,41 @@ impl WindowAggregateOperator {
             )?],
             compiled,
             state: WindowState::default(),
+            state_budget: StateBudget::default(),
         })
+    }
+
+    /// Sets the logical row and byte limit for retained window accumulators.
+    ///
+    /// The default is one million windows and 256 MiB of logical charge.
+    /// Existing state must fit the replacement budget. Checkpoint segment
+    /// copies and process RSS are outside this limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalcFlowError::InvalidArgument`] if existing state exceeds
+    /// the requested budget.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use calc_flow::{StateBudget, WindowAggregateOperator};
+    /// fn configure(operator: &mut WindowAggregateOperator) -> calc_flow::Result<()> {
+    ///     operator.set_state_budget(StateBudget::new(10_000, 64 << 20)?)
+    /// }
+    /// ```
+    pub fn set_state_budget(&mut self, budget: StateBudget) -> Result<()> {
+        if !budget.allows(
+            u64::try_from(self.state.accumulators.len()).unwrap_or(u64::MAX),
+            self.state.accumulator_bytes,
+        ) {
+            return Err(invalid_argument(
+                "window.state_budget",
+                "existing accumulator state exceeds the requested budget",
+            ));
+        }
+        self.state_budget = budget;
+        Ok(())
     }
 
     fn prepare_input_batch(
@@ -475,13 +616,18 @@ impl WindowAggregateOperator {
         let table = batch.table_payload()?;
         let mut scratch = BTreeMap::<WindowKey, AccumulatorRow>::new();
         let mut metrics = PreparedInputMetrics::default();
+        let mut usage = WindowStateUsage {
+            rows: logical_length(self.state.accumulators.len()),
+            bytes: self.state.accumulator_bytes,
+        };
 
         for record in table.batches() {
-            self.prepare_record(record, context, &mut scratch, &mut metrics)?;
+            self.prepare_record(record, context, &mut scratch, &mut metrics, &mut usage)?;
         }
 
         Ok(InputBatchUpdate {
             accumulators: scratch,
+            usage,
             metrics: metrics.into_delta(),
         })
     }
@@ -492,9 +638,10 @@ impl WindowAggregateOperator {
         context: &StreamOperatorContext<'_>,
         scratch: &mut BTreeMap<WindowKey, AccumulatorRow>,
         metrics: &mut PreparedInputMetrics,
+        usage: &mut WindowStateUsage,
     ) -> Result<()> {
         for row_index in 0..record.num_rows() {
-            self.prepare_row(record, row_index, context, scratch, metrics)?;
+            self.prepare_row(record, row_index, context, scratch, metrics, usage)?;
         }
         Ok(())
     }
@@ -506,6 +653,7 @@ impl WindowAggregateOperator {
         context: &StreamOperatorContext<'_>,
         scratch: &mut BTreeMap<WindowKey, AccumulatorRow>,
         metrics: &mut PreparedInputMetrics,
+        usage: &mut WindowStateUsage,
     ) -> Result<()> {
         let Some(event_time) = self.row_event_time(record, row_index, context.operator_id())?
         else {
@@ -523,7 +671,14 @@ impl WindowAggregateOperator {
         if open_assignments.is_empty() {
             return Ok(());
         }
-        self.prepare_open_row(record, row_index, &open_assignments, context, scratch)
+        self.prepare_open_row(
+            record,
+            row_index,
+            &open_assignments,
+            context,
+            scratch,
+            usage,
+        )
     }
 
     fn prepare_open_row(
@@ -533,6 +688,7 @@ impl WindowAggregateOperator {
         open_assignments: &[(EventTime, EventTime)],
         context: &StreamOperatorContext<'_>,
         scratch: &mut BTreeMap<WindowKey, AccumulatorRow>,
+        usage: &mut WindowStateUsage,
     ) -> Result<()> {
         let (stable_group_key, group_values) = encode_group_key(
             record,
@@ -550,6 +706,7 @@ impl WindowAggregateOperator {
                 &stable_group_key,
                 &group_values,
                 scratch,
+                usage,
                 context.operator_id(),
             )?;
         }
@@ -587,6 +744,7 @@ impl WindowAggregateOperator {
         stable_group_key: &[u8],
         group_values: &[Option<ScalarValue>],
         scratch: &mut BTreeMap<WindowKey, AccumulatorRow>,
+        usage: &mut WindowStateUsage,
         operator_id: &str,
     ) -> Result<()> {
         let key = WindowKey {
@@ -594,14 +752,16 @@ impl WindowAggregateOperator {
             end,
             stable_group_key: stable_group_key.to_vec(),
         };
+        let key_bytes = logical_length(key.stable_group_key.len());
+        let scratch_previous = scratch.get(&key);
+        let existing = if scratch_previous.is_some() {
+            None
+        } else {
+            self.state.accumulators.get(&key)
+        };
+        let previous_dynamic_bytes = scratch_previous.or(existing).map(aggregate_dynamic_bytes);
         let accumulator = scratch.entry(key).or_insert_with(|| {
-            self.state
-                .accumulators
-                .get(&WindowKey {
-                    start,
-                    end,
-                    stable_group_key: stable_group_key.to_vec(),
-                })
+            existing
                 .cloned()
                 .unwrap_or_else(|| new_accumulator_row(&self.spec, &self.compiled, group_values))
         });
@@ -612,7 +772,29 @@ impl WindowAggregateOperator {
             &self.spec,
             &self.compiled,
             operator_id,
-        )
+        )?;
+        let next_rows = usage
+            .rows
+            .saturating_add(u64::from(previous_dynamic_bytes.is_none()));
+        let next_bytes = if let Some(previous_dynamic_bytes) = previous_dynamic_bytes {
+            usage
+                .bytes
+                .checked_sub(previous_dynamic_bytes)
+                .ok_or_else(|| internal_error("window accumulator charge underflowed"))?
+                .saturating_add(aggregate_dynamic_bytes(accumulator))
+        } else {
+            usage
+                .bytes
+                .saturating_add(window_entry_bytes(key_bytes, accumulator))
+        };
+        if !self.state_budget.allows(next_rows, next_bytes) {
+            return Err(operator_error(operator_id, "window state budget exceeded"));
+        }
+        *usage = WindowStateUsage {
+            rows: next_rows,
+            bytes: next_bytes,
+        };
+        Ok(())
     }
 
     fn observe_context(&self, context: &StreamOperatorContext<'_>) -> Result<()> {
@@ -939,7 +1121,7 @@ impl StreamOperator for WindowAggregateOperator {
         let retained_inventory = self.next_snapshot_inventory(prepared.descriptors)?;
         let retained_segments = self.next_snapshot_segments(&retained_inventory, prepared.bytes)?;
         let metadata = WindowSnapshotMetadata {
-            state_layout_version: WINDOW_STATE_LAYOUT_VERSION,
+            state_layout_version: WINDOW_SEGMENT_LAYOUT_VERSION,
             configuration_hash: self.compiled.configuration_hash.clone(),
             state_schema_fingerprint: self.compiled.state_schema_fingerprint.clone(),
             epoch,
@@ -960,7 +1142,15 @@ impl StreamOperator for WindowAggregateOperator {
         };
         self.state.prepared_segments.clear();
         for key in std::mem::take(&mut self.state.emitted_pending_snapshot) {
-            self.state.accumulators.remove(&key);
+            if let Some(entry) = self.state.accumulators.remove(&key) {
+                self.state.accumulator_bytes =
+                    self.state
+                        .accumulator_bytes
+                        .saturating_sub(window_entry_bytes(
+                            logical_length(key.stable_group_key.len()),
+                            &entry,
+                        ));
+            }
             self.state.dirty.remove(&key);
         }
         self.state.dirty.clear();
@@ -979,10 +1169,10 @@ impl StreamOperator for WindowAggregateOperator {
             return self.reset();
         }
         let metadata = parse_snapshot_metadata(snapshot)?;
-        let inventory = validate_snapshot_metadata(&metadata, &self.compiled, snapshot)?;
+        let inventory =
+            validate_snapshot_metadata(&metadata, &self.spec, &self.compiled, snapshot)?;
         let decoded = self.decode_snapshot_segments(snapshot, &metadata)?;
-        self.install_restored_state(metadata, inventory, snapshot.segments.clone(), decoded);
-        Ok(())
+        self.install_restored_state(metadata, inventory, snapshot.segments.clone(), decoded)
     }
 
     fn reset(&mut self) -> Result<()> {
@@ -1037,7 +1227,7 @@ impl WindowAggregateOperator {
             .map_err(|_| internal_error("window segment length does not fit u64"))?;
         Ok(SegmentDescriptor {
             kind,
-            state_layout_version: WINDOW_STATE_LAYOUT_VERSION,
+            state_layout_version: WINDOW_SEGMENT_LAYOUT_VERSION,
             schema_fingerprint: self.compiled.state_schema_fingerprint.clone(),
             handle: StateHandle::new(
                 operator_id,
@@ -1063,6 +1253,18 @@ impl WindowAggregateOperator {
             return Ok(StateInventory::default());
         };
         if base.kind != SegmentKind::Base {
+            return StateInventory::new(new_descriptors);
+        }
+        if self
+            .state
+            .retained_inventory
+            .segments()
+            .first()
+            .is_some_and(|retained| {
+                retained.state_layout_version != base.state_layout_version
+                    || retained.schema_fingerprint != base.schema_fingerprint
+            })
+        {
             return StateInventory::new(new_descriptors);
         }
         let replacement = self
@@ -1130,6 +1332,7 @@ impl WindowAggregateOperator {
     ) {
         self.install_context_identity(context);
         self.state.metrics = next_metrics;
+        self.state.accumulator_bytes = update.usage.bytes;
         for (key, accumulator) in update.accumulators {
             self.state.dirty.insert(key.clone());
             self.state.accumulators.insert(key, accumulator);
@@ -1171,20 +1374,58 @@ impl WindowAggregateOperator {
         inventory: StateInventory,
         retained_segments: BTreeMap<String, crate::StateSegment>,
         decoded: BTreeMap<WindowKey, AccumulatorRow>,
-    ) {
+    ) -> Result<()> {
+        let usage = window_state_usage(&decoded);
+        if !self.state_budget.allows(usage.rows, usage.bytes) {
+            return Err(checkpoint_mismatch("window state budget exceeded"));
+        }
+        let migrate_legacy = metadata.state_layout_version == WINDOW_STATE_LAYOUT_VERSION;
+        let prepared_segments = if migrate_legacy && !decoded.is_empty() {
+            let pipeline_fingerprint =
+                metadata.pipeline_fingerprint.as_deref().ok_or_else(|| {
+                    checkpoint_mismatch("window legacy state is missing its pipeline fingerprint")
+                })?;
+            let operator_id = metadata.operator_id.as_deref().ok_or_else(|| {
+                checkpoint_mismatch("window legacy state is missing its operator ID")
+            })?;
+            let operations = decoded
+                .iter()
+                .map(|(key, entry)| StateOperationRow {
+                    key: key.clone(),
+                    entry: entry.clone(),
+                    tombstone: false,
+                })
+                .collect::<Vec<_>>();
+            vec![PreparedStateSegment {
+                kind: SegmentKind::Base,
+                bytes: encode_state_segment(
+                    &operations,
+                    &self.spec,
+                    &self.compiled,
+                    pipeline_fingerprint,
+                    operator_id,
+                )?,
+            }]
+        } else {
+            Vec::new()
+        };
         self.state = WindowState {
             accumulators: decoded,
+            accumulator_bytes: usage.bytes,
             last_input_watermark: metadata.last_input_watermark,
             next_output_sequence: metadata.next_output_sequence,
             ended: metadata.ended,
             metrics: metadata.metrics,
             retained_inventory: inventory,
             retained_segments,
+            prepared_segments,
+            replace_retained_on_checkpoint: migrate_legacy,
             last_checkpoint_epoch: Some(metadata.epoch),
             pipeline_fingerprint: metadata.pipeline_fingerprint,
             operator_id: metadata.operator_id,
             ..WindowState::default()
         };
+        Ok(())
     }
 }
 
@@ -1200,7 +1441,7 @@ fn parse_snapshot_metadata(
 fn snapshot_segments(
     snapshot: &crate::OperatorStateSnapshot,
     inventory: &[SegmentDescriptor],
-) -> Result<Vec<Arc<Vec<u8>>>> {
+) -> Result<Vec<(u32, Arc<Vec<u8>>)>> {
     inventory
         .iter()
         .map(|descriptor| {
@@ -1209,7 +1450,7 @@ fn snapshot_segments(
                 checkpoint_mismatch(format!("window snapshot is missing segment {segment_id:?}"))
             })?;
             validate_snapshot_segment_bytes(descriptor, segment.bytes())?;
-            Ok(segment.bytes_arc())
+            Ok((descriptor.state_layout_version, segment.bytes_arc()))
         })
         .collect()
 }
@@ -1623,9 +1864,10 @@ fn new_accumulator_row(
                 DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
                     AccumulatorValue::UnsignedAverage { sum: 0, count: 0 }
                 }
-                DataType::Float32 | DataType::Float64 => {
-                    AccumulatorValue::FloatAverage { sum: 0.0, count: 0 }
-                }
+                DataType::Float32 | DataType::Float64 => AccumulatorValue::FloatAverage {
+                    sum: CompensatedSum::new(0.0),
+                    count: 0,
+                },
                 _ => unreachable!("aggregate matrix validated at construction"),
             },
         })
@@ -1710,7 +1952,8 @@ fn update_sum(
         AccumulatorValue::SignedSum(sum) => update_signed_sum(sum, value),
         AccumulatorValue::UnsignedSum(sum) => update_unsigned_sum(sum, value),
         AccumulatorValue::FloatSum(sum) => {
-            *sum = Some(canonical_float_add(sum.unwrap_or(0.0), float_value(value)?));
+            sum.get_or_insert(CompensatedSum::new(0.0))
+                .add(float_value(value)?);
             Ok(())
         }
         _ => Err("compiled aggregate accumulator type mismatch".into()),
@@ -1770,7 +2013,7 @@ fn update_average(
             update_unsigned_average(sum, count, value)
         }
         AccumulatorValue::FloatAverage { sum, count } => {
-            *sum = canonical_float_add(*sum, float_value(value)?);
+            sum.add(float_value(value)?);
             increment_average_count(count)
         }
         _ => Err("compiled aggregate accumulator type mismatch".into()),
@@ -1879,7 +2122,7 @@ fn finalize_accumulator(accumulator: &AccumulatorValue) -> Result<Option<ScalarV
             })
             .transpose(),
         AccumulatorValue::FloatSum(value) => {
-            Ok(value.map(|value| ScalarValue::Float64(value.to_bits())))
+            Ok(value.map(|value| ScalarValue::Float64(value.total().to_bits())))
         }
         AccumulatorValue::Min(value) | AccumulatorValue::Max(value) => Ok(value.clone()),
         AccumulatorValue::SignedAverage { sum, count } => {
@@ -1889,9 +2132,8 @@ fn finalize_accumulator(accumulator: &AccumulatorValue) -> Result<Option<ScalarV
             Ok((*count != 0)
                 .then(|| ScalarValue::Float64(unsigned_average(*sum, *count).to_bits())))
         }
-        AccumulatorValue::FloatAverage { sum, count } => {
-            Ok((*count != 0).then(|| ScalarValue::Float64(float_average(*sum, *count).to_bits())))
-        }
+        AccumulatorValue::FloatAverage { sum, count } => Ok((*count != 0)
+            .then(|| ScalarValue::Float64(float_average(sum.total(), *count).to_bits()))),
     }
 }
 
@@ -1917,10 +2159,6 @@ fn unsigned_average(sum: u128, count: u64) -> f64 {
 )]
 fn float_average(sum: f64, count: u64) -> f64 {
     canonicalize_float(sum / count as f64)
-}
-
-fn canonical_float_add(left: f64, right: f64) -> f64 {
-    canonicalize_float(left + right)
 }
 
 fn canonicalize_float(value: f64) -> f64 {
@@ -2372,7 +2610,15 @@ fn compile_geometry(geometry: WindowGeometry) -> CompiledWindowGeometry {
 }
 
 fn state_schema_fingerprint(spec: &WindowSpec, compiled: &CompiledWindowSpec) -> String {
-    let schema = Schema::new(state_fields(spec, compiled));
+    state_schema_fingerprint_for_version(spec, compiled, WINDOW_SEGMENT_LAYOUT_VERSION)
+}
+
+fn state_schema_fingerprint_for_version(
+    spec: &WindowSpec,
+    compiled: &CompiledWindowSpec,
+    version: u32,
+) -> String {
+    let schema = Schema::new(state_fields_for_version(spec, compiled, version));
     let mut dictionary_tracker = DictionaryTracker::new(true);
     let encoded = IpcSchemaEncoder::new()
         .with_dictionary_tracker(&mut dictionary_tracker)
@@ -2386,13 +2632,31 @@ fn state_schema(
     pipeline_fingerprint: &str,
     operator_id: &str,
 ) -> Schema {
+    state_schema_for_version(
+        spec,
+        compiled,
+        pipeline_fingerprint,
+        operator_id,
+        WINDOW_SEGMENT_LAYOUT_VERSION,
+    )
+}
+
+fn state_schema_for_version(
+    spec: &WindowSpec,
+    compiled: &CompiledWindowSpec,
+    pipeline_fingerprint: &str,
+    operator_id: &str,
+    version: u32,
+) -> Schema {
+    let schema_fingerprint = if version == WINDOW_SEGMENT_LAYOUT_VERSION {
+        compiled.state_schema_fingerprint.clone()
+    } else {
+        state_schema_fingerprint_for_version(spec, compiled, version)
+    };
     Schema::new_with_metadata(
-        state_fields(spec, compiled),
+        state_fields_for_version(spec, compiled, version),
         HashMap::from([
-            (
-                "calc_flow.state_layout_version".into(),
-                WINDOW_STATE_LAYOUT_VERSION.to_string(),
-            ),
+            ("calc_flow.state_layout_version".into(), version.to_string()),
             (
                 "calc_flow.pipeline_fingerprint".into(),
                 pipeline_fingerprint.into(),
@@ -2404,14 +2668,18 @@ fn state_schema(
             ),
             (
                 "calc_flow.state_schema_fingerprint".into(),
-                compiled.state_schema_fingerprint.clone(),
+                schema_fingerprint,
             ),
             ("calc_flow.group_key_encoding".into(), "g1".into()),
         ]),
     )
 }
 
-fn state_fields(spec: &WindowSpec, compiled: &CompiledWindowSpec) -> Vec<Field> {
+fn state_fields_for_version(
+    spec: &WindowSpec,
+    compiled: &CompiledWindowSpec,
+    version: u32,
+) -> Vec<Field> {
     let utc_timestamp = DataType::Timestamp(TimeUnit::Microsecond, Some(Arc::from("UTC")));
     let mut fields = vec![
         Field::new("_operation", DataType::UInt8, false),
@@ -2439,6 +2707,15 @@ fn state_fields(spec: &WindowSpec, compiled: &CompiledWindowSpec) -> Vec<Field> 
                     compiled_aggregate.output_type.clone(),
                     true,
                 ));
+                if version >= WINDOW_SEGMENT_LAYOUT_VERSION
+                    && compiled_aggregate.output_type == DataType::Float64
+                {
+                    fields.push(Field::new(
+                        format!("_agg_{ordinal:04}_correction"),
+                        DataType::Float64,
+                        true,
+                    ));
+                }
             }
             AggregateFunction::Min | AggregateFunction::Max => {
                 fields.push(Field::new(
@@ -2466,6 +2743,18 @@ fn state_fields(spec: &WindowSpec, compiled: &CompiledWindowSpec) -> Vec<Field> 
                     DataType::UInt64,
                     true,
                 ));
+                if version >= WINDOW_SEGMENT_LAYOUT_VERSION
+                    && matches!(
+                        compiled_aggregate.input_type,
+                        DataType::Float32 | DataType::Float64
+                    )
+                {
+                    fields.push(Field::new(
+                        format!("_agg_{ordinal:04}_correction"),
+                        DataType::Float64,
+                        true,
+                    ));
+                }
             }
         }
     }
@@ -2620,6 +2909,13 @@ fn append_accumulator_state_array(
                 })
                 .collect::<Result<Vec<_>>>()?;
             arrays.push(scalar_array(state_type, &values, operator_id)?);
+            if function == AggregateFunction::Sum && compiled.output_type == DataType::Float64 {
+                arrays.push(float_correction_state_array(
+                    operations,
+                    ordinal,
+                    operator_id,
+                )?);
+            }
         }
         AggregateFunction::Avg => append_average_state_arrays(
             arrays,
@@ -2660,6 +2956,13 @@ fn append_average_state_arrays(
         _ => unreachable!("average input matrix validated at construction"),
     }
     arrays.push(average_count_array(operations, ordinal)?);
+    if matches!(input_type, DataType::Float32 | DataType::Float64) {
+        arrays.push(float_correction_state_array(
+            operations,
+            ordinal,
+            operator_id,
+        )?);
+    }
     Ok(())
 }
 
@@ -2726,11 +3029,35 @@ fn float_average_state_array(
             |row| match (&row.entry.aggregates[ordinal], row.tombstone) {
                 (_, true) => Ok(None),
                 (AccumulatorValue::FloatAverage { sum, .. }, false) => {
-                    Ok(Some(ScalarValue::Float64(sum.to_bits())))
+                    Ok(Some(ScalarValue::Float64(sum.sum.to_bits())))
                 }
                 _ => Err(internal_error("float average state type mismatch")),
             },
         )
+        .collect::<Result<Vec<_>>>()?;
+    scalar_array(&DataType::Float64, &values, operator_id)
+}
+
+fn float_correction_state_array(
+    operations: &[StateOperationRow],
+    ordinal: usize,
+    operator_id: &str,
+) -> Result<ArrayRef> {
+    let values = operations
+        .iter()
+        .map(|row| {
+            if row.tombstone {
+                return Ok(None);
+            }
+            match &row.entry.aggregates[ordinal] {
+                AccumulatorValue::FloatSum(Some(sum))
+                | AccumulatorValue::FloatAverage { sum, .. } => {
+                    Ok(Some(ScalarValue::Float64(sum.correction.to_bits())))
+                }
+                AccumulatorValue::FloatSum(None) => Ok(None),
+                _ => Err(internal_error("float correction state type mismatch")),
+            }
+        })
         .collect::<Result<Vec<_>>>()?;
     scalar_array(&DataType::Float64, &values, operator_id)
 }
@@ -2753,7 +3080,7 @@ fn accumulator_state_scalar(accumulator: &AccumulatorValue) -> Result<Option<Sca
             })
             .transpose(),
         AccumulatorValue::FloatSum(value) => {
-            Ok(value.map(|value| ScalarValue::Float64(value.to_bits())))
+            Ok(value.map(|value| ScalarValue::Float64(value.sum.to_bits())))
         }
         AccumulatorValue::Min(value) | AccumulatorValue::Max(value) => Ok(value.clone()),
         AccumulatorValue::SignedAverage { .. }
@@ -2784,13 +3111,14 @@ fn average_count_array(operations: &[StateOperationRow], ordinal: usize) -> Resu
 
 fn validate_snapshot_metadata(
     metadata: &WindowSnapshotMetadata,
+    spec: &WindowSpec,
     compiled: &CompiledWindowSpec,
     snapshot: &crate::OperatorStateSnapshot,
 ) -> Result<StateInventory> {
-    validate_snapshot_header(metadata, compiled)?;
+    validate_snapshot_header(metadata, spec, compiled)?;
     let inventory = StateInventory::new(metadata.segment_inventory.clone())
         .map_err(|error| checkpoint_mismatch(error.to_string()))?;
-    validate_snapshot_inventory(metadata, compiled, &inventory)?;
+    validate_snapshot_inventory(metadata, spec, compiled, &inventory)?;
     validate_snapshot_segment_set(snapshot, &inventory)?;
     validate_snapshot_identity(metadata, snapshot)?;
     Ok(inventory)
@@ -2798,12 +3126,15 @@ fn validate_snapshot_metadata(
 
 fn validate_snapshot_header(
     metadata: &WindowSnapshotMetadata,
+    spec: &WindowSpec,
     compiled: &CompiledWindowSpec,
 ) -> Result<()> {
-    if metadata.state_layout_version != WINDOW_STATE_LAYOUT_VERSION {
+    if !(WINDOW_STATE_LAYOUT_VERSION..=WINDOW_SEGMENT_LAYOUT_VERSION)
+        .contains(&metadata.state_layout_version)
+    {
         return Err(checkpoint_mismatch(format!(
-            "window state layout version {} does not match expected {}",
-            metadata.state_layout_version, WINDOW_STATE_LAYOUT_VERSION
+            "window state layout version {} is unsupported",
+            metadata.state_layout_version
         )));
     }
     if metadata.configuration_hash != compiled.configuration_hash {
@@ -2811,7 +3142,9 @@ fn validate_snapshot_header(
             "window operator configuration hash does not match the compiled operator",
         ));
     }
-    if metadata.state_schema_fingerprint != compiled.state_schema_fingerprint {
+    let expected_fingerprint =
+        state_schema_fingerprint_for_version(spec, compiled, metadata.state_layout_version);
+    if metadata.state_schema_fingerprint != expected_fingerprint {
         return Err(checkpoint_mismatch(
             "window state schema fingerprint does not match the compiled operator",
         ));
@@ -2877,12 +3210,15 @@ fn validate_snapshot_operator_id(operator_id: Option<&str>) -> Result<()> {
 
 fn validate_snapshot_inventory(
     metadata: &WindowSnapshotMetadata,
+    spec: &WindowSpec,
     compiled: &CompiledWindowSpec,
     inventory: &StateInventory,
 ) -> Result<()> {
     for descriptor in inventory.segments() {
-        if descriptor.state_layout_version != WINDOW_STATE_LAYOUT_VERSION
-            || descriptor.schema_fingerprint != compiled.state_schema_fingerprint
+        let version = descriptor.state_layout_version;
+        if version != metadata.state_layout_version
+            || descriptor.schema_fingerprint
+                != state_schema_fingerprint_for_version(spec, compiled, version)
         {
             return Err(checkpoint_mismatch(
                 "window segment inventory layout or schema does not match the compiled operator",
@@ -2903,7 +3239,7 @@ fn validate_snapshot_inventory(
 }
 
 fn decode_state_segments(
-    segments: &[Arc<Vec<u8>>],
+    segments: &[(u32, Arc<Vec<u8>>)],
     spec: &WindowSpec,
     compiled: &CompiledWindowSpec,
     pipeline_fingerprint: Option<&str>,
@@ -2916,22 +3252,34 @@ fn decode_state_segments(
         .ok_or_else(|| checkpoint_mismatch("window state is missing its pipeline fingerprint"))?;
     let operator_id = operator_id
         .ok_or_else(|| checkpoint_mismatch("window state is missing its operator ID"))?;
-    let expected_schema = state_schema(spec, compiled, pipeline_fingerprint, operator_id);
     let decoded = segments
         .iter()
-        .map(|bytes| {
-            decode_state_segment(bytes, spec, compiled, &expected_schema, operator_id).map(
-                |operations| {
-                    operations
-                        .into_iter()
-                        .map(|(key, entry)| {
-                            let operation =
-                                entry.map_or(StateOperation::Tombstone, StateOperation::Upsert);
-                            (key, operation)
-                        })
-                        .collect::<Vec<_>>()
-                },
+        .map(|(version, bytes)| {
+            let expected_schema = state_schema_for_version(
+                spec,
+                compiled,
+                pipeline_fingerprint,
+                operator_id,
+                *version,
+            );
+            decode_state_segment(
+                bytes,
+                spec,
+                compiled,
+                &expected_schema,
+                operator_id,
+                *version,
             )
+            .map(|operations| {
+                operations
+                    .into_iter()
+                    .map(|(key, entry)| {
+                        let operation =
+                            entry.map_or(StateOperation::Tombstone, StateOperation::Upsert);
+                        (key, operation)
+                    })
+                    .collect::<Vec<_>>()
+            })
         })
         .collect::<Result<Vec<_>>>()?;
     fold_state_segments(decoded)
@@ -2947,6 +3295,7 @@ fn decode_state_segment(
     compiled: &CompiledWindowSpec,
     expected_schema: &Schema,
     operator_id: &str,
+    version: u32,
 ) -> Result<Vec<(WindowKey, Option<AccumulatorRow>)>> {
     if !bytes.starts_with(b"ARROW1") || !bytes.ends_with(b"ARROW1") {
         return Err(state_format(
@@ -3051,6 +3400,7 @@ fn decode_state_segment(
                 compiled_aggregate,
                 operator_id,
                 ordinal,
+                version,
             )?;
             column_index = next_column;
             if let Some(accumulator) = accumulator {
@@ -3081,20 +3431,21 @@ fn decode_accumulator_state(
     compiled: &CompiledAggregate,
     operator_id: &str,
     ordinal: usize,
+    version: u32,
 ) -> Result<(Option<AccumulatorValue>, usize)> {
     let value = record.column(column_index);
+    let compensated = version >= WINDOW_SEGMENT_LAYOUT_VERSION
+        && ((function == AggregateFunction::Sum && compiled.output_type == DataType::Float64)
+            || (function == AggregateFunction::Avg
+                && matches!(compiled.input_type, DataType::Float32 | DataType::Float64)));
+    let width = 1 + usize::from(function == AggregateFunction::Avg) + usize::from(compensated);
     if tombstone {
-        if !value.is_null(row)
-            || (function == AggregateFunction::Avg && !record.column(column_index + 1).is_null(row))
-        {
+        if (0..width).any(|offset| !record.column(column_index + offset).is_null(row)) {
             return Err(state_format(format!(
                 "window tombstone aggregate {ordinal} contains state"
             )));
         }
-        return Ok((
-            None,
-            column_index + 1 + usize::from(function == AggregateFunction::Avg),
-        ));
+        return Ok((None, column_index + width));
     }
 
     let decoded = match function {
@@ -3124,13 +3475,33 @@ fn decode_accumulator_state(
                     .transpose()
                     .map_err(state_format)?,
             ),
-            DataType::Float64 => AccumulatorValue::FloatSum(
-                scalar_at(value.as_ref(), &DataType::Float64, row, operator_id)
+            DataType::Float64 => {
+                let sum = scalar_at(value.as_ref(), &DataType::Float64, row, operator_id)
                     .map_err(|error| state_format(error.to_string()))?
                     .map(|value| float_value(&value))
                     .transpose()
-                    .map_err(state_format)?,
-            ),
+                    .map_err(state_format)?;
+                let correction = if compensated {
+                    match sum {
+                        Some(_) => float_compensation_at(
+                            record,
+                            row,
+                            column_index + 1,
+                            operator_id,
+                            ordinal,
+                        )?,
+                        None if record.column(column_index + 1).is_null(row) => 0.0,
+                        None => {
+                            return Err(state_format(format!(
+                                "window float sum aggregate {ordinal} has correction without sum"
+                            )));
+                        }
+                    }
+                } else {
+                    0.0
+                };
+                AccumulatorValue::FloatSum(sum.map(|sum| CompensatedSum { sum, correction }))
+            }
             _ => unreachable!("sum output matrix validated at construction"),
         },
         AggregateFunction::Min | AggregateFunction::Max => {
@@ -3150,12 +3521,32 @@ fn decode_accumulator_state(
             &compiled.input_type,
             operator_id,
             ordinal,
+            version,
         )?,
     };
-    Ok((
-        Some(decoded),
-        column_index + 1 + usize::from(function == AggregateFunction::Avg),
-    ))
+    Ok((Some(decoded), column_index + width))
+}
+
+fn float_compensation_at(
+    record: &RecordBatch,
+    row: usize,
+    column_index: usize,
+    operator_id: &str,
+    ordinal: usize,
+) -> Result<f64> {
+    let value = scalar_at(
+        record.column(column_index),
+        &DataType::Float64,
+        row,
+        operator_id,
+    )
+    .map_err(|error| state_format(error.to_string()))?
+    .ok_or_else(|| {
+        state_format(format!(
+            "window float aggregate {ordinal} has null correction"
+        ))
+    })?;
+    float_value(&value).map_err(state_format)
 }
 
 /// Decode one average aggregate's sum column and its adjacent count column.
@@ -3168,6 +3559,7 @@ fn decode_average_state(
     input_type: &DataType,
     operator_id: &str,
     ordinal: usize,
+    version: u32,
 ) -> Result<AccumulatorValue> {
     let count_array = state_array::<UInt64Array>(
         record,
@@ -3205,7 +3597,14 @@ fn decode_average_state(
                 )));
             };
             AccumulatorValue::FloatAverage {
-                sum: f64::from_bits(bits),
+                sum: CompensatedSum {
+                    sum: f64::from_bits(bits),
+                    correction: if version >= WINDOW_SEGMENT_LAYOUT_VERSION {
+                        float_compensation_at(record, row, column_index + 2, operator_id, ordinal)?
+                    } else {
+                        0.0
+                    },
+                },
                 count,
             }
         }
@@ -3514,10 +3913,515 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::BatchMetadata;
+    use crate::{BatchMetadata, StateBudget};
 
     const HIGH_CARDINALITY_ROWS: usize = 400_000;
     const LEGACY_PROJECT_JSON_LIMIT: usize = 10 * 1024 * 1024;
+
+    fn budget_test_batch(times: &[i64]) -> Batch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "event_time",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                false,
+            ),
+            Field::new("amount", DataType::Int64, false),
+        ]));
+        let record = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(TimestampMicrosecondArray::from(times.to_vec())) as ArrayRef,
+                Arc::new(Int64Array::from(vec![1; times.len()])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        Batch::table(vec![record], BatchMetadata::default()).unwrap()
+    }
+
+    fn budget_test_string_batch(value: &str) -> Batch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "event_time",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                false,
+            ),
+            Field::new("value", DataType::Utf8, false),
+        ]));
+        let record = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(TimestampMicrosecondArray::from(vec![0])) as ArrayRef,
+                Arc::new(StringArray::from(vec![value])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        Batch::table(vec![record], BatchMetadata::default()).unwrap()
+    }
+
+    fn budget_test_job() -> crate::StreamJobContext {
+        crate::StreamJobContext::new(
+            1,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            JsonMap::new(),
+            None,
+            crate::CancellationToken::new(),
+        )
+    }
+
+    #[tokio::test]
+    async fn window_state_row_budget_rejects_whole_batch_before_installing_it() {
+        let mut operator = checkpoint_segment_operator();
+        operator
+            .set_state_budget(StateBudget::new(1, 1_048_576).unwrap())
+            .unwrap();
+        let job = budget_test_job();
+        let context = StreamOperatorContext::new(&job, "window", None);
+        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+
+        let error = operator
+            .process_data(
+                "input",
+                budget_test_batch(&[0, 60_000_000]),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("window state budget exceeded"));
+        assert!(operator.state.accumulators.is_empty());
+
+        operator
+            .process_data("input", budget_test_batch(&[0]), &context, &mut output)
+            .await
+            .unwrap();
+        assert_eq!(operator.state.accumulators.len(), 1);
+        let previous_budget = operator.state_budget;
+        assert!(
+            operator
+                .set_state_budget(StateBudget::new(1, 1).unwrap())
+                .is_err()
+        );
+        assert_eq!(operator.state_budget, previous_budget);
+    }
+
+    #[tokio::test]
+    async fn window_state_byte_budget_rejects_one_group() {
+        let mut operator = checkpoint_segment_operator();
+        operator
+            .set_state_budget(StateBudget::new(10, 1).unwrap())
+            .unwrap();
+        let job = budget_test_job();
+        let context = StreamOperatorContext::new(&job, "window", None);
+        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+
+        let error = operator
+            .process_data("input", budget_test_batch(&[0]), &context, &mut output)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("window state budget exceeded"));
+        assert!(operator.state.accumulators.is_empty());
+    }
+
+    #[tokio::test]
+    async fn window_state_budget_tracks_min_string_growth_without_changing_live_state() {
+        let schema = budget_test_string_batch("z")
+            .table_payload()
+            .unwrap()
+            .batches()[0]
+            .schema();
+        let spec = WindowSpec::tumbling("event_time", Duration::from_secs(60))
+            .unwrap()
+            .aggregate(AggregateFunction::Min, "value", "minimum")
+            .unwrap();
+        let mut operator = WindowAggregateOperator::new("window", schema, spec).unwrap();
+        operator
+            .set_state_budget(StateBudget::new(1, 250).unwrap())
+            .unwrap();
+        let job = budget_test_job();
+        let context = StreamOperatorContext::new(&job, "window", None);
+        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data(
+                "input",
+                budget_test_string_batch("z"),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap();
+        let previous_bytes = operator.state.accumulator_bytes;
+
+        let error = operator
+            .process_data(
+                "input",
+                budget_test_string_batch(&"a".repeat(200)),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("window state budget exceeded"));
+        assert_eq!(operator.state.accumulator_bytes, previous_bytes);
+        let entry = operator.state.accumulators.values().next().unwrap();
+        assert!(matches!(
+            &entry.aggregates[0],
+            AccumulatorValue::Min(Some(ScalarValue::String(value))) if value == "z"
+        ));
+
+        operator
+            .process_data(
+                "input",
+                budget_test_string_batch("y"),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn hopping_window_budget_rejects_mid_row_without_partial_state() {
+        let schema = budget_test_batch(&[15]).table_payload().unwrap().batches()[0].schema();
+        let spec = WindowSpec::hopping(
+            "event_time",
+            Duration::from_micros(60),
+            Duration::from_micros(10),
+        )
+        .unwrap()
+        .aggregate(AggregateFunction::Count, "amount", "count_amount")
+        .unwrap();
+        let mut operator = WindowAggregateOperator::new("window", schema, spec).unwrap();
+        operator
+            .set_state_budget(StateBudget::new(1, 1_048_576).unwrap())
+            .unwrap();
+        let job = budget_test_job();
+        let context = StreamOperatorContext::new(&job, "window", None);
+        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+
+        let error = operator
+            .process_data("input", budget_test_batch(&[15]), &context, &mut output)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("window state budget exceeded"));
+        assert!(operator.state.accumulators.is_empty());
+        assert_eq!(operator.state.accumulator_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn window_state_budget_releases_closed_groups_after_checkpoint() {
+        let mut operator = checkpoint_segment_operator();
+        operator
+            .set_state_budget(StateBudget::new(1, 1_048_576).unwrap())
+            .unwrap();
+        let job = budget_test_job();
+        let context = StreamOperatorContext::new(&job, "window", None);
+        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("input", budget_test_batch(&[0]), &context, &mut output)
+            .await
+            .unwrap();
+
+        operator
+            .on_watermark(EventTime::from_micros(60_000_000), &context, &mut output)
+            .await
+            .unwrap();
+        assert_eq!(operator.state.accumulators.len(), 1);
+        operator.checkpoint(crate::Epoch::INITIAL).unwrap();
+        assert!(operator.state.accumulators.is_empty());
+        assert_eq!(operator.state.accumulator_bytes, 0);
+
+        operator
+            .process_data(
+                "input",
+                budget_test_batch(&[60_000_000]),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap();
+        assert_eq!(operator.state.accumulators.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn window_state_budget_rejects_restore_without_replacing_live_state() {
+        let mut source = checkpoint_segment_operator();
+        let job = budget_test_job();
+        let context = StreamOperatorContext::new(&job, "window", None);
+        let mut output = crate::EdgeCollector::new(source.output_ports().to_vec());
+        source
+            .process_data(
+                "input",
+                budget_test_batch(&[0, 60_000_000]),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap();
+        let snapshot = source.checkpoint(crate::Epoch::INITIAL).unwrap();
+
+        let mut restored = checkpoint_segment_operator();
+        restored
+            .set_state_budget(StateBudget::new(1, 1_048_576).unwrap())
+            .unwrap();
+        let error = restored.restore(&snapshot).unwrap_err();
+        assert!(error.to_string().contains("window state budget exceeded"));
+        assert!(restored.state.accumulators.is_empty());
+    }
+
+    #[tokio::test]
+    async fn restored_window_state_budget_applies_to_next_batch() {
+        let mut source = checkpoint_segment_operator();
+        let job = budget_test_job();
+        let context = StreamOperatorContext::new(&job, "window", None);
+        let mut output = crate::EdgeCollector::new(source.output_ports().to_vec());
+        source
+            .process_data("input", budget_test_batch(&[0]), &context, &mut output)
+            .await
+            .unwrap();
+        let snapshot = source.checkpoint(crate::Epoch::INITIAL).unwrap();
+
+        let mut restored = checkpoint_segment_operator();
+        restored
+            .set_state_budget(StateBudget::new(1, 1_048_576).unwrap())
+            .unwrap();
+        restored.restore(&snapshot).unwrap();
+        let previous_bytes = restored.state.accumulator_bytes;
+        let mut output = crate::EdgeCollector::new(restored.output_ports().to_vec());
+        let error = restored
+            .process_data(
+                "input",
+                budget_test_batch(&[60_000_000]),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("window state budget exceeded"));
+        assert_eq!(restored.state.accumulators.len(), 1);
+        assert_eq!(restored.state.accumulator_bytes, previous_bytes);
+    }
+
+    #[test]
+    fn float_sum_and_average_recover_low_order_terms() {
+        let mut sum = AccumulatorValue::FloatSum(None);
+        let mut average = AccumulatorValue::FloatAverage {
+            sum: CompensatedSum::new(0.0),
+            count: 0,
+        };
+        for value in [1.0e16, 1.0, -1.0e16] {
+            let scalar = ScalarValue::Float64(f64::to_bits(value));
+            update_accumulator(&mut sum, AggregateFunction::Sum, scalar.clone()).unwrap();
+            update_accumulator(&mut average, AggregateFunction::Avg, scalar).unwrap();
+        }
+        let sum = finalize_accumulator(&sum).unwrap().unwrap();
+        let average = finalize_accumulator(&average).unwrap().unwrap();
+        assert_eq!(float_value(&sum).unwrap().to_bits(), 1.0_f64.to_bits());
+        assert_eq!(
+            float_value(&average).unwrap().to_bits(),
+            (1.0_f64 / 3.0).to_bits()
+        );
+    }
+
+    #[test]
+    fn float_compensation_survives_checkpoint_segment_restore() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "event_time",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                false,
+            ),
+            Field::new("amount", DataType::Float64, false),
+        ]));
+        let spec = WindowSpec::tumbling("event_time", Duration::from_secs(60))
+            .unwrap()
+            .aggregate(AggregateFunction::Sum, "amount", "total")
+            .unwrap()
+            .aggregate(AggregateFunction::Avg, "amount", "mean")
+            .unwrap();
+        let mut source =
+            WindowAggregateOperator::new("window", Arc::clone(&schema), spec.clone()).unwrap();
+        let mut sum = AccumulatorValue::FloatSum(None);
+        let mut average = AccumulatorValue::FloatAverage {
+            sum: CompensatedSum::new(0.0),
+            count: 0,
+        };
+        for value in [1.0e16, 1.0] {
+            let scalar = ScalarValue::Float64(f64::to_bits(value));
+            update_accumulator(&mut sum, AggregateFunction::Sum, scalar.clone()).unwrap();
+            update_accumulator(&mut average, AggregateFunction::Avg, scalar).unwrap();
+        }
+        let operations = vec![StateOperationRow {
+            key: WindowKey {
+                start: EventTime::from_micros(0),
+                end: EventTime::from_micros(60_000_000),
+                stable_group_key: Vec::new(),
+            },
+            entry: AccumulatorRow {
+                group_values: Vec::new(),
+                aggregates: vec![sum, average],
+            },
+            tombstone: false,
+        }];
+        let fingerprint = "a".repeat(64);
+        let bytes =
+            encode_state_segment(&operations, &spec, &source.compiled, &fingerprint, "window")
+                .unwrap();
+        source.state.pipeline_fingerprint = Some(fingerprint);
+        source.state.operator_id = Some("window".into());
+        source
+            .state
+            .accumulators
+            .insert(operations[0].key.clone(), operations[0].entry.clone());
+        source.state.prepared_segments.push(PreparedStateSegment {
+            kind: SegmentKind::Delta,
+            bytes,
+        });
+        let snapshot = source.checkpoint(crate::Epoch::INITIAL).unwrap();
+        let mut restored = WindowAggregateOperator::new("window", schema, spec).unwrap();
+        restored.restore(&snapshot).unwrap();
+        let mut decoded = restored
+            .state
+            .accumulators
+            .values()
+            .next()
+            .unwrap()
+            .aggregates
+            .clone();
+        for (function, accumulator) in [AggregateFunction::Sum, AggregateFunction::Avg]
+            .into_iter()
+            .zip(&mut decoded)
+        {
+            update_accumulator(
+                accumulator,
+                function,
+                ScalarValue::Float64((-1.0e16_f64).to_bits()),
+            )
+            .unwrap();
+        }
+        let sum = finalize_accumulator(&decoded[0]).unwrap().unwrap();
+        let average = finalize_accumulator(&decoded[1]).unwrap().unwrap();
+        assert_eq!(float_value(&sum).unwrap().to_bits(), 1.0_f64.to_bits());
+        assert_eq!(
+            float_value(&average).unwrap().to_bits(),
+            (1.0_f64 / 3.0).to_bits()
+        );
+    }
+
+    #[test]
+    fn legacy_float_snapshot_is_rewritten_as_compensated_base() {
+        let (mut operator, spec) = legacy_float_window_operator();
+        operator.state.operator_id = Some("window".into());
+        let fingerprint = "a".repeat(64);
+        let legacy_schema = state_schema_for_version(
+            &spec,
+            &operator.compiled,
+            &fingerprint,
+            "window",
+            WINDOW_STATE_LAYOUT_VERSION,
+        );
+        let operations = vec![StateOperationRow {
+            key: WindowKey {
+                start: EventTime::from_micros(0),
+                end: EventTime::from_micros(60_000_000),
+                stable_group_key: Vec::new(),
+            },
+            entry: AccumulatorRow {
+                group_values: Vec::new(),
+                aggregates: vec![AccumulatorValue::FloatSum(Some(CompensatedSum::new(5.0)))],
+            },
+            tombstone: false,
+        }];
+        let mut arrays = state_key_arrays(&operations);
+        arrays.push(
+            scalar_array(
+                &DataType::Float64,
+                &[Some(ScalarValue::Float64(5.0_f64.to_bits()))],
+                "window",
+            )
+            .unwrap(),
+        );
+        let segment = crate::StateSegment::new(write_state_ipc(&legacy_schema, arrays).unwrap());
+        let segment_id = "delta-00000000000000000001-00000000";
+        let mut descriptor = operator
+            .snapshot_segment_descriptor(
+                crate::Epoch::INITIAL,
+                segment_id,
+                SegmentKind::Delta,
+                &segment,
+            )
+            .unwrap();
+        descriptor.state_layout_version = WINDOW_STATE_LAYOUT_VERSION;
+        descriptor.schema_fingerprint = state_schema_fingerprint_for_version(
+            &spec,
+            &operator.compiled,
+            WINDOW_STATE_LAYOUT_VERSION,
+        );
+        let metadata = WindowSnapshotMetadata {
+            state_layout_version: WINDOW_STATE_LAYOUT_VERSION,
+            configuration_hash: operator.compiled.configuration_hash.clone(),
+            state_schema_fingerprint: descriptor.schema_fingerprint.clone(),
+            epoch: crate::Epoch::INITIAL,
+            pipeline_fingerprint: Some(fingerprint),
+            operator_id: Some("window".into()),
+            last_input_watermark: None,
+            next_output_sequence: 0,
+            ended: false,
+            metrics: LateMetricDelta::default(),
+            segment_inventory: vec![descriptor],
+        };
+        let Value::Object(inline_metadata) = serde_json::to_value(metadata).unwrap() else {
+            panic!("snapshot metadata must be an object");
+        };
+        let mut malformed_metadata = inline_metadata.clone();
+        malformed_metadata.insert("state_layout_version".into(), serde_json::json!(2));
+        malformed_metadata.insert(
+            "state_schema_fingerprint".into(),
+            serde_json::json!(operator.compiled.state_schema_fingerprint.clone()),
+        );
+        assert!(
+            operator
+                .restore(&crate::OperatorStateSnapshot {
+                    inline_metadata: malformed_metadata.into_iter().collect(),
+                    segments: BTreeMap::from([(segment_id.into(), segment.clone())]),
+                })
+                .is_err(),
+            "a version 2 header cannot retain version 1 segments"
+        );
+        operator
+            .restore(&crate::OperatorStateSnapshot {
+                inline_metadata: inline_metadata.into_iter().collect(),
+                segments: BTreeMap::from([(segment_id.into(), segment)]),
+            })
+            .unwrap();
+        assert!(operator.state.replace_retained_on_checkpoint);
+        let upgraded = operator.checkpoint(crate::Epoch::new(2).unwrap()).unwrap();
+        let inventory = upgraded.inline_metadata["segment_inventory"]
+            .as_array()
+            .unwrap();
+        assert_eq!(inventory.len(), 1);
+        assert_eq!(inventory[0]["state_layout_version"], 2);
+        assert_eq!(inventory[0]["kind"], "base");
+        assert!(!upgraded.segments.contains_key(segment_id));
+    }
+
+    fn legacy_float_window_operator() -> (WindowAggregateOperator, WindowSpec) {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "event_time",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                false,
+            ),
+            Field::new("amount", DataType::Float64, false),
+        ]));
+        let spec = WindowSpec::tumbling("event_time", Duration::from_secs(60))
+            .unwrap()
+            .aggregate(AggregateFunction::Sum, "amount", "total")
+            .unwrap();
+        (
+            WindowAggregateOperator::new("window", schema, spec.clone()).unwrap(),
+            spec,
+        )
+    }
 
     fn output_record(rows: usize) -> RecordBatch {
         RecordBatch::try_from_iter(vec![(
@@ -3599,9 +4503,15 @@ mod tests {
 
         // Decoding must restore the exact rows in order.
         let expected_schema = state_schema(&spec, &compiled, &"a".repeat(64), "window");
-        let restored =
-            decode_state_segment(&first_bytes, &spec, &compiled, &expected_schema, "window")
-                .unwrap();
+        let restored = decode_state_segment(
+            &first_bytes,
+            &spec,
+            &compiled,
+            &expected_schema,
+            "window",
+            WINDOW_SEGMENT_LAYOUT_VERSION,
+        )
+        .unwrap();
         assert_eq!(restored.len(), operations.len());
         for ((key, row), original) in restored.iter().zip(&operations) {
             assert_eq!(*key, original.key);
@@ -3628,8 +4538,14 @@ mod tests {
         let mut corrupted = first_bytes.clone();
         let flip_at = corrupted.len() - 6;
         corrupted[flip_at] ^= 0x01;
-        let decoded =
-            decode_state_segment(&corrupted, &spec, &compiled, &expected_schema, "window");
+        let decoded = decode_state_segment(
+            &corrupted,
+            &spec,
+            &compiled,
+            &expected_schema,
+            "window",
+            WINDOW_SEGMENT_LAYOUT_VERSION,
+        );
         if let Ok(rows) = decoded {
             let same = rows.len() == operations.len()
                 && rows.iter().zip(&operations).all(|((k, r), o)| {

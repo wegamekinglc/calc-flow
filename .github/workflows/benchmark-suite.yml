@@ -67,10 +67,10 @@ jobs:
           scripts.test_analyze_sql_datafusion_attribution
           scripts.test_benchmark_asof
           scripts.test_benchmark_join_materialization
-          scripts.test_dal301_groupby
-          scripts.test_dal301_imports
-          scripts.test_dal301_rustc
-          scripts.test_m5_checkpoint_benchmark
+          scripts.test_groupby_diagnostic
+          scripts.test_groupby_diagnostic_imports
+          scripts.test_groupby_diagnostic_rustc
+          scripts.test_checkpoint_benchmark
           scripts.test_native_memory_profile
           scripts.test_native_slow_sink_diagnostics
           scripts.test_release_collectors

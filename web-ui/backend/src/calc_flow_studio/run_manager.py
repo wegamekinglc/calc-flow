@@ -1543,39 +1543,21 @@ class RunManager:
             RunStatus.CANCELLED,
             RunStatus.TIMED_OUT,
         }
+        next_index = max(after_sequence + 1, 0)
+
+        def current_handle() -> _RunHandle | _JobHandle:
+            if run_id in self._jobs:
+                return self._jobs[run_id]
+            return self._require(run_id)
 
         def ready() -> bool:
-            if run_id in self._jobs:
-                handle = self._jobs[run_id]
-                return (
-                    any(event.sequence > after_sequence for event in handle.events)
-                    or handle.status in terminal
-                )
-            handle = self._require(run_id)
-            return (
-                any(event.sequence > after_sequence for event in handle.events)
-                or handle.status in terminal
-            )
+            handle = current_handle()
+            return len(handle.events) > next_index or handle.status in terminal
 
         with self._event_condition:
             self._event_condition.wait_for(ready, timeout=timeout)
-            if run_id in self._jobs:
-                handle = self._jobs[run_id]
-                return (
-                    tuple(
-                        event
-                        for event in handle.events
-                        if event.sequence > after_sequence
-                    ),
-                    handle.status,
-                )
-            handle = self._require(run_id)
-            return (
-                tuple(
-                    event for event in handle.events if event.sequence > after_sequence
-                ),
-                handle.status,
-            )
+            handle = current_handle()
+            return handle.events[next_index:], handle.status
 
     def cancel(self, run_id: str) -> RunResponse:
         with self._lock:

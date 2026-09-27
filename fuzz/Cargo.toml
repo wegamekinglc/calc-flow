@@ -1,0 +1,29 @@
+[package]
+name = "calc-flow-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+calc-flow = { path = "../crates/calc-flow" }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "project_parser"
+path = "fuzz_targets/project_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sql_validator"
+path = "fuzz_targets/sql_validator.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = []

@@ -9,21 +9,23 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use calc_flow::{
     ArrowFieldSpec, Batch, CalcFlowError, ConnectorError, ConnectorIdentity, ConnectorOperation,
-    Cursor, DecodeBounds, FormatDecoder, JsonMap, Result, SinkRecovery, SourceCapabilities,
-    SourceEvent, SourceSchema, StreamSink, StreamSource, TransactionalStreamSink,
+    Cursor, DecodeBounds, FormatDecoder, JsonMap, Result, SecretHandle, SecretReference,
+    SecretResolver, SecretResolverKind, SinkRecovery, SourceCapabilities, SourceEvent,
+    SourceSchema, StreamSink, StreamSource, TransactionalStreamSink,
 };
-use rdkafka::Offset;
 use rdkafka::admin::{AdminClient, AdminOptions, ResourceSpecifier};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::message::Message;
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
 use rdkafka::topic_partition_list::TopicPartitionList;
+use rdkafka::{Offset, config::ClientConfig};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
@@ -50,6 +52,95 @@ fn fail(operation: &str, detail: &str) -> CalcFlowError {
         ConnectorOperation::new(operation).expect("operation name is non-empty"),
         detail,
     ))
+}
+
+type ProducerCall =
+    Box<dyn FnOnce(&FutureProducer) -> rdkafka::error::KafkaResult<()> + Send + 'static>;
+
+struct ProducerCommand {
+    producer: FutureProducer,
+    call: ProducerCall,
+    response: tokio::sync::oneshot::Sender<std::result::Result<(), String>>,
+}
+
+struct ProducerLifecycle(tokio::sync::mpsc::UnboundedSender<ProducerCommand>);
+
+impl ProducerLifecycle {
+    fn new() -> Self {
+        Self(spawn_producer_actor())
+    }
+}
+
+fn spawn_producer_actor() -> tokio::sync::mpsc::UnboundedSender<ProducerCommand> {
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<ProducerCommand>();
+    tokio::spawn(async move {
+        while let Some(command) = receiver.recv().await {
+            let ProducerCommand {
+                producer,
+                call,
+                response,
+            } = command;
+            let result = tokio::task::spawn_blocking(move || call(&producer))
+                .await
+                .map_err(|error| format!("Kafka worker failed: {error}"))
+                .and_then(|result| result.map_err(|error| error.to_string()));
+            let _ = response.send(result);
+        }
+    });
+    sender
+}
+
+async fn send_producer_call(
+    sender: &tokio::sync::mpsc::UnboundedSender<ProducerCommand>,
+    producer: &FutureProducer,
+    operation: &'static str,
+    call: impl FnOnce(&FutureProducer) -> rdkafka::error::KafkaResult<()> + Send + 'static,
+) -> Result<()> {
+    let (response, completed) = tokio::sync::oneshot::channel();
+    sender
+        .send(ProducerCommand {
+            producer: producer.clone(),
+            call: Box::new(call),
+            response,
+        })
+        .map_err(|_| fail(operation, "Kafka lifecycle worker stopped"))?;
+    completed
+        .await
+        .map_err(|error| fail(operation, &format!("Kafka worker stopped: {error}")))?
+        .map_err(|error| fail(operation, &error))
+}
+
+fn start_transaction_init(
+    producer: &FutureProducer,
+) -> tokio::sync::oneshot::Receiver<std::result::Result<(), String>> {
+    let producer = producer.clone();
+    let (response, completed) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let result = producer
+            .init_transactions(Duration::from_secs(30))
+            .map_err(|error| error.to_string());
+        let _ = response.send(result);
+    });
+    completed
+}
+
+async fn finish_transaction_init(
+    completion: &mut tokio::sync::oneshot::Receiver<std::result::Result<(), String>>,
+) -> Result<()> {
+    completion
+        .await
+        .map_err(|error| fail("open", &format!("Kafka init worker stopped: {error}")))?
+        .map_err(|error| fail("open", &error))
+}
+
+async fn blocking_producer_call(
+    producer: &FutureProducer,
+    lifecycle: &OnceLock<ProducerLifecycle>,
+    operation: &'static str,
+    call: impl FnOnce(&FutureProducer) -> rdkafka::error::KafkaResult<()> + Send + 'static,
+) -> Result<()> {
+    let lifecycle = lifecycle.get_or_init(ProducerLifecycle::new);
+    send_producer_call(&lifecycle.0, producer, operation, call).await
 }
 
 /// Attaches one record's coordinates to its decode failure.
@@ -108,11 +199,255 @@ impl KafkaFormat {
     }
 }
 
+/// Transport security selected for every Kafka client in one binding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum KafkaSecurityProtocol {
+    /// No TLS or SASL authentication.
+    Plaintext,
+    /// TLS transport without SASL authentication.
+    Ssl,
+    /// SASL authentication over an unencrypted transport.
+    SaslPlaintext,
+    /// SASL authentication over TLS.
+    SaslSsl,
+}
+
+impl KafkaSecurityProtocol {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "plaintext" => Ok(Self::Plaintext),
+            "ssl" => Ok(Self::Ssl),
+            "sasl_plaintext" => Ok(Self::SaslPlaintext),
+            "sasl_ssl" => Ok(Self::SaslSsl),
+            _ => Err(security_option_error(
+                "security_protocol",
+                "expected plaintext, ssl, sasl_plaintext, or sasl_ssl",
+            )),
+        }
+    }
+
+    fn librdkafka_value(self) -> &'static str {
+        match self {
+            Self::Plaintext => "plaintext",
+            Self::Ssl => "ssl",
+            Self::SaslPlaintext => "sasl_plaintext",
+            Self::SaslSsl => "sasl_ssl",
+        }
+    }
+
+    fn uses_sasl(self) -> bool {
+        matches!(self, Self::SaslPlaintext | Self::SaslSsl)
+    }
+
+    fn uses_tls(self) -> bool {
+        matches!(self, Self::Ssl | Self::SaslSsl)
+    }
+}
+
+/// Data-only Kafka security options; passwords arrive through secret slots.
+#[derive(Clone, Debug)]
+pub struct KafkaSecurityConfig {
+    /// Transport security mode.
+    pub protocol: KafkaSecurityProtocol,
+    /// Optional trusted CA bundle path for TLS connections.
+    pub ssl_ca_location: Option<String>,
+    /// SASL mechanism: `PLAIN`, `SCRAM-SHA-256`, or `SCRAM-SHA-512`.
+    pub sasl_mechanism: Option<String>,
+    /// SASL username; the password uses the `sasl_password` secret slot.
+    pub sasl_username: Option<String>,
+}
+
+impl KafkaSecurityConfig {
+    fn from_options(options: &JsonMap) -> Result<Self> {
+        if options.contains_key("sasl_password") {
+            return Err(security_option_error(
+                "sasl_password",
+                "passwords must use the sasl_password secret slot",
+            ));
+        }
+        let protocol = KafkaSecurityProtocol::parse(
+            optional_security_string(options, "security_protocol")?
+                .as_deref()
+                .unwrap_or("plaintext"),
+        )?;
+        let ssl_ca_location = optional_security_string(options, "ssl_ca_location")?;
+        let sasl_mechanism = optional_security_string(options, "sasl_mechanism")?;
+        let sasl_username = optional_security_string(options, "sasl_username")?;
+        let config = Self {
+            protocol,
+            ssl_ca_location,
+            sasl_mechanism,
+            sasl_username,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn validate(&self) -> Result<()> {
+        self.validate_tls()?;
+        self.validate_sasl()
+    }
+
+    fn validate_tls(&self) -> Result<()> {
+        if self
+            .ssl_ca_location
+            .as_ref()
+            .is_some_and(|path| path.trim().is_empty())
+        {
+            return Err(security_option_error(
+                "ssl_ca_location",
+                "must be a non-empty string",
+            ));
+        }
+        if self.ssl_ca_location.is_some() && !self.protocol.uses_tls() {
+            return Err(security_option_error(
+                "ssl_ca_location",
+                "a CA path requires ssl or sasl_ssl",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_sasl(&self) -> Result<()> {
+        if self.protocol.uses_sasl() {
+            if !matches!(
+                self.sasl_mechanism.as_deref(),
+                Some("PLAIN" | "SCRAM-SHA-256" | "SCRAM-SHA-512")
+            ) {
+                return Err(security_option_error(
+                    "sasl_mechanism",
+                    "SASL requires PLAIN, SCRAM-SHA-256, or SCRAM-SHA-512",
+                ));
+            }
+            if self
+                .sasl_username
+                .as_ref()
+                .is_none_or(|value| value.trim().is_empty())
+            {
+                return Err(security_option_error(
+                    "sasl_username",
+                    "SASL requires a username",
+                ));
+            }
+        } else if self.sasl_mechanism.is_some() || self.sasl_username.is_some() {
+            return Err(security_option_error(
+                "sasl_mechanism",
+                "SASL options require sasl_plaintext or sasl_ssl",
+            ));
+        }
+        Ok(())
+    }
+
+    fn resolve_password(&self, secrets: &dyn SecretResolver) -> Result<Option<SecretHandle>> {
+        let reference = SecretReference::new(SecretResolverKind::Registered, "sasl_password")
+            .map_err(|_| fail("open", "the SASL password reference is invalid"))?;
+        if !self.protocol.uses_sasl() {
+            return match secrets.has_reference(&reference) {
+                Some(true) => Err(fail(
+                    "open",
+                    "sasl_password was supplied for a non-SASL Kafka binding",
+                )),
+                Some(false) => Ok(None),
+                None => Err(fail(
+                    "open",
+                    "the resolver cannot confirm whether sasl_password was supplied",
+                )),
+            };
+        }
+        secrets
+            .resolve(&reference)
+            .map(Some)
+            .map_err(|_| fail("open", "the SASL password secret could not be resolved"))
+    }
+}
+
+fn security_option_error(field: &str, message: &str) -> CalcFlowError {
+    CalcFlowError::InvalidArgument {
+        field: field.into(),
+        message: message.into(),
+    }
+}
+
+fn optional_security_string(options: &JsonMap, key: &str) -> Result<Option<String>> {
+    match options.get(key) {
+        None => Ok(None),
+        Some(Value::String(value)) if !value.trim().is_empty() => Ok(Some(value.clone())),
+        _ => Err(security_option_error(key, "must be a non-empty string")),
+    }
+}
+
+fn kafka_client_config(
+    bootstrap_servers: &str,
+    security: &KafkaSecurityConfig,
+    password: Option<&SecretHandle>,
+) -> Result<ClientConfig> {
+    security.validate()?;
+    let mut client = ClientConfig::new();
+    client.set("bootstrap.servers", bootstrap_servers);
+    client.set("security.protocol", security.protocol.librdkafka_value());
+    if let Some(path) = &security.ssl_ca_location {
+        client.set("ssl.ca.location", path);
+    }
+    configure_sasl(&mut client, security, password)?;
+    Ok(client)
+}
+
+fn configure_sasl(
+    client: &mut ClientConfig,
+    security: &KafkaSecurityConfig,
+    password: Option<&SecretHandle>,
+) -> Result<()> {
+    if !security.protocol.uses_sasl() {
+        return if password.is_some() {
+            Err(fail(
+                "open",
+                "SASL password supplied for a non-SASL Kafka binding",
+            ))
+        } else {
+            Ok(())
+        };
+    }
+    let password = sasl_password_text(password)?;
+    client.set(
+        "sasl.mechanism",
+        security
+            .sasl_mechanism
+            .as_deref()
+            .ok_or_else(|| security_option_error("sasl_mechanism", "SASL mechanism is missing"))?,
+    );
+    client.set(
+        "sasl.username",
+        security
+            .sasl_username
+            .as_deref()
+            .ok_or_else(|| security_option_error("sasl_username", "SASL username is missing"))?,
+    );
+    client.set("sasl.password", password);
+    Ok(())
+}
+
+fn sasl_password_text(password: Option<&SecretHandle>) -> Result<&str> {
+    let password = password.ok_or_else(|| {
+        fail(
+            "open",
+            "the SASL password secret is required for this Kafka binding",
+        )
+    })?;
+    let password = std::str::from_utf8(password.expose())
+        .map_err(|_| fail("open", "the SASL password secret is not valid UTF-8"))?;
+    if password.is_empty() {
+        return Err(fail("open", "the SASL password secret is empty"));
+    }
+    Ok(password)
+}
+
 /// Data-only configuration for one Kafka source.
 #[derive(Clone, Debug)]
 pub struct KafkaSourceConfig {
     /// Comma-separated bootstrap broker list.
     pub bootstrap_servers: String,
+    /// Transport security shared by the source consumer.
+    pub security: KafkaSecurityConfig,
     /// Topic to read.
     pub topic: String,
     /// Explicitly owned partitions in ascending order.
@@ -168,6 +503,7 @@ impl KafkaSourceConfig {
         let (descriptor_set, message, decoder) = parse_format_companions(options, format, &schema)?;
         Ok(Self {
             bootstrap_servers,
+            security: KafkaSecurityConfig::from_options(options)?,
             topic,
             partitions: parse_partitions(options)?,
             auto_offset_reset: parse_offset_reset(options)?,
@@ -385,6 +721,14 @@ impl KafkaSource {
         config: KafkaSourceConfig,
         decoders: &KafkaDecoderRegistry,
     ) -> Result<Self> {
+        Self::with_decoders_and_password(config, decoders, None)
+    }
+
+    fn with_decoders_and_password(
+        config: KafkaSourceConfig,
+        decoders: &KafkaDecoderRegistry,
+        password: Option<&SecretHandle>,
+    ) -> Result<Self> {
         let schema = if config.schema.is_empty() {
             SourceSchema::DynamicOrUnknown
         } else {
@@ -392,8 +736,8 @@ impl KafkaSource {
         };
         let bounds = DecodeBounds::new(config.max_batch_rows, config.max_batch_bytes)?;
         let decoder = config.decoder(decoders)?;
-        let mut client = rdkafka::config::ClientConfig::new();
-        client.set("bootstrap.servers", &config.bootstrap_servers);
+        let mut client =
+            kafka_client_config(&config.bootstrap_servers, &config.security, password)?;
         client.set("group.id", "calc-flow-kafka-source");
         client.set("enable.auto.commit", "false");
         client.set(
@@ -653,6 +997,8 @@ pub fn transactional_id(pipeline: &str, output: &str) -> String {
 pub struct KafkaSinkConfig {
     /// Comma-separated bootstrap broker list.
     pub bootstrap_servers: String,
+    /// Transport security shared by producers and recovery clients.
+    pub security: KafkaSecurityConfig,
     /// Target topic.
     pub topic: String,
     /// Dedicated, one-partition compacted epoch-ledger topic.
@@ -686,6 +1032,7 @@ impl KafkaSinkConfig {
         let output = required_string(options, "output")?;
         Ok(Self {
             bootstrap_servers: required_string(options, "bootstrap_servers")?,
+            security: KafkaSecurityConfig::from_options(options)?,
             topic: required_string(options, "topic")?,
             ledger_topic: required_string(options, "ledger_topic")?,
             transactional_id: transactional_id(&pipeline, &output),
@@ -733,6 +1080,38 @@ fn encode_kafka_payload(format: KafkaFormat, batch: &Batch) -> Result<Vec<u8>> {
         KafkaFormat::Csv => CsvCodec::new(csv::IDENTITY_VERSION, true)?.encode(batch),
         KafkaFormat::Protobuf | KafkaFormat::Custom => Err(fail("encode", SINK_FORMAT_MESSAGE)),
     }
+}
+
+fn kafka_format_name(format: KafkaFormat) -> &'static str {
+    match format {
+        KafkaFormat::Json => "json",
+        KafkaFormat::Csv => "csv",
+        KafkaFormat::Protobuf => "protobuf",
+        KafkaFormat::Custom => "custom",
+    }
+}
+
+fn kafka_schema_hash(format: KafkaFormat, schema: Option<&arrow::datatypes::Schema>) -> String {
+    let fields = schema
+        .map(|schema| {
+            schema
+                .fields()
+                .iter()
+                .map(|field| {
+                    (
+                        field.name(),
+                        format!("{:?}", field.data_type()),
+                        field.is_nullable(),
+                        field.metadata().iter().collect::<BTreeMap<_, _>>(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let metadata = schema.map(|schema| schema.metadata().iter().collect::<BTreeMap<_, _>>());
+    let bytes = serde_json::to_vec(&(kafka_format_name(format), fields, metadata))
+        .expect("data-only Kafka schema identity serializes");
+    crate::evidence::sha256_hex(&bytes)
 }
 
 fn positive_kafka_option(options: &JsonMap, key: &str, default: u64) -> Result<u64> {
@@ -899,25 +1278,35 @@ fn required_decoder_field<'a>(decoder: &'a Value, key: &str) -> Result<&'a str> 
 /// The transactional Kafka sink.
 pub struct TransactionalKafkaSink {
     config: KafkaSinkConfig,
+    password: Option<SecretHandle>,
     producer: FutureProducer,
+    lifecycle: OnceLock<ProducerLifecycle>,
+    init_inflight: Option<tokio::sync::oneshot::Receiver<std::result::Result<(), String>>>,
     active: bool,
     delivered: u64,
     pending_records: Vec<Vec<u8>>,
     pending_bytes: u64,
+    pending_schema_hash: Option<String>,
 }
 
 const PREPARED_RECORDS_SEGMENT: &str = "records";
 
 impl TransactionalKafkaSink {
-    /// Builds the sink and fences stale transactional producers.
+    /// Builds the sink. [`TransactionalStreamSink::open`] fences stale producers.
     ///
     /// # Errors
     ///
-    /// Returns the connector error when the producer cannot be created
-    /// or transaction initialization is rejected by the broker.
+    /// Returns the connector error when the producer cannot be created.
     pub fn new(config: KafkaSinkConfig) -> Result<Self> {
-        let mut client = rdkafka::config::ClientConfig::new();
-        client.set("bootstrap.servers", &config.bootstrap_servers);
+        Self::new_with_password(config, None)
+    }
+
+    fn new_with_password(config: KafkaSinkConfig, password: Option<SecretHandle>) -> Result<Self> {
+        let mut client = kafka_client_config(
+            &config.bootstrap_servers,
+            &config.security,
+            password.as_ref(),
+        )?;
         client.set("transactional.id", &config.transactional_id);
         client.set("enable.idempotence", "true");
         client.set("message.timeout.ms", "30000");
@@ -925,16 +1314,17 @@ impl TransactionalKafkaSink {
         let producer: FutureProducer = client
             .create()
             .map_err(|error| fail("open", &error.to_string()))?;
-        producer
-            .init_transactions(Duration::from_secs(30))
-            .map_err(|error| fail("open", &format!("transaction init failed: {error}")))?;
         Ok(Self {
             config,
+            password,
             producer,
+            lifecycle: OnceLock::new(),
+            init_inflight: None,
             active: false,
             delivered: 0,
             pending_records: Vec::new(),
             pending_bytes: 0,
+            pending_schema_hash: None,
         })
     }
 
@@ -943,12 +1333,22 @@ impl TransactionalKafkaSink {
             .get("segment_sha256")
             .and_then(Value::as_str)
             .ok_or_else(|| fail("commit", "prepared segment hash is missing"))?;
+        let schema_hash = evidence
+            .get("schema_hash")
+            .and_then(Value::as_str)
+            .ok_or_else(|| fail("commit", "prepared schema hash is missing"))?;
         let payload = serde_json::to_vec(&BTreeMap::from([
             ("epoch", Value::from(epoch.as_u64())),
             (
                 "transactional_id",
                 Value::String(self.config.transactional_id.clone()),
             ),
+            ("topic", Value::String(self.config.topic.clone())),
+            (
+                "format",
+                Value::String(kafka_format_name(self.config.format).into()),
+            ),
+            ("schema_hash", Value::String(schema_hash.into())),
             ("segment_sha256", Value::String(segment_sha256.to_string())),
         ]))
         .map_err(|error| fail("commit", &error.to_string()))?;
@@ -968,8 +1368,11 @@ impl TransactionalKafkaSink {
     // termination branches would obscure which Kafka event closes recovery.
     // #lizard forgives
     async fn latest_ledger_marker(&self) -> Result<Option<KafkaLedgerMarker>> {
-        let mut client = rdkafka::config::ClientConfig::new();
-        client.set("bootstrap.servers", &self.config.bootstrap_servers);
+        let mut client = kafka_client_config(
+            &self.config.bootstrap_servers,
+            &self.config.security,
+            self.password.as_ref(),
+        )?;
         client.set(
             "group.id",
             format!("{}-recovery", self.config.transactional_id),
@@ -1038,10 +1441,13 @@ impl TransactionalKafkaSink {
                 "Kafka ledger topic must have exactly one partition",
             ));
         }
-        let admin: AdminClient<DefaultClientContext> = rdkafka::config::ClientConfig::new()
-            .set("bootstrap.servers", &self.config.bootstrap_servers)
-            .create()
-            .map_err(|error| fail("open", &error.to_string()))?;
+        let admin: AdminClient<DefaultClientContext> = kafka_client_config(
+            &self.config.bootstrap_servers,
+            &self.config.security,
+            self.password.as_ref(),
+        )?
+        .create()
+        .map_err(|error| fail("open", &error.to_string()))?;
         let results = admin
             .describe_configs(
                 &[ResourceSpecifier::Topic(&self.config.ledger_topic)],
@@ -1072,7 +1478,33 @@ impl TransactionalKafkaSink {
 struct KafkaLedgerMarker {
     epoch: u64,
     transactional_id: String,
+    topic: Option<String>,
+    format: Option<String>,
+    schema_hash: Option<String>,
     segment_sha256: String,
+}
+
+fn validate_ledger_marker_target(marker: &KafkaLedgerMarker, target: &str) -> Result<()> {
+    match marker.topic.as_deref() {
+        Some(recorded) if recorded == target => Ok(()),
+        _ => Err(fail(
+            "recover",
+            "Kafka ledger marker target topic differs from this sink",
+        )),
+    }
+}
+
+fn validate_ledger_marker_schema(marker: &KafkaLedgerMarker, evidence: &JsonMap) -> Result<()> {
+    if marker.schema_hash.as_deref() == evidence.get("schema_hash").and_then(Value::as_str)
+        && marker.schema_hash.is_some()
+    {
+        Ok(())
+    } else {
+        Err(fail(
+            "recover",
+            "Kafka ledger marker schema differs from durable evidence",
+        ))
+    }
 }
 
 fn encode_records(records: &[Vec<u8>]) -> Result<Vec<u8>> {
@@ -1149,6 +1581,7 @@ fn validate_prepared_evidence(
     epoch: calc_flow::Epoch,
     evidence: &JsonMap,
     records: &[Vec<u8>],
+    live_schema_hash: Option<&str>,
 ) -> Result<()> {
     validate_recovery_evidence(&config.transactional_id, evidence)?;
     let protocol = |message: String| fail("recover", &message);
@@ -1161,16 +1594,92 @@ fn validate_prepared_evidence(
             "prepared Kafka evidence names another sink",
         ));
     }
+    if crate::evidence::string_field(evidence, "topic").map_err(protocol)? != config.topic {
+        return Err(fail(
+            "recover",
+            "prepared Kafka evidence names another target topic",
+        ));
+    }
+    if crate::evidence::string_field(evidence, "format").map_err(protocol)?
+        != kafka_format_name(config.format)
+    {
+        return Err(fail(
+            "recover",
+            "prepared Kafka evidence names another wire format",
+        ));
+    }
+    crate::evidence::check_schema_hash(evidence).map_err(protocol)?;
+    if live_schema_hash
+        .is_some_and(|hash| evidence.get("schema_hash").and_then(Value::as_str) != Some(hash))
+    {
+        return Err(fail(
+            "commit",
+            "prepared Kafka schema differs from the active epoch",
+        ));
+    }
     crate::evidence::check_segment_id(evidence, PREPARED_RECORDS_SEGMENT).map_err(protocol)?;
     let segment = encode_records(records)?;
     crate::evidence::check_segment(evidence, &segment).map_err(protocol)?;
     Ok(())
 }
 
+fn prepared_kafka_evidence(
+    config: &KafkaSinkConfig,
+    epoch: calc_flow::Epoch,
+    messages: u64,
+    schema_hash: &str,
+    records: &[Vec<u8>],
+) -> Result<JsonMap> {
+    let segment = encode_records(records)?;
+    Ok(BTreeMap::from([
+        (
+            "transactional_id".into(),
+            Value::String(config.transactional_id.clone()),
+        ),
+        ("messages".into(), Value::from(messages)),
+        ("epoch".into(), Value::from(epoch.as_u64())),
+        (
+            "ledger_topic".into(),
+            Value::String(config.ledger_topic.clone()),
+        ),
+        ("topic".into(), Value::String(config.topic.clone())),
+        (
+            "format".into(),
+            Value::String(kafka_format_name(config.format).into()),
+        ),
+        ("schema_hash".into(), Value::String(schema_hash.into())),
+        (
+            "segment_id".into(),
+            Value::String(PREPARED_RECORDS_SEGMENT.into()),
+        ),
+        (
+            "segment_bytes".into(),
+            Value::from(u64::try_from(segment.len()).unwrap_or(u64::MAX)),
+        ),
+        (
+            "segment_sha256".into(),
+            Value::String(crate::evidence::sha256_hex(&segment)),
+        ),
+    ]))
+}
+
 #[async_trait]
 impl TransactionalStreamSink for TransactionalKafkaSink {
     async fn open(&mut self) -> Result<()> {
+        let completion = self
+            .init_inflight
+            .get_or_insert_with(|| start_transaction_init(&self.producer));
+        let initialized = finish_transaction_init(completion).await;
+        self.init_inflight = None;
+        initialized?;
         self.preflight_ledger().await
+    }
+
+    async fn settle_open(&mut self) -> Result<()> {
+        if let Some(mut completion) = self.init_inflight.take() {
+            finish_transaction_init(&mut completion).await?;
+        }
+        Ok(())
     }
 
     async fn begin_epoch(&mut self, _epoch: calc_flow::Epoch) -> Result<()> {
@@ -1180,13 +1689,15 @@ impl TransactionalStreamSink for TransactionalKafkaSink {
                 "a transaction is already active; the runtime owns epoch sequencing",
             ));
         }
-        self.producer
-            .begin_transaction()
-            .map_err(|error| fail("begin_epoch", &error.to_string()))?;
         self.active = true;
+        blocking_producer_call(&self.producer, &self.lifecycle, "begin_epoch", |producer| {
+            producer.begin_transaction()
+        })
+        .await?;
         self.delivered = 0;
         self.pending_records.clear();
         self.pending_bytes = 0;
+        self.pending_schema_hash = None;
         Ok(())
     }
 
@@ -1195,6 +1706,20 @@ impl TransactionalStreamSink for TransactionalKafkaSink {
             return Err(fail("write", "write before begin_epoch"));
         }
         let payload = encode_kafka_payload(self.config.format, batch)?;
+        let table = batch
+            .table_payload()
+            .map_err(|_| fail("write", "the Kafka sink writes table batches only"))?;
+        let schema_hash = kafka_schema_hash(self.config.format, Some(table.schema().as_ref()));
+        if self
+            .pending_schema_hash
+            .as_ref()
+            .is_some_and(|pending| pending != &schema_hash)
+        {
+            return Err(fail(
+                "write",
+                "all batches in one epoch must use the same Arrow schema",
+            ));
+        }
         let rows = u64::try_from(batch.num_rows()).unwrap_or(u64::MAX);
         let next_rows = self
             .delivered
@@ -1219,6 +1744,7 @@ impl TransactionalStreamSink for TransactionalKafkaSink {
         self.pending_records.push(payload);
         self.pending_bytes = next_bytes;
         self.delivered = next_rows;
+        self.pending_schema_hash = Some(schema_hash);
         let _ = delivery;
         Ok(())
     }
@@ -1227,34 +1753,21 @@ impl TransactionalStreamSink for TransactionalKafkaSink {
         if !self.active {
             return Err(fail("pre_commit", "pre_commit before begin_epoch"));
         }
-        self.producer
-            .flush(Duration::from_secs(30))
-            .map_err(|error| fail("pre_commit", &error.to_string()))?;
-        let segment = encode_records(&self.pending_records)?;
-        Ok(BTreeMap::from([
-            (
-                "transactional_id".to_string(),
-                Value::String(self.config.transactional_id.clone()),
-            ),
-            ("messages".to_string(), Value::from(self.delivered)),
-            ("epoch".to_string(), Value::from(epoch.as_u64())),
-            (
-                "ledger_topic".to_string(),
-                Value::String(self.config.ledger_topic.clone()),
-            ),
-            (
-                "segment_id".to_string(),
-                Value::String(PREPARED_RECORDS_SEGMENT.into()),
-            ),
-            (
-                "segment_bytes".to_string(),
-                Value::from(u64::try_from(segment.len()).unwrap_or(u64::MAX)),
-            ),
-            (
-                "segment_sha256".to_string(),
-                Value::String(hex::encode(Sha256::digest(&segment))),
-            ),
-        ]))
+        blocking_producer_call(&self.producer, &self.lifecycle, "pre_commit", |producer| {
+            producer.flush(Duration::from_secs(30))
+        })
+        .await?;
+        let schema_hash = self
+            .pending_schema_hash
+            .clone()
+            .unwrap_or_else(|| kafka_schema_hash(self.config.format, None));
+        prepared_kafka_evidence(
+            &self.config,
+            epoch,
+            self.delivered,
+            &schema_hash,
+            &self.pending_records,
+        )
     }
 
     async fn pre_commit_segments(
@@ -1271,14 +1784,26 @@ impl TransactionalStreamSink for TransactionalKafkaSink {
         if !self.active {
             return Err(fail("commit", "commit without an active transaction"));
         }
-        validate_prepared_evidence(&self.config, epoch, pre_commit, &self.pending_records)?;
+        let live_schema_hash = self
+            .pending_schema_hash
+            .clone()
+            .unwrap_or_else(|| kafka_schema_hash(self.config.format, None));
+        validate_prepared_evidence(
+            &self.config,
+            epoch,
+            pre_commit,
+            &self.pending_records,
+            Some(&live_schema_hash),
+        )?;
         self.write_ledger_marker(epoch, pre_commit).await?;
-        self.producer
-            .commit_transaction(Duration::from_secs(30))
-            .map_err(|error| fail("commit", &error.to_string()))?;
+        blocking_producer_call(&self.producer, &self.lifecycle, "commit", |producer| {
+            producer.commit_transaction(Duration::from_secs(30))
+        })
+        .await?;
         self.active = false;
         self.pending_records.clear();
         self.pending_bytes = 0;
+        self.pending_schema_hash = None;
         Ok(())
     }
 
@@ -1288,13 +1813,15 @@ impl TransactionalStreamSink for TransactionalKafkaSink {
         _pre_commit: Option<&JsonMap>,
     ) -> Result<()> {
         if self.active {
-            self.producer
-                .abort_transaction(Duration::from_secs(30))
-                .map_err(|error| fail("abort", &error.to_string()))?;
+            blocking_producer_call(&self.producer, &self.lifecycle, "abort", |producer| {
+                producer.abort_transaction(Duration::from_secs(30))
+            })
+            .await?;
             self.active = false;
         }
         self.pending_records.clear();
         self.pending_bytes = 0;
+        self.pending_schema_hash = None;
         Ok(())
     }
 
@@ -1310,12 +1837,29 @@ impl TransactionalStreamSink for TransactionalKafkaSink {
             recovery.epoch(),
             recovery.pre_commit(),
             &records,
+            None,
         )?;
         if let Some(marker) = self.latest_ledger_marker().await? {
+            validate_ledger_marker_target(&marker, &self.config.topic)?;
+            if marker.format.as_deref() != Some(kafka_format_name(self.config.format)) {
+                return Err(fail(
+                    "recover",
+                    "Kafka ledger marker wire format differs from this sink",
+                ));
+            }
+            if !marker.schema_hash.as_ref().is_some_and(|hash| {
+                hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+            }) {
+                return Err(fail(
+                    "recover",
+                    "Kafka ledger marker schema hash is missing or invalid",
+                ));
+            }
             if marker.epoch > recovery.epoch().as_u64() {
                 return Ok(());
             }
             if marker.epoch == recovery.epoch().as_u64() {
+                validate_ledger_marker_schema(&marker, recovery.pre_commit())?;
                 let expected_hash = recovery.pre_commit()["segment_sha256"]
                     .as_str()
                     .ok_or_else(|| fail("recover", "prepared segment hash is missing"))?;
@@ -1328,9 +1872,10 @@ impl TransactionalStreamSink for TransactionalKafkaSink {
                 return Ok(());
             }
         }
-        self.producer
-            .begin_transaction()
-            .map_err(|error| fail("recover", &error.to_string()))?;
+        blocking_producer_call(&self.producer, &self.lifecycle, "recover", |producer| {
+            producer.begin_transaction()
+        })
+        .await?;
         for payload in &records {
             let record = FutureRecord::<Vec<u8>, Vec<u8>>::to(&self.config.topic).payload(payload);
             self.producer
@@ -1340,15 +1885,17 @@ impl TransactionalStreamSink for TransactionalKafkaSink {
         }
         self.write_ledger_marker(recovery.epoch(), recovery.pre_commit())
             .await?;
-        self.producer
-            .commit_transaction(Duration::from_secs(30))
-            .map_err(|error| fail("recover", &error.to_string()))
+        blocking_producer_call(&self.producer, &self.lifecycle, "recover", |producer| {
+            producer.commit_transaction(Duration::from_secs(30))
+        })
+        .await
     }
 
     async fn close(&mut self) -> Result<()> {
-        self.producer
-            .flush(Duration::from_secs(30))
-            .map_err(|error| fail("close", &error.to_string()))?;
+        blocking_producer_call(&self.producer, &self.lifecycle, "close", |producer| {
+            producer.flush(Duration::from_secs(30))
+        })
+        .await?;
         Ok(())
     }
 }
@@ -1357,6 +1904,7 @@ impl TransactionalStreamSink for TransactionalKafkaSink {
 pub struct OrdinaryKafkaSink {
     config: KafkaSinkConfig,
     producer: FutureProducer,
+    lifecycle: OnceLock<ProducerLifecycle>,
     sequence: u64,
 }
 
@@ -1367,8 +1915,12 @@ impl OrdinaryKafkaSink {
     ///
     /// Returns the connector error when the producer cannot be created.
     pub fn new(config: KafkaSinkConfig) -> Result<Self> {
-        let mut client = rdkafka::config::ClientConfig::new();
-        client.set("bootstrap.servers", &config.bootstrap_servers);
+        Self::new_with_password(config, None)
+    }
+
+    fn new_with_password(config: KafkaSinkConfig, password: Option<&SecretHandle>) -> Result<Self> {
+        let mut client =
+            kafka_client_config(&config.bootstrap_servers, &config.security, password)?;
         client.set("enable.idempotence", "true");
         client.set("message.timeout.ms", "30000");
         let producer: FutureProducer = client
@@ -1377,6 +1929,7 @@ impl OrdinaryKafkaSink {
         Ok(Self {
             config,
             producer,
+            lifecycle: OnceLock::new(),
             sequence: 0,
         })
     }
@@ -1400,9 +1953,10 @@ impl StreamSink for OrdinaryKafkaSink {
     }
 
     async fn close(&mut self) -> Result<()> {
-        self.producer
-            .flush(Duration::from_secs(30))
-            .map_err(|error| fail("close", &error.to_string()))?;
+        blocking_producer_call(&self.producer, &self.lifecycle, "close", |producer| {
+            producer.flush(Duration::from_secs(30))
+        })
+        .await?;
         Ok(())
     }
 }
@@ -1413,7 +1967,7 @@ use std::sync::Arc;
 use calc_flow::{
     ConnectorCapabilities, ConnectorDescriptor, ConnectorFactories, ConnectorKind,
     ConnectorRegistry, ConnectorSinkFactory, ConnectorSourceFactory, DeliveryCapability,
-    FormatDescriptor, FormatIdentity, SecretResolver, TransactionSupport, WatermarkSupport,
+    FormatDescriptor, FormatIdentity, TransactionSupport, WatermarkSupport,
 };
 
 use crate::{csv, json_lines};
@@ -1480,12 +2034,14 @@ impl ConnectorSourceFactory for KafkaSourceFactory {
     async fn open(
         &self,
         options: &JsonMap,
-        _secrets: &dyn SecretResolver,
+        secrets: &dyn SecretResolver,
     ) -> Result<Box<dyn StreamSource>> {
         let config = KafkaSourceConfig::from_options(options)?;
-        Ok(Box::new(KafkaSource::with_decoders(
+        let password = config.security.resolve_password(secrets)?;
+        Ok(Box::new(KafkaSource::with_decoders_and_password(
             config,
             &self.decoders,
+            password.as_ref(),
         )?))
     }
 }
@@ -1523,19 +2079,26 @@ impl ConnectorSinkFactory for KafkaSinkFactory {
     async fn open(
         &self,
         options: &JsonMap,
-        _secrets: &dyn SecretResolver,
+        secrets: &dyn SecretResolver,
     ) -> Result<Box<dyn StreamSink>> {
         let config = KafkaSinkConfig::from_options(options)?;
-        Ok(Box::new(OrdinaryKafkaSink::new(config)?))
+        let password = config.security.resolve_password(secrets)?;
+        Ok(Box::new(OrdinaryKafkaSink::new_with_password(
+            config,
+            password.as_ref(),
+        )?))
     }
 
     async fn open_transactional(
         &self,
         options: &JsonMap,
-        _secrets: &dyn SecretResolver,
+        secrets: &dyn SecretResolver,
     ) -> Result<Option<Box<dyn TransactionalStreamSink>>> {
         let config = KafkaSinkConfig::from_options(options)?;
-        Ok(Some(Box::new(TransactionalKafkaSink::new(config)?)))
+        let password = config.security.resolve_password(secrets)?;
+        Ok(Some(Box::new(TransactionalKafkaSink::new_with_password(
+            config, password,
+        )?)))
     }
 }
 
@@ -1565,6 +2128,10 @@ fn kafka_connector_descriptor() -> ConnectorDescriptor {
         ],
         config_schema: JsonMap::from([
             ("bootstrap_servers".to_string(), serde_json::json!("string")),
+            ("security_protocol".to_string(), serde_json::json!("string")),
+            ("ssl_ca_location".to_string(), serde_json::json!("string")),
+            ("sasl_mechanism".to_string(), serde_json::json!("string")),
+            ("sasl_username".to_string(), serde_json::json!("string")),
             ("topic".to_string(), serde_json::json!("string")),
             ("partitions".to_string(), serde_json::json!("array")),
             ("auto_offset_reset".to_string(), serde_json::json!("string")),
@@ -1581,7 +2148,7 @@ fn kafka_connector_descriptor() -> ConnectorDescriptor {
             ("max_epoch_rows".to_string(), serde_json::json!("u64")),
             ("max_epoch_bytes".to_string(), serde_json::json!("u64")),
         ]),
-        secret_slots: BTreeSet::new(),
+        secret_slots: ["sasl_password".to_string()].into_iter().collect(),
         required_secret_slots: BTreeSet::new(),
     }
 }
@@ -1627,6 +2194,79 @@ pub fn register_kafka_connectors_with_decoders(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn producer_lifecycle_call_runs_off_the_async_worker() {
+        let producer: FutureProducer = ClientConfig::new()
+            .set("bootstrap.servers", "127.0.0.1:1")
+            .create()
+            .unwrap();
+        let async_worker = std::thread::current().id();
+        let lifecycle = OnceLock::new();
+        blocking_producer_call(&producer, &lifecycle, "test", move |_| {
+            assert_ne!(std::thread::current().id(), async_worker);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropped_lifecycle_wait_keeps_late_begin_before_abort() {
+        let producer: FutureProducer = ClientConfig::new()
+            .set("bootstrap.servers", "127.0.0.1:1")
+            .create()
+            .unwrap();
+        let lifecycle = OnceLock::new();
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (started, started_rx) = std::sync::mpsc::channel();
+        let begin_order = Arc::clone(&order);
+        let mut begin = Box::pin(blocking_producer_call(
+            &producer,
+            &lifecycle,
+            "begin",
+            move |_| {
+                started.send(()).unwrap();
+                std::thread::sleep(Duration::from_millis(50));
+                begin_order.lock().unwrap().push("begin");
+                Ok(())
+            },
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), begin.as_mut())
+                .await
+                .is_err()
+        );
+        started_rx.recv().unwrap();
+        drop(begin);
+        let abort_order = Arc::clone(&order);
+        blocking_producer_call(&producer, &lifecycle, "abort", move |_| {
+            abort_order.lock().unwrap().push("abort");
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(&*order.lock().unwrap(), &["begin", "abort"]);
+    }
+
+    #[tokio::test]
+    async fn cancelled_open_retains_native_init_until_settled() {
+        let config = KafkaSinkConfig::from_options(&sink_options("json")).unwrap();
+        let mut sink = TransactionalKafkaSink::new(config).unwrap();
+        let (response, completion) = tokio::sync::oneshot::channel();
+        sink.init_inflight = Some(completion);
+        {
+            let settlement = sink.settle_open();
+            tokio::pin!(settlement);
+            tokio::select! {
+                result = &mut settlement => panic!("init settled before its native worker: {result:?}"),
+                () = tokio::task::yield_now() => {}
+            }
+            response.send(Ok(())).unwrap();
+            settlement.await.unwrap();
+        }
+        assert!(sink.init_inflight.is_none());
+    }
 
     fn source_options(format: &str) -> JsonMap {
         BTreeMap::from([
@@ -1945,6 +2585,271 @@ mod tests {
             ("output".into(), Value::String("events".into())),
             ("format".into(), Value::String(format.into())),
         ])
+    }
+
+    #[test]
+    fn prepared_recovery_evidence_binds_target_topic() {
+        let config = KafkaSinkConfig::from_options(&sink_options("json")).expect("config");
+        let records = vec![b"one".to_vec()];
+        let evidence = prepared_kafka_evidence(
+            &config,
+            calc_flow::Epoch::INITIAL,
+            1,
+            &"a".repeat(64),
+            &records,
+        )
+        .unwrap();
+        validate_prepared_evidence(
+            &config,
+            calc_flow::Epoch::INITIAL,
+            &evidence,
+            &records,
+            Some(&"a".repeat(64)),
+        )
+        .expect("matching topic is recoverable");
+        crate::evidence::assert_recovery_contract(&evidence, "topic", |candidate| {
+            validate_prepared_evidence(
+                &config,
+                calc_flow::Epoch::INITIAL,
+                candidate,
+                &records,
+                Some(&"a".repeat(64)),
+            )
+            .is_ok()
+        });
+        let mut wrong_schema = evidence.clone();
+        wrong_schema.insert("schema_hash".into(), Value::String("b".repeat(64)));
+        assert!(
+            validate_prepared_evidence(
+                &config,
+                calc_flow::Epoch::INITIAL,
+                &wrong_schema,
+                &records,
+                Some(&"a".repeat(64)),
+            )
+            .is_err(),
+            "live evidence cannot claim another Arrow schema"
+        );
+        let mut foreign = evidence.clone();
+        foreign.insert("topic".into(), Value::String("other-topic".into()));
+        assert!(
+            validate_prepared_evidence(
+                &config,
+                calc_flow::Epoch::INITIAL,
+                &foreign,
+                &records,
+                None
+            )
+            .is_err(),
+            "another target topic must fail closed"
+        );
+        let mut missing = evidence;
+        missing.remove("topic");
+        assert!(
+            validate_prepared_evidence(
+                &config,
+                calc_flow::Epoch::INITIAL,
+                &missing,
+                &records,
+                None
+            )
+            .is_err(),
+            "missing target topic must fail closed"
+        );
+        missing.insert("topic".into(), Value::String(config.topic.clone()));
+        missing.insert("format".into(), Value::String("csv".into()));
+        assert!(
+            validate_prepared_evidence(
+                &config,
+                calc_flow::Epoch::INITIAL,
+                &missing,
+                &records,
+                None
+            )
+            .is_err(),
+            "a different wire format must fail closed"
+        );
+    }
+
+    #[test]
+    fn ledger_marker_binds_target_topic() {
+        let marker = |topic: Option<&str>| {
+            let mut payload = serde_json::json!({
+                "epoch": 1,
+                "transactional_id": "calc-flow-test",
+                "schema_hash": "a".repeat(64),
+                "segment_sha256": "a".repeat(64),
+            });
+            if let Some(topic) = topic {
+                payload["topic"] = Value::String(topic.into());
+            }
+            serde_json::from_value::<KafkaLedgerMarker>(payload).expect("marker parses")
+        };
+        validate_ledger_marker_target(&marker(Some("events")), "events")
+            .expect("matching target recovers");
+        assert!(validate_ledger_marker_target(&marker(Some("other")), "events").is_err());
+        assert!(validate_ledger_marker_target(&marker(None), "events").is_err());
+        let expected = BTreeMap::from([("schema_hash".into(), Value::String("a".repeat(64)))]);
+        validate_ledger_marker_schema(&marker(Some("events")), &expected)
+            .expect("matching schema recovers");
+        let changed = BTreeMap::from([("schema_hash".into(), Value::String("b".repeat(64)))]);
+        assert!(validate_ledger_marker_schema(&marker(Some("events")), &changed).is_err());
+    }
+
+    #[test]
+    fn schema_hash_distinguishes_equal_wire_payloads() {
+        use arrow::datatypes::{DataType, Field, Schema};
+
+        let narrow = Schema::new(vec![Field::new("a", DataType::Int32, false)]);
+        let wide = Schema::new(vec![Field::new("a", DataType::Int64, false)]);
+        assert_ne!(
+            kafka_schema_hash(KafkaFormat::Json, Some(&narrow)),
+            kafka_schema_hash(KafkaFormat::Json, Some(&wide)),
+        );
+    }
+
+    #[test]
+    fn sasl_tls_options_use_a_secret_and_configure_librdkafka() {
+        let mut options = sink_options("json");
+        options.insert("security_protocol".into(), Value::String("sasl_ssl".into()));
+        options.insert(
+            "sasl_mechanism".into(),
+            Value::String("SCRAM-SHA-512".into()),
+        );
+        options.insert("sasl_username".into(), Value::String("worker".into()));
+        options.insert(
+            "ssl_ca_location".into(),
+            Value::String("/tmp/ca.pem".into()),
+        );
+        calc_flow::validate_connector_options(&kafka_connector_descriptor(), &options)
+            .expect("security options are declared");
+        let config = KafkaSinkConfig::from_options(&options).expect("SASL over TLS parses");
+        let password = SecretHandle::from_bytes(b"private-password");
+        let client =
+            kafka_client_config(&config.bootstrap_servers, &config.security, Some(&password))
+                .expect("resolved password configures client");
+        assert_eq!(client.get("security.protocol"), Some("sasl_ssl"));
+        assert_eq!(client.get("sasl.mechanism"), Some("SCRAM-SHA-512"));
+        assert_eq!(client.get("sasl.username"), Some("worker"));
+        assert_eq!(client.get("sasl.password"), Some("private-password"));
+        assert_eq!(client.get("ssl.ca.location"), Some("/tmp/ca.pem"));
+        assert!(kafka_client_config(&config.bootstrap_servers, &config.security, None).is_err());
+
+        options.insert("sasl_password".into(), Value::String("literal".into()));
+        assert!(
+            calc_flow::validate_connector_options(&kafka_connector_descriptor(), &options).is_err(),
+            "passwords are secret references, never project options"
+        );
+        assert!(KafkaSinkConfig::from_options(&options).is_err());
+    }
+
+    #[test]
+    fn security_options_reject_incomplete_or_incompatible_combinations() {
+        let mut options = sink_options("json");
+        options.insert("security_protocol".into(), Value::String("sasl_ssl".into()));
+        assert!(KafkaSinkConfig::from_options(&options).is_err());
+        options.insert("sasl_mechanism".into(), Value::String("PLAIN".into()));
+        options.insert("sasl_username".into(), Value::String("worker".into()));
+        assert!(KafkaSinkConfig::from_options(&options).is_ok());
+        options.insert(
+            "security_protocol".into(),
+            Value::String("plaintext".into()),
+        );
+        assert!(KafkaSinkConfig::from_options(&options).is_err());
+        options.remove("sasl_mechanism");
+        options.remove("sasl_username");
+        options.insert(
+            "ssl_ca_location".into(),
+            Value::String("/tmp/ca.pem".into()),
+        );
+        assert!(KafkaSinkConfig::from_options(&options).is_err());
+
+        let mut public_config = KafkaSinkConfig::from_options(&sink_options("json")).unwrap();
+        public_config.security.protocol = KafkaSecurityProtocol::SaslSsl;
+        assert!(OrdinaryKafkaSink::new(public_config).is_err());
+    }
+
+    struct PasswordResolver;
+
+    impl SecretResolver for PasswordResolver {
+        fn has_reference(&self, reference: &SecretReference) -> Option<bool> {
+            Some(reference.key == "sasl_password")
+        }
+
+        fn resolve(&self, reference: &SecretReference) -> Result<SecretHandle> {
+            assert_eq!(reference.key, "sasl_password");
+            Ok(SecretHandle::from_bytes(b"private-password"))
+        }
+    }
+
+    struct UnresolvedPasswordReference;
+
+    impl SecretResolver for UnresolvedPasswordReference {
+        fn has_reference(&self, reference: &SecretReference) -> Option<bool> {
+            Some(reference.key == "sasl_password")
+        }
+
+        fn resolve(&self, _reference: &SecretReference) -> Result<SecretHandle> {
+            Err(CalcFlowError::NotFound {
+                resource: "secret".into(),
+                key: "sasl_password".into(),
+            })
+        }
+    }
+
+    struct UnknownPasswordReference;
+
+    impl SecretResolver for UnknownPasswordReference {
+        fn resolve(&self, _reference: &SecretReference) -> Result<SecretHandle> {
+            Err(CalcFlowError::NotFound {
+                resource: "secret".into(),
+                key: "sasl_password".into(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn factories_resolve_sasl_password_for_source_and_sink() {
+        let security = [
+            ("security_protocol".into(), Value::String("sasl_ssl".into())),
+            ("sasl_mechanism".into(), Value::String("PLAIN".into())),
+            ("sasl_username".into(), Value::String("worker".into())),
+        ];
+        let mut source = source_options("json");
+        source.extend(security.clone());
+        KafkaSourceFactory::new()
+            .open(&source, &PasswordResolver)
+            .await
+            .expect("source factory uses password secret");
+
+        let mut sink = sink_options("json");
+        sink.extend(security);
+        KafkaSinkFactory::new()
+            .open(&sink, &PasswordResolver)
+            .await
+            .expect("sink factory uses password secret");
+    }
+
+    #[tokio::test]
+    async fn plaintext_binding_rejects_supplied_password_secret() {
+        let error = KafkaSinkFactory::new()
+            .open(&sink_options("json"), &PasswordResolver)
+            .await
+            .err()
+            .expect("plaintext must reject a supplied SASL password");
+        assert!(error.to_string().contains("sasl_password"), "{error}");
+        let error = KafkaSinkFactory::new()
+            .open(&sink_options("json"), &UnresolvedPasswordReference)
+            .await
+            .err()
+            .expect("an unresolved declared password still blocks plaintext");
+        assert!(error.to_string().contains("sasl_password"), "{error}");
+        let error = KafkaSinkFactory::new()
+            .open(&sink_options("json"), &UnknownPasswordReference)
+            .await
+            .err()
+            .expect("unknown secret presence cannot allow plaintext");
+        assert!(error.to_string().contains("sasl_password"), "{error}");
     }
 
     fn sample_batch() -> Batch {

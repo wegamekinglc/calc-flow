@@ -1209,6 +1209,9 @@ mod tests {
             .unwrap();
         let metadata = checkpoint_metadata(&mut operator, 1);
         assert_eq!(metadata["metrics"]["left"]["retained_rows"], 2);
+        let right_plan = operator.side_plan("right").unwrap();
+        operator.opposite_state_keys(&right_plan).unwrap();
+        assert!(operator.retained_key_cache.left.is_some());
 
         let eviction = progress_context(
             &job_context,
@@ -1219,6 +1222,7 @@ mod tests {
             .on_ingress_progress("right", &eviction)
             .await
             .unwrap();
+        assert!(operator.retained_key_cache.left.is_none());
         let metadata = checkpoint_metadata(&mut operator, 2);
         let left_metrics = serde_json::to_string(&metadata["metrics"]["left"]).unwrap();
         assert!(
@@ -1232,7 +1236,10 @@ mod tests {
             (IngressState::Active, Some(1_000_000)),
             (IngressState::Ended, Some(50_000_000)),
         );
+        operator.opposite_state_keys(&right_plan).unwrap();
+        assert!(operator.retained_key_cache.left.is_some());
         operator.on_ingress_progress("right", &ended).await.unwrap();
+        assert!(operator.retained_key_cache.left.is_none());
         let metadata = checkpoint_metadata(&mut operator, 3);
         assert_eq!(metadata["metrics"]["left"]["retained_rows"], 0);
     }
@@ -1574,6 +1581,57 @@ mod tests {
     }
 
     #[test]
+    fn unchanged_opposite_state_reuses_join_key_arrays() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let first_record = right_batch(vec![0]).table_payload().unwrap().batches()[0].clone();
+        operator.state.right.push(StoredRow {
+            encoded_key: Arc::new(encode_join_key_v1(&first_record, 0, &[0]).unwrap()),
+            record: first_record,
+            event_time: EventTime::from_micros(0),
+            row_id: 0,
+            charge: 64,
+        });
+        let plan = operator.side_plan("left").unwrap();
+        let first = operator.opposite_state_keys(&plan).unwrap();
+        let reused = operator.opposite_state_keys(&plan).unwrap();
+        assert!(Arc::ptr_eq(first.column(0), reused.column(0)));
+
+        let second_record = right_batch(vec![1]).table_payload().unwrap().batches()[0].clone();
+        operator.state.right.push(StoredRow {
+            encoded_key: Arc::new(encode_join_key_v1(&second_record, 0, &[0]).unwrap()),
+            record: second_record,
+            event_time: EventTime::from_micros(1),
+            row_id: 1,
+            charge: 64,
+        });
+        let rebuilt = operator.opposite_state_keys(&plan).unwrap();
+        assert!(!Arc::ptr_eq(first.column(0), rebuilt.column(0)));
+        assert_eq!(rebuilt.num_rows(), 2);
+    }
+
+    #[tokio::test]
+    async fn admitted_rows_release_the_previous_key_cache() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        let job_context = job();
+        let context = StreamOperatorContext::new(&job_context, "match", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("left", left_batch(vec![0]), &context, &mut collector)
+            .await
+            .unwrap();
+        let plan = operator.side_plan("right").unwrap();
+        operator.opposite_state_keys(&plan).unwrap();
+        assert!(operator.retained_key_cache.left.is_some());
+        operator
+            .process_data("left", left_batch(vec![1]), &context, &mut collector)
+            .await
+            .unwrap();
+        assert!(operator.retained_key_cache.left.is_none());
+    }
+
+    #[test]
     fn metadata_exposes_data_only_configuration_and_debug() {
         let operator =
             StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
@@ -1857,6 +1915,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
     io::Cursor,
+    mem::size_of,
     sync::Arc,
     time::Duration,
 };
@@ -1884,9 +1943,9 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::Value;
 
 use crate::{
-    Batch, BatchKind, BatchMetadata, CalcFlowError, DataFusionConfig, DataFusionRuntime, Epoch,
-    EventTime, IngressProgress, JsonMap, OperatorStateSnapshot, Port, Result, StateSegment,
-    StreamCollector, StreamOperator, StreamOperatorContext, UdfRegistrySnapshot,
+    Batch, BatchKind, BatchMetadata, CalcFlowError, DataFusionConfig, Epoch, EventTime,
+    IngressProgress, JsonMap, OperatorStateSnapshot, Port, Result, StateSegment, StreamCollector,
+    StreamOperator, StreamOperatorContext, UdfRegistrySnapshot,
 };
 
 use super::{OperatorMetadata, StreamRuntimeState, is_portable_identifier, validate_operator_name};
@@ -2285,6 +2344,20 @@ pub struct StreamJoinOperator {
     compiled: CompiledJoin,
     runtime: StreamRuntimeState,
     state: StreamJoinState,
+    retained_key_cache: RetainedKeyCache,
+}
+
+const MAX_RETAINED_KEY_CACHE_BYTES_PER_SIDE: usize = 32 * 1024 * 1024;
+
+#[derive(Default)]
+struct RetainedKeyCache {
+    left: Option<CachedRetainedKeys>,
+    right: Option<CachedRetainedKeys>,
+}
+
+struct CachedRetainedKeys {
+    row_ids: Vec<u64>,
+    batch: RecordBatch,
 }
 
 #[derive(Clone)]
@@ -2508,6 +2581,7 @@ impl StreamJoinOperator {
             compiled,
             runtime: StreamRuntimeState::new(),
             state: StreamJoinState::default(),
+            retained_key_cache: RetainedKeyCache::default(),
         })
     }
 
@@ -2779,25 +2853,30 @@ impl StreamJoinOperator {
         plan: &SidePlan,
         admitted: &[AdmittedRow],
     ) -> Result<Vec<MatchedPair>> {
+        if admitted.is_empty()
+            || (if plan.incoming_is_left {
+                self.state.right.is_empty()
+            } else {
+                self.state.left.is_empty()
+            })
+        {
+            return Ok(Vec::new());
+        }
+        let state_keys = self.opposite_state_keys(plan)?;
         let runtime = self.runtime.runtime()?;
         let opposite = if plan.incoming_is_left {
             self.state.right.as_slice()
         } else {
             self.state.left.as_slice()
         };
-        if admitted.is_empty() || opposite.is_empty() {
-            return Ok(Vec::new());
-        }
-        let matched = matched_pairs(
-            runtime,
-            &self.compiled,
-            &self.spec,
-            plan,
-            admitted,
-            opposite,
-            &self.name,
-        )
-        .await?;
+        let probe = probe_key_batch(admitted, &plan.key_indices)?;
+        let tables = equality_tables(probe, state_keys)?;
+        let result = runtime
+            .sql(&self.compiled.equality_query, &tables, Some(&self.name))
+            .await?;
+        let equal_pairs = decode_key_pairs(&result)?;
+        let matched =
+            filter_and_order_pairs(&self.spec.bounds, plan, admitted, opposite, equal_pairs);
         enforce_match_limit(
             matched.len(),
             &mut self.state.metrics.match_limit_failures,
@@ -2805,6 +2884,39 @@ impl StreamJoinOperator {
             &self.name,
         )?;
         Ok(matched)
+    }
+
+    fn opposite_state_keys(&mut self, plan: &SidePlan) -> Result<RecordBatch> {
+        let (opposite, cached) = if plan.incoming_is_left {
+            (&self.state.right, &mut self.retained_key_cache.right)
+        } else {
+            (&self.state.left, &mut self.retained_key_cache.left)
+        };
+        if let Some(existing) = cached.as_ref()
+            && existing.row_ids.len() == opposite.len()
+            && existing
+                .row_ids
+                .iter()
+                .zip(opposite)
+                .all(|(row_id, row)| *row_id == row.row_id)
+        {
+            return Ok(existing.batch.clone());
+        }
+        let batch = state_key_batch(opposite, &self.compiled, plan)?;
+        let bytes = batch
+            .columns()
+            .iter()
+            .try_fold(0_usize, |total, array| {
+                total.checked_add(array.get_array_memory_size())
+            })
+            .and_then(|total| total.checked_add(opposite.len().checked_mul(size_of::<u64>())?));
+        *cached = bytes
+            .filter(|&bytes| bytes <= MAX_RETAINED_KEY_CACHE_BYTES_PER_SIDE)
+            .map(|_| CachedRetainedKeys {
+                row_ids: opposite.iter().map(|row| row.row_id).collect(),
+                batch: batch.clone(),
+            });
+        Ok(batch)
     }
 
     fn validate_state_admission(
@@ -2818,8 +2930,11 @@ impl StreamJoinOperator {
             &self.state.right
         };
         let (rows, bytes) = prospective_state_charge(current, retained, &self.name)?;
-        if rows > self.spec.limits.max_state_rows_per_side
-            || bytes > self.spec.limits.max_state_bytes_per_side
+        if !super::StateBudget::new(
+            self.spec.limits.max_state_rows_per_side,
+            self.spec.limits.max_state_bytes_per_side,
+        )?
+        .allows(rows, bytes)
         {
             self.state.metrics.state_limit_failures = checked_metric(
                 self.state.metrics.state_limit_failures,
@@ -2848,8 +2963,11 @@ impl StreamJoinOperator {
                 .ok_or_else(|| CalcFlowError::CheckpointMismatch {
                     message: format!("stream Join {:?} {side} byte charge overflowed", self.name),
                 })?;
-            if row_count > self.spec.limits.max_state_rows_per_side
-                || byte_count > self.spec.limits.max_state_bytes_per_side
+            if !super::StateBudget::new(
+                self.spec.limits.max_state_rows_per_side,
+                self.spec.limits.max_state_bytes_per_side,
+            )?
+            .allows(row_count, byte_count)
             {
                 return Err(CalcFlowError::CheckpointMismatch {
                     message: format!(
@@ -2935,11 +3053,17 @@ impl StreamJoinOperator {
         }
         if side == JoinSide::Left {
             self.state.next_left_row_id = prepared.next_row_id;
+            if !prepared.retained.is_empty() {
+                self.retained_key_cache.left = None;
+            }
             self.state.left.extend(prepared.retained);
             self.state.metrics.left = metrics;
             refresh_retained_metrics(&mut self.state.metrics.left, &self.state.left, &self.name)?;
         } else {
             self.state.next_right_row_id = prepared.next_row_id;
+            if !prepared.retained.is_empty() {
+                self.retained_key_cache.right = None;
+            }
             self.state.right.extend(prepared.retained);
             self.state.metrics.right = metrics;
             refresh_retained_metrics(&mut self.state.metrics.right, &self.state.right, &self.name)?;
@@ -3070,6 +3194,7 @@ impl StreamOperator for StreamJoinOperator {
         }
         match ingress {
             "left" => {
+                let before = self.state.right.len();
                 evict_opposite(
                     &mut self.state.right,
                     progress,
@@ -3079,8 +3204,12 @@ impl StreamOperator for StreamJoinOperator {
                     &mut self.state.deltas.pending,
                     &self.name,
                 )?;
+                if self.state.right.len() != before {
+                    self.retained_key_cache.right = None;
+                }
             }
             "right" => {
+                let before = self.state.left.len();
                 evict_opposite(
                     &mut self.state.left,
                     progress,
@@ -3090,6 +3219,9 @@ impl StreamOperator for StreamJoinOperator {
                     &mut self.state.deltas.pending,
                     &self.name,
                 )?;
+                if self.state.left.len() != before {
+                    self.retained_key_cache.left = None;
+                }
             }
             _ => {
                 return Err(operator_error(
@@ -3139,6 +3271,7 @@ impl StreamOperator for StreamJoinOperator {
         );
         self.state.left.clear();
         self.state.right.clear();
+        self.retained_key_cache = RetainedKeyCache::default();
         self.state.metrics.left.retained_rows = 0;
         self.state.metrics.left.retained_bytes = 0;
         self.state.metrics.right.retained_rows = 0;
@@ -3149,6 +3282,7 @@ impl StreamOperator for StreamJoinOperator {
 
     fn reset(&mut self) -> Result<()> {
         self.state = StreamJoinState::default();
+        self.retained_key_cache = RetainedKeyCache::default();
         Ok(())
     }
 
@@ -3251,6 +3385,7 @@ impl StreamOperator for StreamJoinOperator {
                 ..DeltaTracking::default()
             },
         };
+        self.retained_key_cache = RetainedKeyCache::default();
         Ok(())
     }
 }
@@ -3399,33 +3534,6 @@ fn late_lateness(
         u64::try_from(i128::from(watermark.as_micros()) - i128::from(event_time.as_micros()))
             .map_err(|_| counter_overflow(operator_id, "lateness"))?;
     Ok(Some(lateness))
-}
-
-/// Runs the batched key-equality probe and returns the time-qualified pairs
-/// in emission order.
-async fn matched_pairs(
-    runtime: &DataFusionRuntime,
-    compiled: &CompiledJoin,
-    spec: &StreamJoinSpec,
-    plan: &SidePlan,
-    admitted: &[AdmittedRow],
-    opposite: &[StoredRow],
-    operator_id: &str,
-) -> Result<Vec<MatchedPair>> {
-    let probe = probe_key_batch(admitted, &plan.key_indices)?;
-    let state_keys = state_key_batch(opposite, compiled, plan)?;
-    let tables = equality_tables(probe, state_keys)?;
-    let result = runtime
-        .sql(&compiled.equality_query, &tables, Some(operator_id))
-        .await?;
-    let equal_pairs = decode_key_pairs(&result)?;
-    Ok(filter_and_order_pairs(
-        &spec.bounds,
-        plan,
-        admitted,
-        opposite,
-        equal_pairs,
-    ))
 }
 
 fn retained_rows(
@@ -4695,18 +4803,14 @@ fn evict_opposite(
         );
         rows.clear();
     } else if let Some(watermark) = progress.watermark() {
-        let mut index = 0;
-        while index < rows.len() {
-            let expired = i128::from(rows[index].event_time.as_micros())
-                + i128::from(extension_micros)
+        rows.retain(|row| {
+            let expired = i128::from(row.event_time.as_micros()) + i128::from(extension_micros)
                 < i128::from(watermark.as_micros());
             if expired {
-                let row = rows.remove(index);
                 evicted_identities.push((row.row_id, row.event_time, Arc::clone(&row.encoded_key)));
-            } else {
-                index += 1;
             }
-        }
+            !expired
+        });
     }
     record_tombstones(pending, side, evicted_identities);
     let evicted = u64::try_from(before - rows.len())

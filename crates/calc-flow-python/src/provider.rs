@@ -882,19 +882,31 @@ impl calc_flow::BatchOperator for PythonOperator {
             outputs: output_contracts,
         } = &self.mode
         {
-            return Python::attach(|py| {
-                call_python_operator_mapping(
-                    py,
-                    &self.callback,
-                    inputs,
-                    input_contracts,
-                    output_contracts,
-                    &self.outputs,
-                    &self.options_json,
-                    self.accepts_context.then_some(context.run),
-                )
+            let callback = Arc::clone(&self.callback);
+            let batches = inputs.clone();
+            let input_contracts = input_contracts.clone();
+            let output_contracts = output_contracts.clone();
+            let output_ports = self.outputs.clone();
+            let options_json = self.options_json.clone();
+            let run = self.accepts_context.then(|| context.run.clone());
+            return tokio::task::spawn_blocking(move || {
+                Python::attach(|py| {
+                    call_python_operator_mapping(
+                        py,
+                        &callback,
+                        &batches,
+                        &input_contracts,
+                        &output_contracts,
+                        &output_ports,
+                        &options_json,
+                        run.as_ref(),
+                    )
+                })
+                .map_err(|error| error.to_string())
             })
-            .map_err(|error| self.provider_error(error.to_string()));
+            .await
+            .map_err(|_| self.provider_error("batch callback worker terminated"))?
+            .map_err(|message| self.provider_error(message));
         }
         let input = inputs
             .get("input")
@@ -908,16 +920,19 @@ impl calc_flow::BatchOperator for PythonOperator {
             .ok_or_else(|| {
                 self.provider_error("input payload was not created by the Python host")
             })?;
-        let output = Python::attach(|py| {
-            call_python_operator(
-                py,
-                &self.callback,
-                input,
-                &self.options_json,
-                self.accepts_context.then_some(context.run),
-            )
+        let callback = Arc::clone(&self.callback);
+        let input = input.clone();
+        let options_json = self.options_json.clone();
+        let run = self.accepts_context.then(|| context.run.clone());
+        let output = tokio::task::spawn_blocking(move || {
+            Python::attach(|py| {
+                call_python_operator(py, &callback, &input, &options_json, run.as_ref())
+            })
+            .map_err(|error| error.to_string())
         })
-        .map_err(|error| self.provider_error(error.to_string()))?;
+        .await
+        .map_err(|_| self.provider_error("batch callback worker terminated"))?
+        .map_err(|message| self.provider_error(message))?;
         let output_payload = output
             .external_payload()
             .map_err(|error| self.provider_error(error.to_string()))?;
@@ -1409,6 +1424,56 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("not created by the Python host"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn batch_python_callback_runs_off_the_runtime_thread() {
+        Python::initialize();
+        let runtime_thread = Python::attach(|py| {
+            py.import("threading")
+                .unwrap()
+                .call_method0("get_ident")
+                .unwrap()
+                .extract::<u64>()
+                .unwrap()
+        });
+        let (root, callback) = Python::attach(|py| {
+            let locals = PyDict::new(py);
+            py.run(
+                c"class Callback:\n    def __init__(self): self.thread = None\n    def __call__(self, batch, options):\n        self.thread = __import__('threading').get_ident()\n        return batch\ncallback = Callback()",
+                None,
+                Some(&locals),
+            )
+            .unwrap();
+            let callback = locals.get_item("callback").unwrap().unwrap().unbind();
+            (Arc::new(PythonRoot::new(callback.clone_ref(py))), callback)
+        });
+        let factory = PythonOperatorFactory::new(root, "python", "identity", "1");
+        let spec = calc_flow::ExternalOperatorSpec::new("python", "identity", "1", BTreeMap::new())
+            .unwrap();
+        let mut operator = factory
+            .create(&spec, vec![array_port("input")], vec![array_port("output")])
+            .unwrap();
+        let input = Python::attach(python_array_batch);
+        let run =
+            calc_flow::RunContext::new(BTreeMap::new(), None, calc_flow::CancellationToken::new())
+                .unwrap();
+        operator
+            .process(
+                &BTreeMap::from([("input".into(), input)]),
+                &calc_flow::BatchOperatorContext { run: &run },
+            )
+            .await
+            .unwrap();
+        let callback_thread = Python::attach(|py| {
+            callback
+                .bind(py)
+                .getattr("thread")
+                .unwrap()
+                .extract::<u64>()
+                .unwrap()
+        });
+        assert_ne!(callback_thread, runtime_thread);
     }
 
     #[test]

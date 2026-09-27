@@ -133,3 +133,33 @@ def test_sse_preserves_explicit_null_asof_watermarks(tmp_path):
         next(line[6:] for line in frame.splitlines() if line.startswith("data: "))
     )
     assert payload["stream_asof_joins"][0]["output_watermark_micros"] is None
+
+
+def test_sse_does_not_hold_a_threadpool_worker_while_idle(tmp_path):
+    from calc_flow_studio.app import create_app
+
+    observed_timeouts: list[float] = []
+
+    def wait_for_events(
+        _job_id: str, *, after_sequence: int, timeout: float
+    ) -> tuple[tuple[RunEvent, ...], RunStatus]:
+        assert after_sequence == -1
+        observed_timeouts.append(timeout)
+        return (), RunStatus.COMPLETED
+
+    manager = SimpleNamespace(
+        get_job=lambda _job_id: None, wait_for_events=wait_for_events
+    )
+    app = create_app(project_directory=tmp_path / "projects", run_manager=manager)
+    endpoint = next(
+        route.endpoint
+        for route in app.routes
+        if getattr(route, "path", "").endswith("/events")
+    )
+
+    async def read() -> list[str]:
+        response = await endpoint("idle", None)
+        return [frame async for frame in response.body_iterator]
+
+    assert asyncio.run(read()) == ["retry: 500\n\n"]
+    assert observed_timeouts == [0.0]

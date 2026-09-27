@@ -54,6 +54,7 @@ pub(crate) mod runner;
 )]
 mod sink_task;
 #[cfg(test)]
+#[path = "../../../benches/support/streaming_soak.rs"]
 mod soak;
 #[allow(
     dead_code,

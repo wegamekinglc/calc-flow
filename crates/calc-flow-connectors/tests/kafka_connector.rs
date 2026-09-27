@@ -200,6 +200,10 @@ async fn unreachable_broker_surfaces_as_idleness() {
 
 #[test]
 #[ignore = "broker-backed; set CALC_FLOW_CONNECTOR_CONTAINERS=1 with a Kafka/Redpanda service"]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one gated broker flow verifies commit, recovery, and foreign-target rejection"
+)]
 fn kafka_roundtrip_and_transactional_exactly_once() {
     if !containers_enabled() {
         return;
@@ -240,8 +244,8 @@ fn kafka_roundtrip_and_transactional_exactly_once() {
         let batch = sample_batch();
         let mut sink =
             calc_flow_connectors::kafka::TransactionalKafkaSink::new(sink_config.clone())
-                .expect("transactional producer initializes");
-        sink.open().await.expect("opens");
+                .expect("transactional producer is constructed");
+        sink.open().await.expect("initializes and opens");
         sink.begin_epoch(calc_flow::Epoch::INITIAL)
             .await
             .expect("begins");
@@ -254,15 +258,21 @@ fn kafka_roundtrip_and_transactional_exactly_once() {
             .pre_commit_segments(calc_flow::Epoch::INITIAL)
             .await
             .expect("prepared records");
+        let foreign_segments = segments.clone();
+        let mut foreign_evidence = evidence.clone();
+        foreign_evidence.insert("topic".into(), json!("another-target"));
         sink.commit(calc_flow::Epoch::INITIAL, &evidence)
             .await
             .expect("commits");
         sink.close().await.expect("first producer closes");
 
         let mut recovery_sink =
-            calc_flow_connectors::kafka::TransactionalKafkaSink::new(sink_config)
-                .expect("new producer fences stale ownership");
-        recovery_sink.open().await.expect("recovery sink opens");
+            calc_flow_connectors::kafka::TransactionalKafkaSink::new(sink_config.clone())
+                .expect("new producer is constructed");
+        recovery_sink
+            .open()
+            .await
+            .expect("recovery sink fences and opens");
         recovery_sink
             .recover(
                 &calc_flow::SinkRecovery::from_parts(
@@ -282,6 +292,33 @@ fn kafka_roundtrip_and_transactional_exactly_once() {
             .close()
             .await
             .expect("recovery producer closes");
+
+        let mut foreign_config = sink_config;
+        foreign_config.topic = "another-target".into();
+        let mut foreign_sink =
+            calc_flow_connectors::kafka::TransactionalKafkaSink::new(foreign_config)
+                .expect("foreign target producer initializes");
+        foreign_sink
+            .open()
+            .await
+            .expect("foreign target ledger opens");
+        let error = foreign_sink
+            .recover(
+                &calc_flow::SinkRecovery::from_parts(
+                    calc_flow::Epoch::INITIAL,
+                    false,
+                    calc_flow::SinkDelivery::EpochIdempotent {
+                        mechanism: "kafka-ledger".into(),
+                        retention: calc_flow::RetentionClass::Unbounded,
+                    },
+                    foreign_evidence,
+                )
+                .with_segments(foreign_segments),
+            )
+            .await
+            .expect_err("another target cannot reuse a committed ledger marker");
+        assert!(error.to_string().contains("target topic"), "{error}");
+        foreign_sink.close().await.expect("foreign producer closes");
 
         let mut source =
             calc_flow_connectors::kafka::KafkaSource::new(config).expect("source constructs");
@@ -506,6 +543,10 @@ async fn factories_register_and_resolve_offline() {
 struct NoSecrets;
 
 impl calc_flow::SecretResolver for NoSecrets {
+    fn has_reference(&self, _reference: &calc_flow::SecretReference) -> Option<bool> {
+        Some(false)
+    }
+
     fn resolve(
         &self,
         reference: &calc_flow::SecretReference,

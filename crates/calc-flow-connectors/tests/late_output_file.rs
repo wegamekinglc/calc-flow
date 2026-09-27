@@ -3,12 +3,12 @@
 
 use async_trait::async_trait;
 use calc_flow::{
-    Batch, BatchMetadata, Cursor, DecodeBounds, DeliveryGuarantee, Epoch, EventTime, FormatDecoder,
-    JobState, JsonMap, ManagedCheckpointRuntime, NativeWatermarkCapability, OperatorMetadata,
-    PipelineBuilder, ReplayPositioning, Result, RollingOperator, SinkBinding, SinkRecovery,
-    SourceBinding, SourceCapabilities, SourceDeliveryCapability, SourceEvent, SourceSchema,
-    StreamRequirements, StreamRuntimeConfig, StreamSource, StreamingJob, StreamingRunner,
-    TransactionalStreamSink, UdfRegistry,
+    Batch, BatchMetadata, CheckpointPhase, Cursor, DecodeBounds, DeliveryGuarantee, Epoch,
+    EventTime, FormatDecoder, JobState, JsonMap, ManagedCheckpointRuntime,
+    NativeWatermarkCapability, OperatorMetadata, PipelineBuilder, ReplayPositioning, Result,
+    RollingOperator, SinkBinding, SinkRecovery, SourceBinding, SourceCapabilities,
+    SourceDeliveryCapability, SourceEvent, SourceSchema, StreamRequirements, StreamRuntimeConfig,
+    StreamSource, StreamingJob, StreamingRunner, TransactionalStreamSink, UdfRegistry,
 };
 use calc_flow_connectors::{FileSinkConfig, TransactionalParquetSink, parquet::ParquetCodec};
 use datafusion::arrow::{
@@ -796,13 +796,32 @@ async fn test_late_files_blocked_barrier_times_out_without_confirming_partial_ep
             .is_err()
     );
     let failed = job.wait().await;
-    assert_eq!(failed.state, JobState::Failed, "{failed:?}");
+    // A sink abort can also exceed this deliberately short checkpoint timeout.
+    // In that case the transaction is uncertain and recovery is required.
+    assert!(
+        matches!(failed.state, JobState::Failed | JobState::RecoveryRequired),
+        "{failed:?}"
+    );
     assert_eq!(
         failed.errors[0].category(),
         calc_flow::StreamingErrorCategory::CheckpointTimeout
     );
     assert!(failed.completed_epoch.is_none());
-    assert!(job.status().checkpoint.sink_commit_acks < 2);
+    let checkpoint = job.status().checkpoint;
+    assert_eq!(checkpoint.installed_unknown_epoch, None);
+    assert!(
+        matches!(
+            checkpoint.phase,
+            Some(
+                CheckpointPhase::Requested
+                    | CheckpointPhase::SourcesCut
+                    | CheckpointPhase::OperatorsSnapshotted
+                    | CheckpointPhase::SinksPrecommitted
+            )
+        ),
+        "manifest must not be installed or durable: {checkpoint:?}"
+    );
+    assert!(checkpoint.sink_commit_acks < 2);
     assert_settled(&job);
     assert_eq!(probe.sink_drops.load(Ordering::SeqCst), 2);
     assert!(rows(root.path(), "normal").is_empty());

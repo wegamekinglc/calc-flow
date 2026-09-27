@@ -10,7 +10,7 @@
 
 以 `crates/calc-flow/src/lib.rs` 的导出、`python/calc_flow/__init__.py` 和 `pyproject.toml`、`web-ui/backend/pyproject.toml`、`web-ui/backend/src/calc_flow_studio/app.py`、`web-ui/openapi.json`、`web-ui/package.json`、`.github/workflows/ci-linux.yml` 和仓库脚本为依据，复核当前 API、版本、命令、REST 路由、安全要求和 CI 超时。核对 `AGENTS.md`、`docs/introduction.md`、`docs/README.md`、`README.md`、相关用户指南及同名 agent 定义；`.codex/artifacts/`、`design/` 的旧路径和旧版本描述按历史决策记录处理，不改写为当前规范。
 
-- `CLAUDE.md` 把核心 Python 最低版本写成 3.13，并把 Linux 预编译和执行都写成 30 分钟；已对齐包要求的 CPython 3.9+、Studio 的 Python 3.13+，以及 CI 的 45/30 分钟。
+- 基线 `CLAUDE.md` 把核心 Python 最低版本写成 3.13，并把 Linux 预编译和执行都写成 30 分钟。合并最新 `main` 时沿用其精简版，统一指向 `AGENTS.md`；后者已明确核心包 CPython 3.9+、Studio Python 3.13+，以及 CI 的 45/30 分钟。
 - `web-ui/backend/README.md` 称核心依赖为 “v5”；已按 Studio 的 `pyproject.toml` 写明 `calc-flow-python>=2026.9.25,<2027`。
 - `docs/api-reference.md` 遗漏实际存在的 `GET /api/v3/session` 和写请求 token 要求；已补齐路由、`X-Calc-Flow-Session`、本地 Host/Origin 限制及该路由不进入 OpenAPI 的事实，并删除规范页中的旧版本迁移叙述。
 - `.claude/agents/README.md` 的固定全阶段流程与 reviewer 职责描述落后于 `.codex/agents/README.md`；已从 canonical 语义同步为按需路由和独立评审。
@@ -42,4 +42,4 @@
 - 行内代码路径筛出 301 个不同的仓库根相对候选；75 次不存在的引用位于历史 spec/analysis/design、未来示例占位或旧路径说明，现行用户文档没有此类候选。历史记录保留原貌。
 - 40 个现行根目录、`docs/`、Studio、examples 与 benchmarks Markdown 文件中的 99 个 Bash 代码块经 `bash -n` 检查，98 个通过；`docs/python-release.md` 的 `<version>` 是发布者须替换的占位符，原样执行会触发 shell 重定向语法错误。
 - `scripts/run_rust_tests.py`、`scripts/run_rust_coverage.py`、`scripts/run_examples.py`、Studio 启停脚本、schema、OpenAPI 与生成类型路径存在；`web-ui/package.json` 包含文档引用的 npm 命令。此环境有 `uv`、`cargo`、`npm`、`python`、`bash`、`curl`，没有 `pwsh`，故未在本机执行 Windows 命令。
-- 仅进行文档相关结构、链接、锚点、配置和 diff 检查；未运行构建或测试套件。独立 cf-reviewer 评审和随后 PR 尚待协调器安排，本分支不自行合并。
+- 仅进行文档相关结构、链接、锚点、配置和 diff 检查；未运行构建或测试套件。原审计时独立 cf-reviewer 评审和 PR 尚待协调器安排；随后已在 PR #346 完成评审，本次合并冲突只保留最新 `main` 的精简 `CLAUDE.md` 并修正上述记录。

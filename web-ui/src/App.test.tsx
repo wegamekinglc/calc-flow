@@ -108,6 +108,23 @@ afterEach(() => {
 });
 
 describe('Calc Flow Studio', () => {
+  it('aborts pending initialization requests when the app unmounts', async () => {
+    const fetchMock = vi.fn<typeof fetch>(
+      () => new Promise<Response>(() => undefined),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { unmount } = render(<App />);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    const signals = fetchMock.mock.calls.map(([, init]) =>
+      (init as RequestInit | undefined)?.signal,
+    );
+    expect(signals.every((signal) => signal instanceof AbortSignal)).toBe(true);
+
+    unmount();
+    expect(signals.every((signal) => signal?.aborted)).toBe(true);
+  });
+
   it('offers exactly the Arrow types accepted by the Rust runtime', () => {
     expect(ARROW_TYPES).toEqual([
       'bool',

@@ -147,5 +147,11 @@ transactional sink uses `"mode": "transactional"` plus stable `pipeline` and
 `output` options; it writes the epoch ledger and target rows in the same
 database transaction. `append` and `upsert` remain at-least-once modes.
 
+The sink adds target, schema, and payload hashes to an existing ledger table
+when it opens. Older ledger rows have no such hashes. Recovery of an epoch
+recorded by an older version fails closed because its payload cannot be
+authenticated. Reconcile that epoch against the target table and durable
+checkpoint before resuming; do not remove the ledger row to force a replay.
+
 See the [connector overview](README.md) for shared delivery, secret,
 and recovery rules.

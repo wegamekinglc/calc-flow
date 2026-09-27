@@ -260,6 +260,8 @@ fails before enqueue, a closed receiver wakes blocked senders, and each fan-out
 edge is charged independently even though immutable payload buffers are
 shared. The default `Block` path therefore propagates a slow consumer through
 sink, operator, source task, prefetch slot, and source pump. FIFO order, close wakeup, and single-producer ownership apply to every edge.
+An edge budget or source batch declaration cannot exceed 1,000,000 rows or
+256 MiB; project-v3 stream runtime options use the same bounds.
 
 ## Stream plan compilation
 
@@ -501,19 +503,50 @@ outside the managed roots fail closed. Regular abandoned `.tmp*` manifest
 files are removed during a serialized scan; links and directories are never
 followed or removed as temporary files.
 
-Every transactional sink pre-commits before manifest publication. A failure
-before manifest installation aborts prepared transactions. After rename, an
-installed manifest remains recovery intent even when parent-directory sync or
-the publication acknowledgement is ambiguous: prepared sinks are preserved,
-not aborted. A durable manifest authorizes idempotent external commit, and a
-partial multi-sink commit completes forward during recovery. No second durable
-completion record competes with the manifest. Retention failure after commit
-fails the live job but does not invalidate the completed epoch.
+The managed filesystem durability guarantee applies on Unix platforms. On
+non-Unix platforms, including Windows, file contents are synced but parent
+directory changes are not synced; an operating-system crash or power loss can
+lose a recently published segment or manifest. Process restart recovery still
+validates the files that remain, but do not rely on the managed local backend
+for durable exactly-once recovery across a Windows crash.
+
+Every transactional sink pre-commits before manifest publication. When the
+coordinator can establish that publication did not occur, it sends an explicit
+abort command to prepared sinks. If that command cannot be delivered, the sink
+preserves its transaction and reports that recovery must resolve the manifest
+status; a closed or timed-out command channel alone does not prove that abort
+is safe. After rename, an installed manifest remains recovery intent even when
+parent-directory sync or the publication acknowledgement is ambiguous:
+prepared sinks are preserved. A durable manifest authorizes idempotent external
+commit, and a partial multi-sink commit completes forward during recovery. No
+second durable completion record competes with the manifest. Retention failure
+after commit fails the live job but does not invalidate the completed epoch.
 Once publication is durable, the runtime sends sink commit commands before
-acknowledging source cursors. A source acknowledgement failure can therefore
-leave an already committed sink; the durable manifest remains the recovery
-intent, and the live job reports recovery required rather than aborting that
-sink transaction.
+acknowledging source cursors. Settlement records the ordered phases Published,
+SinksCommanded, CoordinatorDurable, and SourceAcked. Source acknowledgement
+has the configured checkpoint timeout. A failure or timeout can leave an
+already committed sink; the durable manifest remains the recovery intent.
+The live job reports recovery required rather than aborting that transaction.
+
+Sink checkpoint lifecycle calls and checkpoint-channel waits have the configured
+checkpoint timeout; connector open has a private 30-second bound and a separate
+35-second bound for any native open settlement. Recovery has a private
+ten-minute bound, and close has a five-second bound. Cancellation interrupts
+pending pre-commit. After a sink acknowledges pre-commit, it waits for the
+coordinator's Abort, Preserve, or ManifestDurable decision despite cancellation;
+an absent command requires recovery before restart. Kafka's synchronous
+transaction calls run through a per-producer asynchronous FIFO queue; only
+active calls use blocking workers, leaving Tokio executor threads free. Queued
+calls remain ordered after the outer wait expires: a later pre-publication
+abort cannot overtake a late begin or flush. Kafka transaction initialization
+runs on a bounded native thread. If connector open is cancelled or times out,
+the runner retains the sink and lineage until initialization settles or the
+private settlement bound expires. A connector that does not settle within that
+bound fails its launch.
+If the Kafka native call exceeds its own timeout and finishes after the
+settlement bound, a late transaction fence remains possible; operators must
+resolve that failed launch before reusing its transactional identity. Durable
+recovery reconciles uncertain post-publication commits.
 
 Checkpointed startup remains gated: pure preflight completes before the runtime
 opens the lineage, strictly selects and validates the manifest, reloads
@@ -795,6 +828,12 @@ while dropping closed ones. Watermark and end handlers emit one final value
 per non-empty window before runtime-owned control forwarding, chunk outputs to
 the effective edge budget, and preserve checked operator-owned sequences
 across snapshot/restore.
+
+Floating `sum` and `avg` use compensated accumulation. Window checkpoint
+segments use a version 2 physical layout with separate sum and correction
+columns; the public operator state capability remains version 1. Recovery
+accepts existing version 1 segments, initializes their missing correction to
+zero, and rewrites live windows as a version 2 base at the next checkpoint.
 
 The public state surface consists of immutable `StateHandle` values,
 lineage-exclusive `StateBackend` sessions, `LocalStateBackend`, and the strict
