@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from calc_flow import ProjectDocument
-from fastapi.testclient import TestClient
+from studio_client import TestClient
 
 import calc_flow_studio.run_manager as run_manager_module
 from calc_flow_studio.app import create_app

@@ -1,5 +1,7 @@
 import { expect, test } from '@playwright/test';
 
+import { deleteWithLaunchToken } from './session';
+
 const projectsUrl = 'http://127.0.0.1:8765/api/v3/projects';
 
 test.use({
@@ -44,7 +46,7 @@ test('imports, binds and validates both late-output ports without losing deliver
       options: { path: `late-workflow-${binding}`, output: 'rows' },
     })),
   };
-  await request.delete(`${projectsUrl}/${id}`);
+  await deleteWithLaunchToken(request, `${projectsUrl}/${id}`);
   try {
     await page.goto('/');
     await page.getByLabel('Import project').setInputFiles({
@@ -78,6 +80,6 @@ test('imports, binds and validates both late-output ports without losing deliver
     expect(saved.sinks.map((sink: { binding: string; delivery: string }) => [sink.binding, sink.delivery]))
       .toEqual([['output', 'at_least_once'], ['late', 'best_effort']]);
   } finally {
-    await request.delete(`${projectsUrl}/${id}`);
+    await deleteWithLaunchToken(request, `${projectsUrl}/${id}`);
   }
 });

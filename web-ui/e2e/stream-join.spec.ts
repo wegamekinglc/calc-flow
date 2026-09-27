@@ -23,6 +23,8 @@ async function latestJob(
 import { mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
+import { deleteWithLaunchToken, postWithLaunchToken } from './session';
+
 const projectsUrl = 'http://127.0.0.1:8765/api/v3/projects';
 const jobsUrl = 'http://127.0.0.1:8765/api/v3/jobs';
 
@@ -239,10 +241,10 @@ async function resetProject(
     recursive: true,
     force: true,
   });
-  const deleted = await request.delete(`${projectsUrl}/${fixture.id}`);
+  const deleted = await deleteWithLaunchToken(request, `${projectsUrl}/${fixture.id}`);
   expect([204, 404]).toContain(deleted.status());
   const paths = await writeJoinInputs(fixture.rowsPerSide);
-  const created = await request.post(projectsUrl, {
+  const created = await postWithLaunchToken(request, projectsUrl, {
     data: streamJoinProject(fixture, paths.leftPath, paths.rightPath),
   });
   expect(created.status()).toBe(201);
@@ -256,7 +258,7 @@ test.describe('stream Join studio workflow', () => {
       `stream_join_run_${runTag}`,
       `stream_join_fail_${runTag}`,
     ]) {
-      await request.delete(`${projectsUrl}/${id}`);
+      await deleteWithLaunchToken(request, `${projectsUrl}/${id}`);
     }
   });
 
@@ -341,7 +343,7 @@ test.describe('stream Join studio workflow', () => {
     await expect(inspector.getByLabel('Right keys')).toHaveValue('account_id');
     await expect(inspector.getByLabel('before micros')).toHaveValue('0');
 
-    await request.delete(`${projectsUrl}/${fixture.id}`);
+    await deleteWithLaunchToken(request, `${projectsUrl}/${fixture.id}`);
   });
 
   test('runs the Join->Window job and observes join metrics and sink output', async ({
@@ -402,7 +404,7 @@ test.describe('stream Join studio workflow', () => {
     expect(stream).toContain('"stream_joins"');
     expect(stream).toContain('"emitted_match_rows"');
 
-    await request.delete(`${projectsUrl}/${fixture.id}`);
+    await deleteWithLaunchToken(request, `${projectsUrl}/${fixture.id}`);
   });
 
   test('surfaces the typed join failure reason on the worker path', async ({ page, request }) => {
@@ -433,7 +435,7 @@ test.describe('stream Join studio workflow', () => {
     expect(failed?.error_code).toBe('worker_failed');
     expect(failed?.reason_code).toBe('join_match_limit_exceeded');
 
-    await request.delete(`${projectsUrl}/${fixture.id}`);
+    await deleteWithLaunchToken(request, `${projectsUrl}/${fixture.id}`);
   });
 
 

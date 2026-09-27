@@ -3,19 +3,22 @@
 from __future__ import annotations
 
 import ipaddress
-from collections.abc import AsyncIterator
+import secrets
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from functools import partial
 from pathlib import Path
 
 from calc_flow import FileProjectStore, Runtime
-from fastapi import FastAPI, Request, status
+from fastapi import FastAPI, Request, Response, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.types import Receive, Scope, Send
 
 from calc_flow_studio.openapi import project_openapi
 from calc_flow_studio.routes import (
@@ -44,6 +47,79 @@ __all__ = [
     "validate_bind_host",
 ]
 
+_DEV_ORIGINS = frozenset({"http://127.0.0.1:5173", "http://localhost:5173"})
+_SESSION_HEADER = "X-Calc-Flow-Session"
+
+
+def _valid_authority_port(port: str) -> bool:
+    return (
+        port.isascii()
+        and port.isdecimal()
+        and 0 < len(port) <= 5
+        and 0 < int(port) <= 65535
+    )
+
+
+def _allowed_ipv6_authority(authority: str, allowed_hosts: list[str]) -> bool:
+    address, closing, suffix = authority[1:].partition("]")
+    if not closing or "[::1]" not in allowed_hosts or "%" in address:
+        return False
+    try:
+        if not ipaddress.IPv6Address(address).is_loopback:
+            return False
+    except ValueError:
+        return False
+    if not suffix:
+        return True
+    return suffix.startswith(":") and _valid_authority_port(suffix[1:])
+
+
+def _allowed_loopback_authority(authority: str, allowed_hosts: list[str]) -> bool:
+    if authority.startswith("["):
+        return _allowed_ipv6_authority(authority, allowed_hosts)
+    hostname, separator, port = authority.partition(":")
+    if hostname not in allowed_hosts:
+        return False
+    return not separator or _valid_authority_port(port)
+
+
+class LoopbackTrustedHostMiddleware(TrustedHostMiddleware):
+    """Validate complete loopback authorities before accepting a request."""
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] not in {"http", "websocket"}:
+            await self.app(scope, receive, send)
+            return
+        hosts = [
+            value for name, value in scope.get("headers", []) if name.lower() == b"host"
+        ]
+        try:
+            authority = hosts[0].decode("ascii") if len(hosts) == 1 else ""
+        except UnicodeDecodeError:
+            authority = ""
+        if _allowed_loopback_authority(authority, self.allowed_hosts):
+            await self.app(scope, receive, send)
+            return
+        await PlainTextResponse("Invalid host header", status_code=400)(
+            scope, receive, send
+        )
+
+
+async def _require_local_origin_and_launch_token(
+    request: Request, call_next: Callable[[Request], Awaitable[Response]]
+) -> Response:
+    origin = request.headers.get("origin")
+    same_origin = f"{request.url.scheme}://{request.headers['host']}"
+    if origin is not None and origin not in _DEV_ORIGINS | {same_origin}:
+        return JSONResponse(status_code=403, content={"detail": "Untrusted origin"})
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+        supplied = request.headers.get(_SESSION_HEADER, "")
+        if not secrets.compare_digest(supplied, request.app.state.launch_token):
+            return JSONResponse(
+                status_code=403, content={"detail": "Invalid launch token"}
+            )
+    return await call_next(request)
+
 
 def _default_frontend_directory() -> Path | None:
     static = Path(__file__).with_name("static")
@@ -58,6 +134,7 @@ def create_app(
     runtime: RuntimeProtocol | None = None,
     run_manager: RunManagerProtocol | None = None,
     frontend_directory: str | Path | None = None,
+    bind_host: str | None = None,
 ) -> FastAPI:
     """Create the local-only v3 API without opening a network listener."""
     projects = project_store or FileProjectStore(project_directory)
@@ -82,13 +159,32 @@ def create_app(
     app.state.project_store = projects
     app.state.runtime = selected_runtime
     app.state.run_manager = selected_run_manager
+    app.state.launch_token = secrets.token_urlsafe(32)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
+        allow_origins=sorted(_DEV_ORIGINS),
         allow_credentials=False,
-        allow_methods=["GET", "POST", "PUT", "DELETE"],
-        allow_headers=["Content-Type", "Last-Event-ID"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+        allow_headers=["Content-Type", "Last-Event-ID", _SESSION_HEADER],
     )
+
+    app.middleware("http")(_require_local_origin_and_launch_token)
+
+    trusted_hosts = {"127.0.0.1", "localhost", "[::1]"}
+    if bind_host is not None:
+        trusted_hosts.add(validate_bind_host(bind_host))
+    app.add_middleware(
+        LoopbackTrustedHostMiddleware,
+        allowed_hosts=sorted(trusted_hosts),
+        www_redirect=False,
+    )
+
+    @app.get(f"{API_PREFIX}/session", include_in_schema=False)
+    def launch_session() -> JSONResponse:
+        return JSONResponse(
+            {"token": app.state.launch_token},
+            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+        )
 
     @app.exception_handler(RequestValidationError)
     async def join_raw_validation_envelope(
@@ -150,7 +246,7 @@ def serve(
     project_directory: str | Path = ".calc-flow-projects",
     checkpoint_directory: str | Path = ".calc-flow-checkpoints",
 ) -> None:
-    """Run the unauthenticated v3 service on a loopback interface only."""
+    """Run the token-protected v3 service on a loopback interface only."""
     import uvicorn
 
     validate_bind_host(host)
@@ -158,6 +254,7 @@ def serve(
         create_app(
             project_directory=project_directory,
             checkpoint_directory=checkpoint_directory,
+            bind_host=host,
         ),
         host=host,
         port=port,

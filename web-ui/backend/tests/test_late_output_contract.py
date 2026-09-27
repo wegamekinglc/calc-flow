@@ -10,7 +10,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from calc_flow import ProjectDocument, Runtime
-from fastapi.testclient import TestClient
+from studio_client import TestClient
 
 from calc_flow_studio.app import create_app
 from calc_flow_studio.run_manager import RunManager
