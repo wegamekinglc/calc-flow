@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import secrets
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from functools import partial
 from pathlib import Path
@@ -105,6 +105,22 @@ class LoopbackTrustedHostMiddleware(TrustedHostMiddleware):
         )
 
 
+async def _require_local_origin_and_launch_token(
+    request: Request, call_next: Callable[[Request], Awaitable[Response]]
+) -> Response:
+    origin = request.headers.get("origin")
+    same_origin = f"{request.url.scheme}://{request.headers['host']}"
+    if origin is not None and origin not in _DEV_ORIGINS | {same_origin}:
+        return JSONResponse(status_code=403, content={"detail": "Untrusted origin"})
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+        supplied = request.headers.get(_SESSION_HEADER, "")
+        if not secrets.compare_digest(supplied, request.app.state.launch_token):
+            return JSONResponse(
+                status_code=403, content={"detail": "Invalid launch token"}
+            )
+    return await call_next(request)
+
+
 def _default_frontend_directory() -> Path | None:
     static = Path(__file__).with_name("static")
     return static if (static / "index.html").is_file() else None
@@ -152,26 +168,7 @@ def create_app(
         allow_headers=["Content-Type", "Last-Event-ID", _SESSION_HEADER],
     )
 
-    @app.middleware("http")
-    async def require_local_origin_and_launch_token(
-        request: Request, call_next
-    ) -> Response:
-        origin = request.headers.get("origin")
-        same_origin = f"{request.url.scheme}://{request.headers['host']}"
-        if origin is not None and origin not in _DEV_ORIGINS | {same_origin}:
-            return JSONResponse(status_code=403, content={"detail": "Untrusted origin"})
-        if request.method in {
-            "POST",
-            "PUT",
-            "PATCH",
-            "DELETE",
-        }:
-            supplied = request.headers.get(_SESSION_HEADER, "")
-            if not secrets.compare_digest(supplied, app.state.launch_token):
-                return JSONResponse(
-                    status_code=403, content={"detail": "Invalid launch token"}
-                )
-        return await call_next(request)
+    app.middleware("http")(_require_local_origin_and_launch_token)
 
     trusted_hosts = {"127.0.0.1", "localhost", "[::1]"}
     if bind_host is not None:
