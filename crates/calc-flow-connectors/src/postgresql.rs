@@ -1441,8 +1441,26 @@ impl TransactionalPostgresSink {
                     .and_then(pg_identifier)
             })
             .collect::<Result<Vec<_>>>()?;
+        if self.active == Some(epoch) && columns != self.pending_columns {
+            return Err(fail(
+                "commit",
+                "pre-commit columns differ from the active epoch",
+            ));
+        }
         let sql = compile_insert_sql(&self.config, &columns)?;
         crate::evidence::check_schema_hash(evidence).map_err(protocol)?;
+        if self.active == Some(epoch) {
+            let expected = self
+                .pending_schema_hash
+                .clone()
+                .unwrap_or_else(|| hex::encode(Sha256::digest([])));
+            if evidence.get("schema_hash").and_then(Value::as_str) != Some(expected.as_str()) {
+                return Err(fail(
+                    "commit",
+                    "pre-commit schema differs from the active epoch",
+                ));
+            }
+        }
         if rows.iter().any(|row| row.len() != columns.len()) {
             return Err(fail(
                 "commit",
@@ -2024,12 +2042,23 @@ mod tests {
         sink.pending_schema_hash = Some("a".repeat(64));
         sink.rows = 1;
         let epoch = calc_flow::Epoch::INITIAL;
+        sink.active = Some(epoch);
         let evidence = sink.prepared_evidence(epoch).unwrap();
         let prepared = sink
             .validate_evidence(epoch, &evidence, sink.pending_rows.clone())
             .unwrap();
         assert_eq!(prepared.rows.len(), 1);
         assert_eq!(prepared.sql, "INSERT INTO orders (id) VALUES ($1)");
+        crate::evidence::assert_recovery_contract(&evidence, "target", |candidate| {
+            sink.validate_evidence(epoch, candidate, sink.pending_rows.clone())
+                .is_ok()
+        });
+        let mut wrong_columns = evidence.clone();
+        wrong_columns.insert("columns".into(), serde_json::json!(["other"]));
+        assert!(
+            sink.validate_evidence(epoch, &wrong_columns, sink.pending_rows.clone())
+                .is_err()
+        );
 
         let encoded = evidence_rows(&sink.pending_rows);
         assert_eq!(
@@ -2042,6 +2071,20 @@ mod tests {
         tampered.insert("rows".into(), Value::from(2));
         assert!(
             sink.validate_evidence(epoch, &tampered, sink.pending_rows.clone())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn empty_live_epoch_rejects_another_valid_schema_hash() {
+        let config = PostgresSinkConfig::from_options(&sink_options("transactional")).unwrap();
+        let mut sink = TransactionalPostgresSink::new(config).unwrap();
+        let epoch = calc_flow::Epoch::INITIAL;
+        sink.active = Some(epoch);
+        let mut evidence = sink.prepared_evidence(epoch).unwrap();
+        evidence.insert("schema_hash".into(), Value::String("a".repeat(64)));
+        assert!(
+            sink.validate_evidence(epoch, &evidence, Vec::new())
                 .is_err()
         );
     }

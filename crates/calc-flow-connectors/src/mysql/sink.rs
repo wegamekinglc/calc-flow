@@ -980,6 +980,15 @@ mod tests {
         sink.stage(&batch("id", vec![1])).unwrap();
         let evidence = sink.pre_commit(Epoch::INITIAL).await.unwrap();
         let segments = sink.pre_commit_segments(Epoch::INITIAL).await.unwrap();
+        crate::evidence::assert_recovery_contract(&evidence, "target", |candidate| {
+            sink.validate_prepared(
+                "recover",
+                Epoch::INITIAL,
+                candidate,
+                sink.prepared.as_ref().unwrap(),
+            )
+            .is_ok()
+        });
         let mut bad_schema = evidence.clone();
         bad_schema.insert("schema_hash".into(), json!("0".repeat(64)));
         let error = sink.commit(Epoch::INITIAL, &bad_schema).await.unwrap_err();

@@ -1,7 +1,7 @@
 //! Shared pre-commit evidence protocol checks.
 //!
 //! Transactional sinks validate data-only evidence before committing a
-//! prepared segment. `PostgreSQL` and `ClickHouse` bind pipeline, output, target,
+//! prepared segment. `PostgreSQL`, `MySQL`, and `ClickHouse` bind pipeline, output, target,
 //! schema, epoch, row count, segment size, and SHA-256 checksum. `Kafka` binds
 //! transactional ID, ledger topic, target topic, wire format, Arrow schema,
 //! epoch, and segment checksum.
@@ -94,6 +94,60 @@ pub(crate) fn check_rows(evidence: &JsonMap, actual_rows: u64) -> Result<(), Str
 /// Hex-encode the SHA-256 digest of the prepared bytes.
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
+}
+
+/// Runs the common offline recovery-evidence validation contract against one
+/// sink's producer and validator. Service-backed tests cover ledger settlement
+/// and replay; this helper checks field presence and tampering before I/O.
+#[cfg(test)]
+pub(crate) fn assert_recovery_contract(
+    evidence: &JsonMap,
+    target_field: &str,
+    validates: impl Fn(&JsonMap) -> bool,
+) {
+    assert!(
+        validates(evidence),
+        "original recovery evidence must validate"
+    );
+    assert!(string_field(evidence, target_field).is_ok());
+    assert!(check_schema_hash(evidence).is_ok());
+    assert!(string_field(evidence, "segment_sha256").is_ok());
+    assert!(
+        evidence
+            .get("segment_bytes")
+            .and_then(Value::as_u64)
+            .is_some()
+    );
+    let epoch = evidence.get("epoch").and_then(Value::as_u64).unwrap();
+    let other_epoch = if epoch == u64::MAX { 1 } else { epoch + 1 };
+
+    for (field, replacement) in [
+        (target_field, Value::String("__foreign_target__".into())),
+        ("epoch", Value::from(other_epoch)),
+        ("segment_sha256", Value::String("0".repeat(64))),
+        ("segment_bytes", Value::from(u64::MAX)),
+    ] {
+        let mut changed = evidence.clone();
+        changed.insert(field.into(), replacement);
+        assert!(!validates(&changed), "{field} tampering must be rejected");
+    }
+    let schema_hash = string_field(evidence, "schema_hash").unwrap();
+    let other_hash = if schema_hash.starts_with('0') {
+        "1".repeat(64)
+    } else {
+        "0".repeat(64)
+    };
+    let mut wrong_schema = evidence.clone();
+    wrong_schema.insert("schema_hash".into(), Value::String(other_hash));
+    assert!(
+        !validates(&wrong_schema),
+        "a different valid schema hash must be rejected while the live schema is known"
+    );
+    for field in [target_field, "schema_hash", "segment_sha256"] {
+        let mut missing = evidence.clone();
+        missing.remove(field);
+        assert!(!validates(&missing), "missing {field} must be rejected");
+    }
 }
 
 #[cfg(test)]

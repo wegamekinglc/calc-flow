@@ -1595,6 +1595,46 @@ fn validate_prepared_evidence(
     Ok(())
 }
 
+fn prepared_kafka_evidence(
+    config: &KafkaSinkConfig,
+    epoch: calc_flow::Epoch,
+    messages: u64,
+    schema_hash: &str,
+    records: &[Vec<u8>],
+) -> Result<JsonMap> {
+    let segment = encode_records(records)?;
+    Ok(BTreeMap::from([
+        (
+            "transactional_id".into(),
+            Value::String(config.transactional_id.clone()),
+        ),
+        ("messages".into(), Value::from(messages)),
+        ("epoch".into(), Value::from(epoch.as_u64())),
+        (
+            "ledger_topic".into(),
+            Value::String(config.ledger_topic.clone()),
+        ),
+        ("topic".into(), Value::String(config.topic.clone())),
+        (
+            "format".into(),
+            Value::String(kafka_format_name(config.format).into()),
+        ),
+        ("schema_hash".into(), Value::String(schema_hash.into())),
+        (
+            "segment_id".into(),
+            Value::String(PREPARED_RECORDS_SEGMENT.into()),
+        ),
+        (
+            "segment_bytes".into(),
+            Value::from(u64::try_from(segment.len()).unwrap_or(u64::MAX)),
+        ),
+        (
+            "segment_sha256".into(),
+            Value::String(crate::evidence::sha256_hex(&segment)),
+        ),
+    ]))
+}
+
 #[async_trait]
 impl TransactionalStreamSink for TransactionalKafkaSink {
     async fn open(&mut self) -> Result<()> {
@@ -1689,47 +1729,17 @@ impl TransactionalStreamSink for TransactionalKafkaSink {
             producer.flush(Duration::from_secs(30))
         })
         .await?;
-        let segment = encode_records(&self.pending_records)?;
-        Ok(BTreeMap::from([
-            (
-                "transactional_id".to_string(),
-                Value::String(self.config.transactional_id.clone()),
-            ),
-            ("messages".to_string(), Value::from(self.delivered)),
-            ("epoch".to_string(), Value::from(epoch.as_u64())),
-            (
-                "ledger_topic".to_string(),
-                Value::String(self.config.ledger_topic.clone()),
-            ),
-            (
-                "topic".to_string(),
-                Value::String(self.config.topic.clone()),
-            ),
-            (
-                "format".to_string(),
-                Value::String(kafka_format_name(self.config.format).into()),
-            ),
-            (
-                "schema_hash".to_string(),
-                Value::String(
-                    self.pending_schema_hash
-                        .clone()
-                        .unwrap_or_else(|| kafka_schema_hash(self.config.format, None)),
-                ),
-            ),
-            (
-                "segment_id".to_string(),
-                Value::String(PREPARED_RECORDS_SEGMENT.into()),
-            ),
-            (
-                "segment_bytes".to_string(),
-                Value::from(u64::try_from(segment.len()).unwrap_or(u64::MAX)),
-            ),
-            (
-                "segment_sha256".to_string(),
-                Value::String(hex::encode(Sha256::digest(&segment))),
-            ),
-        ]))
+        let schema_hash = self
+            .pending_schema_hash
+            .clone()
+            .unwrap_or_else(|| kafka_schema_hash(self.config.format, None));
+        prepared_kafka_evidence(
+            &self.config,
+            epoch,
+            self.delivered,
+            &schema_hash,
+            &self.pending_records,
+        )
     }
 
     async fn pre_commit_segments(
@@ -2553,33 +2563,14 @@ mod tests {
     fn prepared_recovery_evidence_binds_target_topic() {
         let config = KafkaSinkConfig::from_options(&sink_options("json")).expect("config");
         let records = vec![b"one".to_vec()];
-        let segment = encode_records(&records).expect("segment");
-        let evidence = BTreeMap::from([
-            (
-                "transactional_id".into(),
-                Value::String(config.transactional_id.clone()),
-            ),
-            (
-                "epoch".into(),
-                Value::from(calc_flow::Epoch::INITIAL.as_u64()),
-            ),
-            (
-                "ledger_topic".into(),
-                Value::String(config.ledger_topic.clone()),
-            ),
-            ("topic".into(), Value::String(config.topic.clone())),
-            ("format".into(), Value::String("json".into())),
-            ("schema_hash".into(), Value::String("a".repeat(64))),
-            (
-                "segment_id".into(),
-                Value::String(PREPARED_RECORDS_SEGMENT.into()),
-            ),
-            ("segment_bytes".into(), Value::from(segment.len() as u64)),
-            (
-                "segment_sha256".into(),
-                Value::String(hex::encode(Sha256::digest(&segment))),
-            ),
-        ]);
+        let evidence = prepared_kafka_evidence(
+            &config,
+            calc_flow::Epoch::INITIAL,
+            1,
+            &"a".repeat(64),
+            &records,
+        )
+        .unwrap();
         validate_prepared_evidence(
             &config,
             calc_flow::Epoch::INITIAL,
@@ -2588,6 +2579,16 @@ mod tests {
             Some(&"a".repeat(64)),
         )
         .expect("matching topic is recoverable");
+        crate::evidence::assert_recovery_contract(&evidence, "topic", |candidate| {
+            validate_prepared_evidence(
+                &config,
+                calc_flow::Epoch::INITIAL,
+                candidate,
+                &records,
+                Some(&"a".repeat(64)),
+            )
+            .is_ok()
+        });
         let mut wrong_schema = evidence.clone();
         wrong_schema.insert("schema_hash".into(), Value::String("b".repeat(64)));
         assert!(
