@@ -32,6 +32,7 @@ mod continuous;
 mod datafusion;
 mod datafusion_predicate;
 mod datafusion_rolling;
+mod datafusion_template;
 mod error;
 mod expression;
 mod json;
