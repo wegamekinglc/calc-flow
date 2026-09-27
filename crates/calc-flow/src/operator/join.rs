@@ -2930,8 +2930,11 @@ impl StreamJoinOperator {
             &self.state.right
         };
         let (rows, bytes) = prospective_state_charge(current, retained, &self.name)?;
-        if rows > self.spec.limits.max_state_rows_per_side
-            || bytes > self.spec.limits.max_state_bytes_per_side
+        if !super::StateBudget::new(
+            self.spec.limits.max_state_rows_per_side,
+            self.spec.limits.max_state_bytes_per_side,
+        )?
+        .allows(rows, bytes)
         {
             self.state.metrics.state_limit_failures = checked_metric(
                 self.state.metrics.state_limit_failures,
@@ -2960,8 +2963,11 @@ impl StreamJoinOperator {
                 .ok_or_else(|| CalcFlowError::CheckpointMismatch {
                     message: format!("stream Join {:?} {side} byte charge overflowed", self.name),
                 })?;
-            if row_count > self.spec.limits.max_state_rows_per_side
-                || byte_count > self.spec.limits.max_state_bytes_per_side
+            if !super::StateBudget::new(
+                self.spec.limits.max_state_rows_per_side,
+                self.spec.limits.max_state_bytes_per_side,
+            )?
+            .allows(row_count, byte_count)
             {
                 return Err(CalcFlowError::CheckpointMismatch {
                     message: format!(

@@ -12,6 +12,7 @@ pub(crate) mod rolling;
 pub(crate) mod rolling_metrics;
 pub(crate) mod row_cost;
 mod sql;
+mod state_budget;
 mod stream;
 mod union;
 mod window;
@@ -45,6 +46,7 @@ pub use rolling::{
     RollingOutputSpec, RollingSpec, RollingValuePolicy,
 };
 pub use sql::SqlOperator;
+pub use state_budget::StateBudget;
 pub use stream::{
     EdgeCollector, IngressProgress, IngressProgressSnapshot, IngressState, OperatorStateSnapshot,
     StateSegment, StreamCollector, StreamOperator, StreamOperatorContext, StreamOperatorLifecycle,

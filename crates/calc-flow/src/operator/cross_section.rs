@@ -11,6 +11,7 @@ use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet, HashMap},
     io::Cursor,
+    mem::size_of,
     sync::Arc,
 };
 
@@ -43,7 +44,7 @@ use crate::{
 use super::checkpoint::{checkpoint_mismatch, compile_error, internal_error, state_format};
 use super::{
     BatchOperator, BatchOperatorContext, LateMetricDelta, LatePolicySpec, OperatorMetadata,
-    StreamCollector, StreamOperator, StreamOperatorContext, accumulate_late_metrics,
+    StateBudget, StreamCollector, StreamOperator, StreamOperatorContext, accumulate_late_metrics,
     expression::required_input,
     late_output::{LateRowTally, record_late_row, reject_batch_mode},
     validate_operator_name,
@@ -503,6 +504,7 @@ impl CrossSectionSpec {
 pub struct CrossSectionOperator {
     name: String,
     spec: CrossSectionSpec,
+    state_budget: StateBudget,
     input_ports: [Port; 1],
     output_ports: Vec<Port>,
     compiled: CompiledCrossSectionSpec,
@@ -529,6 +531,7 @@ impl CrossSectionOperator {
         Ok(Self {
             name: name.into(),
             spec,
+            state_budget: StateBudget::default(),
             input_ports: [Port::with_schema_ref(
                 "input",
                 BatchKind::Table,
@@ -545,6 +548,34 @@ impl CrossSectionOperator {
     pub const fn spec(&self) -> &CrossSectionSpec {
         &self.spec
     }
+
+    /// Sets the maximum number of open rows and their logical byte charge.
+    /// The default is 1,000,000 rows and 256 MiB. The budget is runtime
+    /// tuning; changing it does not change the project fingerprint.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalcFlowError::InvalidArgument`] if existing open state
+    /// exceeds the new budget.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use calc_flow::{CrossSectionOperator, StateBudget};
+    /// fn configure(operator: &mut CrossSectionOperator) -> calc_flow::Result<()> {
+    ///     operator.set_state_budget(StateBudget::new(10_000, 64 << 20)?)
+    /// }
+    /// ```
+    pub fn set_state_budget(&mut self, budget: StateBudget) -> Result<()> {
+        if !budget.allows(self.state.charge.rows, self.state.charge.bytes) {
+            return Err(invalid_argument(
+                "cross_section.state_budget",
+                "existing open state exceeds the requested budget",
+            ));
+        }
+        self.state_budget = budget;
+        Ok(())
+    }
 }
 
 impl std::fmt::Debug for CrossSectionOperator {
@@ -553,6 +584,7 @@ impl std::fmt::Debug for CrossSectionOperator {
             .debug_struct("CrossSectionOperator")
             .field("name", &self.name)
             .field("spec", &self.spec)
+            .field("state_budget", &self.state_budget)
             .field("input_ports", &self.input_ports)
             .field("output_ports", &self.output_ports)
             .finish_non_exhaustive()
@@ -626,6 +658,7 @@ impl BatchOperator for CrossSectionOperator {
 #[derive(Default)]
 struct CrossSectionStreamState {
     groups: Groups,
+    charge: StateCharge,
     /// One proven canonical batch awaiting a complete-group watermark.
     pending_mean: Option<RecordBatch>,
     /// Duplicate evidence for every open identity: one row identity maps to
@@ -640,6 +673,169 @@ struct CrossSectionStreamState {
     pipeline_fingerprint: Option<String>,
     operator_id: Option<String>,
     last_checkpoint_epoch: Option<Epoch>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct StateCharge {
+    rows: u64,
+    bytes: u64,
+}
+
+impl StateCharge {
+    fn checked_add(self, other: Self, node_id: &str) -> Result<Self> {
+        let rows = self
+            .rows
+            .checked_add(other.rows)
+            .ok_or_else(|| operator_error(node_id, "cross-section state row charge overflowed"))?;
+        let bytes = self
+            .bytes
+            .checked_add(other.bytes)
+            .ok_or_else(|| operator_error(node_id, "cross-section state byte charge overflowed"))?;
+        Ok(Self { rows, bytes })
+    }
+
+    fn checked_sub(self, other: Self) -> Result<Self> {
+        let rows = self
+            .rows
+            .checked_sub(other.rows)
+            .ok_or_else(|| internal_error("cross-section state row charge underflowed"))?;
+        let bytes = self
+            .bytes
+            .checked_sub(other.bytes)
+            .ok_or_else(|| internal_error("cross-section state byte charge underflowed"))?;
+        Ok(Self { rows, bytes })
+    }
+}
+
+fn charged_row(group: &GroupKey, row: &BufferedRow, node_id: &str) -> Result<StateCharge> {
+    // Charge cloned keys and map entries as well as the materialized values.
+    // The fixed overhead is a stable logical allowance for map/vector nodes.
+    let key_bytes = row
+        .identity
+        .entity
+        .iter()
+        .filter_map(Option::as_ref)
+        .chain(row.identity.sequence.iter())
+        .chain(group.partition.iter().filter_map(Option::as_ref))
+        .filter_map(|key| match key {
+            KeyValue::String(value) => Some(value.len()),
+            _ => None,
+        })
+        .try_fold(0_usize, usize::checked_add)
+        .ok_or_else(|| operator_error(node_id, "cross-section state byte charge overflowed"))?;
+    let value_bytes = row
+        .values
+        .iter()
+        .map(ScalarValue::size)
+        .try_fold(0_usize, usize::checked_add)
+        .ok_or_else(|| operator_error(node_id, "cross-section state byte charge overflowed"))?;
+    let bytes = 256_usize
+        .checked_add(key_bytes.saturating_mul(2))
+        .and_then(|bytes| bytes.checked_add(value_bytes))
+        .ok_or_else(|| operator_error(node_id, "cross-section state byte charge overflowed"))?;
+    Ok(StateCharge {
+        rows: 1,
+        bytes: u64::try_from(bytes)
+            .map_err(|_| operator_error(node_id, "cross-section state byte charge overflowed"))?,
+    })
+}
+
+fn charged_accepted(rows: &AcceptedRows, node_id: &str) -> Result<StateCharge> {
+    rows.iter()
+        .try_fold(StateCharge::default(), |charge, (group, _, row)| {
+            charge.checked_add(charged_row(group, row, node_id)?, node_id)
+        })
+}
+
+fn charged_groups(groups: &Groups, node_id: &str) -> Result<StateCharge> {
+    groups
+        .iter()
+        .try_fold(StateCharge::default(), |charge, (group, rows)| {
+            rows.values().try_fold(charge, |charge, row| {
+                charge.checked_add(charged_row(group, row, node_id)?, node_id)
+            })
+        })
+}
+
+fn bounded_pending_mean_charge(
+    record: &RecordBatch,
+    compiled: &CompiledCrossSectionSpec,
+    node_id: &str,
+) -> Result<Option<StateCharge>> {
+    // Only flat scalar columns have a simple upper bound on the future
+    // ScalarValue representation. Nested and dictionary columns take the
+    // ordinary row path instead of speculating about their expansion.
+    let schema = record.schema();
+    let flat = schema.fields().iter().all(|field| {
+        matches!(
+            field.data_type(),
+            DataType::Null
+                | DataType::Boolean
+                | DataType::Int8
+                | DataType::Int16
+                | DataType::Int32
+                | DataType::Int64
+                | DataType::UInt8
+                | DataType::UInt16
+                | DataType::UInt32
+                | DataType::UInt64
+                | DataType::Float16
+                | DataType::Float32
+                | DataType::Float64
+                | DataType::Date32
+                | DataType::Date64
+                | DataType::Timestamp(_, _)
+                | DataType::Utf8
+                | DataType::LargeUtf8
+                | DataType::Binary
+                | DataType::LargeBinary
+        )
+    });
+    if !flat {
+        return Ok(None);
+    }
+    let Some(payload_bytes) = super::row_cost::RowCosts::try_total(record)? else {
+        return Ok(None);
+    };
+    let entity = record
+        .column(compiled.entity_columns[0].index)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("columnar mean has a validated UTF-8 entity column");
+    let rows = u64::try_from(record.num_rows())
+        .map_err(|_| operator_error(node_id, "cross-section state row charge overflowed"))?;
+    let fields = u64::try_from(schema.fields().len())
+        .map_err(|_| operator_error(node_id, "cross-section state byte charge overflowed"))?;
+    let scalar_size = u64::try_from(size_of::<ScalarValue>())
+        .map_err(|_| operator_error(node_id, "cross-section state byte charge overflowed"))?;
+    let timezone_bytes = schema
+        .fields()
+        .iter()
+        .filter_map(|field| match field.data_type() {
+            DataType::Timestamp(_, Some(timezone)) => Some(timezone.len()),
+            _ => None,
+        })
+        .try_fold(0_usize, usize::checked_add)
+        .ok_or_else(|| operator_error(node_id, "cross-section state byte charge overflowed"))?;
+    let per_row =
+        256_u64
+            .checked_add(fields.checked_mul(scalar_size).ok_or_else(|| {
+                operator_error(node_id, "cross-section state byte charge overflowed")
+            })?)
+            .and_then(|bytes| bytes.checked_add(u64::try_from(timezone_bytes).ok()?))
+            .ok_or_else(|| operator_error(node_id, "cross-section state byte charge overflowed"))?;
+    let bytes = rows
+        .checked_mul(per_row)
+        .and_then(|bytes| bytes.checked_add(u64::try_from(payload_bytes).ok()?))
+        .and_then(|bytes| {
+            bytes.checked_add(
+                u64::try_from(entity.value_data().len())
+                    .ok()?
+                    .checked_mul(2)?,
+            )
+        })
+        .ok_or_else(|| operator_error(node_id, "cross-section state byte charge overflowed"))?;
+    Ok(Some(StateCharge { rows, bytes }))
 }
 
 /// Bounded inline manifest contribution of one cross-section checkpoint
@@ -738,8 +934,17 @@ impl CrossSectionOperator {
         {
             return Ok(false);
         }
+        let Some(charge) =
+            bounded_pending_mean_charge(&record, &self.compiled, context.operator_id())?
+        else {
+            return Ok(false);
+        };
+        if !self.state_budget.allows(charge.rows, charge.bytes) {
+            return Ok(false);
+        }
         context.record_window_metrics(0, None, 0)?;
         self.state.pending_mean = Some(record);
+        self.state.charge = charge;
         self.install_context_identity(context);
         Ok(true)
     }
@@ -824,7 +1029,13 @@ impl CrossSectionOperator {
                 Ok((group, row.identity.clone(), row))
             })
             .collect::<Result<AcceptedRows>>()?;
-        self.install_accepted_rows(accepted);
+        let charge = charged_accepted(&accepted, node_id)?;
+        self.check_state_budget(charge, node_id)?;
+        let pending_charge = std::mem::take(&mut self.state.charge);
+        if let Err(error) = self.install_accepted_rows(accepted, node_id) {
+            self.state.charge = pending_charge;
+            return Err(error);
+        }
         self.state.pending_mean = None;
         Ok(())
     }
@@ -836,14 +1047,34 @@ impl CrossSectionOperator {
         next_metrics: LateMetricDelta,
         context: &StreamOperatorContext<'_>,
     ) -> Result<()> {
-        self.install_accepted_rows(accepted);
+        self.validate_state_admission(&accepted, context.operator_id())?;
+        self.install_accepted_rows(accepted, context.operator_id())?;
         context.record_window_metrics(metrics.late_rows, metrics.max_lateness_micros, 0)?;
         self.state.metrics = next_metrics;
         self.install_context_identity(context);
         Ok(())
     }
 
-    fn install_accepted_rows(&mut self, accepted: AcceptedRows) {
+    fn check_state_budget(&self, charge: StateCharge, node_id: &str) -> Result<()> {
+        if self.state_budget.allows(charge.rows, charge.bytes) {
+            Ok(())
+        } else {
+            Err(operator_error(
+                node_id,
+                "cross-section open state budget exceeded",
+            ))
+        }
+    }
+
+    fn validate_state_admission(&self, accepted: &AcceptedRows, node_id: &str) -> Result<()> {
+        let incoming = charged_accepted(accepted, node_id)?;
+        let prospective = self.state.charge.checked_add(incoming, node_id)?;
+        self.check_state_budget(prospective, node_id)
+    }
+
+    fn install_accepted_rows(&mut self, accepted: AcceptedRows, node_id: &str) -> Result<()> {
+        let incoming = charged_accepted(&accepted, node_id)?;
+        self.state.charge = self.state.charge.checked_add(incoming, node_id)?;
         for (group, identity, row) in accepted {
             self.state
                 .groups
@@ -852,6 +1083,7 @@ impl CrossSectionOperator {
                 .insert(identity.clone(), row);
             self.state.identity_groups.insert(identity, group);
         }
+        Ok(())
     }
 }
 
@@ -880,20 +1112,22 @@ impl StreamOperator for CrossSectionOperator {
             return Ok(());
         }
         let pending = self.state.pending_mean.clone();
+        let pending_charge = self.state.charge;
         self.materialize_pending_mean(context.operator_id())?;
-        let (accepted, metrics, next_metrics) =
-            match self.prepare_stream_data(ingress, &batch, context) {
-                Ok(prepared) => prepared,
-                Err(error) => {
-                    if let Some(record) = pending {
-                        self.state.groups.clear();
-                        self.state.identity_groups.clear();
-                        self.state.pending_mean = Some(record);
-                    }
-                    return Err(error);
-                }
-            };
-        self.install_stream_data(accepted, metrics, next_metrics, context)
+        let result = self.prepare_stream_data(ingress, &batch, context).and_then(
+            |(accepted, metrics, next_metrics)| {
+                self.install_stream_data(accepted, metrics, next_metrics, context)
+            },
+        );
+        if result.is_err()
+            && let Some(record) = pending
+        {
+            self.state.groups.clear();
+            self.state.identity_groups.clear();
+            self.state.charge = pending_charge;
+            self.state.pending_mean = Some(record);
+        }
+        result
     }
 
     /// Emits every newly closed group once in canonical order before the
@@ -927,6 +1161,7 @@ impl StreamOperator for CrossSectionOperator {
             if times.value(record.num_rows() - 1) <= watermark.as_micros() {
                 self.emit_columnar_mean(&record, context, output).await?;
                 self.state.pending_mean = None;
+                self.state.charge = StateCharge::default();
                 self.install_context_identity(context);
                 self.state.last_input_watermark = Some(watermark);
                 return Ok(());
@@ -961,16 +1196,19 @@ impl StreamOperator for CrossSectionOperator {
         if let Some(record) = self.state.pending_mean.clone() {
             self.emit_columnar_mean(&record, context, output).await?;
             self.state.pending_mean = None;
+            self.state.charge = StateCharge::default();
             self.install_context_identity(context);
             self.state.ended = true;
             return Ok(());
         }
         let groups = std::mem::take(&mut self.state.groups);
         let identity_groups = std::mem::take(&mut self.state.identity_groups);
+        let charge = std::mem::take(&mut self.state.charge);
         if let Err(error) = self.emit_groups(&groups, context, output).await {
             // Preserve the open groups even if the collector accepted a prefix.
             self.state.groups = groups;
             self.state.identity_groups = identity_groups;
+            self.state.charge = charge;
             return Err(error);
         }
         self.install_context_identity(context);
@@ -1053,8 +1291,13 @@ impl StreamOperator for CrossSectionOperator {
             metadata.late_output.as_ref(),
         )?;
         let (groups, identity_groups) = self.decode_state(&metadata, snapshot)?;
+        let charge = charged_groups(&groups, &self.name)
+            .map_err(|error| checkpoint_mismatch(error.to_string()))?;
+        self.check_state_budget(charge, &self.name)
+            .map_err(|error| checkpoint_mismatch(error.to_string()))?;
         self.state = CrossSectionStreamState {
             groups,
+            charge,
             identity_groups,
             pending_mean: None,
             last_input_watermark: metadata.last_input_watermark,
@@ -1213,6 +1456,17 @@ impl CrossSectionOperator {
                 closing_keys.push(group.clone());
             }
         }
+        let closing_charge =
+            closing_keys
+                .iter()
+                .try_fold(StateCharge::default(), |charge, key| {
+                    self.state.groups[key]
+                        .values()
+                        .try_fold(charge, |charge, row| {
+                            charge.checked_add(charged_row(key, row, node_id)?, node_id)
+                        })
+                })?;
+        let remaining_charge = self.state.charge.checked_sub(closing_charge)?;
         let mut closing = Groups::new();
         for key in closing_keys {
             let rows = self
@@ -1225,10 +1479,18 @@ impl CrossSectionOperator {
             }
             closing.insert(key, rows);
         }
+        self.state.charge = remaining_charge;
         Ok(closing)
     }
 
     fn restore_groups(&mut self, groups: Groups) {
+        let restored = charged_groups(&groups, &self.name)
+            .expect("closing groups had valid state charges before emission");
+        self.state.charge = self
+            .state
+            .charge
+            .checked_add(restored, &self.name)
+            .expect("restored closing group charge fits the previous total");
         for (key, rows) in groups {
             for identity in rows.keys() {
                 self.state
@@ -3799,6 +4061,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_watermark_emit_restores_budget_charge() {
+        let mut operator =
+            CrossSectionOperator::new("features", Arc::new(input_schema()), valid_spec()).unwrap();
+        operator
+            .set_state_budget(StateBudget::new(1, 1_048_576).unwrap())
+            .unwrap();
+        let job = mean_job();
+        let context = StreamOperatorContext::new(&job, "features", None);
+        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        let record = mean_input_record();
+        operator
+            .process_data(
+                "input",
+                mean_batch(record.slice(0, 1)),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap();
+        let error = operator
+            .on_watermark(EventTime::from_micros(1), &context, &mut RejectOutput)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("injected output failure"));
+        let error = operator
+            .process_data(
+                "input",
+                mean_batch(record.slice(2, 1)),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("state budget"), "{error}");
+        assert!(
+            operator
+                .set_state_budget(StateBudget::new(1, 128).unwrap())
+                .is_err()
+        );
+        operator
+            .on_watermark(EventTime::from_micros(1), &context, &mut output)
+            .await
+            .unwrap();
+        operator
+            .process_data(
+                "input",
+                mean_batch(record.slice(2, 1)),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn closing_groups_survive_a_failed_watermark_emit() {
         let mut operator =
             CrossSectionOperator::new("features", Arc::new(input_schema()), valid_spec()).unwrap();
@@ -3887,6 +4204,175 @@ mod tests {
             .unwrap();
         assert_mean_output(&mut output, &[2.0, 2.0, 5.0, 5.0]);
         assert!(operator.state.pending_mean.is_none());
+    }
+
+    #[test]
+    fn columnar_bound_covers_nullable_flat_payloads() {
+        use datafusion::arrow::array::{BinaryArray, LargeBinaryArray, LargeStringArray};
+
+        let input = mean_input_record();
+        let mut fields = input.schema().fields().to_vec();
+        let mut columns = input.columns().to_vec();
+        fields.push(Arc::new(Field::new("text", DataType::Utf8, true)));
+        columns.push(Arc::new(StringArray::from(vec![
+            Some("one"),
+            None,
+            Some("中文"),
+            Some(""),
+        ])));
+        fields.push(Arc::new(Field::new(
+            "large_text",
+            DataType::LargeUtf8,
+            true,
+        )));
+        columns.push(Arc::new(LargeStringArray::from(vec![
+            None,
+            Some("wide"),
+            Some(""),
+            Some("last"),
+        ])));
+        fields.push(Arc::new(Field::new("binary", DataType::Binary, true)));
+        columns.push(Arc::new(BinaryArray::from(vec![
+            Some(b"a".as_slice()),
+            None,
+            Some(b"xyz".as_slice()),
+            Some(b"".as_slice()),
+        ])));
+        fields.push(Arc::new(Field::new(
+            "large_binary",
+            DataType::LargeBinary,
+            true,
+        )));
+        columns.push(Arc::new(LargeBinaryArray::from(vec![
+            None,
+            Some(b"bytes".as_slice()),
+            Some(b"".as_slice()),
+            Some(b"tail".as_slice()),
+        ])));
+        let schema = Arc::new(Schema::new(fields));
+        let record = RecordBatch::try_new(schema.clone(), columns).unwrap();
+        let operator = CrossSectionOperator::new("features", schema, valid_mean_spec()).unwrap();
+        let bound = bounded_pending_mean_charge(&record, &operator.compiled, "features")
+            .unwrap()
+            .unwrap();
+        let accepted = (0..record.num_rows())
+            .map(|index| {
+                let row = read_row(&record, index, &operator.compiled, "features")?;
+                let group = operator.compiled.group_key(&row, "features")?;
+                Ok((group, row.identity.clone(), row))
+            })
+            .collect::<Result<AcceptedRows>>()
+            .unwrap();
+        let exact = charged_accepted(&accepted, "features").unwrap();
+        assert_eq!(bound.rows, exact.rows);
+        assert!(bound.bytes >= exact.bytes);
+    }
+
+    #[tokio::test]
+    async fn columnar_bound_over_budget_uses_exact_row_admission() {
+        let record = mean_input_record();
+        let mut operator = mean_operator();
+        let accepted = (0..record.num_rows())
+            .map(|index| {
+                let row = read_row(&record, index, &operator.compiled, "features")?;
+                let group = operator.compiled.group_key(&row, "features")?;
+                Ok((group, row.identity.clone(), row))
+            })
+            .collect::<Result<AcceptedRows>>()
+            .unwrap();
+        let exact = charged_accepted(&accepted, "features").unwrap();
+        let bound = bounded_pending_mean_charge(&record, &operator.compiled, "features")
+            .unwrap()
+            .unwrap();
+        assert!(bound.bytes > exact.bytes);
+        operator
+            .set_state_budget(StateBudget::new(10, exact.bytes).unwrap())
+            .unwrap();
+        let job = mean_job();
+        let context = StreamOperatorContext::new(&job, "features", None);
+        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("input", mean_batch(record), &context, &mut output)
+            .await
+            .unwrap();
+        assert!(operator.state.pending_mean.is_none());
+        assert!(!operator.state.groups.is_empty());
+    }
+
+    #[tokio::test]
+    async fn columnar_mean_admission_covers_checkpoint_materialization_of_wide_rows() {
+        use datafusion::arrow::array::NullArray;
+
+        let input = mean_input_record();
+        let mut fields = input.schema().fields().to_vec();
+        let mut columns = input.columns().to_vec();
+        for index in 0..200 {
+            fields.push(Arc::new(Field::new(
+                format!("null_{index}"),
+                DataType::Null,
+                true,
+            )));
+            columns.push(Arc::new(NullArray::new(input.num_rows())));
+        }
+        let schema = Arc::new(Schema::new(fields));
+        let record = RecordBatch::try_new(schema.clone(), columns).unwrap();
+        let mut operator =
+            CrossSectionOperator::new("features", schema, valid_mean_spec()).unwrap();
+        let previous_estimate =
+            u64::try_from(record.get_array_memory_size()).unwrap() * 4 + 1_024 * 4;
+        let accepted = (0..record.num_rows())
+            .map(|index| {
+                let row = read_row(&record, index, &operator.compiled, "features")?;
+                let group = operator.compiled.group_key(&row, "features")?;
+                Ok((group, row.identity.clone(), row))
+            })
+            .collect::<Result<AcceptedRows>>()
+            .unwrap();
+        let materialized = charged_accepted(&accepted, "features").unwrap().bytes;
+        let bounded = bounded_pending_mean_charge(&record, &operator.compiled, "features")
+            .unwrap()
+            .unwrap();
+        assert!(materialized > previous_estimate);
+        assert!(bounded.bytes >= materialized);
+        operator
+            .set_state_budget(
+                StateBudget::new(10, previous_estimate.midpoint(materialized)).unwrap(),
+            )
+            .unwrap();
+        let job = mean_job();
+        let context = StreamOperatorContext::new(&job, "features", None);
+        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        let error = operator
+            .process_data("input", mean_batch(record), &context, &mut output)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("state budget"), "{error}");
+        assert!(operator.state.pending_mean.is_none());
+    }
+
+    #[tokio::test]
+    async fn columnar_mean_respects_open_state_budget_before_buffering() {
+        let mut operator =
+            CrossSectionOperator::new("features", Arc::new(input_schema()), valid_mean_spec())
+                .unwrap();
+        operator
+            .set_state_budget(StateBudget::new(2, 1_048_576).unwrap())
+            .unwrap();
+        let job = mean_job();
+        let context = StreamOperatorContext::new(&job, "features", None);
+        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        let error = operator
+            .process_data(
+                "input",
+                mean_batch(mean_input_record()),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("state budget"), "{error}");
+        assert!(operator.state.pending_mean.is_none());
+        assert!(operator.state.groups.is_empty());
     }
 
     #[tokio::test]

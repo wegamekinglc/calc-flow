@@ -72,6 +72,35 @@ struct FailingCollector {
     sent: Vec<Batch>,
 }
 
+#[tokio::test]
+async fn side_output_checks_open_state_budget_before_emitting_late_rows() {
+    let mut spec = valid_spec();
+    spec.late_policy = LatePolicySpec::SideOutput {
+        metrics_version: 1,
+        schema_version: 1,
+    };
+    let mut side = CrossSectionOperator::new("cross", Arc::new(input_schema()), spec).unwrap();
+    side.set_state_budget(StateBudget::new(1, 1_048_576).unwrap())
+        .unwrap();
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "cross", Some(EventTime::from_micros(12)));
+    let mut output = EdgeCollector::new(side.output_ports().to_vec());
+    let input = batch(&[&[
+        (5, "a", 1, Some(5.0)),
+        (20, "b", 2, Some(20.0)),
+        (21, "c", 3, Some(21.0)),
+    ]]);
+    let error = side
+        .process_late_data(&input, context.input_watermark(), &context, &mut output)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("state budget"), "{error}");
+    assert!(side.state.groups.is_empty());
+    assert_eq!(side.state.metrics, LateMetricDelta::default());
+    assert!(!side.state.late_output_failed);
+    assert!(output.drain("late").is_empty());
+}
+
 #[async_trait::async_trait]
 impl StreamCollector for FailingCollector {
     async fn emit(&mut self, port: &str, batch: Batch) -> Result<()> {

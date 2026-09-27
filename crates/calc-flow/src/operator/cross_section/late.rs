@@ -47,7 +47,7 @@ impl CrossSectionOperator {
         // (borrow/async constraints block a shared helper); change both.
         self.state.late_output_failed = true;
         let next_sequence = prepared.emit(output).await?;
-        self.install_accepted_rows(accepted);
+        self.install_accepted_rows(accepted, context.operator_id())?;
         self.state.metrics = next_metrics;
         self.state.next_late_output_sequence = next_sequence;
         metrics.commit();
@@ -63,6 +63,7 @@ impl CrossSectionOperator {
         context: &'a StreamOperatorContext<'_>,
     ) -> Result<PendingInput<'a>> {
         let input = self.prepare_late_input(batch, watermark, context)?;
+        self.validate_state_admission(&input.accepted, context.operator_id())?;
         late_output::prepare_late_callback(
             input.accepted,
             input.metrics,

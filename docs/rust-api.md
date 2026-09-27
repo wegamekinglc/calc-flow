@@ -459,6 +459,15 @@ configuration-hash and schema-fingerprint metadata plus bounded inline
 manifest fields — and a restored operator reproduces the same ordered
 output, watermark frontier, output sequence, and metrics.
 
+Stream cross-section state permits at most 1,000,000 open rows and 256 MiB of
+logical charges by default. Direct Rust users can set positive row and byte
+limits through `CrossSectionOperator::set_state_budget(StateBudget::new(...))`.
+Project-created operators use the default; the budget is runtime tuning and
+does not change project fingerprints. Charges count materialized values,
+keys, and map overhead. An envelope that would exceed either limit fails
+before any accepted row or late side output is installed, and restore rejects
+oversized state. Batch evaluation does not apply this stream-state budget.
+
 ## Late-row policy contract
 
 Rolling and cross-section specifications share `LatePolicySpec`.

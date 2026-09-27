@@ -438,6 +438,54 @@ async fn an_empty_state_checkpoint_carries_no_segments() {
 }
 
 #[tokio::test]
+async fn restore_rejects_state_over_runtime_budget_without_changing_live_rows() {
+    let job = new_job();
+    let mut original = new_operator();
+    let mut output = EdgeCollector::new(original.output_ports().to_vec());
+    original
+        .process_data(
+            "input",
+            input_batch(&[
+                (100, "a", Some("tech"), 1, Some(2.0)),
+                (100, "b", Some("tech"), 2, Some(3.0)),
+            ]),
+            &context(&job, None),
+            &mut output,
+        )
+        .await
+        .unwrap();
+    let snapshot = original.checkpoint(Epoch::new(1).unwrap()).unwrap();
+
+    let mut restored = new_operator();
+    restored
+        .set_state_budget(calc_flow::StateBudget::new(1, 1_048_576).unwrap())
+        .unwrap();
+    let mut live_output = EdgeCollector::new(restored.output_ports().to_vec());
+    restored
+        .process_data(
+            "input",
+            input_batch(&[(300, "keep", Some("tech"), 1, Some(5.0))]),
+            &context(&job, None),
+            &mut live_output,
+        )
+        .await
+        .unwrap();
+    let error = restored.restore(&snapshot).unwrap_err();
+    assert!(matches!(
+        error,
+        calc_flow::CalcFlowError::CheckpointMismatch { .. }
+    ));
+    assert!(error.to_string().contains("state budget"), "{error}");
+    restored
+        .on_end(&context(&job, None), &mut live_output)
+        .await
+        .unwrap();
+    let mut observed = Observed::default();
+    drain(&mut live_output, &mut observed);
+    assert_eq!(observed.symbols, ["keep"]);
+}
+
+#[tokio::test]
 async fn restore_rejects_state_from_a_different_configuration() {
     let job = new_job();
     let mut operator = new_operator();
