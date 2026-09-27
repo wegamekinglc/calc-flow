@@ -276,6 +276,15 @@ against the input watermark, and `RollingValuePolicy` is the frozen
 `stateful_numeric_v1`, which preserves a null or NaN current or referenced
 value.
 
+Stream rolling state has a default limit of 1,000,000 logical rows and 256 MiB.
+`RollingOperator::set_state_budget(StateBudget::new(...))` changes the row and
+byte limits before graph compilation. The charge covers accepted reorder rows,
+retained per-entity history, keys, and state overhead; it excludes checkpoint
+copies and process-wide resident memory. Input and watermark callbacks reject
+state growth before committing it, and restore rejects an oversized snapshot.
+Batch evaluation does not use this budget. Project-created operators use the
+default, and this runtime limit does not change the project fingerprint.
+
 `numerical_profile` is optional. Its default `stable_v1` is omitted from the
 canonical configuration, preserving existing project and checkpoint hashes.
 The explicit `stable_v2` value is a preview: floating numeric and pair windows

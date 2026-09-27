@@ -198,9 +198,433 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use serde_json::{Value, json};
 
 use super::*;
-use crate::{CalcFlowError, OperatorMetadata};
+use crate::{CalcFlowError, OperatorMetadata, StateBudget};
 
 const TEST_FINGERPRINT: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+#[tokio::test]
+async fn rolling_state_budget_rejects_an_oversized_buffer_atomically() {
+    let mut operator =
+        RollingOperator::new("rolling", Arc::new(kernel_schema()), valid_spec()).unwrap();
+    operator
+        .set_state_budget(StateBudget::new(1, 1_048_576).unwrap())
+        .unwrap();
+    let job = crate::StreamJobContext::new(
+        1,
+        TEST_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "rolling", None);
+    let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+    let batch = Batch::table(
+        vec![float64_fast_record(&[
+            (1, "a", 1, Some(1.0)),
+            (2, "a", 2, Some(2.0)),
+        ])],
+        BatchMetadata::default(),
+    )
+    .unwrap();
+    let error = operator
+        .process_data("input", batch, &context, &mut output)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("state budget"), "{error}");
+    assert!(operator.state.buffer.is_empty());
+    assert!(operator.state.ordered.is_empty());
+    assert!(output.drain("output").is_empty());
+}
+
+#[tokio::test]
+async fn ordered_rolling_budget_rejects_new_rows_without_changing_the_buffer() {
+    let spec = kernel_spec(json!([aggregate_output("sum", "price", "sum", 2)]));
+    let mut operator = RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
+    operator
+        .set_state_budget(StateBudget::new(1, 1_048_576).unwrap())
+        .unwrap();
+    let job = crate::StreamJobContext::new(
+        1,
+        TEST_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "rolling", None);
+    let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+    for (time, sequence) in [(1, 1), (2, 2)] {
+        let record = float64_fast_record(&[(time, "a", sequence, Some(1.0))]);
+        let result = operator
+            .process_data(
+                "input",
+                Batch::table(vec![record], BatchMetadata::default()).unwrap(),
+                &context,
+                &mut output,
+            )
+            .await;
+        if time == 1 {
+            result.unwrap();
+            assert!(!operator.state.ordered.is_empty());
+        } else {
+            assert!(result.unwrap_err().to_string().contains("state budget"));
+        }
+    }
+    assert_eq!(operator.state.charge.rows, 1);
+    assert_eq!(
+        operator
+            .state
+            .ordered
+            .records()
+            .map(RecordBatch::num_rows)
+            .sum::<usize>(),
+        1
+    );
+    assert!(output.drain("output").is_empty());
+}
+
+#[tokio::test]
+async fn ordered_rolling_admitted_long_key_can_be_checkpointed() {
+    let spec = kernel_spec(json!([aggregate_output("sum", "price", "sum", 2)]));
+    let mut operator = RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
+    let symbol = "x".repeat(4_096);
+    let record = float64_fast_record(&[(1, &symbol, 1, Some(1.0))]);
+    let charge = budget::ordered_buffer_record_charge(&record, &operator.compiled, "rolling")
+        .unwrap()
+        .unwrap();
+    operator
+        .set_state_budget(StateBudget::new(2, charge.bytes).unwrap())
+        .unwrap();
+    let job = crate::StreamJobContext::new(
+        1,
+        TEST_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "rolling", None);
+    let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+    operator
+        .process_data(
+            "input",
+            Batch::table(vec![record], BatchMetadata::default()).unwrap(),
+            &context,
+            &mut output,
+        )
+        .await
+        .unwrap();
+    assert!(!operator.state.ordered.is_empty());
+    operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    assert!(operator.state.ordered.is_empty());
+    assert_eq!(operator.state.buffer.len(), 1);
+}
+
+#[tokio::test]
+async fn ordered_rolling_large_non_key_string_fits_its_logical_budget() {
+    use datafusion::arrow::array::StringArray;
+
+    let spec = kernel_spec(json!([aggregate_output("sum", "price", "sum", 2)]));
+    let mut operator = RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
+    let original = float64_fast_record(&[(1, "a", 1, Some(1.0))]);
+    let label = "x".repeat(4_096);
+    let mut columns = original.columns().to_vec();
+    columns[5] = Arc::new(StringArray::from(vec![Some(label.as_str())]));
+    let record = RecordBatch::try_new(original.schema(), columns).unwrap();
+    let base_charge = budget::ordered_record_charge(&record, "rolling")
+        .unwrap()
+        .unwrap();
+    operator
+        .set_state_budget(StateBudget::new(2, base_charge.bytes + 512).unwrap())
+        .unwrap();
+    let job = crate::StreamJobContext::new(
+        1,
+        TEST_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "rolling", None);
+    let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+    operator
+        .process_data(
+            "input",
+            Batch::table(vec![record], BatchMetadata::default()).unwrap(),
+            &context,
+            &mut output,
+        )
+        .await
+        .unwrap();
+    assert!(!operator.state.ordered.is_empty());
+    operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    assert_eq!(operator.state.buffer.len(), 1);
+}
+
+#[tokio::test]
+async fn ordered_rolling_admitted_timezone_column_can_be_checkpointed() {
+    use datafusion::arrow::array::TimestampMicrosecondArray;
+
+    let timezone = "America/Argentina/Buenos_Aires";
+    let mut fields = kernel_schema().fields().iter().cloned().collect::<Vec<_>>();
+    let spec = kernel_spec(json!([aggregate_output("sum", "price", "sum", 2)]));
+    let original = float64_fast_record(&[(1, "a", 1, Some(1.0))]);
+    let mut columns = original.columns().to_vec();
+    for index in 0..16 {
+        fields.push(Arc::new(Field::new(
+            format!("timezone_{index}"),
+            DataType::Timestamp(TimeUnit::Microsecond, Some(Arc::from(timezone))),
+            true,
+        )));
+        columns.push(Arc::new(
+            TimestampMicrosecondArray::from(vec![Some(1)]).with_timezone(timezone),
+        ));
+    }
+    let schema = Schema::new(fields);
+    let mut operator = RollingOperator::new("rolling", Arc::new(schema.clone()), spec).unwrap();
+    let record = RecordBatch::try_new(Arc::new(schema), columns).unwrap();
+    let charge = budget::ordered_buffer_record_charge(&record, &operator.compiled, "rolling")
+        .unwrap()
+        .unwrap();
+    operator
+        .set_state_budget(StateBudget::new(2, charge.bytes).unwrap())
+        .unwrap();
+    let job = crate::StreamJobContext::new(
+        1,
+        TEST_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "rolling", None);
+    let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+    operator
+        .process_data(
+            "input",
+            Batch::table(vec![record], BatchMetadata::default()).unwrap(),
+            &context,
+            &mut output,
+        )
+        .await
+        .unwrap();
+    assert!(!operator.state.ordered.is_empty());
+    operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    assert_eq!(operator.state.buffer.len(), 1);
+}
+
+#[tokio::test]
+async fn rolling_history_budget_failure_restores_rows_for_retry() {
+    let mut operator =
+        RollingOperator::new("rolling", Arc::new(kernel_schema()), valid_spec()).unwrap();
+    operator
+        .set_state_budget(StateBudget::new(1, 1_048_576).unwrap())
+        .unwrap();
+    let job = crate::StreamJobContext::new(
+        1,
+        TEST_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "rolling", None);
+    let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+    let record = float64_fast_record(&[(1, "a", 1, Some(1.0))]);
+    operator
+        .process_data(
+            "input",
+            Batch::table(vec![record], BatchMetadata::default()).unwrap(),
+            &context,
+            &mut output,
+        )
+        .await
+        .unwrap();
+    let error = operator
+        .on_watermark(EventTime::from_micros(1), &context, &mut output)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("state budget"), "{error}");
+    assert_eq!(operator.state.charge.rows, 1);
+    assert_eq!(operator.state.buffer.len(), 1);
+    assert!(output.drain("output").is_empty());
+
+    operator
+        .set_state_budget(StateBudget::new(3, 1_048_576).unwrap())
+        .unwrap();
+    operator
+        .on_watermark(EventTime::from_micros(1), &context, &mut output)
+        .await
+        .unwrap();
+    assert!(!output.drain("output").is_empty());
+    assert!(operator.state.buffer.is_empty());
+}
+
+#[tokio::test]
+async fn ordered_rolling_history_budget_failure_restores_records_for_retry() {
+    let spec = kernel_spec(json!([aggregate_output("sum", "price", "sum", 2)]));
+    let mut operator = RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
+    operator
+        .set_state_budget(StateBudget::new(1, 1_048_576).unwrap())
+        .unwrap();
+    let job = crate::StreamJobContext::new(
+        1,
+        TEST_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "rolling", None);
+    let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+    let record = float64_fast_record(&[(1, "a", 1, Some(1.0))]);
+    operator
+        .process_data(
+            "input",
+            Batch::table(vec![record], BatchMetadata::default()).unwrap(),
+            &context,
+            &mut output,
+        )
+        .await
+        .unwrap();
+    assert!(!operator.state.ordered.is_empty());
+    let error = operator
+        .on_watermark(EventTime::from_micros(1), &context, &mut output)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("state budget"), "{error}");
+    assert_eq!(operator.state.charge.rows, 1);
+    assert_eq!(
+        operator
+            .state
+            .ordered
+            .records()
+            .map(RecordBatch::num_rows)
+            .sum::<usize>(),
+        1
+    );
+    assert!(output.drain("output").is_empty());
+
+    operator
+        .set_state_budget(StateBudget::new(3, 1_048_576).unwrap())
+        .unwrap();
+    operator
+        .on_watermark(EventTime::from_micros(1), &context, &mut output)
+        .await
+        .unwrap();
+    assert!(!output.drain("output").is_empty());
+    assert!(operator.state.ordered.is_empty());
+}
+
+#[tokio::test]
+async fn ordered_rolling_budget_failure_restores_partially_closed_record() {
+    let spec = kernel_spec(json!([aggregate_output("sum", "price", "sum", 2)]));
+    let mut operator = RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
+    operator
+        .set_state_budget(StateBudget::new(2, 1_048_576).unwrap())
+        .unwrap();
+    let job = crate::StreamJobContext::new(
+        1,
+        TEST_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "rolling", None);
+    let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+    let record = float64_fast_record(&[(1, "a", 1, Some(1.0)), (2, "a", 2, Some(2.0))]);
+    operator
+        .process_data(
+            "input",
+            Batch::table(vec![record], BatchMetadata::default()).unwrap(),
+            &context,
+            &mut output,
+        )
+        .await
+        .unwrap();
+    let last_identity = operator.state.ordered.last_identity();
+    let error = operator
+        .on_watermark(EventTime::from_micros(1), &context, &mut output)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("state budget"), "{error}");
+    assert_eq!(operator.state.charge.rows, 2);
+    assert_eq!(operator.state.ordered.last_identity(), last_identity);
+    assert_eq!(
+        operator
+            .state
+            .ordered
+            .records()
+            .map(RecordBatch::num_rows)
+            .sum::<usize>(),
+        2
+    );
+    assert!(output.drain("output").is_empty());
+
+    operator
+        .set_state_budget(StateBudget::new(3, 1_048_576).unwrap())
+        .unwrap();
+    operator
+        .on_watermark(EventTime::from_micros(1), &context, &mut output)
+        .await
+        .unwrap();
+    assert!(!output.drain("output").is_empty());
+    assert_eq!(
+        operator
+            .state
+            .ordered
+            .records()
+            .map(RecordBatch::num_rows)
+            .sum::<usize>(),
+        1
+    );
+    assert_eq!(
+        operator.state.charge,
+        budget::full_state_charge(
+            &operator.state.buffer,
+            &operator.state.ordered,
+            &operator.state.histories,
+            &operator.compiled,
+            "rolling",
+        )
+        .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn rolling_restore_rejects_an_oversized_snapshot_without_replacing_state() {
+    let spec = valid_spec();
+    let mut source =
+        RollingOperator::new("rolling", Arc::new(kernel_schema()), spec.clone()).unwrap();
+    let job = crate::StreamJobContext::new(
+        1,
+        TEST_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "rolling", None);
+    let mut output = crate::EdgeCollector::new(source.output_ports().to_vec());
+    let record = float64_fast_record(&[(1, "a", 1, Some(1.0)), (2, "a", 2, Some(2.0))]);
+    source
+        .process_data(
+            "input",
+            Batch::table(vec![record], BatchMetadata::default()).unwrap(),
+            &context,
+            &mut output,
+        )
+        .await
+        .unwrap();
+    let snapshot = source.checkpoint(Epoch::new(1).unwrap()).unwrap();
+
+    let mut target = RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
+    target
+        .set_state_budget(StateBudget::new(1, 1_048_576).unwrap())
+        .unwrap();
+    let error = StreamOperator::restore(&mut target, &snapshot).unwrap_err();
+    assert!(error.to_string().contains("state budget"), "{error}");
+    assert!(target.state.buffer.is_empty());
+    assert_eq!(target.state.charge.rows, 0);
+    target
+        .set_state_budget(StateBudget::new(3, 1_048_576).unwrap())
+        .unwrap();
+    StreamOperator::restore(&mut target, &snapshot).unwrap();
+    assert_eq!(target.state.charge.rows, 2);
+}
 
 fn input_schema() -> Schema {
     Schema::new(vec![
@@ -2941,12 +3365,17 @@ async fn failed_parallel_ordered_emission_preserves_committed_snapshot() {
     let parallel_context =
         StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(1_279)))
             .with_entity_work(task.context_client().unwrap());
+    let record = parallel_rollback_record(1_280, 64_000);
+    let charge = budget::ordered_buffer_record_charge(&record, &operator.compiled, "rolling")
+        .unwrap()
+        .unwrap();
+    operator.state.charge = operator
+        .state
+        .charge
+        .checked_add(charge, "rolling")
+        .unwrap();
     let result = operator
-        .emit_ordered(
-            vec![parallel_rollback_record(1_280, 64_000)],
-            &parallel_context,
-            &mut Reject,
-        )
+        .emit_ordered(vec![record], None, &parallel_context, &mut Reject)
         .await;
     scope.settle_abandoned().await;
     drop(parallel_context);
@@ -2954,11 +3383,12 @@ async fn failed_parallel_ordered_emission_preserves_committed_snapshot() {
     owner.close_admission();
     assert!(owner.drain().await.is_empty());
 
+    let error = result.unwrap_err();
     assert!(
-        result
-            .unwrap_err()
+        error
             .to_string()
-            .contains("expected parallel collector rejection")
+            .contains("expected parallel collector rejection"),
+        "{error}"
     );
     assert_eq!(launches.load(AtomicOrdering::SeqCst), 2);
     assert_eq!(committed(&operator), before);
@@ -3194,6 +3624,14 @@ async fn general_rolling_observations_distinguish_routing_from_numeric_work() {
         let callback = store.begin(RollingCallback::Watermark, cancellation.clone());
         let context = StreamOperatorContext::new(&job, "rolling", None)
             .with_rolling_metrics(callback.recorder());
+        operator.state.charge = operator
+            .state
+            .charge
+            .checked_add(
+                budget::buffered_row_charge(&row, "rolling").unwrap(),
+                "rolling",
+            )
+            .unwrap();
         let result = operator
             .emit_rows(vec![row], &context, &mut collector)
             .await;

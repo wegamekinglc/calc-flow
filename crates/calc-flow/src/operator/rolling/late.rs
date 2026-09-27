@@ -43,6 +43,17 @@ impl RollingOperator {
         }
         let (accepted, next_metrics, metrics, prepared) =
             self.prepare_late_callback(batch, watermark, context)?;
+        let old_ordered = super::budget::ordered_buffer_charge(
+            self.state.ordered.records(),
+            &self.compiled,
+            context.operator_id(),
+        )?
+        .expect("ordered rolling state has chargeable records");
+        let next_charge = self.state.charge.checked_sub(old_ordered)?.checked_add(
+            super::budget::buffered_charge(accepted.values(), context.operator_id())?,
+            context.operator_id(),
+        )?;
+        self.check_state_budget(next_charge, context.operator_id())?;
         // Poison before emit: only the commit below clears the flag, so a
         // failed or cancelled emission forbids live retry; a durable cut
         // is the only recovery. This poison -> emit -> commit -> unpoison
@@ -53,6 +64,7 @@ impl RollingOperator {
         self.state.buffer.extend(accepted);
         self.state.ordered.clear();
         self.state.metrics = next_metrics;
+        self.state.charge = next_charge;
         self.state.next_late_output_sequence = next_sequence;
         metrics.commit();
         self.install_context_identity(context);

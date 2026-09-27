@@ -487,8 +487,9 @@ async fn test_native_late_ordered_wholly_normal_output_matches_drop() {
     assert!(!side.state.ordered.is_empty());
     assert!(side.state.buffer.is_empty());
     assert!(side_output.drain("late").is_empty());
+    let last_identity = side.state.ordered.last_identity();
     let records = side.state.ordered.take_all();
-    side.emit_ordered(records, &context, &mut side_output)
+    side.emit_ordered(records, last_identity, &context, &mut side_output)
         .await
         .unwrap();
     drop.on_end(&context, &mut drop_output).await.unwrap();

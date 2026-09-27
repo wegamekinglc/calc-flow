@@ -1054,6 +1054,14 @@ rows and 256 MiB. Project-v3 stream runtime options follow the same caps.
 Each stream SQL or expression node has its own 1 GiB DataFusion memory pool;
 this is not a job-wide memory limit.
 
+Each rolling node also bounds its accepted buffer and retained history to
+1,000,000 logical rows and 256 MiB by default. Rust callers can set a different
+`StateBudget` on `RollingOperator` before compiling the stream. Project-created
+rolling nodes use the default. A callback that exceeds either limit fails
+before it commits new state; recovery rejects snapshots above the selected
+limit. These logical charges do not count checkpoint copies or total process
+memory.
+
 Backpressure is expected. A slow sink eventually awaits upstream sends. Do not
 hide that signal behind an unbounded queue inside a connector. If the external
 transport cannot pause, declare the loss explicitly and use a best-effort

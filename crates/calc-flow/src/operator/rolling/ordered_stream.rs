@@ -14,8 +14,8 @@ use crate::operator::rolling_metrics::{RollingMetricsRecorder, RollingStage, Rol
 use crate::runtime::streaming::entity_work::ReservePair;
 
 use super::{
-    Arc, Array, BTreeMap, Batch, BufferedRow, CompiledRollingSpec, EventTime, KeyValue,
-    RecordBatch, Result, RollingHistories, RollingOperator, RowIdentity, ScalarValue,
+    Arc, Array, BTreeMap, Batch, BufferedRow, CompiledRollingSpec, EntityRollingState, EventTime,
+    KeyValue, RecordBatch, Result, RollingHistories, RollingOperator, RowIdentity, ScalarValue,
     StreamCollector, StreamOperatorContext, TableBatch, VecDeque, WindowState, chunk_output_record,
     closing_coordinate, concat_batches, fresh_windows, internal_error, operator_error,
     read_buffered_row, reconstruct_typed_state,
@@ -28,6 +28,25 @@ pub(super) struct OrderedStreamBuffer {
 }
 
 impl OrderedStreamBuffer {
+    pub(super) fn records(&self) -> impl Iterator<Item = &RecordBatch> {
+        self.records.iter()
+    }
+
+    pub(super) fn last_identity(&self) -> Option<Vec<u8>> {
+        self.last_identity.clone()
+    }
+
+    pub(super) fn restore_front(
+        &mut self,
+        records: Vec<RecordBatch>,
+        last_identity: Option<Vec<u8>>,
+    ) {
+        for record in records.into_iter().rev() {
+            self.records.push_front(record);
+        }
+        self.last_identity = last_identity;
+    }
+
     pub(super) fn clear(&mut self) {
         self.records.clear();
         self.last_identity = None;
@@ -107,6 +126,49 @@ fn timestamps<'a>(
 }
 
 impl RollingOperator {
+    fn restore_ordered_failure(
+        &mut self,
+        records: Vec<RecordBatch>,
+        last_identity: Option<Vec<u8>>,
+        error: super::CalcFlowError,
+        node: &str,
+    ) -> Result<()> {
+        self.state.ordered.restore_front(records, last_identity);
+        if let Ok(charge) = super::budget::full_state_charge(
+            &self.state.buffer,
+            &self.state.ordered,
+            &self.state.histories,
+            &self.compiled,
+            node,
+        ) {
+            self.state.charge = charge;
+        }
+        Err(error)
+    }
+
+    fn projected_ordered_charge(
+        &mut self,
+        prepared: &PreparedOrderedOutput,
+        removed: super::budget::StateCharge,
+        was_warm: bool,
+        node: &str,
+    ) -> Result<(super::budget::StateCharge, super::budget::StateCharge)> {
+        if !was_warm {
+            self.state.charge = super::budget::full_state_charge(
+                &self.state.buffer,
+                &self.state.ordered,
+                &self.state.histories,
+                &self.compiled,
+                node,
+            )?
+            .checked_add(removed, node)?;
+        }
+        let current = self.state.charge.checked_sub(removed)?;
+        let next = prepared.projected_charge(self, current, node)?;
+        self.check_state_budget(next, node)?;
+        Ok((current, next))
+    }
+
     fn supports_ordered_buffer(&self) -> bool {
         self.compiled.kernel_plan.supports_typed_transition()
             && self.compiled.max_duration_micros.is_none()
@@ -169,8 +231,16 @@ impl RollingOperator {
             prepared.push(record.clone());
             last = Some(end);
         }
+        let Some(incoming) =
+            super::budget::ordered_buffer_charge(prepared.iter(), &self.compiled, &self.name)?
+        else {
+            return Ok(false);
+        };
+        let next_charge = self.state.charge.checked_add(incoming, &self.name)?;
+        self.check_state_budget(next_charge, &self.name)?;
         self.state.ordered.records.extend(prepared);
         self.state.ordered.last_identity = last;
+        self.state.charge = next_charge;
         Ok(true)
     }
 
@@ -179,8 +249,20 @@ impl RollingOperator {
         observer: Option<&RollingMetricsRecorder>,
     ) -> Result<()> {
         let materialized = self.prepare_ordered_buffer(observer)?;
+        let old_charge = super::budget::ordered_buffer_charge(
+            self.state.ordered.records.iter(),
+            &self.compiled,
+            &self.name,
+        )?
+        .expect("ordered buffer contains chargeable records");
+        let next_charge = self.state.charge.checked_sub(old_charge)?.checked_add(
+            super::budget::buffered_charge(materialized.values(), &self.name)?,
+            &self.name,
+        )?;
+        self.check_state_budget(next_charge, &self.name)?;
         self.state.buffer.extend(materialized);
         self.state.ordered.clear();
+        self.state.charge = next_charge;
         Ok(())
     }
 
@@ -355,22 +437,86 @@ impl RollingOperator {
     pub(super) async fn emit_ordered(
         &mut self,
         records: Vec<RecordBatch>,
+        last_identity: Option<Vec<u8>>,
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
         let observer = context.rolling_metrics();
-        let Some(input) = ({
-            let _stage = observer.map(|recorder| recorder.stage(RollingStage::ArrowOutput));
-            combine_ordered_records(&records, context.operator_id())?
-        }) else {
-            return Ok(());
+        let removed = match super::budget::ordered_buffer_charge(
+            records.iter(),
+            &self.compiled,
+            context.operator_id(),
+        ) {
+            Ok(Some(charge)) => charge,
+            Ok(None) => {
+                return self.restore_ordered_failure(
+                    records,
+                    last_identity,
+                    internal_error("ordered rolling state has unsupported state charge"),
+                    context.operator_id(),
+                );
+            }
+            Err(error) => {
+                return self.restore_ordered_failure(
+                    records,
+                    last_identity,
+                    error,
+                    context.operator_id(),
+                );
+            }
         };
-        let mut prepared = self.prepare_ordered_output(&input, context).await?;
+        let combined = {
+            let _stage = observer.map(|recorder| recorder.stage(RollingStage::ArrowOutput));
+            combine_ordered_records(&records, context.operator_id())
+        };
+        let input = match combined {
+            Ok(Some(input)) => input,
+            Ok(None) => return Ok(()),
+            Err(error) => {
+                return self.restore_ordered_failure(
+                    records,
+                    last_identity,
+                    error,
+                    context.operator_id(),
+                );
+            }
+        };
+        let was_warm = self.state.typed_kernel_state.is_some();
+        let prepared = self.prepare_ordered_output(&input, context).await;
+        let mut prepared = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return self.restore_ordered_failure(
+                    records,
+                    last_identity,
+                    error,
+                    context.operator_id(),
+                );
+            }
+        };
+        let (current_charge, next_charge) = match self.projected_ordered_charge(
+            &prepared,
+            removed,
+            was_warm,
+            context.operator_id(),
+        ) {
+            Ok(charge) => charge,
+            Err(error) => {
+                return self.restore_ordered_failure(
+                    records,
+                    last_identity,
+                    error,
+                    context.operator_id(),
+                );
+            }
+        };
+        self.state.charge = current_charge;
         for batch in std::mem::take(&mut prepared.batches) {
             output.emit("output", batch).await?;
         }
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::HistoryMaintenance));
         prepared.commit(self);
+        self.state.charge = next_charge;
         Ok(())
     }
 }
@@ -396,6 +542,35 @@ struct PreparedOrderedOutput {
 }
 
 impl PreparedOrderedOutput {
+    fn projected_charge(
+        &self,
+        operator: &RollingOperator,
+        current: super::budget::StateCharge,
+        node: &str,
+    ) -> Result<super::budget::StateCharge> {
+        let retention = usize::try_from(operator.compiled.max_row_retention).unwrap_or(usize::MAX);
+        let mut old = super::budget::StateCharge::default();
+        let mut new = super::budget::StateCharge::default();
+        for tail in &self.touched {
+            let previous = operator.state.histories.by_entity.get(&tail.entity);
+            if let Some(previous) = previous {
+                old = old.checked_add(
+                    super::budget::history_entity_charge(&tail.entity, previous, node)?,
+                    node,
+                )?;
+            }
+            let seeds = self
+                .ewma_seeds
+                .get(tail.entity_id)
+                .expect("every touched entity has a prepared EWMA seed");
+            new = new.checked_add(
+                tail.projected_charge(previous, retention, &operator.compiled, seeds, node)?,
+                node,
+            )?;
+        }
+        current.checked_sub(old)?.checked_add(new, node)
+    }
+
     fn commit(self, operator: &mut RollingOperator) {
         let retention = usize::try_from(operator.compiled.max_row_retention).unwrap_or(usize::MAX);
         for tail in self.touched {
@@ -563,6 +738,64 @@ impl RollingHistories {
 }
 
 impl RetainedHistoryAppend {
+    fn projected_charge(
+        &self,
+        previous: Option<&EntityRollingState>,
+        retention: usize,
+        compiled: &CompiledRollingSpec,
+        seeds: &[Option<(u64, f64)>],
+        node: &str,
+    ) -> Result<super::budget::StateCharge> {
+        let windows = if seeds.iter().any(Option::is_some) {
+            compiled.window_groups.len()
+        } else {
+            0
+        };
+        let mut charge = super::budget::history_entity_base_charge(&self.entity, windows, node)?;
+        if let Some(previous) = previous {
+            let keep = retention.saturating_sub(self.rows.len());
+            let discard = (previous.rows.len() + previous.columnar.rows).saturating_sub(keep);
+            let scalar_discard = discard.min(previous.rows.len());
+            for row in previous.rows.iter().skip(scalar_discard) {
+                charge = charge
+                    .checked_add(super::budget::scalar_history_row_charge(row, node)?, node)?;
+            }
+            let mut columnar_discard = discard - scalar_discard;
+            for record in &previous.columnar.records {
+                if columnar_discard >= record.num_rows() {
+                    columnar_discard -= record.num_rows();
+                    continue;
+                }
+                let retained = if columnar_discard == 0 {
+                    record
+                } else {
+                    self.prepared_front
+                        .as_ref()
+                        .expect("partial discard has a prepared front")
+                };
+                let retained_charge = super::budget::ordered_record_charge(retained, node)?
+                    .ok_or_else(|| internal_error("columnar history has unsupported charge"))?;
+                charge = charge.checked_add(retained_charge, node)?;
+                columnar_discard = 0;
+            }
+        }
+        match &self.rows {
+            RetainedRows::Columnar(record) if record.num_rows() != 0 => {
+                let appended = super::budget::ordered_record_charge(record, node)?
+                    .ok_or_else(|| internal_error("columnar tail has unsupported charge"))?;
+                charge = charge.checked_add(appended, node)?;
+            }
+            RetainedRows::Columnar(_) => {}
+            RetainedRows::Scalar(rows) => {
+                for row in rows {
+                    charge = charge
+                        .checked_add(super::budget::scalar_history_row_charge(row, node)?, node)?;
+                }
+            }
+        }
+        Ok(charge)
+    }
+
     fn commit(
         self,
         histories: &mut RollingHistories,

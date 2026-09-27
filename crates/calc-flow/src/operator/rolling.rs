@@ -39,13 +39,14 @@ use crate::{
 
 use super::rolling_metrics::{RollingMetricsRecorder, RollingStage, RollingWork};
 use super::{
-    BatchOperator, BatchOperatorContext, LateMetricDelta, OperatorMetadata, StreamCollector,
-    StreamOperator, StreamOperatorContext, accumulate_late_metrics,
+    BatchOperator, BatchOperatorContext, LateMetricDelta, OperatorMetadata, StateBudget,
+    StreamCollector, StreamOperator, StreamOperatorContext, accumulate_late_metrics,
     expression::required_input,
     late_output::{LateRowTally, record_late_row, reject_batch_mode},
     validate_operator_name,
 };
 
+mod budget;
 mod generated_kernel_manifest;
 mod kernel;
 mod late;
@@ -53,6 +54,7 @@ mod ordered_stream;
 mod state_v3;
 
 use super::checkpoint::{checkpoint_mismatch, compile_error, internal_error, state_format};
+use budget::StateCharge;
 #[cfg(test)]
 use kernel::KernelSelection;
 #[cfg(test)]
@@ -1120,6 +1122,7 @@ pub struct RollingOperator {
     output_ports: Vec<Port>,
     compiled: Box<CompiledRollingSpec>,
     state: RollingStreamState,
+    state_budget: StateBudget,
 }
 
 impl RollingOperator {
@@ -1150,7 +1153,36 @@ impl RollingOperator {
             output_ports,
             compiled,
             state: RollingStreamState::default(),
+            state_budget: StateBudget::default(),
         })
+    }
+
+    /// Sets the logical row and byte limit for buffered rows and retained
+    /// per-entity rolling history. The default is one million rows and 256 MiB.
+    /// Checkpoint copies and process resident memory are outside this limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalcFlowError::InvalidArgument`] when current state exceeds
+    /// the requested budget.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use calc_flow::{RollingOperator, StateBudget};
+    /// fn configure(operator: &mut RollingOperator) -> calc_flow::Result<()> {
+    ///     operator.set_state_budget(StateBudget::new(10_000, 64 << 20)?)
+    /// }
+    /// ```
+    pub fn set_state_budget(&mut self, budget: StateBudget) -> Result<()> {
+        if !budget.allows(self.state.charge.rows, self.state.charge.bytes) {
+            return Err(CalcFlowError::InvalidArgument {
+                field: "rolling.state_budget".into(),
+                message: "existing rolling state exceeds the requested budget".into(),
+            });
+        }
+        self.state_budget = budget;
+        Ok(())
     }
 
     /// Returns the validated rolling declaration.
@@ -1170,6 +1202,7 @@ impl std::fmt::Debug for RollingOperator {
             .debug_struct("RollingOperator")
             .field("name", &self.name)
             .field("spec", &self.spec)
+            .field("state_budget", &self.state_budget)
             .field("input_ports", &self.input_ports)
             .field("output_ports", &self.output_ports)
             .field("kernel_version", &self.compiled.kernel_plan.version())
@@ -1276,6 +1309,7 @@ struct RollingStreamState {
     operator_id: Option<String>,
     last_checkpoint_epoch: Option<Epoch>,
     typed_kernel_state: Option<Box<RollingKernelState>>,
+    charge: StateCharge,
 }
 
 /// Bounded inline manifest contribution of one rolling checkpoint (SCE-00
@@ -1365,6 +1399,11 @@ impl StreamOperator for RollingOperator {
         let (accepted, metrics) =
             self.classify_envelope(rows, watermark, context.operator_id(), observer)?;
         let next_metrics = accumulate_late_metrics(self.state.metrics, metrics)?;
+        let next_charge = self.state.charge.checked_add(
+            budget::buffered_charge(accepted.values(), context.operator_id())?,
+            context.operator_id(),
+        )?;
+        self.check_state_budget(next_charge, context.operator_id())?;
         for (identity, row) in accepted {
             self.state.buffer.insert(identity, row);
         }
@@ -1374,6 +1413,7 @@ impl StreamOperator for RollingOperator {
             metrics.null_event_time_rows,
         )?;
         self.state.metrics = next_metrics;
+        self.state.charge = next_charge;
         self.install_context_identity(context);
         Ok(())
     }
@@ -1410,6 +1450,7 @@ impl StreamOperator for RollingOperator {
             };
             self.emit_rows(rows, context, output).await?;
         } else {
+            let last_identity = self.state.ordered.last_identity();
             let records = {
                 let _stage = context
                     .rolling_metrics()
@@ -1421,7 +1462,8 @@ impl StreamOperator for RollingOperator {
                     context.operator_id(),
                 )?
             };
-            self.emit_ordered(records, context, output).await?;
+            self.emit_ordered(records, last_identity, context, output)
+                .await?;
         }
         self.install_context_identity(context);
         self.state.last_input_watermark = Some(watermark);
@@ -1444,8 +1486,10 @@ impl StreamOperator for RollingOperator {
             let rows = self.take_all_buffered();
             self.emit_rows(rows, context, output).await?;
         } else {
+            let last_identity = self.state.ordered.last_identity();
             let records = self.state.ordered.take_all();
-            self.emit_ordered(records, context, output).await?;
+            self.emit_ordered(records, last_identity, context, output)
+                .await?;
         }
         self.install_context_identity(context);
         self.state.ended = true;
@@ -1469,6 +1513,15 @@ impl StreamOperator for RollingOperator {
         self.state
             .histories
             .materialize_columnar(&self.compiled, &self.name, None)?;
+        let charge = budget::full_state_charge(
+            &self.state.buffer,
+            &self.state.ordered,
+            &self.state.histories,
+            &self.compiled,
+            &self.name,
+        )?;
+        self.check_state_budget(charge, &self.name)?;
+        self.state.charge = charge;
         let encoded = self.encode_state(epoch)?;
         let (descriptor, segments) = match encoded {
             Some(prepared) => {
@@ -1531,6 +1584,15 @@ impl StreamOperator for RollingOperator {
             metadata.late_output.as_ref(),
         )?;
         let restored = self.decode_state(&metadata, snapshot)?;
+        let charge = budget::buffered_charge(restored.buffer.values(), &self.name)?.checked_add(
+            budget::histories_charge(&restored.histories, &self.name)?,
+            &self.name,
+        )?;
+        if !self.state_budget.allows(charge.rows, charge.bytes) {
+            return Err(checkpoint_mismatch(
+                "restored rolling state exceeds the configured state budget",
+            ));
+        }
         self.state = RollingStreamState {
             buffer: restored.buffer,
             ordered: ordered_stream::OrderedStreamBuffer::default(),
@@ -1545,6 +1607,7 @@ impl StreamOperator for RollingOperator {
             operator_id: metadata.operator_id,
             last_checkpoint_epoch: Some(metadata.epoch),
             typed_kernel_state: None,
+            charge,
         };
         Ok(())
     }
@@ -1556,6 +1619,57 @@ impl StreamOperator for RollingOperator {
 }
 
 impl RollingOperator {
+    fn check_state_budget(&self, charge: StateCharge, node: &str) -> Result<()> {
+        if self.state_budget.allows(charge.rows, charge.bytes) {
+            Ok(())
+        } else {
+            Err(operator_error(node, "rolling state budget exceeded"))
+        }
+    }
+
+    fn projected_rows_charge(
+        &self,
+        rows: &[BufferedRow],
+        touched: &HistoryUpdates,
+        node: &str,
+    ) -> Result<(StateCharge, StateCharge)> {
+        let current = self
+            .state
+            .charge
+            .checked_sub(budget::buffered_charge(rows.iter(), node)?)?;
+        let (old_histories, new_histories) =
+            budget::changed_histories_charge(&self.state.histories, touched, node)?;
+        let next = current
+            .checked_sub(old_histories)?
+            .checked_add(new_histories, node)?;
+        self.check_state_budget(next, node)?;
+        Ok((current, next))
+    }
+
+    fn materialize_histories_with_charge(
+        &mut self,
+        node: &str,
+        observer: Option<&RollingMetricsRecorder>,
+    ) -> Result<()> {
+        let has_columnar = self
+            .state
+            .histories
+            .by_entity
+            .values()
+            .any(|state| !state.columnar.records.is_empty());
+        let old = has_columnar
+            .then(|| budget::histories_charge(&self.state.histories, node))
+            .transpose()?;
+        self.state
+            .histories
+            .materialize_columnar(&self.compiled, node, observer)?;
+        if let Some(old) = old {
+            let new = budget::histories_charge(&self.state.histories, node)?;
+            self.state.charge = self.state.charge.checked_sub(old)?.checked_add(new, node)?;
+        }
+        Ok(())
+    }
+
     fn observe_context(&self, context: &StreamOperatorContext<'_>) -> Result<()> {
         super::late_output::ensure_can_continue(
             self.state.late_output_failed,
@@ -1698,11 +1812,7 @@ impl RollingOperator {
             return Ok(());
         }
         let observer = context.rolling_metrics();
-        self.state.histories.materialize_columnar(
-            &self.compiled,
-            context.operator_id(),
-            observer,
-        )?;
+        self.materialize_histories_with_charge(context.operator_id(), observer)?;
         let output_schema = self.output_ports[0]
             .schema()
             .expect("rolling output always has an exact schema");
@@ -1737,6 +1847,26 @@ impl RollingOperator {
                 computed.touched,
             )
         };
+        let (current_charge, next_charge) =
+            match self.projected_rows_charge(&rows, &touched, context.operator_id()) {
+                Ok(charge) => charge,
+                Err(error) => {
+                    for row in rows {
+                        self.state.buffer.insert(row.identity.clone(), row);
+                    }
+                    if let Ok(charge) = budget::full_state_charge(
+                        &self.state.buffer,
+                        &self.state.ordered,
+                        &self.state.histories,
+                        &self.compiled,
+                        context.operator_id(),
+                    ) {
+                        self.state.charge = charge;
+                    }
+                    return Err(error);
+                }
+            };
+        self.state.charge = current_charge;
         if let Some(recorder) = observer {
             recorder.add(RollingWork::OutputRowsPrepared, record.num_rows());
         }
@@ -1768,6 +1898,7 @@ impl RollingOperator {
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::HistoryMaintenance));
         self.state.histories.apply(touched);
         self.state.typed_kernel_state = next_kernel_state.map(Box::new);
+        self.state.charge = next_charge;
         Ok(())
     }
 }
