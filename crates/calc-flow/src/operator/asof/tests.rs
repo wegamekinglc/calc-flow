@@ -3,6 +3,7 @@ use crate::{
     BatchMetadata, CancellationToken, EdgeBudget, EdgeCollector, Epoch, IngressProgress,
     IngressState, StreamJobContext,
 };
+use checkpoint::PreparedSegment;
 use datafusion::arrow::{
     array::{Float64Array, Int64Array, StringArray, TimestampMicrosecondArray, UInt64Array},
     datatypes::{DataType, Field, Schema, TimeUnit},
@@ -71,10 +72,55 @@ async fn finalization_without_eviction_does_not_clone_retained_state() {
     assert_eq!(op.status.pending_left_rows, 0);
     let expected = op.prepare_checkpoint(&op.state, &cx).await.unwrap();
     assert_eq!(
-        op.prepared, expected.segment,
+        op.prepared.as_ref().map(PreparedSegment::canonical),
+        expected.segment.map(|segment| segment.canonical()),
         "checkpoint bytes stay canonical"
     );
 }
+#[tokio::test]
+async fn finalized_prefixes_share_committed_checkpoint_bytes_until_capture() {
+    let (mut op, left, right) = prefix_fixture();
+    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+    let cx = StreamOperatorContext::new(&job, "asof", None)
+        .with_test_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
+    let mut collector = EdgeCollector::new(op.output_ports().to_vec());
+    op.process_data("right", right, &cx, &mut collector)
+        .await
+        .unwrap();
+    op.process_data("left", left, &cx, &mut collector)
+        .await
+        .unwrap();
+    let committed = op.capture(Epoch::INITIAL).unwrap().segments["asof-state-v1"].bytes_arc();
+    let owners = Arc::strong_count(&committed);
+    op.on_watermark(EventTime::from_micros(103), &cx, &mut collector)
+        .await
+        .unwrap();
+    assert_eq!(collector.drain("output").len(), 3);
+    assert_eq!(
+        Arc::strong_count(&committed),
+        owners,
+        "each finalized prefix borrows the committed bytes instead of copying them"
+    );
+    let expected = op
+        .prepare_checkpoint(&op.state, &cx)
+        .await
+        .unwrap()
+        .segment
+        .map(|segment| segment.canonical());
+    let captured = op.capture(Epoch::INITIAL).unwrap().segments["asof-state-v1"].clone();
+    assert_eq!(Some(captured.clone()), expected, "capture stays canonical");
+    assert_eq!(
+        Arc::strong_count(&committed),
+        1,
+        "capture releases the drained committed bytes"
+    );
+    let repeated = op.capture(Epoch::INITIAL).unwrap().segments["asof-state-v1"].bytes_arc();
+    assert!(
+        Arc::ptr_eq(&captured.bytes_arc(), &repeated),
+        "later captures share the materialized bytes"
+    );
+}
+
 struct CancelPrefixCollector {
     cancel: CancellationToken,
     accepted: Vec<Batch>,
@@ -126,7 +172,10 @@ async fn cancelled_prefix_has_canonical_checkpoint_and_resumes_exactly() {
     let resumed_cx = StreamOperatorContext::new(&fresh_job, "asof", None)
         .with_test_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
     let canonical = op.prepare_checkpoint(&op.state, &resumed_cx).await.unwrap();
-    assert_eq!(op.prepared, canonical.segment);
+    assert_eq!(
+        op.prepared.as_ref().map(PreparedSegment::canonical),
+        canonical.segment.map(|segment| segment.canonical())
+    );
     let (mut restored, _, _) = prefix_fixture();
     restored.restore(&before).unwrap();
     assert_eq!(
