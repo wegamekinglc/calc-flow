@@ -680,6 +680,12 @@ let plan = PipelineBuilder::new("orders")?
     .compile_stream(&udfs, &StreamRequirements::default())?;
 ```
 
+The window operator bounds retained accumulators by default to one million
+window groups and 256 MiB of logical charge. Rust callers can adjust this
+with `WindowAggregateOperator::set_state_budget` before graph compilation;
+recovery rejects a snapshot that exceeds the selected budget. The budget does
+not include checkpoint segment copies or process RSS.
+
 Run the complete source-watermark-window-sink example with:
 
 ```bash

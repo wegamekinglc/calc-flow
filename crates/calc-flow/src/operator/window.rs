@@ -36,7 +36,9 @@ use crate::{
 };
 
 use super::checkpoint::{checkpoint_mismatch, compile_error, internal_error, state_format};
-use super::{LateMetricDelta, OperatorMetadata, accumulate_late_metrics, validate_operator_name};
+use super::{
+    LateMetricDelta, OperatorMetadata, StateBudget, accumulate_late_metrics, validate_operator_name,
+};
 
 /// Maximum number of concrete hopping-window assignments for one input row.
 pub const MAX_WINDOW_OVERLAP: u64 = 1_024;
@@ -263,6 +265,7 @@ pub struct WindowAggregateOperator {
     output_ports: [Port; 1],
     compiled: CompiledWindowSpec,
     state: WindowState,
+    state_budget: StateBudget,
 }
 
 #[derive(Clone)]
@@ -302,6 +305,7 @@ struct CompiledWindowGeometry {
 #[derive(Default)]
 struct WindowState {
     accumulators: BTreeMap<WindowKey, AccumulatorRow>,
+    accumulator_bytes: u64,
     dirty: BTreeSet<WindowKey>,
     emitted_pending_snapshot: BTreeSet<WindowKey>,
     last_input_watermark: Option<EventTime>,
@@ -428,7 +432,75 @@ struct WindowSnapshotMetadata {
 
 struct InputBatchUpdate {
     accumulators: BTreeMap<WindowKey, AccumulatorRow>,
+    usage: WindowStateUsage,
     metrics: LateMetricDelta,
+}
+
+#[derive(Clone, Copy)]
+struct WindowStateUsage {
+    rows: u64,
+    bytes: u64,
+}
+
+// Stable logical prices for retained map entries and scalar slots; variable
+// key and string lengths are charged separately from these fixed costs.
+const WINDOW_ENTRY_BASE_BYTES: u64 = 128;
+const WINDOW_GROUP_VALUE_BYTES: u64 = 64;
+const WINDOW_AGGREGATE_BYTES: u64 = 64;
+
+fn logical_length(length: usize) -> u64 {
+    u64::try_from(length).unwrap_or(u64::MAX)
+}
+
+fn scalar_dynamic_bytes(value: &ScalarValue) -> u64 {
+    match value {
+        ScalarValue::String(value) => logical_length(value.len()),
+        _ => 0,
+    }
+}
+
+fn aggregate_dynamic_bytes(entry: &AccumulatorRow) -> u64 {
+    entry
+        .aggregates
+        .iter()
+        .filter_map(|aggregate| match aggregate {
+            AccumulatorValue::Min(value) | AccumulatorValue::Max(value) => value.as_ref(),
+            _ => None,
+        })
+        .map(scalar_dynamic_bytes)
+        .fold(0_u64, u64::saturating_add)
+}
+
+fn window_entry_bytes(key_bytes: u64, entry: &AccumulatorRow) -> u64 {
+    let group_bytes = logical_length(entry.group_values.len())
+        .saturating_mul(WINDOW_GROUP_VALUE_BYTES)
+        .saturating_add(
+            entry
+                .group_values
+                .iter()
+                .flatten()
+                .map(scalar_dynamic_bytes)
+                .fold(0_u64, u64::saturating_add),
+        );
+    let aggregate_bytes = logical_length(entry.aggregates.len())
+        .saturating_mul(WINDOW_AGGREGATE_BYTES)
+        .saturating_add(aggregate_dynamic_bytes(entry));
+    WINDOW_ENTRY_BASE_BYTES
+        .saturating_add(key_bytes)
+        .saturating_add(group_bytes)
+        .saturating_add(aggregate_bytes)
+}
+
+fn window_state_usage(accumulators: &BTreeMap<WindowKey, AccumulatorRow>) -> WindowStateUsage {
+    WindowStateUsage {
+        rows: logical_length(accumulators.len()),
+        bytes: accumulators
+            .iter()
+            .map(|(key, entry)| {
+                window_entry_bytes(logical_length(key.stable_group_key.len()), entry)
+            })
+            .fold(0_u64, u64::saturating_add),
+    }
 }
 
 #[derive(Default)]
@@ -493,7 +565,41 @@ impl WindowAggregateOperator {
             )?],
             compiled,
             state: WindowState::default(),
+            state_budget: StateBudget::default(),
         })
+    }
+
+    /// Sets the logical row and byte limit for retained window accumulators.
+    ///
+    /// The default is one million windows and 256 MiB of logical charge.
+    /// Existing state must fit the replacement budget. Checkpoint segment
+    /// copies and process RSS are outside this limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalcFlowError::InvalidArgument`] if existing state exceeds
+    /// the requested budget.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use calc_flow::{StateBudget, WindowAggregateOperator};
+    /// fn configure(operator: &mut WindowAggregateOperator) -> calc_flow::Result<()> {
+    ///     operator.set_state_budget(StateBudget::new(10_000, 64 << 20)?)
+    /// }
+    /// ```
+    pub fn set_state_budget(&mut self, budget: StateBudget) -> Result<()> {
+        if !budget.allows(
+            u64::try_from(self.state.accumulators.len()).unwrap_or(u64::MAX),
+            self.state.accumulator_bytes,
+        ) {
+            return Err(invalid_argument(
+                "window.state_budget",
+                "existing accumulator state exceeds the requested budget",
+            ));
+        }
+        self.state_budget = budget;
+        Ok(())
     }
 
     fn prepare_input_batch(
@@ -510,13 +616,18 @@ impl WindowAggregateOperator {
         let table = batch.table_payload()?;
         let mut scratch = BTreeMap::<WindowKey, AccumulatorRow>::new();
         let mut metrics = PreparedInputMetrics::default();
+        let mut usage = WindowStateUsage {
+            rows: logical_length(self.state.accumulators.len()),
+            bytes: self.state.accumulator_bytes,
+        };
 
         for record in table.batches() {
-            self.prepare_record(record, context, &mut scratch, &mut metrics)?;
+            self.prepare_record(record, context, &mut scratch, &mut metrics, &mut usage)?;
         }
 
         Ok(InputBatchUpdate {
             accumulators: scratch,
+            usage,
             metrics: metrics.into_delta(),
         })
     }
@@ -527,9 +638,10 @@ impl WindowAggregateOperator {
         context: &StreamOperatorContext<'_>,
         scratch: &mut BTreeMap<WindowKey, AccumulatorRow>,
         metrics: &mut PreparedInputMetrics,
+        usage: &mut WindowStateUsage,
     ) -> Result<()> {
         for row_index in 0..record.num_rows() {
-            self.prepare_row(record, row_index, context, scratch, metrics)?;
+            self.prepare_row(record, row_index, context, scratch, metrics, usage)?;
         }
         Ok(())
     }
@@ -541,6 +653,7 @@ impl WindowAggregateOperator {
         context: &StreamOperatorContext<'_>,
         scratch: &mut BTreeMap<WindowKey, AccumulatorRow>,
         metrics: &mut PreparedInputMetrics,
+        usage: &mut WindowStateUsage,
     ) -> Result<()> {
         let Some(event_time) = self.row_event_time(record, row_index, context.operator_id())?
         else {
@@ -558,7 +671,14 @@ impl WindowAggregateOperator {
         if open_assignments.is_empty() {
             return Ok(());
         }
-        self.prepare_open_row(record, row_index, &open_assignments, context, scratch)
+        self.prepare_open_row(
+            record,
+            row_index,
+            &open_assignments,
+            context,
+            scratch,
+            usage,
+        )
     }
 
     fn prepare_open_row(
@@ -568,6 +688,7 @@ impl WindowAggregateOperator {
         open_assignments: &[(EventTime, EventTime)],
         context: &StreamOperatorContext<'_>,
         scratch: &mut BTreeMap<WindowKey, AccumulatorRow>,
+        usage: &mut WindowStateUsage,
     ) -> Result<()> {
         let (stable_group_key, group_values) = encode_group_key(
             record,
@@ -585,6 +706,7 @@ impl WindowAggregateOperator {
                 &stable_group_key,
                 &group_values,
                 scratch,
+                usage,
                 context.operator_id(),
             )?;
         }
@@ -622,6 +744,7 @@ impl WindowAggregateOperator {
         stable_group_key: &[u8],
         group_values: &[Option<ScalarValue>],
         scratch: &mut BTreeMap<WindowKey, AccumulatorRow>,
+        usage: &mut WindowStateUsage,
         operator_id: &str,
     ) -> Result<()> {
         let key = WindowKey {
@@ -629,14 +752,16 @@ impl WindowAggregateOperator {
             end,
             stable_group_key: stable_group_key.to_vec(),
         };
+        let key_bytes = logical_length(key.stable_group_key.len());
+        let scratch_previous = scratch.get(&key);
+        let existing = if scratch_previous.is_some() {
+            None
+        } else {
+            self.state.accumulators.get(&key)
+        };
+        let previous_dynamic_bytes = scratch_previous.or(existing).map(aggregate_dynamic_bytes);
         let accumulator = scratch.entry(key).or_insert_with(|| {
-            self.state
-                .accumulators
-                .get(&WindowKey {
-                    start,
-                    end,
-                    stable_group_key: stable_group_key.to_vec(),
-                })
+            existing
                 .cloned()
                 .unwrap_or_else(|| new_accumulator_row(&self.spec, &self.compiled, group_values))
         });
@@ -647,7 +772,29 @@ impl WindowAggregateOperator {
             &self.spec,
             &self.compiled,
             operator_id,
-        )
+        )?;
+        let next_rows = usage
+            .rows
+            .saturating_add(u64::from(previous_dynamic_bytes.is_none()));
+        let next_bytes = if let Some(previous_dynamic_bytes) = previous_dynamic_bytes {
+            usage
+                .bytes
+                .checked_sub(previous_dynamic_bytes)
+                .ok_or_else(|| internal_error("window accumulator charge underflowed"))?
+                .saturating_add(aggregate_dynamic_bytes(accumulator))
+        } else {
+            usage
+                .bytes
+                .saturating_add(window_entry_bytes(key_bytes, accumulator))
+        };
+        if !self.state_budget.allows(next_rows, next_bytes) {
+            return Err(operator_error(operator_id, "window state budget exceeded"));
+        }
+        *usage = WindowStateUsage {
+            rows: next_rows,
+            bytes: next_bytes,
+        };
+        Ok(())
     }
 
     fn observe_context(&self, context: &StreamOperatorContext<'_>) -> Result<()> {
@@ -995,7 +1142,15 @@ impl StreamOperator for WindowAggregateOperator {
         };
         self.state.prepared_segments.clear();
         for key in std::mem::take(&mut self.state.emitted_pending_snapshot) {
-            self.state.accumulators.remove(&key);
+            if let Some(entry) = self.state.accumulators.remove(&key) {
+                self.state.accumulator_bytes =
+                    self.state
+                        .accumulator_bytes
+                        .saturating_sub(window_entry_bytes(
+                            logical_length(key.stable_group_key.len()),
+                            &entry,
+                        ));
+            }
             self.state.dirty.remove(&key);
         }
         self.state.dirty.clear();
@@ -1177,6 +1332,7 @@ impl WindowAggregateOperator {
     ) {
         self.install_context_identity(context);
         self.state.metrics = next_metrics;
+        self.state.accumulator_bytes = update.usage.bytes;
         for (key, accumulator) in update.accumulators {
             self.state.dirty.insert(key.clone());
             self.state.accumulators.insert(key, accumulator);
@@ -1219,6 +1375,10 @@ impl WindowAggregateOperator {
         retained_segments: BTreeMap<String, crate::StateSegment>,
         decoded: BTreeMap<WindowKey, AccumulatorRow>,
     ) -> Result<()> {
+        let usage = window_state_usage(&decoded);
+        if !self.state_budget.allows(usage.rows, usage.bytes) {
+            return Err(checkpoint_mismatch("window state budget exceeded"));
+        }
         let migrate_legacy = metadata.state_layout_version == WINDOW_STATE_LAYOUT_VERSION;
         let prepared_segments = if migrate_legacy && !decoded.is_empty() {
             let pipeline_fingerprint =
@@ -1251,6 +1411,7 @@ impl WindowAggregateOperator {
         };
         self.state = WindowState {
             accumulators: decoded,
+            accumulator_bytes: usage.bytes,
             last_input_watermark: metadata.last_input_watermark,
             next_output_sequence: metadata.next_output_sequence,
             ended: metadata.ended,
@@ -3752,10 +3913,293 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::BatchMetadata;
+    use crate::{BatchMetadata, StateBudget};
 
     const HIGH_CARDINALITY_ROWS: usize = 400_000;
     const LEGACY_PROJECT_JSON_LIMIT: usize = 10 * 1024 * 1024;
+
+    fn budget_test_batch(times: &[i64]) -> Batch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "event_time",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                false,
+            ),
+            Field::new("amount", DataType::Int64, false),
+        ]));
+        let record = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(TimestampMicrosecondArray::from(times.to_vec())) as ArrayRef,
+                Arc::new(Int64Array::from(vec![1; times.len()])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        Batch::table(vec![record], BatchMetadata::default()).unwrap()
+    }
+
+    fn budget_test_string_batch(value: &str) -> Batch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "event_time",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                false,
+            ),
+            Field::new("value", DataType::Utf8, false),
+        ]));
+        let record = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(TimestampMicrosecondArray::from(vec![0])) as ArrayRef,
+                Arc::new(StringArray::from(vec![value])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        Batch::table(vec![record], BatchMetadata::default()).unwrap()
+    }
+
+    fn budget_test_job() -> crate::StreamJobContext {
+        crate::StreamJobContext::new(
+            1,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            JsonMap::new(),
+            None,
+            crate::CancellationToken::new(),
+        )
+    }
+
+    #[tokio::test]
+    async fn window_state_row_budget_rejects_whole_batch_before_installing_it() {
+        let mut operator = checkpoint_segment_operator();
+        operator
+            .set_state_budget(StateBudget::new(1, 1_048_576).unwrap())
+            .unwrap();
+        let job = budget_test_job();
+        let context = StreamOperatorContext::new(&job, "window", None);
+        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+
+        let error = operator
+            .process_data(
+                "input",
+                budget_test_batch(&[0, 60_000_000]),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("window state budget exceeded"));
+        assert!(operator.state.accumulators.is_empty());
+
+        operator
+            .process_data("input", budget_test_batch(&[0]), &context, &mut output)
+            .await
+            .unwrap();
+        assert_eq!(operator.state.accumulators.len(), 1);
+        let previous_budget = operator.state_budget;
+        assert!(
+            operator
+                .set_state_budget(StateBudget::new(1, 1).unwrap())
+                .is_err()
+        );
+        assert_eq!(operator.state_budget, previous_budget);
+    }
+
+    #[tokio::test]
+    async fn window_state_byte_budget_rejects_one_group() {
+        let mut operator = checkpoint_segment_operator();
+        operator
+            .set_state_budget(StateBudget::new(10, 1).unwrap())
+            .unwrap();
+        let job = budget_test_job();
+        let context = StreamOperatorContext::new(&job, "window", None);
+        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+
+        let error = operator
+            .process_data("input", budget_test_batch(&[0]), &context, &mut output)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("window state budget exceeded"));
+        assert!(operator.state.accumulators.is_empty());
+    }
+
+    #[tokio::test]
+    async fn window_state_budget_tracks_min_string_growth_without_changing_live_state() {
+        let schema = budget_test_string_batch("z")
+            .table_payload()
+            .unwrap()
+            .batches()[0]
+            .schema();
+        let spec = WindowSpec::tumbling("event_time", Duration::from_secs(60))
+            .unwrap()
+            .aggregate(AggregateFunction::Min, "value", "minimum")
+            .unwrap();
+        let mut operator = WindowAggregateOperator::new("window", schema, spec).unwrap();
+        operator
+            .set_state_budget(StateBudget::new(1, 250).unwrap())
+            .unwrap();
+        let job = budget_test_job();
+        let context = StreamOperatorContext::new(&job, "window", None);
+        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data(
+                "input",
+                budget_test_string_batch("z"),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap();
+        let previous_bytes = operator.state.accumulator_bytes;
+
+        let error = operator
+            .process_data(
+                "input",
+                budget_test_string_batch(&"a".repeat(200)),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("window state budget exceeded"));
+        assert_eq!(operator.state.accumulator_bytes, previous_bytes);
+        let entry = operator.state.accumulators.values().next().unwrap();
+        assert!(matches!(
+            &entry.aggregates[0],
+            AccumulatorValue::Min(Some(ScalarValue::String(value))) if value == "z"
+        ));
+
+        operator
+            .process_data(
+                "input",
+                budget_test_string_batch("y"),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn hopping_window_budget_rejects_mid_row_without_partial_state() {
+        let schema = budget_test_batch(&[15]).table_payload().unwrap().batches()[0].schema();
+        let spec = WindowSpec::hopping(
+            "event_time",
+            Duration::from_micros(60),
+            Duration::from_micros(10),
+        )
+        .unwrap()
+        .aggregate(AggregateFunction::Count, "amount", "count_amount")
+        .unwrap();
+        let mut operator = WindowAggregateOperator::new("window", schema, spec).unwrap();
+        operator
+            .set_state_budget(StateBudget::new(1, 1_048_576).unwrap())
+            .unwrap();
+        let job = budget_test_job();
+        let context = StreamOperatorContext::new(&job, "window", None);
+        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+
+        let error = operator
+            .process_data("input", budget_test_batch(&[15]), &context, &mut output)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("window state budget exceeded"));
+        assert!(operator.state.accumulators.is_empty());
+        assert_eq!(operator.state.accumulator_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn window_state_budget_releases_closed_groups_after_checkpoint() {
+        let mut operator = checkpoint_segment_operator();
+        operator
+            .set_state_budget(StateBudget::new(1, 1_048_576).unwrap())
+            .unwrap();
+        let job = budget_test_job();
+        let context = StreamOperatorContext::new(&job, "window", None);
+        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("input", budget_test_batch(&[0]), &context, &mut output)
+            .await
+            .unwrap();
+
+        operator
+            .on_watermark(EventTime::from_micros(60_000_000), &context, &mut output)
+            .await
+            .unwrap();
+        assert_eq!(operator.state.accumulators.len(), 1);
+        operator.checkpoint(crate::Epoch::INITIAL).unwrap();
+        assert!(operator.state.accumulators.is_empty());
+        assert_eq!(operator.state.accumulator_bytes, 0);
+
+        operator
+            .process_data(
+                "input",
+                budget_test_batch(&[60_000_000]),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap();
+        assert_eq!(operator.state.accumulators.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn window_state_budget_rejects_restore_without_replacing_live_state() {
+        let mut source = checkpoint_segment_operator();
+        let job = budget_test_job();
+        let context = StreamOperatorContext::new(&job, "window", None);
+        let mut output = crate::EdgeCollector::new(source.output_ports().to_vec());
+        source
+            .process_data(
+                "input",
+                budget_test_batch(&[0, 60_000_000]),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap();
+        let snapshot = source.checkpoint(crate::Epoch::INITIAL).unwrap();
+
+        let mut restored = checkpoint_segment_operator();
+        restored
+            .set_state_budget(StateBudget::new(1, 1_048_576).unwrap())
+            .unwrap();
+        let error = restored.restore(&snapshot).unwrap_err();
+        assert!(error.to_string().contains("window state budget exceeded"));
+        assert!(restored.state.accumulators.is_empty());
+    }
+
+    #[tokio::test]
+    async fn restored_window_state_budget_applies_to_next_batch() {
+        let mut source = checkpoint_segment_operator();
+        let job = budget_test_job();
+        let context = StreamOperatorContext::new(&job, "window", None);
+        let mut output = crate::EdgeCollector::new(source.output_ports().to_vec());
+        source
+            .process_data("input", budget_test_batch(&[0]), &context, &mut output)
+            .await
+            .unwrap();
+        let snapshot = source.checkpoint(crate::Epoch::INITIAL).unwrap();
+
+        let mut restored = checkpoint_segment_operator();
+        restored
+            .set_state_budget(StateBudget::new(1, 1_048_576).unwrap())
+            .unwrap();
+        restored.restore(&snapshot).unwrap();
+        let previous_bytes = restored.state.accumulator_bytes;
+        let mut output = crate::EdgeCollector::new(restored.output_ports().to_vec());
+        let error = restored
+            .process_data(
+                "input",
+                budget_test_batch(&[60_000_000]),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("window state budget exceeded"));
+        assert_eq!(restored.state.accumulators.len(), 1);
+        assert_eq!(restored.state.accumulator_bytes, previous_bytes);
+    }
 
     #[test]
     fn float_sum_and_average_recover_low_order_terms() {
