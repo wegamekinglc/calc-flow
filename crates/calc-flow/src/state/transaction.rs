@@ -624,7 +624,7 @@ impl ManifestTransaction {
             }
             Err(error) => Err(error),
         };
-        if let Ok((handle, _)) = &outcome {
+        if let Ok((handle, false)) = &outcome {
             let mut session = self.session_segments.lock();
             session.carried.insert(carry_key, handle.clone());
             session.verified.insert(handle.clone());
@@ -660,6 +660,17 @@ impl ManifestTransaction {
                 self.lineage.publish_segment(handle),
             )
             .await?;
+        }
+        let mut session = self.session_segments.lock();
+        for handle in handles {
+            session.carried.insert(
+                (
+                    handle.operator_id().to_string(),
+                    handle.segment_id().to_string(),
+                ),
+                handle.clone(),
+            );
+            session.verified.insert(handle.clone());
         }
         Ok(())
     }
@@ -1410,12 +1421,18 @@ fn classify_failed_publication(
             parent_synced,
             error,
         }),
-        Ok(_) => Err(CalcFlowError::Conflict {
-            resource: "checkpoint manifest".into(),
-            key: destination.display().to_string(),
+        Ok(_) => Ok(ManifestPublication::Installed {
+            parent_synced: false,
+            error: CalcFlowError::Conflict {
+                resource: "checkpoint manifest".into(),
+                key: destination.display().to_string(),
+            },
         }),
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => Err(error),
-        Err(source) => Err(io_error(destination, source)),
+        Err(source) => Ok(ManifestPublication::Installed {
+            parent_synced: false,
+            error: io_error(destination, source),
+        }),
     }
 }
 
@@ -1523,6 +1540,8 @@ fn sync_directory(directory: &Path) -> Result<()> {
     )
 )]
 fn sync_directory(_directory: &Path) -> Result<()> {
+    // Non-Unix targets lack a portable directory fsync. Managed crash
+    // durability is documented as Unix-only; file contents are still synced.
     Ok(())
 }
 
@@ -1618,6 +1637,50 @@ mod tests {
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     const RUNTIME_CONFIG_HASH: &str =
         "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+
+    #[test]
+    fn unreadable_post_rename_destination_requires_preservation() {
+        let directory = TempDir::new().unwrap();
+        let publication = super::classify_failed_publication(
+            directory.path(),
+            b"expected",
+            false,
+            CalcFlowError::Internal {
+                message: "rename result unknown".into(),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            publication,
+            ManifestPublication::Installed {
+                parent_synced: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn mismatched_post_rename_destination_requires_preservation() {
+        let directory = TempDir::new().unwrap();
+        let destination = directory.path().join("manifest.json");
+        std::fs::write(&destination, b"different").unwrap();
+        let publication = super::classify_failed_publication(
+            &destination,
+            b"expected",
+            false,
+            CalcFlowError::Internal {
+                message: "rename result unknown".into(),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            publication,
+            ManifestPublication::Installed {
+                parent_synced: false,
+                error: CalcFlowError::Conflict { .. },
+            }
+        ));
+    }
 
     #[cfg(unix)]
     #[test]
@@ -1833,6 +1896,54 @@ mod tests {
         assert_eq!(third.segments[0].epoch(), third_epoch);
         assert_ne!(third.segments, second.segments);
         assert_eq!(committed_file_count(&state_root.join("committed")), 2);
+    }
+
+    #[tokio::test]
+    async fn retry_after_staging_unpublished_segment_publishes_it() {
+        let directory = TempDir::new().unwrap();
+        let backend = LocalStateBackend::new(directory.path().join("state"))
+            .await
+            .unwrap();
+        let key = StateLineageKey::new("orders", PIPELINE_FINGERPRINT).unwrap();
+        let lineage: Arc<dyn StateLineageBackend> =
+            Arc::from(backend.open_lineage(&key).await.unwrap());
+        let transaction = ManifestTransaction::open(
+            Arc::clone(&lineage),
+            &key,
+            directory.path().join("manifests"),
+            2,
+        )
+        .await
+        .unwrap();
+        let bytes = b"unpublished-state";
+        let segment = StateSegment::new(bytes.to_vec());
+        let (handle, needs_publication) = transaction
+            .stage_state_segment(
+                "window",
+                Epoch::INITIAL,
+                &super::digest("window"),
+                "delta",
+                &segment,
+                &crate::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(needs_publication);
+        assert!(matches!(
+            lineage.load_segment(&handle).await,
+            Err(CalcFlowError::NotFound { .. })
+        ));
+
+        let staged = transaction
+            .stage_operator_state(
+                "window",
+                Epoch::INITIAL,
+                snapshot_with_segments(&[("delta", bytes)]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(staged.segments, vec![handle.clone()]);
+        assert_eq!(lineage.load_segment(&handle).await.unwrap(), bytes);
     }
 
     #[tokio::test]

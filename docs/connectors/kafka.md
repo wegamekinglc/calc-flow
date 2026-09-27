@@ -68,6 +68,36 @@ demo topic. The graph and JSON codec share an explicit `id`, `quantity`,
 `price` schema; the calculation casts quantity to `float64` before multiplying.
 The transactional write example below uses separate target and ledger topics.
 
+## TLS and SASL
+
+Kafka bindings default to `"security_protocol": "plaintext"`. Set it to
+`"ssl"`, `"sasl_plaintext"`, or `"sasl_ssl"` for secured brokers. TLS modes
+can set `"ssl_ca_location"` to a trusted CA bundle path; without it,
+librdkafka uses its default trust configuration. SASL modes require
+`"sasl_mechanism"` (`"PLAIN"`, `"SCRAM-SHA-256"`, or `"SCRAM-SHA-512"`),
+`"sasl_username"`, and the `sasl_password` secret slot. For example, add
+these fields to either source or sink binding:
+
+```json
+"options": {
+  "security_protocol": "sasl_ssl",
+  "ssl_ca_location": "/etc/ssl/certs/kafka-ca.pem",
+  "sasl_mechanism": "SCRAM-SHA-512",
+  "sasl_username": "calc-flow"
+},
+"secrets": {
+  "sasl_password": {"resolver": "environment", "key": "CALC_FLOW_KAFKA_PASSWORD"}
+}
+```
+
+Keep the existing topic, format, and other required options alongside these
+fields. Passwords are rejected in `options`. The factory applies the same
+security settings to the source, both sink modes, and transactional ledger
+recovery clients. Direct Rust constructors without a secret resolver accept
+TLS and plaintext modes; use connector factories for SASL bindings. Custom
+`SecretResolver` implementations used by a plaintext factory must report
+secret-slot presence through `has_reference`; an unknown result fails closed.
+
 ## Protobuf payloads
 
 Set `"format": "protobuf"` to decode one protobuf message per record value.
@@ -362,7 +392,12 @@ to supply physical graph bindings and explicit runtime/state settings.
 The ledger topic must be dedicated, have exactly one partition, and use only
 `cleanup.policy=compact`. Calc Flow derives the transactional ID from pipeline
 and output identity; a project cannot supply it. Recovery validates the exact
-prepared record bytes and checks the committed epoch marker before replay.
+prepared record bytes, target topic, wire format, and Arrow schema identity,
+then checks the committed epoch marker before replay. Older markers lack the
+topic and schema identity and cannot authenticate a recovery attempt. Reconcile
+the pending epoch against the target topic and durable checkpoint before
+starting a fresh sink identity and ledger; do not delete the old marker to
+force replay.
 
 See the [connector overview](README.md) for shared delivery, secret,
 and recovery rules.

@@ -11,6 +11,11 @@ performance controller tests run in this scheduled workflow. Supplemental SQL
 adaptive tuning experiments run only by manual dispatch from `benchmarks.yml`;
 they are not required suite shards.
 
+Historical JSON results under `benchmarks/rolling/` are stored with Git LFS.
+Install Git LFS and run `git lfs pull --include='benchmarks/rolling/*.json'`
+when inspecting those results locally. Scheduled benchmark runs generate their
+own artifacts and do not read these historical files.
+
 On this page:
 
 - [Complete inventory](#complete-inventory)

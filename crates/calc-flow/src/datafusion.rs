@@ -12,12 +12,14 @@ use datafusion::{
     datasource::MemTable,
     execution::{
         context::{SessionConfig, SessionContext},
+        memory_pool::GreedyMemoryPool,
+        runtime_env::{RuntimeEnv, RuntimeEnvBuilder},
         session_state::SessionStateBuilder,
     },
     logical_expr::ScalarUDF,
     physical_plan::{ExecutionPlanProperties, displayable, execute_stream},
 };
-use futures::{StreamExt, TryStreamExt};
+use futures::StreamExt;
 use parking_lot::Mutex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -30,6 +32,9 @@ use crate::{
     expression::{sql_projection, validate_select_query},
     validate_selected_udfs,
 };
+
+const MAX_SQL_RESULT_ROWS: usize = 100_000_000;
+const MAX_SQL_RESULT_BYTES: usize = 1 << 30;
 
 /// Selects the requested `DataFusion` partition policy.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -187,6 +192,7 @@ pub struct DataFusionQueryMetric {
 
 pub struct DataFusionRuntime {
     config: DataFusionConfig,
+    runtime_env: Arc<RuntimeEnv>,
     context: OnceLock<SessionContext>,
     selected_udfs: Vec<(UdfReference, Arc<ScalarUDF>)>,
     query_lock: AsyncMutex<()>,
@@ -209,9 +215,14 @@ impl DataFusionRuntime {
     pub fn new(config: DataFusionConfig) -> Result<Self> {
         let started = Instant::now();
         config.validate()?;
+        let runtime_env = RuntimeEnvBuilder::new()
+            .with_memory_pool(Arc::new(GreedyMemoryPool::new(1 << 30)))
+            .build_arc()
+            .map_err(|error| datafusion_error(None, error))?;
         let runtime_acquire_ns = nanos(started.elapsed());
         Ok(Self {
             config,
+            runtime_env,
             context: OnceLock::new(),
             selected_udfs: Vec::new(),
             query_lock: AsyncMutex::new(()),
@@ -436,15 +447,31 @@ impl DataFusionRuntime {
             .transpose()
             .map_err(|error| datafusion_error(node_id, error))?;
         let execution_to_first_batch_ns = nanos(execution_start.elapsed());
+        let mut batches = Vec::new();
+        let mut output_rows = 0;
+        let mut output_bytes = 0;
+        if let Some(batch) = first_batch {
+            push_bounded_sql_batch(
+                &mut batches,
+                &mut output_rows,
+                &mut output_bytes,
+                batch,
+                MAX_SQL_RESULT_ROWS,
+                MAX_SQL_RESULT_BYTES,
+            )?;
+        }
         let remaining_start = Instant::now();
-        let remaining = stream
-            .try_collect::<Vec<_>>()
-            .await
-            .map_err(|error| datafusion_error(node_id, error))?;
+        while let Some(batch) = stream.next().await {
+            push_bounded_sql_batch(
+                &mut batches,
+                &mut output_rows,
+                &mut output_bytes,
+                batch.map_err(|error| datafusion_error(node_id, error))?,
+                MAX_SQL_RESULT_ROWS,
+                MAX_SQL_RESULT_BYTES,
+            )?;
+        }
         let execution_remaining_ns = nanos(remaining_start.elapsed());
-        let mut batches = Vec::with_capacity(remaining.len() + usize::from(first_batch.is_some()));
-        batches.extend(first_batch);
-        batches.extend(remaining);
         let collect_ns = nanos(collect_start.elapsed());
         let execution_ns = stream_open_ns.saturating_add(collect_ns);
         // A zero-row result (for example an INNER JOIN with no key-equal
@@ -583,6 +610,7 @@ impl DataFusionRuntime {
                 .with_batch_size(self.config.batch_size)
                 .with_target_partitions(target_partitions);
             let state = SessionStateBuilder::new()
+                .with_runtime_env(Arc::clone(&self.runtime_env))
                 .with_config(session)
                 .with_default_features()
                 .with_optimizer_rule(Arc::new(UInt64ModuloPredicate));
@@ -613,6 +641,43 @@ impl DataFusionRuntime {
             Ok(())
         }
     }
+}
+
+fn push_bounded_sql_batch(
+    batches: &mut Vec<RecordBatch>,
+    rows: &mut usize,
+    bytes: &mut usize,
+    batch: RecordBatch,
+    max_rows: usize,
+    max_bytes: usize,
+) -> Result<()> {
+    let next_rows = rows.checked_add(batch.num_rows());
+    let next_bytes = batch
+        .columns()
+        .iter()
+        .try_fold(Some(*bytes), |total, array| {
+            let size = array.to_data().get_slice_memory_size().map_err(|error| {
+                CalcFlowError::InvalidArgument {
+                    field: "query.result".into(),
+                    message: format!("Arrow slice memory could not be measured: {error}"),
+                }
+            })?;
+            Ok::<_, CalcFlowError>(total.and_then(|total| total.checked_add(size)))
+        })?;
+    if next_rows.is_none_or(|count| count > max_rows)
+        || next_bytes.is_none_or(|count| count > max_bytes)
+    {
+        return Err(CalcFlowError::InvalidArgument {
+            field: "query.result".into(),
+            message: format!(
+                "result exceeds {max_rows} rows or {max_bytes} bytes of visible Arrow slices"
+            ),
+        });
+    }
+    *rows = next_rows.expect("bounded row count is present");
+    *bytes = next_bytes.expect("bounded byte count is present");
+    batches.push(batch);
+    Ok(())
 }
 
 #[derive(Default)]
@@ -988,10 +1053,84 @@ mod tests {
     use super::*;
     use crate::UdfRegistry;
     use datafusion::{
-        arrow::datatypes::DataType,
+        arrow::{array::Int32Array, datatypes::DataType, record_batch::RecordBatch},
         common::ScalarValue,
+        execution::memory_pool::MemoryLimit,
         logical_expr::{ColumnarValue, Volatility, create_udf},
     };
+
+    #[test]
+    fn each_run_owns_a_bounded_datafusion_memory_pool() {
+        let left = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+        let right = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+        let left_environment = left.context().runtime_env();
+        let right_environment = right.context().runtime_env();
+
+        assert!(matches!(
+            left_environment.memory_pool.memory_limit(),
+            MemoryLimit::Finite(limit) if limit > 0
+        ));
+        assert!(!Arc::ptr_eq(
+            &left_environment.memory_pool,
+            &right_environment.memory_pool
+        ));
+    }
+
+    #[test]
+    fn sql_result_collection_rejects_excess_rows_and_bytes() {
+        let batch = RecordBatch::try_from_iter(vec![(
+            "value",
+            Arc::new(Int32Array::from(vec![1, 2])) as _,
+        )])
+        .unwrap();
+        let mut bounded = Vec::new();
+        let mut bounded_rows = 0;
+        let mut bounded_bytes = 0;
+        for _ in 0..2 {
+            push_bounded_sql_batch(
+                &mut bounded,
+                &mut bounded_rows,
+                &mut bounded_bytes,
+                batch.clone(),
+                4,
+                16,
+            )
+            .unwrap();
+        }
+        assert_eq!((bounded_rows, bounded_bytes, bounded.len()), (4, 16, 2));
+        assert!(
+            push_bounded_sql_batch(
+                &mut bounded,
+                &mut bounded_rows,
+                &mut bounded_bytes,
+                batch.clone(),
+                4,
+                16,
+            )
+            .is_err()
+        );
+        assert_eq!((bounded_rows, bounded_bytes, bounded.len()), (4, 16, 2));
+
+        let mut collected = Vec::new();
+        let mut rows = 0;
+        let mut bytes = 0;
+        assert!(
+            push_bounded_sql_batch(
+                &mut collected,
+                &mut rows,
+                &mut bytes,
+                batch.clone(),
+                1,
+                usize::MAX,
+            )
+            .is_err()
+        );
+        assert!(
+            push_bounded_sql_batch(&mut collected, &mut rows, &mut bytes, batch, usize::MAX, 1,)
+                .is_err()
+        );
+        assert!(collected.is_empty());
+    }
 
     fn constant_udf(name: &str, value: i64) -> Arc<ScalarUDF> {
         Arc::new(create_udf(

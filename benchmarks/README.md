@@ -8,6 +8,9 @@ incremental measurements. Its 06:00 and 18:00 Asia/Shanghai runs publish
 complete Markdown tables and raw artifacts, including failures. Manual runs
 remain available independently of regular CI.
 
+Historical `rolling/*.json` reports use Git LFS. Install Git LFS and run
+`git lfs pull --include='benchmarks/rolling/*.json'` to inspect them locally.
+
 The slow legacy Python `nightly` scale is not part of the automated suite.
 The separate 10-to-10M engine and warm-state matrices remain enabled. Native
 streaming in the cross-library table starts from an already-ready runner with

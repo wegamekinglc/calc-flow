@@ -91,6 +91,14 @@ impl fmt::Display for SecretHandle {
 
 /// Resolves secret references for connector opens.
 pub trait SecretResolver: Send + Sync {
+    /// Whether a secret slot was supplied for this binding, without reading it.
+    ///
+    /// `None` means the resolver cannot establish presence. Callers that must
+    /// prevent a security downgrade should reject this unknown state.
+    fn has_reference(&self, _reference: &SecretReference) -> Option<bool> {
+        None
+    }
+
     /// Resolves one reference to its secret handle.
     ///
     /// # Errors
@@ -106,6 +114,10 @@ pub trait SecretResolver: Send + Sync {
 pub struct EnvironmentSecretResolver;
 
 impl SecretResolver for EnvironmentSecretResolver {
+    fn has_reference(&self, reference: &SecretReference) -> Option<bool> {
+        Some(std::env::var_os(&reference.key).is_some())
+    }
+
     fn resolve(&self, reference: &SecretReference) -> Result<SecretHandle> {
         std::env::var(&reference.key)
             .map(|value| SecretHandle::from_bytes(value.as_bytes()))

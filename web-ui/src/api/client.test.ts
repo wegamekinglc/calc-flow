@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { blankProject } from '../types';
-import { api, ApiContractError, ApiError } from './client';
+import { api, ApiContractError, ApiError, pathId } from './client';
 import { at } from '../types';
 
 const job = (status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled') => ({
@@ -157,6 +157,17 @@ describe('API client', () => {
     );
 
     await expect(api.job('job-1')).rejects.toBeInstanceOf(ApiContractError);
+  });
+
+  it('rejects IDs that the backend cannot store or issue', () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    expect(() => api.project('a/b?c#d')).toThrow(ApiContractError);
+    expect(() => api.job('a/b?c#d')).toThrow(ApiContractError);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(pathId('1a2b3c4d')).toBe('1a2b3c4d');
   });
 
   it('uses only the exact continuous job lifecycle routes', async () => {

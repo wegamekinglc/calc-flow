@@ -93,7 +93,7 @@ pub use operator::{
     ROLLING_EWMA_STATE_LAYOUT_VERSION, ROLLING_STATE_LAYOUT_VERSION, RankTieMethod,
     RollingFloatPrimitiveSpec, RollingFrameSpec, RollingNumericalProfile, RollingOperator,
     RollingOutputSpec, RollingSpec, RollingValuePolicy, STREAM_JOIN_MAX_SAFE_JSON_INTEGER,
-    STREAM_JOIN_STATE_ROW_OVERHEAD_BYTES_V1, SortDirection, SqlOperator, StateSegment,
+    STREAM_JOIN_STATE_ROW_OVERHEAD_BYTES_V1, SortDirection, SqlOperator, StateBudget, StateSegment,
     StreamAsofJoinOperator, StreamAsofJoinSideStatus, StreamAsofJoinSpec, StreamAsofJoinStatus,
     StreamCollector, StreamJoinOperator, StreamJoinSideStatus, StreamJoinSpec, StreamJoinStatus,
     StreamJoinType, StreamOperator, StreamOperatorContext, StreamOperatorFactory,

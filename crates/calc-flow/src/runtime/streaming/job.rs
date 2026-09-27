@@ -106,6 +106,9 @@ pub(crate) trait OrdinaryStreamSink: Send {
 #[async_trait]
 pub(crate) trait TransactionalStreamSink: Send {
     async fn open(&mut self) -> Result<()>;
+    async fn settle_open(&mut self) -> Result<()> {
+        Ok(())
+    }
     async fn begin_epoch(&mut self, epoch: Epoch) -> Result<()>;
     async fn write(&mut self, batch: &Batch) -> Result<()>;
     async fn pre_commit(&mut self, epoch: Epoch) -> Result<JsonMap>;
@@ -182,6 +185,13 @@ impl OrdinarySinkBinding {
         match &mut self.sink {
             SinkImplementation::Ordinary(sink) => sink.open().await,
             SinkImplementation::Transactional(sink) => sink.open().await,
+        }
+    }
+
+    pub(crate) async fn settle_open(&mut self) -> Result<()> {
+        match &mut self.sink {
+            SinkImplementation::Ordinary(_) => Ok(()),
+            SinkImplementation::Transactional(sink) => sink.settle_open().await,
         }
     }
 

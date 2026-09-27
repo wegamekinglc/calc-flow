@@ -158,7 +158,7 @@ jobs:
         run: |
           mkdir -p target/dal301-profile
           set +e
-          target/diagnostic-venv/bin/python -m scripts.dal301_groupby build \
+          target/diagnostic-venv/bin/python -m scripts.groupby_diagnostic build \
             --side "$PROFILE_SIDE" --source target/profile-source --output target/dal301-profile \
             >target/dal301-profile/stdout.log 2>target/dal301-profile/stderr.log
           result=$?
@@ -246,7 +246,7 @@ jobs:
         run: |
           mkdir -p target/dal301-evidence
           set +e
-          target/diagnostic-venv/bin/python -m scripts.dal301_groupby run \
+          target/diagnostic-venv/bin/python -m scripts.groupby_diagnostic run \
             --releases target/sealed --profiles target/profiles --output target/dal301-evidence \
             >target/dal301-evidence/stdout.log 2>target/dal301-evidence/stderr.log
           result=$?

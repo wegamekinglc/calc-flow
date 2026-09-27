@@ -14,13 +14,14 @@ use std::{
 
 use async_trait::async_trait;
 use calc_flow::{
-    Batch, BatchKind, BatchMetadata, CalcFlowError, ComponentKind, Cursor, DeliveryGuarantee,
-    DurableCursorAcknowledger, ExpressionOperator, ExternalPayload, JobState, JsonMap,
-    ManagedCheckpointRuntime, NativeWatermarkCapability, PipelineBuilder, Port, ReplayPositioning,
-    Result, SinkBinding, SinkRecovery, SourceBinding, SourceCapabilities, SourceCheckpointGate,
-    SourceDeliveryCapability, SourceEvent, SourceSchema, SourceStatus, StreamOperator,
-    StreamRequirements, StreamSink, StreamSource, StreamingErrorCategory, StreamingJob,
-    StreamingRunner, TransactionalStreamSink, UdfRegistry, UnionOperator,
+    Batch, BatchKind, BatchMetadata, CalcFlowError, CheckpointPhase, ComponentKind, Cursor,
+    DeliveryGuarantee, DurableCursorAcknowledger, ExpressionOperator, ExternalPayload, JobState,
+    JsonMap, ManagedCheckpointRuntime, NativeWatermarkCapability, PipelineBuilder, Port,
+    ReplayPositioning, Result, SinkBinding, SinkRecovery, SourceBinding, SourceCapabilities,
+    SourceCheckpointGate, SourceDeliveryCapability, SourceEvent, SourceSchema, SourceStatus,
+    StreamOperator, StreamRequirements, StreamRuntimeConfig, StreamSink, StreamSource,
+    StreamingErrorCategory, StreamingJob, StreamingRunner, TransactionalStreamSink, UdfRegistry,
+    UnionOperator,
 };
 use datafusion::arrow::{array::Int64Array, record_batch::RecordBatch};
 use restart_vector::{RestartRecordVector, RestartVector, restart_vector};
@@ -276,6 +277,7 @@ struct ManifestInspectingAcknowledger {
     log: Arc<Mutex<Vec<&'static str>>>,
     sink_committed: Arc<Notify>,
     fail: bool,
+    hang: bool,
 }
 
 #[async_trait]
@@ -299,6 +301,10 @@ impl DurableCursorAcknowledger for ManifestInspectingAcknowledger {
         .map_err(|_| CalcFlowError::Internal {
             message: "sink commit did not follow durable manifest publication".into(),
         })?;
+        if self.hang {
+            self.log.lock().unwrap().push("source-ack-hanging");
+            std::future::pending::<()>().await;
+        }
         if self.fail {
             self.log.lock().unwrap().push("source-ack-failed");
             return Err(CalcFlowError::Internal {
@@ -795,9 +801,40 @@ async fn public_job_checkpoints_and_cancel_settles_connectors() {
     assert_eq!(probe.sink_closes.load(Ordering::SeqCst), 1);
 }
 
+fn assert_durable_ack_failure(
+    hang: bool,
+    checkpoint_error: &CalcFlowError,
+    outcome: &calc_flow::JobOutcome,
+    phase: Option<CheckpointPhase>,
+    events: &[&str],
+) {
+    if hang {
+        assert!(
+            matches!(
+                checkpoint_error,
+                CalcFlowError::Streaming(error)
+                    if error.checkpoint_phase() == Some(CheckpointPhase::ManifestDurable)
+                        && error.message().contains("requires recovery")
+            ),
+            "unexpected checkpoint error: {checkpoint_error:?}; outcome: {outcome:?}; events: {events:?}"
+        );
+        assert_eq!(phase, Some(CheckpointPhase::ManifestDurable));
+    }
+    assert_eq!(outcome.state, JobState::RecoveryRequired);
+    assert!(events.starts_with(&[
+        "sink-commit",
+        if hang {
+            "source-ack-hanging"
+        } else {
+            "source-ack-failed"
+        }
+    ]));
+    assert!(!events.contains(&"sink-abort-initial"));
+}
+
 #[tokio::test]
-async fn durable_source_ack_follows_sink_commit_even_when_ack_fails() {
-    for fail in [false, true] {
+async fn durable_source_ack_follows_sink_commit_even_when_ack_fails_or_hangs() {
+    for (fail, hang) in [(false, false), (true, false), (false, true)] {
         let plan = continuous_plan();
         let source_id = plan.source_binding_ids()[0].to_owned();
         let output_id = plan.sink_binding_ids()[0].to_owned();
@@ -812,6 +849,7 @@ async fn durable_source_ack_follows_sink_commit_even_when_ack_fails() {
             log: Arc::clone(&log),
             sink_committed: Arc::clone(&committed),
             fail,
+            hang,
         });
         let runner = StreamingRunner::new(
             plan,
@@ -840,6 +878,16 @@ async fn durable_source_ack_follows_sink_commit_even_when_ack_fails() {
             ManagedCheckpointRuntime::new(&managed_root).unwrap(),
         )
         .unwrap();
+        let runner = if hang {
+            runner
+                .with_runtime_config(StreamRuntimeConfig {
+                    checkpoint_timeout: std::time::Duration::from_millis(500),
+                    ..StreamRuntimeConfig::default()
+                })
+                .unwrap()
+        } else {
+            runner
+        };
 
         let job = runner.start().await.unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -851,12 +899,23 @@ async fn durable_source_ack_follows_sink_commit_even_when_ack_fails() {
         .expect("the data row should reach the sink before checkpointing");
         assert_eq!(emitted.load(Ordering::SeqCst), 1);
 
-        if fail {
-            assert!(job.trigger_checkpoint().await.is_err());
-            assert_eq!(job.wait().await.state, JobState::RecoveryRequired);
+        if fail || hang {
+            let checkpoint_error =
+                tokio::time::timeout(std::time::Duration::from_secs(3), job.trigger_checkpoint())
+                    .await
+                    .expect("durable source acknowledgement must settle")
+                    .unwrap_err();
+            let outcome = tokio::time::timeout(std::time::Duration::from_secs(3), job.wait())
+                .await
+                .expect("the failed job must terminate");
             let events = log.lock().unwrap();
-            assert!(events.starts_with(&["sink-commit", "source-ack-failed"]));
-            assert!(!events.contains(&"sink-abort-initial"));
+            assert_durable_ack_failure(
+                hang,
+                &checkpoint_error,
+                &outcome,
+                job.status().checkpoint.phase,
+                &events,
+            );
         } else {
             assert_eq!(
                 job.trigger_checkpoint().await.unwrap(),

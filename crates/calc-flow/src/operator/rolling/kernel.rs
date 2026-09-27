@@ -8,6 +8,7 @@ use std::{
     cmp::Ordering,
     collections::{HashMap, VecDeque},
     mem::size_of,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -348,7 +349,7 @@ impl StreamKernelUpdate {
 pub(super) struct RollingKernelState {
     kernel_fingerprint: Option<String>,
     entities: HashMap<Vec<u8>, usize>,
-    states: Vec<TypedEntityState>,
+    states: Vec<Arc<TypedEntityState>>,
     last_identity: Option<Vec<u8>>,
 }
 
@@ -656,7 +657,7 @@ impl RollingKernelPlan {
             .get_or_insert_with(|| self.fingerprint.clone());
         let entity_ids = seeded.resolve_entities(entity_keys, &self.groups);
         for (row_index, values) in seeds.iter().enumerate() {
-            let entity = &mut seeded.states[entity_ids[row_index]];
+            let entity = Arc::make_mut(&mut seeded.states[entity_ids[row_index]]);
             self.seed_restored_entity(entity, transition_counts[row_index], values, node_id)?;
         }
         Ok(seeded)
@@ -835,11 +836,7 @@ impl RollingKernelPlan {
         let keys = encoded_keys(&rows, input.num_rows());
         let mut next_state = {
             let _stage = observer.map(|recorder| recorder.stage(RollingStage::StatePreparation));
-            let next_state = state.clone();
-            if let Some(recorder) = observer {
-                recorder.add(RollingWork::CopiedEntities, state.states.len());
-            }
-            next_state
+            state.clone()
         };
         next_state
             .kernel_fingerprint
@@ -1012,7 +1009,7 @@ impl RollingKernelPlan {
         let state_bytes = state
             .states
             .iter()
-            .map(TypedEntityState::estimated_bytes)
+            .map(|entity| entity.estimated_bytes())
             .sum();
         if last_identity.is_some() {
             state.last_identity = last_identity;
@@ -1180,10 +1177,12 @@ impl RollingKernelState {
             .zip(counts)
             .map(|(&key, count)| {
                 self.entities.get(key).map_or_else(
-                    || TypedEntityState::new(groups, count),
+                    || Arc::new(TypedEntityState::new(groups, count)),
                     |&index| {
                         copied += 1;
-                        self.states[index].clone()
+                        // The prepared stream update owns each touched state
+                        // before serial or parallel execution is selected.
+                        Arc::new(self.states[index].as_ref().clone())
                     },
                 )
             })
@@ -1242,7 +1241,8 @@ impl RollingKernelState {
             let entity_id = self.states.len();
             let row_count = counts[key];
             self.entities.insert(key.to_vec(), entity_id);
-            self.states.push(TypedEntityState::new(groups, row_count));
+            self.states
+                .push(Arc::new(TypedEntityState::new(groups, row_count)));
             entity_id
         })
         .collect()
@@ -1259,7 +1259,7 @@ struct TypedRowInputs<'a> {
 fn fill_typed_rows(
     plan: &RollingKernelPlan,
     inputs: TypedRowInputs<'_>,
-    states: &mut [TypedEntityState],
+    states: &mut [Arc<TypedEntityState>],
     builders: &mut [DerivedBuilder],
     node_id: &str,
     observer: Option<&RollingMetricsRecorder>,
@@ -1267,7 +1267,11 @@ fn fill_typed_rows(
     let mut processed = 0;
     let result = (|| {
         for (row_index, &entity_id) in inputs.entity_ids.iter().enumerate() {
-            let entity = &mut states[entity_id];
+            let copied = observer.is_some() && Arc::strong_count(&states[entity_id]) > 1;
+            let entity = Arc::make_mut(&mut states[entity_id]);
+            if copied && let Some(recorder) = observer {
+                recorder.add(RollingWork::CopiedEntities, 1);
+            }
             entity.transition_count = entity.transition_count.checked_add(1).ok_or_else(|| {
                 operator_error(node_id, "rolling entity transition count overflowed")
             })?;
@@ -3185,15 +3189,15 @@ impl DerivedBuilder {
 
     fn finish(self) -> Result<ArrayRef> {
         match self {
-            Self::Count(mut builder) => Ok(std::sync::Arc::new(builder.finish())),
+            Self::Count(mut builder) => Ok(Arc::new(builder.finish())),
             Self::Signed(mut builder, storage) => {
-                finish_with_storage(std::sync::Arc::new(builder.finish()), storage)
+                finish_with_storage(Arc::new(builder.finish()), storage)
             }
             Self::Unsigned(mut builder, storage) => {
-                finish_with_storage(std::sync::Arc::new(builder.finish()), storage)
+                finish_with_storage(Arc::new(builder.finish()), storage)
             }
             Self::Float(mut builder, storage) => {
-                finish_with_storage(std::sync::Arc::new(builder.finish()), storage)
+                finish_with_storage(Arc::new(builder.finish()), storage)
             }
         }
     }
@@ -3502,6 +3506,70 @@ fn nanos(duration: Duration) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cloned_batch_state_copies_only_touched_entities() {
+        let keys = [vec![1], vec![2]];
+        let mut state = RollingKernelState::default();
+        state.resolve_entities(keys.iter().map(Vec::as_slice), &[]);
+        let mut next = state.clone();
+        assert!(Arc::ptr_eq(&state.states[0], &next.states[0]));
+        assert!(Arc::ptr_eq(&state.states[1], &next.states[1]));
+        Arc::make_mut(&mut next.states[0]).transition_count = 1;
+        assert_eq!(state.states[0].transition_count, 0);
+        assert_eq!(next.states[0].transition_count, 1);
+        assert!(!Arc::ptr_eq(&state.states[0], &next.states[0]));
+        assert!(Arc::ptr_eq(&state.states[1], &next.states[1]));
+    }
+
+    #[test]
+    fn batch_update_preserves_untouched_resident_entities() {
+        let kernel = numeric_plan(RollingNumericalProfile::StableV1);
+        let first = batch(
+            vec![Some(1), Some(2)],
+            vec![Some(1), Some(2)],
+            vec!["a", "b"],
+            vec![Some(1.0), Some(2.0)],
+        );
+        let initial = kernel.open_and_fill(&first, "r").unwrap().unwrap();
+        let second = batch(vec![Some(3)], vec![Some(3)], vec!["a"], vec![Some(3.0)]);
+        let next = kernel
+            .update_and_fill(&initial.state, &second, "r")
+            .unwrap()
+            .unwrap();
+        assert!(!Arc::ptr_eq(
+            &initial.state.states[0],
+            &next.state.states[0]
+        ));
+        assert!(Arc::ptr_eq(&initial.state.states[1], &next.state.states[1]));
+        assert_eq!(initial.state.states[0].transition_count, 1);
+        assert_eq!(next.state.states[0].transition_count, 2);
+    }
+
+    #[test]
+    fn prepared_stream_entities_are_owned_before_parallel_admission() {
+        let kernel = numeric_plan(RollingNumericalProfile::StableV1);
+        let first = batch(
+            vec![Some(1), Some(2)],
+            vec![Some(1), Some(2)],
+            vec!["a", "b"],
+            vec![Some(1.0), Some(2.0)],
+        );
+        let resident = kernel.open_and_fill(&first, "r").unwrap().unwrap().state;
+        let next = batch(
+            vec![Some(3), Some(4)],
+            vec![Some(3), Some(4)],
+            vec!["a", "b"],
+            vec![Some(3.0), Some(4.0)],
+        );
+        let prepared = kernel
+            .prepare_ordered_stream_state(&resident, &next, "r", None)
+            .unwrap();
+        for (old, new) in resident.states.iter().zip(&prepared.state.states) {
+            assert!(!Arc::ptr_eq(old, new));
+            assert_eq!(Arc::strong_count(new), 1);
+        }
+    }
+
     #[test]
     fn resident_entity_resolution_allocates_only_the_result() {
         let keys = (0_u8..64).map(|key| vec![key]).collect::<Vec<_>>();

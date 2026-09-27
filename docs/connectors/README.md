@@ -243,3 +243,7 @@ manifest, restores every participant before opening the data gate, and
 finishes any idempotent post-manifest sink commit. Studio projects use the
 same native owner through `/api/v3/jobs`; Studio never exposes raw cursors,
 secret values, connector state, or filesystem paths.
+
+For managed local state, crash-durable checkpoint publication is guaranteed
+only on Unix platforms. Windows does not sync parent directory updates; see
+the [runtime durability contract](../runtime-envelope.md#manifest-publication-and-recovery).

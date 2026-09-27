@@ -43,6 +43,9 @@ exclude_paths:
   - "Cargo.lock"
   # Test caches and coverage output
   - ".benchmarks/**"
+  # Git LFS benchmark archives are pointers in the Git checkout consumed by
+  # Codacy, not JSON source files. Their payloads are measured by benchmarks.
+  - "benchmarks/rolling/*.json"
   - ".hypothesis/**"
   - ".pytest_cache/**"
   - ".ruff_cache/**"

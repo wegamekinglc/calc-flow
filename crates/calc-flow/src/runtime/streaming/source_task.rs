@@ -1130,6 +1130,18 @@ pub(super) fn validate_source_capabilities(
             message: "must be greater than zero".into(),
         });
     }
+    if capabilities.max_batch_rows > crate::EdgeBudget::MAX_ROWS {
+        return Err(CalcFlowError::InvalidArgument {
+            field: format!("sources.{binding_id}.capabilities.max_batch_rows"),
+            message: format!("must not exceed {}", crate::EdgeBudget::MAX_ROWS),
+        });
+    }
+    if capabilities.max_batch_bytes > crate::EdgeBudget::MAX_BYTES {
+        return Err(CalcFlowError::InvalidArgument {
+            field: format!("sources.{binding_id}.capabilities.max_batch_bytes"),
+            message: format!("must not exceed {}", crate::EdgeBudget::MAX_BYTES),
+        });
+    }
     Ok(())
 }
 
@@ -2421,6 +2433,38 @@ mod tests {
                 if field == "sources.input.capabilities.max_batch_rows"
         ));
         assert_eq!(*opened_at.lock(), OpenObservation::NotOpened);
+    }
+
+    #[test]
+    fn oversized_source_capability_is_rejected() {
+        assert!(
+            super::validate_source_capabilities(
+                "input",
+                SourceCapabilities {
+                    replayable: true,
+                    max_batch_rows: EdgeBudget::MAX_ROWS,
+                    max_batch_bytes: EdgeBudget::MAX_BYTES,
+                },
+            )
+            .is_ok()
+        );
+        for (rows, bytes, field) in [
+            (1_000_001, 1, "max_batch_rows"),
+            (1, (256 << 20) + 1, "max_batch_bytes"),
+        ] {
+            assert!(matches!(
+                super::validate_source_capabilities(
+                    "input",
+                    SourceCapabilities {
+                        replayable: true,
+                        max_batch_rows: rows,
+                        max_batch_bytes: bytes,
+                    },
+                ),
+                Err(CalcFlowError::InvalidArgument { field: actual, .. })
+                    if actual == format!("sources.input.capabilities.{field}")
+            ));
+        }
     }
 
     #[test]

@@ -7,8 +7,10 @@ small factory.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
+from time import monotonic
 from typing import Protocol
 from urllib.parse import quote
 
@@ -464,20 +466,26 @@ def register_job_routes(
                 RunStatus.COMPLETED,
                 RunStatus.FAILED,
                 RunStatus.CANCELLED,
+                RunStatus.TIMED_OUT,
             }
+            last_activity = monotonic()
             yield "retry: 500\n\n"
             while True:
                 events, job_status = await run_in_threadpool(
                     run_manager.wait_for_events,
                     job_id,
                     after_sequence=after_sequence,
-                    timeout=10.0,
+                    timeout=0.0,
                 )
                 if not events:
                     if job_status in terminal:
                         return
-                    yield ": keep-alive\n\n"
+                    if monotonic() - last_activity >= 10.0:
+                        yield ": keep-alive\n\n"
+                        last_activity = monotonic()
+                    await asyncio.sleep(0.5)
                     continue
+                last_activity = monotonic()
                 for event in events:
                     payload = _job_event_json(event)
                     yield (

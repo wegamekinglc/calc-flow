@@ -351,6 +351,18 @@ impl ClickHouseSink {
         crate::evidence::check_segment_id(evidence, PREPARED_SEGMENT_ID).map_err(protocol)?;
         crate::evidence::check_segment(evidence, insert_block.as_bytes()).map_err(protocol)?;
         crate::evidence::check_schema_hash(evidence).map_err(protocol)?;
+        if self.active_epoch == Some(epoch) {
+            let expected = self
+                .schema_hash
+                .clone()
+                .unwrap_or_else(|| hex::encode(Sha256::digest([])));
+            if evidence.get("schema_hash").and_then(Value::as_str) != Some(expected.as_str()) {
+                return Err(fail(
+                    "commit",
+                    "pre-commit schema differs from the active epoch",
+                ));
+            }
+        }
         let actual_rows = if insert_block.is_empty() {
             0
         } else {
@@ -617,6 +629,12 @@ mod tests {
         sink.begin_epoch(epoch).await.unwrap();
         let evidence = sink.pre_commit(epoch).await.unwrap();
         assert_eq!(evidence["rows"], Value::from(0));
+        let mut wrong_schema = evidence.clone();
+        wrong_schema.insert("schema_hash".into(), Value::String("a".repeat(64)));
+        assert!(
+            sink.validate_evidence(epoch, &wrong_schema, String::new())
+                .is_err()
+        );
         sink.commit(epoch, &evidence).await.unwrap();
         assert!(sink.active_epoch.is_none());
     }
@@ -635,6 +653,10 @@ mod tests {
             .validate_evidence(epoch, &evidence, insert_block.clone())
             .unwrap();
         assert_eq!(prepared.rows, 2);
+        crate::evidence::assert_recovery_contract(&evidence, "target", |candidate| {
+            sink.validate_evidence(epoch, candidate, insert_block.clone())
+                .is_ok()
+        });
 
         let mut tampered = evidence.clone();
         tampered.insert("segment_sha256".into(), Value::String("0".repeat(64)));

@@ -632,6 +632,14 @@ impl SinkRecovery {
 pub trait TransactionalStreamSink: Send {
     /// Opens connector resources.
     async fn open(&mut self) -> Result<()>;
+    /// Waits for any non-cancellable open work before release of job ownership.
+    ///
+    /// The default is immediate for connectors whose `open` future has no
+    /// detached work. Implementations that start a bounded native operation
+    /// must settle it even when the caller dropped the `open` future.
+    async fn settle_open(&mut self) -> Result<()> {
+        Ok(())
+    }
     /// Starts one epoch transaction.
     async fn begin_epoch(&mut self, epoch: Epoch) -> Result<()>;
     /// Writes one batch into the active epoch.
@@ -678,6 +686,9 @@ struct TransactionalSinkAdapter<S> {
 impl<S: TransactionalStreamSink> InternalTransactionalStreamSink for TransactionalSinkAdapter<S> {
     async fn open(&mut self) -> Result<()> {
         self.sink.open().await
+    }
+    async fn settle_open(&mut self) -> Result<()> {
+        self.sink.settle_open().await
     }
     async fn begin_epoch(&mut self, epoch: Epoch) -> Result<()> {
         self.sink.begin_epoch(epoch).await

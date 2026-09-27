@@ -186,6 +186,132 @@ fn drain(collector: &mut EdgeCollector, observed: &mut Observed) {
 }
 
 #[tokio::test]
+async fn closing_a_group_releases_its_state_budget() {
+    let job = job();
+    let mut operator = error_operator();
+    operator
+        .set_state_budget(calc_flow::StateBudget::new(1, 1_048_576).unwrap())
+        .unwrap();
+    let mut collected = collector(&operator);
+    operator
+        .process_data(
+            "input",
+            input_batch(&[(100, "a", Some("tech"), 1, Some(2.0))]),
+            &context(&job, None),
+            &mut collected,
+        )
+        .await
+        .unwrap();
+    operator
+        .on_watermark(
+            EventTime::from_micros(100),
+            &context(&job, Some(100)),
+            &mut collected,
+        )
+        .await
+        .unwrap();
+    operator
+        .process_data(
+            "input",
+            input_batch(&[(200, "b", Some("tech"), 2, Some(3.0))]),
+            &context(&job, Some(100)),
+            &mut collected,
+        )
+        .await
+        .unwrap();
+    operator
+        .on_end(&context(&job, Some(100)), &mut collected)
+        .await
+        .unwrap();
+    let mut observed = Observed::default();
+    drain(&mut collected, &mut observed);
+    assert_eq!(observed.symbols, ["a", "b"]);
+}
+
+#[tokio::test]
+async fn open_state_row_limit_rejects_an_envelope_without_changing_groups() {
+    let job = job();
+    let mut operator = error_operator();
+    operator
+        .set_state_budget(calc_flow::StateBudget::new(2, 1_048_576).unwrap())
+        .unwrap();
+    let mut collected = collector(&operator);
+
+    operator
+        .process_data(
+            "input",
+            input_batch(&[(100, "a", Some("tech"), 1, Some(2.0))]),
+            &context(&job, None),
+            &mut collected,
+        )
+        .await
+        .unwrap();
+    let error = operator
+        .process_data(
+            "input",
+            input_batch(&[
+                (100, "b", Some("tech"), 2, Some(3.0)),
+                (100, "c", Some("tech"), 3, Some(4.0)),
+            ]),
+            &context(&job, None),
+            &mut collected,
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("state budget"), "{error}");
+    operator
+        .on_watermark(
+            EventTime::from_micros(100),
+            &context(&job, Some(100)),
+            &mut collected,
+        )
+        .await
+        .unwrap();
+    let mut observed = Observed::default();
+    drain(&mut collected, &mut observed);
+    assert_eq!(observed.symbols, ["a"]);
+}
+
+#[tokio::test]
+async fn open_state_byte_limit_rejects_one_wide_row() {
+    let job = job();
+    let mut operator = error_operator();
+    operator
+        .set_state_budget(calc_flow::StateBudget::new(10, 128).unwrap())
+        .unwrap();
+    let mut collected = collector(&operator);
+    let error = operator
+        .process_data(
+            "input",
+            input_batch(&[(100, "a", Some("tech"), 1, Some(2.0))]),
+            &context(&job, None),
+            &mut collected,
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("state budget"), "{error}");
+    operator
+        .on_end(&context(&job, None), &mut collected)
+        .await
+        .unwrap();
+    assert!(collected.drain("output").is_empty());
+}
+
+#[test]
+fn state_budget_rejects_invalid_limits_and_legacy_spec_keeps_its_shape() {
+    let declaration = serde_json::to_value(spec(
+        &serde_json::json!({"kind": "exact_time"}),
+        0,
+        &serde_json::json!({"kind": "error", "scope": "envelope"}),
+    ))
+    .unwrap();
+    assert!(declaration.get("state_budget").is_none());
+    assert!(calc_flow::StateBudget::new(0, 1).is_err());
+    assert!(calc_flow::StateBudget::new(1, 0).is_err());
+    assert!(calc_flow::StateBudget::new(9_007_199_254_740_992, 1).is_err());
+}
+
+#[tokio::test]
 async fn group_split_across_batches_emits_once_at_the_closing_watermark() {
     let job = job();
     let mut operator = error_operator();

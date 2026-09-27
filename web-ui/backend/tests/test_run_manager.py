@@ -2435,6 +2435,25 @@ def test_wait_for_events_replays_and_history_prunes_terminal_runs() -> None:
     manager.shutdown()
 
 
+def test_idle_event_poll_does_not_scan_large_history() -> None:
+    manager = RunManager(use_processes=False)
+    run = manager.submit(_project(), RunRequest())
+    assert _wait(manager, run.id) is RunStatus.COMPLETED
+
+    class UnreadableEvent:
+        @property
+        def sequence(self) -> int:
+            raise AssertionError("idle polling scanned event history")
+
+    with manager._lock:
+        manager._runs[run.id].events = (UnreadableEvent(),) * 10_000
+    assert manager.wait_for_events(run.id, after_sequence=9_999, timeout=0.0) == (
+        (),
+        RunStatus.COMPLETED,
+    )
+    manager.shutdown()
+
+
 def test_json_safe_and_result_payload_normalize_transport_values() -> None:
     class Value(Enum):
         ITEM = "item"

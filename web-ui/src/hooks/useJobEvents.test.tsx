@@ -61,6 +61,18 @@ afterEach(() => {
 });
 
 describe('useJobEvents', () => {
+  it('rejects a job ID that cannot match the backend event route', () => {
+    vi.stubGlobal('EventSource', FakeEventSource);
+    const onError = vi.fn();
+
+    renderHook(() => {
+      useJobEvents('a/b?c#d', vi.fn(), vi.fn(), onError);
+    });
+
+    expect(FakeEventSource.instances).toEqual([]);
+    expect(onError).toHaveBeenCalledWith(expect.any(ApiContractError));
+  });
+
   it('preserves full ASOF integer strings and refreshes authoritative job state', async () => {
     const onUpdate = vi.fn();
     const onEvent = vi.fn();

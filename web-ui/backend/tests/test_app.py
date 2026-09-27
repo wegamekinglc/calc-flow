@@ -647,6 +647,15 @@ def test_project_crud_preserves_client_ids_sorting_and_request_values(tmp_path) 
     assert missing_delete.status_code == 404
 
 
+def test_project_creation_rejects_slash_ids(tmp_path) -> None:
+    project = _project("team/alpha")
+    with _client(tmp_path) as client:
+        created = _create(client, project)
+
+    assert created.status_code == 422
+    assert "invalid_id" in created.text
+
+
 def test_project_routes_await_async_store_and_never_use_blocking_facades(
     tmp_path,
 ) -> None:

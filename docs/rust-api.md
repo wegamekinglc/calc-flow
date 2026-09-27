@@ -276,6 +276,15 @@ against the input watermark, and `RollingValuePolicy` is the frozen
 `stateful_numeric_v1`, which preserves a null or NaN current or referenced
 value.
 
+Stream rolling state has a default limit of 1,000,000 logical rows and 256 MiB.
+`RollingOperator::set_state_budget(StateBudget::new(...))` changes the row and
+byte limits before graph compilation. The charge covers accepted reorder rows,
+retained per-entity history, keys, and state overhead; it excludes checkpoint
+copies and process-wide resident memory. Input and watermark callbacks reject
+state growth before committing it, and restore rejects an oversized snapshot.
+Batch evaluation does not use this budget. Project-created operators use the
+default, and this runtime limit does not change the project fingerprint.
+
 `numerical_profile` is optional. Its default `stable_v1` is omitted from the
 canonical configuration, preserving existing project and checkpoint hashes.
 The explicit `stable_v2` value is a preview: floating numeric and pair windows
@@ -459,6 +468,15 @@ configuration-hash and schema-fingerprint metadata plus bounded inline
 manifest fields — and a restored operator reproduces the same ordered
 output, watermark frontier, output sequence, and metrics.
 
+Stream cross-section state permits at most 1,000,000 open rows and 256 MiB of
+logical charges by default. Direct Rust users can set positive row and byte
+limits through `CrossSectionOperator::set_state_budget(StateBudget::new(...))`.
+Project-created operators use the default; the budget is runtime tuning and
+does not change project fingerprints. Charges count materialized values,
+keys, and map overhead. An envelope that would exceed either limit fails
+before any accepted row or late side output is installed, and restore rejects
+oversized state. Batch evaluation does not apply this stream-state budget.
+
 ## Late-row policy contract
 
 Rolling and cross-section specifications share `LatePolicySpec`.
@@ -571,7 +589,12 @@ progress.
 aggregates. `WindowAggregateOperator` is stream-only: it updates incremental
 state, classifies late row-window assignments against the current input
 watermark, emits closed windows in deterministic order, and snapshots retained
-Arrow IPC deltas. The complete
+Arrow IPC deltas. Retained accumulators have a default budget of one million
+windows and 256 MiB of logical charge. Rust callers can set a smaller limit
+through `WindowAggregateOperator::set_state_budget(StateBudget::new(...))`
+before adding the operator to a graph. Admission and restore reject state that
+exceeds the budget; checkpoint segment copies and process RSS are separate.
+The complete
 [`windowed_streaming.rs`](../crates/calc-flow/examples/windowed_streaming.rs)
 example wires a source-provided watermark through this operator to a sink.
 `StateBackend` opens an exclusive lineage session;
@@ -689,6 +712,10 @@ capabilities, then implements async `open`, `next`, and `close`. An ordinary
 `StreamSink` implements async `open`, `write`, and `close`; transactional sinks
 also expose epoch commit and recovery. Managed checkpoints bind source cursors,
 operator state, and sink evidence to the plan fingerprint.
+
+The managed local backend's crash-durability guarantee applies on Unix;
+on Windows, parent directory updates are not synced, so recovery after a
+power loss is not guaranteed.
 
 Run the checked examples:
 

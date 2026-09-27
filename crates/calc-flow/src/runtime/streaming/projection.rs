@@ -312,10 +312,13 @@ pub(crate) fn project_manual_checkpoint_error(
             position: error.position,
         };
     }
+    if let Some(epoch) = status.and_then(|status| status.installed_unknown_epoch) {
+        return checkpoint_publication_unknown(epoch, job_id, None, 0);
+    }
+    if matches!(error, CalcFlowError::RecoveryRequired { .. }) {
+        return project_manual_recovery_required(job_id, status);
+    }
     if let Some(status) = status {
-        if let Some(epoch) = status.installed_unknown_epoch {
-            return checkpoint_publication_unknown(epoch, job_id, None, 0);
-        }
         if let Some(category) = status.failure_category {
             let category = match category {
                 CheckpointFailureCategory::Timeout => StreamingErrorCategory::CheckpointTimeout,
@@ -369,6 +372,46 @@ pub(crate) fn project_manual_checkpoint_error(
         }
     }
     project_public_error(Some(job_id), error)
+}
+
+fn project_manual_recovery_required(
+    job_id: u64,
+    status: Option<&InternalCheckpointStatus>,
+) -> StreamingError {
+    let epoch = status.and_then(|status| status.current_epoch);
+    let phase = status
+        .and_then(|status| status.phase)
+        .map(CheckpointPhase::from);
+    let durable = matches!(
+        phase,
+        Some(
+            CheckpointPhase::ManifestDurable
+                | CheckpointPhase::SinksCommitted
+                | CheckpointPhase::Completed
+        )
+    );
+    let message = match (epoch, durable) {
+        (Some(epoch), true) => format!(
+            "checkpoint epoch {} requires recovery after durable manifest settlement",
+            epoch.as_u64()
+        ),
+        (Some(epoch), false) => {
+            format!("checkpoint epoch {} requires recovery", epoch.as_u64())
+        }
+        (None, _) => "checkpoint requires recovery".into(),
+    };
+    StreamingError {
+        category: StreamingErrorCategory::Internal,
+        reason_code: None,
+        message,
+        job_id: Some(job_id),
+        epoch,
+        checkpoint_phase: phase,
+        component_kind: Some(ComponentKind::Checkpoint),
+        component_id: None,
+        diagnostic_id: None,
+        position: 0,
+    }
 }
 
 pub(crate) fn project_runtime_failures(
@@ -1804,6 +1847,56 @@ mod tests {
         ] {
             assert!(!rendered.contains(SECRET));
             assert!(!rendered.contains(PATH));
+        }
+    }
+
+    #[test]
+    fn manual_recovery_projection_requires_durable_phase_evidence() {
+        let epoch = Epoch::new(7).unwrap();
+        let mut status = InternalCheckpointStatus {
+            current_epoch: Some(epoch),
+            phase: Some(InternalCheckpointPhase::SinksPrecommitted),
+            terminal: false,
+            source_acks: 1,
+            operator_acks: 1,
+            sink_precommit_acks: 1,
+            sink_commit_acks: 0,
+            expected_sources: 1,
+            expected_operators: 1,
+            expected_sinks: 1,
+            elapsed: None,
+            last_completed_epoch: None,
+            installed_unknown_epoch: None,
+            failure_category: None,
+            runtime_config_changed: false,
+        };
+        let error = CalcFlowError::RecoveryRequired {
+            pipeline_name: SECRET.into(),
+            message: SECRET.into(),
+        };
+        let prepublication = super::project_manual_checkpoint_error(17, &error, Some(&status));
+        assert_eq!(
+            prepublication.checkpoint_phase(),
+            Some(super::CheckpointPhase::SinksPrecommitted)
+        );
+        assert!(!prepublication.message().contains("durable"));
+
+        status.phase = Some(InternalCheckpointPhase::ManifestDurable);
+        let durable = super::project_manual_checkpoint_error(17, &error, Some(&status));
+        assert_eq!(durable.epoch(), Some(epoch));
+        assert!(durable.message().contains("durable manifest settlement"));
+        status.installed_unknown_epoch = Some(epoch);
+        let unknown = super::project_manual_checkpoint_error(17, &error, Some(&status));
+        assert_eq!(
+            unknown.category(),
+            StreamingErrorCategory::CheckpointPublicationUnknown
+        );
+        for rendered in [
+            format!("{prepublication:?}"),
+            format!("{durable:?}"),
+            format!("{unknown:?}"),
+        ] {
+            assert!(!rendered.contains(SECRET));
         }
     }
 

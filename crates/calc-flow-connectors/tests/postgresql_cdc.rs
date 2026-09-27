@@ -145,6 +145,163 @@ async fn exported_snapshot_hands_off_to_pgoutput_without_a_gap() {
         .expect("connection closes");
 }
 
+#[tokio::test]
+#[ignore = "container-backed; PostgreSQL must use wal_level=logical"]
+async fn snapshot_import_failure_removes_newly_created_replication_slot() {
+    if !containers_enabled() {
+        return;
+    }
+    let (client, connection) = tokio_postgres::connect(&connection_url(), tokio_postgres::NoTls)
+        .await
+        .expect("connects to PostgreSQL");
+    let connection = tokio::spawn(connection);
+    client
+        .batch_execute(
+            "DROP PUBLICATION IF EXISTS calc_flow_cdc_bootstrap_failure_publication; \
+             DROP TABLE IF EXISTS cdc_bootstrap_failure; \
+             CREATE TABLE cdc_bootstrap_failure (id BIGINT PRIMARY KEY, label TEXT NOT NULL); \
+             ALTER TABLE cdc_bootstrap_failure REPLICA IDENTITY FULL; \
+             CREATE PUBLICATION calc_flow_cdc_bootstrap_failure_publication \
+               FOR TABLE cdc_bootstrap_failure;",
+        )
+        .await
+        .expect("prepares CDC relation and publication");
+    let mut options = cdc_options();
+    options.insert("table".into(), json!("cdc_bootstrap_failure"));
+    options.insert("slot".into(), json!("calc_flow_cdc_bootstrap_failure"));
+    options.insert(
+        "publication".into(),
+        json!("calc_flow_cdc_bootstrap_failure_publication"),
+    );
+    options.insert(
+        "columns".into(),
+        json!([
+            {"name": "id", "data_type": "int64", "nullable": false},
+            {"name": "label", "data_type": "int64", "nullable": false}
+        ]),
+    );
+    let factory = PostgresSourceFactory::new();
+    let mut source = factory
+        .open(&options, &TestUrl)
+        .await
+        .expect("factory accepts a frozen schema before opening the slot");
+    let error = source
+        .open(None)
+        .await
+        .expect_err("frozen schema differs from the database after slot creation");
+    assert!(
+        error
+            .to_string()
+            .contains("database column \"label\" differs from the frozen schema"),
+        "unexpected bootstrap failure: {error}"
+    );
+    let slot = client
+        .query_opt(
+            "SELECT slot_name FROM pg_replication_slots WHERE slot_name = $1",
+            &[&"calc_flow_cdc_bootstrap_failure"],
+        )
+        .await
+        .expect("queries replication slots");
+    assert!(
+        slot.is_none(),
+        "failed bootstrap retained its replication slot"
+    );
+    source
+        .close()
+        .await
+        .expect("closes failed bootstrap source");
+    client
+        .batch_execute(
+            "DROP PUBLICATION calc_flow_cdc_bootstrap_failure_publication; \
+             DROP TABLE cdc_bootstrap_failure;",
+        )
+        .await
+        .expect("cleans CDC artifacts");
+    drop(client);
+    connection
+        .await
+        .expect("connection task joins")
+        .expect("connection closes");
+}
+
+#[tokio::test]
+#[ignore = "container-backed; PostgreSQL must use wal_level=logical"]
+async fn snapshot_bootstrap_preserves_an_existing_slot() {
+    if !containers_enabled() {
+        return;
+    }
+    let (client, connection) = tokio_postgres::connect(&connection_url(), tokio_postgres::NoTls)
+        .await
+        .expect("connects to PostgreSQL");
+    let connection = tokio::spawn(connection);
+    client
+        .batch_execute(
+            "DROP PUBLICATION IF EXISTS calc_flow_cdc_existing_publication; \
+             DROP TABLE IF EXISTS cdc_existing_slot; \
+             CREATE TABLE cdc_existing_slot (id BIGINT PRIMARY KEY, label TEXT NOT NULL); \
+             ALTER TABLE cdc_existing_slot REPLICA IDENTITY FULL; \
+             CREATE PUBLICATION calc_flow_cdc_existing_publication FOR TABLE cdc_existing_slot;",
+        )
+        .await
+        .expect("prepares CDC relation and publication");
+    client
+        .query_one(
+            "SELECT slot_name FROM pg_create_logical_replication_slot($1, 'pgoutput')",
+            &[&"calc_flow_cdc_existing_slot"],
+        )
+        .await
+        .expect("creates a slot owned by another source");
+    let mut options = cdc_options();
+    options.insert("table".into(), json!("cdc_existing_slot"));
+    options.insert("slot".into(), json!("calc_flow_cdc_existing_slot"));
+    options.insert(
+        "publication".into(),
+        json!("calc_flow_cdc_existing_publication"),
+    );
+    options.insert("slot_policy".into(), json!("create_with_snapshot"));
+    let factory = PostgresSourceFactory::new();
+    let mut source = factory
+        .open(&options, &TestUrl)
+        .await
+        .expect("factory accepts the source configuration");
+    let error = source
+        .open(None)
+        .await
+        .expect_err("create_with_snapshot must reject an existing slot");
+    assert!(
+        error.to_string().contains("does not already exist"),
+        "unexpected bootstrap failure: {error}"
+    );
+    assert!(
+        client
+            .query_opt(
+                "SELECT slot_name FROM pg_replication_slots WHERE slot_name = $1",
+                &[&"calc_flow_cdc_existing_slot"],
+            )
+            .await
+            .expect("queries replication slots")
+            .is_some(),
+        "bootstrap removed a slot it did not create"
+    );
+    source
+        .close()
+        .await
+        .expect("closes failed bootstrap source");
+    client
+        .batch_execute(
+            "SELECT pg_drop_replication_slot('calc_flow_cdc_existing_slot'); \
+             DROP PUBLICATION calc_flow_cdc_existing_publication; \
+             DROP TABLE cdc_existing_slot;",
+        )
+        .await
+        .expect("cleans CDC artifacts");
+    drop(client);
+    connection
+        .await
+        .expect("connection task joins")
+        .expect("connection closes");
+}
+
 async fn next_data(source: &mut dyn calc_flow::StreamSource) -> calc_flow::Batch {
     let event = tokio::time::timeout(Duration::from_secs(15), source.next())
         .await

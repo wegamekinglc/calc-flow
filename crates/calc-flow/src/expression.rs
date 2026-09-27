@@ -1,4 +1,4 @@
-use std::sync::OnceLock;
+use std::{ops::ControlFlow, sync::OnceLock};
 
 use datafusion::{
     execution::{FunctionRegistry, context::SessionContext},
@@ -6,7 +6,7 @@ use datafusion::{
     sql::{
         parser::DFParser,
         sqlparser::{
-            ast::{Expr, visit_expressions},
+            ast::{Expr, ObjectName, Query, TableFactor, Visit, Visitor, visit_expressions},
             dialect::GenericDialect,
         },
     },
@@ -63,22 +63,80 @@ pub(crate) fn validate_select_query(query: &str) -> Result<String> {
                 message: error.to_string(),
             }
         })?;
-    if statements.len() != 1
-        || !matches!(
-            statements.front(),
-            Some(datafusion::sql::parser::Statement::Statement(statement))
-                if matches!(
-                    statement.as_ref(),
-                    datafusion::sql::sqlparser::ast::Statement::Query(_)
-                )
-        )
-    {
+    let Some(datafusion::sql::parser::Statement::Statement(statement)) = statements.front() else {
+        return Err(CalcFlowError::InvalidArgument {
+            field: "query".into(),
+            message: "exactly one SELECT or CTE query is required".into(),
+        });
+    };
+    let datafusion::sql::sqlparser::ast::Statement::Query(parsed) = statement.as_ref() else {
+        return Err(CalcFlowError::InvalidArgument {
+            field: "query".into(),
+            message: "exactly one SELECT or CTE query is required".into(),
+        });
+    };
+    if statements.len() != 1 {
         return Err(CalcFlowError::InvalidArgument {
             field: "query".into(),
             message: "exactly one SELECT or CTE query is required".into(),
         });
     }
+    if let ControlFlow::Break(message) = parsed.visit(&mut ResourceLimitVisitor) {
+        return Err(CalcFlowError::InvalidArgument {
+            field: "query".into(),
+            message: message.into(),
+        });
+    }
     Ok(query.trim().trim_end_matches(';').trim().to_owned())
+}
+
+struct ResourceLimitVisitor;
+
+impl Visitor for ResourceLimitVisitor {
+    type Break = &'static str;
+
+    fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
+        if query.with.as_ref().is_some_and(|with| with.recursive) {
+            ControlFlow::Break("recursive CTEs are unavailable")
+        } else {
+            ControlFlow::Continue(())
+        }
+    }
+
+    fn pre_visit_table_factor(&mut self, factor: &TableFactor) -> ControlFlow<Self::Break> {
+        let name = match factor {
+            TableFactor::Table {
+                name,
+                args: Some(_),
+                ..
+            }
+            | TableFactor::Function { name, .. } => Some(name),
+            _ => None,
+        };
+        if name.is_some_and(is_unbounded_generator) {
+            ControlFlow::Break("generate_series and range table functions are unavailable")
+        } else {
+            ControlFlow::Continue(())
+        }
+    }
+
+    fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<Self::Break> {
+        if matches!(expr, Expr::Function(function) if is_unbounded_generator(&function.name)) {
+            ControlFlow::Break("generate_series and range table functions are unavailable")
+        } else {
+            ControlFlow::Continue(())
+        }
+    }
+}
+
+fn is_unbounded_generator(name: &ObjectName) -> bool {
+    name.0
+        .last()
+        .and_then(|part| part.as_ident())
+        .is_some_and(|ident| {
+            ident.value.eq_ignore_ascii_case("generate_series")
+                || ident.value.eq_ignore_ascii_case("range")
+        })
 }
 
 /// `DataFusion` datetime built-ins that read the wall clock while declaring
@@ -136,13 +194,13 @@ pub(crate) fn validate_no_volatile_functions(
                     } else if WALL_CLOCK_BUILTINS.contains(&udf.name()) {
                         "wall-clock"
                     } else {
-                        return std::ops::ControlFlow::Continue(());
+                        return ControlFlow::Continue(());
                     };
                     rejected = Some((name.clone(), kind));
-                    return std::ops::ControlFlow::Break(());
+                    return ControlFlow::Break(());
                 }
             }
-            std::ops::ControlFlow::Continue(())
+            ControlFlow::Continue(())
         });
         if rejected.is_some() {
             break;
@@ -390,6 +448,24 @@ mod tests {
     fn select_query_validation_rejects_multiple_statements_and_dml() {
         assert!(validate_select_query("SELECT 1; SELECT 2").is_err());
         assert!(validate_select_query("INSERT INTO input VALUES (1)").is_err());
+    }
+
+    #[test]
+    fn select_query_validation_rejects_unbounded_generators_and_recursion() {
+        for query in [
+            "SELECT * FROM generate_series(1, 1000000000)",
+            "SELECT * FROM range(1000000000)",
+            "SELECT * FROM (SELECT * FROM generate_series(1, 1000000000)) AS generated",
+            "WITH RECURSIVE t(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM t) SELECT * FROM t",
+        ] {
+            assert!(
+                matches!(
+                    validate_select_query(query),
+                    Err(CalcFlowError::InvalidArgument { field, .. }) if field == "query"
+                ),
+                "query was accepted: {query}"
+            );
+        }
     }
 
     #[test]

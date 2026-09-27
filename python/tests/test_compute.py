@@ -85,6 +85,69 @@ def test_async_collection_snapshots_mapping_and_forwards_options(monkeypatch):
     assert seen[0] is options
 
 
+def test_async_compute_compiles_off_the_event_loop(monkeypatch):
+    import asyncio
+    import threading
+
+    data = pa.table({"x": [1]})
+    runtime = cf.Runtime()
+    seen = []
+    compile_project = cf.Runtime.compile_batch_project
+
+    def record(self, document):
+        seen.append(threading.get_ident())
+        return compile_project(self, document)
+
+    monkeypatch.setattr(cf.Runtime, "compile_batch_project", record)
+
+    async def run():
+        event_loop_thread = threading.get_ident()
+        result = await cf.compute_async(data, lambda t: t.select("x"), runtime=runtime)
+        assert result.equals(data)
+        assert len(seen) == 1
+        assert seen[0] != event_loop_thread
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("fail_compile", [False, True])
+def test_async_compute_cancellation_waits_for_compile_worker(monkeypatch, fail_compile):
+    import asyncio
+    import threading
+
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    compile_project = cf.Runtime.compile_batch_project
+
+    def blocked(self, document):
+        started.set()
+        try:
+            assert release.wait(5)
+            if fail_compile:
+                raise ValueError("compile failed after cancellation")
+            return compile_project(self, document)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(cf.Runtime, "compile_batch_project", blocked)
+
+    async def run():
+        task = asyncio.create_task(cf.compute_async(pa.table({"x": [1]}), lambda t: t))
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+        finally:
+            release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+        assert finished.is_set()
+
+    asyncio.run(run())
+
+
 def test_compute_rejects_invalid_builders_and_preserves_original_exception():
     import pytest
 

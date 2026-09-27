@@ -1327,13 +1327,32 @@ impl TransactionalPostgresSink {
                 &format!(
                     "CREATE TABLE IF NOT EXISTS {LEDGER_TABLE} (\
                      pipeline TEXT NOT NULL, output TEXT NOT NULL, epoch BIGINT NOT NULL, \
-                     rows_written BIGINT NOT NULL, committed_at timestamptz NOT NULL DEFAULT now(), \
+                     rows_written BIGINT NOT NULL, target TEXT, schema_hash TEXT, \
+                     segment_sha256 TEXT, committed_at timestamptz NOT NULL DEFAULT now(), \
                      PRIMARY KEY (pipeline, output, epoch))"
                 ),
                 &[],
             )
             .await;
         if let Err(error) = create_result {
+            let primary = fail("open", &error.to_string());
+            let _ = settle_connection(&mut self.client, &mut self.connection_driver).await;
+            return Err(primary);
+        }
+        // Older ledgers stored only the row count. Keep their existing entries
+        // unverified; a replay against one must fail instead of guessing its payload.
+        let migrate_result = self
+            .client
+            .as_ref()
+            .expect("connection established")
+            .batch_execute(&format!(
+                "ALTER TABLE {LEDGER_TABLE} \
+                 ADD COLUMN IF NOT EXISTS target TEXT, \
+                 ADD COLUMN IF NOT EXISTS schema_hash TEXT, \
+                 ADD COLUMN IF NOT EXISTS segment_sha256 TEXT"
+            ))
+            .await;
+        if let Err(error) = migrate_result {
             let primary = fail("open", &error.to_string());
             let _ = settle_connection(&mut self.client, &mut self.connection_driver).await;
             return Err(primary);
@@ -1422,8 +1441,26 @@ impl TransactionalPostgresSink {
                     .and_then(pg_identifier)
             })
             .collect::<Result<Vec<_>>>()?;
+        if self.active == Some(epoch) && columns != self.pending_columns {
+            return Err(fail(
+                "commit",
+                "pre-commit columns differ from the active epoch",
+            ));
+        }
         let sql = compile_insert_sql(&self.config, &columns)?;
         crate::evidence::check_schema_hash(evidence).map_err(protocol)?;
+        if self.active == Some(epoch) {
+            let expected = self
+                .pending_schema_hash
+                .clone()
+                .unwrap_or_else(|| hex::encode(Sha256::digest([])));
+            if evidence.get("schema_hash").and_then(Value::as_str) != Some(expected.as_str()) {
+                return Err(fail(
+                    "commit",
+                    "pre-commit schema differs from the active epoch",
+                ));
+            }
+        }
         if rows.iter().any(|row| row.len() != columns.len()) {
             return Err(fail(
                 "commit",
@@ -1435,7 +1472,15 @@ impl TransactionalPostgresSink {
         crate::evidence::check_segment(evidence, &prepared_rows).map_err(protocol)?;
         crate::evidence::check_rows(evidence, u64::try_from(rows.len()).unwrap_or(u64::MAX))
             .map_err(protocol)?;
-        Ok(PreparedPostgresCommit { sql, rows })
+        Ok(PreparedPostgresCommit {
+            sql,
+            rows,
+            target: self.config.table.clone(),
+            schema_hash: crate::evidence::string_field(evidence, "schema_hash")
+                .map_err(protocol)?,
+            segment_sha256: crate::evidence::string_field(evidence, "segment_sha256")
+                .map_err(protocol)?,
+        })
     }
 
     // Prepared-transaction recovery deliberately handles every idempotent
@@ -1460,8 +1505,9 @@ impl TransactionalPostgresSink {
         let inserted = tx
             .query_opt(
                 &format!(
-                    "INSERT INTO {LEDGER_TABLE} (pipeline, output, epoch, rows_written) \
-                     VALUES ($1, $2, $3, $4) \
+                    "INSERT INTO {LEDGER_TABLE} \
+                     (pipeline, output, epoch, rows_written, target, schema_hash, segment_sha256) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7) \
                      ON CONFLICT (pipeline, output, epoch) DO NOTHING \
                      RETURNING rows_written"
                 ),
@@ -1470,6 +1516,9 @@ impl TransactionalPostgresSink {
                     &self.config.output,
                     &epoch_value,
                     &rows_written,
+                    &prepared.target,
+                    &prepared.schema_hash,
+                    &prepared.segment_sha256,
                 ],
             )
             .await
@@ -1485,21 +1534,29 @@ impl TransactionalPostgresSink {
                     .map_err(|error| fail("commit", &error.to_string()))?;
             }
         } else {
-            let recorded: i64 = tx
+            let recorded = tx
                 .query_one(
                     &format!(
-                        "SELECT rows_written FROM {LEDGER_TABLE} \
+                        "SELECT rows_written, target, schema_hash, segment_sha256 \
+                         FROM {LEDGER_TABLE} \
                          WHERE pipeline = $1 AND output = $2 AND epoch = $3"
                     ),
                     &[&self.config.pipeline, &self.config.output, &epoch_value],
                 )
                 .await
-                .map_err(|error| fail("commit", &error.to_string()))?
-                .get(0);
-            if recorded != rows_written {
+                .map_err(|error| fail("commit", &error.to_string()))?;
+            let recorded_rows: i64 = recorded.get(0);
+            let recorded_target: Option<String> = recorded.get(1);
+            let recorded_schema: Option<String> = recorded.get(2);
+            let recorded_segment: Option<String> = recorded.get(3);
+            if recorded_rows != rows_written
+                || recorded_target.as_deref() != Some(prepared.target.as_str())
+                || recorded_schema.as_deref() != Some(prepared.schema_hash.as_str())
+                || recorded_segment.as_deref() != Some(prepared.segment_sha256.as_str())
+            {
                 return Err(fail(
                     "commit",
-                    "existing epoch ledger row count conflicts with recovery evidence",
+                    "existing epoch ledger entry conflicts with recovery evidence",
                 ));
             }
         }
@@ -1512,6 +1569,9 @@ impl TransactionalPostgresSink {
 struct PreparedPostgresCommit {
     sql: String,
     rows: Vec<Vec<crate::database_types::PgValue>>,
+    target: String,
+    schema_hash: String,
+    segment_sha256: String,
 }
 
 #[async_trait]
@@ -1982,12 +2042,23 @@ mod tests {
         sink.pending_schema_hash = Some("a".repeat(64));
         sink.rows = 1;
         let epoch = calc_flow::Epoch::INITIAL;
+        sink.active = Some(epoch);
         let evidence = sink.prepared_evidence(epoch).unwrap();
         let prepared = sink
             .validate_evidence(epoch, &evidence, sink.pending_rows.clone())
             .unwrap();
         assert_eq!(prepared.rows.len(), 1);
         assert_eq!(prepared.sql, "INSERT INTO orders (id) VALUES ($1)");
+        crate::evidence::assert_recovery_contract(&evidence, "target", |candidate| {
+            sink.validate_evidence(epoch, candidate, sink.pending_rows.clone())
+                .is_ok()
+        });
+        let mut wrong_columns = evidence.clone();
+        wrong_columns.insert("columns".into(), serde_json::json!(["other"]));
+        assert!(
+            sink.validate_evidence(epoch, &wrong_columns, sink.pending_rows.clone())
+                .is_err()
+        );
 
         let encoded = evidence_rows(&sink.pending_rows);
         assert_eq!(
@@ -2000,6 +2071,20 @@ mod tests {
         tampered.insert("rows".into(), Value::from(2));
         assert!(
             sink.validate_evidence(epoch, &tampered, sink.pending_rows.clone())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn empty_live_epoch_rejects_another_valid_schema_hash() {
+        let config = PostgresSinkConfig::from_options(&sink_options("transactional")).unwrap();
+        let mut sink = TransactionalPostgresSink::new(config).unwrap();
+        let epoch = calc_flow::Epoch::INITIAL;
+        sink.active = Some(epoch);
+        let mut evidence = sink.prepared_evidence(epoch).unwrap();
+        evidence.insert("schema_hash".into(), Value::String("a".repeat(64)));
+        assert!(
+            sink.validate_evidence(epoch, &evidence, Vec::new())
                 .is_err()
         );
     }

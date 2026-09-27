@@ -206,7 +206,7 @@ async fn checkpoint_is_incremental_arrow_ipc_and_restore_replaces_live_state() {
     let first_bytes = first.segments.values().next().unwrap().bytes();
     let descriptor = &inventory[0];
     assert_eq!(descriptor["kind"], "delta");
-    assert_eq!(descriptor["state_layout_version"], 1);
+    assert_eq!(descriptor["state_layout_version"], 2);
     assert_eq!(descriptor["handle"]["operator_id"], "window");
     assert_eq!(descriptor["handle"]["epoch"], 1);
     assert_eq!(
