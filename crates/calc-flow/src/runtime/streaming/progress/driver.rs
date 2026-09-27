@@ -375,6 +375,68 @@ mod checkpoint_cut_tests {
     }
 
     #[tokio::test]
+    async fn cancelled_barrier_fanout_rejects_checkpoint_cut() {
+        let prepared = Arc::new(
+            prepare_stream_job(
+                "compiled",
+                &[source("left")],
+                StreamProgressRuntimeConfig::default(),
+            )
+            .unwrap(),
+        );
+        let budget = EdgeBudget {
+            max_rows: 1,
+            max_bytes: 1 << 20,
+        };
+        let (first_sender, mut first_receiver) = edge_channel("first", budget).unwrap();
+        let (mut blocked_sender, _blocked_receiver) = edge_channel("blocked", budget).unwrap();
+        blocked_sender
+            .send(crate::StreamMessage::idle())
+            .await
+            .unwrap();
+        let cancellation = CancellationToken::new();
+        let coordinator = LiveProgressCoordinator::new(
+            &prepared,
+            BTreeMap::from([("left".into(), vec![first_sender, blocked_sender])]),
+            cancellation.clone(),
+        )
+        .unwrap();
+        let cut_cancellation = cancellation.clone();
+        let cut = tokio::spawn(async move {
+            coordinator
+                .checkpoint_cut(
+                    Epoch::INITIAL,
+                    &BTreeMap::from([(
+                        binding("left"),
+                        DurableSourceCut {
+                            cursor: Some(CursorManifestEntry {
+                                order: "01".into(),
+                                payload: BTreeMap::new(),
+                            }),
+                            next_sequence: 0,
+                            ended: false,
+                        },
+                    )]),
+                    &cut_cancellation,
+                )
+                .await
+        });
+
+        let delivered =
+            tokio::time::timeout(std::time::Duration::from_secs(1), first_receiver.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        assert_eq!(delivered.as_barrier(), Some(Epoch::INITIAL));
+        cancellation.cancel();
+        assert!(matches!(
+            cut.await.unwrap(),
+            Err(crate::CalcFlowError::Cancelled { .. })
+        ));
+    }
+
+    #[tokio::test]
     async fn idle_live_source_participates_in_the_checkpoint_cut() {
         let prepared = Arc::new(
             prepare_stream_job(
@@ -3446,7 +3508,9 @@ async fn send_progress_fanout(
     for output in outputs {
         tokio::select! {
             biased;
-            () = cancellation.cancelled() => return Ok(()),
+            () = cancellation.cancelled() => return Err(CalcFlowError::Cancelled {
+                run_id: "stream-progress".into(),
+            }),
             result = output.send(message.clone()) => result?,
         }
     }
