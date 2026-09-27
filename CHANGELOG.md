@@ -9,6 +9,14 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-28: Share batch metadata across stream fanout. `BatchMetadata`
+  clones share their source and attributes, so each fanout branch copies
+  reference counts instead of the source string and attribute map; its JSON
+  form, equality, and accessors are unchanged. Source, progress-driver, and
+  operator fanout move each message into its last output edge instead of
+  cloning it. Cloning a 16-row table batch with eight attributes fell from
+  about 238 ns to 37 ns in a local probe.
+
 - 2026-09-27: Reduce fixed per-call overhead from the #339 performance review.
   Expression lowering, primitive search, and common-subexpression extraction
   visit each shared subexpression once, so deeply shared row-local diamonds

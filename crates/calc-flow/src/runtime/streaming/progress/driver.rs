@@ -3505,16 +3505,27 @@ async fn send_progress_fanout(
     message: super::super::StreamMessage,
     cancellation: &crate::CancellationToken,
 ) -> Result<()> {
-    for output in outputs {
-        tokio::select! {
-            biased;
-            () = cancellation.cancelled() => return Err(CalcFlowError::Cancelled {
-                run_id: "stream-progress".into(),
-            }),
-            result = output.send(message.clone()) => result?,
-        }
+    let Some((last, rest)) = outputs.split_last_mut() else {
+        return Ok(());
+    };
+    for output in rest {
+        send_progress_edge(output, message.clone(), cancellation).await?;
     }
-    Ok(())
+    send_progress_edge(last, message, cancellation).await
+}
+
+async fn send_progress_edge(
+    output: &mut super::super::EdgeSender,
+    message: super::super::StreamMessage,
+    cancellation: &crate::CancellationToken,
+) -> Result<()> {
+    tokio::select! {
+        biased;
+        () = cancellation.cancelled() => Err(CalcFlowError::Cancelled {
+            run_id: "stream-progress".into(),
+        }),
+        result = output.send(message) => result,
+    }
 }
 
 pub(crate) fn spawn_live_progress_task(

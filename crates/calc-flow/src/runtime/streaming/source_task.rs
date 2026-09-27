@@ -1893,15 +1893,27 @@ async fn send_fanout(
     message: StreamMessage,
     cancellation: &crate::CancellationToken,
 ) -> Result<bool> {
-    for output in outputs {
-        let sent = tokio::select! {
-            biased;
-            () = cancellation.cancelled() => return Ok(false),
-            result = output.send(message.clone()) => result,
-        };
-        sent?;
+    let Some((last, rest)) = outputs.split_last_mut() else {
+        return Ok(true);
+    };
+    for output in rest {
+        if !send_edge(output, message.clone(), cancellation).await? {
+            return Ok(false);
+        }
     }
-    Ok(true)
+    send_edge(last, message, cancellation).await
+}
+
+async fn send_edge(
+    output: &mut EdgeSender,
+    message: StreamMessage,
+    cancellation: &crate::CancellationToken,
+) -> Result<bool> {
+    tokio::select! {
+        biased;
+        () = cancellation.cancelled() => Ok(false),
+        result = output.send(message) => result.map(|()| true),
+    }
 }
 
 #[cfg(test)]

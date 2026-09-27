@@ -1768,18 +1768,29 @@ async fn send_emission(
     job_id: u64,
     observation: Option<&RollingMetricsRecorder>,
 ) -> Result<()> {
-    for sender in senders {
-        tokio::select! {
-            biased;
-            () = cancellation.cancelled() => {
-                return Err(CalcFlowError::Cancelled {
-                    run_id: job_id.to_string(),
-                });
-            }
-            result = sender.send_observed(message.clone(), observation) => result?,
-        }
+    let Some((last, rest)) = senders.split_last_mut() else {
+        return Ok(());
+    };
+    for sender in rest {
+        send_observed_edge(sender, message.clone(), cancellation, job_id, observation).await?;
     }
-    Ok(())
+    send_observed_edge(last, message, cancellation, job_id, observation).await
+}
+
+async fn send_observed_edge(
+    sender: &mut EdgeSender,
+    message: StreamMessage,
+    cancellation: &CancellationToken,
+    job_id: u64,
+    observation: Option<&RollingMetricsRecorder>,
+) -> Result<()> {
+    tokio::select! {
+        biased;
+        () = cancellation.cancelled() => Err(CalcFlowError::Cancelled {
+            run_id: job_id.to_string(),
+        }),
+        result = sender.send_observed(message, observation) => result,
+    }
 }
 
 fn runtime_routes_error(node_id: &str, port: &str) -> CalcFlowError {
