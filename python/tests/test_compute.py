@@ -503,3 +503,29 @@ def test_sync_collect_rejects_non_execution_options():
         program.collect({"q": data}, options=object())
     with pytest.raises(TypeError, match="options must be a calc_flow.ExecutionOptions"):
         cf.compute(data, lambda table: table, options=object())
+
+
+def test_multi_output_conversion_reads_native_outputs_once() -> None:
+    from calc_flow.compute import _tables
+
+    batches = {
+        f"port_{index}": cf.Batch.from_pyarrow(pa.table({"x": [index]}))
+        for index in range(3)
+    }
+
+    class CountingResult:
+        reads = 0
+
+        @property
+        def outputs(self) -> dict[str, cf.Batch]:
+            CountingResult.reads += 1
+            return dict(batches)
+
+    tables = _tables(CountingResult(), {f"out_{i}": f"port_{i}" for i in range(3)})
+
+    assert CountingResult.reads == 1
+    assert [table.column("x").to_pylist() for table in tables.values()] == [
+        [0],
+        [1],
+        [2],
+    ]

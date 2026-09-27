@@ -9,6 +9,7 @@ use std::{
 
 use datafusion::{
     arrow::{datatypes::SchemaRef, record_batch::RecordBatch},
+    dataframe::DataFrame,
     datasource::MemTable,
     execution::{
         context::{SessionConfig, SessionContext},
@@ -17,7 +18,9 @@ use datafusion::{
         session_state::SessionStateBuilder,
     },
     logical_expr::ScalarUDF,
-    physical_plan::{ExecutionPlanProperties, displayable, execute_stream},
+    physical_plan::{
+        ExecutionPlanProperties, SendableRecordBatchStream, displayable, execute_stream,
+    },
 };
 use futures::StreamExt;
 use parking_lot::Mutex;
@@ -28,8 +31,8 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::{
     Batch, BatchMetadata, CalcFlowError, Result, UdfKind, UdfReference, UdfRegistrySnapshot,
     datafusion_predicate::UInt64ModuloPredicate,
-    datafusion_rolling::{CalcFlowQueryPlanner, RollingRewriteAudit},
-    expression::{sql_projection, validate_select_query},
+    datafusion_rolling::{CalcFlowQueryPlanner, RollingRewriteAudit, RollingRewriteAuditSnapshot},
+    expression::{ValidatedQuery, parse_select_query, sql_projection},
     validate_selected_udfs,
 };
 
@@ -325,7 +328,7 @@ impl DataFusionRuntime {
         node_id: &str,
     ) -> Result<SchemaRef> {
         self.ensure_open()?;
-        let query = validate_select_query(query)?;
+        let query = parse_select_query(query)?;
         let _query_guard = self.query_lock.lock().await;
         self.ensure_open()?;
         let context = self.context_for_rows(0, None, "not_evaluated");
@@ -347,10 +350,6 @@ impl DataFusionRuntime {
     /// Returns an error when the runtime is closed, the input map is empty, an
     /// alias or query is invalid, an input is not a table batch, or `DataFusion`
     /// cannot plan or execute the query.
-    #[allow(
-        clippy::too_many_lines,
-        reason = "the ordered phase boundaries are kept together so benchmark attribution cannot drift"
-    )]
     pub async fn sql(
         &self,
         query: &str,
@@ -358,15 +357,38 @@ impl DataFusionRuntime {
         node_id: Option<&str>,
     ) -> Result<Batch> {
         self.ensure_open()?;
-        if tables.is_empty() {
-            return Err(CalcFlowError::InvalidArgument {
-                field: "tables".into(),
-                message: "must not be empty".into(),
-            });
-        }
+        require_tables(tables)?;
         let parse_start = Instant::now();
-        let query = validate_select_query(query)?;
+        let query = parse_select_query(query)?;
         let sql_parse_ns = nanos(parse_start.elapsed());
+        self.execute_query(&query, sql_parse_ns, tables, node_id)
+            .await
+    }
+
+    /// Executes one query that was validated and parsed when its operator was
+    /// built, so the per-call parse phase is skipped.
+    pub(crate) async fn sql_validated(
+        &self,
+        query: &ValidatedQuery,
+        tables: &BTreeMap<String, Batch>,
+        node_id: Option<&str>,
+    ) -> Result<Batch> {
+        self.ensure_open()?;
+        require_tables(tables)?;
+        self.execute_query(query, 0, tables, node_id).await
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the ordered phase boundaries are kept together so benchmark attribution cannot drift"
+    )]
+    async fn execute_query(
+        &self,
+        query: &ValidatedQuery,
+        sql_parse_ns: u64,
+        tables: &BTreeMap<String, Batch>,
+        node_id: Option<&str>,
+    ) -> Result<Batch> {
         // Declared before registrations so alias cleanup runs before unlock.
         let _query_guard = self.query_lock.lock().await;
         self.ensure_open()?;
@@ -377,133 +399,51 @@ impl DataFusionRuntime {
         let context_preexisting = self.context.get().is_some();
         let session_state_create_start = Instant::now();
         let context = self.context_for_rows(input_rows, active_entities, active_entities_source);
-        let session_state_create_ns = if context_preexisting {
-            0
-        } else {
-            nanos(session_state_create_start.elapsed())
-        };
-        let mut registrations = TableRegistrations::new(context);
-        let mut input_adapter_ns = 0_u64;
-        let mut table_register_ns = 0_u64;
-        for (alias, batch) in tables {
-            let timing = registrations.register(alias, batch, node_id)?;
-            input_adapter_ns = input_adapter_ns.saturating_add(timing.input_adapter_ns);
-            table_register_ns = table_register_ns.saturating_add(timing.table_register_ns);
-        }
-
-        let logical_planning_start = Instant::now();
-        let dataframe = context
-            .sql(&query)
-            .await
-            .map_err(|error| datafusion_error(node_id, error))?;
-        let logical_plan_string_start = Instant::now();
-        let logical_plan = if self.config.collect_diagnostics {
-            dataframe.logical_plan().display_indent_schema().to_string()
-        } else {
-            String::new()
-        };
-        let logical_plan_string_ns = if self.config.collect_diagnostics {
-            nanos(logical_plan_string_start.elapsed())
-        } else {
-            0
-        };
-        let logical_planning_ns = nanos(logical_planning_start.elapsed());
-
-        let physical_planning_start = Instant::now();
-        let physical_plan = dataframe
-            .create_physical_plan()
-            .await
-            .map_err(|error| datafusion_error(node_id, error))?;
-        let physical_plan_string_start = Instant::now();
-        let physical_plan_text = if self.config.collect_diagnostics {
-            displayable(physical_plan.as_ref()).indent(true).to_string()
-        } else {
-            String::new()
-        };
-        let physical_plan_string_ns = if self.config.collect_diagnostics {
-            nanos(physical_plan_string_start.elapsed())
-        } else {
-            0
-        };
-        let audit_start = Instant::now();
-        let rolling_audit = self.rolling_rewrite_audit.snapshot();
-        let audit_ns = nanos(audit_start.elapsed());
-        let physical_planning_ns = nanos(physical_planning_start.elapsed());
+        let session_state_create_ns =
+            u64::from(!context_preexisting) * nanos(session_state_create_start.elapsed());
+        let (_registrations, input_adapter_ns, table_register_ns) =
+            register_tables(context, tables, node_id)?;
+        let planned = self.plan_query(context, query, node_id).await?;
         let planning_ns = sql_parse_ns
-            .saturating_add(logical_planning_ns)
-            .saturating_add(physical_planning_ns);
+            .saturating_add(planned.logical_planning_ns)
+            .saturating_add(planned.physical_planning_ns);
 
         let execution_start = Instant::now();
-        let result_schema = physical_plan.schema();
-        let metrics_plan = Arc::clone(&physical_plan);
-        let mut stream = execute_stream(physical_plan, Arc::new(dataframe.task_ctx()))
-            .map_err(|error| datafusion_error(node_id, error))?;
+        let metrics_plan = Arc::clone(&planned.physical_plan);
+        let stream = execute_stream(
+            planned.physical_plan,
+            Arc::new(planned.dataframe.task_ctx()),
+        )
+        .map_err(|error| datafusion_error(node_id, error))?;
         let stream_open_ns = nanos(execution_start.elapsed());
-
-        let collect_start = Instant::now();
-        let first_batch = stream
-            .next()
-            .await
-            .transpose()
-            .map_err(|error| datafusion_error(node_id, error))?;
-        let execution_to_first_batch_ns = nanos(execution_start.elapsed());
-        let mut batches = Vec::new();
-        let mut output_rows = 0;
-        let mut output_bytes = 0;
-        if let Some(batch) = first_batch {
-            push_bounded_sql_batch(
-                &mut batches,
-                &mut output_rows,
-                &mut output_bytes,
-                batch,
-                MAX_SQL_RESULT_ROWS,
-                MAX_SQL_RESULT_BYTES,
-            )?;
-        }
-        let remaining_start = Instant::now();
-        while let Some(batch) = stream.next().await {
-            push_bounded_sql_batch(
-                &mut batches,
-                &mut output_rows,
-                &mut output_bytes,
-                batch.map_err(|error| datafusion_error(node_id, error))?,
-                MAX_SQL_RESULT_ROWS,
-                MAX_SQL_RESULT_BYTES,
-            )?;
-        }
-        let execution_remaining_ns = nanos(remaining_start.elapsed());
-        let collect_ns = nanos(collect_start.elapsed());
-        let execution_ns = stream_open_ns.saturating_add(collect_ns);
-        // A zero-row result (for example an INNER JOIN with no key-equal
-        // pairs) collects to zero RecordBatches; represent it as one
-        // zero-row batch, exactly as the Batch::table contract prescribes.
-        let output_arrow_wrap_start = Instant::now();
-        let batches = if batches.is_empty() {
-            vec![RecordBatch::new_empty(result_schema)]
-        } else {
-            batches
-        };
-        let output_arrow_wrap_ns = nanos(output_arrow_wrap_start.elapsed());
+        let collected =
+            collect_bounded(stream, metrics_plan.schema(), execution_start, node_id).await?;
+        let execution_ns = stream_open_ns.saturating_add(collected.collect_ns);
         let batch_envelope_start = Instant::now();
-        let output = Batch::table(batches, merged_metadata(tables))?;
+        let output = Batch::table(collected.batches, merged_metadata(tables))?;
         let batch_envelope_ns = nanos(batch_envelope_start.elapsed());
         let output_rows = output.num_rows();
-        let metrics_traversal_start = Instant::now();
-        let plan_statistics = if self.config.collect_diagnostics {
-            physical_plan_statistics(metrics_plan.as_ref(), output_rows)
-        } else {
-            PhysicalPlanStatistics::default()
-        };
-        let metrics_traversal_ns = if self.config.collect_diagnostics {
-            nanos(metrics_traversal_start.elapsed())
-        } else {
-            0
-        };
-        let Some(decision) = self.parallelism_decision.get() else {
-            return Err(CalcFlowError::Internal {
-                message: "DataFusion context initialized without a parallelism decision".into(),
-            });
-        };
+        let (plan_statistics, metrics_traversal_ns) =
+            self.plan_statistics(metrics_plan.as_ref(), output_rows);
+        let decision = self.decision()?;
+        let PlannedQuery {
+            logical_plan,
+            logical_plan_string_ns,
+            logical_planning_ns,
+            physical_plan_text,
+            physical_plan_string_ns,
+            physical_planning_ns,
+            rolling_audit,
+            audit_ns,
+            ..
+        } = planned;
+        let CollectedOutput {
+            execution_to_first_batch_ns,
+            execution_remaining_ns,
+            collect_ns,
+            output_arrow_wrap_ns,
+            ..
+        } = collected;
         self.metrics.lock().push(DataFusionQueryMetric {
             query_id: self.next_query.fetch_add(1, Ordering::Relaxed),
             node_id: node_id.map(str::to_owned),
@@ -576,6 +516,68 @@ impl DataFusionRuntime {
 
     pub fn close(&self) {
         self.closed.store(true, Ordering::Release);
+    }
+
+    /// Plans one query, timing the logical and physical phases exactly as
+    /// the benchmark attribution defines them.
+    async fn plan_query(
+        &self,
+        context: &SessionContext,
+        query: &ValidatedQuery,
+        node_id: Option<&str>,
+    ) -> Result<PlannedQuery> {
+        let diagnostics = self.config.collect_diagnostics;
+        let logical_planning_start = Instant::now();
+        let dataframe = plan_statement(context, query)
+            .await
+            .map_err(|error| datafusion_error(node_id, error))?;
+        let (logical_plan, logical_plan_string_ns) = diagnostic(diagnostics, || {
+            dataframe.logical_plan().display_indent_schema().to_string()
+        });
+        let logical_planning_ns = nanos(logical_planning_start.elapsed());
+
+        let physical_planning_start = Instant::now();
+        let physical_plan = dataframe
+            .create_physical_plan()
+            .await
+            .map_err(|error| datafusion_error(node_id, error))?;
+        let (physical_plan_text, physical_plan_string_ns) = diagnostic(diagnostics, || {
+            displayable(physical_plan.as_ref()).indent(true).to_string()
+        });
+        let audit_start = Instant::now();
+        let rolling_audit = self.rolling_rewrite_audit.snapshot();
+        let audit_ns = nanos(audit_start.elapsed());
+        let physical_planning_ns = nanos(physical_planning_start.elapsed());
+        Ok(PlannedQuery {
+            dataframe,
+            physical_plan,
+            logical_plan,
+            logical_plan_string_ns,
+            logical_planning_ns,
+            physical_plan_text,
+            physical_plan_string_ns,
+            physical_planning_ns,
+            rolling_audit,
+            audit_ns,
+        })
+    }
+
+    fn plan_statistics(
+        &self,
+        plan: &dyn datafusion::physical_plan::ExecutionPlan,
+        output_rows: usize,
+    ) -> (PhysicalPlanStatistics, u64) {
+        diagnostic(self.config.collect_diagnostics, || {
+            physical_plan_statistics(plan, output_rows)
+        })
+    }
+
+    fn decision(&self) -> Result<&DataFusionParallelismDecision> {
+        self.parallelism_decision
+            .get()
+            .ok_or_else(|| CalcFlowError::Internal {
+                message: "DataFusion context initialized without a parallelism decision".into(),
+            })
     }
 
     #[cfg(test)]
@@ -989,13 +991,140 @@ impl Drop for TableRegistrations<'_> {
     }
 }
 
+/// Planned query state carried from the planning phases to execution.
+struct PlannedQuery {
+    dataframe: DataFrame,
+    physical_plan: Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+    logical_plan: String,
+    logical_plan_string_ns: u64,
+    logical_planning_ns: u64,
+    physical_plan_text: String,
+    physical_plan_string_ns: u64,
+    physical_planning_ns: u64,
+    rolling_audit: RollingRewriteAuditSnapshot,
+    audit_ns: u64,
+}
+
+/// Bounded query output with its collection-phase timings.
+struct CollectedOutput {
+    batches: Vec<RecordBatch>,
+    execution_to_first_batch_ns: u64,
+    execution_remaining_ns: u64,
+    collect_ns: u64,
+    output_arrow_wrap_ns: u64,
+}
+
+/// Runs an optional diagnostic phase, returning its value and duration, or
+/// the default value and zero when diagnostics are disabled.
+fn diagnostic<T: Default>(enabled: bool, render: impl FnOnce() -> T) -> (T, u64) {
+    if !enabled {
+        return (T::default(), 0);
+    }
+    let start = Instant::now();
+    let value = render();
+    (value, nanos(start.elapsed()))
+}
+
+fn register_tables<'a>(
+    context: &'a SessionContext,
+    tables: &BTreeMap<String, Batch>,
+    node_id: Option<&str>,
+) -> Result<(TableRegistrations<'a>, u64, u64)> {
+    let mut registrations = TableRegistrations::new(context);
+    let mut input_adapter_ns = 0_u64;
+    let mut table_register_ns = 0_u64;
+    for (alias, batch) in tables {
+        let timing = registrations.register(alias, batch, node_id)?;
+        input_adapter_ns = input_adapter_ns.saturating_add(timing.input_adapter_ns);
+        table_register_ns = table_register_ns.saturating_add(timing.table_register_ns);
+    }
+    Ok((registrations, input_adapter_ns, table_register_ns))
+}
+
+/// Collects every result batch under the SQL row and byte bounds.
+async fn collect_bounded(
+    mut stream: SendableRecordBatchStream,
+    result_schema: SchemaRef,
+    execution_start: Instant,
+    node_id: Option<&str>,
+) -> Result<CollectedOutput> {
+    let collect_start = Instant::now();
+    let first_batch = stream
+        .next()
+        .await
+        .transpose()
+        .map_err(|error| datafusion_error(node_id, error))?;
+    let execution_to_first_batch_ns = nanos(execution_start.elapsed());
+    let mut batches = Vec::new();
+    let mut output_rows = 0;
+    let mut output_bytes = 0;
+    if let Some(batch) = first_batch {
+        push_bounded_sql_batch(
+            &mut batches,
+            &mut output_rows,
+            &mut output_bytes,
+            batch,
+            MAX_SQL_RESULT_ROWS,
+            MAX_SQL_RESULT_BYTES,
+        )?;
+    }
+    let remaining_start = Instant::now();
+    while let Some(batch) = stream.next().await {
+        push_bounded_sql_batch(
+            &mut batches,
+            &mut output_rows,
+            &mut output_bytes,
+            batch.map_err(|error| datafusion_error(node_id, error))?,
+            MAX_SQL_RESULT_ROWS,
+            MAX_SQL_RESULT_BYTES,
+        )?;
+    }
+    let execution_remaining_ns = nanos(remaining_start.elapsed());
+    let collect_ns = nanos(collect_start.elapsed());
+    // A zero-row result (for example an INNER JOIN with no key-equal pairs)
+    // collects to zero RecordBatches; represent it as one zero-row batch,
+    // exactly as the Batch::table contract prescribes.
+    let output_arrow_wrap_start = Instant::now();
+    let batches = if batches.is_empty() {
+        vec![RecordBatch::new_empty(result_schema)]
+    } else {
+        batches
+    };
+    Ok(CollectedOutput {
+        batches,
+        execution_to_first_batch_ns,
+        execution_remaining_ns,
+        collect_ns,
+        output_arrow_wrap_ns: nanos(output_arrow_wrap_start.elapsed()),
+    })
+}
+
+fn require_tables(tables: &BTreeMap<String, Batch>) -> Result<()> {
+    if tables.is_empty() {
+        return Err(CalcFlowError::InvalidArgument {
+            field: "tables".into(),
+            message: "must not be empty".into(),
+        });
+    }
+    Ok(())
+}
+
+/// Plans a pre-parsed statement exactly as `SessionContext::sql` would after
+/// its own parse; validation already rejected every non-query statement.
+async fn plan_statement(
+    context: &SessionContext,
+    query: &ValidatedQuery,
+) -> datafusion::error::Result<DataFrame> {
+    let plan = context.state().statement_to_plan(query.statement()).await?;
+    context.execute_logical_plan(plan).await
+}
+
 async fn physical_query_schema(
     context: &SessionContext,
-    query: &str,
+    query: &ValidatedQuery,
     node_id: &str,
 ) -> Result<SchemaRef> {
-    let dataframe = context
-        .sql(query)
+    let dataframe = plan_statement(context, query)
         .await
         .map_err(|error| datafusion_error(Some(node_id), error))?;
     let plan = dataframe

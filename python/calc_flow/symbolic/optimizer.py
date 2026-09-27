@@ -63,8 +63,12 @@ def expression_refs(tree: Node, /) -> frozenset[str]:
     """Collect every column reference name inside one resolved tree."""
 
     names: set[str] = set()
+    visited: set[str] = set()
 
     def walk(node: Node) -> None:
+        if node.digest in visited:
+            return
+        visited.add(node.digest)
         if node.op.name == "column_ref":
             value = node.attr("name")
             if isinstance(value, CStr):
@@ -78,15 +82,31 @@ def expression_refs(tree: Node, /) -> frozenset[str]:
 
 
 def _subtree_counts(forest: list[tuple[tuple[str, ...], Node]], /) -> dict[str, int]:
-    counts: dict[str, int] = {}
+    """Count expanded-forest occurrences per digest, saturating at two.
 
-    def walk(node: Node) -> None:
-        counts[node.digest] = counts.get(node.digest, 0) + 1
+    Counts propagate over distinct nodes in topological order, so shared
+    subtrees cost linear work instead of one visit per path.
+    """
+
+    postorder: list[Node] = []
+    visited: set[str] = set()
+
+    def visit(node: Node) -> None:
+        if node.digest in visited:
+            return
+        visited.add(node.digest)
         for argument in node.args:
-            walk(argument)
+            visit(argument)
+        postorder.append(node)
 
+    counts: dict[str, int] = {}
     for _, tree in forest:
-        walk(tree)
+        visit(tree)
+        counts[tree.digest] = min(counts.get(tree.digest, 0) + 1, 2)
+    for node in reversed(postorder):
+        count = counts[node.digest]
+        for argument in node.args:
+            counts[argument.digest] = min(counts.get(argument.digest, 0) + count, 2)
     return counts
 
 
@@ -107,13 +127,18 @@ def _maximal_candidates(
 
     def mark_descendants(node: Node) -> None:
         for argument in node.args:
-            contained.add(argument.digest)
-            mark_descendants(argument)
+            if argument.digest not in contained:
+                contained.add(argument.digest)
+                mark_descendants(argument)
 
     chosen: list[tuple[str, Node]] = []
     seen: set[str] = set()
+    walked: set[str] = set()
 
     def walk(node: Node) -> None:
+        if node.digest in walked:
+            return
+        walked.add(node.digest)
         if counts.get(node.digest, 0) >= 2 and node.op.name not in _TRIVIAL:
             if node.digest not in seen:
                 seen.add(node.digest)
@@ -129,17 +154,28 @@ def _maximal_candidates(
 
 
 def _rewrite(tree: Node, replacements: dict[str, str], /) -> Node:
-    replacement = replacements.get(tree.digest)
-    if replacement is not None:
-        return build("column_ref", (), {"name": CStr(replacement)})
-    if not tree.args:
-        return tree
-    return build(
-        tree.op.name,
-        tuple(_rewrite(argument, replacements) for argument in tree.args),
-        dict(tree.attrs.entries),
-        version=tree.op.version,
-    )
+    rewritten: dict[str, Node] = {}
+
+    def rewrite(node: Node) -> Node:
+        cached = rewritten.get(node.digest)
+        if cached is not None:
+            return cached
+        replacement = replacements.get(node.digest)
+        if replacement is not None:
+            result = build("column_ref", (), {"name": CStr(replacement)})
+        elif not node.args:
+            result = node
+        else:
+            result = build(
+                node.op.name,
+                tuple(rewrite(argument) for argument in node.args),
+                dict(node.attrs.entries),
+                version=node.op.version,
+            )
+        rewritten[node.digest] = result
+        return result
+
+    return rewrite(tree)
 
 
 def extract_common(

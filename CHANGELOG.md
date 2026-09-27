@@ -9,6 +9,17 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-27: Reduce fixed per-call overhead from the #339 performance review.
+  Expression lowering, primitive search, and common-subexpression extraction
+  visit each shared subexpression once, so deeply shared row-local diamonds
+  lower in linear rather than exponential time. Built-in SQL, expression, and
+  stream Join operators parse their read-only query once at construction, and
+  their per-call `sql_parse_ns` metric is now zero. Plans with only built-in
+  operators skip the null-state rollback snapshot on each execute. Table
+  batches measure their Arrow byte cost once and share it with clones. Native
+  batch and stream compilation releases the GIL, and multi-output `collect`
+  reads native outputs once.
+
 - 2026-09-25: Remove benchmark scenarios, performance controller checks,
   benchmark support script tests, and benchmark target compilation from regular
   Linux and Windows CI. The complete benchmark suite runs independently at

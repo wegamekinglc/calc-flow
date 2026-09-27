@@ -329,11 +329,34 @@ def _inline(
     input_types: dict[str, Field],
     /,
 ) -> Node:
+    # Shared subexpressions are inlined once per digest to avoid path explosion.
+    inlined: dict[str, Node] = {}
+
+    def inline(current: Node) -> Node:
+        cached = inlined.get(current.digest)
+        if cached is not None:
+            return cached
+        name = current.op.name
+        if name == "column_ref":
+            return env[_cstr(current.attr("name"))]
+        if name == "literal":
+            return current
+        _check_inlined_primitive(current, path)
+        resolved = build(
+            name,
+            tuple(inline(argument) for argument in current.args),
+            dict(current.attrs.entries),
+            version=current.op.version,
+        )
+        result = _preserve_float32_row_type(resolved, input_types)
+        inlined[current.digest] = result
+        return result
+
+    return inline(node)
+
+
+def _check_inlined_primitive(node: Node, path: str, /) -> None:
     name = node.op.name
-    if name == "column_ref":
-        return env[_cstr(node.attr("name"))]
-    if name == "literal":
-        return node
     if (
         name not in _ROW_LOCAL_PRIMITIVES
         and name not in _ROLLING_PRIMITIVES
@@ -342,13 +365,6 @@ def _inline(
         _reject_primitive(path, node)
     if name == "cast":
         _cast_target(node, path)
-    resolved = build(
-        name,
-        tuple(_inline(argument, env, path, input_types) for argument in node.args),
-        dict(node.attrs.entries),
-        version=node.op.version,
-    )
-    return _preserve_float32_row_type(resolved, input_types)
 
 
 def _preserve_float32_row_type(node: Node, input_types: dict[str, Field], /) -> Node:
@@ -372,22 +388,31 @@ def _preserve_float32_row_type(node: Node, input_types: dict[str, Field], /) -> 
 
 
 def _find_primitives(node: Node, primitives: frozenset[str], /):
-    """Yield matching subtrees in deterministic first-appearance order."""
+    """Yield distinct matching subtrees in deterministic first-appearance order.
 
-    if node.op.name in primitives:
-        yield node
-    for argument in node.args:
-        yield from _find_primitives(argument, primitives)
+    Shared subtrees are visited once, so the walk is linear in distinct nodes.
+    """
+
+    seen: set[str] = set()
+    pending = [node]
+    while pending:
+        current = pending.pop()
+        if current.digest in seen:
+            continue
+        seen.add(current.digest)
+        if current.op.name in primitives:
+            yield current
+        pending.extend(reversed(current.args))
 
 
 def _find_rolling(node: Node, /):
-    """Yield every rolling temporal subtree in first-appearance order."""
+    """Yield every distinct rolling temporal subtree in first-appearance order."""
 
     yield from _find_primitives(node, _ROLLING_PRIMITIVES)
 
 
 def _find_cross_section(node: Node, /):
-    """Yield every cross-section subtree in first-appearance order."""
+    """Yield every distinct cross-section subtree in first-appearance order."""
 
     yield from _find_primitives(node, _CROSS_SECTION_PRIMITIVES)
 
@@ -532,15 +557,27 @@ def _cbool(value: CValue | None, /) -> bool | None:
 
 
 def _replace_materialized(node: Node, replacements: dict[str, str], /) -> Node:
-    replacement = replacements.get(node.digest)
-    if replacement is not None:
-        return _base_ref(replacement)
-    return build(
-        node.op.name,
-        tuple(_replace_materialized(argument, replacements) for argument in node.args),
-        dict(node.attrs.entries),
-        version=node.op.version,
-    )
+    replaced: dict[str, Node] = {}
+
+    def replace(current: Node) -> Node:
+        cached = replaced.get(current.digest)
+        if cached is not None:
+            return cached
+        replacement = replacements.get(current.digest)
+        result = (
+            _base_ref(replacement)
+            if replacement is not None
+            else build(
+                current.op.name,
+                tuple(replace(argument) for argument in current.args),
+                dict(current.attrs.entries),
+                version=current.op.version,
+            )
+        )
+        replaced[current.digest] = result
+        return result
+
+    return replace(node)
 
 
 @dataclass(frozen=True, slots=True)
@@ -781,15 +818,25 @@ def _rolling_argument_is_row_local(node: Node, /) -> bool:
 
 
 def _find_ready_rolling(node: Node, /):
-    """Yield innermost rolling subtrees ready for one physical stage."""
+    """Yield distinct innermost rolling subtrees ready for one physical stage."""
 
-    if node.op.name in _ROLLING_PRIMITIVES:
-        nested = any(True for argument in node.args for _ in _find_rolling(argument))
-        if not nested:
-            yield node
+    visited: set[str] = set()
+
+    def ready(current: Node):
+        if current.digest in visited:
             return
-    for argument in node.args:
-        yield from _find_ready_rolling(argument)
+        visited.add(current.digest)
+        if current.op.name in _ROLLING_PRIMITIVES:
+            nested = any(
+                True for argument in current.args for _ in _find_rolling(argument)
+            )
+            if not nested:
+                yield current
+                return
+        for argument in current.args:
+            yield from ready(argument)
+
+    yield from ready(node)
 
 
 def _rolling_frame(subtree: Node, path: str, kind: str, /) -> dict[str, object]:

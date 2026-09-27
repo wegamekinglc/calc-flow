@@ -328,6 +328,8 @@ async fn expression_operator_processes_assignment_with_real_datafusion() {
         result.datafusion_metrics[0].node_id.as_deref(),
         Some("calculate")
     );
+    // The operator parsed its generated query once at construction.
+    assert_eq!(result.datafusion_metrics[0].sql_parse_ns, 0);
 }
 
 #[tokio::test]
@@ -410,6 +412,8 @@ async fn sql_operator_processes_join_with_real_datafusion() {
         result.datafusion_metrics[0].node_id.as_deref(),
         Some("join")
     );
+    // The operator parsed its query once at construction.
+    assert_eq!(result.datafusion_metrics[0].sql_parse_ns, 0);
 }
 
 #[test]

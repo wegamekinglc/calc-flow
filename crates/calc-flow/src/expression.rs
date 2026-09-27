@@ -4,7 +4,7 @@ use datafusion::{
     execution::{FunctionRegistry, context::SessionContext},
     logical_expr::Volatility,
     sql::{
-        parser::DFParser,
+        parser::{DFParser, Statement as DFStatement},
         sqlparser::{
             ast::{Expr, ObjectName, Query, TableFactor, Visit, Visitor, visit_expressions},
             dialect::GenericDialect,
@@ -49,6 +49,49 @@ pub(crate) fn sql_projection(expression: &str, table_name: &str) -> Result<Strin
     })
 }
 
+/// One read-only SELECT or CTE query, validated and parsed once.
+///
+/// Operators keep this value so repeated executions plan the stored statement
+/// instead of reparsing the normalized text.
+#[derive(Clone, Debug)]
+pub(crate) struct ValidatedQuery {
+    text: String,
+    statement: DFStatement,
+}
+
+impl ValidatedQuery {
+    /// The normalized query text.
+    pub(crate) fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// An owned copy of the parsed statement for one logical planning pass.
+    pub(crate) fn statement(&self) -> DFStatement {
+        self.statement.clone()
+    }
+}
+
+/// Validate, normalize, and parse one SELECT or CTE query.
+///
+/// # Errors
+///
+/// Returns [`CalcFlowError::InvalidArgument`] when parsing fails or the input
+/// is not exactly one SELECT or CTE query.
+pub(crate) fn parse_select_query(query: &str) -> Result<ValidatedQuery> {
+    let statement = validated_statement(query)?;
+    let text = query.trim().trim_end_matches(';').trim();
+    // Planning consumes the normalized text's statement so source spans match it.
+    let statement = if text == query {
+        statement
+    } else {
+        validated_statement(text)?
+    };
+    Ok(ValidatedQuery {
+        text: text.to_owned(),
+        statement,
+    })
+}
+
 /// Validate and normalize one SELECT or CTE query.
 ///
 /// # Errors
@@ -56,7 +99,11 @@ pub(crate) fn sql_projection(expression: &str, table_name: &str) -> Result<Strin
 /// Returns [`CalcFlowError::InvalidArgument`] when parsing fails or the input
 /// is not exactly one SELECT or CTE query.
 pub(crate) fn validate_select_query(query: &str) -> Result<String> {
-    let statements =
+    parse_select_query(query).map(|query| query.text)
+}
+
+fn validated_statement(query: &str) -> Result<DFStatement> {
+    let mut statements =
         DFParser::parse_sql_with_dialect(query, &GenericDialect {}).map_err(|error| {
             CalcFlowError::InvalidArgument {
                 field: "query".into(),
@@ -87,7 +134,11 @@ pub(crate) fn validate_select_query(query: &str) -> Result<String> {
             message: message.into(),
         });
     }
-    Ok(query.trim().trim_end_matches(';').trim().to_owned())
+    statements
+        .pop_front()
+        .ok_or_else(|| CalcFlowError::Internal {
+            message: "validated query statement disappeared".into(),
+        })
 }
 
 struct ResourceLimitVisitor;
@@ -236,7 +287,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        split_assignment, sql_projection, validate_no_volatile_functions, validate_select_query,
+        parse_select_query, split_assignment, sql_projection, validate_no_volatile_functions,
+        validate_select_query,
     };
     use crate::CalcFlowError;
     use datafusion::{
@@ -434,6 +486,14 @@ mod tests {
             validate_select_query("  WITH x AS (SELECT 1) SELECT * FROM x;  ").unwrap(),
             "WITH x AS (SELECT 1) SELECT * FROM x"
         );
+    }
+
+    #[test]
+    fn parsed_query_keeps_the_normalized_statement_for_planning() {
+        let query = parse_select_query("  SELECT 1 AS one;  ").unwrap();
+
+        assert_eq!(query.text(), "SELECT 1 AS one");
+        assert_eq!(query.statement().to_string(), "SELECT 1 AS one");
     }
 
     #[test]

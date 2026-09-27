@@ -325,8 +325,18 @@ def _ready_rolling_occurrences(segment: _Segment, /) -> tuple[Node, ...]:
 
 
 def _rolling_depth(node: Node, /) -> int:
-    child_depth = max((_rolling_depth(argument) for argument in node.args), default=0)
-    return child_depth + 1 if node.op.name in _ROLLING_PRIMITIVES else child_depth
+    depths: dict[str, int] = {}
+
+    def depth(current: Node) -> int:
+        cached = depths.get(current.digest)
+        if cached is not None:
+            return cached
+        child = max((depth(argument) for argument in current.args), default=0)
+        result = child + 1 if current.op.name in _ROLLING_PRIMITIVES else child
+        depths[current.digest] = result
+        return result
+
+    return depth(node)
 
 
 def _rolling_stage_count(segment: _Segment, /) -> int:

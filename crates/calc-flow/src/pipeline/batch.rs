@@ -142,6 +142,8 @@ pub struct BatchExecutionPlan {
     pub(crate) external_outputs: BTreeMap<String, PortEndpoint>,
     pub(crate) fingerprint: String,
     table: Option<TablePlanResources>,
+    /// Built-in batch operators hold no run state; only external ones can.
+    has_operator_state: bool,
     pub(crate) run_lock: tokio::sync::Mutex<()>,
     operation_state: StdMutex<OperationState>,
 }
@@ -203,6 +205,10 @@ impl PipelineBuilder {
         }
         let graph = compile_graph(&self, "batch", udfs)?;
         let name = self.name.clone();
+        let has_operator_state = self
+            .nodes
+            .values()
+            .any(|node| matches!(node.operator, NodeOperator::Batch(_)));
         let nodes = build_nodes(self, graph.order, |definition| {
             CompiledBatchOperator::try_convert(definition)
                 .expect("batch-only nodes were validated before conversion")
@@ -214,6 +220,7 @@ impl PipelineBuilder {
             external_outputs: graph.external_outputs,
             fingerprint: graph.fingerprint,
             table: graph.table,
+            has_operator_state,
             run_lock: tokio::sync::Mutex::new(()),
             operation_state: StdMutex::new(OperationState::default()),
         })
@@ -290,6 +297,10 @@ impl BatchExecutionPlan {
     ) -> Result<RunResult> {
         let transaction = self.public_transaction().await?;
         transaction.validate_inputs(&inputs)?;
+        if !self.has_operator_state {
+            // Every built-in batch operator's state is null, so rollback is a no-op.
+            return transaction.execute_validated(inputs, options).await;
+        }
         let before = transaction.snapshot().await?;
         let operation = transaction.begin_rollback(before)?;
         let result = transaction.execute_validated(inputs, options).await;
@@ -1077,6 +1088,39 @@ mod lifecycle_tests {
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(restores.load(Ordering::SeqCst), 1);
         assert_eq!(marker(&plan), None);
+    }
+
+    #[test]
+    fn only_external_operator_state_requires_an_execute_rollback_snapshot() {
+        let stateless = PipelineBuilder::new("stateless")
+            .unwrap()
+            .add_node(
+                "expression",
+                Box::new(
+                    ExpressionOperator::new(
+                        "expression",
+                        "copy = value",
+                        Vec::new(),
+                        None,
+                        Vec::new(),
+                    )
+                    .unwrap(),
+                ),
+            )
+            .unwrap()
+            .compile_batch(&UdfRegistry::new().snapshot())
+            .unwrap();
+        let stateful = lifecycle_plan(
+            Arc::new(tokio::sync::Notify::new()),
+            Arc::new(tokio::sync::Notify::new()),
+            Arc::new(AtomicUsize::new(1)),
+            Arc::new(AtomicUsize::new(0)),
+            false,
+            false,
+        );
+
+        assert!(!stateless.has_operator_state);
+        assert!(stateful.has_operator_state);
     }
 
     #[tokio::test]

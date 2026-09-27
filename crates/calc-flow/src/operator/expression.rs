@@ -7,7 +7,7 @@ use serde_json::Value;
 use crate::{
     Batch, CalcFlowError, DataFusionConfig, DataFusionRuntime, EventTime, JsonMap, Port, Result,
     RunContext, UdfReference, UdfRegistrySnapshot,
-    expression::{sql_projection, validate_select_query},
+    expression::{ValidatedQuery, parse_select_query, sql_projection},
 };
 
 use super::{
@@ -32,7 +32,7 @@ pub struct ExpressionOperator {
     expression: Option<String>,
     select: Vec<String>,
     filter_expression: Option<String>,
-    query: String,
+    query: ValidatedQuery,
     column_projection: Option<ColumnProjection>,
     udfs: Vec<UdfReference>,
     input_ports: [Port; 1],
@@ -67,7 +67,7 @@ impl fmt::Debug for ExpressionOperator {
             .field("expression", &self.expression)
             .field("select", &self.select)
             .field("filter_expression", &self.filter_expression)
-            .field("query", &self.query)
+            .field("query", &self.query.text())
             .field("udfs", &self.udfs)
             .field("input_ports", &self.input_ports)
             .field("output_ports", &self.output_ports)
@@ -144,7 +144,7 @@ impl ExpressionOperator {
 
     /// The normalized read-only query executed by this operator.
     pub(crate) fn query_text(&self) -> &str {
-        &self.query
+        self.query.text()
     }
 
     pub(crate) fn is_exact_column_projection(
@@ -184,7 +184,7 @@ impl ExpressionOperator {
             return Ok(schema);
         }
         DataFusionRuntime::new(DataFusionConfig::default())?
-            .infer_input_query_schema(&self.query, input, &self.name)
+            .infer_input_query_schema(self.query.text(), input, &self.name)
             .await
     }
 
@@ -213,7 +213,9 @@ impl ExpressionOperator {
         let input = required_input(inputs, "input", self.name(), run.node_id())?;
         self.input_ports[0].validate(input, &format!("{}.input", self.name))?;
         let tables = BTreeMap::from([("input".into(), input.clone())]);
-        let output = datafusion.sql(&self.query, &tables, run.node_id()).await?;
+        let output = datafusion
+            .sql_validated(&self.query, &tables, run.node_id())
+            .await?;
         run.check_cancelled()?;
         Ok(BTreeMap::from([("output".into(), output)]))
     }
@@ -227,7 +229,9 @@ impl ExpressionOperator {
         }
         let tables = BTreeMap::from([("input".into(), batch)]);
         let runtime = self.stream_state.runtime()?;
-        runtime.sql(&self.query, &tables, Some(&self.name)).await
+        runtime
+            .sql_validated(&self.query, &tables, Some(&self.name))
+            .await
     }
 }
 
@@ -333,7 +337,7 @@ pub(crate) fn expression_query(
     expression: Option<&str>,
     select: &[String],
     filter_expression: Option<&str>,
-) -> Result<String> {
+) -> Result<ValidatedQuery> {
     let mut query = if let Some(expression) = expression {
         sql_projection(expression, "input")?
     } else {
@@ -344,7 +348,7 @@ pub(crate) fn expression_query(
         query.push_str(filter);
         query.push(')');
     }
-    validate_select_query(&query)
+    parse_select_query(&query)
 }
 
 pub(crate) fn required_input<'a>(
