@@ -341,14 +341,7 @@ def _inline(
             return env[_cstr(current.attr("name"))]
         if name == "literal":
             return current
-        if (
-            name not in _ROW_LOCAL_PRIMITIVES
-            and name not in _ROLLING_PRIMITIVES
-            and name not in _CROSS_SECTION_PRIMITIVES
-        ):
-            _reject_primitive(path, current)
-        if name == "cast":
-            _cast_target(current, path)
+        _check_inlined_primitive(current, path)
         resolved = build(
             name,
             tuple(inline(argument) for argument in current.args),
@@ -360,6 +353,18 @@ def _inline(
         return result
 
     return inline(node)
+
+
+def _check_inlined_primitive(node: Node, path: str, /) -> None:
+    name = node.op.name
+    if (
+        name not in _ROW_LOCAL_PRIMITIVES
+        and name not in _ROLLING_PRIMITIVES
+        and name not in _CROSS_SECTION_PRIMITIVES
+    ):
+        _reject_primitive(path, node)
+    if name == "cast":
+        _cast_target(node, path)
 
 
 def _preserve_float32_row_type(node: Node, input_types: dict[str, Field], /) -> Node:

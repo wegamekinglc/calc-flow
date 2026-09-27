@@ -380,6 +380,8 @@ impl DataFusionRuntime {
         clippy::too_many_lines,
         reason = "the ordered phase boundaries are kept together so benchmark attribution cannot drift"
     )]
+    // Each branch is one optional diagnostic or bounded-collection phase.
+    // #lizard forgives
     async fn execute_query(
         &self,
         query: &ValidatedQuery,
