@@ -1935,7 +1935,7 @@ use datafusion::arrow::{
         ArrowPrimitiveType, DataType, Field, Int8Type, Int16Type, Int32Type, Int64Type,
         IntervalUnit, Schema, SchemaRef, TimeUnit, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
     },
-    ipc::{reader::StreamReader, writer::StreamWriter},
+    ipc::reader::StreamReader,
     record_batch::RecordBatch,
 };
 use schemars::JsonSchema;
@@ -2536,6 +2536,7 @@ struct JoinCheckpointMetadata {
 }
 
 mod materialization;
+mod row_ipc;
 
 struct PreparedJoinBatch {
     output: Vec<MatchedPair>,
@@ -4147,6 +4148,7 @@ fn encode_pending_delta(
     operator_id: &str,
 ) -> Result<Vec<(JoinSide, Vec<u8>)>> {
     let mut encoded = Vec::new();
+    let mut ipc_encoder = row_ipc::RowIpcEncoder::default();
     for side in [JoinSide::Left, JoinSide::Right] {
         let ops = state
             .deltas
@@ -4161,47 +4163,58 @@ fn encode_pending_delta(
         segment.extend_from_slice(JOIN_DELTA_MAGIC);
         segment.extend_from_slice(&ops.len().to_le_bytes());
         for op in ops {
-            segment.push(match op {
-                PendingOp::Upsert { .. } => JOIN_DELTA_UPSERT_TAG,
-                PendingOp::Tombstone { .. } => JOIN_DELTA_TOMBSTONE_TAG,
-            });
-            let (row_id, event_time, encoded_key) = match op {
-                PendingOp::Upsert {
-                    row_id,
-                    event_time,
-                    encoded_key,
-                    ..
-                }
-                | PendingOp::Tombstone {
-                    row_id,
-                    event_time,
-                    encoded_key,
-                    ..
-                } => (*row_id, *event_time, encoded_key.as_slice()),
-            };
-            segment.extend_from_slice(&row_id.to_le_bytes());
-            segment.extend_from_slice(&event_time.as_micros().to_le_bytes());
-            segment.extend_from_slice(
-                &u64::try_from(encoded_key.len())
-                    .map_err(|_| counter_overflow(operator_id, "encoded key length"))?
-                    .to_le_bytes(),
-            );
-            segment.extend_from_slice(encoded_key);
-            if let PendingOp::Upsert { record, charge, .. } = op {
-                segment.extend_from_slice(&charge.to_le_bytes());
-                let ipc = encode_row_ipc(record, operator_id, side.as_str())?;
-                segment.extend_from_slice(
-                    &u64::try_from(ipc.len())
-                        .map_err(|_| counter_overflow(operator_id, "IPC length"))?
-                        .to_le_bytes(),
-                );
-                segment.extend_from_slice(&ipc);
-            }
+            encode_delta_op(&mut segment, op, &mut ipc_encoder, operator_id)?;
         }
         let _ = epoch;
         encoded.push((side, segment));
     }
     Ok(encoded)
+}
+
+/// Appends one dirty op's tag, identity and (for upserts) carried row IPC.
+fn encode_delta_op(
+    segment: &mut Vec<u8>,
+    op: &PendingOp,
+    ipc_encoder: &mut row_ipc::RowIpcEncoder,
+    operator_id: &str,
+) -> Result<()> {
+    segment.push(match op {
+        PendingOp::Upsert { .. } => JOIN_DELTA_UPSERT_TAG,
+        PendingOp::Tombstone { .. } => JOIN_DELTA_TOMBSTONE_TAG,
+    });
+    let (row_id, event_time, encoded_key) = match op {
+        PendingOp::Upsert {
+            row_id,
+            event_time,
+            encoded_key,
+            ..
+        }
+        | PendingOp::Tombstone {
+            row_id,
+            event_time,
+            encoded_key,
+            ..
+        } => (*row_id, *event_time, encoded_key.as_slice()),
+    };
+    segment.extend_from_slice(&row_id.to_le_bytes());
+    segment.extend_from_slice(&event_time.as_micros().to_le_bytes());
+    segment.extend_from_slice(
+        &u64::try_from(encoded_key.len())
+            .map_err(|_| counter_overflow(operator_id, "encoded key length"))?
+            .to_le_bytes(),
+    );
+    segment.extend_from_slice(encoded_key);
+    if let PendingOp::Upsert { record, charge, .. } = op {
+        segment.extend_from_slice(&charge.to_le_bytes());
+        let ipc = ipc_encoder.encode(record, operator_id, op.side().as_str())?;
+        segment.extend_from_slice(
+            &u64::try_from(ipc.len())
+                .map_err(|_| counter_overflow(operator_id, "IPC length"))?
+                .to_le_bytes(),
+        );
+        segment.extend_from_slice(&ipc);
+    }
+    Ok(())
 }
 
 impl PendingOp {
@@ -4210,28 +4223,6 @@ impl PendingOp {
             PendingOp::Upsert { side, .. } | PendingOp::Tombstone { side, .. } => *side,
         }
     }
-}
-
-/// Encodes one stored row's Arrow IPC payload.
-fn encode_row_ipc(record: &RecordBatch, operator_id: &str, side: &str) -> Result<Vec<u8>> {
-    let mut ipc = Vec::new();
-    {
-        let mut writer =
-            StreamWriter::try_new(&mut ipc, record.schema().as_ref()).map_err(|error| {
-                CalcFlowError::Internal {
-                    message: format!(
-                        "stream Join {operator_id:?} {side} IPC writer failed: {error}"
-                    ),
-                }
-            })?;
-        writer
-            .write(record)
-            .and_then(|()| writer.finish())
-            .map_err(|error| CalcFlowError::Internal {
-                message: format!("stream Join {operator_id:?} {side} IPC encoding failed: {error}"),
-            })?;
-    }
-    Ok(ipc)
 }
 
 /// Restores both sides by folding the base segment and the delta segments in
@@ -4500,24 +4491,9 @@ fn encode_side(rows: &[StoredRow], operator_id: &str, side: &str) -> Result<Vec<
             .map_err(|_| counter_overflow(operator_id, "checkpoint rows"))?
             .to_le_bytes(),
     );
+    let mut ipc_encoder = row_ipc::RowIpcEncoder::default();
     for row in ordered {
-        let mut ipc = Vec::new();
-        {
-            let mut writer = StreamWriter::try_new(&mut ipc, row.record.schema().as_ref())
-                .map_err(|error| CalcFlowError::Internal {
-                    message: format!(
-                        "stream Join {operator_id:?} {side} IPC writer failed: {error}"
-                    ),
-                })?;
-            writer
-                .write(&row.record)
-                .and_then(|()| writer.finish())
-                .map_err(|error| CalcFlowError::Internal {
-                    message: format!(
-                        "stream Join {operator_id:?} {side} IPC encoding failed: {error}"
-                    ),
-                })?;
-        }
+        let ipc = ipc_encoder.encode(&row.record, operator_id, side)?;
         output.extend_from_slice(&row.row_id.to_le_bytes());
         output.extend_from_slice(&row.event_time.as_micros().to_le_bytes());
         output.extend_from_slice(&row.charge.to_le_bytes());
