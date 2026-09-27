@@ -77,7 +77,7 @@ use budget::StateCharge;
 use kernel::KernelSelection;
 #[cfg(test)]
 pub(crate) use kernel::entity_parallel_tests::entity_parallel_test_pair;
-use kernel::{RollingKernelPlan, RollingKernelState};
+use kernel::{RollingKernelPlan, RollingKernelState, TypedStreamTransition};
 pub(crate) use kernel::{
     StreamKernelUpdate,
     entity_parallel::{
@@ -1915,7 +1915,7 @@ impl RollingOperator {
             .ok_or_else(|| operator_error(context.operator_id(), "output sequence overflowed"))?;
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::HistoryMaintenance));
         self.state.histories.apply(touched);
-        self.state.typed_kernel_state = next_kernel_state.map(Box::new);
+        TypedStreamTransition::replace(next_kernel_state, &mut self.state.typed_kernel_state);
         self.state.charge = next_charge;
         Ok(())
     }

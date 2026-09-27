@@ -1,5 +1,7 @@
 //! Rolling checkpoint state serialization and typed restoration.
 
+use std::borrow::Cow;
+
 use super::{
     Arc, Array, ArrayRef, BTreeMap, Batch, BufferedRow, CompiledFrame, CompiledRollingSpec,
     CompiledWindowGroup, Cursor, DataType, DecodedRollingState, Deserialize, Deserializer,
@@ -14,6 +16,7 @@ use super::{
     history_event_time, internal_error, is_valid_sample, kernel, new_null_array, operator_error,
     spec_uses_stable_v2, state_format, state_v3,
 };
+use kernel::{StreamKernelUpdate, TypedStreamTransition};
 
 fn state_fields(input_schema: &Schema, state_layout_version: u32) -> Vec<Field> {
     if state_layout_version == ROLLING_COLUMNAR_STATE_LAYOUT_VERSION {
@@ -1150,11 +1153,10 @@ pub(super) fn build_typed_batch_output(
         })
 }
 
-type TypedStreamOutput = (RecordBatch, Option<RollingKernelState>, HistoryUpdates);
+type TypedStreamOutput = (RecordBatch, Option<TypedStreamTransition>, HistoryUpdates);
 
 // Bootstrap, transition, output slicing, and history replacement form one
 // failure-atomic stream update; none of them may escape independently.
-// #lizard forgives
 pub(super) fn build_typed_stream_output(
     rows: &[BufferedRow],
     histories: &RollingHistories,
@@ -1170,25 +1172,13 @@ pub(super) fn build_typed_stream_output(
     let input_schema = Arc::new(Schema::new(
         output_schema.fields()[..output_schema.fields().len() - compiled.outputs.len()].to_vec(),
     ));
-    let restored_state;
-    let prior = if let Some(state) = state {
-        state
-    } else {
-        let _stage = observer.map(|recorder| recorder.stage(RollingStage::StatePreparation));
-        restored_state = reconstruct_typed_state(histories, compiled, &input_schema, node_id)?;
-        &restored_state
-    };
+    let prior = typed_stream_prior(state, histories, compiled, &input_schema, node_id, observer)?;
     let input = {
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::ArrowOutput));
         build_input_record(rows, input_schema, node_id)?
     };
-    let execution = compiled
-        .kernel_plan
-        .update_stream_and_fill(prior, &input, node_id, observer)?
-        .ok_or_else(|| {
-            internal_error("typed rolling stream rows did not satisfy canonical ordering")
-        })?;
-    let columns = execution.columns;
+    let mut update = prepare_typed_stream(compiled, &prior, &input, node_id, observer)?;
+    let columns = update.take_columns();
     let record = {
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::ArrowOutput));
         build_output_record(rows, columns, output_schema, node_id)?
@@ -1197,7 +1187,42 @@ pub(super) fn build_typed_stream_output(
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::HistoryMaintenance));
         typed_history_updates(rows, histories, compiled, node_id)?
     };
-    Ok(Some((record, Some(execution.state), touched)))
+    Ok(Some((
+        record,
+        Some(TypedStreamTransition::new(prior, update)),
+        touched,
+    )))
+}
+
+fn prepare_typed_stream(
+    compiled: &CompiledRollingSpec,
+    prior: &RollingKernelState,
+    input: &RecordBatch,
+    node_id: &str,
+    observer: Option<&RollingMetricsRecorder>,
+) -> Result<StreamKernelUpdate> {
+    compiled
+        .kernel_plan
+        .prepare_stream(prior, input, node_id, observer)?
+        .ok_or_else(|| {
+            internal_error("typed rolling stream rows did not satisfy canonical ordering")
+        })
+}
+
+/// Borrows the warm typed state or rebuilds it from retained history.
+fn typed_stream_prior<'a>(
+    state: Option<&'a RollingKernelState>,
+    histories: &RollingHistories,
+    compiled: &CompiledRollingSpec,
+    input_schema: &SchemaRef,
+    node_id: &str,
+    observer: Option<&RollingMetricsRecorder>,
+) -> Result<Cow<'a, RollingKernelState>> {
+    if let Some(state) = state {
+        return Ok(Cow::Borrowed(state));
+    }
+    let _stage = observer.map(|recorder| recorder.stage(RollingStage::StatePreparation));
+    reconstruct_typed_state(histories, compiled, input_schema, node_id).map(Cow::Owned)
 }
 
 pub(super) fn reconstruct_typed_state(

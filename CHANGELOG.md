@@ -9,6 +9,37 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-28: Reuse plans and cut stateful-operator costs from the #339
+  roadmap. Repeated `compute` and `collect` calls reuse the program's lowered
+  project document within one runtime registration revision; each call still
+  compiles a fresh native plan. A DataFusion runtime rebinds a recorded
+  single-table projection/filter plan with only immutable functions to new
+  rows when the same query, alias, and exact schema repeat, which removes
+  per-batch planning from stream SQL and expression nodes; such reuses report
+  `physical_planning_count == 0`. Window aggregation assigns windows lazily,
+  shares encoded group keys, and downcasts each column once per batch; dense
+  local benchmarks ran about 2.1× faster tumbling and 2.6× faster hopping.
+  ASOF finalization drains finished prefixes over the shared committed
+  checkpoint bytes instead of copying the remaining segment for every chunk,
+  so settling 8,192 pending rows fell from about 0.7–1.9 s to 0.14–0.2 s.
+  Stream Join checkpoint capture reuses Arrow IPC schema framing per schema;
+  checkpoint bytes are unchanged.
+
+- 2026-09-28: Stop cloning resident typed rolling state on every stream
+  batch. The typed stream transition now copies only the entities a batch
+  touches into a private update and commits it after output emission
+  succeeds, as the ordered stream path already did. Failed batches still leave
+  the resident state untouched. With 50,000 resident entities, a 64-row batch
+  touching eight of them fell from about 5–13 ms to 9–11 µs in a local probe.
+
+- 2026-09-28: Share batch metadata across stream fanout. `BatchMetadata`
+  clones share their source and attributes, so each fanout branch copies
+  reference counts instead of the source string and attribute map; its JSON
+  form, equality, and accessors are unchanged. Source, progress-driver, and
+  operator fanout move each message into its last output edge instead of
+  cloning it. Cloning a 16-row table batch with eight attributes fell from
+  about 238 ns to 37 ns in a local probe.
+
 - 2026-09-27: Reduce fixed per-call overhead from the #339 performance review.
   Expression lowering, primitive search, and common-subexpression extraction
   visit each shared subexpression once, so deeply shared row-local diamonds

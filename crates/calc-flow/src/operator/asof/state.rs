@@ -116,7 +116,11 @@ pub(super) struct Inventory {
 impl State {
     /// Full-walk inventory charge: the cold path used by checkpoint restore
     /// validation and by the debug cross-check of the maintained deltas.
-    pub fn inventory(&self, prepared: Option<&StateSegment>, name: &str) -> Result<Inventory> {
+    pub fn inventory(
+        &self,
+        prepared: Option<&super::checkpoint::PreparedSegment>,
+        name: &str,
+    ) -> Result<Inventory> {
         let mut total = Inventory::default();
         self.left.iter().try_for_each(|((_, key, sequence), row)| {
             total.charge_left(key, sequence, row, name)
@@ -128,7 +132,7 @@ impl State {
             }
         }
         if let Some(prepared) = prepared {
-            total.charge_allocation(&prepared.bytes_arc(), name)?;
+            total.bytes = super::checked(name, total.bytes, prepared_allocation(prepared))?;
         }
         Ok(total)
     }
@@ -314,6 +318,10 @@ fn payload_allocation(row: &StateSegment) -> u64 {
     ALLOCATION_BYTES + row.bytes_arc().capacity() as u64
 }
 
+fn prepared_allocation(prepared: &super::checkpoint::PreparedSegment) -> u64 {
+    ALLOCATION_BYTES + prepared.capacity() as u64
+}
+
 fn left_row_charge(key: &Encoding, sequence: &Encoding, row: &StateSegment) -> u64 {
     LEFT_IDENTITY_BYTES
         + encoding_allocation(key)
@@ -370,18 +378,26 @@ impl Inventory {
     }
 
     /// Charges the freshly encoded checkpoint segment allocation.
-    pub fn charge_prepared(&mut self, prepared: Option<&StateSegment>, name: &str) -> Result<()> {
+    pub fn charge_prepared(
+        &mut self,
+        prepared: Option<&super::checkpoint::PreparedSegment>,
+        name: &str,
+    ) -> Result<()> {
         if let Some(prepared) = prepared {
-            self.bytes = super::checked(name, self.bytes, payload_allocation(prepared))?;
+            self.bytes = super::checked(name, self.bytes, prepared_allocation(prepared))?;
         }
         Ok(())
     }
 
     /// Retires the previously installed checkpoint segment charge, failing
     /// closed if the maintained bytes would underflow.
-    pub fn uncharge_prepared(&mut self, prepared: Option<&StateSegment>, name: &str) -> Result<()> {
+    pub fn uncharge_prepared(
+        &mut self,
+        prepared: Option<&super::checkpoint::PreparedSegment>,
+        name: &str,
+    ) -> Result<()> {
         if let Some(prepared) = prepared {
-            self.bytes = apply_delta(name, self.bytes, -i128::from(payload_allocation(prepared)))?;
+            self.bytes = apply_delta(name, self.bytes, -i128::from(prepared_allocation(prepared)))?;
         }
         Ok(())
     }

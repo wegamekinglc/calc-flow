@@ -34,11 +34,44 @@ pub enum BatchKind {
     Array,
 }
 
+/// Envelope metadata; clones share the source and attributes because every
+/// stream fanout branch carries a copy.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BatchMetadata {
-    source: String,
+    #[serde(
+        serialize_with = "serialize_shared",
+        deserialize_with = "deserialize_source"
+    )]
+    source: Arc<str>,
     sequence: u64,
-    attributes: JsonMap,
+    #[serde(
+        serialize_with = "serialize_shared",
+        deserialize_with = "deserialize_attributes"
+    )]
+    attributes: Arc<JsonMap>,
+}
+
+// Serde's `rc` feature is not enabled; these keep the owned-value wire shape.
+fn serialize_shared<T, S>(value: &Arc<T>, serializer: S) -> std::result::Result<S::Ok, S::Error>
+where
+    T: Serialize + ?Sized,
+    S: serde::Serializer,
+{
+    T::serialize(value, serializer)
+}
+
+fn deserialize_source<'de, D>(deserializer: D) -> std::result::Result<Arc<str>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(Arc::from)
+}
+
+fn deserialize_attributes<'de, D>(deserializer: D) -> std::result::Result<Arc<JsonMap>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    JsonMap::deserialize(deserializer).map(Arc::new)
 }
 
 impl BatchMetadata {
@@ -61,9 +94,9 @@ impl BatchMetadata {
             });
         }
         Ok(Self {
-            source,
+            source: source.into(),
             sequence,
-            attributes,
+            attributes: Arc::new(attributes),
         })
     }
 
@@ -928,6 +961,48 @@ mod tests {
             CalcFlowError::InvalidArgument { field, .. } => field,
             other => panic!("expected InvalidArgument, got {other:?}"),
         }
+    }
+
+    fn sample_metadata() -> BatchMetadata {
+        BatchMetadata::new(
+            "orders",
+            3,
+            BTreeMap::from([("region".to_owned(), serde_json::json!({"code": 7}))]),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn metadata_clones_share_source_and_attributes() {
+        let metadata = sample_metadata();
+        let cloned = metadata.clone();
+
+        assert_eq!(metadata.source().as_ptr(), cloned.source().as_ptr());
+        assert!(std::ptr::eq(metadata.attributes(), cloned.attributes()));
+        assert_eq!(cloned, metadata);
+    }
+
+    #[test]
+    fn metadata_json_and_debug_representations_are_stable() {
+        let metadata = sample_metadata();
+        let wire = serde_json::to_string(&metadata).unwrap();
+
+        assert_eq!(
+            wire,
+            r#"{"source":"orders","sequence":3,"attributes":{"region":{"code":7}}}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<BatchMetadata>(&wire).unwrap(),
+            metadata
+        );
+        assert_eq!(
+            serde_json::to_string(&BatchMetadata::default()).unwrap(),
+            r#"{"source":"","sequence":0,"attributes":{}}"#
+        );
+        assert_eq!(
+            format!("{metadata:?}"),
+            r#"BatchMetadata { source: "orders", sequence: 3, attributes: {"region": Object {"code": Number(7)}} }"#
+        );
     }
 
     #[test]

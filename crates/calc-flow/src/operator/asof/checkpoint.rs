@@ -1,4 +1,5 @@
 mod encoding;
+mod prepared;
 mod validation;
 
 use super::{
@@ -15,13 +16,14 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use encoding::{Decoder, encode_state, restore_charge};
 pub(super) use encoding::{encoded_length, left_prefix_length};
+pub(super) use prepared::PreparedSegment;
 use validation::{validate_counters, validate_progress};
 
 const MAGIC: &[u8; 8] = b"CFASOF01";
 const SEGMENT: &str = "asof-state-v1";
 
 pub(super) struct PreparedCheckpoint {
-    pub segment: Option<StateSegment>,
+    pub segment: Option<PreparedSegment>,
     pub _workspace: datafusion::execution::memory_pool::MemoryReservation,
 }
 
@@ -60,7 +62,9 @@ impl StreamAsofJoinOperator {
         let segment = if state.left.is_empty() && state.right.is_empty() {
             None
         } else {
-            Some(encode_state(state, length, limit, context).await?)
+            Some(PreparedSegment::new(
+                encode_state(state, length, limit, context).await?,
+            ))
         };
         Ok(PreparedCheckpoint {
             segment,
@@ -68,7 +72,20 @@ impl StreamAsofJoinOperator {
         })
     }
 
-    pub(super) fn capture(&self, epoch: Epoch) -> Result<OperatorStateSnapshot> {
+    /// Replaces a drained view with its canonical bytes so the snapshot and
+    /// later captures share one exact-capacity buffer and the drained base is
+    /// released. The reservation bounds the copy while the base is alive.
+    fn compact_prepared(&mut self) -> Result<()> {
+        if let Some(prepared) = self.prepared.as_ref().filter(|view| view.is_drained()) {
+            let _workspace = self.reserve_workspace(prepared.len() as u64)?;
+            let canonical = PreparedSegment::new(prepared.canonical());
+            self.prepared = Some(canonical);
+        }
+        Ok(())
+    }
+
+    pub(super) fn capture(&mut self, epoch: Epoch) -> Result<OperatorStateSnapshot> {
+        self.compact_prepared()?;
         let mut metrics = self.status.clone();
         for side in [&mut metrics.left, &mut metrics.right] {
             side.watermark_micros = None;
@@ -94,7 +111,7 @@ impl StreamAsofJoinOperator {
         let segments = self
             .prepared
             .as_ref()
-            .map(|segment| BTreeMap::from([(SEGMENT.into(), segment.clone())]))
+            .map(|segment| BTreeMap::from([(SEGMENT.into(), segment.canonical())]))
             .unwrap_or_default();
         Ok(OperatorStateSnapshot {
             inline_metadata,
@@ -167,7 +184,10 @@ impl StreamAsofJoinOperator {
         segment: Option<&StateSegment>,
         metrics: &StreamAsofJoinStatus,
     ) -> Result<()> {
-        let inventory = state.inventory(segment, &self.name)?;
+        let inventory = state.inventory(
+            segment.cloned().map(PreparedSegment::new).as_ref(),
+            &self.name,
+        )?;
         validate_gauges(&inventory, state.left.len() as u64, metrics)?;
         if inventory.identities > self.spec.limits().max_state_rows()
             || inventory.bytes > self.spec.limits().max_state_bytes()
@@ -361,7 +381,11 @@ impl StreamAsofJoinOperator {
         self.status = decoded.metrics;
         self.terminal = decoded.terminal;
         self.next_output_sequence = decoded.sequence;
-        self.prepared = snapshot.segments.get(SEGMENT).cloned();
+        self.prepared = snapshot
+            .segments
+            .get(SEGMENT)
+            .cloned()
+            .map(PreparedSegment::new);
         self.swept = None;
     }
 }

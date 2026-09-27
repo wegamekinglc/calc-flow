@@ -16,6 +16,7 @@ use datafusion::arrow::{
         TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt8Array,
         UInt16Array, UInt32Array, UInt64Array,
     },
+    buffer::NullBuffer,
     datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit},
     ipc::{
         convert::IpcSchemaEncoder,
@@ -325,7 +326,7 @@ struct WindowState {
 struct WindowKey {
     start: EventTime,
     end: EventTime,
-    stable_group_key: Vec<u8>,
+    stable_group_key: Arc<[u8]>,
 }
 
 #[derive(Clone)]
@@ -442,6 +443,137 @@ struct WindowStateUsage {
     bytes: u64,
 }
 
+/// One open window of one interned batch group.
+#[derive(Clone, Copy)]
+struct WindowSlot {
+    start: EventTime,
+    end: EventTime,
+    group: usize,
+}
+
+/// Per-batch accumulator scratch: hashed while rows stream in, then sorted
+/// once into the deterministic window-key order installs and encodes observe.
+struct BatchScratch {
+    group_ids: HashMap<Arc<[u8]>, usize>,
+    group_keys: Vec<Arc<[u8]>>,
+    // Keyed by (window start, group); the fixed geometry determines the end.
+    slots: HashMap<(i64, usize), usize>,
+    entries: Vec<(WindowKey, AccumulatorRow)>,
+    // Reused per row: the current row's encoded group key and group values.
+    encoded_group: Vec<u8>,
+    group_values: Vec<Option<ScalarValue>>,
+    usage: WindowStateUsage,
+    metrics: PreparedInputMetrics,
+}
+
+impl BatchScratch {
+    fn new(usage: WindowStateUsage) -> Self {
+        Self {
+            group_ids: HashMap::new(),
+            group_keys: Vec::new(),
+            slots: HashMap::new(),
+            entries: Vec::new(),
+            encoded_group: Vec::new(),
+            group_values: Vec::new(),
+            usage,
+            metrics: PreparedInputMetrics::default(),
+        }
+    }
+
+    /// Encodes the row's group into the reusable buffers and returns its
+    /// batch-local group index, sharing one key allocation per distinct group.
+    fn intern_group(
+        &mut self,
+        columns: &RecordColumns<'_>,
+        row: usize,
+        operator_id: &str,
+        names: &[String],
+    ) -> Result<usize> {
+        encode_group_key(
+            columns,
+            row,
+            operator_id,
+            names,
+            &mut self.encoded_group,
+            &mut self.group_values,
+        )?;
+        if let Some(&group) = self.group_ids.get(self.encoded_group.as_slice()) {
+            return Ok(group);
+        }
+        let key = Arc::<[u8]>::from(self.encoded_group.as_slice());
+        let group = self.group_keys.len();
+        self.group_keys.push(Arc::clone(&key));
+        self.group_ids.insert(key, group);
+        Ok(group)
+    }
+
+    fn into_update(self) -> InputBatchUpdate {
+        InputBatchUpdate {
+            accumulators: self.entries.into_iter().collect(),
+            usage: self.usage,
+            metrics: self.metrics.into_delta(),
+        }
+    }
+}
+
+/// Input columns of one record, downcast once so per-row reads skip dynamic
+/// type dispatch.
+struct RecordColumns<'a> {
+    event_time: EventTimeColumn<'a>,
+    groups: Vec<(ScalarColumn<'a>, &'a DataType)>,
+    aggregates: Vec<ScalarColumn<'a>>,
+}
+
+impl<'a> RecordColumns<'a> {
+    fn new(
+        record: &'a RecordBatch,
+        spec: &WindowSpec,
+        compiled: &'a CompiledWindowSpec,
+        operator_id: &str,
+    ) -> Result<Self> {
+        let groups = compiled
+            .group_columns
+            .iter()
+            .map(|column| {
+                ScalarColumn::new(
+                    record.column(column.index).as_ref(),
+                    &column.data_type,
+                    operator_id,
+                )
+                .map(|values| (values, &column.data_type))
+            })
+            .collect::<Result<_>>()?;
+        let aggregates = spec
+            .aggregates
+            .iter()
+            .zip(&compiled.aggregates)
+            .map(|(aggregate, compiled)| {
+                aggregate_column(record, aggregate.function, compiled, operator_id)
+            })
+            .collect::<Result<_>>()?;
+        Ok(Self {
+            event_time: EventTimeColumn::new(record, compiled.event_time_index, operator_id)?,
+            groups,
+            aggregates,
+        })
+    }
+}
+
+/// `count` accepts any input type and only reads validity, so its column
+/// stays opaque; every other aggregate reads typed scalars.
+fn aggregate_column<'a>(
+    record: &'a RecordBatch,
+    function: AggregateFunction,
+    aggregate: &CompiledAggregate,
+    operator_id: &str,
+) -> Result<ScalarColumn<'a>> {
+    let array = record.column(aggregate.input_index).as_ref();
+    if function == AggregateFunction::Count {
+        return Ok(ScalarColumn::opaque(array));
+    }
+    ScalarColumn::new(array, &aggregate.input_type, operator_id)
+}
+
 // Stable logical prices for retained map entries and scalar slots; variable
 // key and string lengths are charged separately from these fixed costs.
 const WINDOW_ENTRY_BASE_BYTES: u64 = 128;
@@ -489,6 +621,33 @@ fn window_entry_bytes(key_bytes: u64, entry: &AccumulatorRow) -> u64 {
         .saturating_add(key_bytes)
         .saturating_add(group_bytes)
         .saturating_add(aggregate_bytes)
+}
+
+/// Charges one updated accumulator against the running usage: a new key adds
+/// its whole entry, an existing key replaces its previous dynamic bytes.
+fn charge_accumulator(
+    usage: WindowStateUsage,
+    previous_dynamic_bytes: Option<u64>,
+    key_bytes: u64,
+    accumulator: &AccumulatorRow,
+) -> Result<WindowStateUsage> {
+    let Some(previous_dynamic_bytes) = previous_dynamic_bytes else {
+        return Ok(WindowStateUsage {
+            rows: usage.rows.saturating_add(1),
+            bytes: usage
+                .bytes
+                .saturating_add(window_entry_bytes(key_bytes, accumulator)),
+        });
+    };
+    let bytes = usage
+        .bytes
+        .checked_sub(previous_dynamic_bytes)
+        .ok_or_else(|| internal_error("window accumulator charge underflowed"))?
+        .saturating_add(aggregate_dynamic_bytes(accumulator));
+    Ok(WindowStateUsage {
+        rows: usage.rows,
+        bytes,
+    })
 }
 
 fn window_state_usage(accumulators: &BTreeMap<WindowKey, AccumulatorRow>) -> WindowStateUsage {
@@ -614,187 +773,110 @@ impl WindowAggregateOperator {
             ));
         }
         let table = batch.table_payload()?;
-        let mut scratch = BTreeMap::<WindowKey, AccumulatorRow>::new();
-        let mut metrics = PreparedInputMetrics::default();
-        let mut usage = WindowStateUsage {
+        let mut scratch = BatchScratch::new(WindowStateUsage {
             rows: logical_length(self.state.accumulators.len()),
             bytes: self.state.accumulator_bytes,
-        };
+        });
 
         for record in table.batches() {
-            self.prepare_record(record, context, &mut scratch, &mut metrics, &mut usage)?;
+            let columns =
+                RecordColumns::new(record, &self.spec, &self.compiled, context.operator_id())?;
+            for row in 0..record.num_rows() {
+                self.prepare_row(&columns, row, context, &mut scratch)?;
+            }
         }
 
-        Ok(InputBatchUpdate {
-            accumulators: scratch,
-            usage,
-            metrics: metrics.into_delta(),
-        })
-    }
-
-    fn prepare_record(
-        &self,
-        record: &RecordBatch,
-        context: &StreamOperatorContext<'_>,
-        scratch: &mut BTreeMap<WindowKey, AccumulatorRow>,
-        metrics: &mut PreparedInputMetrics,
-        usage: &mut WindowStateUsage,
-    ) -> Result<()> {
-        for row_index in 0..record.num_rows() {
-            self.prepare_row(record, row_index, context, scratch, metrics, usage)?;
-        }
-        Ok(())
+        Ok(scratch.into_update())
     }
 
     fn prepare_row(
         &self,
-        record: &RecordBatch,
-        row_index: usize,
+        columns: &RecordColumns<'_>,
+        row: usize,
         context: &StreamOperatorContext<'_>,
-        scratch: &mut BTreeMap<WindowKey, AccumulatorRow>,
-        metrics: &mut PreparedInputMetrics,
-        usage: &mut WindowStateUsage,
+        scratch: &mut BatchScratch,
     ) -> Result<()> {
-        let Some(event_time) = self.row_event_time(record, row_index, context.operator_id())?
+        let operator_id = context.operator_id();
+        let Some(event_time) =
+            columns
+                .event_time
+                .at(row, operator_id, &self.spec.event_time_column)?
         else {
-            record_null_event_time(metrics, context.operator_id())?;
-            return Ok(());
+            return record_null_event_time(&mut scratch.metrics, operator_id);
         };
         let assignments = window_assignments(event_time, self.compiled.geometry)
-            .map_err(|message| operator_error(context.operator_id(), &message))?;
-        let open_assignments = partition_open_assignments(
-            assignments,
-            context.input_watermark(),
-            metrics,
-            context.operator_id(),
-        )?;
-        if open_assignments.is_empty() {
+            .map_err(|message| operator_error(operator_id, &message))?;
+        let watermark = context.input_watermark();
+        if !record_late_assignments(
+            assignments.clone(),
+            watermark,
+            &mut scratch.metrics,
+            operator_id,
+        )? {
             return Ok(());
         }
-        self.prepare_open_row(
-            record,
-            row_index,
-            &open_assignments,
-            context,
-            scratch,
-            usage,
-        )
+        let group = scratch.intern_group(columns, row, operator_id, &self.spec.group_by)?;
+        assignments
+            .filter(|&(_, end)| is_open_assignment(end, watermark))
+            .try_for_each(|(start, end)| {
+                let slot = WindowSlot { start, end, group };
+                self.prepare_assignment(columns, row, slot, scratch, operator_id)
+            })
     }
 
-    fn prepare_open_row(
-        &self,
-        record: &RecordBatch,
-        row_index: usize,
-        open_assignments: &[(EventTime, EventTime)],
-        context: &StreamOperatorContext<'_>,
-        scratch: &mut BTreeMap<WindowKey, AccumulatorRow>,
-        usage: &mut WindowStateUsage,
-    ) -> Result<()> {
-        let (stable_group_key, group_values) = encode_group_key(
-            record,
-            row_index,
-            &self.compiled.group_columns,
-            context.operator_id(),
-            &self.spec.group_by,
-        )?;
-        for &(start, end) in open_assignments {
-            self.prepare_assignment(
-                record,
-                row_index,
-                start,
-                end,
-                &stable_group_key,
-                &group_values,
-                scratch,
-                usage,
-                context.operator_id(),
-            )?;
-        }
-        Ok(())
-    }
-
-    fn row_event_time(
-        &self,
-        record: &RecordBatch,
-        row_index: usize,
-        operator_id: &str,
-    ) -> Result<Option<EventTime>> {
-        event_time_at(
-            record.column(self.compiled.event_time_index).as_ref(),
-            record
-                .schema()
-                .field(self.compiled.event_time_index)
-                .data_type(),
-            row_index,
-            operator_id,
-            &self.spec.event_time_column,
-        )
-    }
-
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "one prepared assignment carries its immutable row and key coordinates"
-    )]
     fn prepare_assignment(
         &self,
-        record: &RecordBatch,
-        row_index: usize,
-        start: EventTime,
-        end: EventTime,
-        stable_group_key: &[u8],
-        group_values: &[Option<ScalarValue>],
-        scratch: &mut BTreeMap<WindowKey, AccumulatorRow>,
-        usage: &mut WindowStateUsage,
+        columns: &RecordColumns<'_>,
+        row: usize,
+        slot: WindowSlot,
+        scratch: &mut BatchScratch,
         operator_id: &str,
     ) -> Result<()> {
-        let key = WindowKey {
-            start,
-            end,
-            stable_group_key: stable_group_key.to_vec(),
-        };
-        let key_bytes = logical_length(key.stable_group_key.len());
-        let scratch_previous = scratch.get(&key);
-        let existing = if scratch_previous.is_some() {
-            None
-        } else {
-            self.state.accumulators.get(&key)
-        };
-        let previous_dynamic_bytes = scratch_previous.or(existing).map(aggregate_dynamic_bytes);
-        let accumulator = scratch.entry(key).or_insert_with(|| {
-            existing
-                .cloned()
-                .unwrap_or_else(|| new_accumulator_row(&self.spec, &self.compiled, group_values))
-        });
-        update_accumulators(
+        let (index, previous_dynamic_bytes) = self.accumulator_slot(scratch, slot);
+        let (key, accumulator) = &mut scratch.entries[index];
+        update_accumulators(accumulator, columns, row, &self.spec, operator_id)?;
+        let next = charge_accumulator(
+            scratch.usage,
+            previous_dynamic_bytes,
+            logical_length(key.stable_group_key.len()),
             accumulator,
-            record,
-            row_index,
-            &self.spec,
-            &self.compiled,
-            operator_id,
         )?;
-        let next_rows = usage
-            .rows
-            .saturating_add(u64::from(previous_dynamic_bytes.is_none()));
-        let next_bytes = if let Some(previous_dynamic_bytes) = previous_dynamic_bytes {
-            usage
-                .bytes
-                .checked_sub(previous_dynamic_bytes)
-                .ok_or_else(|| internal_error("window accumulator charge underflowed"))?
-                .saturating_add(aggregate_dynamic_bytes(accumulator))
-        } else {
-            usage
-                .bytes
-                .saturating_add(window_entry_bytes(key_bytes, accumulator))
-        };
-        if !self.state_budget.allows(next_rows, next_bytes) {
+        if !self.state_budget.allows(next.rows, next.bytes) {
             return Err(operator_error(operator_id, "window state budget exceeded"));
         }
-        *usage = WindowStateUsage {
-            rows: next_rows,
-            bytes: next_bytes,
-        };
+        scratch.usage = next;
         Ok(())
+    }
+
+    /// Finds or creates the batch scratch entry for one window slot, seeding a
+    /// new entry from live state. Returns the entry index and the dynamic
+    /// bytes already charged for it, or `None` when the key is new to state.
+    fn accumulator_slot(
+        &self,
+        scratch: &mut BatchScratch,
+        slot: WindowSlot,
+    ) -> (usize, Option<u64>) {
+        let slot_key = (slot.start.as_micros(), slot.group);
+        if let Some(&index) = scratch.slots.get(&slot_key) {
+            return (
+                index,
+                Some(aggregate_dynamic_bytes(&scratch.entries[index].1)),
+            );
+        }
+        let key = WindowKey {
+            start: slot.start,
+            end: slot.end,
+            stable_group_key: Arc::clone(&scratch.group_keys[slot.group]),
+        };
+        let existing = self.state.accumulators.get(&key);
+        let previous_dynamic_bytes = existing.map(aggregate_dynamic_bytes);
+        let entry = existing.cloned().unwrap_or_else(|| {
+            new_accumulator_row(&self.spec, &self.compiled, &scratch.group_values)
+        });
+        let index = scratch.entries.len();
+        scratch.entries.push((key, entry));
+        scratch.slots.insert(slot_key, index);
+        (index, previous_dynamic_bytes)
     }
 
     fn observe_context(&self, context: &StreamOperatorContext<'_>) -> Result<()> {
@@ -1477,21 +1559,26 @@ fn record_null_event_time(metrics: &mut PreparedInputMetrics, operator_id: &str)
     Ok(())
 }
 
-fn partition_open_assignments(
-    assignments: Vec<(EventTime, EventTime)>,
+/// Records every late assignment and reports whether any assignment is open.
+fn record_late_assignments(
+    assignments: impl Iterator<Item = (EventTime, EventTime)>,
     watermark: Option<EventTime>,
     metrics: &mut PreparedInputMetrics,
     operator_id: &str,
-) -> Result<Vec<(EventTime, EventTime)>> {
-    let mut open = Vec::with_capacity(assignments.len());
-    for assignment in assignments {
-        if let Some(closing_watermark) = watermark.filter(|value| assignment.1 <= *value) {
-            record_late_assignment(metrics, closing_watermark, assignment.1, operator_id)?;
+) -> Result<bool> {
+    let mut any_open = false;
+    for (_, end) in assignments {
+        if let Some(closing_watermark) = watermark.filter(|value| end <= *value) {
+            record_late_assignment(metrics, closing_watermark, end, operator_id)?;
         } else {
-            open.push(assignment);
+            any_open = true;
         }
     }
-    Ok(open)
+    Ok(any_open)
+}
+
+fn is_open_assignment(end: EventTime, watermark: Option<EventTime>) -> bool {
+    watermark.is_none_or(|value| end > value)
 }
 
 fn record_late_assignment(
@@ -1515,78 +1602,94 @@ fn record_late_assignment(
     Ok(())
 }
 
-fn event_time_at(
-    array: &dyn Array,
-    data_type: &DataType,
-    row: usize,
-    operator_id: &str,
-    column: &str,
-) -> Result<Option<EventTime>> {
-    if array.is_null(row) {
-        return Ok(None);
-    }
-    let timestamp_value = match data_type {
-        DataType::Timestamp(TimeUnit::Second, _) => downcast_array::<TimestampSecondArray>(
-            array,
-            operator_id,
-            "event-time timestamp(second)",
-        )?
-        .value(row),
-        DataType::Timestamp(TimeUnit::Millisecond, _) => {
-            downcast_array::<TimestampMillisecondArray>(
-                array,
-                operator_id,
-                "event-time timestamp(millisecond)",
-            )?
-            .value(row)
-        }
-        DataType::Timestamp(TimeUnit::Microsecond, _) => {
-            downcast_array::<TimestampMicrosecondArray>(
-                array,
-                operator_id,
-                "event-time timestamp(microsecond)",
-            )?
-            .value(row)
-        }
-        DataType::Timestamp(TimeUnit::Nanosecond, _) => downcast_array::<TimestampNanosecondArray>(
-            array,
-            operator_id,
-            "event-time timestamp(nanosecond)",
-        )?
-        .value(row),
-        _ => {
-            return Err(operator_error(
-                operator_id,
-                "compiled event-time column is not a timestamp",
-            ));
-        }
-    };
-    EventTime::import_timestamp(timestamp_value, data_type, column)
-        .map(Some)
-        .map_err(|error| {
-            operator_error(
-                operator_id,
-                &format!("event-time conversion failed: {error}"),
-            )
-        })
+/// The event-time column downcast once per record; every supported unit
+/// stores `i64` values.
+struct EventTimeColumn<'a> {
+    array: &'a dyn Array,
+    data_type: &'a DataType,
+    values: &'a [i64],
 }
 
+impl<'a> EventTimeColumn<'a> {
+    fn new(record: &'a RecordBatch, index: usize, operator_id: &str) -> Result<Self> {
+        let array = record.column(index).as_ref();
+        let data_type = record.schema_ref().field(index).data_type();
+        let values = match data_type {
+            DataType::Timestamp(TimeUnit::Second, _) => downcast_array::<TimestampSecondArray>(
+                array,
+                operator_id,
+                "event-time timestamp(second)",
+            )
+            .map(|array| array.values().as_ref()),
+            DataType::Timestamp(TimeUnit::Millisecond, _) => {
+                downcast_array::<TimestampMillisecondArray>(
+                    array,
+                    operator_id,
+                    "event-time timestamp(millisecond)",
+                )
+                .map(|array| array.values().as_ref())
+            }
+            DataType::Timestamp(TimeUnit::Microsecond, _) => {
+                downcast_array::<TimestampMicrosecondArray>(
+                    array,
+                    operator_id,
+                    "event-time timestamp(microsecond)",
+                )
+                .map(|array| array.values().as_ref())
+            }
+            DataType::Timestamp(TimeUnit::Nanosecond, _) => {
+                downcast_array::<TimestampNanosecondArray>(
+                    array,
+                    operator_id,
+                    "event-time timestamp(nanosecond)",
+                )
+                .map(|array| array.values().as_ref())
+            }
+            _ => Err(operator_error(
+                operator_id,
+                "compiled event-time column is not a timestamp",
+            )),
+        }?;
+        Ok(Self {
+            array,
+            data_type,
+            values,
+        })
+    }
+
+    fn at(&self, row: usize, operator_id: &str, column: &str) -> Result<Option<EventTime>> {
+        if self.array.is_null(row) {
+            return Ok(None);
+        }
+        EventTime::import_timestamp(self.values[row], self.data_type, column)
+            .map(Some)
+            .map_err(|error| {
+                operator_error(
+                    operator_id,
+                    &format!("event-time conversion failed: {error}"),
+                )
+            })
+    }
+}
+
+/// Returns the event's window assignments, earliest window first, without
+/// allocating. Starts and ends grow monotonically with the window, so
+/// validating the two extremes up front validates every assignment and keeps
+/// the eager error precedence.
 fn window_assignments(
     event_time: EventTime,
     geometry: CompiledWindowGeometry,
-) -> std::result::Result<Vec<(EventTime, EventTime)>, String> {
+) -> std::result::Result<impl Iterator<Item = (EventTime, EventTime)> + Clone, String> {
     let time = i128::from(event_time.as_micros());
     let size = i128::from(geometry.size_micros);
     let slide = i128::from(geometry.slide_micros);
     let latest_start = time.div_euclid(slide) * slide;
-    let mut assignments = Vec::with_capacity(
-        usize::try_from(geometry.overlap)
-            .map_err(|_| "window overlap does not fit usize".to_string())?,
-    );
-    for offset in (0..geometry.overlap).rev() {
-        assignments.push(window_assignment(latest_start, slide, size, offset)?);
-    }
-    Ok(assignments)
+    let assignment = move |offset| window_assignment(latest_start, slide, size, offset);
+    assignment(geometry.overlap - 1)?;
+    assignment(0)?;
+    Ok((0..geometry.overlap)
+        .rev()
+        .map(move |offset| assignment(offset).expect("window assignment extremes were validated")))
 }
 
 fn window_assignment(
@@ -1608,36 +1711,32 @@ fn window_assignment(
     Ok((EventTime::from_micros(start), EventTime::from_micros(end)))
 }
 
+/// Encodes the row's stable group key and values into caller-owned reusable
+/// buffers, replacing their previous contents.
 fn encode_group_key(
-    record: &RecordBatch,
+    columns: &RecordColumns<'_>,
     row: usize,
-    columns: &[CompiledGroupColumn],
     operator_id: &str,
     names: &[String],
-) -> Result<(Vec<u8>, Vec<Option<ScalarValue>>)> {
-    let mut encoded = Vec::new();
-    let mut values = Vec::with_capacity(columns.len());
-    for (ordinal, column) in columns.iter().enumerate() {
-        let value = scalar_at(
-            record.column(column.index).as_ref(),
-            &column.data_type,
-            row,
-            operator_id,
-        )?;
-        encode_group_scalar(&mut encoded, &column.data_type, value.as_ref()).map_err(
-            |message| {
-                operator_error(
-                    operator_id,
-                    &format!(
-                        "window.group_by[{ordinal}] ({:?}) encoding failed: {message}",
-                        names[ordinal]
-                    ),
-                )
-            },
-        )?;
+    encoded: &mut Vec<u8>,
+    values: &mut Vec<Option<ScalarValue>>,
+) -> Result<()> {
+    encoded.clear();
+    values.clear();
+    for (ordinal, (column, data_type)) in columns.groups.iter().enumerate() {
+        let value = column.scalar_at(row);
+        encode_group_scalar(encoded, data_type, value.as_ref()).map_err(|message| {
+            operator_error(
+                operator_id,
+                &format!(
+                    "window.group_by[{ordinal}] ({:?}) encoding failed: {message}",
+                    names[ordinal]
+                ),
+            )
+        })?;
         values.push(value);
     }
-    Ok((encoded, values))
+    Ok(())
 }
 
 fn encode_group_scalar(
@@ -1880,36 +1979,21 @@ fn new_accumulator_row(
 
 fn update_accumulators(
     row: &mut AccumulatorRow,
-    record: &RecordBatch,
+    columns: &RecordColumns<'_>,
     row_index: usize,
     spec: &WindowSpec,
-    compiled: &CompiledWindowSpec,
     operator_id: &str,
 ) -> Result<()> {
-    for (ordinal, ((aggregate, compiled), accumulator)) in spec
+    for (ordinal, ((aggregate, column), accumulator)) in spec
         .aggregates
         .iter()
-        .zip(&compiled.aggregates)
+        .zip(&columns.aggregates)
         .zip(&mut row.aggregates)
         .enumerate()
     {
-        let array = record.column(compiled.input_index);
-        if array.is_null(row_index) {
+        let Some(value) = aggregate_input(aggregate.function, column, row_index) else {
             continue;
-        }
-        if aggregate.function == AggregateFunction::Count {
-            update_accumulator(accumulator, aggregate.function, ScalarValue::Unsigned(0)).map_err(
-                |message| {
-                    operator_error(
-                        operator_id,
-                        &format!("window.aggregates[{ordinal}] update failed: {message}"),
-                    )
-                },
-            )?;
-            continue;
-        }
-        let value = scalar_at(array.as_ref(), &compiled.input_type, row_index, operator_id)?
-            .expect("non-null array row produces a scalar");
+        };
         update_accumulator(accumulator, aggregate.function, value).map_err(|message| {
             operator_error(
                 operator_id,
@@ -1918,6 +2002,22 @@ fn update_accumulators(
         })?;
     }
     Ok(())
+}
+
+/// Returns the aggregate's input for one row, or `None` for a null input;
+/// `count` only observes validity.
+fn aggregate_input(
+    function: AggregateFunction,
+    column: &ScalarColumn<'_>,
+    row: usize,
+) -> Option<ScalarValue> {
+    if column.is_null(row) {
+        None
+    } else if function == AggregateFunction::Count {
+        Some(ScalarValue::Unsigned(0))
+    } else {
+        Some(column.value(row))
+    }
 }
 
 fn update_accumulator(
@@ -2225,144 +2325,116 @@ fn scalar_at(
     if array.is_null(row) {
         return Ok(None);
     }
-    scalar_non_null_at(array, data_type, row, operator_id).map(Some)
+    ScalarColumn::new(array, data_type, operator_id).map(|column| Some(column.value(row)))
 }
 
-fn scalar_non_null_at(
-    array: &dyn Array,
-    data_type: &DataType,
-    row: usize,
-    operator_id: &str,
-) -> Result<ScalarValue> {
-    match data_type {
-        DataType::Boolean => Ok(ScalarValue::Boolean(
-            downcast_array::<BooleanArray>(array, operator_id, "Boolean")?.value(row),
-        )),
-        DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
-            signed_scalar_at(array, data_type, row, operator_id)
+/// One scalar column downcast once, so per-row reads skip dynamic type
+/// dispatch. `Opaque` columns answer only validity checks.
+#[derive(Clone, Copy)]
+struct ScalarColumn<'a> {
+    nulls: Option<&'a NullBuffer>,
+    values: TypedValues<'a>,
+}
+
+#[derive(Clone, Copy)]
+enum TypedValues<'a> {
+    Opaque,
+    Boolean(&'a BooleanArray),
+    Int8(&'a Int8Array),
+    Int16(&'a Int16Array),
+    Int32(&'a Int32Array),
+    Int64(&'a Int64Array),
+    UInt8(&'a UInt8Array),
+    UInt16(&'a UInt16Array),
+    UInt32(&'a UInt32Array),
+    UInt64(&'a UInt64Array),
+    Float32(&'a Float32Array),
+    Float64(&'a Float64Array),
+    Utf8(&'a StringArray),
+    LargeUtf8(&'a LargeStringArray),
+    Date32(&'a Date32Array),
+    Date64(&'a Date64Array),
+    Timestamp(&'a TimestampMicrosecondArray),
+}
+
+impl<'a> ScalarColumn<'a> {
+    fn opaque(array: &'a dyn Array) -> Self {
+        Self {
+            nulls: array.nulls(),
+            values: TypedValues::Opaque,
         }
-        DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
-            unsigned_scalar_at(array, data_type, row, operator_id)
-        }
-        DataType::Float32 | DataType::Float64 => {
-            float_scalar_at(array, data_type, row, operator_id)
-        }
-        DataType::Utf8 | DataType::LargeUtf8 => {
-            string_scalar_at(array, data_type, row, operator_id)
-        }
-        DataType::Date32 | DataType::Date64 | DataType::Timestamp(TimeUnit::Microsecond, _) => {
-            temporal_scalar_at(array, data_type, row, operator_id)
-        }
-        _ => Err(operator_error(
-            operator_id,
-            &format!("compiled scalar type {data_type} is unsupported"),
-        )),
+    }
+
+    fn new(array: &'a dyn Array, data_type: &DataType, operator_id: &str) -> Result<Self> {
+        Ok(Self {
+            nulls: array.nulls(),
+            values: TypedValues::new(array, data_type, operator_id)?,
+        })
+    }
+
+    fn is_null(&self, row: usize) -> bool {
+        self.nulls.is_some_and(|nulls| nulls.is_null(row))
+    }
+
+    fn scalar_at(&self, row: usize) -> Option<ScalarValue> {
+        (!self.is_null(row)).then(|| self.value(row))
+    }
+
+    fn value(&self, row: usize) -> ScalarValue {
+        self.values.value(row)
     }
 }
 
-fn signed_scalar_at(
-    array: &dyn Array,
-    data_type: &DataType,
-    row: usize,
-    operator_id: &str,
-) -> Result<ScalarValue> {
-    let value = match data_type {
-        DataType::Int8 => {
-            i64::from(downcast_array::<Int8Array>(array, operator_id, "Int8")?.value(row))
-        }
-        DataType::Int16 => {
-            i64::from(downcast_array::<Int16Array>(array, operator_id, "Int16")?.value(row))
-        }
-        DataType::Int32 => {
-            i64::from(downcast_array::<Int32Array>(array, operator_id, "Int32")?.value(row))
-        }
-        DataType::Int64 => downcast_array::<Int64Array>(array, operator_id, "Int64")?.value(row),
-        _ => return Err(internal_error("compiled signed scalar type mismatch")),
-    };
-    Ok(ScalarValue::Signed(value))
-}
-
-fn unsigned_scalar_at(
-    array: &dyn Array,
-    data_type: &DataType,
-    row: usize,
-    operator_id: &str,
-) -> Result<ScalarValue> {
-    let value = match data_type {
-        DataType::UInt8 => {
-            u64::from(downcast_array::<UInt8Array>(array, operator_id, "UInt8")?.value(row))
-        }
-        DataType::UInt16 => {
-            u64::from(downcast_array::<UInt16Array>(array, operator_id, "UInt16")?.value(row))
-        }
-        DataType::UInt32 => {
-            u64::from(downcast_array::<UInt32Array>(array, operator_id, "UInt32")?.value(row))
-        }
-        DataType::UInt64 => downcast_array::<UInt64Array>(array, operator_id, "UInt64")?.value(row),
-        _ => return Err(internal_error("compiled unsigned scalar type mismatch")),
-    };
-    Ok(ScalarValue::Unsigned(value))
-}
-
-fn float_scalar_at(
-    array: &dyn Array,
-    data_type: &DataType,
-    row: usize,
-    operator_id: &str,
-) -> Result<ScalarValue> {
-    match data_type {
-        DataType::Float32 => Ok(ScalarValue::Float32(
-            downcast_array::<Float32Array>(array, operator_id, "Float32")?
-                .value(row)
-                .to_bits(),
-        )),
-        DataType::Float64 => Ok(ScalarValue::Float64(
-            downcast_array::<Float64Array>(array, operator_id, "Float64")?
-                .value(row)
-                .to_bits(),
-        )),
-        _ => Err(internal_error("compiled float scalar type mismatch")),
-    }
-}
-
-fn string_scalar_at(
-    array: &dyn Array,
-    data_type: &DataType,
-    row: usize,
-    operator_id: &str,
-) -> Result<ScalarValue> {
-    let value = match data_type {
-        DataType::Utf8 => downcast_array::<StringArray>(array, operator_id, "Utf8")?.value(row),
-        DataType::LargeUtf8 => {
-            downcast_array::<LargeStringArray>(array, operator_id, "LargeUtf8")?.value(row)
-        }
-        _ => return Err(internal_error("compiled string scalar type mismatch")),
-    };
-    Ok(ScalarValue::String(value.into()))
-}
-
-fn temporal_scalar_at(
-    array: &dyn Array,
-    data_type: &DataType,
-    row: usize,
-    operator_id: &str,
-) -> Result<ScalarValue> {
-    match data_type {
-        DataType::Date32 => Ok(ScalarValue::Date32(
-            downcast_array::<Date32Array>(array, operator_id, "Date32")?.value(row),
-        )),
-        DataType::Date64 => Ok(ScalarValue::Date64(
-            downcast_array::<Date64Array>(array, operator_id, "Date64")?.value(row),
-        )),
-        DataType::Timestamp(TimeUnit::Microsecond, _) => Ok(ScalarValue::Timestamp(
-            downcast_array::<TimestampMicrosecondArray>(
-                array,
+impl<'a> TypedValues<'a> {
+    fn new(array: &'a dyn Array, data_type: &DataType, operator_id: &str) -> Result<Self> {
+        match data_type {
+            DataType::Boolean => downcast_array(array, operator_id, "Boolean").map(Self::Boolean),
+            DataType::Int8 => downcast_array(array, operator_id, "Int8").map(Self::Int8),
+            DataType::Int16 => downcast_array(array, operator_id, "Int16").map(Self::Int16),
+            DataType::Int32 => downcast_array(array, operator_id, "Int32").map(Self::Int32),
+            DataType::Int64 => downcast_array(array, operator_id, "Int64").map(Self::Int64),
+            DataType::UInt8 => downcast_array(array, operator_id, "UInt8").map(Self::UInt8),
+            DataType::UInt16 => downcast_array(array, operator_id, "UInt16").map(Self::UInt16),
+            DataType::UInt32 => downcast_array(array, operator_id, "UInt32").map(Self::UInt32),
+            DataType::UInt64 => downcast_array(array, operator_id, "UInt64").map(Self::UInt64),
+            DataType::Float32 => downcast_array(array, operator_id, "Float32").map(Self::Float32),
+            DataType::Float64 => downcast_array(array, operator_id, "Float64").map(Self::Float64),
+            DataType::Utf8 => downcast_array(array, operator_id, "Utf8").map(Self::Utf8),
+            DataType::LargeUtf8 => {
+                downcast_array(array, operator_id, "LargeUtf8").map(Self::LargeUtf8)
+            }
+            DataType::Date32 => downcast_array(array, operator_id, "Date32").map(Self::Date32),
+            DataType::Date64 => downcast_array(array, operator_id, "Date64").map(Self::Date64),
+            DataType::Timestamp(TimeUnit::Microsecond, _) => {
+                downcast_array(array, operator_id, "Timestamp(Microsecond)").map(Self::Timestamp)
+            }
+            _ => Err(operator_error(
                 operator_id,
-                "Timestamp(Microsecond)",
-            )?
-            .value(row),
-        )),
-        _ => Err(internal_error("compiled temporal scalar type mismatch")),
+                &format!("compiled scalar type {data_type} is unsupported"),
+            )),
+        }
+    }
+
+    fn value(self, row: usize) -> ScalarValue {
+        match self {
+            Self::Opaque => unreachable!("opaque columns only answer validity checks"),
+            Self::Boolean(array) => ScalarValue::Boolean(array.value(row)),
+            Self::Int8(array) => ScalarValue::Signed(i64::from(array.value(row))),
+            Self::Int16(array) => ScalarValue::Signed(i64::from(array.value(row))),
+            Self::Int32(array) => ScalarValue::Signed(i64::from(array.value(row))),
+            Self::Int64(array) => ScalarValue::Signed(array.value(row)),
+            Self::UInt8(array) => ScalarValue::Unsigned(u64::from(array.value(row))),
+            Self::UInt16(array) => ScalarValue::Unsigned(u64::from(array.value(row))),
+            Self::UInt32(array) => ScalarValue::Unsigned(u64::from(array.value(row))),
+            Self::UInt64(array) => ScalarValue::Unsigned(array.value(row)),
+            Self::Float32(array) => ScalarValue::Float32(array.value(row).to_bits()),
+            Self::Float64(array) => ScalarValue::Float64(array.value(row).to_bits()),
+            Self::Utf8(array) => ScalarValue::String(array.value(row).into()),
+            Self::LargeUtf8(array) => ScalarValue::String(array.value(row).into()),
+            Self::Date32(array) => ScalarValue::Date32(array.value(row)),
+            Self::Date64(array) => ScalarValue::Date64(array.value(row)),
+            Self::Timestamp(array) => ScalarValue::Timestamp(array.value(row)),
+        }
     }
 }
 
@@ -2817,9 +2889,7 @@ fn state_key_arrays(operations: &[StateOperationRow]) -> Vec<ArrayRef> {
             .with_timezone("UTC"),
         ),
         Arc::new(LargeBinaryArray::from_iter_values(
-            operations
-                .iter()
-                .map(|row| row.key.stable_group_key.as_slice()),
+            operations.iter().map(|row| &*row.key.stable_group_key),
         )),
     ]
 }
@@ -3354,7 +3424,7 @@ fn decode_state_segment(
         let key = WindowKey {
             start: EventTime::from_micros(starts.value(row)),
             end: EventTime::from_micros(ends.value(row)),
-            stable_group_key: stable_keys.value(row).to_vec(),
+            stable_group_key: stable_keys.value(row).into(),
         };
         validate_restored_window_key(&key, compiled)?;
         if previous_key
@@ -3380,7 +3450,7 @@ fn decode_state_segment(
             );
         }
         let encoded_group = encode_group_values(&group_values, compiled)?;
-        if encoded_group != key.stable_group_key {
+        if *encoded_group != *key.stable_group_key {
             return Err(checkpoint_mismatch(
                 "window state stable group key does not match its declared group values",
             ));
@@ -3918,6 +3988,73 @@ mod tests {
     const HIGH_CARDINALITY_ROWS: usize = 400_000;
     const LEGACY_PROJECT_JSON_LIMIT: usize = 10 * 1024 * 1024;
 
+    /// The pre-iterator eager assignment semantics the lazy iterator must match.
+    fn eager_window_assignments(
+        event_time: EventTime,
+        geometry: CompiledWindowGeometry,
+    ) -> std::result::Result<Vec<(EventTime, EventTime)>, String> {
+        let time = i128::from(event_time.as_micros());
+        let slide = i128::from(geometry.slide_micros);
+        let latest_start = time.div_euclid(slide) * slide;
+        (0..geometry.overlap)
+            .rev()
+            .map(|offset| {
+                window_assignment(
+                    latest_start,
+                    slide,
+                    i128::from(geometry.size_micros),
+                    offset,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn window_assignment_iterator_matches_eager_assignments_at_boundaries() {
+        let geometries = [
+            (1, 1),
+            (100, 100),
+            (100, 10),
+            (1_024, 1),
+            (1 << 62, 1 << 52),
+            (1 << 63, 1 << 63),
+            (1 << 63, 1 << 54),
+            (u64::MAX, u64::MAX),
+        ];
+        let times = [
+            i64::MIN,
+            i64::MIN + 1,
+            i64::MIN + 99,
+            -101,
+            -100,
+            -1,
+            0,
+            1,
+            99,
+            100,
+            i64::MAX - 1_023,
+            i64::MAX - 1,
+            i64::MAX,
+        ];
+        for (size_micros, slide_micros) in geometries {
+            let geometry = CompiledWindowGeometry {
+                size_micros,
+                slide_micros,
+                overlap: size_micros / slide_micros,
+            };
+            for time in times {
+                let event_time = EventTime::from_micros(time);
+                let lazy =
+                    window_assignments(event_time, geometry).map(Iterator::collect::<Vec<_>>);
+                assert_eq!(
+                    lazy,
+                    eager_window_assignments(event_time, geometry),
+                    "size={size_micros} slide={slide_micros} time={time}"
+                );
+            }
+        }
+    }
+
     fn budget_test_batch(times: &[i64]) -> Batch {
         let schema = Arc::new(Schema::new(vec![
             Field::new(
@@ -4254,7 +4391,7 @@ mod tests {
             key: WindowKey {
                 start: EventTime::from_micros(0),
                 end: EventTime::from_micros(60_000_000),
-                stable_group_key: Vec::new(),
+                stable_group_key: Arc::from([]),
             },
             entry: AccumulatorRow {
                 group_values: Vec::new(),
@@ -4323,7 +4460,7 @@ mod tests {
             key: WindowKey {
                 start: EventTime::from_micros(0),
                 end: EventTime::from_micros(60_000_000),
-                stable_group_key: Vec::new(),
+                stable_group_key: Arc::from([]),
             },
             entry: AccumulatorRow {
                 group_values: Vec::new(),
@@ -4475,7 +4612,7 @@ mod tests {
                 key: WindowKey {
                     start: EventTime::from_micros(0),
                     end: EventTime::from_micros(60_000_000),
-                    stable_group_key: Vec::new(),
+                    stable_group_key: Arc::from([]),
                 },
                 entry: AccumulatorRow {
                     group_values: Vec::new(),
@@ -4487,7 +4624,7 @@ mod tests {
                 key: WindowKey {
                     start: EventTime::from_micros(60_000_000),
                     end: EventTime::from_micros(120_000_000),
-                    stable_group_key: Vec::new(),
+                    stable_group_key: Arc::from([]),
                 },
                 entry: AccumulatorRow {
                     group_values: Vec::new(),

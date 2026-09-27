@@ -59,7 +59,7 @@ pub struct StreamAsofJoinOperator {
     outputs: Vec<Port>,
     schemas: [SchemaRef; 3],
     state: State,
-    prepared: Option<crate::StateSegment>,
+    prepared: Option<checkpoint::PreparedSegment>,
     /// `Some` when the committed state was eviction-swept under the stamped
     /// inputs; `None` when admissions, removals or a restore may have left
     /// evictable rows behind.
@@ -181,7 +181,7 @@ impl StreamAsofJoinOperator {
         &self,
         state: &State,
         delta: state::InventoryDelta,
-        prepared: Option<&crate::StateSegment>,
+        prepared: Option<&checkpoint::PreparedSegment>,
         status: &mut StreamAsofJoinStatus,
     ) -> Result<()> {
         let inventory = self.candidate_inventory(delta, prepared, status)?;
@@ -202,7 +202,7 @@ impl StreamAsofJoinOperator {
     fn candidate_inventory(
         &self,
         delta: state::InventoryDelta,
-        prepared: Option<&crate::StateSegment>,
+        prepared: Option<&checkpoint::PreparedSegment>,
         status: &StreamAsofJoinStatus,
     ) -> Result<state::Inventory> {
         let mut inventory = state::Inventory {

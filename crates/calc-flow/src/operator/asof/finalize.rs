@@ -59,7 +59,7 @@ impl StreamAsofJoinOperator {
         self.reserve_workspace(
             self.prepared
                 .as_ref()
-                .map_or(0, |segment| segment.bytes().len() as u64),
+                .map_or(0, |segment| segment.len() as u64),
         )
     }
 
