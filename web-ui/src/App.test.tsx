@@ -109,10 +109,9 @@ afterEach(() => {
 
 describe('Calc Flow Studio', () => {
   it('aborts pending initialization requests when the app unmounts', async () => {
-    const fetchMock = vi.fn<(
-      path: RequestInfo | URL,
-      init?: RequestInit,
-    ) => Promise<Response>>(() => new Promise<Response>(() => undefined));
+    const fetchMock = vi.fn<typeof fetch>(
+      () => new Promise<Response>(() => undefined),
+    );
     vi.stubGlobal('fetch', fetchMock);
 
     const { unmount } = render(<App />);
