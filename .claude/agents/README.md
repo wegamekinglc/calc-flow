@@ -1,9 +1,8 @@
 # Calc Flow Agent Team
 
-A coordinated team of specialist agents for calc-flow, the Rust-native micro-batch /
-streaming calculation engine with Python adapters and a local web studio. Each agent owns
-one phase of the spec → design → critique → implement → review → document pipeline. The
-orchestrator routes work between them.
+A coordinated team of specialist agents for Calc Flow's Rust runtime, Python
+application API, and local Studio. The orchestrator routes work to the roles
+needed for each request, including documentation and independent review.
 
 This directory is a Claude compatibility mirror. The canonical agent definitions and
 descriptions live in `.codex/agents/`; synchronize team changes from `.codex/agents/` to
@@ -19,7 +18,7 @@ this directory, never in the reverse direction.
 | Critic       | `cf-critic`       | red    | spec, api-note                             | `.codex/artifacts/critiques/<slug>.md`      |
 | Implementer  | `cf-implementer`  | green  | spec, api-note, critique                   | source code, tests, TDD in worktree         |
 | Tester       | `cf-tester`       | cyan   | source under-test, conventions             | tests for the touched surfaces, in worktree |
-| Reviewer     | `cf-reviewer`     | amber  | PR diff, all upstream artifacts            | review report; merge on explicit request    |
+| Reviewer     | `cf-reviewer`     | amber  | diff, requirements, tests, documentation   | review report and requested remediations    |
 | Performancer | `cf-performancer` | yellow | finished impl, benchmark suites, baselines | perf-regression report, coverage advisory   |
 | Simplifier   | `cf-simplifier`   | blue   | finished impl, existing modules            | simplification report; optional apply edits |
 | Doc writer   | `cf-doc-writer`   | teal   | current source, AGENTS.md, docs            | `docs/` and `CHANGELOG.md`                  |

@@ -440,6 +440,7 @@ The separate Studio service exposes its supported API under `/api/v3`.
 | Method                 | Route                     | Purpose                                           |
 |------------------------|---------------------------|---------------------------------------------------|
 | `GET`                  | `/catalog`                | UDF-only top-level array                          |
+| `GET`                  | `/session`                | Read this launch's token for mutating requests    |
 | `GET`                  | `/capabilities`           | Runtime, connector, and worker capabilities       |
 | `GET`                  | `/schema/project`         | Rust-generated v3 project JSON Schema             |
 | `GET`, `POST`          | `/projects`               | List or create projects                           |
@@ -454,6 +455,11 @@ The separate Studio service exposes its supported API under `/api/v3`.
 | `POST`                 | `/jobs/{id}/shutdown`     | Request graceful terminal checkpoint and shutdown |
 | `POST`                 | `/jobs/{id}/cancel`       | Cancel and settle a job                           |
 | `GET`                  | `/resource-limits`        | Read enforced continuous-job resource bounds      |
+
+Studio accepts loopback Host headers and local Studio origins. `POST`, `PUT`,
+`PATCH`, and `DELETE` requests must send the token from `GET /api/v3/session`
+in `X-Calc-Flow-Session`; the browser client does this automatically. The
+session route is excluded from the generated OpenAPI document.
 
 `/capabilities` deliberately separates two scopes. `runtime` is the parent
 session snapshot used for compilation. `preview.workerRegistrations` describes
@@ -526,9 +532,8 @@ The Rust crate, Python binding, Studio package, and frontend are versioned
 `2026.9.25` in this checkout. Project format version `3` and checkpoint-manifest version `3` are
 separate protocol values from the package version.
 
-Package versions use calendar versioning (`YYYY.M.D` release dates); the
-SemVer-to-5.0.0 alignment migration and exact package dependencies are
-recorded in the [2026-09 changelog](../CHANGELOG.md#2026-09).
+Package versions use calendar versioning (`YYYY.M.D` release dates). Studio
+requires `calc-flow-python>=2026.9.25,<2027`.
 
 Projects accept strict format `3`; Studio serves `/api/v3`. See
 [projects and persistence](projects-guide.md) for validation and storage.
