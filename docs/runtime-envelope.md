@@ -673,10 +673,20 @@ observations without a project configuration switch.
 
 For canonical ordered input and supported bounded typed row windows, rolling
 buffers immutable Arrow batches until finality and computes directly from
-their columns. Borrowed encoded keys avoid allocating an owned entity ID per
-row. Only touched entities prepare private kernel state; numerical state
-needed by the released West/M2/refold behavior is retained even for mean-only
-outputs.
+their columns. When the order key is a non-null microsecond event time, one
+non-null Utf8 entity, and one non-null `UInt64` sequence, the ordering proof
+compares those Arrow values in place and row-encodes only each batch's first
+and last identities, and entity routing assigns batch-local IDs from the
+string values, row-encoding each distinct entity once. Other key shapes use
+the full Arrow row encoding. Both routes check the entity that last followed
+the previous row's entity before hashing a key. Only touched entities prepare
+private kernel state; numerical state needed by the released West/M2/refold
+behavior is retained even for mean-only outputs. Plans whose one or two
+row-window numeric groups feed only one or two Float64 mean or
+mean-difference outputs run a fixed-arity loop over that same state; other
+shapes use the generic typed kernel. Retained-history tails reuse each
+entity's routed row count and walk back from the batch end only until every
+tail is full.
 
 An already initialized, ordered Native Float64 StableV1 mean calculation can
 assign whole entities to two owned CPU lanes. The narrow path requires one or
