@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import inspect
 
 import pyarrow as pa
 import pytest
@@ -19,9 +20,9 @@ def _program(engine: str) -> cf.Program:
 
 
 def test_program_requires_immutable_engine_at_construction() -> None:
-    missing_engine: dict[str, object] = {}
-    with pytest.raises(TypeError, match="engine"):
-        cf.Program("empty", **missing_engine)
+    engine = inspect.signature(cf.Program).parameters["engine"]
+    assert engine.kind is inspect.Parameter.KEYWORD_ONLY
+    assert engine.default is inspect.Parameter.empty
 
     source = cf.table_input("events", schema=pa.schema([("x", pa.int64())]))
     program = cf.Program("values", engine="streaming")
