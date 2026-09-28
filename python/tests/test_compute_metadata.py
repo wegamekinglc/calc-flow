@@ -58,7 +58,7 @@ def test_convenience_normalizes_arrow_metadata_without_copying_buffers(
     monkeypatch.setattr(cf.BatchExecutionPlan, "execute", record)
     t = cf.table_input("quotes", schema=original.schema)
     expression = t.select(y=t["x"] + 1)
-    program = cf.Program("metadata", outputs={"answer": expression})
+    program = cf.Program("metadata", engine="sql", outputs={"answer": expression})
     expected = {"y": [None if value is None else value + 1 for value in before["x"]]}
     assert (
         cf.compute(supplied, lambda q: q.select(y=q["x"] + 1)).to_pydict() == expected
@@ -98,7 +98,9 @@ def test_async_convenience_accepts_arrow_metadata(entry):
         elif entry == "table":
             result = await expression.collect_async(batch)
         else:
-            program = cf.Program("metadata", outputs={"answer": expression})
+            program = cf.Program(
+                "metadata", engine="sql", outputs={"answer": expression}
+            )
             result = (await program.collect_async({"quotes": batch}))["answer"]
         assert result.to_pydict() == {"y": [2]}
 
@@ -160,7 +162,7 @@ def test_collection_preserves_zero_column_metadata_rows(entry, asynchronous):
     )
     table = cf.table_input("quotes", schema=data.schema)
     expression = table.select(value=cf.lit(1))
-    program = cf.Program("metadata", outputs={"answer": expression})
+    program = cf.Program("metadata", engine="sql", outputs={"answer": expression})
     if entry == "compute":
         collect = cf.compute_async if asynchronous else cf.compute
         result = collect(data, lambda t: t.select(value=cf.lit(1)))

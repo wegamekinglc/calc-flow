@@ -32,7 +32,11 @@ def build_project(directory: Path) -> ProjectDocument:
         cf.Field("price", "float64"),
     ]
     orders = cf.table_input("orders", schema=schema)
-    graph = cf.Program("kafka-source", outputs={"totals": orders.pipe(order_totals)})
+    graph = cf.Program(
+        "kafka-source",
+        engine="streaming",
+        outputs={"totals": orders.pipe(order_totals)},
+    )
     return ProjectDocument.model_validate(
         {
             **graph.to_project(mode="stream").model_dump(),

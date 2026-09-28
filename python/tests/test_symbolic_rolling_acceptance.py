@@ -65,7 +65,13 @@ def _ordered() -> object:
 def _program(features: list[tuple[str, object]]) -> Program:
     quotes = _ordered()
     signals = quotes.with_columns(FeatureSet(features))
-    return Program("p", inputs=[quotes], outputs=[("signals", signals)])
+    return Program("p", engine="sql", inputs=[quotes], outputs=[("signals", signals)])
+
+
+def _stream_copy(program: Program) -> Program:
+    return Program(
+        program.name, engine="streaming", inputs=program.inputs, outputs=program.outputs
+    )
 
 
 def test_min_max_covariance_and_correlation_execute_with_reference_values() -> None:
@@ -147,7 +153,7 @@ def test_duration_frames_execute_and_correlation_compiles_stream() -> None:
             )
         ]
     )
-    pair_program.compile_stream(Runtime())
+    _stream_copy(pair_program).compile_stream(Runtime())
 
 
 def test_cross_section_winsorize_lowers_in_both_modes() -> None:
@@ -193,7 +199,9 @@ def test_composite_lag_delta_arguments_compile_through_materialization() -> None
 
     derived = quotes.with_columns(FeatureSet([("y", quotes["x"] + 1.0)]))
     signals = derived.with_columns(FeatureSet([("prev", ts.lag(derived["y"]))]))
-    program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
+    program = Program(
+        "p", engine="sql", inputs=[quotes], outputs=[("signals", signals)]
+    )
     program.compile_batch(Runtime())
 
 
@@ -664,7 +672,7 @@ def test_multi_stage_symbolic_checkpoint_recovery_matches_batch(tmp_path: Path) 
 
     async def runner(source: _ReplayPauseSource) -> StreamingRunner:
         return StreamingRunner(
-            _multi_stage_program().compile_stream(Runtime()),
+            _stream_copy(_multi_stage_program()).compile_stream(Runtime()),
             {
                 "input": SourceBinding(
                     source,
@@ -705,7 +713,7 @@ def test_multi_stage_symbolic_checkpoint_recovery_matches_batch(tmp_path: Path) 
 def test_aggregate_stream_matches_batch_across_segmentation(
     tmp_path: Path, segmentation: int
 ) -> None:
-    plan = _aggregate_program().compile_stream(Runtime())
+    plan = _stream_copy(_aggregate_program()).compile_stream(Runtime())
     sink = _CollectSink()
 
     async def exercise() -> None:
@@ -777,7 +785,7 @@ def test_aggregate_inf_stream_matches_batch_across_segmentation(
     tmp_path: Path, segmentation: int
 ) -> None:
     table = _table_from_rows(_INF_PROBE_ROWS)
-    plan = _aggregate_program().compile_stream(Runtime())
+    plan = _stream_copy(_aggregate_program()).compile_stream(Runtime())
     sink = _CollectSink()
 
     async def exercise() -> None:

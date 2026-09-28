@@ -390,6 +390,7 @@ def _native_program(
     indicators = quotes.with_columns(FeatureSet(((_OUTPUT_COLUMNS[indicator], value),)))
     return Program(
         f"incremental-{indicator.replace('_', '-')}",
+        engine="sql",
         inputs=(quotes,),
         outputs=(("indicators", indicators),),
     )

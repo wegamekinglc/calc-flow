@@ -191,6 +191,7 @@ def test_symbolic_matrix_batch_attaches_selected_columns_in_order() -> None:
     )
     program = Program(
         "symbolic-matrix",
+        engine="sql",
         inputs=(source, weights),
         outputs=(("signals", output),),
     )
@@ -250,6 +251,7 @@ def test_symbolic_matrix_batch_consumes_the_lowered_table_segment() -> None:
     )
     program = Program(
         "symbolic-matrix-upstream",
+        engine="sql",
         inputs=(source, weights),
         outputs=(("signals", output),),
     )
@@ -302,6 +304,7 @@ def test_symbolic_matrix_rejects_columns_from_a_different_attached_table(
     right_matrix = linalg.from_columns(right, columns=("z",), backend="numpy")
     program = Program(
         "symbolic-matrix-distinct-sources",
+        engine="streaming" if mode == "stream" else "sql",
         inputs=(source, weights),
         outputs=(
             (
@@ -363,6 +366,7 @@ def test_symbolic_matrix_requires_one_matmul_with_identity_weights_rhs(
         scores = linalg.matmul(matrix + weights, weights)
     program = Program(
         "symbolic-matrix-frozen-shape",
+        engine="streaming" if mode == "stream" else "sql",
         inputs=(source, weights),
         outputs=(
             (
@@ -416,6 +420,7 @@ def test_symbolic_matrix_stream_uses_latched_weights_per_microbatch(
     )
     program = Program(
         "symbolic-matrix-stream",
+        engine="streaming",
         inputs=(source, weights),
         outputs=(("signals", output),),
     )
@@ -509,6 +514,7 @@ def test_symbolic_matrix_unary_not_bool_scalar_matches_analysis_and_provider(
     score = (linalg.matmul(matrix, weights) > 0.0) == ~bool_scalar
     program = Program(
         "symbolic-matrix-unary-not-bool-scalar",
+        engine="streaming" if mode == "stream" else "sql",
         inputs=(source, weights),
         outputs=(
             (
@@ -578,6 +584,7 @@ def test_symbolic_matrix_numpy_uses_safe_common_dtype() -> None:
     matrix = linalg.from_columns(source, columns=("x",), backend="numpy")
     program = Program(
         "symbolic-matrix-dtype",
+        engine="sql",
         inputs=(source, weights),
         outputs=(
             (
@@ -624,6 +631,7 @@ def test_symbolic_matrix_float32_literal_dtype_matches_analysis_and_execution() 
     matrix = linalg.from_columns(source, columns=("x",), backend="numpy")
     program = Program(
         "symbolic-matrix-float32-literal",
+        engine="sql",
         inputs=(source, weights),
         outputs=(
             (
@@ -678,6 +686,7 @@ def test_symbolic_matrix_rejects_provider_output_dtype_drift(
     matrix = linalg.from_columns(source, columns=("x",), backend="numpy")
     program = Program(
         "symbolic-matrix-dtype-drift",
+        engine="sql",
         inputs=(source, weights),
         outputs=(
             (
@@ -732,6 +741,7 @@ def test_symbolic_matrix_jax_stream_matches_batch_on_cpu(tmp_path: Path) -> None
     matrix = linalg.from_columns(source, columns=("x",), backend="jax")
     program = Program(
         "symbolic-matrix-jax-stream",
+        engine="streaming",
         inputs=(source, weights),
         outputs=(
             (
@@ -775,7 +785,10 @@ def test_symbolic_matrix_jax_stream_matches_batch_on_cpu(tmp_path: Path) -> None
         "score"
     ].to_pylist()
     batch_scores = (
-        program.compile_batch(runtime)
+        Program(
+            program.name, engine="sql", inputs=program.inputs, outputs=program.outputs
+        )
+        .compile_batch(runtime)
         .execute(
             {
                 "input": Batch.from_pyarrow(input_table),
@@ -807,6 +820,7 @@ def test_symbolic_matrix_jax_rejects_float64_when_x64_is_disabled() -> None:
     matrix = linalg.from_columns(source, columns=("x",), backend="jax")
     program = Program(
         "symbolic-matrix-jax-x64-disabled",
+        engine="sql",
         inputs=(source, weights),
         outputs=(
             (
@@ -850,6 +864,7 @@ weights = parameter(
 matrix = linalg.from_columns(source, columns=("x",), backend="jax")
 program = Program(
     "symbolic-matrix-jax-x64",
+    engine="sql",
     inputs=(source, weights),
     outputs=(("signals", table.attach_columns(
         source,
@@ -900,6 +915,7 @@ def test_symbolic_matrix_rejects_wrong_provider_row_count(
     matrix = linalg.from_columns(source, columns=("x",), backend="numpy")
     program = Program(
         "symbolic-matrix-row-count",
+        engine="sql",
         inputs=(source, weights),
         outputs=(
             (
@@ -1129,6 +1145,7 @@ def test_symbolic_matrix_public_execution_rejects_provider_output_shape(
     matrix = linalg.from_columns(source, columns=("x",), backend="numpy")
     program = Program(
         "symbolic-matrix-provider-shape",
+        engine="sql",
         inputs=(source, weights),
         outputs=(
             (

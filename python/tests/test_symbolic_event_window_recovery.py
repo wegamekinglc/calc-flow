@@ -109,7 +109,7 @@ def _program(*, hopping: bool = False, fanout: bool = False) -> Program:
     outputs = [("minute", minute)]
     if fanout:
         outputs.append(("copy", declaration()))
-    return Program("minute-bars", inputs=[trades], outputs=outputs)
+    return Program("minute-bars", engine="streaming", inputs=[trades], outputs=outputs)
 
 
 def test_minute_aggregates_compile_to_native_window() -> None:
@@ -630,6 +630,7 @@ def test_filters_and_derived_columns_preserve_shared_window_boundary(
     selected = table.project(selected, ["symbol", "window_end", "volume", "excess"])
     symbolic_plan = Program(
         "window-filter-boundary",
+        engine="streaming",
         inputs=[trades],
         outputs=[("all", minute), ("selected", selected)],
     ).compile_stream(Runtime())
@@ -951,6 +952,7 @@ def test_distinct_window_declarations_own_distinct_manifest_state(
     )
     program = Program(
         base.name,
+        engine="streaming",
         inputs=base.inputs,
         outputs=[*base.outputs, ("two_minutes", two_minutes)],
     )
@@ -1204,7 +1206,10 @@ def test_full_portable_type_matrix_and_null_groups_match_native(
         aggregates=aggregates,
     )
     symbolic_plan = Program(
-        "window-types", inputs=[source], outputs=[("result", result)]
+        "window-types",
+        engine="streaming",
+        inputs=[source],
+        outputs=[("result", result)],
     ).compile_stream(Runtime())
     document = _native_document()
     node = document["graph"]["nodes"][0]
@@ -1265,7 +1270,10 @@ def test_nan_signed_zero_group_order_and_epoch_boundaries_match_native(
         ],
     )
     symbolic_plan = Program(
-        "special-windows", inputs=[source], outputs=[("result", result)]
+        "special-windows",
+        engine="streaming",
+        inputs=[source],
+        outputs=[("result", result)],
     ).compile_stream(Runtime())
     document = _native_document(hopping=True)
     node = document["graph"]["nodes"][0]

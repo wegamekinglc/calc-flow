@@ -104,7 +104,12 @@ def _program(operation, placement, nullable):
             ),
             ["window_start", "window_end", "result", "copy"],
         )
-    return Program("row-window-schema", inputs=[trades], outputs=[("result", result)])
+    return Program(
+        "row-window-schema",
+        engine="streaming",
+        inputs=[trades],
+        outputs=[("result", result)],
+    )
 
 
 def _field(name, dtype, nullable=True):
@@ -269,7 +274,12 @@ def test_unsigned_negation_is_rejected_before_window_source_open(dtype):
     trades = _input(dtype)
     prepared = trades.with_columns(FeatureSet([("negative", -trades["x"])]))
     result = _window(prepared, [window.min("negative", output="result")])
-    program = Program("unsigned-window", inputs=[trades], outputs=[("result", result)])
+    program = Program(
+        "unsigned-window",
+        engine="streaming",
+        inputs=[trades],
+        outputs=[("result", result)],
+    )
     path = "outputs.result.window_tumbling.value.negative.neg.value.dtype"
     issues = program.analyze(Runtime(), mode="stream").issues
     assert any(
@@ -284,7 +294,9 @@ def test_unsigned_negation_allows_explicit_signed_cast():
     result = source.with_columns(
         FeatureSet([("negative", -row.cast(source["x"], "int16"))])
     )
-    program = Program("signed-negation", inputs=[source], outputs=[("result", result)])
+    program = Program(
+        "signed-negation", engine="sql", inputs=[source], outputs=[("result", result)]
+    )
     data = pa.table(
         {
             "ts": pa.array([BASE, BASE], type=pa.timestamp("us", tz="UTC")),
@@ -310,7 +322,12 @@ def test_float64_row_rendering_keeps_existing_sql(operation, sql):
     result = source.with_columns(
         FeatureSet([("result", getattr(row, operation)(source["x"]))])
     )
-    program = Program("unchanged-double", inputs=[source], outputs=[("result", result)])
+    program = Program(
+        "unchanged-double",
+        engine="streaming",
+        inputs=[source],
+        outputs=[("result", result)],
+    )
     document = lower_program_document(program, Runtime(), "batch")
     assert (
         document["graph"]["nodes"][0]["operator"]["select"][-1] == f'{sql} AS "result"'

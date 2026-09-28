@@ -92,6 +92,7 @@ def test_program_wide_cse_shares_a_common_row_local_materialization() -> None:
     )
     program = Program(
         "program-wide-cse",
+        engine="sql",
         inputs=(quotes,),
         outputs=(("first", first), ("second", second)),
     )
@@ -125,6 +126,7 @@ def test_compatible_rolling_outputs_share_one_state_stage() -> None:
     )
     program = Program(
         "rolling-sharing",
+        engine="sql",
         inputs=(quotes,),
         outputs=(("short", short), ("long", long)),
     )
@@ -155,7 +157,9 @@ def test_compatible_rolling_outputs_share_one_state_stage() -> None:
         5.0,
         7.0,
     ]
-    program.compile_stream(Runtime())
+    Program(
+        program.name, engine="streaming", inputs=program.inputs, outputs=program.outputs
+    ).compile_stream(Runtime())
 
 
 def test_rolling_kernel_explain_helpers_fail_closed_on_unknown_shapes() -> None:
@@ -238,6 +242,7 @@ def test_filter_is_not_moved_across_a_rolling_finality_boundary() -> None:
     )
     program = Program(
         "unsafe-filter",
+        engine="sql",
         inputs=(quotes,),
         outputs=(("filtered", filtered_output), ("unfiltered", unfiltered_output)),
     )
@@ -268,6 +273,7 @@ def test_compatible_cross_sections_share_grouping_and_sorting() -> None:
     )
     program = Program(
         "cross-section-sharing",
+        engine="sql",
         inputs=(quotes,),
         outputs=(("ranked", ranked), ("normalized", normalized)),
     )
@@ -286,7 +292,9 @@ def test_compatible_cross_sections_share_grouping_and_sorting() -> None:
     )
     assert ranked_values == [1.0, 2.0, 1.0, 2.0]
     assert normalized_values == [-1.0, 1.0, -1.0, 1.0]
-    program.compile_stream(Runtime())
+    Program(
+        program.name, engine="streaming", inputs=program.inputs, outputs=program.outputs
+    ).compile_stream(Runtime())
 
 
 def test_incompatible_cross_section_finality_is_not_shared() -> None:
@@ -303,6 +311,7 @@ def test_incompatible_cross_section_finality_is_not_shared() -> None:
     )
     program = Program(
         "cross-section-finality",
+        engine="sql",
         inputs=(quotes,),
         outputs=(("exact", exact_output), ("bucket", bucket_output)),
     )
@@ -315,7 +324,9 @@ def test_incompatible_cross_section_finality_is_not_shared() -> None:
 def test_compile_cache_reuses_immutable_values_and_revision_invalidates() -> None:
     quotes = _ordered()
     output = quotes.with_columns(FeatureSet((("score", quotes["x"] + 1.0),)))
-    program = Program("compile-cache", inputs=(quotes,), outputs=(("output", output),))
+    program = Program(
+        "compile-cache", engine="sql", inputs=(quotes,), outputs=(("output", output),)
+    )
     runtime = Runtime()
 
     first = program.compile_batch(runtime)
@@ -333,7 +344,9 @@ def test_compile_cache_reuses_immutable_values_and_revision_invalidates() -> Non
 def test_compile_cache_key_captures_every_frozen_identity_dimension() -> None:
     quotes = _ordered()
     output = quotes.with_columns(FeatureSet((("score", quotes["x"] + 1.0),)))
-    program = Program("cache-key", inputs=(quotes,), outputs=(("output", output),))
+    program = Program(
+        "cache-key", engine="sql", inputs=(quotes,), outputs=(("output", output),)
+    )
     runtime = Runtime()
     document = lower_program_document(program, runtime, "batch")
     augmented = deepcopy(document)
@@ -380,7 +393,9 @@ def test_explain_reports_deterministic_optimization_and_cost_facts() -> None:
             )
         )
     )
-    program = Program("explain-costs", inputs=(quotes,), outputs=(("output", output),))
+    program = Program(
+        "explain-costs", engine="sql", inputs=(quotes,), outputs=(("output", output),)
+    )
     runtime = Runtime()
 
     explanation = program.explain(runtime, mode="batch")
@@ -414,6 +429,7 @@ def test_explain_reports_fused_array_provider_and_copy_boundaries() -> None:
     output = table.attach_columns(quotes, scores, names=("score",))
     program = Program(
         "array-fusion",
+        engine="streaming",
         inputs=(quotes, weights),
         outputs=(("output", output),),
     )

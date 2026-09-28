@@ -118,18 +118,18 @@ they do not retain live data. `cf.lit(value)` constructs a scalar expression fro
 `None`, `bool`, `int`, finite `float`, or `str`. Cast an untyped null explicitly when its type cannot
 be inferred.
 
-| Operation                                    | Meaning                                                           |
-|----------------------------------------------|-------------------------------------------------------------------|
-| `t["price"]`                                 | Select one named column expression                                |
-| `+`, `-`, `*`, `/`, unary `-`                | Compose arithmetic, including reflected scalar arithmetic         |
-| `==`, `!=`, `<`, `<=`, `>`, `>=`             | Build comparison expressions                                      |
-| `&`, `\|`, `~`                               | Compose boolean expressions; parenthesize comparisons             |
-| `t.with_columns(mapping, **named)`           | Append named expressions; `mapping` is optional                   |
-| `t.select(*columns, **named)`                | Keep literal column names, then append named expressions in order |
-| `t.filter(predicate)`                        | Keep rows matching a boolean `ColumnExpr` over that table         |
-| `expression.pipe(function, *args, **kwargs)` | Apply a synchronous declaration function once                     |
-| `t.sql(query)`                               | Add SQL using this table as the local alias `input`               |
-| `expression.identical(other)`                | Compare structural identity as a Python boolean                   |
+| Operation                                      | Meaning                                                             |
+| ---------------------------------------------- | ------------------------------------------------------------------- |
+| `t["price"]`                                   | Select one named column expression                                  |
+| `+`, `-`, `*`, `/`, unary `-`                  | Compose arithmetic, including reflected scalar arithmetic           |
+| `==`, `!=`, `<`, `<=`, `>`, `>=`               | Build comparison expressions                                        |
+| `&`, `\|`, `~`                                 | Compose boolean expressions; parenthesize comparisons               |
+| `t.with_columns(mapping, **named)`             | Append named expressions; `mapping` is optional                     |
+| `t.select(*columns, **named)`                  | Keep literal column names, then append named expressions in order   |
+| `t.filter(predicate)`                          | Keep rows matching a boolean `ColumnExpr` over that table           |
+| `expression.pipe(function, *args, **kwargs)`   | Apply a synchronous declaration function once                       |
+| `t.sql(query)`                                 | Add SQL using this table as the local alias `input`                 |
+| `expression.identical(other)`                  | Compare structural identity as a Python boolean                     |
 
 Use `&`, `|`, and `~` instead of `and`, `or`, and `not`; converting an expression
 to `bool` fails. Chained comparisons, `**`, `//`, and `%` are unsupported.
@@ -155,25 +155,43 @@ parsed as formulas.
 
 ## Reusable programs and collection
 
-`cf.Program(name, /, *, inputs=None, outputs=())` accepts outputs as a mapping
+`cf.Program(name, /, *, engine, inputs=None, outputs=())` accepts outputs as a mapping
 in insertion order or a sequence of `(name, TableExpr | ArrayExpr)` pairs. Omitting
-`inputs` discovers reachable table inputs and parameters in deterministic order.
+`inputs` discovers reachable table inputs and parameters in deterministic order,
+including when outputs are added later with `program.output(...)`.
 Explicit input sequences are respected, including `inputs=()`; missing referenced
 inputs become analysis errors. Conflicting roots with the same name fail.
 Declarations and output mappings are copied and remain immutable.
+Pass `engine="sql"` or `engine="streaming"` when constructing the program,
+before adding declarations. `program.execute(inputs)` uses that fixed engine.
+Immutable `with_input` and `output` calls preserve it, and incompatible graph
+shapes are rejected when outputs are declared. The same declarations retain
+their fingerprint in either engine; construct a separate `Program` to use the
+other engine. Calls for the other engine raise `RuntimeError`.
+`analyze` and `explain` accept an explicit opposite `mode` only for hypothetical
+diagnostics; it does not change the program engine or permit opposite-mode
+compilation, export, or execution.
 
-| Method                                                                                                 | Result and input contract                                                      |
-|--------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------|
-| `table_expr.collect(inputs, /, *, runtime=None, options=None)`                                         | One Arrow table; one table root accepts data directly, otherwise use a mapping |
-| `program.collect(inputs, /, *, runtime=None, options=None)`                                            | `dict[str, pyarrow.Table]` in logical output order; always supply a mapping    |
-| `table_expr.collect_async(...)` / `program.collect_async(...)`                                         | Awaitable forms of the same contracts                                          |
-| `table_expr.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`                          | Owned async iterator of Arrow tables                                           |
-| `program.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`                             | Owned async iterator of named `StreamOutput` events; input mapping required    |
-| `program.analyze(runtime=None, /, *, mode="batch")`                                                    | Immutable analysis result                                                      |
-| `program.explain(runtime=None, /, *, mode="batch")`                                                    | Deterministic explanation text                                                 |
-| `program.compile_batch(runtime=None, /)`                                                               | Explicit batch execution plan                                                  |
-| `program.compile_stream(runtime=None, /, *, allowed_lateness_micros=0, late_policy="error")`           | Explicit stream plan for a runner                                              |
-| `program.to_project(runtime=None, /, *, mode="batch", allowed_lateness_micros=0, late_policy="error")` | Validated, data-only project-v3 document                                       |
+| Method                                                                                                   | Result and input contract                                                        |
+| -------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| `table_expr.collect(inputs, /, *, runtime=None, options=None)`                                           | One Arrow table; one table root accepts data directly, otherwise use a mapping   |
+| `program.collect(inputs, /, *, runtime=None, options=None)`                                              | `dict[str, pyarrow.Table]` in logical output order; always supply a mapping      |
+| `cf.Program(name, engine=...)`                                                                           | Require `"sql"` or `"streaming"` at construction                                 |
+| `program.execute(inputs, /, *, runtime=None, options=None, config=None, watermarks=None)`                | SQL: named Arrow tables; streaming: owned `StreamOutput` events                  |
+| `table_expr.collect_async(...)` / `program.collect_async(...)`                                           | Awaitable forms of the same contracts                                            |
+| `table_expr.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`                            | Owned async iterator of Arrow tables                                             |
+| `program.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`                               | Owned async iterator of named `StreamOutput` events; input mapping required      |
+| `program.analyze(runtime=None, /, *, mode=None)`                                                         | Immutable analysis result; defaults to the selected engine                       |
+| `program.explain(runtime=None, /, *, mode=None)`                                                         | Deterministic explanation text                                                   |
+| `program.compile_batch(runtime=None, /)`                                                                 | Explicit batch execution plan                                                    |
+| `program.compile_stream(runtime=None, /, *, allowed_lateness_micros=0, late_policy="error")`             | Explicit stream plan for a runner                                                |
+| `program.to_project(runtime=None, /, *, mode=None, allowed_lateness_micros=0, late_policy="error")`      | Validated, data-only project-v3 document for the selected engine                 |
+
+`execute` uses finite table inputs with the SQL engine and stream inputs with
+the streaming engine. `options` is SQL-only; `config` and `watermarks` are
+streaming-only. Consume streaming results with `async with` and `async for`.
+See [example 29](../examples/29_sql_stream_switch.py) for both modes using the
+same SQL declaration.
 
 Collection mappings use declared input names, and the returned mapping uses
 logical output names. Missing, extra, or wrong-kind inputs fail with named paths.
@@ -219,10 +237,17 @@ work after SQL and rolling before SQL are supported. SQL-to-event-window paths
 and standalone array Program outputs are unsupported; the
 [composition reference](symbolic-api.md#sql-composition) gives the full boundary.
 
-Batch SQL accepts multiple aliases. Stream SQL accepts exactly one and applies
-SQL independently to each native input batch. SQL aggregation, sorting, limits,
-and window functions have batch-local semantics, including inside a stream.
-Use native stateful declarations for cross-batch calculations.
+Batch SQL accepts multiple aliases. Stream SQL accepts exactly one. Queries with
+ordinary aggregates or `GROUP BY` retain input across batches and emit the full
+current result after each batch: `SELECT SUM(value) AS total` emits `1`, then
+`6` for input batches `[1]` and `[2, 3]`. A grouped result includes unchanged
+groups in each snapshot. By default, retained SQL input has no fixed row or
+byte cap. Set `StreamRuntimeConfig.sql_state_budget` to
+`StateBudget(20_000_000, 8 << 30)` to enforce application limits. The query is
+recomputed over retained input on each batch, so memory, checkpoint size, and
+query cost grow with stream length. SQL without aggregation remains batch-local,
+as do SQL window functions when used without a grouped or ordinary aggregate.
+`ORDER BY` and `LIMIT` apply to each emitted snapshot.
 
 ## Streaming results
 
@@ -328,7 +353,7 @@ part of declaration identity and exported native configuration.
 
 The late schema is the full stage input plus nine non-null `_cf_late_*`
 diagnostics. It has a distinct row lineage and no temporal ordering; it can
-feed only built-in single-input expressions or per-batch SQL before a Sink.
+feed only built-in single-input expressions or SQL before a Sink.
 Read the [late-row guide](streaming-guide.md#route-late-rows) for exact fields,
 closing-coordinate equality, control messages, resource/failure boundaries,
 and persistent recovery. The example's logical `normal`/`late` names map
@@ -584,7 +609,7 @@ the engine implementation:
 | `cross_section@1`    | batch, stream | group_final_append_only | checkpointed_stateful | 1             | 1             |
 | `expression@1`       | batch, stream | per_row_final           | stateless             | —             | —             |
 | `rolling@1`          | batch, stream | per_row_final           | checkpointed_stateful | 1             | 1, 2          |
-| `sql@1`              | batch, stream | unproven                | stateless             | —             | —             |
+| `sql@1`              | batch, stream | unproven                | checkpointed_stateful | 1             | 1             |
 | `stream_asof_join@1` | stream        | group_final_append_only | checkpointed_stateful | 1             | 1             |
 | `stream_join@1`      | stream        | unproven                | checkpointed_stateful | 1             | 1             |
 | `window@1`           | stream        | group_final_append_only | checkpointed_stateful | 1             | 1             |
@@ -597,7 +622,8 @@ inventory alone to decide rolling checkpoint compatibility. See
 implemented encoding and restore rules.
 
 `cross_section@1`, `rolling@1`, `stream_asof_join@1`, `stream_join@1`, and
-`window@1` are the stateful operators and the only ones that require a watermark;
+`window@1` are stateful operators that require a watermark; aggregate-bearing
+`sql@1` is stateful without requiring one. Row-local SQL remains stateless.
 `cross_section@1`, `expression@1`, `rolling@1`, `stream_asof_join@1`, and
 `window@1` are micro-batch invariant. All seven
 report `deterministic=True` and `replay_safe=True`. For `sql@1` those two claims

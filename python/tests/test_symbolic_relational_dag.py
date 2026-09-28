@@ -177,6 +177,7 @@ def test_nested_join_requires_and_accepts_explicit_intermediate_ordering() -> No
     )
     invalid_result = Program(
         "nested-unordered",
+        engine="streaming",
         inputs=[left, middle, right],
         outputs=[("matches", invalid)],
     ).analyze(Runtime(), mode="stream")
@@ -203,6 +204,7 @@ def test_nested_join_requires_and_accepts_explicit_intermediate_ordering() -> No
     )
     program = Program(
         "nested-ordered",
+        engine="streaming",
         inputs=[left, middle, right],
         outputs=[("matches", nested)],
     )
@@ -241,6 +243,7 @@ def test_stream_join_v2_rejects_unproved_output_ordering_fields() -> None:
     )
     result = Program(
         "invalid-post-join-ordering",
+        engine="streaming",
         inputs=[left, right],
         outputs=[("matches", joined)],
     ).analyze(Runtime(), mode="stream")
@@ -274,6 +277,7 @@ def test_nested_join_rejects_mismatched_or_projected_away_ordering() -> None:
     )
     wrong_result = Program(
         "nested-wrong-time",
+        engine="streaming",
         inputs=[left, middle, right],
         outputs=[("matches", wrong_time)],
     ).analyze(Runtime(), mode="stream")
@@ -298,6 +302,7 @@ def test_nested_join_rejects_mismatched_or_projected_away_ordering() -> None:
     )
     projected_result = Program(
         "nested-projected-ordering",
+        engine="streaming",
         inputs=[left, middle, right],
         outputs=[("matches", missing_sequence)],
     ).analyze(Runtime(), mode="stream")
@@ -328,6 +333,7 @@ def test_nested_join_lowers_row_local_segment_between_join_boundaries() -> None:
     )
     program = Program(
         "nested-row-local-segment",
+        engine="streaming",
         inputs=[left, middle, right],
         outputs=[("matches", nested)],
     )
@@ -359,6 +365,7 @@ def test_independent_joins_and_unrelated_output_share_declared_sources() -> None
     passthrough = table.project(first, ["key", "first_value"])
     program = Program(
         "independent-joins",
+        engine="streaming",
         inputs=[first, second, third, fourth],
         outputs=[
             ("first_matches", first_join),
@@ -394,6 +401,7 @@ def test_relational_source_id_avoids_output_name_collision() -> None:
     )
     program = Program(
         "source-output-collision",
+        engine="streaming",
         inputs=[left, right],
         outputs=[("matches", joined)],
     )
@@ -417,6 +425,7 @@ def test_relational_source_id_skips_logical_and_physical_collision_chain(
     )
     program = Program(
         "source-collision-chain",
+        engine="streaming",
         inputs=[right, left] if reverse_inputs else [left, right],
         outputs=[
             ("result", joined),
@@ -442,6 +451,7 @@ def test_relational_source_id_avoids_already_allocated_digest_prefix() -> None:
     )
     program = Program(
         "source-digest-collision",
+        engine="streaming",
         inputs=[left, right],
         outputs=[("left_output", left), ("right_output", right)],
     )
@@ -484,7 +494,10 @@ def test_relational_source_ids_preserve_main_graph_fingerprints(
         left, right, left_prefix="left", right_prefix="right", ordered_output=True
     )
     program = Program(
-        "stable-relational-sources", inputs=[left, right], outputs=[("matches", joined)]
+        "stable-relational-sources",
+        engine="streaming",
+        inputs=[left, right],
+        outputs=[("matches", joined)],
     )
 
     document = lower_program_document(program, Runtime(), "stream")
@@ -514,6 +527,7 @@ def test_relational_source_id_avoids_generated_stage_collision() -> None:
     )
     program = Program(
         "source-generated-stage-collision",
+        engine="streaming",
         inputs=[left, right],
         outputs=[("features", output)],
     )
@@ -543,6 +557,7 @@ def test_relational_source_id_avoids_join_side_stage_collision() -> None:
     )
     program = Program(
         "source-join-side-stage-collision",
+        engine="streaming",
         inputs=[left, right, unrelated],
         outputs=[
             ("matches", joined),
@@ -572,6 +587,7 @@ def test_post_join_rolling_requires_and_uses_explicit_output_ordering() -> None:
     )
     invalid = Program(
         "post-join-unordered",
+        engine="streaming",
         inputs=[left, right],
         outputs=[("features", invalid_output)],
     )
@@ -590,6 +606,7 @@ def test_post_join_rolling_requires_and_uses_explicit_output_ordering() -> None:
     )
     program = Program(
         "post-join-rolling",
+        engine="streaming",
         inputs=[left, right],
         outputs=[("features", output)],
     )
@@ -621,6 +638,7 @@ def test_post_join_ordering_is_required_when_upstream_uses_same_state_kind() -> 
     )
     result = Program(
         "same-state-kind",
+        engine="streaming",
         inputs=[left, right],
         outputs=[("features", post_join_lag)],
     ).analyze(Runtime(), mode="stream")
@@ -653,6 +671,7 @@ def test_post_join_cross_section_uses_explicit_output_ordering() -> None:
     )
     program = Program(
         "post-join-cross-section",
+        engine="streaming",
         inputs=[left, right],
         outputs=[("features", output)],
     )

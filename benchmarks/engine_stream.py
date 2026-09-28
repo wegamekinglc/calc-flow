@@ -235,7 +235,7 @@ def stream_plan(
     else:
         output = _scalar_stream_output(scenario, quotes)
     return Program(
-        "suite-stream", inputs=inputs, outputs=(("result", output),)
+        "suite-stream", engine="streaming", inputs=inputs, outputs=(("result", output),)
     ).compile_stream(Runtime())
 
 

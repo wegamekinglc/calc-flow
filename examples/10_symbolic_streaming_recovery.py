@@ -137,6 +137,7 @@ def symbolic_program() -> Program:
     )
     return Program(
         "symbolic-streaming-recovery",
+        engine="streaming",
         inputs=(quotes,),
         outputs=(("signals", output),),
     )

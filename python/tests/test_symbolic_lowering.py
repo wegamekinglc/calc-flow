@@ -40,7 +40,7 @@ def _quotes_batch() -> pa.Table:
 
 def test_compile_batch_lowers_passthrough_program() -> None:
     quotes = _quotes()
-    program = Program("p", inputs=[quotes], outputs=[("signals", quotes)])
+    program = Program("p", engine="sql", inputs=[quotes], outputs=[("signals", quotes)])
 
     plan = program.compile_batch(Runtime())
 
@@ -55,7 +55,9 @@ def test_compile_batch_lowers_passthrough_program() -> None:
 def test_compile_batch_is_deterministic_across_builds() -> None:
     def build() -> BatchExecutionPlan:
         quotes = _quotes()
-        program = Program("p", inputs=[quotes], outputs=[("signals", quotes)])
+        program = Program(
+            "p", engine="sql", inputs=[quotes], outputs=[("signals", quotes)]
+        )
         return program.compile_batch(Runtime())
 
     assert build().fingerprint == build().fingerprint
@@ -70,6 +72,7 @@ def test_batch_source_fallback_collision_keeps_distinct_values(
     right = table_input(right_name, schema=[Field(right_column, "int64")])
     program = Program(
         "batch-source-collision",
+        engine="sql",
         inputs=[left, right],
         outputs=[("result", left), ("other", right)],
     )
@@ -87,7 +90,7 @@ def test_batch_source_fallback_collision_keeps_distinct_values(
 
 def test_compile_batch_requires_a_runtime() -> None:
     quotes = _quotes()
-    program = Program("p", inputs=[quotes], outputs=[("signals", quotes)])
+    program = Program("p", engine="sql", inputs=[quotes], outputs=[("signals", quotes)])
 
     with pytest.raises(TypeError, match="explicit calc_flow Runtime"):
         program.compile_batch(object())
@@ -104,6 +107,7 @@ def test_compile_batch_raises_compile_error_from_analysis_issues() -> None:
     )
     program = Program(
         "p",
+        engine="sql",
         inputs=[quotes],
         outputs=[("signals", quotes.with_columns(FeatureSet([("score", other["y"])])))],
     )
@@ -118,7 +122,9 @@ def test_compile_batch_raises_compile_error_from_analysis_issues() -> None:
 
 def test_compile_stream_lowers_passthrough_program() -> None:
     quotes = _quotes()
-    program = Program("p", inputs=[quotes], outputs=[("signals", quotes)])
+    program = Program(
+        "p", engine="streaming", inputs=[quotes], outputs=[("signals", quotes)]
+    )
 
     plan = program.compile_stream(Runtime())
 
@@ -127,7 +133,9 @@ def test_compile_stream_lowers_passthrough_program() -> None:
 
 def test_compile_stream_validates_lateness_arguments() -> None:
     quotes = _quotes()
-    program = Program("p", inputs=[quotes], outputs=[("signals", quotes)])
+    program = Program(
+        "p", engine="streaming", inputs=[quotes], outputs=[("signals", quotes)]
+    )
 
     with pytest.raises(TypeError):
         program.compile_stream(Runtime(), allowed_lateness_micros=True)

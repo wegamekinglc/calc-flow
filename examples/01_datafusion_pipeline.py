@@ -32,6 +32,7 @@ def main() -> None:
     t = cf.table_input("orders", schema=orders.schema)
     program = cf.Program(
         "order-outputs",
+        engine="sql",
         outputs={
             "totals": t.select("order_id", gross=t["quantity"] * t["unit_price"]),
             "quantities": t.select("order_id", "quantity"),

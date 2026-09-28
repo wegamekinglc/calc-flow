@@ -157,6 +157,7 @@ t = cf.table_input("orders", schema=data.schema)
 gross = t["quantity"] * t["unit_price"]
 program = cf.Program(
     "orders",
+    engine="sql",
     outputs={
         "totals": t.select("order_id", gross=gross),
         "quantities": t.select("order_id", "quantity"),

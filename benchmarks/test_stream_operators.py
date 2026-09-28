@@ -153,7 +153,10 @@ def _program(scenario: str, input_rows: int) -> Program:
     else:
         raise ValueError(f"unsupported stream operator benchmark: {scenario}")
     return Program(
-        f"benchmark-{scenario}", inputs=inputs, outputs=(("result", output),)
+        f"benchmark-{scenario}",
+        engine="streaming",
+        inputs=inputs,
+        outputs=(("result", output),),
     )
 
 

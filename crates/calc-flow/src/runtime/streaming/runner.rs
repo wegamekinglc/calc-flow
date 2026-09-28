@@ -1102,11 +1102,19 @@ impl ContinuousRunner {
     )]
     fn start_internal(
         &self,
-        spec: ContinuousJobSpec,
+        mut spec: ContinuousJobSpec,
         checkpoint: Option<CheckpointRuntimeSpec>,
     ) -> StartObserver {
         #[cfg(test)]
         let launch_probe = self.core.next_launch_probe.lock().take();
+        if let Some(budget) = checkpoint
+            .as_ref()
+            .and_then(|checkpoint| checkpoint.config.sql_state_budget)
+        {
+            if let Err(error) = spec.plan.set_sql_state_budget(Some(budget)) {
+                return preflight_error_observer(error);
+            }
+        }
         let runtime_config_hash = match checkpoint.as_ref() {
             Some(checkpoint) => match spec.plan.runtime_config_hash(&checkpoint.config) {
                 Ok(hash) => Some(hash),

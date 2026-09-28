@@ -44,7 +44,13 @@ def _ordered() -> TableExpr:
 def _program(features: list[tuple[str, object]]) -> Program:
     quotes = _ordered()
     signals = quotes.with_columns(FeatureSet(features))
-    return Program("p", inputs=[quotes], outputs=[("signals", signals)])
+    return Program("p", engine="sql", inputs=[quotes], outputs=[("signals", signals)])
+
+
+def _stream_copy(program: Program) -> Program:
+    return Program(
+        program.name, engine="streaming", inputs=program.inputs, outputs=program.outputs
+    )
 
 
 def _rolling_nodes(document: dict[str, object]) -> list[dict[str, object]]:
@@ -407,7 +413,7 @@ def test_row_local_bridge_materializes_between_rolling_stages() -> None:
         "signals__cf_rolling_2",
         "signals",
     ]
-    program.compile_stream(Runtime())
+    _stream_copy(program).compile_stream(Runtime())
 
 
 def test_row_local_rolling_operands_execute_across_scalar_shapes() -> None:
@@ -499,7 +505,9 @@ def test_lag_requires_declared_ordering() -> None:
         ],
     )
     signals = quotes.with_columns(FeatureSet([("prev", ts.lag(quotes["x"]))]))
-    program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
+    program = Program(
+        "p", engine="sql", inputs=[quotes], outputs=[("signals", signals)]
+    )
 
     with pytest.raises(CompileError, match="ordering_required"):
         lower_program_document(program, Runtime(), "batch")
@@ -536,7 +544,7 @@ def test_stream_compile_lowers_a_rolling_program() -> None:
     quotes = _ordered()
     program = _program([("prev", ts.lag(quotes["x"]))])
 
-    plan = program.compile_stream(
+    plan = _stream_copy(program).compile_stream(
         Runtime(), allowed_lateness_micros=5, late_policy="drop"
     )
 
@@ -547,7 +555,9 @@ def test_filter_below_rolling_feeds_a_prefilter_stage() -> None:
     quotes = _ordered()
     filtered = table.filter(quotes, quotes["x"] > 1.0)
     signals = filtered.with_columns(FeatureSet([("prev", ts.lag(quotes["x"]))]))
-    program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
+    program = Program(
+        "p", engine="sql", inputs=[quotes], outputs=[("signals", signals)]
+    )
 
     document = lower_program_document(program, Runtime(), "batch")
 
@@ -569,7 +579,9 @@ def test_filter_below_materialized_rolling_preserves_stage_order() -> None:
     signals = filtered.with_columns(
         FeatureSet((("previous_log", ts.lag(row.log(quotes["x"]))),))
     )
-    program = Program("p", inputs=(quotes,), outputs=(("signals", signals),))
+    program = Program(
+        "p", engine="sql", inputs=(quotes,), outputs=(("signals", signals),)
+    )
 
     document = lower_program_document(program, Runtime(), "batch")
 
@@ -595,6 +607,7 @@ def test_materialized_rolling_outputs_connect_through_input_fanout() -> None:
     )
     program = Program(
         "p",
+        engine="sql",
         inputs=(quotes,),
         outputs=(("first", first), ("second", second)),
     )
@@ -614,6 +627,7 @@ def test_identical_multi_stage_rolling_pipelines_share_physical_state() -> None:
     second = quotes.with_columns(FeatureSet((("second_mean", second_value),)))
     program = Program(
         "p",
+        engine="sql",
         inputs=(quotes,),
         outputs=(("first", first), ("second", second)),
     )
@@ -653,7 +667,9 @@ def test_filter_above_rolling_applies_after_the_rolling_stage() -> None:
     quotes = _ordered()
     featured = quotes.with_columns(FeatureSet([("prev", ts.lag(quotes["x"]))]))
     signals = table.filter(featured, featured["prev"] > 1.0)
-    program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
+    program = Program(
+        "p", engine="sql", inputs=[quotes], outputs=[("signals", signals)]
+    )
 
     document = lower_program_document(program, Runtime(), "batch")
 
@@ -691,7 +707,9 @@ def test_lower_program_document_validates_lateness_when_rolling_present() -> Non
 def test_row_local_program_ignores_lateness_arguments() -> None:
     quotes = _ordered()
     signals = quotes.with_columns(FeatureSet([("double", quotes["x"] * 2.0)]))
-    program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
+    program = Program(
+        "p", engine="sql", inputs=[quotes], outputs=[("signals", signals)]
+    )
 
     document = lower_program_document(
         program, Runtime(), "stream", allowed_lateness_micros=-1, late_policy="bogus"
@@ -705,7 +723,7 @@ def test_compile_stream_rejects_out_of_range_lateness() -> None:
     program = _program([("prev", ts.lag(quotes["x"]))])
 
     with pytest.raises(ValueError, match="unsigned"):
-        program.compile_stream(Runtime(), allowed_lateness_micros=1 << 64)
+        _stream_copy(program).compile_stream(Runtime(), allowed_lateness_micros=1 << 64)
 
 
 def test_rolling_capability_is_advertised_with_frozen_lifecycle_facts() -> None:
@@ -900,7 +918,7 @@ def test_stream_compile_lowers_an_aggregate_program() -> None:
     quotes = _ordered()
     program = _program([("avg", ts.mean(quotes["x"], window=rows(3)))])
 
-    plan = program.compile_stream(
+    plan = _stream_copy(program).compile_stream(
         Runtime(), allowed_lateness_micros=5, late_policy="drop"
     )
 

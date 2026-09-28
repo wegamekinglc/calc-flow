@@ -40,7 +40,7 @@ import calc_flow as cf
 data = pa.table({"a": [1, 3], "b": [2, 4]})
 t = cf.table_input("numbers", schema=data.schema)
 program = cf.Program(
-    "saved-totals", outputs={"totals": t.select(total=t["a"] + t["b"])}
+    "saved-totals", engine="sql", outputs={"totals": t.select(total=t["a"] + t["b"])}
 )
 document = program.to_project()
 ```

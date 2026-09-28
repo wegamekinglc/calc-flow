@@ -133,7 +133,7 @@ def test_program_copies_inputs_and_outputs_at_construction() -> None:
     quotes = _quotes()
     inputs = [quotes]
     outputs = [("signals", quotes)]
-    program = Program("p", inputs=inputs, outputs=outputs)
+    program = Program("p", engine="sql", inputs=inputs, outputs=outputs)
     inputs.append(_weights())
     outputs.append(("extra", quotes))
 
@@ -144,50 +144,61 @@ def test_program_copies_inputs_and_outputs_at_construction() -> None:
 
 def test_program_rejects_wrong_host_types() -> None:
     with pytest.raises(TypeError, match=r"^Program.name"):
-        Program(1)  # type: ignore[arg-type]
+        Program(1, engine="sql")  # type: ignore[arg-type]
     with pytest.raises(TypeError):
-        Program("p", inputs=[object()])  # type: ignore[list-item]
+        Program("p", engine="sql", inputs=[object()])  # type: ignore[list-item]
     with pytest.raises(TypeError):
-        Program("p", outputs=[("signals", object())])  # type: ignore[list-item]
+        Program("p", engine="sql", outputs=[("signals", object())])  # type: ignore[list-item]
     with pytest.raises(TypeError):
-        Program("p", outputs=[(1, _quotes())])  # type: ignore[list-item]
+        Program("p", engine="sql", outputs=[(1, _quotes())])  # type: ignore[list-item]
     with pytest.raises(ValueError, match=r"^Program.name:"):
-        Program("")
+        Program("", engine="sql")
 
 
 def test_program_rejects_derived_tables_and_wrong_domains_as_inputs() -> None:
     with pytest.raises(TypeError, match=r"^Program.inputs\[0\]:"):
         Program(
-            "p", inputs=[linalg.from_columns(_quotes(), columns=["x"], backend="numpy")]
+            "p",
+            engine="sql",
+            inputs=[linalg.from_columns(_quotes(), columns=["x"], backend="numpy")],
         )  # type: ignore[list-item]
     with pytest.raises(ValueError, match=r"^Program.inputs\[0\]:"):
-        Program("p", inputs=[_quotes().with_columns(FeatureSet())])  # type: ignore[list-item]
+        Program("p", engine="sql", inputs=[_quotes().with_columns(FeatureSet())])  # type: ignore[list-item]
 
 
 def test_program_rejects_duplicate_input_names_with_stable_paths() -> None:
     with pytest.raises(ValueError, match=r"^inputs.quotes: duplicate_name:") as exc:
-        Program("p", inputs=[_quotes(), _quotes()])
+        Program("p", engine="sql", inputs=[_quotes(), _quotes()])
     assert "quotes" in str(exc.value)
 
     with pytest.raises(ValueError, match=r"^static_inputs.weights: duplicate_name:"):
-        Program("p", inputs=[_weights(), _weights()])
+        Program("p", engine="sql", inputs=[_weights(), _weights()])
 
     with pytest.raises(ValueError, match=r"^static_inputs.quotes: duplicate_name:"):
-        Program("p", inputs=[_quotes(), parameter("quotes", kind="table", schema=[])])
+        Program(
+            "p",
+            engine="sql",
+            inputs=[_quotes(), parameter("quotes", kind="table", schema=[])],
+        )
 
 
 def test_program_rejects_duplicate_output_names_with_stable_paths() -> None:
     quotes = _quotes()
     with pytest.raises(ValueError, match=r"^outputs.signals: duplicate_name:"):
         Program(
-            "p", inputs=[quotes], outputs=[("signals", quotes), ("signals", quotes)]
+            "p",
+            engine="sql",
+            inputs=[quotes],
+            outputs=[("signals", quotes), ("signals", quotes)],
         )
 
 
 def test_program_equality_is_object_identity_only() -> None:
     quotes = _quotes()
-    program = Program("p", inputs=[quotes], outputs=[("signals", quotes)])
-    equal_looking = Program("p", inputs=[quotes], outputs=[("signals", quotes)])
+    program = Program("p", engine="sql", inputs=[quotes], outputs=[("signals", quotes)])
+    equal_looking = Program(
+        "p", engine="sql", inputs=[quotes], outputs=[("signals", quotes)]
+    )
 
     assert program == program
     assert program != equal_looking
@@ -195,7 +206,7 @@ def test_program_equality_is_object_identity_only() -> None:
 
 def test_with_input_and_output_build_new_programs() -> None:
     quotes = _quotes()
-    program = Program("p")
+    program = Program("p", engine="sql")
     with_quotes = program.with_input(quotes)
     complete = with_quotes.output("signals", quotes)
 
@@ -210,6 +221,7 @@ def test_program_fingerprint_matches_frozen_golden_vector() -> None:
     quotes = table_input("quotes", schema=[Field("x", "float64")])
     program = Program(
         "p",
+        engine="sql",
         inputs=[quotes],
         outputs=[("signals", quotes)],
     )
@@ -225,6 +237,7 @@ def test_program_fingerprint_ignores_construction_order_not_declaration_order() 
         quotes = _quotes()
         return Program(
             "p",
+            engine="sql",
             inputs=[quotes],
             outputs=[
                 ("signals", quotes.with_columns(FeatureSet([("score", left + right)])))
@@ -243,16 +256,19 @@ def test_program_fingerprint_ignores_construction_order_not_declaration_order() 
     table = quotes.with_columns(FeatureSet())
     direct = Program(
         "p",
+        engine="sql",
         inputs=[quotes, weights],
         outputs=[("signals", table), ("scores", scores)],
     )
     reordered_inputs = Program(
         "p",
+        engine="sql",
         inputs=[weights, quotes],
         outputs=[("signals", table), ("scores", scores)],
     )
     reordered_outputs = Program(
         "p",
+        engine="sql",
         inputs=[quotes, weights],
         outputs=[("scores", scores), ("signals", table)],
     )
@@ -263,7 +279,7 @@ def test_program_fingerprint_ignores_construction_order_not_declaration_order() 
 
 def test_program_fingerprint_needs_no_runtime() -> None:
     quotes = _quotes()
-    program = Program("p", inputs=[quotes], outputs=[("signals", quotes)])
+    program = Program("p", engine="sql", inputs=[quotes], outputs=[("signals", quotes)])
 
     assert program.fingerprint == program.fingerprint
     assert len(program.fingerprint) == 64

@@ -18,7 +18,8 @@ For end-to-end batch, continuous, recovery, static NumPy/JAX matrix, Studio
 inspection, and performance workflows, see the
 [expression workflow guide](symbolic-workflows.md).
 
-Use `import calc_flow as cf` for typed immutable expressions and programs.
+Use `import calc_flow as cf` for typed immutable expressions and reusable
+programs.
 `cf.compute` derives a declaration from Arrow schema and returns an Arrow table;
 `TableExpr.collect` and `Program.collect` execute reusable declarations.
 `sql` and `pipe` compose those declarations, and `stream` exposes their owned
@@ -58,6 +59,7 @@ t = cf.table_input("orders", schema=data.schema)
 gross = t["quantity"] * t["unit_price"]
 program = cf.Program(
     "orders",
+    engine="sql",
     outputs={
         "totals": t.select("order_id", gross=gross),
         "quantities": t.select("order_id", "quantity"),
@@ -174,13 +176,21 @@ standalone array Program outputs are not supported. Matrix calculations must
 use the documented table-attachment shape and explicit provider registration.
 
 Batch SQL can join multiple aliases. Stream compilation rejects more than one
-alias before any source opens, even if aliases share a root. Accepted stream SQL
-runs separately for each native input batch: SQL aggregation, ordering, limits,
-and window functions are batch-local. Native rolling, event windows, and bounded
-stream joins have their separately declared cross-batch semantics. Use
+alias before any source opens, even if aliases share a root. Stream SQL with an
+ordinary aggregate or `GROUP BY` retains input and emits the full cumulative
+result after every batch. There is no fixed SQL state cap by default; an
+optional `StreamRuntimeConfig.sql_state_budget` enforces application limits.
+Each snapshot reruns the query over all retained input. Other SQL stays
+batch-local. `ORDER BY` and `LIMIT` apply to the current
+snapshot; SQL window functions alone remain batch-local. These aggregate
+snapshots repeat unchanged groups, so downstream operators receive them as new
+rows. Native rolling, event windows, and bounded stream joins have their
+separately declared cross-batch semantics. Use
 [SQL composition](../examples/19_sql_expression_pipeline.py),
 [named SQL inputs](../examples/02_sql_join.py), and the
 [rolling-to-SQL stream](../examples/20_streaming_pipeline.py) as executable examples.
+The [engine selection example](../examples/29_sql_stream_switch.py) executes
+the same SQL declaration through two separately selected `Program` instances.
 
 ## Symbolic compilation
 
@@ -686,8 +696,8 @@ including declaration-only `window_tumbling@1`/`window_hopping@1` nodes and
 `linalg`/`parameter` uses that do not form the exact symbolic matrix compilation
 shape above — fail with `unknown_primitive_version` rooted at the output or
 `static_inputs.<name>`, in both batch and stream modes. Native stateful
-operators retain their declared finality; explicit stream SQL uses the per-batch
-semantics described in [SQL composition](#sql-composition). Standalone array outputs fail
+operators retain their declared finality; explicit stream SQL uses the snapshot
+or batch-local semantics described in [SQL composition](#sql-composition). Standalone array outputs fail
 with `unknown_primitive_version` in batch mode; stream mode rejects them
 earlier, at the analysis phase, with `unbounded_state` rooted at
 `outputs.<name>` — the stream-safety rule for an array output with row-axis

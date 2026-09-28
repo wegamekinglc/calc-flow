@@ -151,6 +151,7 @@ async def main() -> None:
     source = cf.table_input("events", schema=pa.schema([("value", pa.int64())]))
     program = cf.Program(
         "branches",
+        engine="streaming",
         outputs={
             "double": source.select(value2=source["value"] * 2),
             "large": source.filter(source["value"] >= 2).select("value"),
@@ -209,7 +210,7 @@ events = cf.table_input(
 calculation = events.with_columns(avg=cf.ts.mean(events["x"], window=cf.rows(2)))
 routed = cf.with_late_output(calculation)
 program = cf.Program(
-    "late-demo", outputs={"normal": routed.output, "late": routed.late}
+    "late-demo", engine="streaming", outputs={"normal": routed.output, "late": routed.late}
 )
 
 
@@ -317,11 +318,11 @@ and a branch with no late rows still participates in each checkpoint epoch.
 There is no total arrival order across normal and late outputs.
 
 A late branch can end at a Sink or pass through built-in single-input table
-expressions or per-batch SQL before a Sink. Temporal successors, Union,
+expressions or single-input SQL before a Sink. Temporal successors, Union,
 multi-input merges, external operators, and array paths are rejected, including
-after an allowed transform. Per-batch SQL results follow the SQL contract:
-`COUNT(*)`, for example, depends on chunk boundaries and does not inherit
-the raw late port's row-level equivalence across different chunk sizes.
+after an allowed transform. Aggregate SQL such as `COUNT(*)` emits cumulative
+snapshots as late batches arrive. Intermediate snapshots depend on chunk
+boundaries and do not inherit the raw late port's row-level equivalence.
 `late_rows` counts rows excluded from normal computation; observe Sink/edge
 metrics for delivered rows.
 
@@ -480,11 +481,20 @@ slow consumers. `StreamRuntimeConfig.edge_budget` also bounds each iterable
 input batch; schema mismatches and oversized batches fail with the input name.
 This does not bound tables that application code accumulates after reading them.
 
-A streaming SQL stage supports exactly one alias and evaluates its query
-separately for each native input batch. SQL aggregates, `ORDER BY`, `LIMIT`, and
-SQL window functions do not retain cross-batch SQL state. Multi-alias SQL is a
-batch operation. Use native `ts` operations for rolling state and the documented
-window/join declarations for event-time aggregation and matching.
+A streaming SQL stage supports exactly one alias. Ordinary aggregates and
+`GROUP BY` retain input and emit a full cumulative result after each batch.
+For example, `SELECT SUM(value) AS total FROM input` emits `1` after `[1]` and
+`6` after `[2, 3]`; grouped snapshots include every current group, including
+unchanged ones. Each batch reruns the query over retained input, and the state
+is checkpointed. There is no fixed SQL state cap by default. Supply
+`StreamRuntimeConfig(sql_state_budget=StateBudget(20_000_000, 8 << 30))`
+to enforce application limits; retained memory, checkpoint size, and query
+cost grow with stream length.
+Other SQL remains batch-local. `ORDER BY` and `LIMIT` apply to each snapshot;
+SQL window functions alone remain batch-local. Downstream stages receive each
+snapshot as new rows. Multi-alias SQL is a batch operation. Use native `ts`
+operations for rolling state and the documented window/join declarations for
+event-time aggregation and matching.
 
 SQL results have a new row lineage and no inherited temporal ordering. The
 supported pipeline above calculates rolling values before SQL, then may apply

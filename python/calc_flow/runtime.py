@@ -559,12 +559,27 @@ class EdgeBudget:
 
 
 @dataclass(frozen=True, slots=True)
+class StateBudget:
+    """Optional logical row and byte limit for retained SQL aggregate input."""
+
+    max_rows: int
+    max_bytes: int
+
+    def __post_init__(self) -> None:
+        for name in ("max_rows", "max_bytes"):
+            value = getattr(self, name)
+            if type(value) is not int or not 0 < value <= 9_007_199_254_740_991:
+                raise ValueError(f"{name} must be a positive JSON-safe integer")
+
+
+@dataclass(frozen=True, slots=True)
 class StreamRuntimeConfig:
     """Immutable runtime tuning excluded from the plan fingerprint."""
 
     checkpoint_interval: timedelta = timedelta(seconds=60)
     checkpoint_timeout: timedelta = timedelta(minutes=10)
     edge_budget: EdgeBudget = EdgeBudget()
+    sql_state_budget: StateBudget | None = None
     retained_epochs: int = 2
 
     def _native(self) -> dict[str, int]:
@@ -572,7 +587,11 @@ class StreamRuntimeConfig:
             raise TypeError("edge_budget must be a calc_flow.EdgeBudget")
         if type(self.retained_epochs) is not int or self.retained_epochs <= 0:
             raise ValueError("retained_epochs must be a positive integer")
-        return {
+        if self.sql_state_budget is not None and not isinstance(
+            self.sql_state_budget, StateBudget
+        ):
+            raise TypeError("sql_state_budget must be a calc_flow.StateBudget or None")
+        values = {
             "checkpoint_interval_micros": _duration_micros(
                 self.checkpoint_interval, "checkpoint_interval"
             ),
@@ -583,6 +602,10 @@ class StreamRuntimeConfig:
             "edge_max_bytes": self.edge_budget.max_bytes,
             "retained_epochs": self.retained_epochs,
         }
+        if self.sql_state_budget is not None:
+            values["sql_state_max_rows"] = self.sql_state_budget.max_rows
+            values["sql_state_max_bytes"] = self.sql_state_budget.max_bytes
+        return values
 
 
 class ManagedCheckpointRuntime:

@@ -57,6 +57,16 @@ def _execute(program: Program, table: pa.Table) -> pa.Table:
     return result.outputs["output"].to_pyarrow()
 
 
+def _stream_copy(program: Program) -> Program:
+    return Program(
+        program.name, engine="streaming", inputs=program.inputs, outputs=program.outputs
+    )
+
+
+def _compile_stream_copy(program: Program) -> None:
+    _stream_copy(program).compile_stream(Runtime())
+
+
 def _assert_optional_floats(
     actual: list[float | None], expected: list[float | None]
 ) -> None:
@@ -159,6 +169,7 @@ def test_finance_style_returns_momentum_and_bollinger_match_reference() -> None:
     )
     program = Program(
         "finance-temporal-reference",
+        engine="sql",
         inputs=(quotes,),
         outputs=(("signals", quotes.with_columns(features)),),
     )
@@ -213,6 +224,7 @@ def test_finance_style_ewma_and_macd_match_independent_reference() -> None:
     )
     program = Program(
         "finance-exponential-reference",
+        engine="sql",
         inputs=(quotes,),
         outputs=(("signals", quotes.with_columns(features)),),
     )
@@ -293,6 +305,7 @@ def test_finance_style_ewma_isolates_entities_under_interleaving() -> None:
     features = FeatureSet((("ema_3", ts.ewma(quotes["price"], span=3, min_periods=2)),))
     program = Program(
         "finance-ewma-entity-isolation",
+        engine="sql",
         inputs=(quotes,),
         outputs=(("signals", quotes.with_columns(features)),),
     )
@@ -354,6 +367,7 @@ def test_finance_style_rsi_composition_matches_independent_reference() -> None:
     )
     program = Program(
         "finance-rsi-reference",
+        engine="sql",
         inputs=(quotes,),
         outputs=(("signals", quotes.with_columns(features)),),
     )
@@ -412,6 +426,7 @@ def test_finance_style_cross_section_uses_calc_flow_frozen_semantics() -> None:
     )
     program = Program(
         "finance-cross-section-reference",
+        engine="sql",
         inputs=(quotes,),
         outputs=(("signals", quotes.with_columns(features)),),
     )
@@ -489,6 +504,7 @@ def test_cross_section_mean_broadcasts_valid_group_sample() -> None:
     group = exact_time(quotes["ts"])
     program = Program(
         "cross-section-mean",
+        engine="sql",
         inputs=(quotes,),
         outputs=(
             (
@@ -521,7 +537,7 @@ def test_cross_section_mean_broadcasts_valid_group_sample() -> None:
     output = _execute(program, table)
     assert output["mean"].to_pylist() == pytest.approx([7.0 / 3.0] * 5)
     assert output["insufficient"].to_pylist() == [None] * 5
-    program.compile_stream(Runtime())
+    _compile_stream_copy(program)
 
 
 def test_cross_section_fraction_selection_uses_average_tie_rank() -> None:
@@ -529,6 +545,7 @@ def test_cross_section_fraction_selection_uses_average_tie_rank() -> None:
     group = exact_time(quotes["ts"])
     program = Program(
         "cross-section-fraction-selection",
+        engine="sql",
         inputs=(quotes,),
         outputs=(
             (
@@ -565,7 +582,7 @@ def test_cross_section_fraction_selection_uses_average_tie_rank() -> None:
     output = _execute(program, table)
     assert output["top_half"].to_pylist() == [False, False, False, True, None]
     assert output["bottom_half"].to_pylist() == [True, False, False, False, None]
-    program.compile_stream(Runtime())
+    _compile_stream_copy(program)
 
 
 def test_rolling_boolean_reductions_ignore_null_samples() -> None:
@@ -573,6 +590,7 @@ def test_rolling_boolean_reductions_ignore_null_samples() -> None:
     flag = quotes["price"] > 0.0
     program = Program(
         "rolling-boolean-reductions",
+        engine="sql",
         inputs=(quotes,),
         outputs=(
             (
@@ -605,7 +623,7 @@ def test_rolling_boolean_reductions_ignore_null_samples() -> None:
     output = _execute(program, table)
     assert output["all_true"].to_pylist() == [False, False, None, True, True]
     assert output["any_true"].to_pylist() == [False, False, None, True, True]
-    program.compile_stream(Runtime())
+    _compile_stream_copy(program)
 
 
 def test_positive_window_reductions_ignore_nonpositive_and_missing_values() -> None:
@@ -613,6 +631,7 @@ def test_positive_window_reductions_ignore_nonpositive_and_missing_values() -> N
     price = quotes["price"]
     program = Program(
         "positive-window-reductions",
+        engine="sql",
         inputs=(quotes,),
         outputs=(
             (
@@ -646,7 +665,7 @@ def test_positive_window_reductions_ignore_nonpositive_and_missing_values() -> N
         output["positive_mean"].to_pylist(),
         [0.0, 0.0, 2.0, 2.0, 3.0, 4.0],
     )
-    program.compile_stream(Runtime())
+    _compile_stream_copy(program)
 
 
 def test_cross_section_regression_residual_uses_pairwise_valid_rows() -> None:
@@ -654,6 +673,7 @@ def test_cross_section_regression_residual_uses_pairwise_valid_rows() -> None:
     group = exact_time(quotes["ts"], partition_by=(quotes["sector"],))
     program = Program(
         "cross-section-regression-residual",
+        engine="sql",
         inputs=(quotes,),
         outputs=(
             (
@@ -687,7 +707,7 @@ def test_cross_section_regression_residual_uses_pairwise_valid_rows() -> None:
         output["residual"].to_pylist(),
         [-7 / 35, -8 / 35, 26 / 35, None, -11 / 35, None],
     )
-    program.compile_stream(Runtime())
+    _compile_stream_copy(program)
 
     async def feed():
         yield table.slice(0, 2)
@@ -695,7 +715,7 @@ def test_cross_section_regression_residual_uses_pairwise_valid_rows() -> None:
 
     async def stream_residuals() -> list[float | None]:
         values: list[float | None] = []
-        async with program.stream({"quotes": feed()}) as results:
+        async with _stream_copy(program).stream({"quotes": feed()}) as results:
             async for event in results:
                 values.extend(event.table["residual"].to_pylist())
         return values
@@ -709,6 +729,7 @@ def test_cross_section_regression_residual_centers_large_predictors() -> None:
     quotes = _ordered_quotes()
     program = Program(
         "cross-section-centered-regression",
+        engine="sql",
         inputs=(quotes,),
         outputs=(
             (
@@ -752,6 +773,7 @@ def test_cross_section_regression_residual_handles_opposite_extreme_values(
     quotes = _ordered_quotes()
     program = Program(
         "cross-section-extreme-regression",
+        engine="sql",
         inputs=(quotes,),
         outputs=(
             (
@@ -792,6 +814,7 @@ def test_cross_section_regression_residual_handles_extreme_scales(
     quotes = _ordered_quotes()
     program = Program(
         "cross-section-underflowed-covariance",
+        engine="sql",
         inputs=(quotes,),
         outputs=(
             (
@@ -831,6 +854,7 @@ def test_rolling_order_unique_and_decay_match_reference() -> None:
     frame = rows(3)
     program = Program(
         "rolling-order-unique-decay",
+        engine="sql",
         inputs=(quotes,),
         outputs=(
             (
@@ -874,7 +898,7 @@ def test_rolling_order_unique_and_decay_match_reference() -> None:
         output["decay"].to_pylist(),
         [2.0, 13 / 5, 17 / 6, 2.0, 9 / 5, 14 / 5],
     )
-    program.compile_stream(Runtime())
+    _compile_stream_copy(program)
 
     async def feed():
         yield table.slice(0, 2)
@@ -893,7 +917,7 @@ def test_rolling_order_unique_and_decay_match_reference() -> None:
                 "decay",
             )
         }
-        async with program.stream({"quotes": feed()}) as results:
+        async with _stream_copy(program).stream({"quotes": feed()}) as results:
             async for event in results:
                 for name in columns:
                     columns[name].extend(event.table[name].to_pylist())
@@ -909,6 +933,7 @@ def test_row_finance_math_functions_execute_in_batch_and_compile_stream() -> Non
     price = quotes["price"]
     program = Program(
         "row-finance-math",
+        engine="sql",
         inputs=(quotes,),
         outputs=(
             (
@@ -966,7 +991,7 @@ def test_row_finance_math_functions_execute_in_batch_and_compile_stream() -> Non
     assert output["ceil"].to_pylist() == [-2.0, 1.0, 2.0, None]
     assert output["floor"].to_pylist() == [-2.0, 0.0, 2.0, None]
     assert output["rounded"].to_pylist() == [-2.0, 1.0, 2.0, None]
-    program.compile_stream(Runtime())
+    _compile_stream_copy(program)
 
 
 def test_row_finance_math_accepts_integer_columns() -> None:
@@ -974,6 +999,7 @@ def test_row_finance_math_accepts_integer_columns() -> None:
     sequence = quotes["seq"]
     program = Program(
         "row-integer-math",
+        engine="sql",
         inputs=(quotes,),
         outputs=(
             (
@@ -1021,6 +1047,7 @@ def test_inverse_normal_cdf_matches_reference_probabilities() -> None:
     quotes = _ordered_quotes()
     program = Program(
         "inverse-normal-cdf",
+        engine="sql",
         inputs=(quotes,),
         outputs=(
             (
@@ -1052,13 +1079,14 @@ def test_inverse_normal_cdf_matches_reference_probabilities() -> None:
     assert result[1] == pytest.approx(0.0, abs=1e-12)
     assert result[2] == pytest.approx(1.959963984540054, abs=1e-8)
     assert result[3] is None
-    program.compile_stream(Runtime())
+    _compile_stream_copy(program)
 
 
 def test_inverse_normal_cdf_handles_domain_edges_and_tails() -> None:
     quotes = _ordered_quotes()
     program = Program(
         "inverse-normal-domain",
+        engine="sql",
         inputs=(quotes,),
         outputs=(("signals", quotes.with_columns(score=row.norminv(quotes["price"]))),),
     )
@@ -1092,6 +1120,7 @@ def test_pairwise_extrema_skip_nan_and_null_on_either_side() -> None:
     price = quotes["price"]
     program = Program(
         "pairwise-extrema",
+        engine="sql",
         inputs=(quotes,),
         outputs=(
             (
@@ -1136,6 +1165,7 @@ def test_isnan_and_sign_distinguish_nan_from_null() -> None:
     quotes = _ordered_quotes()
     program = Program(
         "nan-sign",
+        engine="sql",
         inputs=(quotes,),
         outputs=(
             (
@@ -1172,6 +1202,7 @@ def test_boolean_windows_skip_nan_numeric_samples() -> None:
     quotes = _ordered_quotes()
     program = Program(
         "boolean-numeric-nan",
+        engine="sql",
         inputs=(quotes,),
         outputs=(
             (
@@ -1209,6 +1240,7 @@ def test_cumulative_average_and_last_valid_survive_missing_values() -> None:
     price = quotes["price"]
     program = Program(
         "cumulative-average-and-last",
+        engine="sql",
         inputs=(quotes,),
         outputs=(
             (
@@ -1239,13 +1271,14 @@ def test_cumulative_average_and_last_valid_survive_missing_values() -> None:
     output = _execute(program, table)
     _assert_optional_floats(output["average"].to_pylist(), [2.0, 2.0, 3.0, 3.0, 14 / 3])
     assert output["last_valid"].to_pylist() == [2.0, 2.0, 4.0, 4.0, 8.0]
-    program.compile_stream(Runtime())
+    _compile_stream_copy(program)
 
 
 def test_cumulative_average_handles_opposite_extreme_values() -> None:
     quotes = _ordered_quotes()
     program = Program(
         "cumulative-extreme-average",
+        engine="sql",
         inputs=(quotes,),
         outputs=(
             ("signals", quotes.with_columns(average=ts.average(quotes["price"]))),
@@ -1274,6 +1307,7 @@ def test_last_valid_replaces_infinity_with_new_finite_value() -> None:
     quotes = _ordered_quotes()
     program = Program(
         "last-after-infinity",
+        engine="sql",
         inputs=(quotes,),
         outputs=(
             ("signals", quotes.with_columns(last_valid=ts.last(quotes["price"]))),
@@ -1304,7 +1338,7 @@ def test_last_valid_replaces_infinity_with_new_finite_value() -> None:
 
     async def stream_values() -> list[float | None]:
         values: list[float | None] = []
-        async with program.stream({"quotes": feed()}) as results:
+        async with _stream_copy(program).stream({"quotes": feed()}) as results:
             async for event in results:
                 values.extend(event.table["last_valid"].to_pylist())
         return values
@@ -1317,6 +1351,7 @@ def test_rolling_order_treats_signed_zeros_as_equal() -> None:
     price = quotes["price"]
     program = Program(
         "rolling-signed-zero",
+        engine="sql",
         inputs=(quotes,),
         outputs=(
             (

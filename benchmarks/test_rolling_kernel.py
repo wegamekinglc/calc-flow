@@ -53,6 +53,7 @@ def _symbolic_plan(*, dual: bool) -> tuple[object, str]:
     output = quotes.with_columns(FeatureSet((("indicator", indicator),)))
     program = Program(
         "rolling-kernel-paired",
+        engine="sql",
         inputs=(quotes,),
         outputs=(("output", output),),
     )

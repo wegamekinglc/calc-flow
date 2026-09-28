@@ -72,7 +72,12 @@ def _rolling_program(window: int) -> Program:
     signals = quotes.with_columns(
         FeatureSet([("avg", ts.mean(quotes["x"], window=rows(window)))])
     )
-    return Program("late-policy", inputs=[quotes], outputs=[("signals", signals)])
+    return Program(
+        "late-policy",
+        engine="streaming",
+        inputs=[quotes],
+        outputs=[("signals", signals)],
+    )
 
 
 def _row(seconds: int, value: float) -> pa.Table:
@@ -377,6 +382,7 @@ def _join_program() -> Program:
     )
     return Program(
         "join-fanout",
+        engine="streaming",
         inputs=[left, right],
         outputs=[("settled", settled), ("amounts", amounts)],
     )

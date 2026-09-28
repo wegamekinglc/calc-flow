@@ -51,7 +51,9 @@ def build_project(directory: Path, format_name: str) -> ProjectDocument:
         cf.Field("price", "float64"),
     ]
     orders = cf.table_input("orders", schema=schema)
-    graph = cf.Program("file-source", outputs={"totals": orders.pipe(order_totals)})
+    graph = cf.Program(
+        "file-source", engine="streaming", outputs={"totals": orders.pipe(order_totals)}
+    )
     return ProjectDocument.model_validate(
         {
             **graph.to_project(mode="stream").model_dump(),

@@ -82,6 +82,7 @@ def _row_local_program() -> Program:
     quotes = _quotes_plain()
     return Program(
         "p",
+        engine="sql",
         inputs=[quotes],
         outputs=[
             (
@@ -122,6 +123,7 @@ def test_unknown_field_reference_fails_from_named_output() -> None:
     quotes = _quotes_plain()
     program = Program(
         "p",
+        engine="sql",
         inputs=[quotes],
         outputs=[
             (
@@ -143,6 +145,7 @@ def test_nested_unknown_field_reports_operand_path() -> None:
     quotes = _quotes_plain()
     program = Program(
         "p",
+        engine="sql",
         inputs=[quotes],
         outputs=[
             (
@@ -164,6 +167,7 @@ def test_column_operators_reject_mixed_input_lineage() -> None:
     trades = _trades_plain()
     program = Program(
         "p",
+        engine="sql",
         inputs=[quotes, trades],
         outputs=[
             (
@@ -184,6 +188,7 @@ def test_undeclared_input_reference_is_reported_at_input_path() -> None:
     trades = _trades_plain()
     program = Program(
         "p",
+        engine="sql",
         inputs=[quotes],
         outputs=[("trades_out", trades.with_columns(FeatureSet()))],
     )
@@ -199,6 +204,7 @@ def test_incompatible_operand_types_require_explicit_cast() -> None:
     quotes = _quotes_plain()
     program = Program(
         "p",
+        engine="sql",
         inputs=[quotes],
         outputs=[
             (
@@ -221,6 +227,7 @@ def test_incompatible_operand_types_require_explicit_cast() -> None:
 
     literal_program = Program(
         "p",
+        engine="sql",
         inputs=[quotes],
         outputs=[
             (
@@ -241,6 +248,7 @@ def test_matmul_propagates_symbolic_dimensions_and_row_lineage() -> None:
     )
     program = Program(
         "p",
+        engine="sql",
         inputs=[quotes, _weights()],
         outputs=[("scores", scores)],
     )
@@ -263,6 +271,7 @@ def test_attached_array_derives_table_fields_with_types() -> None:
     signals = table.attach_columns(quotes, scores, names=("score",))
     program = Program(
         "p",
+        engine="sql",
         inputs=[quotes, _weights()],
         outputs=[("signals", signals)],
     )
@@ -284,6 +293,7 @@ def test_matmul_rejects_inner_dimension_mismatch_with_d12_path() -> None:
     )
     program = Program(
         "p",
+        engine="sql",
         inputs=[quotes, weights],
         outputs=[
             (
@@ -334,6 +344,7 @@ def test_matmul_rejects_rank_and_backend_mismatch_but_promotes_safe_dtype() -> N
     for name, weights in (("flat", flat), ("jax", jax_weights)):
         program = Program(
             "p",
+            engine="sql",
             inputs=[quotes, weights],
             outputs=[("scores", linalg.matmul(base, weights))],
         )
@@ -344,6 +355,7 @@ def test_matmul_rejects_rank_and_backend_mismatch_but_promotes_safe_dtype() -> N
 
     promoted = Program(
         "p",
+        engine="sql",
         inputs=[quotes, float32],
         outputs=[("scores", linalg.matmul(base, float32))],
     )
@@ -371,6 +383,7 @@ def test_attach_rejects_foreign_row_axis_lineage() -> None:
 
     program = Program(
         "p",
+        engine="sql",
         inputs=[quotes, trades],
         outputs=[("signals", table.attach_columns(quotes, foreign, names=("v",)))],
     )
@@ -385,6 +398,7 @@ def test_attach_rejects_width_and_name_collisions() -> None:
 
     width_program = Program(
         "p",
+        engine="sql",
         inputs=[quotes],
         outputs=[("signals", table.attach_columns(quotes, wide, names=("score",)))],
     )
@@ -393,6 +407,7 @@ def test_attach_rejects_width_and_name_collisions() -> None:
 
     collision_program = Program(
         "p",
+        engine="sql",
         inputs=[quotes],
         outputs=[("signals", table.attach_columns(quotes, wide, names=("v", "x")))],
     )
@@ -410,6 +425,7 @@ def test_with_columns_rejects_foreign_lineage_and_name_collisions() -> None:
 
     lineage_program = Program(
         "p",
+        engine="sql",
         inputs=[quotes, trades],
         outputs=[
             (
@@ -423,6 +439,7 @@ def test_with_columns_rejects_foreign_lineage_and_name_collisions() -> None:
 
     collision_program = Program(
         "p",
+        engine="sql",
         inputs=[quotes],
         outputs=[
             (
@@ -439,6 +456,7 @@ def test_stream_mode_requires_event_time_entity_and_sequence() -> None:
     quotes = _quotes_plain()
     program = Program(
         "p",
+        engine="sql",
         inputs=[quotes],
         outputs=[
             (
@@ -483,6 +501,7 @@ def test_stream_mode_validates_ordering_field_types() -> None:
     )
     program = Program(
         "p",
+        engine="streaming",
         inputs=[quotes],
         outputs=[
             (
@@ -512,6 +531,7 @@ def test_stream_mode_rejects_unbounded_table_derived_array_output() -> None:
     scores = linalg.from_columns(quotes, columns=["x", "y"], backend="numpy")
     program = Program(
         "p",
+        engine="sql",
         inputs=[quotes],
         outputs=[("scores", scores)],
     )
@@ -531,6 +551,7 @@ def test_stream_mode_rejects_unbounded_table_derived_array_output() -> None:
     )
     attached_program = Program(
         "p",
+        engine="sql",
         inputs=[quotes, _weights()],
         outputs=[("signals", attached)],
     )
@@ -542,6 +563,7 @@ def test_filter_rejects_foreign_lineage_and_non_bool_predicates() -> None:
     trades = _trades_plain()
     lineage_program = Program(
         "p",
+        engine="sql",
         inputs=[quotes, trades],
         outputs=[("signals", table.filter(quotes, trades["y"] > 0.0))],
     )
@@ -550,6 +572,7 @@ def test_filter_rejects_foreign_lineage_and_non_bool_predicates() -> None:
 
     type_program = Program(
         "p",
+        engine="sql",
         inputs=[quotes],
         outputs=[("signals", table.filter(quotes, quotes["x"]))],
     )
@@ -561,6 +584,7 @@ def test_window_derives_window_schema_and_checks_event_time_field() -> None:
     quotes = _quotes_ordered()
     program = Program(
         "p",
+        engine="streaming",
         inputs=[quotes],
         outputs=[
             (
@@ -578,6 +602,7 @@ def test_window_derives_window_schema_and_checks_event_time_field() -> None:
 
     broken = Program(
         "p",
+        engine="streaming",
         inputs=[quotes],
         outputs=[
             (
@@ -605,6 +630,7 @@ def test_capability_snapshot_gates_portable_types_and_batch_kinds() -> None:
 
     program = Program(
         "p",
+        engine="sql",
         inputs=[quotes],
         outputs=[
             (
@@ -631,6 +657,7 @@ def test_capability_snapshot_gates_portable_types_and_batch_kinds() -> None:
 
     array_program = Program(
         "p",
+        engine="sql",
         inputs=[quotes, _weights()],
         outputs=[
             (
@@ -651,6 +678,7 @@ def test_explain_reports_state_requirements_per_output() -> None:
     quotes = _quotes_ordered()
     program = Program(
         "p",
+        engine="sql",
         inputs=[quotes],
         outputs=[
             (
@@ -684,6 +712,7 @@ def test_explain_reports_constant_exponential_state() -> None:
     quotes = _quotes_ordered()
     program = Program(
         "p",
+        engine="streaming",
         inputs=[quotes],
         outputs=[
             (
@@ -753,6 +782,7 @@ def _feature_program(
     extra_inputs = rest.get("extra_inputs", ())
     return Program(
         "p",
+        engine="sql",
         inputs=[quotes, *extra_inputs],  # type: ignore[list-item]
         outputs=[("signals", quotes.with_columns(FeatureSet([(name, value)])))],  # type: ignore[arg-type]
     )
@@ -773,6 +803,7 @@ def test_stream_mode_requires_ordering_for_lag_and_delta() -> None:
     quotes = _quotes_plain()
     program = Program(
         "p",
+        engine="sql",
         inputs=[quotes],
         outputs=[
             (
@@ -869,7 +900,9 @@ def test_analysis_accepts_row_local_derived_columns_and_input_aliases() -> None:
             )
         )
     )
-    program = Program("p", inputs=(quotes,), outputs=(("signals", signals),))
+    program = Program(
+        "p", engine="sql", inputs=(quotes,), outputs=(("signals", signals),)
+    )
 
     result = program.analyze(Runtime(), mode="batch")
 
@@ -885,7 +918,9 @@ def test_direct_input_alias_remains_analyzable_and_compilable() -> None:
     signals = filtered.with_columns(
         FeatureSet((("price_previous", ts.lag(filtered["price"])),))
     )
-    program = Program("p", inputs=(quotes,), outputs=(("signals", signals),))
+    program = Program(
+        "p", engine="sql", inputs=(quotes,), outputs=(("signals", signals),)
+    )
 
     assert program.analyze(Runtime(), mode="batch").issues == ()
     program.compile_batch(Runtime())
@@ -895,7 +930,9 @@ def test_original_column_after_row_local_derivation_remains_materializable() -> 
     quotes = _quotes_ordered()
     derived = quotes.with_columns(FeatureSet((("adjusted", quotes["x"] + 1.0),)))
     signals = derived.with_columns(FeatureSet((("previous", ts.lag(derived["x"])),)))
-    program = Program("p", inputs=(quotes,), outputs=(("signals", signals),))
+    program = Program(
+        "p", engine="sql", inputs=(quotes,), outputs=(("signals", signals),)
+    )
 
     assert program.analyze(Runtime(), mode="batch").issues == ()
     program.compile_batch(Runtime())
@@ -911,6 +948,7 @@ def test_non_row_local_table_boundary_is_not_a_rolling_operand() -> None:
     signals = attached.with_columns(FeatureSet((("previous", ts.lag(attached["x"])),)))
     program = Program(
         "p",
+        engine="sql",
         inputs=(quotes, _weights()),
         outputs=(("signals", signals),),
     )
@@ -930,6 +968,7 @@ def test_where_condition_and_coalesce_operands_respect_lineage() -> None:
 
     where_program = Program(
         "p",
+        engine="sql",
         inputs=[quotes, trades],
         outputs=[
             (
@@ -955,6 +994,7 @@ def test_where_condition_and_coalesce_operands_respect_lineage() -> None:
 
     coalesce_program = Program(
         "p",
+        engine="sql",
         inputs=[quotes, trades],
         outputs=[
             (
@@ -976,6 +1016,7 @@ def test_where_condition_state_propagates_to_result() -> None:
     quotes = _quotes_ordered()
     program = Program(
         "p",
+        engine="sql",
         inputs=[quotes],
         outputs=[
             (
@@ -1008,6 +1049,7 @@ def test_cross_section_group_columns_are_analyzed() -> None:
 
     unresolved = Program(
         "p",
+        engine="sql",
         inputs=[quotes],
         outputs=[
             (
@@ -1034,6 +1076,7 @@ def test_cross_section_group_columns_are_analyzed() -> None:
 
     lineage = Program(
         "p",
+        engine="sql",
         inputs=[quotes, trades],
         outputs=[
             (
@@ -1064,6 +1107,7 @@ def test_cross_section_group_columns_are_analyzed() -> None:
 
     value_mismatch = Program(
         "p",
+        engine="sql",
         inputs=[quotes, trades],
         outputs=[
             (
@@ -1093,6 +1137,7 @@ def test_window_output_has_no_row_axis_lineage() -> None:
     derived = linalg.from_columns(windows, columns=["window_start"], backend="numpy")
     program = Program(
         "p",
+        engine="streaming",
         inputs=[quotes],
         outputs=[("signals", table.attach_columns(quotes, derived, names=("w",)))],
     )
@@ -1154,6 +1199,7 @@ def test_statistics_reject_non_numeric_inputs() -> None:
 
     numeric_program = Program(
         "p",
+        engine="sql",
         inputs=[quotes],
         outputs=[
             (
@@ -1187,6 +1233,7 @@ def test_elementwise_shape_paths_index_from_the_left() -> None:
     left = linalg.from_columns(quotes, columns=["x", "y"], backend="numpy")
     program = Program(
         "p",
+        engine="sql",
         inputs=[quotes, square],
         outputs=[("scores", left * square)],
     )
@@ -1226,6 +1273,7 @@ def test_projection_resolves_columns_and_preserves_field_types() -> None:
     narrow = table.project(quotes, ["symbol", "x"])
     program = Program(
         "p",
+        engine="sql",
         inputs=[quotes],
         outputs=[("signals", narrow.with_columns(FeatureSet([("s", narrow["x"])])))],
     )
@@ -1238,6 +1286,7 @@ def test_projection_resolves_columns_and_preserves_field_types() -> None:
 
     broken = Program(
         "p",
+        engine="sql",
         inputs=[quotes],
         outputs=[
             (
@@ -1256,6 +1305,7 @@ def test_row_local_scalar_functions_infer_types() -> None:
     quotes = _quotes_typed()
     program = Program(
         "p",
+        engine="sql",
         inputs=[quotes],
         outputs=[
             (
@@ -1315,6 +1365,7 @@ def test_scalar_functions_reject_non_numeric_operands() -> None:
 
     clean = Program(
         "p",
+        engine="sql",
         inputs=[quotes],
         outputs=[
             (
@@ -1340,6 +1391,7 @@ def test_where_and_coalesce_report_operand_type_mismatches() -> None:
     quotes = _quotes_typed()
     mismatched = Program(
         "p",
+        engine="sql",
         inputs=[quotes],
         outputs=[
             (
@@ -1373,6 +1425,7 @@ def test_where_and_coalesce_report_operand_type_mismatches() -> None:
 
     non_bool = Program(
         "p",
+        engine="sql",
         inputs=[quotes],
         outputs=[
             (
@@ -1392,6 +1445,7 @@ def test_where_and_coalesce_report_operand_type_mismatches() -> None:
 
     null_fallback = Program(
         "p",
+        engine="sql",
         inputs=[quotes],
         outputs=[
             (
@@ -1413,6 +1467,7 @@ def test_from_columns_requires_one_resolvable_dtype() -> None:
 
     mixed = Program(
         "p",
+        engine="sql",
         inputs=[quotes],
         outputs=[
             (
@@ -1426,6 +1481,7 @@ def test_from_columns_requires_one_resolvable_dtype() -> None:
 
     unknown = Program(
         "p",
+        engine="sql",
         inputs=[quotes],
         outputs=[
             (
@@ -1442,6 +1498,7 @@ def test_window_group_fields_propagate_into_window_schema() -> None:
     quotes = _quotes_typed()
     program = Program(
         "p",
+        engine="streaming",
         inputs=[quotes],
         outputs=[
             (
@@ -1463,6 +1520,7 @@ def test_window_group_fields_propagate_into_window_schema() -> None:
 
     broken = Program(
         "p",
+        engine="streaming",
         inputs=[quotes],
         outputs=[
             (
@@ -1495,6 +1553,7 @@ def test_matmul_rejects_mixed_row_lineages() -> None:
     )
     program = Program(
         "p",
+        engine="sql",
         inputs=[quotes, trades],
         outputs=[
             (
@@ -1523,6 +1582,7 @@ def test_elementwise_broadcast_expands_unit_dimensions() -> None:
     base = linalg.from_columns(quotes, columns=["px", "x"], backend="numpy")
     program = Program(
         "p",
+        engine="sql",
         inputs=[quotes, unit],
         outputs=[("scores", base * unit), ("flags", base == base)],
     )
@@ -1556,6 +1616,7 @@ def test_array_elementwise_primitive_domains_are_checked_statically() -> None:
     )
     valid = Program(
         "valid-array-booleans",
+        engine="sql",
         inputs=(values,),
         outputs=(("flags", (~flags) & flags),),
     ).analyze(Runtime(), mode="batch")
@@ -1564,6 +1625,7 @@ def test_array_elementwise_primitive_domains_are_checked_statically() -> None:
 
     invalid = Program(
         "invalid-array-domains",
+        engine="sql",
         inputs=(values, bool_weights),
         outputs=(
             ("not_numbers", ~numbers),
@@ -1603,6 +1665,7 @@ def test_array_true_division_and_weak_scalars_follow_provider_dtypes() -> None:
     )
     program = Program(
         "provider-array-dtypes",
+        engine="sql",
         inputs=(values,),
         outputs=(
             ("floating", floating * 2.0),
@@ -1635,6 +1698,7 @@ def test_array_unary_and_binary_dtypes_use_provider_or_fail_closed() -> None:
     )
     program = Program(
         "provider-array-dtype-proof",
+        engine="sql",
         inputs=(values,),
         outputs=(
             ("negated", -supported),
@@ -1673,6 +1737,7 @@ def test_matmul_keeps_known_dtype_when_other_operand_is_unresolved() -> None:
     )
     program = Program(
         "partial-matmul-dtype-proof",
+        engine="sql",
         inputs=(values, weights),
         outputs=(
             ("left_unresolved", linalg.matmul(unresolved, weights)),
@@ -1705,6 +1770,7 @@ def test_stream_ordering_checks_field_existence_and_nullability() -> None:
     )
     program = Program(
         "p",
+        engine="streaming",
         inputs=[quotes],
         outputs=[
             (
@@ -1728,6 +1794,7 @@ def test_winsorize_requires_floating_input() -> None:
 
     broken = Program(
         "p",
+        engine="sql",
         inputs=[quotes],
         outputs=[
             (
@@ -1755,6 +1822,7 @@ def test_winsorize_requires_floating_input() -> None:
 
     clean = Program(
         "p",
+        engine="sql",
         inputs=[quotes],
         outputs=[
             (
@@ -1796,6 +1864,7 @@ def test_explain_renders_static_input_declarations() -> None:
     )
     program = Program(
         "p",
+        engine="sql",
         inputs=[quotes, weights, lookup],
         outputs=[("signals", quotes.with_columns(FeatureSet()))],
     )

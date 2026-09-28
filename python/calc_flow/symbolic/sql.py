@@ -13,7 +13,8 @@ def sql(query: str, /, **tables: TableExpr) -> TableExpr:
     """Declare SELECT/CTE SQL over explicit table aliases without executing rows.
 
     SQL has its own row lineage and does not inherit temporal ordering. A stream
-    accepts one alias and evaluates the SQL separately for each native batch.
+    accepts one alias. Aggregates emit cumulative snapshots after each batch;
+    other SQL evaluates each native batch separately.
     """
     require_non_empty_str(query, "sql.query")
     if not tables:

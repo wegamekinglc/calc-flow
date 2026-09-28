@@ -145,7 +145,10 @@ def _program():
         FeatureSet((("slow", slow), ("fast", fast), ("spread", fast - slow)))
     )
     return Program(
-        "checkpoint-cross-version", inputs=(quotes,), outputs=(("signals", signals),)
+        "checkpoint-cross-version",
+        engine="streaming",
+        inputs=(quotes,),
+        outputs=(("signals", signals),),
     )
 
 

@@ -9,6 +9,18 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-29: Require immutable `Program(engine="sql")` or
+  `Program(engine="streaming")` selection at construction and add
+  `Program.execute(inputs)` dispatch. SQL returns named Arrow tables;
+  streaming returns owned async output events. Streaming SQL ordinary
+  aggregates and `GROUP BY` now retain input and emit full cumulative
+  snapshots after each batch. SQL aggregate state has no fixed default row or
+  byte cap; applications may configure a stream state budget. Direct
+  collection and stream calls reject the opposite engine. Four separately
+  identified benchmarks cover the
+  new entry point across both engines, with projection and cumulative
+  aggregation; existing timing identities stay intact.
+
 - 2026-09-28: Repair the scheduled benchmark suite. The `engines-100` shard's
   shared-lock verification now compiles for the project's Python 3.13
   explicitly, since the Finance-Python step installs Python 3.9 first and the

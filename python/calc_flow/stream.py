@@ -381,7 +381,7 @@ def _stream_table(
     config: StreamRuntimeConfig | None,
     watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None,
 ) -> StreamResults[pa.Table]:
-    program = Program("stream", outputs={"result": table})
+    program = Program("stream", engine="streaming", outputs={"result": table})
     mapped = _as_input_mapping(
         program, inputs, "stream: multiple or static inputs require a name mapping"
     )

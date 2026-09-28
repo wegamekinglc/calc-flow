@@ -61,25 +61,33 @@ def test_program_infers_ordered_roots_and_copies_outputs():
     left = cf.table_input("left", schema=schema)
     right = cf.table_input("right", schema=schema)
     outputs = {"r": right.select("x"), "l": left.select("x")}
-    program = cf.Program("p", outputs=outputs)
-    explicit = cf.Program("p", inputs=(right, left), outputs=tuple(outputs.items()))
+    program = cf.Program("p", engine="sql", outputs=outputs)
+    explicit = cf.Program(
+        "p", engine="sql", inputs=(right, left), outputs=tuple(outputs.items())
+    )
     outputs.clear()
     assert program.fingerprint == explicit.fingerprint
     assert program.analyze().issues == ()
     assert isinstance(program.explain(), str)
     assert program.compile_batch().name == "p"
-    assert program.compile_stream().name == "p"
-    assert cf.Program("p", inputs=(), outputs={"l": left}).analyze().issues
+    stream_program = cf.Program(
+        "p", engine="streaming", outputs=tuple(explicit.outputs)
+    )
+    assert stream_program.compile_stream().name == "p"
+    assert stream_program.fingerprint == program.fingerprint
+    assert (
+        cf.Program("p", engine="sql", inputs=(), outputs={"l": left}).analyze().issues
+    )
     conflict = cf.table_input("left", schema=[old.Field("y", "int64")])
     with pytest.raises(ValueError, match="duplicate"):
-        cf.Program("p", outputs={"a": left, "b": conflict})
+        cf.Program("p", engine="sql", outputs={"a": left, "b": conflict})
 
 
 def test_project_export_is_strict_and_keeps_explicit_document():
     from calc_flow.symbolic.lower import lower_program_document
 
     t = cf.table_input("q", schema=[cf.Field("x", "int64")])
-    program = cf.Program("p", outputs={"answer": t.select(y=t["x"] + 1)})
+    program = cf.Program("p", engine="sql", outputs={"answer": t.select(y=t["x"] + 1)})
     runtime = cf.Runtime()
     project = program.to_project(runtime)
     assert isinstance(project, cf.ProjectDocument)
@@ -89,7 +97,8 @@ def test_project_export_is_strict_and_keeps_explicit_document():
     )
     assert project == from_lowerer
     assert runtime.compile_batch_project(project.model_dump_json()).name == "p"
-    assert program.to_project(mode="stream").model_dump()["runtime"]["mode"] == "stream"
+    stream_program = cf.Program("p", engine="streaming", outputs=program.outputs)
+    assert stream_program.to_project().model_dump()["runtime"]["mode"] == "stream"
 
 
 @pytest.mark.parametrize("value", [None, False, 3, 2.5, "literal's value"])

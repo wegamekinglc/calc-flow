@@ -99,7 +99,7 @@ def test_asof_analysis_preserves_left_identity_and_makes_all_right_fields_nullab
     from calc_flow.symbolic.analyzer import _run
 
     result = _join(prefixes=("trade", "quote"))
-    program = cf.Program("matching", outputs={"matched": result})
+    program = cf.Program("matching", engine="streaming", outputs={"matched": result})
     analyzer, _ = _run(program, runtime, "stream")
     assert analyzer.issues == ()
     facts = analyzer.table(result._node, "outputs.matched")
@@ -139,6 +139,7 @@ def test_asof_analysis_rejects_unsupported_identity_key_types(
 ) -> None:
     program = cf.Program(
         "bad",
+        engine="streaming",
         outputs={
             "matched": _join(
                 _input("trades", key_type=key_type), _input("quotes", key_type=key_type)
@@ -153,14 +154,18 @@ def test_asof_analysis_rejects_unsupported_identity_key_types(
 
 def test_asof_analysis_rejects_nullable_or_mismatched_keys(runtime) -> None:
     nullable = cf.Program(
-        "nullable", outputs={"matched": _join(_input("trades", nullable=True))}
+        "nullable",
+        engine="streaming",
+        outputs={"matched": _join(_input("trades", nullable=True))},
     )
     assert any(
         issue.code == "type_mismatch" and "left.keys[0]" in issue.path
         for issue in nullable.analyze(runtime, mode="stream").issues
     )
     mismatch = cf.Program(
-        "mismatch", outputs={"matched": _join(_input("trades", key_type="int64"))}
+        "mismatch",
+        engine="streaming",
+        outputs={"matched": _join(_input("trades", key_type="int64"))},
     )
     assert any(
         issue.code == "type_mismatch"
@@ -169,9 +174,9 @@ def test_asof_analysis_rejects_nullable_or_mismatched_keys(runtime) -> None:
 
 
 def test_asof_analysis_rejects_batch_and_wrong_temporal_type(runtime) -> None:
-    batch = cf.Program("batch", outputs={"matched": _join()}).analyze(
-        runtime, mode="batch"
-    )
+    batch = cf.Program(
+        "batch", engine="streaming", outputs={"matched": _join()}
+    ).analyze(runtime, mode="batch")
     assert any(issue.code == "unsupported_mode" for issue in batch.issues)
     bad = cf.table_input(
         "trades",
@@ -184,9 +189,9 @@ def test_asof_analysis_rejects_batch_and_wrong_temporal_type(runtime) -> None:
         event_time="time",
         sequence_by=["sequence"],
     )
-    result = cf.Program("bad", outputs={"matched": _join(bad)}).analyze(
-        runtime, mode="stream"
-    )
+    result = cf.Program(
+        "bad", engine="streaming", outputs={"matched": _join(bad)}
+    ).analyze(runtime, mode="stream")
     assert any(
         issue.code == "ordering_required" and "left.event_time" in issue.path
         for issue in result.issues
@@ -226,9 +231,9 @@ def test_asof_capability_gate_checks_every_independent_fact(
         ),
     )
     monkeypatch.setattr(cf.Runtime, "capabilities", lambda _self: altered)
-    result = cf.Program("gate", outputs={"matched": _join()}).analyze(
-        runtime, mode="stream"
-    )
+    result = cf.Program(
+        "gate", engine="streaming", outputs={"matched": _join()}
+    ).analyze(runtime, mode="stream")
     assert any(issue.code == "capability_mismatch" for issue in result.issues)
 
 
@@ -248,9 +253,9 @@ def test_asof_forged_temporal_metadata_is_not_trusted(runtime) -> None:
             {"spec": CMap.from_mapping(dict(spec.entries) | {"left": forged_left})},
         )
     )
-    result = cf.Program("forged", outputs={"matched": forged}).analyze(
-        runtime, mode="stream"
-    )
+    result = cf.Program(
+        "forged", engine="streaming", outputs={"matched": forged}
+    ).analyze(runtime, mode="stream")
     assert any(issue.code == "ordering_required" for issue in result.issues)
 
 
@@ -262,7 +267,7 @@ def test_asof_lowering_uses_independent_native_kind_and_logical_stream_bindings(
     bindings = _BatchBindings()
     result = _join(prefixes=("trade", "quote")).select("trade__symbol", "quote__price")
     document = lower_program_document(
-        cf.Program("trades", outputs={"matched": result}),
+        cf.Program("trades", engine="streaming", outputs={"matched": result}),
         runtime,
         "stream",
         _bindings=bindings,
@@ -291,6 +296,7 @@ def test_asof_dag_shares_one_owner_per_digest_and_keeps_chains_independent(
     distinct = _join(left, right, prefixes=("trade", "quote"))
     program = cf.Program(
         "dag",
+        engine="streaming",
         outputs={
             "one": joined,
             "two": joined.select("left__symbol"),
@@ -323,7 +329,9 @@ def test_asof_post_join_rolling_lowers_after_finality_boundary(runtime) -> None:
     joined = _join()
     result = joined.with_columns(previous=cf.ts.lag(joined["left__price"]))
     document = lower_program_document(
-        cf.Program("rolling", outputs={"result": result}), runtime, "stream"
+        cf.Program("rolling", engine="streaming", outputs={"result": result}),
+        runtime,
+        "stream",
     )
     nodes = document["graph"]["nodes"]
     assert (
@@ -361,7 +369,9 @@ def test_asof_and_inner_can_lower_in_both_directions(runtime) -> None:
     )
     for output in (asof, inner_after):
         document = lower_program_document(
-            cf.Program("mixed", outputs={"result": output}), runtime, "stream"
+            cf.Program("mixed", engine="streaming", outputs={"result": output}),
+            runtime,
+            "stream",
         )
         kinds = [node["operator"]["kind"] for node in document["graph"]["nodes"]]
         assert kinds.count("stream_asof_join") == 1
@@ -372,9 +382,9 @@ def test_asof_explain_states_matching_finality_resources_and_unique_ownership(
     runtime,
 ) -> None:
     joined = _join()
-    explanation = cf.Program("explain", outputs={"a": joined, "b": joined}).explain(
-        runtime, mode="stream"
-    )
+    explanation = cf.Program(
+        "explain", engine="streaming", outputs={"a": joined, "b": joined}
+    ).explain(runtime, mode="stream")
     for fact in (
         "stream_asof_join state_stages 1",
         "backward",
@@ -400,9 +410,9 @@ def test_asof_explain_states_matching_finality_resources_and_unique_ownership(
 def test_asof_rejects_stateful_input_before_join(runtime) -> None:
     left = _input("trades")
     left = left.with_columns(previous=cf.ts.lag(left["price"]))
-    result = cf.Program("unsupported", outputs={"result": _join(left)}).analyze(
-        runtime, mode="stream"
-    )
+    result = cf.Program(
+        "unsupported", engine="streaming", outputs={"result": _join(left)}
+    ).analyze(runtime, mode="stream")
     assert any(issue.code == "capability_mismatch" for issue in result.issues)
 
 
@@ -412,7 +422,7 @@ def test_asof_rejects_event_window_chains_but_accepts_independent_branch(
     joined = _join()
     event = cf.window.tumbling(joined, event_time="left__time", size_micros=10)
     issues = (
-        cf.Program("window_after", outputs={"result": event})
+        cf.Program("window_after", engine="streaming", outputs={"result": event})
         .analyze(runtime, mode="stream")
         .issues
     )
@@ -425,7 +435,9 @@ def test_asof_rejects_event_window_chains_but_accepts_independent_branch(
         aggregates=[cf.window.count("price", output="count")],
     )
     program = cf.Program(
-        "independent", outputs={"joined": joined, "windowed": separate}
+        "independent",
+        engine="streaming",
+        outputs={"joined": joined, "windowed": separate},
     )
     document = lower_program_document(program, runtime, "stream")
     kinds = [node["operator"]["kind"] for node in document["graph"]["nodes"]]
@@ -435,7 +447,9 @@ def test_asof_rejects_event_window_chains_but_accepts_independent_branch(
 
 def test_asof_sql_output_does_not_regain_temporal_metadata(runtime) -> None:
     sql = _join().sql("SELECT left__symbol, left__time, left__sequence FROM input")
-    result = cf.Program("sql", outputs={"result": sql}).analyze(runtime, mode="stream")
+    result = cf.Program("sql", engine="streaming", outputs={"result": sql}).analyze(
+        runtime, mode="stream"
+    )
     assert result.issues == ()
     with pytest.raises(ValueError, match="event_time"):
         _join(sql)
@@ -454,7 +468,9 @@ def test_asof_cross_section_compiles_after_finality_boundary(runtime) -> None:
         )
     )
     document = lower_program_document(
-        cf.Program("cs", outputs={"result": transformed}), runtime, "stream"
+        cf.Program("cs", engine="streaming", outputs={"result": transformed}),
+        runtime,
+        "stream",
     )
     assert {node["operator"]["kind"] for node in document["graph"]["nodes"]} >= {
         "stream_asof_join",
@@ -522,7 +538,7 @@ def test_asof_analysis_reports_forged_invalid_spec_as_structured_issue(
         attrs = CMap.from_mapping(dict(attrs.entries) | {"tolerance_micros": value})
     forged = cf.TableExpr(build("stream_asof_join", joined._node.args, {"spec": attrs}))
     issues = (
-        cf.Program("forged", outputs={"result": forged})
+        cf.Program("forged", engine="streaming", outputs={"result": forged})
         .analyze(runtime, mode="stream")
         .issues
     )
@@ -545,7 +561,7 @@ def test_asof_sequence_requires_non_null_integer_or_string_total_order(runtime) 
             sequence_by=["sequence"],
         )
         issues = (
-            cf.Program("bad", outputs={"result": _join(source)})
+            cf.Program("bad", engine="streaming", outputs={"result": _join(source)})
             .analyze(runtime, mode="stream")
             .issues
         )
@@ -568,9 +584,9 @@ def test_asof_capability_cannot_be_inferred_from_inner_offer(
         ),
     )
     monkeypatch.setattr(cf.Runtime, "capabilities", lambda _self: inner_only)
-    result = cf.Program("missing", outputs={"result": _join()}).analyze(
-        runtime, mode="stream"
-    )
+    result = cf.Program(
+        "missing", engine="streaming", outputs={"result": _join()}
+    ).analyze(runtime, mode="stream")
     assert any(issue.code == "capability_mismatch" for issue in result.issues)
 
 
@@ -583,7 +599,9 @@ def test_asof_sql_lowering_preserves_shared_native_owner_and_input_bindings(
     sql = joined.select("left__symbol", "right__price").sql(
         "SELECT left__symbol, right__price FROM input"
     )
-    program = cf.Program("sql_asof", outputs={"raw": joined, "sql": sql})
+    program = cf.Program(
+        "sql_asof", engine="streaming", outputs={"raw": joined, "sql": sql}
+    )
     bindings = _BatchBindings()
     document = lower_program_document(program, runtime, "stream", _bindings=bindings)
     kinds = [node["operator"]["kind"] for node in document["graph"]["nodes"]]
@@ -598,6 +616,7 @@ def test_asof_sql_and_independent_join_branches_keep_one_owner_each(runtime) -> 
     second = _join(_input("orders"), _input("reference"))
     program = cf.Program(
         "sql_branches",
+        engine="streaming",
         outputs={
             "first": first.sql("SELECT * FROM input"),
             "second": second,
@@ -622,7 +641,7 @@ def test_asof_analysis_rejects_cross_prefix_output_name_collision(runtime) -> No
     left = left.with_columns(y__symbol=left["symbol"])
     joined = _join(left, prefixes=("x", "x__y"))
     issues = (
-        cf.Program("collision", outputs={"result": joined})
+        cf.Program("collision", engine="streaming", outputs={"result": joined})
         .analyze(runtime, mode="stream")
         .issues
     )
@@ -645,7 +664,7 @@ def test_asof_explicit_keys_work_without_entity_grouping(runtime) -> None:
     )
     result = _join(left, right, keys=(["symbol"], ["symbol"]))
     assert (
-        cf.Program("explicit", outputs={"result": result})
+        cf.Program("explicit", engine="streaming", outputs={"result": result})
         .analyze(runtime, mode="stream")
         .issues
         == ()
@@ -664,9 +683,9 @@ def test_asof_forged_primitive_requires_exactly_two_table_operands(runtime) -> N
         malformed = cf.TableExpr(
             build("stream_asof_join", operands, dict(joined._node.attrs.entries))
         )
-        result = cf.Program("malformed", outputs={"result": malformed}).analyze(
-            runtime, mode="stream"
-        )
+        result = cf.Program(
+            "malformed", engine="streaming", outputs={"result": malformed}
+        ).analyze(runtime, mode="stream")
         assert any(issue.code == "invalid_literal" for issue in result.issues)
 
 
@@ -676,7 +695,7 @@ def test_asof_logical_binding_names_survive_physical_name_collisions(runtime) ->
     joined = _join(_input("result"), _input("quotes"))
     bindings = _BatchBindings()
     document = lower_program_document(
-        cf.Program("collision", outputs={"result": joined}),
+        cf.Program("collision", engine="streaming", outputs={"result": joined}),
         runtime,
         "stream",
         _bindings=bindings,
@@ -747,9 +766,9 @@ def test_inner_consumer_cannot_reinterpret_asof_output_event_time(runtime, asof_
         bounds=cf.JoinTimeBounds(timedelta(microseconds=10), timedelta()),
         limits=cf.JoinStateLimits(100, 1_000_000, 1_000),
     )
-    result = cf.Program("wrong_time", outputs={"result": output}).analyze(
-        runtime, mode="stream"
-    )
+    result = cf.Program(
+        "wrong_time", engine="streaming", outputs={"result": output}
+    ).analyze(runtime, mode="stream")
     assert any(
         issue.code == "ordering_required"
         and issue.path.endswith(f"{asof_side}_event_time")
@@ -777,7 +796,9 @@ def test_stateful_consumers_require_all_left_asof_ordering_metadata(
         if operation == "with_columns"
         else selected.filter(lagged > 0.0)
     )
-    program = cf.Program("missing_order", outputs={"result": result})
+    program = cf.Program(
+        "missing_order", engine="streaming", outputs={"result": result}
+    )
     analysis = program.analyze(runtime, mode="stream")
     if removed is None:
         assert analysis.issues == ()

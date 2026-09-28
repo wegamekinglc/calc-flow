@@ -26,7 +26,9 @@ def _program() -> Program:
             ]
         )
     )
-    return Program("features", inputs=[quotes], outputs=[("signals", signals)])
+    return Program(
+        "features", engine="sql", inputs=[quotes], outputs=[("signals", signals)]
+    )
 
 
 def _table(rows: list[tuple[float, float | None, int]]) -> pa.Table:
@@ -118,7 +120,9 @@ def test_batch_reexecution_is_deterministic() -> None:
 def test_filter_only_program_lowers_and_executes() -> None:
     quotes = table_input("quotes", schema=[Field("x", "float64", nullable=False)])
     filtered = table.filter(quotes, quotes["x"] > 1.0)
-    program = Program("p", inputs=[quotes], outputs=[("signals", filtered)])
+    program = Program(
+        "p", engine="sql", inputs=[quotes], outputs=[("signals", filtered)]
+    )
     plan = program.compile_batch(Runtime())
 
     schema = pa.schema([pa.field("x", pa.float64(), nullable=False)])

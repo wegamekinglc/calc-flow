@@ -1088,10 +1088,30 @@ fn build_static_inputs(
 }
 
 fn runtime_config(config: &Bound<'_, PyDict>) -> PyResult<calc_flow::StreamRuntimeConfig> {
+    let sql_state_max_rows = config
+        .get_item("sql_state_max_rows")?
+        .map(|value| value.extract::<u64>())
+        .transpose()?;
+    let sql_state_max_bytes = config
+        .get_item("sql_state_max_bytes")?
+        .map(|value| value.extract::<u64>())
+        .transpose()?;
+    let sql_state_budget = match (sql_state_max_rows, sql_state_max_bytes) {
+        (None, None) => None,
+        (Some(rows), Some(bytes)) => {
+            Some(calc_flow::StateBudget::new(rows, bytes).map_err(crate::error::to_py_err)?)
+        }
+        _ => {
+            return Err(PyValueError::new_err(
+                "sql_state_max_rows and sql_state_max_bytes must be supplied together",
+            ));
+        }
+    };
     Ok(calc_flow::StreamRuntimeConfig {
         checkpoint_interval: duration_config(config, "checkpoint_interval_micros")?,
         checkpoint_timeout: duration_config(config, "checkpoint_timeout_micros")?,
         edge_budget: edge_budget_config(config)?,
+        sql_state_budget,
         retained_epochs: required_item(config, "retained_epochs")?.extract()?,
     })
 }

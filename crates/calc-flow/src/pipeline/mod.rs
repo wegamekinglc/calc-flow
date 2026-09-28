@@ -175,9 +175,13 @@ impl PipelineBuilder {
     {
         let operator = operator.into();
         let checkpoint_capability = match &operator {
-            NodeOperator::Expression(_) | NodeOperator::Sql(_) | NodeOperator::Union(_) => {
+            NodeOperator::Expression(_) | NodeOperator::Union(_) => {
                 OperatorCheckpointCapability::Stateless
             }
+            NodeOperator::Sql(operator) if operator.has_stream_aggregate() => {
+                OperatorCheckpointCapability::CheckpointedStateful { state_version: 1 }
+            }
+            NodeOperator::Sql(_) => OperatorCheckpointCapability::Stateless,
             NodeOperator::Window(_) => OperatorCheckpointCapability::CheckpointedStateful {
                 state_version: crate::operator::WINDOW_STATE_LAYOUT_VERSION,
             },

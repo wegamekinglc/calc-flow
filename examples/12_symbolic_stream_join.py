@@ -82,6 +82,7 @@ def symbolic_program() -> Program:
     )
     return Program(
         "symbolic-stream-join",
+        engine="streaming",
         inputs=[authorizations, payments],
         outputs=[("matches", matched)],
     )

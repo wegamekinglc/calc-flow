@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Awaitable, Mapping, Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, cast
 
 from calc_flow._compat import dataclass
 from calc_flow.symbolic.domains import type_name
 from calc_flow.symbolic.expr import ArrayExpr, ColumnExpr, Parameter, TableExpr
 from calc_flow.symbolic.nodes import (
     _MAGIC,
+    CSeq,
     CStr,
     Node,
     _text,
@@ -35,6 +36,46 @@ if TYPE_CHECKING:
     from calc_flow.symbolic.types import LatePolicy
 
 _PROGRAM_TAG = 0x21
+_STREAM_ONLY_OPS = frozenset(
+    {
+        "stream_join",
+        "stream_asof_join",
+        "window_tumbling",
+        "window_hopping",
+        "late_output",
+        "late_rows",
+    }
+)
+
+
+def _validate_engine_outputs(
+    engine: Literal["sql", "streaming"],
+    outputs: tuple[tuple[str, TableExpr | ArrayExpr], ...],
+) -> None:
+    """Reject graph shapes whose engine incompatibility is known at declaration."""
+
+    visited: set[str] = set()
+
+    def visit(node: Node, path: str) -> None:
+        if node.digest in visited:
+            return
+        visited.add(node.digest)
+        if engine == "streaming" and node.op.name == "sql":
+            aliases = node.attr("aliases")
+            if isinstance(aliases, CSeq) and len(aliases.items) != 1:
+                raise ValueError(
+                    f"{path}: unsupported_mode: streaming SQL accepts one table alias"
+                )
+        if engine == "sql" and node.op.name in _STREAM_ONLY_OPS:
+            raise ValueError(
+                f"{path}: unsupported_mode: {node.op.name} requires the"
+                " streaming engine"
+            )
+        for child in node.args:
+            visit(child, path)
+
+    for name, value in outputs:
+        visit(value._node, f"outputs.{name}")
 
 
 @dataclass(frozen=True, slots=True, eq=False, init=False)
@@ -283,18 +324,21 @@ def _validated_outputs(
 
 @dataclass(frozen=True, slots=True, eq=False, init=False)
 class Program:
-    """An immutable program of declared inputs, outputs, and expressions."""
+    """An immutable program with its engine chosen before compilation."""
 
     _name: str
     _inputs: tuple[TableExpr | Parameter[object], ...]
     _outputs: tuple[tuple[str, TableExpr | ArrayExpr], ...]
     _fingerprint: str
+    _engine: Literal["sql", "streaming"]
+    _inputs_inferred: bool
 
     def __init__(
         self,
         name: str,
         /,
         *,
+        engine: Literal["sql", "streaming"],
         inputs: Sequence[TableExpr | Parameter[object]] | None = None,
         outputs: Mapping[str, TableExpr | ArrayExpr]
         | Sequence[tuple[str, TableExpr | ArrayExpr]] = (),
@@ -305,7 +349,12 @@ class Program:
             raise ValueError(
                 "Program.name: invalid_literal: must be a non-empty string"
             )
+        if type(engine) is not str:
+            raise TypeError("Program.engine: expected 'sql' or 'streaming'")
+        if engine not in ("sql", "streaming"):
+            raise ValueError("Program.engine: expected 'sql' or 'streaming'")
         copied_outputs = _validated_outputs(outputs)
+        _validate_engine_outputs(engine, copied_outputs)
         copied_inputs = (
             _discovered_inputs(copied_outputs)
             if inputs is None
@@ -314,6 +363,8 @@ class Program:
         object.__setattr__(self, "_name", name)
         object.__setattr__(self, "_inputs", copied_inputs)
         object.__setattr__(self, "_outputs", copied_outputs)
+        object.__setattr__(self, "_engine", engine)
+        object.__setattr__(self, "_inputs_inferred", inputs is None)
         object.__setattr__(
             self,
             "_fingerprint",
@@ -344,14 +395,63 @@ class Program:
 
         return self._fingerprint
 
+    @property
+    def engine(self) -> Literal["sql", "streaming"]:
+        """The immutable engine selected when this program was constructed."""
+
+        return self._engine
+
     def with_input(self, value: TableExpr | Parameter[object], /) -> Program:
         """Return a new program with one declared input appended."""
 
         return Program(
             self._name,
+            engine=self._engine,
             inputs=(*self._inputs, value),
             outputs=self._outputs,
         )
+
+    def _require_engine(self, engine: Literal["sql", "streaming"], /) -> None:
+        if self._engine != engine:
+            raise RuntimeError(
+                f"Program engine is {self._engine!r}; cannot use {engine!r}"
+            )
+
+    def execute(
+        self,
+        inputs: Mapping[str, StreamInput | TableData],
+        /,
+        *,
+        runtime: Runtime | None = None,
+        options: ExecutionOptions | None = None,
+        config: StreamRuntimeConfig | None = None,
+        watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None = None,
+    ) -> dict[str, pa.Table] | StreamResults[StreamOutput]:
+        """Execute through the selected engine.
+
+        SQL returns named Arrow tables immediately. Streaming returns owned
+        named events; consume it with ``async with`` and ``async for``.
+        """
+
+        if self._engine == "sql":
+            if config is not None:
+                raise ValueError("execute.config is available for the streaming engine")
+            if watermarks is not None:
+                raise ValueError(
+                    "execute.watermarks is available for the streaming engine"
+                )
+            return self.collect(
+                cast("Mapping[str, TableData]", inputs),
+                runtime=runtime,
+                options=options,
+            )
+        if self._engine == "streaming":
+            if options is not None:
+                raise ValueError("execute.options is available for the sql engine")
+            return self.stream(
+                inputs, runtime=runtime, config=config, watermarks=watermarks
+            )
+        raise RuntimeError(f"Program has unsupported engine {self._engine!r}")
 
     def stream(
         self,
@@ -368,6 +468,7 @@ class Program:
         advance safe watermarks by default; explicit policies support disorder or
         iterable-provided watermarks without changing SourceBinding policies.
         """
+        self._require_engine("streaming")
         from calc_flow.stream import _stream_program
 
         return _stream_program(self, inputs, runtime, config, watermarks)
@@ -377,27 +478,45 @@ class Program:
 
         return Program(
             self._name,
-            inputs=self._inputs,
+            engine=self._engine,
+            inputs=None if self._inputs_inferred else self._inputs,
             outputs=(*self._outputs, (name, value)),
         )
 
     def analyze(
-        self, runtime: Runtime | None = None, /, *, mode: CompileMode = "batch"
+        self, runtime: Runtime | None = None, /, *, mode: CompileMode | None = None
     ) -> AnalysisResult:
-        """Analyze this program against one immutable capability snapshot."""
+        """Analyze using the selected mode or an explicit diagnostic mode."""
 
         from calc_flow.symbolic.analyzer import analyze_program
 
-        return analyze_program(self, _selected_runtime(runtime), mode)
+        return analyze_program(
+            self, _selected_runtime(runtime), self._analysis_mode(mode)
+        )
 
     def explain(
-        self, runtime: Runtime | None = None, /, *, mode: CompileMode = "batch"
+        self, runtime: Runtime | None = None, /, *, mode: CompileMode | None = None
     ) -> str:
-        """Render deterministic analysis facts for this program."""
+        """Render deterministic facts; an explicit mode is diagnostic only."""
 
         from calc_flow.symbolic.analyzer import explain_program
 
-        return explain_program(self, _selected_runtime(runtime), mode)
+        return explain_program(
+            self, _selected_runtime(runtime), self._analysis_mode(mode)
+        )
+
+    def _analysis_mode(self, mode: CompileMode | None, /) -> CompileMode:
+        return (
+            ("batch" if self._engine == "sql" else "stream") if mode is None else mode
+        )
+
+    def _selected_mode(self, mode: CompileMode | None, /) -> CompileMode:
+        selected = "batch" if self._engine == "sql" else "stream"
+        if mode is not None and mode != selected:
+            raise ValueError(
+                f"Program engine {self._engine!r} requires mode {selected!r}"
+            )
+        return selected
 
     def compile_batch(self, runtime: Runtime | None = None, /) -> BatchExecutionPlan:
         """Lower this program to a strict project-v3 batch execution plan.
@@ -407,6 +526,7 @@ class Program:
         the Rust graph compiler for final validation. No data, source, sink,
         or runner is accepted.
         """
+        self._require_engine("sql")
 
         from calc_flow.symbolic.lower import compile_program_batch
 
@@ -427,6 +547,7 @@ class Program:
         Row-local-only programs accept the same compile signature but have no
         stateful late-row surface.
         """
+        self._require_engine("streaming")
 
         from calc_flow.symbolic.lower import compile_program_stream
 
@@ -443,6 +564,7 @@ class Program:
         options: ExecutionOptions | None = None,
     ) -> dict[str, pa.Table]:
         """Execute a fresh plan and return Arrow tables by declaration name."""
+        self._require_engine("sql")
         from calc_flow.compute import _collect
 
         return _collect(self, inputs, runtime, options)
@@ -460,6 +582,7 @@ class Program:
         Arrow buffers are shared; keep their underlying storage read-only until
         execution completes.
         """
+        self._require_engine("sql")
         from calc_flow.compute import _collect_async
 
         return _collect_async(self, inputs, runtime, options)
@@ -469,7 +592,7 @@ class Program:
         runtime: Runtime | None = None,
         /,
         *,
-        mode: CompileMode = "batch",
+        mode: CompileMode | None = None,
         allowed_lateness_micros: int = 0,
         late_policy: LatePolicy = "error",
     ) -> ProjectDocument:
@@ -481,7 +604,7 @@ class Program:
             lower_program_document(
                 self,
                 _selected_runtime(runtime),
-                mode,
+                self._selected_mode(mode),
                 allowed_lateness_micros=allowed_lateness_micros,
                 late_policy=late_policy,
             )

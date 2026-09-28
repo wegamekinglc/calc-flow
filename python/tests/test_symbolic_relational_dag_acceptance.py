@@ -91,6 +91,7 @@ def _program() -> Program:
     )
     return Program(
         "symbolic-relational-dag-acceptance",
+        engine="streaming",
         inputs=[left, middle, right],
         outputs=[("matches", output)],
     )
@@ -286,6 +287,7 @@ def test_source_fallback_collision_keeps_distinct_stream_values(
     )
     program = Program(
         "source-fallback-collision",
+        engine="streaming",
         inputs=[right, left] if reverse_inputs else [left, right],
         outputs=[("result", joined)],
     )

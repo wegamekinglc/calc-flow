@@ -258,7 +258,7 @@ def _build_program(
             f"compute.build: expected TableExpr, got {type(output).__name__}; "
             "use a synchronous expression builder"
         )
-    return Program("compute", outputs={"output": output}), batch
+    return Program("compute", engine="sql", outputs={"output": output}), batch
 
 
 def _collect_async(

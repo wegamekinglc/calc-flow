@@ -35,6 +35,7 @@ def test_collection_binds_logical_names_across_distinct_inputs_and_shared_output
     shared = (left["x"] + 1) * (left["x"] + 1)
     program = cf.Program(
         "p",
+        engine="sql",
         outputs={
             "right-output": right.select("x"),
             "first": left.select(v=shared + 1),
@@ -57,7 +58,7 @@ def test_async_collection_snapshots_mapping_and_forwards_options(monkeypatch):
 
     data = pa.table({"x": [3]})
     t = cf.table_input("quotes", schema=data.schema)
-    p = cf.Program("p", outputs={"answer": t.select(v=t["x"] + 1)})
+    p = cf.Program("p", engine="sql", outputs={"answer": t.select(v=t["x"] + 1)})
     inputs = {"quotes": data}
     options = cf.ExecutionOptions(
         settings={"label": "public"},
@@ -185,7 +186,7 @@ def test_blocking_convenience_rejects_loop_before_builder():
         with pytest.raises(RuntimeError, match=r"collect_async"):
             t.collect(data)
         with pytest.raises(RuntimeError, match=r"collect_async"):
-            cf.Program("p", outputs={"o": t}).collect({"q": data})
+            cf.Program("p", engine="sql", outputs={"o": t}).collect({"q": data})
         assert calls == []
 
     asyncio.run(run())
@@ -225,7 +226,7 @@ def test_collect_checks_names_kinds_lineage_and_ordering():
 
     data = pa.table({"x": [1]})
     t = cf.table_input("q", schema=data.schema)
-    p = cf.Program("p", outputs={"o": t})
+    p = cf.Program("p", engine="sql", outputs={"o": t})
     with pytest.raises(ValueError, match=r"inputs.q.*missing table input"):
         p.collect({})
     with pytest.raises(ValueError, match=r"inputs.typo.*unexpected input"):
@@ -268,7 +269,7 @@ def _rolling_program():
         sequence_by=("ts",),
     )
     output = t.select("price", previous=cf.ts.lag(t["price"]))
-    return data, cf.Program("rolling", outputs={"signals": output})
+    return data, cf.Program("rolling", engine="sql", outputs={"signals": output})
 
 
 @pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
@@ -360,7 +361,7 @@ def test_matrix_collect_discovers_and_binds_static_parameter():
     output = cf.table.attach_columns(
         t, cf.linalg.matmul(matrix * 2.0 + 1.0, weights), names=("score",)
     )
-    program = cf.Program("matrix", outputs={"scores": output})
+    program = cf.Program("matrix", engine="sql", outputs={"scores": output})
     runtime = cf.Runtime()
     cf.register_numpy(runtime)
     array = np.array([[1.0], [10.0]])
@@ -490,7 +491,7 @@ def test_collect_rejects_unconsumed_explicit_input():
     data = pa.table({"x": [1]})
     t = cf.table_input("q", schema=data.schema)
     unused = cf.table_input("unused", schema=data.schema)
-    program = cf.Program("p", inputs=(t, unused), outputs={"answer": t})
+    program = cf.Program("p", engine="sql", inputs=(t, unused), outputs={"answer": t})
     with pytest.raises(cf.CompileError, match=r"inputs.unused.*unconsumed"):
         program.collect({"q": data, "unused": data})
 
@@ -498,7 +499,7 @@ def test_collect_rejects_unconsumed_explicit_input():
 def test_sync_collect_rejects_non_execution_options():
     data = pa.table({"x": [1]})
     t = cf.table_input("q", schema=data.schema)
-    program = cf.Program("p", inputs=(t,), outputs={"answer": t})
+    program = cf.Program("p", engine="sql", inputs=(t,), outputs={"answer": t})
     with pytest.raises(TypeError, match="options must be a calc_flow.ExecutionOptions"):
         program.collect({"q": data}, options=object())
     with pytest.raises(TypeError, match="options must be a calc_flow.ExecutionOptions"):

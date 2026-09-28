@@ -176,6 +176,7 @@ def _projection_symbolic_program() -> Program:
     projected = table.project(derived, ("sequence", *feature_names))
     return Program(
         "symbolic-projection-pair",
+        engine="sql",
         inputs=[quotes],
         outputs=[("features", projected)],
     )
@@ -289,13 +290,20 @@ def _sce14_programs() -> tuple[Program, Program, Program]:
         )
     )
     first_program = Program(
-        "sce14-first-reference", inputs=(quotes,), outputs=(("first", first),)
+        "sce14-first-reference",
+        engine="sql",
+        inputs=(quotes,),
+        outputs=(("first", first),),
     )
     second_program = Program(
-        "sce14-second-reference", inputs=(quotes,), outputs=(("second", second),)
+        "sce14-second-reference",
+        engine="sql",
+        inputs=(quotes,),
+        outputs=(("second", second),),
     )
     optimized = Program(
         "sce14-optimized",
+        engine="sql",
         inputs=(quotes,),
         outputs=(("first", first), ("second", second)),
     )
@@ -325,10 +333,21 @@ def _multistage_programs() -> tuple[Program, Program, Program]:
     first = quotes.with_columns(FeatureSet((("first_gain", average_gain),)))
     second = quotes.with_columns(FeatureSet((("second_gain", average_gain),)))
     return (
-        Program("multistage-first", inputs=(quotes,), outputs=(("first", first),)),
-        Program("multistage-second", inputs=(quotes,), outputs=(("second", second),)),
+        Program(
+            "multistage-first",
+            engine="sql",
+            inputs=(quotes,),
+            outputs=(("first", first),),
+        ),
+        Program(
+            "multistage-second",
+            engine="sql",
+            inputs=(quotes,),
+            outputs=(("second", second),),
+        ),
         Program(
             "multistage-shared",
+            engine="sql",
             inputs=(quotes,),
             outputs=(("first", first), ("second", second)),
         ),
@@ -526,6 +545,7 @@ def _sce08_symbolic_program() -> Program:
     )
     return Program(
         "sce08-temporal-pair",
+        engine="sql",
         inputs=[quotes],
         outputs=[("features", enriched)],
     )
@@ -694,6 +714,7 @@ def _sce16_symbolic_program() -> Program:
     )
     return Program(
         "sce16-exponential-pair",
+        engine="sql",
         inputs=(quotes,),
         outputs=(("features", enriched),),
     )

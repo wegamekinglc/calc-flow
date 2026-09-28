@@ -121,6 +121,60 @@ def test_stream_enters_lazily_and_releases_source_at_eof() -> None:
     assert (feed.opened, feed.closed, feed.read) == (1, 1, 2)
 
 
+def test_stream_sql_aggregate_returns_cumulative_snapshots() -> None:
+    query = _source().sql("SELECT SUM(value) AS total FROM input")
+    feed = _Feed([pa.table({"value": [1]}), pa.table({"value": [2, 3]})])
+
+    async def run() -> list[dict[str, list[int]]]:
+        async with query.stream(feed) as results:
+            return [table.to_pydict() async for table in results]
+
+    assert asyncio.run(run()) == [{"total": [1]}, {"total": [6]}]
+
+
+def test_stream_sql_group_by_returns_all_groups_in_each_snapshot() -> None:
+    source = cf.table_input(
+        "events",
+        schema=pa.schema([("category", pa.string()), ("value", pa.int64())]),
+    )
+    query = source.sql(
+        "SELECT category, SUM(value) AS total FROM input "
+        "GROUP BY category ORDER BY category"
+    )
+    feed = _Feed(
+        [
+            pa.table({"category": ["A", "C"], "value": [1, 7]}),
+            pa.table({"category": ["A", "B"], "value": [2, 5]}),
+        ]
+    )
+
+    async def run() -> list[dict[str, list[object]]]:
+        async with query.stream(feed) as results:
+            return [table.to_pydict() async for table in results]
+
+    assert asyncio.run(run()) == [
+        {"category": ["A", "C"], "total": [1, 7]},
+        {"category": ["A", "B", "C"], "total": [3, 5, 7]},
+    ]
+
+
+def test_stream_sql_aggregate_uses_configured_state_budget() -> None:
+    query = _source().sql("SELECT SUM(value) AS total FROM input")
+    config = cf.StreamRuntimeConfig(sql_state_budget=cf.StateBudget(1, 1_024))
+    assert config._native()["sql_state_max_rows"] == 1
+    feed = _Feed([pa.table({"value": [1]}), pa.table({"value": [2]})])
+
+    async def run() -> None:
+        with pytest.raises(
+            cf.StreamingRuntimeError, match="operator .* execution failed"
+        ):
+            async with query.stream(feed, config=config) as results:
+                async for _ in results:
+                    pass
+
+    asyncio.run(run())
+
+
 class _IdleFeed(_Feed):
     def __init__(self) -> None:
         super().__init__([])
@@ -259,6 +313,7 @@ def test_stream_named_branches_consume_source_once_and_capture_mapping() -> None
     feed = _Feed([pa.table({"value": [1, 2]}), pa.table({"value": [3]})])
     program = cf.Program(
         "branches",
+        engine="streaming",
         outputs={
             "double": source.select(value2=source["value"] * 2),
             "large": source.filter(source["value"] >= 2).select("value"),
@@ -404,7 +459,9 @@ def test_stream_context_exit_surfaces_failure_without_iteration() -> None:
 def test_stream_repeated_output_aliases_are_all_emitted() -> None:
     source = _source()
     shared = source.select(incremented=source["value"] + 1)
-    program = cf.Program("shared", outputs={"first": shared, "second": shared})
+    program = cf.Program(
+        "shared", engine="streaming", outputs={"first": shared, "second": shared}
+    )
     feed = _Feed([pa.table({"value": [1, 2]})])
 
     async def run() -> None:
@@ -440,7 +497,7 @@ def test_stream_rejects_multi_alias_sql_before_iterator_acquisition(
     inputs = {"events": feed} if same_root else {"events": feed, "other": feed}
 
     async def run() -> None:
-        with pytest.raises(cf.CompileError, match="multi.*SQL"):
+        with pytest.raises(ValueError, match="streaming SQL accepts one table alias"):
             await output.stream(inputs).__aenter__()
 
     asyncio.run(run())
@@ -628,6 +685,7 @@ def test_stream_sql_branches_share_rolling_input_and_consume_source_once() -> No
     shared = source.with_columns(mean=cf.ts.mean(source["price"], window=cf.rows(2)))
     program = cf.Program(
         "sql-branches",
+        engine="streaming",
         outputs={
             "mean": shared.select("ts", "mean").sql("SELECT mean FROM input"),
             "double": shared.select("ts", adjusted=shared["mean"] * 2.0).sql(
@@ -1271,7 +1329,9 @@ def test_stream_rejects_source_binding_policy_override_before_open() -> None:
 
 def test_stream_multiple_sources_require_logical_watermark_mapping() -> None:
     left, right = _temporal_source("left"), _temporal_source("right")
-    program = cf.Program("two", outputs={"left": left, "right": right})
+    program = cf.Program(
+        "two", engine="streaming", outputs={"left": left, "right": right}
+    )
     feeds = {"left": _Feed([_quotes()]), "right": _Feed([_quotes()])}
     results = program.stream(feeds, watermarks=cf.DisabledWatermarks())
 
@@ -1296,6 +1356,7 @@ def test_stream_captures_policy_mapping_and_defaults_omitted_logical_source() ->
     left, right = _temporal_source("left_input"), _temporal_source("right_input")
     program = cf.Program(
         "two",
+        engine="streaming",
         outputs={
             "left": left.select(previous=cf.ts.lag(left["price"])),
             "right": right.select(previous=cf.ts.lag(right["price"])),
@@ -1343,6 +1404,7 @@ def test_stream_quiet_active_source_holds_shared_watermark_until_it_advances() -
     left, right = _temporal_source("left_input"), _temporal_source("right_input")
     program = cf.Program(
         "two",
+        engine="streaming",
         outputs={
             "left": left.select(previous=cf.ts.lag(left["price"])),
             "right": right.select(previous=cf.ts.lag(right["price"])),
@@ -1442,7 +1504,9 @@ def test_stream_generated_timer_with_full_output_queue_cleans_owned_work(
     monkeypatch.setattr(stream_module.tempfile, "tempdir", str(tmp_path))
     source = _temporal_source()
     previous = source.select(previous=cf.ts.lag(source["price"]))
-    program = cf.Program("fanout", outputs={"first": previous, "second": previous})
+    program = cf.Program(
+        "fanout", engine="streaming", outputs={"first": previous, "second": previous}
+    )
 
     async def run() -> None:
         before = asyncio.all_tasks()

@@ -108,7 +108,10 @@ def _declaration(operation, placement):
             ["window_start", "window_end", "value"],
         )
     return Program(
-        "planned-window-schema", inputs=[source], outputs=[("result", result)]
+        "planned-window-schema",
+        engine="streaming",
+        inputs=[source],
+        outputs=[("result", result)],
     )
 
 
@@ -265,7 +268,10 @@ def test_window_planning_handles_rename_projection_and_multiple_cse_stages(tmp_p
         aggregates=[window.count("copy", output="count")],
     )
     program = Program(
-        "planned-cse-window", inputs=[source], outputs=[("result", result)]
+        "planned-cse-window",
+        engine="streaming",
+        inputs=[source],
+        outputs=[("result", result)],
     )
     runtime = Runtime()
     document = lower_program_document(program, runtime, "stream")
@@ -360,6 +366,7 @@ def test_row_only_projection_keeps_declared_field_nullability():
     source = _source("sqrt_nonnull")
     program = Program(
         "plain-projection",
+        engine="sql",
         inputs=[source],
         outputs=[("result", table.project(source, ["x", "condition"]))],
     )
