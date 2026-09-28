@@ -206,6 +206,7 @@ jobs:
           uv pip compile pyproject.toml web-ui/backend/pyproject.toml \
             --all-extras --no-emit-package calc-flow-python \
             --no-emit-package calc-flow-studio --generate-hashes \
+            --python-version 3.13 \
             --output-file benchmarks/requirements.lock
           uv pip compile benchmarks/finance-python-requirements.in \
             --python-version 3.9 --generate-hashes \
