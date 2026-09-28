@@ -3,14 +3,14 @@
 //! The loop applies the same `Float64NumericState` transition and mean
 //! readout as the generic typed kernel, without per-row group/output dispatch.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use super::{
     ArrayRef, Float64Array, Float64Builder, OutputStorage, RollingKernelPlan,
-    RollingMetricsRecorder, RollingWork, Statistic, TypedEntityState, TypedFloatReadout,
-    TypedFloatReadoutKind, TypedFrame, TypedGroupInput, TypedGroupPlan, TypedOutputKind,
-    TypedOutputPlan, TypedRowInputs, TypedWindowState, float_mean, internal_error, operator_error,
-    valid_float64,
+    RollingMetricsRecorder, RollingStage, RollingWork, Statistic, TypedEntityState,
+    TypedFloatReadout, TypedFloatReadoutKind, TypedFrame, TypedGroupInput, TypedGroupPlan,
+    TypedOutputKind, TypedOutputPlan, TypedRowInputs, TypedWindowState, float_mean, internal_error,
+    nanos, operator_error, valid_float64,
 };
 use crate::Result;
 
@@ -93,7 +93,7 @@ pub(super) fn fill_mean_rows(
     states: &mut [Arc<TypedEntityState>],
     node_id: &str,
     observer: Option<&RollingMetricsRecorder>,
-) -> Result<Vec<ArrayRef>> {
+) -> Result<(Vec<ArrayRef>, u64)> {
     let mut rows = MeanRows {
         plan,
         inputs,
@@ -101,18 +101,17 @@ pub(super) fn fill_mean_rows(
         node_id,
         processed: 0,
     };
-    let columns = rows.fill_arity(&kernel.readouts);
+    let builders = rows.fill_arity(&kernel.readouts);
     if let Some(recorder) = observer {
         recorder.add(RollingWork::NumericRows, rows.processed);
     }
-    columns
-}
-
-fn finish<const OUTPUTS: usize>(builders: [Float64Builder; OUTPUTS]) -> Vec<ArrayRef> {
-    builders
+    let output_start = Instant::now();
+    let _stage = observer.map(|recorder| recorder.stage(RollingStage::ArrowOutput));
+    let columns = builders?
         .into_iter()
         .map(|mut builder| Arc::new(builder.finish()) as ArrayRef)
-        .collect()
+        .collect();
+    Ok((columns, nanos(output_start.elapsed())))
 }
 
 fn single(column: &TypedGroupInput) -> Result<&Float64Array> {
@@ -166,16 +165,16 @@ struct MeanRows<'a> {
 }
 
 impl MeanRows<'_> {
-    fn fill_arity(&mut self, readouts: &[MeanReadout]) -> Result<Vec<ArrayRef>> {
+    fn fill_arity(&mut self, readouts: &[MeanReadout]) -> Result<Vec<Float64Builder>> {
         match (self.inputs.columns, readouts) {
-            ([first], &[readout]) => self.fill([single(first)?], [readout]).map(finish),
-            ([first], &[left, right]) => self.fill([single(first)?], [left, right]).map(finish),
+            ([first], &[readout]) => self.fill([single(first)?], [readout]).map(Vec::from),
+            ([first], &[left, right]) => self.fill([single(first)?], [left, right]).map(Vec::from),
             ([first, second], &[readout]) => self
                 .fill([single(first)?, single(second)?], [readout])
-                .map(finish),
+                .map(Vec::from),
             ([first, second], &[left, right]) => self
                 .fill([single(first)?, single(second)?], [left, right])
-                .map(finish),
+                .map(Vec::from),
             _ => Err(group_mismatch()),
         }
     }
@@ -418,7 +417,7 @@ mod tests {
         mut states: Vec<Arc<TypedEntityState>>,
     ) -> Result<Observed, String> {
         let kernel = MeanKernel::compile(plan).unwrap();
-        let columns = fill_mean_rows(plan, &kernel, inputs, &mut states, "r", None)
+        let (columns, _) = fill_mean_rows(plan, &kernel, inputs, &mut states, "r", None)
             .map_err(|error| error.to_string())?;
         Ok(observe(&columns, &states))
     }

@@ -12,13 +12,13 @@ measurements. Use the current guides for supported behavior.
 - 2026-09-28: Cut ordered rolling stream overhead for SMA-style plans (#342).
   For a non-null microsecond event time, one non-null Utf8 entity, and one
   non-null `UInt64` sequence, the ordering proof compares Arrow values in
-  place and row-encodes only each batch's first and last identities; entity
-  routing assigns batch-local IDs from the string values, reuses the
-  previously observed entity order when it repeats, and row-encodes each
-  distinct entity once. Plans whose one or two row-window numeric groups feed
-  only one or two Float64 mean or mean-difference outputs run a fixed-arity
-  loop over the unchanged numeric state, and retained-history tails reuse the
-  routed per-entity row counts. Other key shapes and outputs keep the
+  place and row-encodes only each batch's first and last identities. Whenever
+  the only entity column is non-null Utf8, entity routing assigns batch-local
+  IDs from the string values, reuses the previously observed entity order
+  when it repeats, and row-encodes each distinct entity once. Plans whose one
+  or two row-window numeric groups feed only one or two Float64 mean or
+  mean-difference outputs run a fixed-arity loop over the unchanged numeric
+  state, and retained-history tails reuse the routed per-entity row counts. Other key shapes and outputs keep the
   row-encoded and generic typed paths. Output bits, checkpoint bytes, restore,
   and emit-before-commit rollback are unchanged. In paired, interleaved,
   correctness-checked local runs over 64 symbols (64,000-row batches), the

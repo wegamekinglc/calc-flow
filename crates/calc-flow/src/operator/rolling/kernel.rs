@@ -1155,7 +1155,7 @@ impl RollingKernelPlan {
             Some(kernel) => {
                 let kernel_start = Instant::now();
                 let _stage = observer.map(|recorder| recorder.stage(RollingStage::NumericUpdate));
-                let columns = mean::fill_mean_rows(
+                let (columns, output_build_ns) = mean::fill_mean_rows(
                     self,
                     &kernel,
                     inputs,
@@ -1163,7 +1163,12 @@ impl RollingKernelPlan {
                     node_id,
                     observer,
                 )?;
-                (columns, nanos(kernel_start.elapsed()), 0)
+                let elapsed = nanos(kernel_start.elapsed());
+                (
+                    columns,
+                    elapsed.saturating_sub(output_build_ns),
+                    output_build_ns,
+                )
             }
             None => {
                 self.fill_generic_columns(inputs, &mut state.states, row_count, node_id, observer)?

@@ -676,9 +676,10 @@ buffers immutable Arrow batches until finality and computes directly from
 their columns. When the order key is a non-null microsecond event time, one
 non-null Utf8 entity, and one non-null `UInt64` sequence, the ordering proof
 compares those Arrow values in place and row-encodes only each batch's first
-and last identities, and entity routing assigns batch-local IDs from the
-string values, row-encoding each distinct entity once. Other key shapes use
-the full Arrow row encoding. Both routes check the entity that last followed
+and last identities. Whenever the only entity column is a non-null Utf8
+column, whatever the time and sequence types, entity routing assigns
+batch-local IDs from the string values and row-encodes each distinct entity
+once. Other key shapes use the full Arrow row encoding. Both routes check the entity that last followed
 the previous row's entity before hashing a key. Only touched entities prepare
 private kernel state; numerical state needed by the released West/M2/refold
 behavior is retained even for mean-only outputs. Plans whose one or two
