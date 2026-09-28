@@ -2047,24 +2047,61 @@ struct EntityRouting {
 fn dense_entity_ids<K: Copy + Eq + std::hash::Hash>(
     keys: impl ExactSizeIterator<Item = K>,
 ) -> (Vec<K>, EntityRows, Vec<usize>) {
-    // Batch-local routing only; resident state keeps its own map and hasher.
-    let mut ids = datafusion::common::HashMap::<K, usize>::default();
-    let mut distinct = Vec::new();
-    let mut rows = EntityRows::default();
+    let mut router = DenseRouter::default();
     let entity_ids = keys
         .enumerate()
-        .map(|(row, key)| {
-            let id = *ids.entry(key).or_insert_with(|| {
-                distinct.push(key);
-                rows.counts.push(0);
-                rows.first_rows.push(row);
-                distinct.len() - 1
-            });
-            rows.counts[id] += 1;
-            id
-        })
+        .map(|(row, key)| router.route(row, key))
         .collect();
-    (distinct, rows, entity_ids)
+    (router.distinct, router.rows, entity_ids)
+}
+
+/// Batch-local routing; resident state keeps its own map and hasher.
+/// Streams usually repeat their entity order, so every ID remembers the
+/// entity that last followed it and a verified guess skips the hash lookup.
+struct DenseRouter<K> {
+    ids: datafusion::common::HashMap<K, usize>,
+    distinct: Vec<K>,
+    successors: Vec<usize>,
+    previous: Option<usize>,
+    rows: EntityRows,
+}
+
+impl<K> Default for DenseRouter<K> {
+    fn default() -> Self {
+        Self {
+            ids: datafusion::common::HashMap::default(),
+            distinct: Vec::new(),
+            successors: Vec::new(),
+            previous: None,
+            rows: EntityRows::default(),
+        }
+    }
+}
+
+impl<K: Copy + Eq + std::hash::Hash> DenseRouter<K> {
+    fn route(&mut self, row: usize, key: K) -> usize {
+        let guess = self
+            .previous
+            .map(|previous| self.successors[previous])
+            .filter(|&candidate| self.distinct.get(candidate) == Some(&key));
+        let id = guess.unwrap_or_else(|| self.lookup(row, key));
+        if let Some(previous) = self.previous {
+            self.successors[previous] = id;
+        }
+        self.previous = Some(id);
+        self.rows.counts[id] += 1;
+        id
+    }
+
+    fn lookup(&mut self, row: usize, key: K) -> usize {
+        *self.ids.entry(key).or_insert_with(|| {
+            self.distinct.push(key);
+            self.successors.push(usize::MAX);
+            self.rows.counts.push(0);
+            self.rows.first_rows.push(row);
+            self.distinct.len() - 1
+        })
+    }
 }
 
 /// The single non-null Utf8 entity column routed without row encoding.
@@ -4273,6 +4310,47 @@ mod tests {
             };
             assert_eq!(update.entity_rows(), &expected);
             assert_eq!(update.execution.state.states.len(), expected.counts.len());
+        }
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            cases: 512,
+            failure_persistence: None,
+            ..proptest::prelude::ProptestConfig::default()
+        })]
+
+        #[test]
+        fn dense_entity_ids_assign_first_appearance_ids(
+            keys in proptest::collection::vec(0_u8..6, 0..64),
+            period in 0_usize..8,
+        ) {
+            // Mix repeating cycles, which exercise successor reuse, with noise.
+            let keys = keys
+                .iter()
+                .enumerate()
+                .map(|(row, &key)| if period > 0 && key < 4 { u8::try_from(row % period).unwrap() } else { key })
+                .collect::<Vec<_>>();
+            let mut distinct = Vec::new();
+            let mut expected = EntityRows::default();
+            let ids = keys
+                .iter()
+                .enumerate()
+                .map(|(row, key)| {
+                    let id = distinct.iter().position(|seen| seen == key).unwrap_or_else(|| {
+                        distinct.push(*key);
+                        expected.counts.push(0);
+                        expected.first_rows.push(row);
+                        distinct.len() - 1
+                    });
+                    expected.counts[id] += 1;
+                    id
+                })
+                .collect::<Vec<_>>();
+            let (actual_keys, actual_rows, actual_ids) = dense_entity_ids(keys.iter().copied());
+            proptest::prop_assert_eq!(actual_keys, distinct);
+            proptest::prop_assert_eq!(actual_rows, expected);
+            proptest::prop_assert_eq!(actual_ids, ids);
         }
     }
 
