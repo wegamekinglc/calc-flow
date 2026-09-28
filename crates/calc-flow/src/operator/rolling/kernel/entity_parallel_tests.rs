@@ -235,6 +235,7 @@ fn entity_parallel_preserves_rows_values_and_complete_touched_state() {
             );
             let actual = merge_numeric_results(seed, &mut results, "job").unwrap();
             assert_eq!(actual.entity_ids(), expected.entity_ids());
+            assert_eq!(actual.entity_rows(), expected.entity_rows());
             for (actual, expected) in actual
                 .execution
                 .columns

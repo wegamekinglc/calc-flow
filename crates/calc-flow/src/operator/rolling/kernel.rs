@@ -354,8 +354,17 @@ impl<'a> DirectOrderColumns<'a> {
 pub(super) struct RollingKernelExecution {
     pub columns: Vec<ArrayRef>,
     pub entity_ids: Vec<usize>,
+    /// Stream routing facts per dense entity; empty for batch execution.
+    pub entity_rows: EntityRows,
     pub metrics: RollingKernelMetrics,
     pub state: RollingKernelState,
+}
+
+/// Row count and first row of each dense entity in one stream batch.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct EntityRows {
+    pub(super) counts: Vec<usize>,
+    pub(super) first_rows: Vec<usize>,
 }
 
 /// A transactional replacement of only the entities touched by a stream batch.
@@ -366,6 +375,10 @@ pub(crate) struct StreamKernelUpdate {
 impl StreamKernelUpdate {
     pub(super) fn entity_ids(&self) -> &[usize] {
         &self.execution.entity_ids
+    }
+
+    pub(super) const fn entity_rows(&self) -> &EntityRows {
+        &self.execution.entity_rows
     }
 
     pub(super) fn take_columns(&mut self) -> Vec<ArrayRef> {
@@ -457,6 +470,7 @@ pub(super) struct RollingKernelState {
 struct PreparedStreamState {
     state: RollingKernelState,
     entity_ids: Vec<usize>,
+    entity_rows: EntityRows,
     last_identity: Option<Vec<u8>>,
     metrics: RollingKernelMetrics,
 }
@@ -465,6 +479,7 @@ struct PreparedStreamState {
 struct ResolvedEntities {
     state: RollingKernelState,
     entity_ids: Vec<usize>,
+    entity_rows: EntityRows,
     elapsed_ns: u64,
 }
 
@@ -479,6 +494,7 @@ impl BatchProof {
         PreparedStreamState {
             state: resolved.state,
             entity_ids: resolved.entity_ids,
+            entity_rows: resolved.entity_rows,
             last_identity: self.order.last_identity,
             metrics: RollingKernelMetrics {
                 input_validation_ns: self.input_validation_ns,
@@ -528,12 +544,14 @@ impl RollingKernelPlan {
         let ResolvedEntities {
             state,
             entity_ids,
+            entity_rows,
             elapsed_ns: entity_encode_ns,
         } = self.prepare_touched_entities(state, input, node_id, observer)?;
         let last_identity = self.last_ordered_identity(input, node_id)?;
         Ok(PreparedStreamState {
             state,
             entity_ids,
+            entity_rows,
             last_identity,
             metrics: RollingKernelMetrics {
                 entity_encode_ns,
@@ -943,6 +961,7 @@ impl RollingKernelPlan {
         Ok(ResolvedEntities {
             state,
             entity_ids,
+            entity_rows: EntityRows::default(),
             elapsed_ns: nanos(started.elapsed()),
         })
     }
@@ -960,21 +979,22 @@ impl RollingKernelPlan {
             Some(entities) => direct_entity_routing(entities, node_id)?,
             None => self.encoded_entity_routing(input, node_id)?,
         };
-        let (state, entity_ids) =
+        let (state, entity_ids, entity_rows) =
             state.prepare_stream_entities(routing, &self.groups, &self.fingerprint, observer);
         Ok(ResolvedEntities {
             state,
             entity_ids,
+            entity_rows,
             elapsed_ns: nanos(started.elapsed()),
         })
     }
 
     fn encoded_entity_routing(&self, input: &RecordBatch, node_id: &str) -> Result<EntityRouting> {
         let rows = encode_rows(input, &self.partition_columns, node_id)?;
-        let (keys, counts, entity_ids) = dense_entity_ids(encoded_keys(&rows, input.num_rows()));
+        let (keys, rows, entity_ids) = dense_entity_ids(encoded_keys(&rows, input.num_rows()));
         Ok(EntityRouting {
             keys: keys.into_iter().map(<[u8]>::to_vec).collect(),
-            counts,
+            rows,
             entity_ids,
         })
     }
@@ -1119,6 +1139,7 @@ impl RollingKernelPlan {
         let PreparedStreamState {
             mut state,
             entity_ids,
+            entity_rows,
             last_identity,
             mut metrics,
         } = stream;
@@ -1160,6 +1181,7 @@ impl RollingKernelPlan {
         Ok(RollingKernelExecution {
             columns,
             entity_ids,
+            entity_rows,
             metrics,
             state,
         })
@@ -1322,10 +1344,10 @@ impl RollingKernelState {
         groups: &[TypedGroupPlan],
         fingerprint: &str,
         observer: Option<&RollingMetricsRecorder>,
-    ) -> (Self, Vec<usize>) {
+    ) -> (Self, Vec<usize>, EntityRows) {
         let EntityRouting {
             keys,
-            counts,
+            rows,
             entity_ids,
         } = routing;
         if let Some(recorder) = observer {
@@ -1336,8 +1358,8 @@ impl RollingKernelState {
         let mut copied = 0;
         let states = keys
             .iter()
-            .zip(counts)
-            .map(|(key, count)| {
+            .zip(&rows.counts)
+            .map(|(key, &count)| {
                 self.entities.get(key.as_slice()).map_or_else(
                     || Arc::new(TypedEntityState::new(groups, count)),
                     |&index| {
@@ -1366,6 +1388,7 @@ impl RollingKernelState {
                 last_identity: None,
             },
             entity_ids,
+            rows,
         )
     }
 
@@ -2016,30 +2039,32 @@ fn encode_arrays(arrays: &[ArrayRef], node_id: &str) -> Result<datafusion::arrow
 /// Batch-local dense entity IDs with one persistent key per distinct entity.
 struct EntityRouting {
     keys: Vec<Vec<u8>>,
-    counts: Vec<usize>,
+    rows: EntityRows,
     entity_ids: Vec<usize>,
 }
 
-/// Assigns first-appearance dense IDs; returns distinct keys and row counts.
+/// Assigns first-appearance dense IDs; returns distinct keys and their rows.
 fn dense_entity_ids<K: Copy + Eq + std::hash::Hash>(
     keys: impl ExactSizeIterator<Item = K>,
-) -> (Vec<K>, Vec<usize>, Vec<usize>) {
+) -> (Vec<K>, EntityRows, Vec<usize>) {
     // Batch-local routing only; resident state keeps its own map and hasher.
     let mut ids = datafusion::common::HashMap::<K, usize>::default();
     let mut distinct = Vec::new();
-    let mut counts = Vec::<usize>::new();
+    let mut rows = EntityRows::default();
     let entity_ids = keys
-        .map(|key| {
+        .enumerate()
+        .map(|(row, key)| {
             let id = *ids.entry(key).or_insert_with(|| {
                 distinct.push(key);
-                counts.push(0);
+                rows.counts.push(0);
+                rows.first_rows.push(row);
                 distinct.len() - 1
             });
-            counts[id] += 1;
+            rows.counts[id] += 1;
             id
         })
         .collect();
-    (distinct, counts, entity_ids)
+    (distinct, rows, entity_ids)
 }
 
 /// The single non-null Utf8 entity column routed without row encoding.
@@ -2058,7 +2083,7 @@ fn direct_entity_column<'a>(
 
 /// Routes by string value and row-encodes each distinct entity once.
 fn direct_entity_routing(entities: &StringArray, node_id: &str) -> Result<EntityRouting> {
-    let (distinct, counts, entity_ids) =
+    let (distinct, entity_rows, entity_ids) =
         dense_entity_ids((0..entities.len()).map(|row| entities.value(row)));
     let distinct: ArrayRef = Arc::new(StringArray::from_iter_values(distinct));
     let rows = encode_arrays(&[distinct], node_id)?;
@@ -2066,7 +2091,7 @@ fn direct_entity_routing(entities: &StringArray, node_id: &str) -> Result<Entity
         keys: (0..rows.num_rows())
             .map(|row| rows.row(row).data().to_vec())
             .collect(),
-        counts,
+        rows: entity_rows,
         entity_ids,
     })
 }
@@ -4175,13 +4200,14 @@ mod tests {
             }
             let input = order_rows(&rows(&keys));
             let direct = plan.prepare_touched_entities(&state, &input, "r", None).unwrap();
-            let (encoded, entity_ids) = state.prepare_stream_entities(
+            let (encoded, entity_ids, entity_rows) = state.prepare_stream_entities(
                 plan.encoded_entity_routing(&input, "r").unwrap(),
                 &plan.groups,
                 &plan.fingerprint,
                 None,
             );
             proptest::prop_assert_eq!(&direct.entity_ids, &entity_ids);
+            proptest::prop_assert_eq!(&direct.entity_rows, &entity_rows);
             proptest::prop_assert_eq!(&direct.state.entities, &encoded.entities);
             proptest::prop_assert_eq!(
                 format!("{:?}", direct.state.states),
@@ -4222,6 +4248,32 @@ mod tests {
             large <= small + dense_ids + 256,
             "small={small}, large={large}"
         );
+    }
+
+    #[test]
+    fn stream_update_reports_entity_row_counts_and_first_rows() {
+        let plan = stream_order_plan();
+        let keys = ["b", "a", "b", "c", "b"];
+        let rows = keys
+            .iter()
+            .enumerate()
+            .map(|(row, key)| (i64::try_from(row).unwrap(), Some(*key), 0))
+            .collect::<Vec<_>>();
+        for input in [order_rows(&rows), order_rows(&[])] {
+            let update = plan
+                .prepare_ordered_stream(&RollingKernelState::default(), &input, "r", None)
+                .unwrap();
+            let expected = if input.num_rows() == 0 {
+                EntityRows::default()
+            } else {
+                EntityRows {
+                    counts: vec![3, 1, 1],
+                    first_rows: vec![0, 1, 3],
+                }
+            };
+            assert_eq!(update.entity_rows(), &expected);
+            assert_eq!(update.execution.state.states.len(), expected.counts.len());
+        }
     }
 
     #[test]

@@ -437,6 +437,7 @@ impl PreparedOrderedKernel<'_> {
             execution: RollingKernelExecution {
                 columns: Vec::new(),
                 entity_ids: Vec::new(),
+                entity_rows: stream.entity_rows,
                 metrics: stream.metrics,
                 state: stream.state,
             },
