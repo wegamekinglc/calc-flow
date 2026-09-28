@@ -15,11 +15,11 @@ use std::{
 
 use datafusion::arrow::{
     array::{
-        Array, ArrayRef, Float64Array, Float64Builder, Int64Array, Int64Builder,
-        TimestampMicrosecondArray, UInt64Array, UInt64Builder,
+        Array, ArrayRef, AsArray, Float64Array, Float64Builder, Int64Array, Int64Builder,
+        StringArray, TimestampMicrosecondArray, UInt64Array, UInt64Builder,
     },
     compute::cast,
-    datatypes::{DataType, Schema},
+    datatypes::{DataType, Schema, TimestampMicrosecondType, UInt64Type},
     record_batch::RecordBatch,
     row::{RowConverter, SortField},
 };
@@ -40,6 +40,7 @@ use crate::{
     operator::rolling_metrics::{RollingMetricsRecorder, RollingStage, RollingWork},
 };
 
+mod mean;
 mod sorted;
 pub(super) use sorted::SortedRollingState;
 pub(super) mod entity_parallel;
@@ -280,13 +281,90 @@ struct OrderProof {
     elapsed_ns: u64,
 }
 
+/// Row-encoded canonical identities of a batch's first and last rows.
+type OrderBounds = (Vec<u8>, Vec<u8>);
+
+/// The first adjacent pair that breaks strict canonical order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OrderViolation {
+    Duplicate(usize),
+    Descending,
+}
+
+struct OrderScan {
+    violation: Option<OrderViolation>,
+    bounds: Option<OrderBounds>,
+}
+
+/// A proven batch carries its bounds unless it is empty.
+enum CanonicalOrder {
+    Unproven,
+    Proven(Option<OrderBounds>),
+}
+
+/// Non-null microsecond time, Utf8 entity, and `UInt64` sequence columns,
+/// compared in place in the same order as their Arrow row encoding.
+struct DirectOrderColumns<'a> {
+    times: &'a [i64],
+    entities: &'a StringArray,
+    sequences: &'a [u64],
+}
+
+impl<'a> DirectOrderColumns<'a> {
+    fn new(plan: &RollingKernelPlan, input: &'a RecordBatch) -> Option<Self> {
+        let [time, entity, sequence] = *plan.order_columns.as_slice() else {
+            return None;
+        };
+        if time != plan.event_time_index
+            || plan.partition_columns != [entity]
+            || plan.sequence_columns != [sequence]
+        {
+            return None;
+        }
+        let times = input
+            .column(time)
+            .as_primitive_opt::<TimestampMicrosecondType>()?;
+        let entities = input.column(entity).as_string_opt::<i32>()?;
+        let sequences = input.column(sequence).as_primitive_opt::<UInt64Type>()?;
+        let null_free = [
+            times.null_count(),
+            entities.null_count(),
+            sequences.null_count(),
+        ] == [0; 3];
+        null_free.then(|| Self {
+            times: times.values(),
+            entities,
+            sequences: sequences.values(),
+        })
+    }
+
+    fn compare(&self, left: usize, right: usize) -> Ordering {
+        self.times[left]
+            .cmp(&self.times[right])
+            .then_with(|| {
+                let left = self.entities.value(left).as_bytes();
+                left.cmp(self.entities.value(right).as_bytes())
+            })
+            .then_with(|| self.sequences[left].cmp(&self.sequences[right]))
+    }
+}
+
 /// Typed columns and execution facts produced without rebuilding input rows.
 #[derive(Debug)]
 pub(super) struct RollingKernelExecution {
     pub columns: Vec<ArrayRef>,
     pub entity_ids: Vec<usize>,
+    /// Stream routing facts per dense entity; empty for batch execution.
+    pub entity_rows: EntityRows,
     pub metrics: RollingKernelMetrics,
     pub state: RollingKernelState,
+}
+
+/// Row count and first row of each dense entity in one stream batch.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct EntityRows {
+    pub(super) counts: Vec<usize>,
+    pub(super) first_rows: Vec<usize>,
 }
 
 /// A transactional replacement of only the entities touched by a stream batch.
@@ -297,6 +375,10 @@ pub(crate) struct StreamKernelUpdate {
 impl StreamKernelUpdate {
     pub(super) fn entity_ids(&self) -> &[usize] {
         &self.execution.entity_ids
+    }
+
+    pub(super) const fn entity_rows(&self) -> &EntityRows {
+        &self.execution.entity_rows
     }
 
     pub(super) fn take_columns(&mut self) -> Vec<ArrayRef> {
@@ -388,6 +470,7 @@ pub(super) struct RollingKernelState {
 struct PreparedStreamState {
     state: RollingKernelState,
     entity_ids: Vec<usize>,
+    entity_rows: EntityRows,
     last_identity: Option<Vec<u8>>,
     metrics: RollingKernelMetrics,
 }
@@ -396,6 +479,7 @@ struct PreparedStreamState {
 struct ResolvedEntities {
     state: RollingKernelState,
     entity_ids: Vec<usize>,
+    entity_rows: EntityRows,
     elapsed_ns: u64,
 }
 
@@ -410,6 +494,7 @@ impl BatchProof {
         PreparedStreamState {
             state: resolved.state,
             entity_ids: resolved.entity_ids,
+            entity_rows: resolved.entity_rows,
             last_identity: self.order.last_identity,
             metrics: RollingKernelMetrics {
                 input_validation_ns: self.input_validation_ns,
@@ -459,12 +544,14 @@ impl RollingKernelPlan {
         let ResolvedEntities {
             state,
             entity_ids,
+            entity_rows,
             elapsed_ns: entity_encode_ns,
         } = self.prepare_touched_entities(state, input, node_id, observer)?;
         let last_identity = self.last_ordered_identity(input, node_id)?;
         Ok(PreparedStreamState {
             state,
             entity_ids,
+            entity_rows,
             last_identity,
             metrics: RollingKernelMetrics {
                 entity_encode_ns,
@@ -479,13 +566,7 @@ impl RollingKernelPlan {
         let Some(index) = input.num_rows().checked_sub(1) else {
             return Ok(None);
         };
-        let last = input.slice(index, 1);
-        Ok(Some(
-            encode_rows(&last, &self.order_columns, node_id)?
-                .row(0)
-                .data()
-                .to_vec(),
-        ))
+        encode_row(input, index, &self.order_columns, node_id).map(Some)
     }
 
     /// Proves strict ordering without extracting generic scalar values.
@@ -500,17 +581,13 @@ impl RollingKernelPlan {
             self.validate_required_values(input, node_id)?;
         }
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::OrderingProof));
-        let rows = encode_rows(input, &self.order_columns, node_id)?;
         if let Some(recorder) = observer {
             recorder.add(RollingWork::OrderProofRows, input.num_rows());
         }
-        if !self.canonical_order_is_proven(input, &rows, None, node_id)? {
-            return Ok(None);
-        }
-        Ok(input
-            .num_rows()
-            .checked_sub(1)
-            .map(|last| (rows.row(0).data().to_vec(), rows.row(last).data().to_vec())))
+        Ok(match self.canonical_order_bounds(input, None, node_id)? {
+            CanonicalOrder::Proven(bounds) => bounds,
+            CanonicalOrder::Unproven => None,
+        })
     }
 
     #[allow(
@@ -856,16 +933,13 @@ impl RollingKernelPlan {
         node_id: &str,
     ) -> Result<Option<OrderProof>> {
         let started = Instant::now();
-        let rows = encode_rows(input, &self.order_columns, node_id)?;
-        if !self.canonical_order_is_proven(input, &rows, prior_state, node_id)? {
+        let prior = prior_state.and_then(|state| state.last_identity.as_deref());
+        let CanonicalOrder::Proven(bounds) = self.canonical_order_bounds(input, prior, node_id)?
+        else {
             return Ok(None);
-        }
-        let last_identity = input
-            .num_rows()
-            .checked_sub(1)
-            .map(|row_index| rows.row(row_index).data().to_vec());
+        };
         Ok(Some(OrderProof {
-            last_identity,
+            last_identity: bounds.map(|(_, last)| last),
             elapsed_ns: nanos(started.elapsed()),
         }))
     }
@@ -887,6 +961,7 @@ impl RollingKernelPlan {
         Ok(ResolvedEntities {
             state,
             entity_ids,
+            entity_rows: EntityRows::default(),
             elapsed_ns: nanos(started.elapsed()),
         })
     }
@@ -900,14 +975,35 @@ impl RollingKernelPlan {
     ) -> Result<ResolvedEntities> {
         let started = Instant::now();
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::EntityResolution));
-        let rows = encode_rows(input, &self.partition_columns, node_id)?;
-        let keys = encoded_keys(&rows, input.num_rows());
-        let (state, entity_ids) =
-            state.prepare_stream_entities(keys, &self.groups, &self.fingerprint, observer);
+        // Resident entities bound the usual touched set of a stream batch.
+        let expected = state.states.len().max(16);
+        let routing = match direct_entity_column(self, input) {
+            Some(entities) => direct_entity_routing(entities, expected, node_id)?,
+            None => self.encoded_entity_routing(input, expected, node_id)?,
+        };
+        let (state, entity_ids, entity_rows) =
+            state.prepare_stream_entities(routing, &self.groups, &self.fingerprint, observer);
         Ok(ResolvedEntities {
             state,
             entity_ids,
+            entity_rows,
             elapsed_ns: nanos(started.elapsed()),
+        })
+    }
+
+    fn encoded_entity_routing(
+        &self,
+        input: &RecordBatch,
+        expected_entities: usize,
+        node_id: &str,
+    ) -> Result<EntityRouting> {
+        let rows = encode_rows(input, &self.partition_columns, node_id)?;
+        let keys = encoded_keys(&rows, input.num_rows());
+        let (keys, rows, entity_ids) = dense_entity_ids(keys, expected_entities);
+        Ok(EntityRouting {
+            keys: keys.into_iter().map(<[u8]>::to_vec).collect(),
+            rows,
+            entity_ids,
         })
     }
 
@@ -925,48 +1021,66 @@ impl RollingKernelPlan {
         Ok(())
     }
 
-    // Within-batch ordering is always proven. Callers that receive a globally
-    // ordered sequence can additionally include the prior batch boundary.
-    // #lizard forgives
-    fn canonical_order_is_proven(
+    /// Within-batch ordering is always proven. Callers that receive a globally
+    /// ordered sequence can additionally include the prior batch boundary.
+    fn canonical_order_bounds(
         &self,
         input: &RecordBatch,
-        order_rows: &datafusion::arrow::row::Rows,
-        prior_state: Option<&RollingKernelState>,
+        prior: Option<&[u8]>,
         node_id: &str,
-    ) -> Result<bool> {
-        if input.num_rows() > 0
-            && let Some(previous) = prior_state.and_then(|state| state.last_identity.as_deref())
-        {
-            let current = order_rows.row(0).data();
-            if previous == current && !self.allows_order_peers() {
-                return Err(duplicate_identity_error(
-                    input,
-                    self.event_time_index,
-                    0,
-                    node_id,
-                )?);
-            }
-            if previous > current {
-                return Ok(false);
-            }
+    ) -> Result<CanonicalOrder> {
+        let scan = self.scan_order(input, node_id)?;
+        let first = scan.bounds.as_ref().map(|(first, _)| first.as_slice());
+        let boundary = prior
+            .zip(first)
+            .map(|(previous, current)| previous.cmp(current))
+            .and_then(|ordering| self.order_violation(ordering, 0));
+        match boundary.or(scan.violation) {
+            Some(OrderViolation::Duplicate(row)) => Err(duplicate_identity_error(
+                input,
+                self.event_time_index,
+                row,
+                node_id,
+            )?),
+            Some(OrderViolation::Descending) => Ok(CanonicalOrder::Unproven),
+            None => Ok(CanonicalOrder::Proven(scan.bounds)),
         }
-        for row_index in 1..input.num_rows() {
-            let previous = order_rows.row(row_index - 1);
-            let current = order_rows.row(row_index);
-            if previous == current && !self.allows_order_peers() {
-                return Err(duplicate_identity_error(
-                    input,
-                    self.event_time_index,
-                    row_index,
-                    node_id,
-                )?);
-            }
-            if previous > current {
-                return Ok(false);
-            }
+    }
+
+    fn order_violation(&self, ordering: Ordering, row: usize) -> Option<OrderViolation> {
+        match ordering {
+            Ordering::Less => None,
+            Ordering::Equal if self.allows_order_peers() => None,
+            Ordering::Equal => Some(OrderViolation::Duplicate(row)),
+            Ordering::Greater => Some(OrderViolation::Descending),
         }
-        Ok(true)
+    }
+
+    /// Compares Arrow values in place for the compiled stream order shape and
+    /// row-encodes every other shape.
+    fn scan_order(&self, input: &RecordBatch, node_id: &str) -> Result<OrderScan> {
+        let Some(columns) = DirectOrderColumns::new(self, input) else {
+            return self.encoded_order_scan(input, node_id);
+        };
+        let violation = (1..input.num_rows())
+            .find_map(|row| self.order_violation(columns.compare(row - 1, row), row));
+        let bounds = input
+            .num_rows()
+            .checked_sub(1)
+            .map(|last| encode_bounds(input, last, &self.order_columns, node_id))
+            .transpose()?;
+        Ok(OrderScan { violation, bounds })
+    }
+
+    fn encoded_order_scan(&self, input: &RecordBatch, node_id: &str) -> Result<OrderScan> {
+        let rows = encode_rows(input, &self.order_columns, node_id)?;
+        let violation = (1..input.num_rows())
+            .find_map(|row| self.order_violation(rows.row(row - 1).cmp(&rows.row(row)), row));
+        let bounds = input
+            .num_rows()
+            .checked_sub(1)
+            .map(|last| (rows.row(0).data().to_vec(), rows.row(last).data().to_vec()));
+        Ok(OrderScan { violation, bounds })
     }
 
     fn allows_order_peers(&self) -> bool {
@@ -1028,42 +1142,38 @@ impl RollingKernelPlan {
         let PreparedStreamState {
             mut state,
             entity_ids,
+            entity_rows,
             last_identity,
             mut metrics,
         } = stream;
-        let arrow_stage = observer.map(|recorder| recorder.stage(RollingStage::ArrowOutput));
-        let mut builders = self
-            .outputs
-            .iter()
-            .map(|output| DerivedBuilder::new(*output, row_count))
-            .collect::<Vec<_>>();
-        drop(arrow_stage);
-
-        let kernel_start = Instant::now();
-        let numeric_stage = observer.map(|recorder| recorder.stage(RollingStage::NumericUpdate));
-        fill_typed_rows(
-            self,
-            TypedRowInputs {
-                columns: &inputs,
-                event_times: &event_times,
-                entity_ids: &entity_ids,
-            },
-            &mut state.states,
-            &mut builders,
-            node_id,
-            observer,
-        )?;
-        let kernel_ns = nanos(kernel_start.elapsed());
-        drop(numeric_stage);
-
-        let output_start = Instant::now();
-        let arrow_stage = observer.map(|recorder| recorder.stage(RollingStage::ArrowOutput));
-        let columns = builders
-            .into_iter()
-            .map(DerivedBuilder::finish)
-            .collect::<Result<Vec<_>>>()?;
-        let output_build_ns = nanos(output_start.elapsed());
-        drop(arrow_stage);
+        let inputs = TypedRowInputs {
+            columns: &inputs,
+            event_times: &event_times,
+            entity_ids: &entity_ids,
+        };
+        let (columns, kernel_ns, output_build_ns) = match mean::MeanKernel::compile(self) {
+            Some(kernel) => {
+                let kernel_start = Instant::now();
+                let _stage = observer.map(|recorder| recorder.stage(RollingStage::NumericUpdate));
+                let (columns, output_build_ns) = mean::fill_mean_rows(
+                    self,
+                    &kernel,
+                    inputs,
+                    &mut state.states,
+                    node_id,
+                    observer,
+                )?;
+                let elapsed = nanos(kernel_start.elapsed());
+                (
+                    columns,
+                    elapsed.saturating_sub(output_build_ns),
+                    output_build_ns,
+                )
+            }
+            None => {
+                self.fill_generic_columns(inputs, &mut state.states, row_count, node_id, observer)?
+            }
+        };
         let state_bytes = state
             .states
             .iter()
@@ -1079,9 +1189,42 @@ impl RollingKernelPlan {
         Ok(RollingKernelExecution {
             columns,
             entity_ids,
+            entity_rows,
             metrics,
             state,
         })
+    }
+
+    /// Generic typed transitions; returns columns and kernel/output times.
+    fn fill_generic_columns(
+        &self,
+        inputs: TypedRowInputs<'_>,
+        states: &mut [Arc<TypedEntityState>],
+        row_count: usize,
+        node_id: &str,
+        observer: Option<&RollingMetricsRecorder>,
+    ) -> Result<(Vec<ArrayRef>, u64, u64)> {
+        let arrow_stage = observer.map(|recorder| recorder.stage(RollingStage::ArrowOutput));
+        let mut builders = self
+            .outputs
+            .iter()
+            .map(|output| DerivedBuilder::new(*output, row_count))
+            .collect::<Vec<_>>();
+        drop(arrow_stage);
+
+        let kernel_start = Instant::now();
+        let numeric_stage = observer.map(|recorder| recorder.stage(RollingStage::NumericUpdate));
+        fill_typed_rows(self, inputs, states, &mut builders, node_id, observer)?;
+        let kernel_ns = nanos(kernel_start.elapsed());
+        drop(numeric_stage);
+
+        let output_start = Instant::now();
+        let _stage = observer.map(|recorder| recorder.stage(RollingStage::ArrowOutput));
+        let columns = builders
+            .into_iter()
+            .map(DerivedBuilder::finish)
+            .collect::<Result<Vec<_>>>()?;
+        Ok((columns, kernel_ns, nanos(output_start.elapsed())))
     }
 
     fn validate_required_values(&self, input: &RecordBatch, node_id: &str) -> Result<()> {
@@ -1203,38 +1346,29 @@ fn cast_primitive(array: &ArrayRef, target: &DataType, node_id: &str) -> Result<
 }
 
 impl RollingKernelState {
-    fn prepare_stream_entities<'a>(
+    fn prepare_stream_entities(
         &self,
-        keys: impl ExactSizeIterator<Item = &'a [u8]>,
+        routing: EntityRouting,
         groups: &[TypedGroupPlan],
         fingerprint: &str,
         observer: Option<&RollingMetricsRecorder>,
-    ) -> (Self, Vec<usize>) {
-        let mut entities = HashMap::new();
-        let mut distinct_keys = Vec::new();
-        let mut counts = Vec::<usize>::new();
-        let mut resolved = Vec::with_capacity(keys.len());
-        for key in keys {
-            let index = *entities.entry(key).or_insert_with(|| {
-                let index = distinct_keys.len();
-                distinct_keys.push(key);
-                counts.push(0);
-                index
-            });
-            counts[index] += 1;
-            resolved.push(index);
-        }
+    ) -> (Self, Vec<usize>, EntityRows) {
+        let EntityRouting {
+            keys,
+            rows,
+            entity_ids,
+        } = routing;
         if let Some(recorder) = observer {
-            recorder.add(RollingWork::ResolvedRows, resolved.len());
-            recorder.add(RollingWork::TouchedEntities, distinct_keys.len());
+            recorder.add(RollingWork::ResolvedRows, entity_ids.len());
+            recorder.add(RollingWork::TouchedEntities, keys.len());
         }
         let state_stage = observer.map(|recorder| recorder.stage(RollingStage::StatePreparation));
         let mut copied = 0;
-        let states = distinct_keys
+        let states = keys
             .iter()
-            .zip(counts)
-            .map(|(&key, count)| {
-                self.entities.get(key).map_or_else(
+            .zip(&rows.counts)
+            .map(|(key, &count)| {
+                self.entities.get(key.as_slice()).map_or_else(
                     || Arc::new(TypedEntityState::new(groups, count)),
                     |&index| {
                         copied += 1;
@@ -1249,10 +1383,10 @@ impl RollingKernelState {
             recorder.add(RollingWork::CopiedEntities, copied);
         }
         drop(state_stage);
-        let entities = distinct_keys
+        let entities = keys
             .into_iter()
             .enumerate()
-            .map(|(index, key)| (key.to_vec(), index))
+            .map(|(index, key)| (key, index))
             .collect();
         (
             Self {
@@ -1261,7 +1395,8 @@ impl RollingKernelState {
                 states,
                 last_identity: None,
             },
-            resolved,
+            entity_ids,
+            rows,
         )
     }
 
@@ -1891,12 +2026,163 @@ fn encode_rows(
         .iter()
         .map(|&index| input.column(index).clone())
         .collect::<Vec<_>>();
+    encode_arrays(&arrays, node_id)
+}
+
+fn encode_arrays(arrays: &[ArrayRef], node_id: &str) -> Result<datafusion::arrow::row::Rows> {
     let fields = arrays
         .iter()
         .map(|array| SortField::new(array.data_type().clone()))
         .collect::<Vec<_>>();
     RowConverter::new(fields)
-        .and_then(|converter| converter.convert_columns(&arrays))
+        .and_then(|converter| converter.convert_columns(arrays))
+        .map_err(|error| {
+            operator_error(
+                node_id,
+                &format!("typed rolling key encoding failed: {error}"),
+            )
+        })
+}
+
+/// Batch-local dense entity IDs with one persistent key per distinct entity.
+struct EntityRouting {
+    keys: Vec<Vec<u8>>,
+    rows: EntityRows,
+    entity_ids: Vec<usize>,
+}
+
+/// Assigns first-appearance dense IDs; returns distinct keys and their rows.
+fn dense_entity_ids<K: Copy + Eq + std::hash::Hash>(
+    keys: impl ExactSizeIterator<Item = K>,
+    expected_entities: usize,
+) -> (Vec<K>, EntityRows, Vec<usize>) {
+    let mut router = DenseRouter::with_capacity(expected_entities.min(keys.len()));
+    let entity_ids = keys
+        .enumerate()
+        .map(|(row, key)| router.route(row, key))
+        .collect();
+    (router.distinct, router.rows, entity_ids)
+}
+
+/// Batch-local routing; resident state keeps its own map and hasher.
+/// Streams usually repeat their entity order, so every ID remembers the
+/// entity that last followed it and a verified guess skips the hash lookup.
+struct DenseRouter<K> {
+    ids: datafusion::common::HashMap<K, usize>,
+    distinct: Vec<K>,
+    successors: Vec<usize>,
+    previous: Option<usize>,
+    rows: EntityRows,
+}
+
+impl<K: Copy + Eq + std::hash::Hash> DenseRouter<K> {
+    fn with_capacity(entities: usize) -> Self {
+        let mut ids = datafusion::common::HashMap::default();
+        ids.reserve(entities);
+        Self {
+            ids,
+            distinct: Vec::with_capacity(entities),
+            successors: Vec::with_capacity(entities),
+            previous: None,
+            rows: EntityRows {
+                counts: Vec::with_capacity(entities),
+                first_rows: Vec::with_capacity(entities),
+            },
+        }
+    }
+
+    fn route(&mut self, row: usize, key: K) -> usize {
+        let guess = self
+            .previous
+            .map(|previous| self.successors[previous])
+            .filter(|&candidate| self.distinct.get(candidate) == Some(&key));
+        let id = guess.unwrap_or_else(|| self.lookup(row, key));
+        if let Some(previous) = self.previous {
+            self.successors[previous] = id;
+        }
+        self.previous = Some(id);
+        self.rows.counts[id] += 1;
+        id
+    }
+
+    fn lookup(&mut self, row: usize, key: K) -> usize {
+        *self.ids.entry(key).or_insert_with(|| {
+            self.distinct.push(key);
+            self.successors.push(usize::MAX);
+            self.rows.counts.push(0);
+            self.rows.first_rows.push(row);
+            self.distinct.len() - 1
+        })
+    }
+}
+
+/// The single non-null Utf8 entity column routed without row encoding.
+fn direct_entity_column<'a>(
+    plan: &RollingKernelPlan,
+    input: &'a RecordBatch,
+) -> Option<&'a StringArray> {
+    let [entity] = *plan.partition_columns.as_slice() else {
+        return None;
+    };
+    input
+        .column(entity)
+        .as_string_opt::<i32>()
+        .filter(|entities| entities.null_count() == 0)
+}
+
+/// Routes by string value and row-encodes each distinct entity once.
+fn direct_entity_routing(
+    entities: &StringArray,
+    expected_entities: usize,
+    node_id: &str,
+) -> Result<EntityRouting> {
+    let values = (0..entities.len()).map(|row| entities.value(row));
+    let (distinct, entity_rows, entity_ids) = dense_entity_ids(values, expected_entities);
+    let distinct: ArrayRef = Arc::new(StringArray::from_iter_values(distinct));
+    let rows = encode_arrays(&[distinct], node_id)?;
+    Ok(EntityRouting {
+        keys: (0..rows.num_rows())
+            .map(|row| rows.row(row).data().to_vec())
+            .collect(),
+        rows: entity_rows,
+        entity_ids,
+    })
+}
+
+fn encode_row(
+    input: &RecordBatch,
+    row: usize,
+    indices: &[usize],
+    node_id: &str,
+) -> Result<Vec<u8>> {
+    Ok(encode_rows(&input.slice(row, 1), indices, node_id)?
+        .row(0)
+        .data()
+        .to_vec())
+}
+
+/// Encodes the first and `last` rows with one converter.
+fn encode_bounds(
+    input: &RecordBatch,
+    last: usize,
+    indices: &[usize],
+    node_id: &str,
+) -> Result<OrderBounds> {
+    let fields = indices
+        .iter()
+        .map(|&index| SortField::new(input.column(index).data_type().clone()))
+        .collect();
+    let encode = |converter: &RowConverter, row: usize| {
+        let arrays = indices
+            .iter()
+            .map(|&index| input.column(index).slice(row, 1))
+            .collect::<Vec<_>>();
+        converter
+            .convert_columns(&arrays)
+            .map(|rows| rows.row(0).data().to_vec())
+    };
+    RowConverter::new(fields)
+        .and_then(|converter| Ok((encode(&converter, 0)?, encode(&converter, last)?)))
         .map_err(|error| {
             operator_error(
                 node_id,
@@ -2108,6 +2394,7 @@ impl TypedWindowState {
     }
 }
 
+#[inline]
 fn valid_float64(input: &Float64Array, row_index: usize, nan_as_value: bool) -> Option<f64> {
     if input.is_null(row_index) || (!nan_as_value && input.value(row_index).is_nan()) {
         None
@@ -2272,6 +2559,7 @@ impl Float64NumericState {
         }
     }
 
+    #[inline]
     fn update(
         &mut self,
         event_time: i64,
@@ -2288,6 +2576,7 @@ impl Float64NumericState {
         self.repair_accumulator(numerical_profile, transition_count, node_id)
     }
 
+    #[inline]
     fn repair_accumulator(
         &mut self,
         numerical_profile: RollingNumericalProfile,
@@ -2322,6 +2611,7 @@ impl Float64NumericState {
         Ok(())
     }
 
+    #[inline]
     fn expire(&mut self, event_time: i64) -> Result<()> {
         let accumulator = &mut self.accumulator;
         self.samples
@@ -2613,6 +2903,7 @@ impl TypedEwmaState {
     clippy::cast_precision_loss,
     reason = "the frozen mean and variance output type is Float64"
 )]
+#[inline]
 fn add_float64(accumulator: &mut WindowAccumulator, sample: f64, node_id: &str) -> Result<()> {
     accumulator.valid_count = accumulator
         .valid_count
@@ -2646,6 +2937,7 @@ fn add_float64(accumulator: &mut WindowAccumulator, sample: f64, node_id: &str) 
     clippy::cast_precision_loss,
     reason = "the frozen mean and variance output type is Float64"
 )]
+#[inline]
 fn remove_float64(accumulator: &mut WindowAccumulator, sample: f64) -> Result<()> {
     accumulator.valid_count = accumulator
         .valid_count
@@ -3529,6 +3821,7 @@ fn append_sum(builder: &mut Float64Builder, accumulator: &WindowAccumulator) -> 
     Ok(())
 }
 
+#[inline]
 fn float_mean(accumulator: &WindowAccumulator) -> f64 {
     if accumulator.nan_count > 0 {
         return f64::NAN;
@@ -3816,6 +4109,294 @@ mod tests {
                 large <= small + 20,
                 "two entities, warm={warm}: small={small}, large={large}"
             );
+        }
+    }
+
+    /// The compiled stream order: event time, entity key, then sequence.
+    fn stream_order_plan() -> RollingKernelPlan {
+        RollingKernelPlan {
+            order_columns: vec![0, 2, 1],
+            ..numeric_plan(RollingNumericalProfile::StableV1)
+        }
+    }
+
+    fn order_rows(rows: &[(i64, Option<&str>, u64)]) -> RecordBatch {
+        let fields = schema()
+            .fields()
+            .iter()
+            .map(|field| field.as_ref().clone().with_nullable(true))
+            .collect::<Vec<_>>();
+        RecordBatch::try_new(
+            Arc::new(Schema::new(fields)),
+            vec![
+                Arc::new(TimestampMicrosecondArray::from_iter_values(
+                    rows.iter().map(|row| row.0),
+                )),
+                Arc::new(UInt64Array::from_iter_values(rows.iter().map(|row| row.2))),
+                Arc::new(rows.iter().map(|row| row.1).collect::<StringArray>()),
+                Arc::new(Float64Array::from(vec![Some(1.0); rows.len()])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// The historical all-row `RowConverter` proof the direct check must match.
+    fn encoded_order_bounds(
+        plan: &RollingKernelPlan,
+        input: &RecordBatch,
+    ) -> std::result::Result<Option<OrderBounds>, String> {
+        let rows = encode_rows(input, &plan.order_columns, "r").unwrap();
+        for row in 1..input.num_rows() {
+            match rows.row(row - 1).cmp(&rows.row(row)) {
+                Ordering::Less => {}
+                Ordering::Equal => {
+                    return Err(duplicate_identity_error(input, 0, row, "r")
+                        .unwrap()
+                        .to_string());
+                }
+                Ordering::Greater => return Ok(None),
+            }
+        }
+        Ok(input
+            .num_rows()
+            .checked_sub(1)
+            .map(|last| (rows.row(0).data().to_vec(), rows.row(last).data().to_vec())))
+    }
+
+    fn assert_order_parity(plan: &RollingKernelPlan, input: &RecordBatch) {
+        let actual = plan
+            .ordered_stream_bounds(input, "r", None)
+            .map_err(|error| error.to_string());
+        assert_eq!(actual, encoded_order_bounds(plan, input), "{input:?}");
+    }
+
+    #[test]
+    fn direct_stream_order_proof_does_not_encode_every_row() {
+        fn bytes(row_count: usize) -> usize {
+            let rows = (0..row_count)
+                .map(|row| {
+                    let index = i64::try_from(row).unwrap();
+                    let key = ["alpha", "beta"][row % 2];
+                    (index / 2, Some(key), u64::try_from(row).unwrap())
+                })
+                .collect::<Vec<_>>();
+            let input = order_rows(&rows);
+            let plan = stream_order_plan();
+            allocation_counter::measure(|| {
+                assert!(
+                    plan.ordered_stream_bounds(&input, "r", None)
+                        .unwrap()
+                        .is_some()
+                );
+            })
+            .bytes_total
+            .try_into()
+            .unwrap()
+        }
+
+        let small = bytes(32);
+        let large = bytes(4096);
+        println!("direct order proof bytes: rows32={small}, rows4096={large}");
+        assert!(large <= small + 256, "small={small}, large={large}");
+    }
+
+    #[test]
+    fn direct_stream_order_proof_matches_row_encoding_at_boundaries() {
+        let plan = stream_order_plan();
+        let cases: [&[(i64, Option<&str>, u64)]; 10] = [
+            &[],
+            &[(1, Some("a"), 1)],
+            &[(1, Some("a"), 1), (1, Some("b"), 0), (2, Some("a"), 0)],
+            &[(1, Some("a"), 1), (1, Some("a"), 1)],
+            &[(1, Some("b"), 1), (1, Some("a"), 2)],
+            &[(1, Some("a"), 1), (1, Some("ab"), 0), (1, Some("b"), 0)],
+            &[(1, Some("ab"), 0), (1, Some("a"), 9)],
+            &[
+                (-1, Some(""), u64::MAX),
+                (0, Some(""), 0),
+                (i64::MAX, Some("z"), 0),
+            ],
+            &[(1, Some("a"), 2), (1, Some("a"), 1), (1, Some("a"), 1)],
+            &[(1, None, 1), (1, Some("a"), 1), (1, None, 2)],
+        ];
+        for rows in cases {
+            assert_order_parity(&plan, &order_rows(rows));
+        }
+        let unicode = order_rows(&[(1, Some("é"), 1), (1, Some("z"), 0), (1, Some("éa"), 0)]);
+        assert_order_parity(&plan, &unicode);
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            cases: 512,
+            failure_persistence: None,
+            ..proptest::prelude::ProptestConfig::default()
+        })]
+
+        #[test]
+        fn direct_stream_order_proof_matches_row_encoding(
+            rows in proptest::collection::vec(
+                (0_i64..3, proptest::option::weighted(0.95, 0_usize..4), 0_u64..3),
+                0..12,
+            ),
+            sorted in proptest::bool::weighted(0.7),
+        ) {
+            const KEYS: [&str; 4] = ["", "a", "ab", "b"];
+            let mut rows = rows
+                .into_iter()
+                .map(|(time, key, sequence)| (time, key.map(|key| KEYS[key]), sequence))
+                .collect::<Vec<_>>();
+            if sorted {
+                rows.sort_unstable();
+            }
+            let input = order_rows(&rows);
+            assert_order_parity(&stream_order_plan(), &input);
+            assert_order_parity(&numeric_plan(RollingNumericalProfile::StableV1), &input);
+        }
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            cases: 256,
+            failure_persistence: None,
+            ..proptest::prelude::ProptestConfig::default()
+        })]
+
+        #[test]
+        fn direct_entity_routing_matches_encoded_routing(
+            keys in proptest::collection::vec(0_usize..5, 0..24),
+            resident in proptest::collection::vec(0_usize..5, 0..4),
+        ) {
+            const KEYS: [&str; 5] = ["", "a", "ab", "b", "é"];
+            let rows = |keys: &[usize]| {
+                keys.iter()
+                    .enumerate()
+                    .map(|(row, &key)| (i64::try_from(row).unwrap(), Some(KEYS[key]), 0))
+                    .collect::<Vec<_>>()
+            };
+            let plan = stream_order_plan();
+            let mut state = RollingKernelState::default();
+            if !resident.is_empty() {
+                plan.prepare_ordered_stream(&state, &order_rows(&rows(&resident)), "r", None)
+                    .unwrap()
+                    .commit(&mut state);
+            }
+            let input = order_rows(&rows(&keys));
+            let direct = plan.prepare_touched_entities(&state, &input, "r", None).unwrap();
+            let (encoded, entity_ids, entity_rows) = state.prepare_stream_entities(
+                plan.encoded_entity_routing(&input, 16, "r").unwrap(),
+                &plan.groups,
+                &plan.fingerprint,
+                None,
+            );
+            proptest::prop_assert_eq!(&direct.entity_ids, &entity_ids);
+            proptest::prop_assert_eq!(&direct.entity_rows, &entity_rows);
+            proptest::prop_assert_eq!(&direct.state.entities, &encoded.entities);
+            proptest::prop_assert_eq!(
+                format!("{:?}", direct.state.states),
+                format!("{:?}", encoded.states)
+            );
+        }
+    }
+
+    #[test]
+    fn direct_entity_routing_encodes_each_distinct_key_once() {
+        fn bytes(row_count: usize) -> usize {
+            let rows = (0..row_count)
+                .map(|row| {
+                    let index = i64::try_from(row).unwrap();
+                    let key = ["alpha", "beta"][row % 2];
+                    (index / 2, Some(key), u64::try_from(row).unwrap())
+                })
+                .collect::<Vec<_>>();
+            let input = order_rows(&rows);
+            let plan = stream_order_plan();
+            let state = RollingKernelState::default();
+            allocation_counter::measure(|| {
+                let resolved = plan
+                    .prepare_touched_entities(&state, &input, "r", None)
+                    .unwrap();
+                assert_eq!(resolved.entity_ids.len(), row_count);
+            })
+            .bytes_total
+            .try_into()
+            .unwrap()
+        }
+
+        let small = bytes(32);
+        let large = bytes(4096);
+        let dense_ids = (4096 - 32) * size_of::<usize>();
+        println!("direct entity routing bytes: rows32={small}, rows4096={large}");
+        assert!(
+            large <= small + dense_ids + 256,
+            "small={small}, large={large}"
+        );
+    }
+
+    #[test]
+    fn stream_update_reports_entity_row_counts_and_first_rows() {
+        let plan = stream_order_plan();
+        let keys = ["b", "a", "b", "c", "b"];
+        let rows = keys
+            .iter()
+            .enumerate()
+            .map(|(row, key)| (i64::try_from(row).unwrap(), Some(*key), 0))
+            .collect::<Vec<_>>();
+        for input in [order_rows(&rows), order_rows(&[])] {
+            let update = plan
+                .prepare_ordered_stream(&RollingKernelState::default(), &input, "r", None)
+                .unwrap();
+            let expected = if input.num_rows() == 0 {
+                EntityRows::default()
+            } else {
+                EntityRows {
+                    counts: vec![3, 1, 1],
+                    first_rows: vec![0, 1, 3],
+                }
+            };
+            assert_eq!(update.entity_rows(), &expected);
+            assert_eq!(update.execution.state.states.len(), expected.counts.len());
+        }
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            cases: 512,
+            failure_persistence: None,
+            ..proptest::prelude::ProptestConfig::default()
+        })]
+
+        #[test]
+        fn dense_entity_ids_assign_first_appearance_ids(
+            keys in proptest::collection::vec(0_u8..6, 0..64),
+            period in 0_usize..8,
+        ) {
+            // Mix repeating cycles, which exercise successor reuse, with noise.
+            let keys = keys
+                .iter()
+                .enumerate()
+                .map(|(row, &key)| if period > 0 && key < 4 { u8::try_from(row % period).unwrap() } else { key })
+                .collect::<Vec<_>>();
+            let mut distinct = Vec::new();
+            let mut expected = EntityRows::default();
+            let ids = keys
+                .iter()
+                .enumerate()
+                .map(|(row, key)| {
+                    let id = distinct.iter().position(|seen| seen == key).unwrap_or_else(|| {
+                        distinct.push(*key);
+                        expected.counts.push(0);
+                        expected.first_rows.push(row);
+                        distinct.len() - 1
+                    });
+                    expected.counts[id] += 1;
+                    id
+                })
+                .collect::<Vec<_>>();
+            let (actual_keys, actual_rows, actual_ids) = dense_entity_ids(keys.iter().copied(), period);
+            proptest::prop_assert_eq!(actual_keys, distinct);
+            proptest::prop_assert_eq!(actual_rows, expected);
+            proptest::prop_assert_eq!(actual_ids, ids);
         }
     }
 

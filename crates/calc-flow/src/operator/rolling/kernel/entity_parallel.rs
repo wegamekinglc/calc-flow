@@ -437,6 +437,7 @@ impl PreparedOrderedKernel<'_> {
             execution: RollingKernelExecution {
                 columns: Vec::new(),
                 entity_ids: Vec::new(),
+                entity_rows: stream.entity_rows,
                 metrics: stream.metrics,
                 state: stream.state,
             },
@@ -939,6 +940,12 @@ fn run_prepared_numeric_lane<const GROUPS: usize>(
         request.test_hook.as_ref(),
     );
     progress.active_site = None;
+    // Prepared lane entities are already unique; borrow each once per lane.
+    let mut entities = request
+        .entities
+        .iter_mut()
+        .map(|entity| Arc::make_mut(&mut entity.state))
+        .collect::<Vec<_>>();
     for (original_row, &entity_id) in context.input.entity_ids.iter().enumerate() {
         let assignment = context.input.assignments[entity_id];
         if assignment.lane != request.lane {
@@ -946,14 +953,12 @@ fn run_prepared_numeric_lane<const GROUPS: usize>(
         }
         let row =
             context.record_row(&mut request.rows, original_row, assignment.local, progress)?;
-        let entity = Arc::make_mut(
-            &mut request.entities[usize::try_from(row.lane_entity).expect("u32 fits platform")]
-                .state,
-        );
+        let entity = &mut *entities[usize::try_from(row.lane_entity).expect("u32 fits platform")];
         context.update_entity(entity, row, progress)?;
         context.append_outputs(&mut builders, entity, row, progress, &mut append)?;
         progress.active_site = None;
     }
+    drop(entities);
     check_cancelled(cancellation, progress)?;
     #[cfg(test)]
     context.observe(NumericTestPoint::Finish);

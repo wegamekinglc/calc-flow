@@ -9,7 +9,7 @@ use datafusion::arrow::{
     datatypes::DataType,
 };
 
-use super::kernel::StreamKernelUpdate;
+use super::kernel::{EntityRows, StreamKernelUpdate};
 use crate::operator::rolling_metrics::{RollingMetricsRecorder, RollingStage, RollingWork};
 use crate::runtime::streaming::entity_work::ReservePair;
 
@@ -367,6 +367,7 @@ impl RollingOperator {
             retained_histories(
                 input,
                 update.entity_ids(),
+                update.entity_rows(),
                 &self.state.histories,
                 &self.compiled,
                 context.operator_id(),
@@ -600,6 +601,8 @@ struct EntityTail {
     entity_id: usize,
     first: usize,
     transitions: u64,
+    /// Rows this batch contributes to the retained history.
+    retained: usize,
     rows: VecDeque<usize>,
 }
 
@@ -834,37 +837,76 @@ impl RetainedHistoryAppend {
     }
 }
 
+/// Builds each touched entity's retained tail from its routed row count,
+/// walking back from the batch end only until every tail is complete.
 fn entity_tails(
     entity_ids: &[usize],
+    rows: &EntityRows,
     retention: usize,
     node_id: &str,
 ) -> Result<impl Iterator<Item = EntityTail>> {
-    let mut tails = Vec::<EntityTail>::new();
-    for (row, &entity_id) in entity_ids.iter().enumerate() {
-        if entity_id == tails.len() {
-            tails.push(EntityTail {
-                entity_id,
-                first: row,
-                transitions: 0,
-                rows: VecDeque::new(),
-            });
+    if rows.counts.iter().sum::<usize>() != entity_ids.len() {
+        return Err(inconsistent_entity_rows());
+    }
+    let mut tails = rows
+        .counts
+        .iter()
+        .zip(&rows.first_rows)
+        .enumerate()
+        .map(|(entity_id, (&count, &first))| {
+            EntityTail::new(entity_id, first, count, retention, node_id)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    collect_tail_rows(&mut tails, entity_ids)?;
+    Ok(tails.into_iter())
+}
+
+/// Fills every tail's newest retained rows in ascending row order.
+fn collect_tail_rows(tails: &mut [EntityTail], entity_ids: &[usize]) -> Result<()> {
+    let mut pending = tails.iter().map(|tail| tail.retained).sum::<usize>();
+    for (row, &entity_id) in entity_ids.iter().enumerate().rev() {
+        if pending == 0 {
+            return Ok(());
         }
         let tail = tails
             .get_mut(entity_id)
             .ok_or_else(|| internal_error("prepared rolling entity IDs are not dense"))?;
-        tail.transitions = tail
-            .transitions
-            .checked_add(1)
-            .ok_or_else(|| operator_error(node_id, "rolling entity transition count overflowed"))?;
-        tail.rows.push_back(row);
-        if tail.rows.len() > retention {
-            tail.rows.pop_front();
+        if tail.rows.len() < tail.retained {
+            tail.rows.push_front(row);
+            pending -= 1;
         }
     }
-    Ok(tails.into_iter())
+    if pending == 0 {
+        Ok(())
+    } else {
+        Err(inconsistent_entity_rows())
+    }
+}
+
+fn inconsistent_entity_rows() -> super::CalcFlowError {
+    internal_error("prepared rolling entity rows are inconsistent")
 }
 
 impl EntityTail {
+    fn new(
+        entity_id: usize,
+        first: usize,
+        count: usize,
+        retention: usize,
+        node_id: &str,
+    ) -> Result<Self> {
+        let transitions = u64::try_from(count)
+            .map_err(|_| operator_error(node_id, "rolling entity transition count overflowed"))?;
+        let retained = count.min(retention);
+        Ok(Self {
+            entity_id,
+            first,
+            transitions,
+            retained,
+            rows: VecDeque::with_capacity(retained),
+        })
+    }
+
     fn prepare(
         self,
         input: &RecordBatch,
@@ -941,6 +983,7 @@ impl EntityTail {
 fn retained_histories(
     input: &RecordBatch,
     entity_ids: &[usize],
+    entity_rows: &EntityRows,
     histories: &RollingHistories,
     compiled: &CompiledRollingSpec,
     node_id: &str,
@@ -959,7 +1002,96 @@ fn retained_histories(
                     | DataType::LargeBinary
             )
     });
-    entity_tails(entity_ids, retention, node_id)?
+    entity_tails(entity_ids, entity_rows, retention, node_id)?
         .map(|tail| tail.prepare(input, histories, compiled, columnar, node_id, observer))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+
+    use super::{EntityRows, entity_tails};
+
+    /// Entity ID, first row, transitions, and retained rows of one tail.
+    type Tail = (usize, usize, u64, Vec<usize>);
+
+    /// The historical forward walk over every row.
+    fn forward_tails(entity_ids: &[usize], retention: usize) -> Vec<Tail> {
+        let mut tails = Vec::<(usize, usize, u64, VecDeque<usize>)>::new();
+        for (row, &entity_id) in entity_ids.iter().enumerate() {
+            if entity_id == tails.len() {
+                tails.push((entity_id, row, 0, VecDeque::new()));
+            }
+            let tail = &mut tails[entity_id];
+            tail.2 += 1;
+            tail.3.push_back(row);
+            if tail.3.len() > retention {
+                tail.3.pop_front();
+            }
+        }
+        tails
+            .into_iter()
+            .map(|(entity, first, transitions, rows)| (entity, first, transitions, rows.into()))
+            .collect()
+    }
+
+    fn dense(keys: &[u8]) -> (Vec<usize>, EntityRows) {
+        let mut distinct = Vec::new();
+        let mut rows = EntityRows::default();
+        let entity_ids = keys
+            .iter()
+            .enumerate()
+            .map(|(row, key)| {
+                let id = distinct
+                    .iter()
+                    .position(|seen| seen == key)
+                    .unwrap_or_else(|| {
+                        distinct.push(*key);
+                        rows.counts.push(0);
+                        rows.first_rows.push(row);
+                        distinct.len() - 1
+                    });
+                rows.counts[id] += 1;
+                id
+            })
+            .collect();
+        (entity_ids, rows)
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            cases: 512,
+            failure_persistence: None,
+            ..proptest::prelude::ProptestConfig::default()
+        })]
+
+        #[test]
+        fn routed_entity_tails_match_the_forward_walk(
+            keys in proptest::collection::vec(0_u8..6, 0..48),
+            retention in 0_usize..8,
+        ) {
+            let (entity_ids, rows) = dense(&keys);
+            let tails = entity_tails(&entity_ids, &rows, retention, "r")
+                .unwrap()
+                .map(|tail| (tail.entity_id, tail.first, tail.transitions, tail.rows.into()))
+                .collect::<Vec<Tail>>();
+            proptest::prop_assert_eq!(tails, forward_tails(&entity_ids, retention));
+        }
+    }
+
+    #[test]
+    fn routed_entity_tails_reject_inconsistent_routing() {
+        let rows = EntityRows {
+            counts: vec![1],
+            first_rows: vec![0],
+        };
+        assert!(entity_tails(&[0, 1], &rows, 2, "r").is_err());
+        assert!(entity_tails(&[0, 0], &rows, 2, "r").is_err());
+        let split = EntityRows {
+            counts: vec![1, 1],
+            first_rows: vec![0, 1],
+        };
+        assert!(entity_tails(&[0, 0], &split, 2, "r").is_err());
+    }
 }
