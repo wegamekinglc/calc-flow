@@ -955,14 +955,26 @@ impl RollingKernelPlan {
     ) -> Result<ResolvedEntities> {
         let started = Instant::now();
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::EntityResolution));
-        let rows = encode_rows(input, &self.partition_columns, node_id)?;
-        let keys = encoded_keys(&rows, input.num_rows());
+        let routing = match direct_entity_column(self, input) {
+            Some(entities) => direct_entity_routing(entities, node_id)?,
+            None => self.encoded_entity_routing(input, node_id)?,
+        };
         let (state, entity_ids) =
-            state.prepare_stream_entities(keys, &self.groups, &self.fingerprint, observer);
+            state.prepare_stream_entities(routing, &self.groups, &self.fingerprint, observer);
         Ok(ResolvedEntities {
             state,
             entity_ids,
             elapsed_ns: nanos(started.elapsed()),
+        })
+    }
+
+    fn encoded_entity_routing(&self, input: &RecordBatch, node_id: &str) -> Result<EntityRouting> {
+        let rows = encode_rows(input, &self.partition_columns, node_id)?;
+        let (keys, counts, entity_ids) = dense_entity_ids(encoded_keys(&rows, input.num_rows()));
+        Ok(EntityRouting {
+            keys: keys.into_iter().map(<[u8]>::to_vec).collect(),
+            counts,
+            entity_ids,
         })
     }
 
@@ -1281,38 +1293,29 @@ fn cast_primitive(array: &ArrayRef, target: &DataType, node_id: &str) -> Result<
 }
 
 impl RollingKernelState {
-    fn prepare_stream_entities<'a>(
+    fn prepare_stream_entities(
         &self,
-        keys: impl ExactSizeIterator<Item = &'a [u8]>,
+        routing: EntityRouting,
         groups: &[TypedGroupPlan],
         fingerprint: &str,
         observer: Option<&RollingMetricsRecorder>,
     ) -> (Self, Vec<usize>) {
-        let mut entities = HashMap::new();
-        let mut distinct_keys = Vec::new();
-        let mut counts = Vec::<usize>::new();
-        let mut resolved = Vec::with_capacity(keys.len());
-        for key in keys {
-            let index = *entities.entry(key).or_insert_with(|| {
-                let index = distinct_keys.len();
-                distinct_keys.push(key);
-                counts.push(0);
-                index
-            });
-            counts[index] += 1;
-            resolved.push(index);
-        }
+        let EntityRouting {
+            keys,
+            counts,
+            entity_ids,
+        } = routing;
         if let Some(recorder) = observer {
-            recorder.add(RollingWork::ResolvedRows, resolved.len());
-            recorder.add(RollingWork::TouchedEntities, distinct_keys.len());
+            recorder.add(RollingWork::ResolvedRows, entity_ids.len());
+            recorder.add(RollingWork::TouchedEntities, keys.len());
         }
         let state_stage = observer.map(|recorder| recorder.stage(RollingStage::StatePreparation));
         let mut copied = 0;
-        let states = distinct_keys
+        let states = keys
             .iter()
             .zip(counts)
-            .map(|(&key, count)| {
-                self.entities.get(key).map_or_else(
+            .map(|(key, count)| {
+                self.entities.get(key.as_slice()).map_or_else(
                     || Arc::new(TypedEntityState::new(groups, count)),
                     |&index| {
                         copied += 1;
@@ -1327,10 +1330,10 @@ impl RollingKernelState {
             recorder.add(RollingWork::CopiedEntities, copied);
         }
         drop(state_stage);
-        let entities = distinct_keys
+        let entities = keys
             .into_iter()
             .enumerate()
-            .map(|(index, key)| (key.to_vec(), index))
+            .map(|(index, key)| (key, index))
             .collect();
         (
             Self {
@@ -1339,7 +1342,7 @@ impl RollingKernelState {
                 states,
                 last_identity: None,
             },
-            resolved,
+            entity_ids,
         )
     }
 
@@ -1969,18 +1972,80 @@ fn encode_rows(
         .iter()
         .map(|&index| input.column(index).clone())
         .collect::<Vec<_>>();
+    encode_arrays(&arrays, node_id)
+}
+
+fn encode_arrays(arrays: &[ArrayRef], node_id: &str) -> Result<datafusion::arrow::row::Rows> {
     let fields = arrays
         .iter()
         .map(|array| SortField::new(array.data_type().clone()))
         .collect::<Vec<_>>();
     RowConverter::new(fields)
-        .and_then(|converter| converter.convert_columns(&arrays))
+        .and_then(|converter| converter.convert_columns(arrays))
         .map_err(|error| {
             operator_error(
                 node_id,
                 &format!("typed rolling key encoding failed: {error}"),
             )
         })
+}
+
+/// Batch-local dense entity IDs with one persistent key per distinct entity.
+struct EntityRouting {
+    keys: Vec<Vec<u8>>,
+    counts: Vec<usize>,
+    entity_ids: Vec<usize>,
+}
+
+/// Assigns first-appearance dense IDs; returns distinct keys and row counts.
+fn dense_entity_ids<K: Copy + Eq + std::hash::Hash>(
+    keys: impl ExactSizeIterator<Item = K>,
+) -> (Vec<K>, Vec<usize>, Vec<usize>) {
+    // Batch-local routing only; resident state keeps its own map and hasher.
+    let mut ids = datafusion::common::HashMap::<K, usize>::default();
+    let mut distinct = Vec::new();
+    let mut counts = Vec::<usize>::new();
+    let entity_ids = keys
+        .map(|key| {
+            let id = *ids.entry(key).or_insert_with(|| {
+                distinct.push(key);
+                counts.push(0);
+                distinct.len() - 1
+            });
+            counts[id] += 1;
+            id
+        })
+        .collect();
+    (distinct, counts, entity_ids)
+}
+
+/// The single non-null Utf8 entity column routed without row encoding.
+fn direct_entity_column<'a>(
+    plan: &RollingKernelPlan,
+    input: &'a RecordBatch,
+) -> Option<&'a StringArray> {
+    let [entity] = *plan.partition_columns.as_slice() else {
+        return None;
+    };
+    input
+        .column(entity)
+        .as_string_opt::<i32>()
+        .filter(|entities| entities.null_count() == 0)
+}
+
+/// Routes by string value and row-encodes each distinct entity once.
+fn direct_entity_routing(entities: &StringArray, node_id: &str) -> Result<EntityRouting> {
+    let (distinct, counts, entity_ids) =
+        dense_entity_ids((0..entities.len()).map(|row| entities.value(row)));
+    let distinct: ArrayRef = Arc::new(StringArray::from_iter_values(distinct));
+    let rows = encode_arrays(&[distinct], node_id)?;
+    Ok(EntityRouting {
+        keys: (0..rows.num_rows())
+            .map(|row| rows.row(row).data().to_vec())
+            .collect(),
+        counts,
+        entity_ids,
+    })
 }
 
 fn encode_row(
@@ -4050,6 +4115,83 @@ mod tests {
             assert_order_parity(&stream_order_plan(), &input);
             assert_order_parity(&numeric_plan(RollingNumericalProfile::StableV1), &input);
         }
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            cases: 256,
+            failure_persistence: None,
+            ..proptest::prelude::ProptestConfig::default()
+        })]
+
+        #[test]
+        fn direct_entity_routing_matches_encoded_routing(
+            keys in proptest::collection::vec(0_usize..5, 0..24),
+            resident in proptest::collection::vec(0_usize..5, 0..4),
+        ) {
+            const KEYS: [&str; 5] = ["", "a", "ab", "b", "é"];
+            let rows = |keys: &[usize]| {
+                keys.iter()
+                    .enumerate()
+                    .map(|(row, &key)| (i64::try_from(row).unwrap(), Some(KEYS[key]), 0))
+                    .collect::<Vec<_>>()
+            };
+            let plan = stream_order_plan();
+            let mut state = RollingKernelState::default();
+            if !resident.is_empty() {
+                plan.prepare_ordered_stream(&state, &order_rows(&rows(&resident)), "r", None)
+                    .unwrap()
+                    .commit(&mut state);
+            }
+            let input = order_rows(&rows(&keys));
+            let direct = plan.prepare_touched_entities(&state, &input, "r", None).unwrap();
+            let (encoded, entity_ids) = state.prepare_stream_entities(
+                plan.encoded_entity_routing(&input, "r").unwrap(),
+                &plan.groups,
+                &plan.fingerprint,
+                None,
+            );
+            proptest::prop_assert_eq!(&direct.entity_ids, &entity_ids);
+            proptest::prop_assert_eq!(&direct.state.entities, &encoded.entities);
+            proptest::prop_assert_eq!(
+                format!("{:?}", direct.state.states),
+                format!("{:?}", encoded.states)
+            );
+        }
+    }
+
+    #[test]
+    fn direct_entity_routing_encodes_each_distinct_key_once() {
+        fn bytes(row_count: usize) -> usize {
+            let rows = (0..row_count)
+                .map(|row| {
+                    let index = i64::try_from(row).unwrap();
+                    let key = ["alpha", "beta"][row % 2];
+                    (index / 2, Some(key), u64::try_from(row).unwrap())
+                })
+                .collect::<Vec<_>>();
+            let input = order_rows(&rows);
+            let plan = stream_order_plan();
+            let state = RollingKernelState::default();
+            allocation_counter::measure(|| {
+                let resolved = plan
+                    .prepare_touched_entities(&state, &input, "r", None)
+                    .unwrap();
+                assert_eq!(resolved.entity_ids.len(), row_count);
+            })
+            .bytes_total
+            .try_into()
+            .unwrap()
+        }
+
+        let small = bytes(32);
+        let large = bytes(4096);
+        let dense_ids = (4096 - 32) * size_of::<usize>();
+        println!("direct entity routing bytes: rows32={small}, rows4096={large}");
+        assert!(
+            large <= small + dense_ids + 256,
+            "small={small}, large={large}"
+        );
     }
 
     #[test]
