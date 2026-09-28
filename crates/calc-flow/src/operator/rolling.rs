@@ -2677,6 +2677,7 @@ impl WindowAccumulator {
     /// True when sliding arithmetic produced a non-finite component; the
     /// caller then re-folds the current window so the live state always
     /// matches the checkpoint rebuild for non-finite classifications.
+    #[inline]
     fn is_non_finite(&self) -> bool {
         let sum_non_finite = match &self.sum {
             Some(SumState::Float(total)) => !total.is_finite(),

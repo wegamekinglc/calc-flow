@@ -40,6 +40,7 @@ use crate::{
     operator::rolling_metrics::{RollingMetricsRecorder, RollingStage, RollingWork},
 };
 
+mod mean;
 mod sorted;
 pub(super) use sorted::SortedRollingState;
 pub(super) mod entity_parallel;
@@ -1121,39 +1122,29 @@ impl RollingKernelPlan {
             last_identity,
             mut metrics,
         } = stream;
-        let arrow_stage = observer.map(|recorder| recorder.stage(RollingStage::ArrowOutput));
-        let mut builders = self
-            .outputs
-            .iter()
-            .map(|output| DerivedBuilder::new(*output, row_count))
-            .collect::<Vec<_>>();
-        drop(arrow_stage);
-
-        let kernel_start = Instant::now();
-        let numeric_stage = observer.map(|recorder| recorder.stage(RollingStage::NumericUpdate));
-        fill_typed_rows(
-            self,
-            TypedRowInputs {
-                columns: &inputs,
-                event_times: &event_times,
-                entity_ids: &entity_ids,
-            },
-            &mut state.states,
-            &mut builders,
-            node_id,
-            observer,
-        )?;
-        let kernel_ns = nanos(kernel_start.elapsed());
-        drop(numeric_stage);
-
-        let output_start = Instant::now();
-        let arrow_stage = observer.map(|recorder| recorder.stage(RollingStage::ArrowOutput));
-        let columns = builders
-            .into_iter()
-            .map(DerivedBuilder::finish)
-            .collect::<Result<Vec<_>>>()?;
-        let output_build_ns = nanos(output_start.elapsed());
-        drop(arrow_stage);
+        let inputs = TypedRowInputs {
+            columns: &inputs,
+            event_times: &event_times,
+            entity_ids: &entity_ids,
+        };
+        let (columns, kernel_ns, output_build_ns) = match mean::MeanKernel::compile(self) {
+            Some(kernel) => {
+                let kernel_start = Instant::now();
+                let _stage = observer.map(|recorder| recorder.stage(RollingStage::NumericUpdate));
+                let columns = mean::fill_mean_rows(
+                    self,
+                    &kernel,
+                    inputs,
+                    &mut state.states,
+                    node_id,
+                    observer,
+                )?;
+                (columns, nanos(kernel_start.elapsed()), 0)
+            }
+            None => {
+                self.fill_generic_columns(inputs, &mut state.states, row_count, node_id, observer)?
+            }
+        };
         let state_bytes = state
             .states
             .iter()
@@ -1172,6 +1163,38 @@ impl RollingKernelPlan {
             metrics,
             state,
         })
+    }
+
+    /// Generic typed transitions; returns columns and kernel/output times.
+    fn fill_generic_columns(
+        &self,
+        inputs: TypedRowInputs<'_>,
+        states: &mut [Arc<TypedEntityState>],
+        row_count: usize,
+        node_id: &str,
+        observer: Option<&RollingMetricsRecorder>,
+    ) -> Result<(Vec<ArrayRef>, u64, u64)> {
+        let arrow_stage = observer.map(|recorder| recorder.stage(RollingStage::ArrowOutput));
+        let mut builders = self
+            .outputs
+            .iter()
+            .map(|output| DerivedBuilder::new(*output, row_count))
+            .collect::<Vec<_>>();
+        drop(arrow_stage);
+
+        let kernel_start = Instant::now();
+        let numeric_stage = observer.map(|recorder| recorder.stage(RollingStage::NumericUpdate));
+        fill_typed_rows(self, inputs, states, &mut builders, node_id, observer)?;
+        let kernel_ns = nanos(kernel_start.elapsed());
+        drop(numeric_stage);
+
+        let output_start = Instant::now();
+        let _stage = observer.map(|recorder| recorder.stage(RollingStage::ArrowOutput));
+        let columns = builders
+            .into_iter()
+            .map(DerivedBuilder::finish)
+            .collect::<Result<Vec<_>>>()?;
+        Ok((columns, kernel_ns, nanos(output_start.elapsed())))
     }
 
     fn validate_required_values(&self, input: &RecordBatch, node_id: &str) -> Result<()> {
@@ -2263,6 +2286,7 @@ impl TypedWindowState {
     }
 }
 
+#[inline]
 fn valid_float64(input: &Float64Array, row_index: usize, nan_as_value: bool) -> Option<f64> {
     if input.is_null(row_index) || (!nan_as_value && input.value(row_index).is_nan()) {
         None
@@ -2427,6 +2451,7 @@ impl Float64NumericState {
         }
     }
 
+    #[inline]
     fn update(
         &mut self,
         event_time: i64,
@@ -2443,6 +2468,7 @@ impl Float64NumericState {
         self.repair_accumulator(numerical_profile, transition_count, node_id)
     }
 
+    #[inline]
     fn repair_accumulator(
         &mut self,
         numerical_profile: RollingNumericalProfile,
@@ -2477,6 +2503,7 @@ impl Float64NumericState {
         Ok(())
     }
 
+    #[inline]
     fn expire(&mut self, event_time: i64) -> Result<()> {
         let accumulator = &mut self.accumulator;
         self.samples
@@ -2768,6 +2795,7 @@ impl TypedEwmaState {
     clippy::cast_precision_loss,
     reason = "the frozen mean and variance output type is Float64"
 )]
+#[inline]
 fn add_float64(accumulator: &mut WindowAccumulator, sample: f64, node_id: &str) -> Result<()> {
     accumulator.valid_count = accumulator
         .valid_count
@@ -2801,6 +2829,7 @@ fn add_float64(accumulator: &mut WindowAccumulator, sample: f64, node_id: &str) 
     clippy::cast_precision_loss,
     reason = "the frozen mean and variance output type is Float64"
 )]
+#[inline]
 fn remove_float64(accumulator: &mut WindowAccumulator, sample: f64) -> Result<()> {
     accumulator.valid_count = accumulator
         .valid_count
@@ -3684,6 +3713,7 @@ fn append_sum(builder: &mut Float64Builder, accumulator: &WindowAccumulator) -> 
     Ok(())
 }
 
+#[inline]
 fn float_mean(accumulator: &WindowAccumulator) -> f64 {
     if accumulator.nan_count > 0 {
         return f64::NAN;
