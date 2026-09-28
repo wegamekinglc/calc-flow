@@ -19,8 +19,9 @@ def _program(engine: str) -> cf.Program:
 
 
 def test_program_requires_immutable_engine_at_construction() -> None:
+    missing_engine: dict[str, object] = {}
     with pytest.raises(TypeError, match="engine"):
-        cf.Program("empty")
+        cf.Program("empty", **missing_engine)
 
     source = cf.table_input("events", schema=pa.schema([("x", pa.int64())]))
     program = cf.Program("values", engine="streaming")

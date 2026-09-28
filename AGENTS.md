@@ -245,9 +245,9 @@ selectors.
   and SQL stages lower through one immutable expression graph to project-v3.
 - SQL result schemas come from private native planning without reading rows.
   SQL output has a new row lineage and no inherited temporal ordering.
-  Batch SQL supports multiple aliases; stream SQL accepts one. Ordinary
-  aggregates and `GROUP BY` retain input and emit a full cumulative
-  snapshot after each batch; other SQL runs per batch. SQL aggregate state has
+  Batch SQL supports multiple aliases; stream SQL accepts one. Ordinary and
+  grouped SQL aggregates retain input and emit a full cumulative snapshot
+  after each batch; other SQL runs per batch. SQL aggregate state has
   no fixed default row or byte cap; a stream runtime budget can be supplied.
 - `compute` and `collect` return Arrow tables using logical declaration names.
   Each convenience call owns a fresh batch plan. Async calls capture mappings

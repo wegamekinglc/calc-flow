@@ -48,6 +48,21 @@ _STREAM_ONLY_OPS = frozenset(
 )
 
 
+def _validate_engine_node(
+    engine: Literal["sql", "streaming"], node: Node, path: str
+) -> None:
+    if engine == "streaming" and node.op.name == "sql":
+        aliases = node.attr("aliases")
+        if isinstance(aliases, CSeq) and len(aliases.items) != 1:
+            raise ValueError(
+                f"{path}: unsupported_mode: streaming SQL accepts one table alias"
+            )
+    if engine == "sql" and node.op.name in _STREAM_ONLY_OPS:
+        raise ValueError(
+            f"{path}: unsupported_mode: {node.op.name} requires the streaming engine"
+        )
+
+
 def _validate_engine_outputs(
     engine: Literal["sql", "streaming"],
     outputs: tuple[tuple[str, TableExpr | ArrayExpr], ...],
@@ -60,17 +75,7 @@ def _validate_engine_outputs(
         if node.digest in visited:
             return
         visited.add(node.digest)
-        if engine == "streaming" and node.op.name == "sql":
-            aliases = node.attr("aliases")
-            if isinstance(aliases, CSeq) and len(aliases.items) != 1:
-                raise ValueError(
-                    f"{path}: unsupported_mode: streaming SQL accepts one table alias"
-                )
-        if engine == "sql" and node.op.name in _STREAM_ONLY_OPS:
-            raise ValueError(
-                f"{path}: unsupported_mode: {node.op.name} requires the"
-                " streaming engine"
-            )
+        _validate_engine_node(engine, node, path)
         for child in node.args:
             visit(child, path)
 
