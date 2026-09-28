@@ -15,11 +15,11 @@ use std::{
 
 use datafusion::arrow::{
     array::{
-        Array, ArrayRef, Float64Array, Float64Builder, Int64Array, Int64Builder,
-        TimestampMicrosecondArray, UInt64Array, UInt64Builder,
+        Array, ArrayRef, AsArray, Float64Array, Float64Builder, Int64Array, Int64Builder,
+        StringArray, TimestampMicrosecondArray, UInt64Array, UInt64Builder,
     },
     compute::cast,
-    datatypes::{DataType, Schema},
+    datatypes::{DataType, Schema, TimestampMicrosecondType, UInt64Type},
     record_batch::RecordBatch,
     row::{RowConverter, SortField},
 };
@@ -280,6 +280,74 @@ struct OrderProof {
     elapsed_ns: u64,
 }
 
+/// Row-encoded canonical identities of a batch's first and last rows.
+type OrderBounds = (Vec<u8>, Vec<u8>);
+
+/// The first adjacent pair that breaks strict canonical order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OrderViolation {
+    Duplicate(usize),
+    Descending,
+}
+
+struct OrderScan {
+    violation: Option<OrderViolation>,
+    bounds: Option<OrderBounds>,
+}
+
+/// A proven batch carries its bounds unless it is empty.
+enum CanonicalOrder {
+    Unproven,
+    Proven(Option<OrderBounds>),
+}
+
+/// Non-null microsecond time, Utf8 entity, and `UInt64` sequence columns,
+/// compared in place in the same order as their Arrow row encoding.
+struct DirectOrderColumns<'a> {
+    times: &'a [i64],
+    entities: &'a StringArray,
+    sequences: &'a [u64],
+}
+
+impl<'a> DirectOrderColumns<'a> {
+    fn new(plan: &RollingKernelPlan, input: &'a RecordBatch) -> Option<Self> {
+        let [time, entity, sequence] = *plan.order_columns.as_slice() else {
+            return None;
+        };
+        if time != plan.event_time_index
+            || plan.partition_columns != [entity]
+            || plan.sequence_columns != [sequence]
+        {
+            return None;
+        }
+        let times = input
+            .column(time)
+            .as_primitive_opt::<TimestampMicrosecondType>()?;
+        let entities = input.column(entity).as_string_opt::<i32>()?;
+        let sequences = input.column(sequence).as_primitive_opt::<UInt64Type>()?;
+        let null_free = [
+            times.null_count(),
+            entities.null_count(),
+            sequences.null_count(),
+        ] == [0; 3];
+        null_free.then(|| Self {
+            times: times.values(),
+            entities,
+            sequences: sequences.values(),
+        })
+    }
+
+    fn compare(&self, left: usize, right: usize) -> Ordering {
+        self.times[left]
+            .cmp(&self.times[right])
+            .then_with(|| {
+                let left = self.entities.value(left).as_bytes();
+                left.cmp(self.entities.value(right).as_bytes())
+            })
+            .then_with(|| self.sequences[left].cmp(&self.sequences[right]))
+    }
+}
+
 /// Typed columns and execution facts produced without rebuilding input rows.
 #[derive(Debug)]
 pub(super) struct RollingKernelExecution {
@@ -479,13 +547,7 @@ impl RollingKernelPlan {
         let Some(index) = input.num_rows().checked_sub(1) else {
             return Ok(None);
         };
-        let last = input.slice(index, 1);
-        Ok(Some(
-            encode_rows(&last, &self.order_columns, node_id)?
-                .row(0)
-                .data()
-                .to_vec(),
-        ))
+        encode_row(input, index, &self.order_columns, node_id).map(Some)
     }
 
     /// Proves strict ordering without extracting generic scalar values.
@@ -500,17 +562,13 @@ impl RollingKernelPlan {
             self.validate_required_values(input, node_id)?;
         }
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::OrderingProof));
-        let rows = encode_rows(input, &self.order_columns, node_id)?;
         if let Some(recorder) = observer {
             recorder.add(RollingWork::OrderProofRows, input.num_rows());
         }
-        if !self.canonical_order_is_proven(input, &rows, None, node_id)? {
-            return Ok(None);
-        }
-        Ok(input
-            .num_rows()
-            .checked_sub(1)
-            .map(|last| (rows.row(0).data().to_vec(), rows.row(last).data().to_vec())))
+        Ok(match self.canonical_order_bounds(input, None, node_id)? {
+            CanonicalOrder::Proven(bounds) => bounds,
+            CanonicalOrder::Unproven => None,
+        })
     }
 
     #[allow(
@@ -856,16 +914,13 @@ impl RollingKernelPlan {
         node_id: &str,
     ) -> Result<Option<OrderProof>> {
         let started = Instant::now();
-        let rows = encode_rows(input, &self.order_columns, node_id)?;
-        if !self.canonical_order_is_proven(input, &rows, prior_state, node_id)? {
+        let prior = prior_state.and_then(|state| state.last_identity.as_deref());
+        let CanonicalOrder::Proven(bounds) = self.canonical_order_bounds(input, prior, node_id)?
+        else {
             return Ok(None);
-        }
-        let last_identity = input
-            .num_rows()
-            .checked_sub(1)
-            .map(|row_index| rows.row(row_index).data().to_vec());
+        };
         Ok(Some(OrderProof {
-            last_identity,
+            last_identity: bounds.map(|(_, last)| last),
             elapsed_ns: nanos(started.elapsed()),
         }))
     }
@@ -925,48 +980,71 @@ impl RollingKernelPlan {
         Ok(())
     }
 
-    // Within-batch ordering is always proven. Callers that receive a globally
-    // ordered sequence can additionally include the prior batch boundary.
-    // #lizard forgives
-    fn canonical_order_is_proven(
+    /// Within-batch ordering is always proven. Callers that receive a globally
+    /// ordered sequence can additionally include the prior batch boundary.
+    fn canonical_order_bounds(
         &self,
         input: &RecordBatch,
-        order_rows: &datafusion::arrow::row::Rows,
-        prior_state: Option<&RollingKernelState>,
+        prior: Option<&[u8]>,
         node_id: &str,
-    ) -> Result<bool> {
-        if input.num_rows() > 0
-            && let Some(previous) = prior_state.and_then(|state| state.last_identity.as_deref())
-        {
-            let current = order_rows.row(0).data();
-            if previous == current && !self.allows_order_peers() {
-                return Err(duplicate_identity_error(
-                    input,
-                    self.event_time_index,
-                    0,
-                    node_id,
-                )?);
-            }
-            if previous > current {
-                return Ok(false);
-            }
+    ) -> Result<CanonicalOrder> {
+        let scan = self.scan_order(input, node_id)?;
+        let first = scan.bounds.as_ref().map(|(first, _)| first.as_slice());
+        let boundary = prior
+            .zip(first)
+            .map(|(previous, current)| previous.cmp(current))
+            .and_then(|ordering| self.order_violation(ordering, 0));
+        match boundary.or(scan.violation) {
+            Some(OrderViolation::Duplicate(row)) => Err(duplicate_identity_error(
+                input,
+                self.event_time_index,
+                row,
+                node_id,
+            )?),
+            Some(OrderViolation::Descending) => Ok(CanonicalOrder::Unproven),
+            None => Ok(CanonicalOrder::Proven(scan.bounds)),
         }
-        for row_index in 1..input.num_rows() {
-            let previous = order_rows.row(row_index - 1);
-            let current = order_rows.row(row_index);
-            if previous == current && !self.allows_order_peers() {
-                return Err(duplicate_identity_error(
-                    input,
-                    self.event_time_index,
-                    row_index,
-                    node_id,
-                )?);
-            }
-            if previous > current {
-                return Ok(false);
-            }
+    }
+
+    fn order_violation(&self, ordering: Ordering, row: usize) -> Option<OrderViolation> {
+        match ordering {
+            Ordering::Less => None,
+            Ordering::Equal if self.allows_order_peers() => None,
+            Ordering::Equal => Some(OrderViolation::Duplicate(row)),
+            Ordering::Greater => Some(OrderViolation::Descending),
         }
-        Ok(true)
+    }
+
+    /// Compares Arrow values in place for the compiled stream order shape and
+    /// row-encodes every other shape.
+    fn scan_order(&self, input: &RecordBatch, node_id: &str) -> Result<OrderScan> {
+        let Some(columns) = DirectOrderColumns::new(self, input) else {
+            return self.encoded_order_scan(input, node_id);
+        };
+        let violation = (1..input.num_rows())
+            .find_map(|row| self.order_violation(columns.compare(row - 1, row), row));
+        let bounds = input
+            .num_rows()
+            .checked_sub(1)
+            .map(|last| -> Result<OrderBounds> {
+                Ok((
+                    encode_row(input, 0, &self.order_columns, node_id)?,
+                    encode_row(input, last, &self.order_columns, node_id)?,
+                ))
+            })
+            .transpose()?;
+        Ok(OrderScan { violation, bounds })
+    }
+
+    fn encoded_order_scan(&self, input: &RecordBatch, node_id: &str) -> Result<OrderScan> {
+        let rows = encode_rows(input, &self.order_columns, node_id)?;
+        let violation = (1..input.num_rows())
+            .find_map(|row| self.order_violation(rows.row(row - 1).cmp(&rows.row(row)), row));
+        let bounds = input
+            .num_rows()
+            .checked_sub(1)
+            .map(|last| (rows.row(0).data().to_vec(), rows.row(last).data().to_vec()));
+        Ok(OrderScan { violation, bounds })
     }
 
     fn allows_order_peers(&self) -> bool {
@@ -1903,6 +1981,18 @@ fn encode_rows(
                 &format!("typed rolling key encoding failed: {error}"),
             )
         })
+}
+
+fn encode_row(
+    input: &RecordBatch,
+    row: usize,
+    indices: &[usize],
+    node_id: &str,
+) -> Result<Vec<u8>> {
+    Ok(encode_rows(&input.slice(row, 1), indices, node_id)?
+        .row(0)
+        .data()
+        .to_vec())
 }
 
 fn encoded_keys(
@@ -3816,6 +3906,149 @@ mod tests {
                 large <= small + 20,
                 "two entities, warm={warm}: small={small}, large={large}"
             );
+        }
+    }
+
+    /// The compiled stream order: event time, entity key, then sequence.
+    fn stream_order_plan() -> RollingKernelPlan {
+        RollingKernelPlan {
+            order_columns: vec![0, 2, 1],
+            ..numeric_plan(RollingNumericalProfile::StableV1)
+        }
+    }
+
+    fn order_rows(rows: &[(i64, Option<&str>, u64)]) -> RecordBatch {
+        let fields = schema()
+            .fields()
+            .iter()
+            .map(|field| field.as_ref().clone().with_nullable(true))
+            .collect::<Vec<_>>();
+        RecordBatch::try_new(
+            Arc::new(Schema::new(fields)),
+            vec![
+                Arc::new(TimestampMicrosecondArray::from_iter_values(
+                    rows.iter().map(|row| row.0),
+                )),
+                Arc::new(UInt64Array::from_iter_values(rows.iter().map(|row| row.2))),
+                Arc::new(rows.iter().map(|row| row.1).collect::<StringArray>()),
+                Arc::new(Float64Array::from(vec![Some(1.0); rows.len()])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// The historical all-row `RowConverter` proof the direct check must match.
+    fn encoded_order_bounds(
+        plan: &RollingKernelPlan,
+        input: &RecordBatch,
+    ) -> std::result::Result<Option<OrderBounds>, String> {
+        let rows = encode_rows(input, &plan.order_columns, "r").unwrap();
+        for row in 1..input.num_rows() {
+            match rows.row(row - 1).cmp(&rows.row(row)) {
+                Ordering::Less => {}
+                Ordering::Equal => {
+                    return Err(duplicate_identity_error(input, 0, row, "r")
+                        .unwrap()
+                        .to_string());
+                }
+                Ordering::Greater => return Ok(None),
+            }
+        }
+        Ok(input
+            .num_rows()
+            .checked_sub(1)
+            .map(|last| (rows.row(0).data().to_vec(), rows.row(last).data().to_vec())))
+    }
+
+    fn assert_order_parity(plan: &RollingKernelPlan, input: &RecordBatch) {
+        let actual = plan
+            .ordered_stream_bounds(input, "r", None)
+            .map_err(|error| error.to_string());
+        assert_eq!(actual, encoded_order_bounds(plan, input), "{input:?}");
+    }
+
+    #[test]
+    fn direct_stream_order_proof_does_not_encode_every_row() {
+        fn bytes(row_count: usize) -> usize {
+            let rows = (0..row_count)
+                .map(|row| {
+                    let index = i64::try_from(row).unwrap();
+                    let key = ["alpha", "beta"][row % 2];
+                    (index / 2, Some(key), u64::try_from(row).unwrap())
+                })
+                .collect::<Vec<_>>();
+            let input = order_rows(&rows);
+            let plan = stream_order_plan();
+            allocation_counter::measure(|| {
+                assert!(
+                    plan.ordered_stream_bounds(&input, "r", None)
+                        .unwrap()
+                        .is_some()
+                );
+            })
+            .bytes_total
+            .try_into()
+            .unwrap()
+        }
+
+        let small = bytes(32);
+        let large = bytes(4096);
+        println!("direct order proof bytes: rows32={small}, rows4096={large}");
+        assert!(large <= small + 256, "small={small}, large={large}");
+    }
+
+    #[test]
+    fn direct_stream_order_proof_matches_row_encoding_at_boundaries() {
+        let plan = stream_order_plan();
+        let cases: [&[(i64, Option<&str>, u64)]; 10] = [
+            &[],
+            &[(1, Some("a"), 1)],
+            &[(1, Some("a"), 1), (1, Some("b"), 0), (2, Some("a"), 0)],
+            &[(1, Some("a"), 1), (1, Some("a"), 1)],
+            &[(1, Some("b"), 1), (1, Some("a"), 2)],
+            &[(1, Some("a"), 1), (1, Some("ab"), 0), (1, Some("b"), 0)],
+            &[(1, Some("ab"), 0), (1, Some("a"), 9)],
+            &[
+                (-1, Some(""), u64::MAX),
+                (0, Some(""), 0),
+                (i64::MAX, Some("z"), 0),
+            ],
+            &[(1, Some("a"), 2), (1, Some("a"), 1), (1, Some("a"), 1)],
+            &[(1, None, 1), (1, Some("a"), 1), (1, None, 2)],
+        ];
+        for rows in cases {
+            assert_order_parity(&plan, &order_rows(rows));
+        }
+        let unicode = order_rows(&[(1, Some("é"), 1), (1, Some("z"), 0), (1, Some("éa"), 0)]);
+        assert_order_parity(&plan, &unicode);
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            cases: 512,
+            failure_persistence: None,
+            ..proptest::prelude::ProptestConfig::default()
+        })]
+
+        #[test]
+        fn direct_stream_order_proof_matches_row_encoding(
+            rows in proptest::collection::vec(
+                (0_i64..3, proptest::option::weighted(0.95, 0_usize..4), 0_u64..3),
+                0..12,
+            ),
+            sorted in proptest::bool::weighted(0.7),
+        ) {
+            const KEYS: [&str; 4] = ["", "a", "ab", "b"];
+            let mut rows = rows
+                .into_iter()
+                .map(|(time, key, sequence)| (time, key.map(|key| KEYS[key]), sequence))
+                .collect::<Vec<_>>();
+            if sorted {
+                rows.sort_unstable();
+            }
+            let input = order_rows(&rows);
+            assert_order_parity(&stream_order_plan(), &input);
+            assert_order_parity(&numeric_plan(RollingNumericalProfile::StableV1), &input);
         }
     }
 
