@@ -975,9 +975,11 @@ impl RollingKernelPlan {
     ) -> Result<ResolvedEntities> {
         let started = Instant::now();
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::EntityResolution));
+        // Resident entities bound the usual touched set of a stream batch.
+        let expected = state.states.len().max(16);
         let routing = match direct_entity_column(self, input) {
-            Some(entities) => direct_entity_routing(entities, node_id)?,
-            None => self.encoded_entity_routing(input, node_id)?,
+            Some(entities) => direct_entity_routing(entities, expected, node_id)?,
+            None => self.encoded_entity_routing(input, expected, node_id)?,
         };
         let (state, entity_ids, entity_rows) =
             state.prepare_stream_entities(routing, &self.groups, &self.fingerprint, observer);
@@ -989,9 +991,15 @@ impl RollingKernelPlan {
         })
     }
 
-    fn encoded_entity_routing(&self, input: &RecordBatch, node_id: &str) -> Result<EntityRouting> {
+    fn encoded_entity_routing(
+        &self,
+        input: &RecordBatch,
+        expected_entities: usize,
+        node_id: &str,
+    ) -> Result<EntityRouting> {
         let rows = encode_rows(input, &self.partition_columns, node_id)?;
-        let (keys, rows, entity_ids) = dense_entity_ids(encoded_keys(&rows, input.num_rows()));
+        let keys = encoded_keys(&rows, input.num_rows());
+        let (keys, rows, entity_ids) = dense_entity_ids(keys, expected_entities);
         Ok(EntityRouting {
             keys: keys.into_iter().map(<[u8]>::to_vec).collect(),
             rows,
@@ -1059,12 +1067,7 @@ impl RollingKernelPlan {
         let bounds = input
             .num_rows()
             .checked_sub(1)
-            .map(|last| -> Result<OrderBounds> {
-                Ok((
-                    encode_row(input, 0, &self.order_columns, node_id)?,
-                    encode_row(input, last, &self.order_columns, node_id)?,
-                ))
-            })
+            .map(|last| encode_bounds(input, last, &self.order_columns, node_id))
             .transpose()?;
         Ok(OrderScan { violation, bounds })
     }
@@ -2046,8 +2049,9 @@ struct EntityRouting {
 /// Assigns first-appearance dense IDs; returns distinct keys and their rows.
 fn dense_entity_ids<K: Copy + Eq + std::hash::Hash>(
     keys: impl ExactSizeIterator<Item = K>,
+    expected_entities: usize,
 ) -> (Vec<K>, EntityRows, Vec<usize>) {
-    let mut router = DenseRouter::default();
+    let mut router = DenseRouter::with_capacity(expected_entities.min(keys.len()));
     let entity_ids = keys
         .enumerate()
         .map(|(row, key)| router.route(row, key))
@@ -2066,19 +2070,22 @@ struct DenseRouter<K> {
     rows: EntityRows,
 }
 
-impl<K> Default for DenseRouter<K> {
-    fn default() -> Self {
+impl<K: Copy + Eq + std::hash::Hash> DenseRouter<K> {
+    fn with_capacity(entities: usize) -> Self {
+        let mut ids = datafusion::common::HashMap::default();
+        ids.reserve(entities);
         Self {
-            ids: datafusion::common::HashMap::default(),
-            distinct: Vec::new(),
-            successors: Vec::new(),
+            ids,
+            distinct: Vec::with_capacity(entities),
+            successors: Vec::with_capacity(entities),
             previous: None,
-            rows: EntityRows::default(),
+            rows: EntityRows {
+                counts: Vec::with_capacity(entities),
+                first_rows: Vec::with_capacity(entities),
+            },
         }
     }
-}
 
-impl<K: Copy + Eq + std::hash::Hash> DenseRouter<K> {
     fn route(&mut self, row: usize, key: K) -> usize {
         let guess = self
             .previous
@@ -2119,9 +2126,13 @@ fn direct_entity_column<'a>(
 }
 
 /// Routes by string value and row-encodes each distinct entity once.
-fn direct_entity_routing(entities: &StringArray, node_id: &str) -> Result<EntityRouting> {
-    let (distinct, entity_rows, entity_ids) =
-        dense_entity_ids((0..entities.len()).map(|row| entities.value(row)));
+fn direct_entity_routing(
+    entities: &StringArray,
+    expected_entities: usize,
+    node_id: &str,
+) -> Result<EntityRouting> {
+    let values = (0..entities.len()).map(|row| entities.value(row));
+    let (distinct, entity_rows, entity_ids) = dense_entity_ids(values, expected_entities);
     let distinct: ArrayRef = Arc::new(StringArray::from_iter_values(distinct));
     let rows = encode_arrays(&[distinct], node_id)?;
     Ok(EntityRouting {
@@ -2143,6 +2154,36 @@ fn encode_row(
         .row(0)
         .data()
         .to_vec())
+}
+
+/// Encodes the first and `last` rows with one converter.
+fn encode_bounds(
+    input: &RecordBatch,
+    last: usize,
+    indices: &[usize],
+    node_id: &str,
+) -> Result<OrderBounds> {
+    let fields = indices
+        .iter()
+        .map(|&index| SortField::new(input.column(index).data_type().clone()))
+        .collect();
+    let encode = |converter: &RowConverter, row: usize| {
+        let arrays = indices
+            .iter()
+            .map(|&index| input.column(index).slice(row, 1))
+            .collect::<Vec<_>>();
+        converter
+            .convert_columns(&arrays)
+            .map(|rows| rows.row(0).data().to_vec())
+    };
+    RowConverter::new(fields)
+        .and_then(|converter| Ok((encode(&converter, 0)?, encode(&converter, last)?)))
+        .map_err(|error| {
+            operator_error(
+                node_id,
+                &format!("typed rolling key encoding failed: {error}"),
+            )
+        })
 }
 
 fn encoded_keys(
@@ -4238,7 +4279,7 @@ mod tests {
             let input = order_rows(&rows(&keys));
             let direct = plan.prepare_touched_entities(&state, &input, "r", None).unwrap();
             let (encoded, entity_ids, entity_rows) = state.prepare_stream_entities(
-                plan.encoded_entity_routing(&input, "r").unwrap(),
+                plan.encoded_entity_routing(&input, 16, "r").unwrap(),
                 &plan.groups,
                 &plan.fingerprint,
                 None,
@@ -4347,7 +4388,7 @@ mod tests {
                     id
                 })
                 .collect::<Vec<_>>();
-            let (actual_keys, actual_rows, actual_ids) = dense_entity_ids(keys.iter().copied());
+            let (actual_keys, actual_rows, actual_ids) = dense_entity_ids(keys.iter().copied(), period);
             proptest::prop_assert_eq!(actual_keys, distinct);
             proptest::prop_assert_eq!(actual_rows, expected);
             proptest::prop_assert_eq!(actual_ids, ids);
