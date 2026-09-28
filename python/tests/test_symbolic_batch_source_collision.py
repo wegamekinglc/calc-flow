@@ -64,6 +64,7 @@ def test_batch_source_collision_with_planned_stage_preserves_results(
     )
     program = Program(
         "planned-source-collision",
+        engine="sql",
         inputs=[quotes, other],
         outputs=[
             ("signals", source.with_columns(FeatureSet([("feature", feature)]))),
@@ -109,6 +110,7 @@ def test_batch_source_collision_with_cse_preserves_results(source_name: str) -> 
     signals = quotes.select(a=middle * 2.0, b=middle * 3.0, c=inner + 5.0)
     program = Program(
         "cse-source-collision",
+        engine="sql",
         inputs=[quotes, other],
         outputs=[("signals", signals), ("other", other)],
     )

@@ -97,7 +97,9 @@ def build_project(directory: Path) -> ProjectDocument:
     ]
     orders = cf.table_input("orders", schema=schema)
     graph = cf.Program(
-        "kafka-protobuf-source", outputs={"totals": orders.pipe(order_totals)}
+        "kafka-protobuf-source",
+        engine="streaming",
+        outputs={"totals": orders.pipe(order_totals)},
     )
     return ProjectDocument.model_validate(
         {

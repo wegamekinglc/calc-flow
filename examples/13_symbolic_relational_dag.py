@@ -105,6 +105,7 @@ def symbolic_program() -> Program:
     )
     return Program(
         "symbolic-relational-dag",
+        engine="streaming",
         inputs=[authorizations, payments, settlements],
         outputs=[("settled_matches", output)],
     )

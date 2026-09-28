@@ -63,7 +63,9 @@ def test_stream_rolling_pair_row_local_argument_is_materialized() -> None:
             ]
         )
     )
-    program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
+    program = Program(
+        "p", engine="streaming", inputs=[quotes], outputs=[("signals", signals)]
+    )
 
     program.compile_stream(Runtime())
 
@@ -80,7 +82,9 @@ def test_batch_rolling_pair_row_local_argument_is_materialized() -> None:
             ]
         )
     )
-    program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
+    program = Program(
+        "p", engine="sql", inputs=[quotes], outputs=[("signals", signals)]
+    )
 
     program.compile_batch(Runtime())
 
@@ -102,16 +106,22 @@ def test_cross_section_winsorize_compiles_in_both_modes() -> None:
             ]
         )
     )
-    program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
+    program = Program(
+        "p", engine="sql", inputs=[quotes], outputs=[("signals", signals)]
+    )
 
     program.compile_batch(Runtime())
-    program.compile_stream(Runtime())
+    Program(
+        program.name, engine="streaming", inputs=program.inputs, outputs=program.outputs
+    ).compile_stream(Runtime())
 
 
 def test_sql_window_is_rejected_in_stream_mode() -> None:
     quotes = _ordered()
     windowed = window.tumbling(quotes, event_time="ts", size_micros=60_000_000)
-    program = Program("p", inputs=[quotes], outputs=[("signals", windowed)])
+    program = Program(
+        "p", engine="streaming", inputs=[quotes], outputs=[("signals", windowed)]
+    )
 
     with pytest.raises(CompileError) as excinfo:
         program.compile_stream(Runtime())
@@ -124,7 +134,7 @@ def test_sql_window_is_rejected_in_stream_mode() -> None:
 def test_array_outputs_are_rejected() -> None:
     quotes = _ordered()
     matrix = linalg.from_columns(quotes, columns=["x", "y"], backend="numpy")
-    program = Program("p", inputs=[quotes], outputs=[("matrix", matrix)])
+    program = Program("p", engine="sql", inputs=[quotes], outputs=[("matrix", matrix)])
 
     with pytest.raises(CompileError) as excinfo:
         program.compile_batch(Runtime())
@@ -143,6 +153,7 @@ def test_static_table_parameter_is_rejected_even_when_unused() -> None:
     )
     program = Program(
         "p",
+        engine="sql",
         inputs=[quotes, reference],
         outputs=[("signals", quotes)],
     )
@@ -162,6 +173,7 @@ def test_static_array_parameter_is_rejected() -> None:
     )
     program = Program(
         "p",
+        engine="streaming",
         inputs=[quotes, weights],
         outputs=[("signals", quotes)],
     )
@@ -179,7 +191,9 @@ def test_matmul_is_rejected() -> None:
     )
     matrix = linalg.from_columns(quotes, columns=["x", "y"], backend="numpy")
     scores = linalg.matmul(matrix, weights)
-    program = Program("p", inputs=[quotes, weights], outputs=[("scores", scores)])
+    program = Program(
+        "p", engine="sql", inputs=[quotes, weights], outputs=[("scores", scores)]
+    )
 
     with pytest.raises(CompileError, match="unknown_primitive_version"):
         program.compile_batch(Runtime())
@@ -190,7 +204,9 @@ def test_cast_to_non_portable_target_is_rejected() -> None:
     signals = quotes.with_columns(
         FeatureSet([("text", row.cast(quotes["x"], "string"))])
     )
-    program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
+    program = Program(
+        "p", engine="sql", inputs=[quotes], outputs=[("signals", signals)]
+    )
 
     with pytest.raises(CompileError) as excinfo:
         program.compile_batch(Runtime())
@@ -210,7 +226,9 @@ def test_attach_columns_requires_registered_matrix_provider() -> None:
     from calc_flow.symbolic import table
 
     attached = table.attach_columns(quotes, scores, names=["score"])
-    program = Program("p", inputs=[quotes, weights], outputs=[("signals", attached)])
+    program = Program(
+        "p", engine="sql", inputs=[quotes, weights], outputs=[("signals", attached)]
+    )
 
     with pytest.raises(ConfigError) as excinfo:
         program.compile_batch(Runtime())
@@ -229,6 +247,7 @@ def test_symbolic_matrix_rejects_mixed_provider_backends() -> None:
 
     program = Program(
         "mixed-matrix-backends",
+        engine="sql",
         inputs=(quotes, weights),
         outputs=(
             (
@@ -260,6 +279,7 @@ def test_symbolic_matrix_rejects_mixed_column_selections() -> None:
 
     program = Program(
         "mixed-matrix-columns",
+        engine="sql",
         inputs=(quotes, weights),
         outputs=(
             (
@@ -292,6 +312,7 @@ def test_symbolic_matrix_rejects_undeclared_parameter_with_same_name() -> None:
 
     program = Program(
         "distinct-matrix-parameters",
+        engine="sql",
         inputs=(quotes, first),
         outputs=(
             (
@@ -327,6 +348,7 @@ def test_symbolic_matrix_rejects_non_weights_static_parameter() -> None:
 
     program = Program(
         "named-matrix-parameter",
+        engine="sql",
         inputs=(quotes, coefficients),
         outputs=(
             (
@@ -359,6 +381,7 @@ def test_symbolic_matrix_rejects_missing_static_parameter() -> None:
 
     program = Program(
         "missing-matrix-parameter",
+        engine="sql",
         inputs=(quotes,),
         outputs=(
             (

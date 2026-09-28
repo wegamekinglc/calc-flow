@@ -27,7 +27,7 @@ _ROWS = 700
 _SEGMENTATIONS = (1, 7, 1000)
 
 
-def _program() -> Program:
+def _program(engine: str = "streaming") -> Program:
     quotes = table_input(
         "quotes",
         schema=[
@@ -51,7 +51,9 @@ def _program() -> Program:
         ),
         quotes["x"] >= 0.5,
     )
-    return Program("features", inputs=[quotes], outputs=[("signals", signals)])
+    return Program(
+        "features", engine=engine, inputs=[quotes], outputs=[("signals", signals)]
+    )
 
 
 def _input_table() -> pa.Table:
@@ -150,7 +152,7 @@ class _CollectSink:
 
 
 def test_batch_executes_fused_features() -> None:
-    plan = _program().compile_batch(Runtime())
+    plan = _program("sql").compile_batch(Runtime())
     result = plan.execute({"input": Batch.from_pyarrow(_input_table())})
     output = result.outputs["output"].to_pyarrow().to_pydict()
     expected = _expected()
@@ -184,7 +186,7 @@ def test_stream_matches_batch_across_segmentation(
 
     stream_output = pa.concat_tables(sink.tables).to_pydict()
     batch_result = (
-        _program()
+        _program("sql")
         .compile_batch(Runtime())
         .execute({"input": Batch.from_pyarrow(_input_table())})
     )
@@ -201,7 +203,7 @@ def test_execution_never_calls_symbolic_python(tmp_path: Path) -> None:
     import calc_flow.symbolic.optimizer as optimizer_module
     import calc_flow.symbolic.program as program_module
 
-    plan = _program().compile_batch(Runtime())
+    plan = _program("sql").compile_batch(Runtime())
     stream_plan = _program().compile_stream(Runtime())
     sink = _CollectSink()
     blocked: list[str] = []

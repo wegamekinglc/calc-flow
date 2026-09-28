@@ -324,8 +324,9 @@ SQL and expressions share one DAG. A private native planning bridge derives SQL
 result schemas without reading rows or executing queries; data execution stays
 in Rust/DataFusion. SQL output has a distinct lineage without inherited temporal
 ordering. Row-local work may follow SQL, and native rolling may precede it.
-Stream SQL accepts one alias and executes per native batch; it does not create
-cross-batch SQL aggregate or window state.
+Stream SQL accepts one alias. Ordinary aggregates and `GROUP BY` retain input
+and emit full cumulative snapshots after each batch. Other SQL, including
+window functions without an ordinary aggregate, executes per native batch.
 
 Convenience adapters infer supported Arrow schemas, capture input references,
 and translate logical input/output names to physical graph bindings. They remove

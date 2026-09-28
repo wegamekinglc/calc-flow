@@ -245,7 +245,10 @@ selectors.
   and SQL stages lower through one immutable expression graph to project-v3.
 - SQL result schemas come from private native planning without reading rows.
   SQL output has a new row lineage and no inherited temporal ordering.
-  Batch SQL supports multiple aliases; stream SQL accepts one and runs per batch.
+  Batch SQL supports multiple aliases; stream SQL accepts one. Ordinary and
+  grouped SQL aggregates retain input and emit a full cumulative snapshot
+  after each batch; other SQL runs per batch. SQL aggregate state has
+  no fixed default row or byte cap; a stream runtime budget can be supplied.
 - `compute` and `collect` return Arrow tables using logical declaration names.
   Each convenience call owns a fresh batch plan. Async calls capture mappings
   and Batch references at entry; Arrow buffers remain shared and read-only.
@@ -257,9 +260,16 @@ selectors.
   to validated nondecreasing arrival times and native watermarks at
   `max_seen - 1 microsecond`. `watermarks` selects existing policies by logical
   input name; supplied `SourceBinding` policies cannot be overridden. Inputs
-  without event time retain stateless per-batch output. Ordinary iterables have
+  without event time retain per-batch output, except SQL aggregates with
+  cumulative snapshots. Ordinary iterables have
   no replay; temporary checkpoints do not provide durable restart or exactly-once
   application delivery.
+- `Program(name, engine="sql")` or `Program(name, engine="streaming")` fixes the
+  engine at construction. Immutable `with_input` and `output` copies preserve
+  it. `Program.execute` dispatches to finite collection or owned streaming
+  results using that engine. The same declaration graph has the same
+  fingerprint across engines. `collect`/`collect_async` and `stream` reject the
+  opposite engine.
 - `Program.to_project` exports data-only native graphs without Python logical
   aliases or payloads. Reloaded projects and explicit runners use physical
   binding names; durable recovery uses explicit bindings and managed state.

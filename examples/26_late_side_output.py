@@ -23,7 +23,9 @@ events = cf.table_input(
 )
 calculation = events.with_columns(avg=cf.ts.mean(events["x"], window=cf.rows(2)))
 pair = cf.with_late_output(calculation)
-program = cf.Program("late", outputs={"normal": pair.output, "late": pair.late})
+program = cf.Program(
+    "late", engine="streaming", outputs={"normal": pair.output, "late": pair.late}
+)
 
 
 async def batches():

@@ -116,6 +116,8 @@ pub struct StreamRuntimeConfig {
     pub checkpoint_interval: Duration,
     pub checkpoint_timeout: Duration,
     pub edge_budget: EdgeBudget,
+    /// Optional retained-input limit for each aggregate SQL node.
+    pub sql_state_budget: Option<crate::StateBudget>,
     pub retained_epochs: usize,
 }
 
@@ -125,6 +127,7 @@ impl Default for StreamRuntimeConfig {
             checkpoint_interval: Duration::from_secs(60),
             checkpoint_timeout: Duration::from_secs(600),
             edge_budget: EdgeBudget::default(),
+            sql_state_budget: None,
             retained_epochs: 2,
         }
     }
@@ -1021,7 +1024,7 @@ impl StreamExecutionPlan {
     /// invalid (see [`StreamRuntimeConfig::validate`]).
     pub fn runtime_config_hash(&self, config: &StreamRuntimeConfig) -> Result<String> {
         config.validate()?;
-        let value = json!({
+        let mut value = json!({
             "checkpoint_interval_micros": exact_micros(config.checkpoint_interval, "checkpoint_interval")?,
             "checkpoint_timeout_micros": exact_micros(config.checkpoint_timeout, "checkpoint_timeout")?,
             "edge_budget": {
@@ -1030,12 +1033,32 @@ impl StreamExecutionPlan {
             },
             "retained_epochs": config.retained_epochs,
         });
+        if let Some(budget) = config.sql_state_budget {
+            let fields = value
+                .as_object_mut()
+                .ok_or_else(|| CalcFlowError::Internal {
+                    message: "runtime configuration hash value is not an object".into(),
+                })?;
+            fields.insert("sql_state_budget".into(), json!(budget));
+        }
         let canonical = canonical_json(&value)?;
         Ok(hex::encode(Sha256::digest(canonical.as_bytes())))
     }
 
     pub const fn requirements(&self) -> &StreamRequirements {
         &self.requirements
+    }
+
+    pub(crate) fn set_sql_state_budget(
+        &mut self,
+        budget: Option<crate::StateBudget>,
+    ) -> Result<()> {
+        for node in &mut self.nodes {
+            if let CompiledStreamOperator::Sql(operator) = &mut node.operator {
+                operator.set_stream_state_budget(budget)?;
+            }
+        }
+        Ok(())
     }
 
     /// The stable source binding slots: external graph input names in
@@ -1433,6 +1456,21 @@ mod runtime_projection_tests {
                 ),
             )
             .unwrap();
+        let aggregate_sql = PipelineBuilder::new("aggregate-sql")
+            .unwrap()
+            .add_node(
+                "sql",
+                Box::new(
+                    SqlOperator::new(
+                        "sql",
+                        "SELECT SUM(a) AS total FROM events",
+                        vec!["events".into()],
+                        Vec::new(),
+                    )
+                    .unwrap(),
+                ),
+            )
+            .unwrap();
         let union_builder = PipelineBuilder::new("union")
             .unwrap()
             .add_node("union", Box::new(union("union", &["left", "right"])))
@@ -1469,6 +1507,10 @@ mod runtime_projection_tests {
         assert_eq!(
             only_capability(sql),
             OperatorCheckpointCapability::Stateless
+        );
+        assert_eq!(
+            only_capability(aggregate_sql),
+            OperatorCheckpointCapability::CheckpointedStateful { state_version: 1 }
         );
         assert_eq!(
             only_capability(union_builder),

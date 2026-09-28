@@ -49,9 +49,9 @@ benchmark cases without a second hand-written case list.
 | Lifecycle       | Isolated checkpoint/recovery benchmark              | Existing minimum-20-round evidence validation             |
 
 The Python shard includes nine streaming operator examples at every Python
-scale. The Rust `stream_union` target measures native Union forwarding. These
-cases extend the inventory without adding a new shard or changing the
-scheduled 06:00 and 18:00 runs.
+scale and four selected `Program.execute` cases. The Rust `stream_union` target
+measures native Union forwarding. These cases extend the inventory without
+adding a new shard or changing the scheduled 06:00 and 18:00 runs.
 
 There are 272 engine cases and 26 warm cases, in addition to dynamically
 discovered cases. Warm cases use one entity to support one-row appends.
@@ -180,6 +180,14 @@ prepared table on two distinct bindings. The Python Join and ASOF cases cap
 each input at 3,200 and 1,920 rows; the engine matrix and dedicated Rust
 targets measure larger join workloads. These measurements are
 informational and have a different scope from the ready-runner engine matrix.
+
+`benchmarks/test_program_engine.py` adds four separately identified cases:
+SQL and streaming `Program.execute` over the same projection or cumulative
+aggregate declaration. The timer starts after engine selection and input
+construction and ends at Arrow output. Streaming includes its owned job and
+returns one full aggregate snapshot per 640-row batch. Inputs cap at 20,000
+rows. Existing compiled-plan and direct `Program.stream` case identities and
+timing boundaries remain unchanged.
 
 ## ASOF settlement measurements
 

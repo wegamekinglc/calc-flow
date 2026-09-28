@@ -45,7 +45,11 @@ def test_stream_entrypoints_forward_explicit_progress_before_eof(named):
         sequence_by=("ts",),
     )
     output = source.select(previous=cf.ts.lag(source["price"]))
-    owner = cf.Program("lag", outputs={"lag": output}) if named else output
+    owner = (
+        cf.Program("lag", engine="streaming", outputs={"lag": output})
+        if named
+        else output
+    )
     policy = cf.SourceProvidedWatermarks()
 
     async def run():

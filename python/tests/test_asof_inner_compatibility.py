@@ -52,7 +52,10 @@ def _declaration(version: int):
         **ordering,
     )
     program = Program(
-        "legacy-inner", inputs=[left, right], outputs=[("matches", joined)]
+        "legacy-inner",
+        engine="streaming",
+        inputs=[left, right],
+        outputs=[("matches", joined)],
     )
     return joined, program
 

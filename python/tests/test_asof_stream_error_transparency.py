@@ -169,6 +169,7 @@ async def _drive_explicit(
 ) -> tuple[str, str | None, int]:
     plan = Program(
         "dal288-asof",
+        engine="streaming",
         inputs=(_source("facts", SCHEMA), _source("dims", DIM_SCHEMA)),
         outputs=(("result", _joined(limits)),),
     ).compile_stream(cf.Runtime())

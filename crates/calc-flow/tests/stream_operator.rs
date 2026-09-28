@@ -13,9 +13,9 @@ use async_trait::async_trait;
 use calc_flow::{
     Batch, BatchKind, BatchMetadata, BatchOperator, BatchOperatorContext, CalcFlowError,
     CancellationToken, EdgeCollector, Epoch, EventTime, ExpressionOperator, JsonMap,
-    OperatorMetadata, OperatorStateSnapshot, Port, Result, SqlOperator, StreamCollector,
-    StreamJobContext, StreamMessage, StreamMessageKind, StreamOperator, StreamOperatorContext,
-    UnionOperator,
+    OperatorMetadata, OperatorStateSnapshot, Port, Result, SqlOperator, StateBudget,
+    StreamCollector, StreamJobContext, StreamMessage, StreamMessageKind, StreamOperator,
+    StreamOperatorContext, UnionOperator,
 };
 use chrono::DateTime;
 use datafusion::arrow::{
@@ -221,6 +221,209 @@ async fn single_alias_sql_stream_operator_executes_per_batch() {
     let drained = collector.drain("output");
     assert_eq!(drained.len(), 1);
     assert_eq!(values(drained[0].as_data().unwrap(), "doubled"), [4, 8]);
+}
+
+#[tokio::test]
+async fn sql_stream_aggregate_emits_cumulative_snapshots() {
+    let mut operator = SqlOperator::new(
+        "totals",
+        "SELECT SUM(value) AS total, COUNT(*) AS rows FROM events",
+        vec!["events".into()],
+        Vec::new(),
+    )
+    .unwrap();
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "totals", None);
+    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+
+    operator
+        .process_data("events", table_batch(&[1]), &context, &mut collector)
+        .await
+        .unwrap();
+    let first = collector.drain("output");
+    assert_eq!(values(first[0].as_data().unwrap(), "total"), [1]);
+    assert_eq!(values(first[0].as_data().unwrap(), "rows"), [1]);
+
+    operator
+        .process_data("events", table_batch(&[2, 3]), &context, &mut collector)
+        .await
+        .unwrap();
+    let second = collector.drain("output");
+    assert_eq!(values(second[0].as_data().unwrap(), "total"), [6]);
+    assert_eq!(values(second[0].as_data().unwrap(), "rows"), [3]);
+}
+
+#[tokio::test]
+async fn sql_stream_group_by_emits_all_groups_each_batch() {
+    let mut operator = SqlOperator::new(
+        "totals",
+        "SELECT category, SUM(value) AS total FROM events GROUP BY category ORDER BY category",
+        vec!["events".into()],
+        Vec::new(),
+    )
+    .unwrap();
+    let batch = |categories: Vec<&str>, values: Vec<i64>| {
+        use datafusion::arrow::array::StringArray;
+        Batch::table(
+            vec![
+                RecordBatch::try_from_iter(vec![
+                    (
+                        "category",
+                        Arc::new(StringArray::from(categories)) as Arc<dyn Array>,
+                    ),
+                    (
+                        "value",
+                        Arc::new(Int64Array::from(values)) as Arc<dyn Array>,
+                    ),
+                ])
+                .unwrap(),
+            ],
+            BatchMetadata::default(),
+        )
+        .unwrap()
+    };
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "totals", None);
+    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+
+    operator
+        .process_data(
+            "events",
+            batch(vec!["A", "C"], vec![1, 7]),
+            &context,
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    collector.drain("output");
+    operator
+        .process_data(
+            "events",
+            batch(vec!["A", "B"], vec![2, 5]),
+            &context,
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    let output = collector.drain("output");
+    let snapshot = output[0].as_data().unwrap();
+    assert_eq!(values(snapshot, "total"), [3, 5, 7]);
+}
+
+#[tokio::test]
+async fn sql_stream_aggregate_restores_cumulative_input() {
+    let new_operator = || {
+        SqlOperator::new(
+            "totals",
+            "SELECT SUM(value) AS total FROM events",
+            vec!["events".into()],
+            Vec::new(),
+        )
+        .unwrap()
+    };
+    let mut original = new_operator();
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "totals", None);
+    let mut collector = EdgeCollector::new(original.output_ports().to_vec());
+    original
+        .process_data("events", table_batch(&[1]), &context, &mut collector)
+        .await
+        .unwrap();
+    collector.drain("output");
+    let snapshot = original.checkpoint(Epoch::INITIAL).unwrap();
+    assert_eq!(snapshot.segments.len(), 1);
+
+    let mut restored = new_operator();
+    StreamOperator::restore(&mut restored, &snapshot).unwrap();
+    restored
+        .process_data("events", table_batch(&[2, 3]), &context, &mut collector)
+        .await
+        .unwrap();
+    let output = collector.drain("output");
+    assert_eq!(values(output[0].as_data().unwrap(), "total"), [6]);
+
+    StreamOperator::reset(&mut restored).unwrap();
+    restored
+        .process_data("events", table_batch(&[4]), &context, &mut collector)
+        .await
+        .unwrap();
+    let after_reset = collector.drain("output");
+    assert_eq!(values(after_reset[0].as_data().unwrap(), "total"), [4]);
+}
+
+#[tokio::test]
+async fn sql_stream_aggregate_accepts_more_than_one_million_rows_by_default() {
+    let mut operator = SqlOperator::new(
+        "totals",
+        "SELECT COUNT(*) AS rows FROM events",
+        vec!["events".into()],
+        Vec::new(),
+    )
+    .unwrap();
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "totals", None);
+    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+
+    operator
+        .process_data(
+            "events",
+            table_batch(&vec![1; 600_000]),
+            &context,
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    collector.drain("output");
+    operator
+        .process_data(
+            "events",
+            table_batch(&vec![1; 400_001]),
+            &context,
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    let output = collector.drain("output");
+    assert_eq!(values(output[0].as_data().unwrap(), "rows"), [1_000_001]);
+}
+
+#[tokio::test]
+async fn sql_stream_aggregate_applies_an_explicit_budget_atomically() {
+    let mut operator = SqlOperator::new(
+        "totals",
+        "SELECT SUM(value) AS total FROM events",
+        vec!["events".into()],
+        Vec::new(),
+    )
+    .unwrap();
+    operator
+        .set_state_budget(StateBudget::new(1, 1_024).unwrap())
+        .unwrap();
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "totals", None);
+    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+    operator
+        .process_data("events", table_batch(&[1]), &context, &mut collector)
+        .await
+        .unwrap();
+    collector.drain("output");
+
+    let error = operator
+        .process_data("events", table_batch(&[2]), &context, &mut collector)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("configured state budget"));
+    assert!(collector.drain("output").is_empty());
+
+    operator
+        .set_state_budget(StateBudget::new(2, 1_024).unwrap())
+        .unwrap();
+    operator
+        .process_data("events", table_batch(&[2]), &context, &mut collector)
+        .await
+        .unwrap();
+    let output = collector.drain("output");
+    assert_eq!(values(output[0].as_data().unwrap(), "total"), [3]);
 }
 
 #[tokio::test]

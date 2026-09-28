@@ -33,7 +33,11 @@ def build_project(directory: Path) -> ProjectDocument:
             cf.Field("price", "float64", nullable=False),
         ],
     )
-    graph = cf.Program("mysql-source", outputs={"totals": orders.pipe(order_totals)})
+    graph = cf.Program(
+        "mysql-source",
+        engine="streaming",
+        outputs={"totals": orders.pipe(order_totals)},
+    )
     return ProjectDocument.model_validate(
         {
             **graph.to_project(mode="stream").model_dump(),

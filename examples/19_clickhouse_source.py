@@ -35,7 +35,9 @@ def build_project(directory: Path) -> ProjectDocument:
         ],
     )
     graph = cf.Program(
-        "clickhouse-source", outputs={"totals": orders.pipe(order_totals)}
+        "clickhouse-source",
+        engine="streaming",
+        outputs={"totals": orders.pipe(order_totals)},
     )
     return ProjectDocument.model_validate(
         {

@@ -77,7 +77,7 @@ class CollectSink:
         pass
 
 
-def symbolic_matrix_program() -> Program:
+def symbolic_matrix_program(engine: str = "sql") -> Program:
     source = table_input(
         "prices",
         schema=(Field("return", "float64"), Field("volatility", "float64")),
@@ -101,6 +101,7 @@ def symbolic_matrix_program() -> Program:
     )
     return Program(
         "symbolic-static-matrix",
+        engine=engine,
         outputs={"signals": output},
     )
 
@@ -140,9 +141,10 @@ async def stream_scores(
 
 async def main() -> None:
     program = symbolic_matrix_program()
+    stream_program = symbolic_matrix_program("streaming")
     unsupported = Runtime()
     try:
-        program.compile_stream(unsupported)
+        stream_program.compile_stream(unsupported)
     except ConfigError as error:
         require(
             "missing_provider" in str(error),
@@ -170,7 +172,7 @@ async def main() -> None:
     )
     batch_scores = batch_result["signals"]["risk_score"].to_pylist()
     streamed_scores, placements = await stream_scores(
-        program,
+        stream_program,
         runtime,
         input_table,
         weights,

@@ -69,7 +69,9 @@ def test_twenty_independent_outputs_form_one_fused_node() -> None:
         for index in range(20)
     ]
     signals = quotes.with_columns(FeatureSet(features))
-    program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
+    program = Program(
+        "p", engine="sql", inputs=[quotes], outputs=[("signals", signals)]
+    )
 
     document = lower_program_document(program, Runtime(), "batch")
 
@@ -92,7 +94,9 @@ def test_shared_subexpression_is_computed_once() -> None:
             ]
         )
     )
-    program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
+    program = Program(
+        "p", engine="sql", inputs=[quotes], outputs=[("signals", signals)]
+    )
 
     document = lower_program_document(program, Runtime(), "batch")
 
@@ -141,7 +145,9 @@ def test_nested_sharing_materializes_deeply_first() -> None:
             ]
         )
     )
-    program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
+    program = Program(
+        "p", engine="sql", inputs=[quotes], outputs=[("signals", signals)]
+    )
 
     document = lower_program_document(program, Runtime(), "batch")
 
@@ -186,7 +192,9 @@ def test_filter_predicate_shares_the_materialized_subexpression() -> None:
         FeatureSet([("a", shared + 1.0), ("b", shared + 2.0)])
     )
     filtered = table.filter(derived, shared > 5.0)
-    program = Program("p", inputs=[quotes], outputs=[("signals", filtered)])
+    program = Program(
+        "p", engine="sql", inputs=[quotes], outputs=[("signals", filtered)]
+    )
 
     document = lower_program_document(program, Runtime(), "batch")
 
@@ -218,7 +226,9 @@ def test_trivial_subexpressions_are_never_materialized() -> None:
     signals = quotes.with_columns(
         FeatureSet([("a", quotes["x"] + quotes["y"]), ("b", quotes["x"] - quotes["y"])])
     )
-    program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
+    program = Program(
+        "p", engine="sql", inputs=[quotes], outputs=[("signals", signals)]
+    )
 
     document = lower_program_document(program, Runtime(), "batch")
 
@@ -237,7 +247,9 @@ def test_identical_features_share_one_materialized_column() -> None:
     signals = quotes.with_columns(
         FeatureSet([("a", quotes["x"] * quotes["y"]), ("b", quotes["x"] * quotes["y"])])
     )
-    program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
+    program = Program(
+        "p", engine="sql", inputs=[quotes], outputs=[("signals", signals)]
+    )
 
     document = lower_program_document(program, Runtime(), "batch")
 

@@ -76,7 +76,9 @@ def test_sql_branches_share_a_column_expression_state_once():
     delta = cf.ts.delta(source["price"])
     first = source.select(delta=delta).sql("SELECT delta FROM input")
     second = source.select(twice=delta * 2.0).sql("SELECT twice FROM input")
-    program = cf.Program("shared-column", outputs={"delta": first, "twice": second})
+    program = cf.Program(
+        "shared-column", engine="streaming", outputs={"delta": first, "twice": second}
+    )
     document = program.to_project(mode="stream").root
     rolling = [
         node
@@ -96,6 +98,7 @@ def test_sql_branches_keep_distinct_filter_admission_for_shared_columns():
     second = source.filter(source["price"] != 15.0).select(delta=delta)
     program = cf.Program(
         "filtered-columns",
+        engine="streaming",
         outputs={
             "high": first.sql("SELECT delta FROM input"),
             "other": second.sql("SELECT delta FROM input"),
@@ -112,6 +115,7 @@ def test_sql_row_branches_preserve_typed_fanout_edges(mode):
     source = cf.table_input("values", schema=data.schema)
     program = cf.Program(
         "branches",
+        engine="streaming" if mode == "stream" else "sql",
         outputs={
             "a": source.select(a=source["x"] + 1).sql("SELECT a FROM input"),
             "b": source.select(b=source["x"] * 2).sql("SELECT b FROM input"),
@@ -149,7 +153,9 @@ def test_sql_join_and_direct_branch_keep_distinct_same_schema_inputs():
         a=first,
         b=second,
     )
-    program = cf.Program("multi-frontier", outputs={"sql": joined, "left": first})
+    program = cf.Program(
+        "multi-frontier", engine="sql", outputs={"sql": joined, "left": first}
+    )
     result = program.collect({"right": right_data, "left": left_data})
     assert result["sql"].to_pydict() == {"total": [22, 23, 42, 43]}
     assert result["left"].to_pydict() == {"v": [2, 3]}

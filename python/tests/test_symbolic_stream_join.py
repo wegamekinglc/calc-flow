@@ -81,6 +81,7 @@ def _program(output=None, *, left=None, right=None) -> Program:
     joined = _join(left, right) if output is None else output
     return Program(
         "payment_match",
+        engine="streaming",
         inputs=[left, right],
         outputs=[("matches", joined)],
     )
@@ -162,7 +163,7 @@ def test_stream_join_analysis_infers_prefixed_exact_schema() -> None:
 def test_stream_join_analysis_rejects_batch_and_missing_ordering() -> None:
     batch = _program().analyze(Runtime(), mode="batch")
     assert any(issue.code == "unsupported_mode" for issue in batch.issues)
-    with pytest.raises(CompileError, match="unsupported_mode"):
+    with pytest.raises(RuntimeError, match="engine.*streaming.*sql"):
         _program().compile_batch(Runtime())
 
     left = _left(ordered=False)
@@ -222,6 +223,7 @@ def test_stream_join_requires_ordering_for_nested_and_post_join_state() -> None:
     )
     nested_program = Program(
         "nested",
+        engine="streaming",
         inputs=[_left(), _right()],
         outputs=[("matches", nested)],
     )
@@ -262,6 +264,7 @@ def test_stream_join_lowering_supports_multiple_and_unrelated_outputs() -> None:
     )
     multiple = Program(
         "multiple",
+        engine="streaming",
         inputs=[left, right],
         outputs=[("first", first), ("second", second)],
     )
@@ -280,6 +283,7 @@ def test_stream_join_lowering_supports_multiple_and_unrelated_outputs() -> None:
 
     unrelated = Program(
         "unrelated",
+        engine="streaming",
         inputs=[left, right],
         outputs=[("matches", first), ("left", left)],
     )
@@ -348,6 +352,7 @@ def test_stream_join_lowers_once_and_shares_post_join_branches() -> None:
     )
     program = Program(
         "payment_match",
+        engine="streaming",
         inputs=[left, right],
         outputs=[("settled", settled), ("amounts", amounts)],
     )

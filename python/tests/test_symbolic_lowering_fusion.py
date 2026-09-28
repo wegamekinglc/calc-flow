@@ -66,7 +66,9 @@ def test_with_columns_lowers_to_one_fused_expression_node() -> None:
             ]
         )
     )
-    program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
+    program = Program(
+        "p", engine="sql", inputs=[quotes], outputs=[("signals", signals)]
+    )
 
     document = lower_program_document(program, Runtime(), "batch")
 
@@ -111,7 +113,9 @@ def test_fused_node_executes_row_local_features() -> None:
             ]
         )
     )
-    program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
+    program = Program(
+        "p", engine="sql", inputs=[quotes], outputs=[("signals", signals)]
+    )
     plan = program.compile_batch(Runtime())
 
     result = plan.execute({"input": Batch.from_pyarrow(_xy_batch())})
@@ -138,7 +142,9 @@ def test_feature_may_reference_an_earlier_feature_in_one_node() -> None:
     quotes = _xy()
     derived = quotes.with_columns(FeatureSet([("base2", quotes["x"] * 2.0)]))
     signals = derived.with_columns(FeatureSet([("quad", derived["base2"] * 2.0)]))
-    program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
+    program = Program(
+        "p", engine="sql", inputs=[quotes], outputs=[("signals", signals)]
+    )
 
     document = lower_program_document(program, Runtime(), "batch")
 
@@ -168,7 +174,9 @@ def test_filter_fuses_into_the_same_node_where_clause() -> None:
     quotes = _xy()
     derived = quotes.with_columns(FeatureSet([("score", quotes["x"] + 1.0)]))
     filtered = table.filter(derived, derived["score"] > 0.0)
-    program = Program("p", inputs=[quotes], outputs=[("signals", filtered)])
+    program = Program(
+        "p", engine="sql", inputs=[quotes], outputs=[("signals", filtered)]
+    )
 
     document = lower_program_document(program, Runtime(), "batch")
 
@@ -191,7 +199,9 @@ def test_project_fuses_into_the_select_list() -> None:
     quotes = _xy()
     derived = quotes.with_columns(FeatureSet([("score", quotes["x"] + 1.0)]))
     projected = table.project(derived, ["x", "score"])
-    program = Program("p", inputs=[quotes], outputs=[("signals", projected)])
+    program = Program(
+        "p", engine="sql", inputs=[quotes], outputs=[("signals", projected)]
+    )
 
     document = lower_program_document(program, Runtime(), "batch")
 
@@ -215,7 +225,9 @@ def test_literal_spellings_round_trip_exactly() -> None:
             ]
         )
     )
-    program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
+    program = Program(
+        "p", engine="sql", inputs=[quotes], outputs=[("signals", signals)]
+    )
 
     document = lower_program_document(program, Runtime(), "batch")
 
@@ -234,7 +246,10 @@ def test_multiple_outputs_share_one_input_through_a_fanout_node() -> None:
         quotes["x"] > 0.0,
     )
     program = Program(
-        "p", inputs=[quotes], outputs=[("first", first), ("second", second)]
+        "p",
+        engine="sql",
+        inputs=[quotes],
+        outputs=[("first", first), ("second", second)],
     )
 
     document = lower_program_document(program, Runtime(), "batch")
@@ -271,6 +286,7 @@ def test_multiple_inputs_lower_with_named_external_inputs() -> None:
     second = trades.with_columns(FeatureSet([("b", trades["z"] * 2.0)]))
     program = Program(
         "p",
+        engine="sql",
         inputs=[quotes, trades],
         outputs=[("first", first), ("second", second)],
     )
@@ -308,7 +324,9 @@ def test_lowered_document_is_byte_deterministic() -> None:
             quotes.with_columns(FeatureSet([("a", quotes["x"] + 1.0)])),
             quotes["x"] > 0.0,
         )
-        program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
+        program = Program(
+            "p", engine="sql", inputs=[quotes], outputs=[("signals", signals)]
+        )
         return json.dumps(
             lower_program_document(program, Runtime(), "batch"), sort_keys=True
         )

@@ -67,7 +67,10 @@ def test_managed_rolling_metrics_publish_eof_and_detached_status(
         FeatureSet((("mean", ts.mean(quotes["price"], window=rows(2), min_periods=2)),))
     )
     plan = Program(
-        "rolling-diagnostics", inputs=(quotes,), outputs=(("result", result),)
+        "rolling-diagnostics",
+        engine="streaming",
+        inputs=(quotes,),
+        outputs=(("result", result),),
     ).compile_stream(Runtime())
     table = pa.Table.from_arrays(
         [

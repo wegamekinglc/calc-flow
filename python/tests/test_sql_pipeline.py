@@ -18,7 +18,9 @@ def test_pipe_composes_tables_columns_and_arguments_once():
         return column * factor + offset
 
     output = source.pipe(lambda t: t.select(value=t["x"].pipe(scaled, 2.0, offset=1.0)))
-    program = output.pipe(lambda t: cf.Program("scaled", outputs={"result": t}))
+    program = output.pipe(
+        lambda t: cf.Program("scaled", engine="sql", outputs={"result": t})
+    )
     assert len(calls) == 1
     assert program.collect({"values": data})["result"].to_pydict() == {
         "value": [5.0, 9.0]
@@ -61,7 +63,9 @@ def test_sql_and_expression_pipeline_executes_in_one_graph():
 
     assert cf.compute(data, pipeline).to_pydict() == {"id": [1, 3], "net": [18.0, 27.0]}
     source = cf.table_input("orders", schema=data.schema)
-    document = cf.Program("sql", outputs={"output": pipeline(source)}).to_project()
+    document = cf.Program(
+        "sql", engine="sql", outputs={"output": pipeline(source)}
+    ).to_project()
     assert '"kind":"sql"' in document.model_dump_json().replace(" ", "")
 
 
@@ -78,6 +82,7 @@ def test_sql_join_nested_cte_and_shared_output_keep_logical_bindings():
     ).sql("WITH selected AS (SELECT * FROM input) SELECT * FROM selected")
     program = cf.Program(
         "branches",
+        engine="sql",
         outputs={"net": joined, "double": joined.select(doubled=joined["net"] * 2)},
     )
     result = program.collect({"fees": fees, "orders": orders})
@@ -147,7 +152,7 @@ def test_sql_shared_rolling_ancestor_is_one_native_state_operator():
     first = rolling.select("delta").sql("SELECT delta FROM input")
     second = rolling.select(twice=rolling["delta"] * 2.0).sql("SELECT twice FROM input")
     document = cf.Program(
-        "shared-state", outputs={"first": first, "second": second}
+        "shared-state", engine="streaming", outputs={"first": first, "second": second}
     ).to_project(mode="stream")
     nodes = document.root["graph"]["nodes"]
     assert sum(node["operator"]["kind"] == "rolling" for node in nodes) == 1
@@ -160,6 +165,7 @@ def test_sql_output_requires_new_ordering_before_temporal_expressions():
     ):
         cf.Program(
             "invalid",
+            engine="streaming",
             outputs={"out": source.select(previous=cf.ts.lag(source["price"]))},
         ).to_project(mode="stream")
 

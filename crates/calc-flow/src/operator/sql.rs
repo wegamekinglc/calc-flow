@@ -1,22 +1,28 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
+    io::Cursor,
 };
 
 use async_trait::async_trait;
-use datafusion::arrow::datatypes::SchemaRef;
-use serde_json::Value;
+use datafusion::arrow::{
+    datatypes::SchemaRef,
+    ipc::{reader::FileReader, writer::FileWriter},
+    record_batch::RecordBatch,
+};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::{
-    Batch, BatchKind, CalcFlowError, DataFusionConfig, DataFusionRuntime, EventTime, JsonMap, Port,
-    Result, RunContext, UdfReference, UdfRegistrySnapshot,
+    Batch, BatchKind, BatchMetadata, CalcFlowError, DataFusionConfig, DataFusionRuntime, Epoch,
+    EventTime, JsonMap, Port, Result, RunContext, UdfReference, UdfRegistrySnapshot,
     expression::{ValidatedQuery, parse_select_query},
 };
 
 use super::{
-    BatchOperator, BatchOperatorContext, OperatorMetadata, StreamCollector, StreamOperator,
-    StreamOperatorContext, StreamRuntimeState, table_port, udf_configuration,
-    validate_builtin_port, validate_operator_name,
+    BatchOperator, BatchOperatorContext, OperatorMetadata, OperatorStateSnapshot, StateBudget,
+    StateSegment, StreamCollector, StreamOperator, StreamOperatorContext, StreamRuntimeState,
+    table_port, udf_configuration, validate_builtin_port, validate_operator_name,
 };
 
 use super::expression::required_input;
@@ -25,8 +31,10 @@ use super::expression::required_input;
 ///
 /// Batch graphs may use several input aliases. Stream graphs accept exactly
 /// one alias (spec NG6: incremental multi-input joins are undefined); the
-/// single-alias form implements [`StreamOperator`] with per-batch stateless
-/// processing (API note A2.4).
+/// single-alias form retains input for cumulative aggregate snapshots
+/// and processes row-level SQL independently for each batch. Each emitted
+/// aggregate snapshot reruns the query over all retained input. Call
+/// [`Self::set_state_budget`] to enforce an application-chosen state limit.
 pub struct SqlOperator {
     name: String,
     query: String,
@@ -36,6 +44,17 @@ pub struct SqlOperator {
     input_ports: Vec<Port>,
     output_ports: [Port; 1],
     stream_state: StreamRuntimeState,
+    stream_aggregate: bool,
+    retained: Option<RetainedSqlInput>,
+    state_budget: Option<StateBudget>,
+}
+
+#[derive(Clone)]
+struct RetainedSqlInput {
+    batch: Batch,
+    segment: StateSegment,
+    rows: u64,
+    bytes: u64,
 }
 
 impl Clone for SqlOperator {
@@ -51,6 +70,9 @@ impl Clone for SqlOperator {
             input_ports: self.input_ports.clone(),
             output_ports: self.output_ports.clone(),
             stream_state: self.stream_state.clone(),
+            stream_aggregate: self.stream_aggregate,
+            retained: None,
+            state_budget: self.state_budget,
         }
     }
 }
@@ -102,6 +124,7 @@ impl SqlOperator {
             .map(|alias| table_port(alias))
             .collect::<Result<Vec<_>>>()?;
         let validated = parse_select_query(query)?;
+        let stream_aggregate = validated.has_stream_aggregate();
         Ok(Self {
             name: name.into(),
             query: query.into(),
@@ -111,6 +134,9 @@ impl SqlOperator {
             input_ports,
             output_ports: [table_port("output")?],
             stream_state: StreamRuntimeState::new(),
+            stream_aggregate,
+            retained: None,
+            state_budget: None,
         })
     }
 
@@ -194,6 +220,171 @@ impl SqlOperator {
 
     pub(crate) const fn stream_runtime_initialized(&self) -> bool {
         self.stream_state.is_initialized()
+    }
+
+    pub(crate) const fn has_stream_aggregate(&self) -> bool {
+        self.stream_aggregate
+    }
+
+    /// Sets an optional row and logical-byte limit for retained stream SQL
+    /// aggregate input. A newly constructed operator has no fixed state limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalcFlowError::InvalidArgument`] if existing state exceeds
+    /// the requested budget.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use calc_flow::{SqlOperator, StateBudget};
+    /// fn configure(operator: &mut SqlOperator) -> calc_flow::Result<()> {
+    ///     operator.set_state_budget(StateBudget::new(20_000_000, 8 << 30)?)
+    /// }
+    /// ```
+    pub fn set_state_budget(&mut self, budget: StateBudget) -> Result<()> {
+        self.set_stream_state_budget(Some(budget))
+    }
+
+    pub(crate) fn set_stream_state_budget(&mut self, budget: Option<StateBudget>) -> Result<()> {
+        if budget.is_some_and(|budget| {
+            self.retained
+                .as_ref()
+                .is_some_and(|state| !budget.allows(state.rows, state.bytes))
+        }) {
+            return Err(CalcFlowError::InvalidArgument {
+                field: "sql.state_budget".into(),
+                message: "existing SQL aggregate state exceeds the requested budget".into(),
+            });
+        }
+        self.state_budget = budget;
+        Ok(())
+    }
+
+    fn query_digest(&self) -> String {
+        hex::encode(Sha256::digest(self.query.as_bytes()))
+    }
+
+    fn incoming_charge(&self, batch: &Batch) -> Result<(u64, u64)> {
+        let incoming_rows = u64::try_from(batch.num_rows())
+            .map_err(|_| sql_state_error("input row count exceeds u64"))?;
+        let incoming_bytes = if batch.num_rows() == 0 && self.retained.is_some() {
+            0
+        } else {
+            u64::try_from(batch.estimated_bytes()?)
+                .map_err(|_| sql_state_error("input byte count exceeds u64"))?
+        };
+        Ok((incoming_rows, incoming_bytes))
+    }
+
+    fn accumulated_charge(&self, batch: &Batch) -> Result<(u64, u64)> {
+        let (incoming_rows, incoming_bytes) = self.incoming_charge(batch)?;
+        let previous_rows = self.retained.as_ref().map_or(0, |state| state.rows);
+        let previous_bytes = self.retained.as_ref().map_or(0, |state| state.bytes);
+        let rows = previous_rows
+            .checked_add(incoming_rows)
+            .ok_or_else(|| sql_state_error("retained row count overflowed"))?;
+        let bytes = previous_bytes
+            .checked_add(incoming_bytes)
+            .ok_or_else(|| sql_state_error("retained byte count overflowed"))?;
+        if self
+            .state_budget
+            .is_some_and(|budget| !budget.allows(rows, bytes))
+        {
+            return Err(CalcFlowError::Operator {
+                node_id: self.name.clone(),
+                message: "SQL aggregate retained input exceeds the configured state budget".into(),
+            });
+        }
+        Ok((rows, bytes))
+    }
+
+    fn merged_records(&self, batch: &Batch) -> Vec<RecordBatch> {
+        let mut records = self
+            .retained
+            .as_ref()
+            .map(|state| {
+                state
+                    .batch
+                    .table_payload()
+                    .expect("retained table")
+                    .batches()
+                    .to_vec()
+            })
+            .unwrap_or_default();
+        if batch.num_rows() > 0 || records.is_empty() {
+            records.extend_from_slice(batch.table_payload().expect("validated table").batches());
+        }
+        records
+    }
+
+    async fn accumulate(&self, batch: &Batch) -> Result<RetainedSqlInput> {
+        let (rows, bytes) = self.accumulated_charge(batch)?;
+        let combined = Batch::table(self.merged_records(batch), batch.metadata().clone())?;
+        let (combined, segment) = tokio::task::spawn_blocking(move || {
+            let segment = StateSegment::new(encode_sql_state(&combined)?);
+            Ok::<_, CalcFlowError>((combined, segment))
+        })
+        .await
+        .map_err(|error| CalcFlowError::Internal {
+            message: format!("SQL state encoder task failed: {error}"),
+        })??;
+        Ok(RetainedSqlInput {
+            batch: combined,
+            segment,
+            rows,
+            bytes,
+        })
+    }
+
+    fn checkpoint_matches(&self, snapshot: &OperatorStateSnapshot) -> bool {
+        self.stream_aggregate
+            && snapshot.inline_metadata.len() == 3
+            && snapshot.segments.len() == 1
+            && snapshot
+                .inline_metadata
+                .get("query_sha256")
+                .and_then(Value::as_str)
+                == Some(self.query_digest().as_str())
+    }
+
+    fn validate_checkpoint_charge(&self, batch: &Batch, rows: u64, bytes: u64) -> Result<()> {
+        let actual_rows = u64::try_from(batch.num_rows())
+            .map_err(|_| sql_state_error("restored row count exceeds u64"))?;
+        let actual_bytes = u64::try_from(batch.estimated_bytes()?)
+            .map_err(|_| sql_state_error("restored byte count exceeds u64"))?;
+        if rows != actual_rows
+            || bytes != actual_bytes
+            || self
+                .state_budget
+                .is_some_and(|budget| !budget.allows(rows, bytes))
+        {
+            return Err(sql_state_error(
+                "SQL aggregate checkpoint charge is invalid",
+            ));
+        }
+        Ok(())
+    }
+
+    fn read_checkpoint_charge(
+        snapshot: &OperatorStateSnapshot,
+    ) -> Result<(StateSegment, u64, u64)> {
+        let segment = snapshot
+            .segments
+            .get("input")
+            .ok_or_else(|| sql_state_error("SQL aggregate checkpoint has no input segment"))?
+            .clone();
+        let rows = snapshot
+            .inline_metadata
+            .get("rows")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| sql_state_error("SQL aggregate checkpoint has no row count"))?;
+        let bytes = snapshot
+            .inline_metadata
+            .get("bytes")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| sql_state_error("SQL aggregate checkpoint has no byte count"))?;
+        Ok((segment, rows, bytes))
     }
 
     #[doc(hidden)]
@@ -303,13 +494,23 @@ impl StreamOperator for SqlOperator {
         }
         context.check_cancelled()?;
         self.input_ports[0].validate(&batch, &format!("{}.{alias}", self.name))?;
-        let tables = BTreeMap::from([(alias.clone(), batch)]);
+        let next = if self.stream_aggregate {
+            Some(self.accumulate(&batch).await?)
+        } else {
+            None
+        };
+        let tables = BTreeMap::from([(
+            alias.clone(),
+            next.as_ref().map_or(batch, |state| state.batch.clone()),
+        )]);
         let runtime = self.stream_state.runtime()?;
         let produced = runtime
             .sql_validated(&self.validated, &tables, Some(&self.name))
             .await?;
         context.check_cancelled()?;
-        output.emit("output", produced).await
+        output.emit("output", produced).await?;
+        self.retained = next;
+        Ok(())
     }
 
     async fn on_watermark(
@@ -328,4 +529,83 @@ impl StreamOperator for SqlOperator {
     ) -> Result<()> {
         Ok(())
     }
+
+    fn checkpoint(&mut self, _epoch: Epoch) -> Result<OperatorStateSnapshot> {
+        let Some(state) = &self.retained else {
+            return Ok(OperatorStateSnapshot::default());
+        };
+        Ok(OperatorStateSnapshot {
+            inline_metadata: BTreeMap::from([
+                ("query_sha256".into(), json!(self.query_digest())),
+                ("rows".into(), json!(state.rows)),
+                ("bytes".into(), json!(state.bytes)),
+            ]),
+            segments: BTreeMap::from([("input".into(), state.segment.clone())]),
+        })
+    }
+
+    fn restore(&mut self, snapshot: &OperatorStateSnapshot) -> Result<()> {
+        if snapshot.inline_metadata.is_empty() && snapshot.segments.is_empty() {
+            self.retained = None;
+            return Ok(());
+        }
+        if !self.checkpoint_matches(snapshot) {
+            return Err(sql_state_error(
+                "SQL aggregate checkpoint does not match this operator",
+            ));
+        }
+        let (segment, rows, bytes) = Self::read_checkpoint_charge(snapshot)?;
+        let batch = decode_sql_state(segment.bytes())?;
+        self.validate_checkpoint_charge(&batch, rows, bytes)?;
+        self.retained = Some(RetainedSqlInput {
+            batch,
+            segment,
+            rows,
+            bytes,
+        });
+        Ok(())
+    }
+
+    fn reset(&mut self) -> Result<()> {
+        self.retained = None;
+        Ok(())
+    }
+}
+
+fn sql_state_error(message: &str) -> CalcFlowError {
+    CalcFlowError::Format {
+        message: message.into(),
+    }
+}
+
+fn encode_sql_state(batch: &Batch) -> Result<Vec<u8>> {
+    let table = batch.table_payload().expect("SQL state is a table");
+    let mut bytes = Vec::new();
+    {
+        let mut writer = FileWriter::try_new(&mut bytes, table.schema())
+            .map_err(|error| sql_state_error(&format!("SQL state IPC header failed: {error}")))?;
+        for record in table.batches() {
+            writer.write(record).map_err(|error| {
+                sql_state_error(&format!("SQL state IPC write failed: {error}"))
+            })?;
+        }
+        writer
+            .finish()
+            .map_err(|error| sql_state_error(&format!("SQL state IPC finish failed: {error}")))?;
+    }
+    Ok(bytes)
+}
+
+fn decode_sql_state(bytes: &[u8]) -> Result<Batch> {
+    if !bytes.starts_with(b"ARROW1") || !bytes.ends_with(b"ARROW1") {
+        return Err(sql_state_error(
+            "SQL state segment has no Arrow IPC file magic",
+        ));
+    }
+    let reader = FileReader::try_new(Cursor::new(bytes), None)
+        .map_err(|error| sql_state_error(&format!("SQL state IPC is invalid: {error}")))?;
+    let records = reader
+        .collect::<std::result::Result<Vec<RecordBatch>, _>>()
+        .map_err(|error| sql_state_error(&format!("SQL state records are invalid: {error}")))?;
+    Batch::table(records, BatchMetadata::default())
 }

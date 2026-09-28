@@ -138,6 +138,7 @@ def infer_table_schema(
     rewritten = _rewrite_nodes(node, sources)
     fragment = Program(
         "symbolic-schema",
+        engine="streaming" if mode == "stream" else "sql",
         outputs=[("cf_schema_result", TableExpr(rewritten))],
     )
     document = lower_program_document(fragment, runtime, mode)

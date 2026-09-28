@@ -78,6 +78,7 @@ def _program() -> Program:
     )
     return Program(
         "symbolic-join-acceptance",
+        engine="streaming",
         inputs=[left, right],
         outputs=[("matches", output)],
     )

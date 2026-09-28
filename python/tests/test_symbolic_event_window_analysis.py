@@ -48,7 +48,12 @@ def _minute(trades, *, event_time="ts", group_by=(), aggregates=None):
 
 
 def _program(trades, result):
-    return Program("event-window", inputs=[trades], outputs=[("minute", result)])
+    return Program(
+        "event-window",
+        engine="streaming",
+        inputs=[trades],
+        outputs=[("minute", result)],
+    )
 
 
 def test_native_window_capability_is_precise_and_sorted() -> None:
@@ -210,7 +215,7 @@ def test_window_is_stream_only_in_analysis_and_compile() -> None:
         (issue.path, issue.code)
         for issue in program.analyze(Runtime(), mode="batch").issues
     ] == [("outputs.minute.window_tumbling", "unsupported_mode")]
-    with pytest.raises(CompileError, match="unsupported_mode"):
+    with pytest.raises(RuntimeError, match="engine.*streaming.*sql"):
         program.compile_batch(Runtime())
 
 
@@ -277,7 +282,9 @@ def test_window_columns_cannot_align_with_source_columns(kind) -> None:
     inputs = [trades] if kind != "spoofed_name" else [trades, foreign]
 
     issues = (
-        Program("mixed", inputs=inputs, outputs=[("minute", output)])
+        Program(
+            "mixed", engine="streaming", inputs=inputs, outputs=[("minute", output)]
+        )
         .analyze(Runtime(), mode="stream")
         .issues
     )
@@ -397,6 +404,7 @@ def test_independent_rolling_branch_keeps_its_input_ordering_requirements() -> N
     )
     program = Program(
         "mixed",
+        engine="streaming",
         inputs=[trades],
         outputs=[("minute", _minute(trades)), ("rolling", rolling)],
     )

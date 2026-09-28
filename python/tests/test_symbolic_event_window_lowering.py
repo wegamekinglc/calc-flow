@@ -64,7 +64,12 @@ def _nodes(document, kind: str):
 def test_window_lowers_to_existing_native_spec(hopping: bool) -> None:
     trades = _input()
     result = _window(trades, hopping=hopping)
-    program = Program("native-window", inputs=[trades], outputs=[("minute", result)])
+    program = Program(
+        "native-window",
+        engine="streaming",
+        inputs=[trades],
+        outputs=[("minute", result)],
+    )
     runtime = Runtime()
 
     document = lower_program_document(program, runtime, "stream")
@@ -96,6 +101,7 @@ def test_shared_window_preserves_filters_on_each_side() -> None:
     selected_minute = table.filter(minute, minute["volume"] > 10)
     program = Program(
         "shared-window",
+        engine="streaming",
         inputs=[trades],
         outputs=[("all", minute), ("selected", selected_minute)],
     )
@@ -119,7 +125,10 @@ def test_distinct_window_inputs_do_not_share_state() -> None:
     first, second = _input("first"), _input("second")
     a, b = _window(first), _window(second)
     program = Program(
-        "independent-windows", inputs=[first, second], outputs=[("a", a), ("b", b)]
+        "independent-windows",
+        engine="streaming",
+        inputs=[first, second],
+        outputs=[("a", a), ("b", b)],
     )
     document = lower_program_document(program, Runtime(), "stream")
     assert len(_nodes(document, "window")) == 2
@@ -134,6 +143,7 @@ def test_window_and_independent_rolling_share_one_source() -> None:
     )
     program = Program(
         "mixed-windows",
+        engine="streaming",
         inputs=[trades],
         outputs=[("minute", minute), ("rolling", rolling)],
     )
@@ -176,6 +186,7 @@ def test_window_and_independent_join_preserve_bindings() -> None:
     )
     program = Program(
         "window-join",
+        engine="streaming",
         inputs=[left, right],
         outputs=[("minute", _window(left)), ("joined", joined)],
     )
@@ -196,6 +207,7 @@ def test_window_and_independent_matrix_preserve_static_bindings() -> None:
     )
     program = Program(
         "window-matrix",
+        engine="streaming",
         inputs=[trades, weights],
         outputs=[("minute", _window(trades)), ("matrix", attached)],
     )
@@ -212,7 +224,10 @@ def test_window_and_independent_matrix_preserve_static_bindings() -> None:
 def test_window_does_not_expose_an_unused_declared_source() -> None:
     used, unused = _input("used"), _input("unused")
     program = Program(
-        "unused-source", inputs=[used, unused], outputs=[("minute", _window(used))]
+        "unused-source",
+        engine="streaming",
+        inputs=[used, unused],
+        outputs=[("minute", _window(used))],
     )
     assert len(program.compile_stream(Runtime()).source_binding_ids) == 1
 
@@ -220,7 +235,10 @@ def test_window_does_not_expose_an_unused_declared_source() -> None:
 def test_failed_native_stream_compile_does_not_populate_cache() -> None:
     trades = _input()
     program = Program(
-        "invalid-node", inputs=[trades], outputs=[("invalid/output", _window(trades))]
+        "invalid-node",
+        engine="streaming",
+        inputs=[trades],
+        outputs=[("invalid/output", _window(trades))],
     )
     runtime = Runtime()
     with pytest.raises(ConfigError, match="invalid_id"):
@@ -234,7 +252,10 @@ def test_failed_native_stream_compile_does_not_populate_cache() -> None:
 def test_window_only_rejects_unused_lateness_options(options) -> None:
     trades = _input()
     program = Program(
-        "window-options", inputs=[trades], outputs=[("minute", _window(trades))]
+        "window-options",
+        engine="streaming",
+        inputs=[trades],
+        outputs=[("minute", _window(trades))],
     )
     with pytest.raises(
         CompileError, match=r"window-options\.compile_stream\..*: capability_mismatch"
@@ -247,7 +268,10 @@ def test_window_node_ids_handle_output_and_source_name_collisions() -> None:
     minute = _window(trades)
     collision = f"cf_window_{minute.digest[:24]}"
     program = Program(
-        "collisions", inputs=[trades], outputs=[("minute", minute), (collision, minute)]
+        "collisions",
+        engine="streaming",
+        inputs=[trades],
+        outputs=[("minute", minute), (collision, minute)],
     )
     document = lower_program_document(program, Runtime(), "stream")
     ids = [node["id"] for node in document["graph"]["nodes"]]
@@ -260,7 +284,10 @@ def test_window_explain_reports_native_finality_and_state_sharing() -> None:
     trades = _input()
     minute = _window(trades)
     program = Program(
-        "explain-window", inputs=[trades], outputs=[("a", minute), ("b", minute)]
+        "explain-window",
+        engine="streaming",
+        inputs=[trades],
+        outputs=[("a", minute), ("b", minute)],
     )
     explained = program.explain(Runtime(), mode="stream")
     assert "window state_stages 1 shared_outputs 2" in explained
@@ -273,8 +300,18 @@ def test_rebuilt_window_graph_has_stable_fingerprint_and_cache_identity() -> Non
     runtime = Runtime()
     first = _input()
     second = _input()
-    a = Program("cache-window", inputs=[first], outputs=[("minute", _window(first))])
-    b = Program("cache-window", inputs=[second], outputs=[("minute", _window(second))])
+    a = Program(
+        "cache-window",
+        engine="streaming",
+        inputs=[first],
+        outputs=[("minute", _window(first))],
+    )
+    b = Program(
+        "cache-window",
+        engine="streaming",
+        inputs=[second],
+        outputs=[("minute", _window(second))],
+    )
     assert lower_program_document(a, runtime, "stream") == lower_program_document(
         b, runtime, "stream"
     )
@@ -283,6 +320,7 @@ def test_rebuilt_window_graph_has_stable_fingerprint_and_cache_identity() -> Non
     assert first_plan.fingerprint == second_plan.fingerprint
     changed = Program(
         "cache-window",
+        engine="streaming",
         inputs=[first],
         outputs=[("minute", _window(first, hopping=True))],
     )

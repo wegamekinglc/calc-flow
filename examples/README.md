@@ -195,7 +195,6 @@ external services and are included in the default example runner.
   consume independent `StreamOutput` events by name. Checks
   `double=[2, 4, 6]` and `large=[2, 3]` without assuming cross-output order.
   Guide: [named outputs](../docs/streaming-guide.md#named-streaming-outputs).
-
 - [22_stream_asof_join.py](22_stream_asof_join.py) — attach the latest quote
   within ten microseconds to each trade. Checks no output while both
   watermarks equal 105, then `quote__price=[10.2, None]` after they advance to
@@ -208,6 +207,13 @@ external services and are included in the default example runner.
   route `normal=[20.0]` and `late=[10.0]`; checks remain active under `python -O`.
   Runs without external services and cleans up its job and temporary state.
   Guide: [late-row routing](../docs/streaming-guide.md#route-late-rows).
+
+- [29_sql_stream_switch.py](29_sql_stream_switch.py) — use one aggregate SQL
+  declaration to construct separate `Program` instances with `engine="sql"`
+  or `engine="streaming"` before declaring outputs and calling `execute()`.
+  Batch SQL returns `total=6`; streaming emits cumulative snapshots `total=1`,
+  then `total=6`. The default runs both and checks their final result.
+  Guide: [SQL stream boundaries](../docs/streaming-guide.md#stream-ownership-and-sql-boundaries).
 
 The explicitly registered [symbolic_event_window.py](symbolic_event_window.py)
 example computes grouped one-minute trade count, volume, low, high, and

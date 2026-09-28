@@ -524,7 +524,7 @@ class TableExpr(Expr[object]):
         from calc_flow.symbolic.program import Program
 
         _require_blocking("collect")
-        program = Program("collect", outputs={"output": self})
+        program = Program("collect", engine="sql", outputs={"output": self})
         return program.collect(
             _table_inputs(program, inputs), runtime=runtime, options=options
         )["output"]
@@ -545,7 +545,7 @@ class TableExpr(Expr[object]):
         from calc_flow.compute import _collect_table_async, _table_inputs
         from calc_flow.symbolic.program import Program
 
-        program = Program("collect", outputs={"output": self})
+        program = Program("collect", engine="sql", outputs={"output": self})
         return _collect_table_async(
             program, _table_inputs(program, inputs), runtime, options
         )

@@ -25,6 +25,12 @@ Example 03 covers explicit typed UDF registration. Runtime contributors can pair
 program uses the small `[3, 7]` addition from the introduction; Python 01 uses
 order totals. The SQL programs share the same order/fee dataset.
 
+Run [29_sql_stream_switch.py](../examples/29_sql_stream_switch.py) to compare
+batch SQL and cumulative streaming for the same declaration. Each `Program`
+sets `engine="sql"` or `engine="streaming"` in its constructor, then calls
+`execute()`;
+the final `total=6` matches in both modes.
+
 ## Calculate with arrays
 
 Read the [array guide](array-guide.md) while running 06 → 07 → 11: center a

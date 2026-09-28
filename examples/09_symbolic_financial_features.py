@@ -96,6 +96,7 @@ def main() -> None:
     )
     program = Program(
         "financial-features",
+        engine="sql",
         outputs={"signals": quotes.with_columns(financial_features(quotes))},
     )
     analysis = program.analyze()

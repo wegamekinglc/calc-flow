@@ -41,7 +41,9 @@ else:
 
     pa.table = altered_table
 
-runpy.run_path(sys.argv[1], run_name="__main__")
+example = sys.argv[1]
+sys.argv = [example]
+runpy.run_path(example, run_name="__main__")
 """
 
 
@@ -56,6 +58,7 @@ runpy.run_path(sys.argv[1], run_name="__main__")
         ("06_numpy_array.py", "array"),
         ("14_project_persistence.py", "a"),
         ("15_file_source.py", "quantity"),
+        ("29_sql_stream_switch.py", "x"),
         ("symbolic_event_window.py", "quantity"),
     ),
 )

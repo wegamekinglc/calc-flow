@@ -247,6 +247,7 @@ class _SQLGraph:
         }
         fragment = Program(
             self.graph.program.name,
+            engine=self.graph.program.engine,
             outputs={
                 name: TableExpr(_rewrite_nodes(node, self.replacements))
                 for name, node in outputs.items()

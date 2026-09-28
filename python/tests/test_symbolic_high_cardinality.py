@@ -73,7 +73,7 @@ def _quotes() -> object:
     )
 
 
-def _rolling_program() -> Program:
+def _rolling_program(engine: str = "sql") -> Program:
     quotes = _quotes()
     signals = quotes.with_columns(
         FeatureSet(
@@ -88,11 +88,14 @@ def _rolling_program() -> Program:
         )
     )
     return Program(
-        "high-cardinality-rolling", inputs=[quotes], outputs=[("signals", signals)]
+        "high-cardinality-rolling",
+        engine=engine,
+        inputs=[quotes],
+        outputs=[("signals", signals)],
     )
 
 
-def _cross_section_program() -> Program:
+def _cross_section_program(engine: str = "sql") -> Program:
     quotes = _quotes()
     group = exact_time(quotes["ts"])
     signals = quotes.with_columns(
@@ -105,6 +108,7 @@ def _cross_section_program() -> Program:
     )
     return Program(
         "high-cardinality-cross-section",
+        engine=engine,
         inputs=[quotes],
         outputs=[("signals", signals)],
     )
@@ -376,7 +380,7 @@ def test_high_cardinality_rolling_stream_matches_batch_across_segmentation(
     tmp_path: Path, segmentation: int
 ) -> None:
     table = _table(_rolling_rows(STREAM_ENTITIES))
-    plan = _rolling_program().compile_stream(Runtime())
+    plan = _rolling_program("streaming").compile_stream(Runtime())
     sink = _CollectSink()
 
     async def exercise() -> None:
@@ -406,7 +410,7 @@ def test_high_cardinality_rolling_stream_matches_batch_across_segmentation(
 
 def test_high_cardinality_cross_section_stream_matches_batch(tmp_path: Path) -> None:
     table = _table(_cross_section_rows(CROSS_SECTION_GROUPS))
-    plan = _cross_section_program().compile_stream(Runtime())
+    plan = _cross_section_program("streaming").compile_stream(Runtime())
     sink = _CollectSink()
 
     async def exercise() -> None:
@@ -447,7 +451,7 @@ def test_high_cardinality_rolling_checkpoint_recovery_matches_batch(
 
     def runner(source: _ReplayPauseSource) -> StreamingRunner:
         return StreamingRunner(
-            _rolling_program().compile_stream(Runtime()),
+            _rolling_program("streaming").compile_stream(Runtime()),
             {"input": SourceBinding(source, watermark_policy=DisabledWatermarks())},
             {"output": [SinkBinding.ordinary("archive", sink)]},
             ManagedCheckpointRuntime(tmp_path),

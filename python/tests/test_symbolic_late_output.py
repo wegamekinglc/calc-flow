@@ -59,7 +59,7 @@ def test_late_outputs_declaration_is_immutable_exported_and_content_addressed() 
 def test_program_requires_explicit_consumers_for_both_outputs(branch: str) -> None:
     pair = cf.with_late_output(rolling(quotes()))
     value = getattr(pair, branch)
-    program = cf.Program("missing", outputs={"only": value})
+    program = cf.Program("missing", engine="streaming", outputs={"only": value})
     with pytest.raises(
         cf.CompileError, match=r"outputs.only.*unconsumed_output.*Program"
     ):
@@ -68,9 +68,10 @@ def test_program_requires_explicit_consumers_for_both_outputs(branch: str) -> No
 
 def test_paired_outputs_are_stream_only() -> None:
     pair = cf.with_late_output(rolling(quotes()))
-    program = cf.Program("batch", outputs={"normal": pair.output, "late": pair.late})
-    with pytest.raises(cf.CompileError, match=r"unsupported_mode.*stream"):
-        program.compile_batch(cf.Runtime())
+    with pytest.raises(ValueError, match=r"unsupported_mode.*stream"):
+        cf.Program(
+            "batch", engine="sql", outputs={"normal": pair.output, "late": pair.late}
+        )
 
 
 @pytest.mark.parametrize("kind", ["rolling", "cross_section"])
@@ -87,7 +88,9 @@ def test_paired_lowering_shares_state_and_preserves_stage_input(kind: str) -> No
     )
     pair = cf.with_late_output(value, allowed_lateness_micros=3)
     program = cf.Program(
-        "paired", outputs={"normal": pair.output, "diagnostics": pair.late}
+        "paired",
+        engine="streaming",
+        outputs={"normal": pair.output, "diagnostics": pair.late},
     )
     runtime = cf.Runtime()
     document = lower_program_document(
@@ -138,7 +141,9 @@ def test_fragment_lowering_rejects_ambiguous_state_stage(
     from calc_flow.symbolic.lower import program as lower_program
 
     pair = cf.with_late_output(rolling(quotes()), allowed_lateness_micros=3)
-    program = cf.Program("paired", outputs={"normal": pair.output, "late": pair.late})
+    program = cf.Program(
+        "paired", engine="streaming", outputs={"normal": pair.output, "late": pair.late}
+    )
     original = lower_program.lower_program_document
 
     def duplicate_fragment_state(*args, **kwargs):
@@ -190,7 +195,9 @@ def test_stage_selection_rejects_ambiguous_or_hidden_materialization(
         "after_stage": rolling(source).select("x"),
     }
     pair = cf.with_late_output(values[variant])
-    program = cf.Program("stage", outputs={"normal": pair.output, "late": pair.late})
+    program = cf.Program(
+        "stage", engine="streaming", outputs={"normal": pair.output, "late": pair.late}
+    )
     with pytest.raises(cf.CompileError, match=r"outputs.*ambiguous_late_stage.*stage"):
         program.compile_stream(cf.Runtime())
 
@@ -221,7 +228,11 @@ def test_late_output_rejects_reserved_input_field_before_native_compile() -> Non
         sequence_by=["seq"],
     )
     pair = cf.with_late_output(rolling(source))
-    program = cf.Program("reserved", outputs={"normal": pair.output, "late": pair.late})
+    program = cf.Program(
+        "reserved",
+        engine="streaming",
+        outputs={"normal": pair.output, "late": pair.late},
+    )
     with pytest.raises(
         cf.CompileError,
         match=r"outputs\..*reserved_field.*input field \"_cf_late_note\" is reserved"
@@ -245,6 +256,7 @@ def test_named_input_materialization_and_late_sql_preserve_boundary() -> None:
     diagnostics = cf.sql("SELECT * FROM rows WHERE twice > 0", rows=derived)
     program = cf.Program(
         "prepared",
+        engine="streaming",
         outputs={"normal": pair.output.select("a", "b"), "diagnostics": diagnostics},
     )
     runtime = cf.Runtime()
@@ -287,13 +299,23 @@ def test_late_successors_reject_even_after_allowed_transform(
         rejected = cf.linalg.from_columns(late, columns=["x"], backend="numpy")
     else:
         rejected = cf.sql("SELECT * FROM a UNION ALL SELECT * FROM b", a=late, b=late)
-    program = cf.Program(
-        "invalid", outputs={"normal": pair.output, "rejected": rejected}
-    )
-    with pytest.raises(
-        cf.CompileError, match=r"outputs.rejected.*unsupported_mode.*late"
-    ):
-        program.compile_stream(cf.Runtime())
+    if successor == "merge":
+        with pytest.raises(ValueError, match=r"outputs.rejected.*unsupported_mode"):
+            cf.Program(
+                "invalid",
+                engine="streaming",
+                outputs={"normal": pair.output, "rejected": rejected},
+            )
+    else:
+        program = cf.Program(
+            "invalid",
+            engine="streaming",
+            outputs={"normal": pair.output, "rejected": rejected},
+        )
+        with pytest.raises(
+            cf.CompileError, match=r"outputs.rejected.*unsupported_mode.*late"
+        ):
+            program.compile_stream(cf.Runtime())
 
 
 def _program_for_successor(successor: str) -> cf.Program:
@@ -308,7 +330,9 @@ def _program_for_successor(successor: str) -> cf.Program:
         "project": lambda: late.select("x", "_cf_late_reason"),
         "sql": lambda: cf.sql("SELECT * FROM rows WHERE x > 0", rows=late),
     }[successor]()
-    return cf.Program("mapped", outputs={"normal": pair.output, "late": derived})
+    return cf.Program(
+        "mapped", engine="streaming", outputs={"normal": pair.output, "late": derived}
+    )
 
 
 def _rolling_state_id(nodes: dict[str, dict[str, object]]) -> str:
@@ -447,7 +471,9 @@ def test_stateful_stage_input_rejects_before_source_open(
         prepared.with_columns(second=cf.ts.mean(prepared["x"], window=cf.rows(2)))
     )
     program = cf.Program(
-        "multiple_stages", outputs={"normal": pair.output, "late": pair.late}
+        "multiple_stages",
+        engine="streaming",
+        outputs={"normal": pair.output, "late": pair.late},
     )
     feed = ScriptedSource([])
 
@@ -497,7 +523,11 @@ def test_one_owned_iterator_routes_scripted_watermarks_and_closes(
         )
     )
     pair = cf.with_late_output(value)
-    program = cf.Program("scripted", outputs={"normal": pair.output, "late": pair.late})
+    program = cf.Program(
+        "scripted",
+        engine="streaming",
+        outputs={"normal": pair.output, "late": pair.late},
+    )
     feed = ScriptedSource([1 if late_rows else -1, batch([0, 2], [10.0, 20.0]), 2])
     results = program.stream({"quotes": source_binding(feed)})
     seen: dict[str, list[pa.Table]] = {"normal": [], "late": []}
@@ -533,7 +563,7 @@ def test_missing_consumer_and_standalone_entrypoints_never_open_source(
     if branch == "indirect":
         value = cf.sql("SELECT * FROM rows", rows=value.select("x"))
     feed = ScriptedSource([])
-    program = cf.Program("missing", outputs={"only": value})
+    program = cf.Program("missing", engine="streaming", outputs={"only": value})
 
     async def run() -> None:
         for result in (
@@ -546,7 +576,7 @@ def test_missing_consumer_and_standalone_entrypoints_never_open_source(
         assert feed.opened == feed.closed == 0
 
     asyncio.run(run())
-    with pytest.raises(cf.CompileError, match="unconsumed_output.*Program"):
+    with pytest.raises(ValueError, match="unsupported_mode.*streaming engine"):
         value.collect({"quotes": batch([0], [1.0])})
 
 
@@ -556,6 +586,7 @@ def test_local_policy_cache_and_export_do_not_change_unmarked_stage() -> None:
     pair = cf.with_late_output(value, allowed_lateness_micros=3)
     program = cf.Program(
         "policies",
+        engine="streaming",
         outputs={"normal": pair.output, "late": pair.late, "ordinary": value},
     )
     runtime = cf.Runtime()
@@ -584,6 +615,7 @@ def test_local_policy_cache_and_export_do_not_change_unmarked_stage() -> None:
     changed = cf.with_late_output(value, allowed_lateness_micros=4)
     other = cf.Program(
         "policies",
+        engine="streaming",
         outputs={"normal": changed.output, "late": changed.late, "ordinary": value},
     )
     assert (
@@ -601,7 +633,9 @@ def test_native_schema_error_retains_real_machine_path() -> None:
     import json
 
     pair = cf.with_late_output(rolling(quotes()))
-    program = cf.Program("native", outputs={"normal": pair.output, "late": pair.late})
+    program = cf.Program(
+        "native", engine="streaming", outputs={"normal": pair.output, "late": pair.late}
+    )
     document = program.to_project(mode="stream").root
     state_index = next(
         index
@@ -652,7 +686,9 @@ def test_paired_lifecycle_closes_resources_before_temporary_state(
     monkeypatch.setattr(stream_module.tempfile, "tempdir", str(tmp_path))
     pair = cf.with_late_output(rolling(quotes()))
     program = cf.Program(
-        "lifecycle", outputs={"normal": pair.output, "late": pair.late}
+        "lifecycle",
+        engine="streaming",
+        outputs={"normal": pair.output, "late": pair.late},
     )
     opened_sinks: set[str] = set()
     closed_sinks: set[str] = set()
@@ -753,7 +789,11 @@ def test_explicit_runner_restores_both_outputs_at_same_control_cut(
         )
     )
     pair = cf.with_late_output(value)
-    program = cf.Program("recovery", outputs={"normal": pair.output, "late": pair.late})
+    program = cf.Program(
+        "recovery",
+        engine="streaming",
+        outputs={"normal": pair.output, "late": pair.late},
+    )
     events = [1, batch([0, 2], [10.0, 20.0]), 2, batch([0, 3], [11.0, 30.0]), 3]
 
     class PausingSource(ScriptedSource):
@@ -834,7 +874,11 @@ def test_named_cross_section_operand_and_normal_temporal_successor() -> None:
         )
     )
     normal = pair.output.with_columns(previous=cf.ts.lag(pair.output["rank"]))
-    program = cf.Program("normal_chain", outputs={"normal": normal, "late": pair.late})
+    program = cf.Program(
+        "normal_chain",
+        engine="streaming",
+        outputs={"normal": normal, "late": pair.late},
+    )
     document = lower_program_document(program, cf.Runtime(), "stream")
     kinds = [node["operator"]["kind"] for node in document["graph"]["nodes"]]
     assert kinds.count("rolling") == kinds.count("cross_section") == 1
@@ -867,17 +911,21 @@ def test_explicit_named_group_column_is_stage_input() -> None:
         )
     )
     program = cf.Program(
-        "named_group", outputs={"normal": pair.output, "late": pair.late}
+        "named_group",
+        engine="streaming",
+        outputs={"normal": pair.output, "late": pair.late},
     )
     assert isinstance(program.compile_stream(), cf.StreamExecutionPlan)
 
 
 @pytest.mark.parametrize("split", [False, True])
-def test_late_sql_uses_its_own_per_batch_contract(split: bool) -> None:
+def test_late_sql_uses_cumulative_aggregate_snapshots(split: bool) -> None:
     pair = cf.with_late_output(rolling(quotes()))
     counts = cf.sql("SELECT COUNT(*) AS n FROM rejected", rejected=pair.late)
     program = cf.Program(
-        "sql_counts", outputs={"normal": pair.output, "counts": counts}
+        "sql_counts",
+        engine="streaming",
+        outputs={"normal": pair.output, "counts": counts},
     )
     payloads = (
         [batch([0], [10.0]), batch([0], [11.0])]
@@ -893,7 +941,7 @@ def test_late_sql_uses_its_own_per_batch_contract(split: bool) -> None:
                 assert output.name == "counts" or output.table.num_rows == 0
                 if output.name == "counts":
                     totals.extend(output.table["n"].to_pylist())
-        assert totals == ([1, 1] if split else [2])
+        assert totals == ([1, 2] if split else [2])
         assert feed.opened == feed.closed == 1
 
     asyncio.run(asyncio.wait_for(run(), 15))
@@ -901,7 +949,11 @@ def test_late_sql_uses_its_own_per_batch_contract(split: bool) -> None:
 
 def test_native_runner_missing_sink_rejects_before_source_open(tmp_path: Path) -> None:
     pair = cf.with_late_output(rolling(quotes()))
-    program = cf.Program("bindings", outputs={"normal": pair.output, "late": pair.late})
+    program = cf.Program(
+        "bindings",
+        engine="streaming",
+        outputs={"normal": pair.output, "late": pair.late},
+    )
     plan = program.compile_stream()
     feed = ScriptedSource([])
     with pytest.raises(
@@ -923,6 +975,7 @@ def test_native_compiler_rejects_temporal_reentry_after_late_projection() -> Non
     pair = cf.with_late_output(rolling(quotes()))
     program = cf.Program(
         "native_guard",
+        engine="streaming",
         outputs={
             "normal": pair.output,
             "late": pair.late.select("ts", "symbol", "seq", "x", "label"),
@@ -968,11 +1021,15 @@ def test_late_provider_and_temporal_stream_reject_before_source_open() -> None:
     provider = cf.table.attach_columns(pair.late, array, names=["p"])
     with pytest.raises(cf.CompileError, match="unsupported_mode.*late"):
         cf.Program(
-            "provider", outputs={"normal": pair.output, "late": provider}
+            "provider",
+            engine="streaming",
+            outputs={"normal": pair.output, "late": provider},
         ).compile_stream()
     feed = ScriptedSource([])
     program = cf.Program(
-        "temporal", outputs={"normal": pair.output, "late": rolling(pair.late)}
+        "temporal",
+        engine="streaming",
+        outputs={"normal": pair.output, "late": rolling(pair.late)},
     )
 
     async def run() -> None:
@@ -1004,7 +1061,9 @@ def test_private_analysis_boundary_does_not_replace_a_declared_input() -> None:
         sequence_by=["seq"],
     )
     program = cf.Program(
-        "names", outputs={"normal": pair.output, "late": pair.late, "other": collision}
+        "names",
+        engine="streaming",
+        outputs={"normal": pair.output, "late": pair.late, "other": collision},
     )
     analyzer, _ = _run(program, cf.Runtime(), "stream")
     assert analyzer.table(collision._node, "outputs.other").lineage == collision_name

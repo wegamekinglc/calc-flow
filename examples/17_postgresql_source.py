@@ -34,7 +34,9 @@ def build_project(directory: Path) -> ProjectDocument:
         ],
     )
     graph = cf.Program(
-        "postgresql-source", outputs={"totals": orders.pipe(order_totals)}
+        "postgresql-source",
+        engine="streaming",
+        outputs={"totals": orders.pipe(order_totals)},
     )
     return ProjectDocument.model_validate(
         {

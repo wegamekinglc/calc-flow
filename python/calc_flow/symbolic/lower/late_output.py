@@ -49,6 +49,7 @@ def append_late_outputs(graph: _SQLGraph, node: Node) -> str:
     late_id = graph.graph.allocate(f"cf_late_rows_{owner.digest[:24]}")
     fragment = Program(
         graph.graph.program.name,
+        engine=graph.graph.program.engine,
         outputs={
             normal_id: TableExpr(_rewrite_nodes(value, {source.digest: virtual._node}))
         },

@@ -272,6 +272,7 @@ def _window_input_source(
     upstream = graph.allocate(f"{plan.node_id}__input")
     fragment = Program(
         graph.program.name,
+        engine="streaming",
         inputs=inputs,
         outputs=[(upstream, TableExpr(plan.node.args[0]))],
     )
@@ -384,7 +385,7 @@ def _output_fragment(
         for value in selected_inputs
         if isinstance(value, TableExpr)
     }
-    fragment = Program(name, inputs=selected_inputs, outputs=group)
+    fragment = Program(name, engine="streaming", inputs=selected_inputs, outputs=group)
     return fragment, selected_bindings
 
 

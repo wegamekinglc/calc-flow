@@ -8,6 +8,7 @@ from benchmarks.rolling_indicator_comparison import (
     DEFAULT_ROW_SCALES,
     INDICATOR_DUAL_SMA_SPREAD,
     TaLibMethod,
+    _native_program,
     build_calc_flow_methods,
     expected_dual_sma_spread,
     expected_rolling_mean,
@@ -18,6 +19,18 @@ from benchmarks.rolling_indicator_comparison import (
     ta_lib_iterations_per_sample,
     ta_lib_valid_rows,
 )
+
+
+def test_native_benchmark_program_selects_engine_before_compilation() -> None:
+    for engine in ("sql", "streaming"):
+        program = _native_program(
+            20, indicator="rolling_mean", fast_window=5, engine=engine
+        )
+        assert program.engine == engine
+        if engine == "sql":
+            program.compile_batch()
+        else:
+            program.compile_stream()
 
 
 def test_default_matrix_includes_small_row_scales() -> None:

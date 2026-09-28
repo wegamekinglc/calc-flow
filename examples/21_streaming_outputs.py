@@ -16,6 +16,7 @@ async def main() -> None:
     source = cf.table_input("events", schema=pa.schema([("value", pa.int64())]))
     program = cf.Program(
         "branches",
+        engine="streaming",
         outputs={
             "double": source.select(value2=source["value"] * 2),
             "large": source.filter(source["value"] >= 2).select("value"),

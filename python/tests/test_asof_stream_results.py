@@ -132,7 +132,7 @@ def test_asof_stream_tie_selection_does_not_depend_on_batch_or_arrival_order(
 
 
 def test_asof_collect_rejects_batch_even_with_finite_inputs() -> None:
-    with pytest.raises(cf.CompileError, match="unsupported_mode"):
+    with pytest.raises(ValueError, match="unsupported_mode"):
         _joined().collect({"trades": _rows([105]), "quotes": _rows([100])})
 
 
@@ -140,6 +140,7 @@ def test_asof_program_stream_preserves_logical_names_and_shares_state() -> None:
     joined = _joined()
     program = cf.Program(
         "fanout",
+        engine="streaming",
         outputs={
             "all": joined,
             "prices": joined.select("trade__price", "quote__price"),
@@ -515,6 +516,7 @@ def test_asof_program_stream_keeps_independent_event_window_and_bypass_outputs()
     )
     program = cf.Program(
         "independent",
+        engine="streaming",
         outputs={"matched": _joined(), "windowed": windowed, "bypass": independent},
     )
 

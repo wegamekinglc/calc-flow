@@ -5397,6 +5397,7 @@ async fn run_checkpoint_soak_child(
             max_rows: 8,
             max_bytes: 1 << 20,
         },
+        sql_state_budget: None,
     };
     let job = start_checkpoint_restart_generation(
         &plan.run_root,
@@ -7631,6 +7632,7 @@ async fn checkpoint_soak_cancel_window_preserves_clean_terminal_metrics() {
             max_rows: 8,
             max_bytes: 1 << 20,
         },
+        sql_state_budget: None,
     };
     let job = start_checkpoint_restart_generation(
         directory.path(),

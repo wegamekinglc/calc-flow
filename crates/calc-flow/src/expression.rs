@@ -1,4 +1,4 @@
-use std::{ops::ControlFlow, sync::OnceLock};
+use std::{collections::BTreeSet, ops::ControlFlow, sync::OnceLock};
 
 use datafusion::{
     execution::{FunctionRegistry, context::SessionContext},
@@ -6,7 +6,10 @@ use datafusion::{
     sql::{
         parser::{DFParser, Statement as DFStatement},
         sqlparser::{
-            ast::{Expr, ObjectName, Query, TableFactor, Visit, Visitor, visit_expressions},
+            ast::{
+                Expr, GroupByExpr, ObjectName, Query, Select, TableFactor, Visit, Visitor,
+                visit_expressions,
+            },
             dialect::GenericDialect,
         },
     },
@@ -68,6 +71,65 @@ impl ValidatedQuery {
     /// An owned copy of the parsed statement for one logical planning pass.
     pub(crate) fn statement(&self) -> DFStatement {
         self.statement.clone()
+    }
+
+    /// Whether the query contains a grouping or a non-window aggregate.
+    pub(crate) fn has_stream_aggregate(&self) -> bool {
+        let names = datafusion::functions_aggregate::all_default_aggregate_functions()
+            .into_iter()
+            .flat_map(|function| {
+                std::iter::once(function.name().to_ascii_lowercase()).chain(
+                    function
+                        .aliases()
+                        .iter()
+                        .map(|alias| alias.to_ascii_lowercase())
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        let mut visitor = AggregateVisitor { names };
+        match &self.statement {
+            DFStatement::Statement(statement) => {
+                matches!(
+                    statement.as_ref().visit(&mut visitor),
+                    ControlFlow::Break(())
+                )
+            }
+            _ => false,
+        }
+    }
+}
+
+struct AggregateVisitor {
+    names: BTreeSet<String>,
+}
+
+impl Visitor for AggregateVisitor {
+    type Break = ();
+
+    fn pre_visit_select(&mut self, select: &Select) -> ControlFlow<Self::Break> {
+        match &select.group_by {
+            GroupByExpr::All(_) => ControlFlow::Break(()),
+            GroupByExpr::Expressions(groups, _) if !groups.is_empty() => ControlFlow::Break(()),
+            GroupByExpr::Expressions(_, _) => ControlFlow::Continue(()),
+        }
+    }
+
+    fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<Self::Break> {
+        let Expr::Function(function) = expr else {
+            return ControlFlow::Continue(());
+        };
+        let name = function
+            .name
+            .0
+            .last()
+            .and_then(|part| part.as_ident())
+            .map(|ident| ident.value.to_ascii_lowercase());
+        if function.over.is_none() && name.is_some_and(|name| self.names.contains(&name)) {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
     }
 }
 

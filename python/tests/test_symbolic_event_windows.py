@@ -179,7 +179,12 @@ def test_legacy_window_declarations_keep_constructor_domain_and_identity(case):
     assert implicit._node.op.version == 1
     assert implicit._node.attrs.get("aggregates") is None
     assert (
-        Program("golden", inputs=[trades], outputs=[("result", explicit)]).fingerprint
+        Program(
+            "golden",
+            engine="streaming",
+            inputs=[trades],
+            outputs=[("result", explicit)],
+        ).fingerprint
         == fingerprint
     )
     if size == 60 and groups == ("symbol",):
@@ -221,7 +226,9 @@ def test_executable_window_copies_ordered_groups_and_aggregates():
     expression = window.tumbling(
         trades, event_time="ts", size_micros=60, group_by=groups, aggregates=aggregates
     )
-    program = Program("p", inputs=[trades], outputs=[("result", expression)])
+    program = Program(
+        "p", engine="streaming", inputs=[trades], outputs=[("result", expression)]
+    )
     fingerprint = program.fingerprint
     equivalent = window.tumbling(
         _trades(),
@@ -256,7 +263,9 @@ def test_executable_window_copies_ordered_groups_and_aggregates():
     )
     assert changed.digest != expression.digest
     assert (
-        Program("p", inputs=[trades], outputs=[("result", changed)]).fingerprint
+        Program(
+            "p", engine="streaming", inputs=[trades], outputs=[("result", changed)]
+        ).fingerprint
         != fingerprint
     )
 

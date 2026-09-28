@@ -44,6 +44,7 @@ historical samples.
 | `array_support.py`, `test_array_*.py`              | Array API kernel, provider, plan, and ownership scopes           |
 | `symbolic_support.py`, `test_symbolic_baseline.py` | Symbolic baselines, milestone pairs, and stream lifecycle        |
 | `test_stream_operators.py`                         | End-to-end coverage of principal native stream operators         |
+| `test_program_engine.py`                           | Selected `Program.execute` SQL and streaming lifecycle cases     |
 | `test_datafusion.py`, `test_runtime.py`            | DataFusion operator scenarios and graph fan-out                  |
 | `test_rolling_kernel.py`                           | Paired rolling-kernel gate against a DataFusion window reference |
 | `rolling_indicator_comparison.py`                  | Standalone cross-library rolling comparison driver               |
@@ -80,6 +81,14 @@ with input capped at 20,000 rows to keep the scheduled suite bounded. The
 Python Join and ASOF examples have 3,200- and 1,920-row caps; the engine
 matrix and dedicated Rust targets measure larger join workloads. Actual input
 and output row counts are recorded with each result.
+
+Four separate `test_program_engine.py` cases time `Program.execute` through
+Arrow output for SQL and streaming, with a row-local SQL projection and a
+cumulative `SUM`. Each instance selects its engine before timing. Inputs use
+640-row stream batches and at most 20,000 rows; every result is checked against
+the corresponding finite or per-batch snapshot oracle. These cases have new
+identities, so the existing compiled-plan and `Program.stream` histories retain
+their original timing contracts.
 
 Standalone scales (`nightly` is manual-only, not a CI suite shard):
 

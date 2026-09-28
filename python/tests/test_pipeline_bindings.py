@@ -101,7 +101,9 @@ def test_stateful_fanout_keeps_logical_names_and_projection_schemas(
     }
     if project_marker:
         outputs["marker"] = right.select("ts")
-    program = cf.Program("stateful-fanout", outputs=outputs)
+    program = cf.Program(
+        "stateful-fanout", engine="streaming" if streaming else "sql", outputs=outputs
+    )
     inputs = {right_name: right_data, left_name: left_data}
     result = (
         _collect_named_stream(program, inputs) if streaming else program.collect(inputs)

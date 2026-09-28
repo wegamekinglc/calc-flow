@@ -47,7 +47,13 @@ def _group(table: TableExpr) -> object:
 def _program(features: list[tuple[str, object]]) -> Program:
     quotes = _ordered()
     signals = quotes.with_columns(FeatureSet(features))
-    return Program("p", inputs=[quotes], outputs=[("signals", signals)])
+    return Program("p", engine="sql", inputs=[quotes], outputs=[("signals", signals)])
+
+
+def _stream_copy(program: Program) -> Program:
+    return Program(
+        program.name, engine="streaming", inputs=program.inputs, outputs=program.outputs
+    )
 
 
 def _cross_section_nodes(document: dict[str, object]) -> list[dict[str, object]]:
@@ -203,7 +209,7 @@ def test_row_local_cross_section_operand_materializes_before_grouping() -> None:
     assert select[-1].endswith('AS "signals__cf_cs_input_0"')
     output = nodes[1]["operator"]["spec"]["outputs"][0]  # type: ignore[index]
     assert output["input"] == "signals__cf_cs_input_0"
-    program.compile_stream(Runtime())
+    _stream_copy(program).compile_stream(Runtime())
 
 
 def test_multi_stage_rolling_result_materializes_before_cross_section() -> None:
@@ -229,7 +235,7 @@ def test_multi_stage_rolling_result_materializes_before_cross_section() -> None:
         ("signals__cf_cross_section_input", "signals__cf_cross_section"),
         ("signals__cf_cross_section", "signals"),
     ]
-    program.compile_stream(Runtime())
+    _stream_copy(program).compile_stream(Runtime())
 
 
 def test_identical_row_local_cross_section_operands_materialize_once() -> None:
@@ -274,6 +280,7 @@ def test_row_local_cross_section_branches_share_materialization_and_state() -> N
     )
     program = Program(
         "p",
+        engine="sql",
         inputs=(quotes,),
         outputs=(("first", first), ("second", second)),
     )
@@ -468,7 +475,9 @@ def test_missing_ordering_keys_are_rejected() -> None:
     signals = unordered.with_columns(
         FeatureSet([("rank", cs.rank(unordered["x"], group=_group(unordered)))])
     )
-    program = Program("p", inputs=[unordered], outputs=[("signals", signals)])
+    program = Program(
+        "p", engine="sql", inputs=[unordered], outputs=[("signals", signals)]
+    )
 
     with pytest.raises(CompileError) as error:
         lower_program_document(program, Runtime(), "batch")
@@ -482,7 +491,9 @@ def test_derived_row_local_column_argument_is_materialized() -> None:
     signals = derived.with_columns(
         FeatureSet([("rank", cs.rank(derived["y"], group=group))])
     )
-    program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
+    program = Program(
+        "p", engine="sql", inputs=[quotes], outputs=[("signals", signals)]
+    )
 
     document = lower_program_document(program, Runtime(), "batch")
 
@@ -503,7 +514,9 @@ def test_non_input_group_expression_is_rejected() -> None:
     signals = quotes.with_columns(
         FeatureSet([("rank", cs.rank(quotes["x"], group=group))])
     )
-    program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
+    program = Program(
+        "p", engine="sql", inputs=[quotes], outputs=[("signals", signals)]
+    )
 
     with pytest.raises(CompileError, match="group columns must be input columns"):
         lower_program_document(program, Runtime(), "batch")
@@ -536,7 +549,9 @@ def test_mixed_grouping_declarations_are_rejected() -> None:
             ]
         )
     )
-    program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
+    program = Program(
+        "p", engine="sql", inputs=[quotes], outputs=[("signals", signals)]
+    )
 
     with pytest.raises(CompileError) as error:
         lower_program_document(program, Runtime(), "batch")
@@ -559,7 +574,9 @@ def test_mixed_grouping_kinds_with_equal_partitions_are_rejected() -> None:
             ]
         )
     )
-    program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
+    program = Program(
+        "p", engine="sql", inputs=[quotes], outputs=[("signals", signals)]
+    )
 
     with pytest.raises(CompileError) as error:
         lower_program_document(program, Runtime(), "batch")
@@ -582,7 +599,9 @@ def test_mixed_bucket_widths_with_equal_partitions_are_rejected() -> None:
             ]
         )
     )
-    program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
+    program = Program(
+        "p", engine="sql", inputs=[quotes], outputs=[("signals", signals)]
+    )
 
     with pytest.raises(CompileError) as error:
         lower_program_document(program, Runtime(), "batch")
@@ -642,7 +661,9 @@ def test_cross_section_lowering_compiles_and_executes_in_batch_mode() -> None:
             ]
         )
     )
-    program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
+    program = Program(
+        "p", engine="sql", inputs=[quotes], outputs=[("signals", signals)]
+    )
 
     runtime = Runtime()
     plan = program.compile_batch(runtime)
@@ -693,7 +714,9 @@ def test_grouped_features_execute_with_partition_ties_and_missing_values() -> No
             ]
         )
     )
-    program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
+    program = Program(
+        "p", engine="sql", inputs=[quotes], outputs=[("signals", signals)]
+    )
     schema = pa.schema(
         [
             pa.field("ts", pa.timestamp("us", tz="UTC"), nullable=False),
@@ -777,7 +800,7 @@ def test_winsorize_and_mean_fill_lower_as_float32_for_float32_inputs() -> None:
         )
     )
     document = lower_program_document(
-        Program("p", inputs=[quotes], outputs=[("signals", signals)]),
+        Program("p", engine="sql", inputs=[quotes], outputs=[("signals", signals)]),
         Runtime(),
         "batch",
     )
@@ -801,7 +824,9 @@ def test_rolling_outputs_feed_the_cross_section_stage() -> None:
             ]
         )
     )
-    program = Program("p", inputs=[quotes], outputs=[("signals", signals)])
+    program = Program(
+        "p", engine="sql", inputs=[quotes], outputs=[("signals", signals)]
+    )
 
     document = lower_program_document(program, Runtime(), "batch")
     graph = document["graph"]
