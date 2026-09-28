@@ -9,6 +9,15 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-28: Repair the scheduled benchmark suite. The `engines-100` shard's
+  shared-lock verification now compiles for the project's Python 3.13
+  explicitly, since the Finance-Python step installs Python 3.9 first and the
+  unpinned compile had resolved for it and failed since 2026-09-26. The shared
+  benchmark lock drops `hypothesis` and `sortedcontainers`, which left the
+  project dependencies on 2026-09-27. A declared `m4_state_window` workload
+  migration covers the dense window cases and the collector-drain fix, so
+  those Rust cases are compared instead of failing their fingerprint check.
+
 - 2026-09-28: Cut ordered rolling stream overhead for SMA-style plans (#342).
   For a non-null microsecond event time, one non-null Utf8 entity, and one
   non-null `UInt64` sequence, the ordering proof compares Arrow values in

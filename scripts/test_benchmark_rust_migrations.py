@@ -60,6 +60,13 @@ def provenance() -> dict:
 
 
 class LoadMigrationTests(unittest.TestCase):
+    def test_repository_registry_loads(self):
+        root = Path(__file__).resolve().parents[1]
+        targets = {item["target"] for item in load_migrations(root)}
+        self.assertTrue(
+            all((root / f"crates/calc-flow/benches/{t}.rs").is_file() for t in targets)
+        )
+
     def test_valid_registry_loads_its_declarations(self):
         with TemporaryDirectory() as raw:
             root = Path(raw)

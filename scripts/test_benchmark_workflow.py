@@ -22,6 +22,19 @@ class BenchmarkWorkflowTests(unittest.TestCase):
         self.assertIn(f"--no-emit-package {project} ", lock)
         self.assertFalse(any(line.startswith("-e ") for line in lock.splitlines()))
 
+    def test_shared_lock_verification_pins_the_project_python(self):
+        suite = (ROOT / ".github/workflows/benchmark-suite.yml").read_text(
+            encoding="utf-8"
+        )
+        version = (ROOT / ".python-version").read_text(encoding="utf-8").strip()
+        verify = suite.split("- name: Verify locked dependencies", 1)[1]
+        shared = verify.split("--output-file benchmarks/requirements.lock", 1)[0]
+        # The Finance-Python step installs 3.9 first; an unpinned compile would
+        # resolve the shared lock for that interpreter and fail.
+        self.assertIn(f"--python-version {version}", shared)
+        lock = (ROOT / "benchmarks/requirements.lock").read_text(encoding="utf-8")
+        self.assertIn(f"--python-version {version}", lock.splitlines()[1])
+
     def test_finance_python_dependencies_use_a_python_39_hash_lock(self):
         suite = (ROOT / ".github/workflows/benchmark-suite.yml").read_text(
             encoding="utf-8"

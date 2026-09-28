@@ -21,6 +21,13 @@
       "candidate_sha256": "857973f8cccd66996cbddae7617c8d7bef9a58676684580d17e2c437f71f35a6",
       "reason": "workload extension: add projection/filter/group_by/join operator scenarios with per-case output_rows evidence and the join dimension side input; existing rolling workloads unchanged. Candidate updated for the follow-up self-test restructuring in the same PR",
       "reference": "DAL-277"
+    },
+    {
+      "target": "m4_state_window",
+      "baseline_sha256": "21aa0cebf626b85213c30938e789da6e1f88214bbd12fa18d6e72153370f8b57",
+      "candidate_sha256": "11db484eeb64abfdc33e0896b2ed88616ba64ee09ed2e5c9dd1f60ce936305f8",
+      "reason": "workload extension and harness fix: add dense tumbling/hopping cases; window iterations drain the collector so each measures one fresh batch instead of an accumulating outbox; state workloads unchanged",
+      "reference": "#339 / PR #348"
     }
   ]
 }
