@@ -15,6 +15,15 @@ import calc_flow as cf
 import calc_flow.stream as stream_module
 
 
+def test_stream_runtime_config_preserves_retained_epochs_position() -> None:
+    config = cf.StreamRuntimeConfig(
+        timedelta(seconds=1), timedelta(seconds=2), cf.EdgeBudget(), 7
+    )
+    assert config.retained_epochs == 7
+    assert config.sql_state_budget is None
+    assert config._native()["retained_epochs"] == 7
+
+
 class _Feed:
     def __init__(
         self, batches: list[pa.Table | pa.RecordBatch | cf.Batch | cf.Watermark]

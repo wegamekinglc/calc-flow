@@ -930,7 +930,10 @@ async def run(args, release: dict, declared: dict) -> dict:
     config = ScenarioConfig(history_rows=HISTORY_ROWS)
     runtime = Runtime()
     program = _native_program(
-        config.window, indicator=config.indicator, fast_window=config.fast_window
+        config.window,
+        indicator=config.indicator,
+        fast_window=config.fast_window,
+        engine="streaming",
     )
     project = program.to_project(runtime, mode="stream").model_dump(mode="json")
     await _write_json(output / "project.json", project)

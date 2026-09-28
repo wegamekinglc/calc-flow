@@ -382,7 +382,7 @@ Constructors copy caller-owned sequences and mappings.
 | `Program(name, /, *, engine, inputs=None, outputs=())`                                  | Immutable engine, declared inputs and outputs, and the declaration v1 fingerprint                                  |
 | `Program.execute(inputs, /, *, ...)`                                                    | Finite named Arrow tables or owned streaming events, according to the selected engine                              |
 | `with_late_output(value, /, *, allowed_lateness_micros=0)`                              | Frozen `LateOutputs(output, late)`; both TableExpr references share one stream state owner and must be consumed    |
-| `Program.analyze(runtime=None, /, *, mode="batch")` / `.explain(...)`                   | Static analysis plus deterministic optimization, state, copy-boundary, and provider-cost fact rendering            |
+| `Program.analyze(runtime=None, /, *, mode=None)` / `.explain(...)`                      | Static analysis plus deterministic optimization and cost facts; mode defaults to the selected engine               |
 | `Program.compile_batch(runtime=None, /)` / `.compile_stream(runtime=None, /, *, ...)`   | Optimize and cache supported row-local, stateful, matrix, and relational-DAG strict project-v3 plans               |
 | `AnalysisIssue` / `AnalysisResult`                                                      | Immutable findings with stable output/input-rooted paths                                                           |
 

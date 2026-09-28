@@ -382,6 +382,7 @@ class WarmScenario:
             config.window,
             indicator=config.indicator,
             fast_window=config.fast_window,
+            engine="streaming",
         ).compile_stream(Runtime())
         maximum = max(config.history_segment_rows, config.append_rows)
         source = _InteractiveSource(max_batch_rows=maximum)

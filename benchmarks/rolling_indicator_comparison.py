@@ -35,7 +35,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import pyarrow as pa
@@ -368,6 +368,7 @@ def _native_program(
     *,
     indicator: str,
     fast_window: int,
+    engine: Literal["sql", "streaming"],
 ) -> Program:
     quotes = table_input(
         "quotes",
@@ -390,7 +391,7 @@ def _native_program(
     indicators = quotes.with_columns(FeatureSet(((_OUTPUT_COLUMNS[indicator], value),)))
     return Program(
         f"incremental-{indicator.replace('_', '-')}",
-        engine="sql",
+        engine=engine,
         inputs=(quotes,),
         outputs=(("indicators", indicators),),
     )
@@ -443,6 +444,7 @@ def build_calc_flow_methods(
         window,
         indicator=indicator,
         fast_window=fast_window,
+        engine="sql",
     ).compile_batch(Runtime())
     sql = (
         PipelineBuilder(f"sql-window-{indicator.replace('_', '-')}")

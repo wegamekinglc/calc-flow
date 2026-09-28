@@ -579,8 +579,8 @@ class StreamRuntimeConfig:
     checkpoint_interval: timedelta = timedelta(seconds=60)
     checkpoint_timeout: timedelta = timedelta(minutes=10)
     edge_budget: EdgeBudget = EdgeBudget()
-    sql_state_budget: StateBudget | None = None
     retained_epochs: int = 2
+    sql_state_budget: StateBudget | None = None
 
     def _native(self) -> dict[str, int]:
         if not isinstance(self.edge_budget, EdgeBudget):
