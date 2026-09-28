@@ -94,9 +94,10 @@ fn plan(kind: &str, path: &str) -> crate::StreamExecutionPlan {
             .unwrap();
     }
     if path == "sql" {
+        // This control-order harness has no state transaction; use row-level SQL.
         let sql = SqlOperator::new(
-            "count",
-            "SELECT COUNT(*) AS n FROM events",
+            "sql_project",
+            "SELECT CAST(1 AS BIGINT) AS n FROM events",
             vec!["events".into()],
             vec![],
         )
@@ -120,11 +121,11 @@ fn plan(kind: &str, path: &str) -> crate::StreamExecutionPlan {
         )
         .unwrap();
         builder = builder
-            .add_node("count", Box::new(sql))
+            .add_node("sql_project", Box::new(sql))
             .unwrap()
             .connect(crate::Edge::new(
                 PortEndpoint::new("project", "output").unwrap(),
-                PortEndpoint::new("count", "events").unwrap(),
+                PortEndpoint::new("sql_project", "events").unwrap(),
             ))
             .unwrap();
     }
