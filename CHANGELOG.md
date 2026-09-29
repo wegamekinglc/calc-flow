@@ -16,6 +16,12 @@ measurements. Use the current guides for supported behavior.
   version, state charge, and v1/v2 restore behavior remain compatible. See the
   second-round performance comparison in the associated PR for measured effects.
 
+- 2026-09-30: Speed up ordered stream ASOF Join admission. It checks adjacent
+  identities in already ordered batches, skips resident identity probes when
+  the new range follows retained state, and avoids interning short inline keys.
+  Watermark-local disorder still uses full duplicate detection; duplicate
+  counters and checkpoint identity bytes remain unchanged.
+
 - 2026-09-29: Require immutable `Program(engine="sql")` or
   `Program(engine="streaming")` selection at construction and add
   `Program.execute(inputs)` dispatch. SQL returns named Arrow tables;

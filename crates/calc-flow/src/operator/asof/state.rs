@@ -24,8 +24,12 @@ pub(super) enum Encoding {
 }
 
 impl Encoding {
+    pub fn fits_inline(bytes: &[u8]) -> bool {
+        bytes.len() <= INLINE_ENCODING_BYTES
+    }
+
     pub fn from_slice(bytes: &[u8]) -> Self {
-        if bytes.len() <= INLINE_ENCODING_BYTES {
+        if Self::fits_inline(bytes) {
             let mut inline = [0; INLINE_ENCODING_BYTES];
             inline[..bytes.len()].copy_from_slice(bytes);
             Self::Inline {

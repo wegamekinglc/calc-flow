@@ -192,15 +192,10 @@ impl StreamAsofJoinOperator {
         } else {
             0
         };
-        let mut seen = HashSet::with_capacity_and_hasher(capacity, RandomState::new());
         let mut keys_by_hash =
-            HashMap::<u64, Vec<state::Encoding>, RandomState>::with_capacity_and_hasher(
-                capacity.min(1_024),
-                RandomState::new(),
-            );
+            HashMap::<u64, Vec<state::Encoding>, RandomState>::with_hasher(RandomState::new());
         let key_hasher = RandomState::new();
         let mut rows = Vec::with_capacity(capacity);
-        let mut duplicates = 0;
         for batch in batches {
             // Per-batch invariants are hoisted: one event-time array
             // resolution and one row converter per identity column set.
@@ -216,6 +211,9 @@ impl StreamAsofJoinOperator {
                     continue;
                 }
                 let key = keys.with_row(row, |key_bytes| {
+                    if state::Encoding::fits_inline(key_bytes) {
+                        return state::Encoding::from_slice(key_bytes);
+                    }
                     let bucket = keys_by_hash
                         .entry(key_hasher.hash_one(key_bytes))
                         .or_default();
@@ -230,15 +228,86 @@ impl StreamAsofJoinOperator {
                     }
                 });
                 let identity: LeftOrder = (time, key, sequences.row(row));
-                let exists = self.state.contains_identity(input.index, &identity);
-                if exists || !seen.insert(identity.clone()) {
-                    duplicates += 1;
-                }
                 rows.push((identity, batch, row));
             }
         }
-        context.check_cancelled()?;
+        let duplicates = count_duplicate_identities(
+            &self.state,
+            input.index,
+            rows.iter().map(|(identity, _, _)| identity),
+            context,
+        )?;
         Ok((rows, duplicates))
+    }
+}
+
+fn count_duplicate_identities<'a>(
+    state: &state::State,
+    side: usize,
+    identities: impl ExactSizeIterator<Item = &'a LeftOrder> + Clone,
+    context: &StreamOperatorContext<'_>,
+) -> Result<u64> {
+    let sorted = identities_are_sorted(identities.clone(), context)?;
+    let skip_resident = sorted && identities_are_after_state(state, side, identities.clone());
+    let mut seen =
+        (!sorted).then(|| HashSet::with_capacity_and_hasher(identities.len(), RandomState::new()));
+    let mut previous = None;
+    let mut duplicates = 0;
+    for (position, identity) in identities.enumerate() {
+        if position % 1_024 == 0 {
+            context.check_cancelled()?;
+        }
+        let repeated = if let Some(seen) = &mut seen {
+            !seen.insert(identity.clone())
+        } else {
+            previous == Some(identity)
+        };
+        if repeated || (!skip_resident && state.contains_identity(side, identity)) {
+            duplicates += 1;
+        }
+        previous = Some(identity);
+    }
+    context.check_cancelled()?;
+    Ok(duplicates)
+}
+
+fn identities_are_sorted<'a>(
+    identities: impl Iterator<Item = &'a LeftOrder>,
+    context: &StreamOperatorContext<'_>,
+) -> Result<bool> {
+    let mut previous = None;
+    for (position, identity) in identities.enumerate() {
+        if position % 1_024 == 0 {
+            context.check_cancelled()?;
+        }
+        if previous.is_some_and(|last| last > identity) {
+            return Ok(false);
+        }
+        previous = Some(identity);
+    }
+    Ok(true)
+}
+
+fn identities_are_after_state<'a>(
+    state: &state::State,
+    side: usize,
+    mut identities: impl Iterator<Item = &'a LeftOrder>,
+) -> bool {
+    let Some(first) = identities.next() else {
+        return true;
+    };
+    if side == 0 {
+        state
+            .left
+            .last_key_value()
+            .is_none_or(|(last, _)| last < first)
+    } else {
+        state
+            .right
+            .values()
+            .filter_map(|bucket| bucket.last_key_value().map(|((time, _), _)| *time))
+            .max()
+            .is_none_or(|latest| latest < first.0)
     }
 }
 
@@ -439,4 +508,41 @@ fn can_share_batch(batch: &RecordBatch) -> Result<bool> {
         )
     })?;
     Ok(excess == 0)
+}
+
+#[cfg(test)]
+mod duplicate_tests {
+    use super::*;
+    use crate::{CancellationToken, JsonMap, StreamJobContext};
+
+    #[test]
+    fn ordered_and_unordered_duplicates_count_each_rejected_row_once() {
+        let key = state::Encoding::from_slice(&[1]);
+        let sequence = state::Encoding::from_slice(&[2]);
+        let mut state = state::State::default();
+        state
+            .right
+            .entry(key.clone())
+            .or_default()
+            .insert((1, sequence.clone()), None);
+        let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+        let context = StreamOperatorContext::new(&job, "asof", None);
+        let identity = |time| (time, key.clone(), sequence.clone());
+
+        let ordered = [identity(1), identity(1), identity(2), identity(3)];
+        assert_eq!(
+            count_duplicate_identities(&state, 1, ordered.iter(), &context).unwrap(),
+            2
+        );
+        let appended = [identity(4), identity(5)];
+        assert_eq!(
+            count_duplicate_identities(&state, 1, appended.iter(), &context).unwrap(),
+            0
+        );
+        let shuffled = [identity(3), identity(2), identity(3)];
+        assert_eq!(
+            count_duplicate_identities(&state, 1, shuffled.iter(), &context).unwrap(),
+            1
+        );
+    }
 }
