@@ -80,13 +80,11 @@ def _check_latest_cursors(collected: dict) -> None:
         raise ValueError("warm base/head sample cursors differ")
 
 
-async def _round(
-    case: dict, sites: dict, releases: dict, sources: dict, root: Path
-) -> dict:
+async def _round(case: dict, workers_by_side: dict, releases: dict, root: Path) -> dict:
     workers = {}
     try:
-        for side, site in sites.items():
-            workers[side] = await Worker.start(site, root / side, source=sources[side])
+        for side, (site, source) in workers_by_side.items():
+            workers[side] = await Worker.start(site, root / side, source=source)
         environment = await _prepare(workers, releases, case)
         samples = await _samples(workers)
         completion = {}
@@ -109,14 +107,18 @@ async def _round(
 
 
 async def measure_case(
-    case: dict, kind: str, sites: dict, releases: dict, sources: dict, root: Path
+    case: dict, kind: str, workers_by_side: dict, releases: dict, root: Path
 ) -> dict:
-    selected = sites if kind == "interleaved" else {"candidate": sites["candidate"]}
+    selected = (
+        workers_by_side
+        if kind == "interleaved"
+        else {"candidate": workers_by_side["candidate"]}
+    )
     evidence = []
     try:
         for index in range(ROUNDS):
             evidence.append(
-                await _round(case, selected, releases, sources, root / f"round-{index}")
+                await _round(case, selected, releases, root / f"round-{index}")
             )
         if evidence[0]["environment"] != evidence[1]["environment"]:
             raise ValueError("confirmation-round environment changed")
@@ -167,6 +169,7 @@ async def measure_shard(
     sites = {
         side: await install(release, root / side) for side, release in releases.items()
     }
+    workers_by_side = {side: (site, sources[side]) for side, site in sites.items()}
     baseline_ids = baseline_case_ids(baseline_source, shard)
     cases = shard_cases(shard)
     report = {
@@ -184,7 +187,7 @@ async def measure_shard(
         print(f"Measuring {case['id']}", flush=True)
         kind = comparison_kind(case, baseline_ids)
         row = await measure_case(
-            case, kind, sites, releases, sources, root / f"case-{index}"
+            case, kind, workers_by_side, releases, root / f"case-{index}"
         )
         report["cases"].append(row)
         (root / "results.json").write_text(
