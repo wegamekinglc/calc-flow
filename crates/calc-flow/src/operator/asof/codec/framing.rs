@@ -2,22 +2,39 @@ use super::framing_error;
 use crate::Result;
 use datafusion::arrow::ipc::{self, Message, MessageHeader};
 
-pub(super) fn validate_ipc_framing(mut bytes: &[u8]) -> Result<()> {
+pub(super) fn validate_ipc_framing(bytes: &[u8]) -> Result<()> {
+    validate_ipc_framing_rows(bytes, Some(1), None).map(|_| ())
+}
+
+pub(super) fn validate_ipc_framing_rows(
+    mut bytes: &[u8],
+    rows: Option<usize>,
+    max_rows: Option<u64>,
+) -> Result<u64> {
     let mut stage = 0;
     let mut fields = 0;
+    let mut payload_body = 0;
     loop {
         let length = message_prefix(&mut bytes)?;
         if length == 0 {
-            return validate_end(stage, bytes);
+            validate_end(stage, bytes)?;
+            return Ok(payload_body);
         }
         if stage >= 2 {
             return Err(framing_error("unexpected additional row IPC message"));
         }
         let (message, body) = read_message(&mut bytes, length)?;
-        fields = validate_stage(stage, &message, body, fields)?;
+        fields = validate_stage(stage, &message, body, fields, rows, max_rows)?;
+        if stage == 1 {
+            payload_body = body as u64;
+        }
         bytes = &bytes[body..];
         stage += 1;
     }
+}
+
+pub(super) fn payload_body_bytes(bytes: &[u8]) -> Result<u64> {
+    validate_ipc_framing_rows(bytes, None, None)
 }
 
 fn message_prefix(bytes: &mut &[u8]) -> Result<i32> {
@@ -63,6 +80,8 @@ fn validate_stage(
     message: &Message<'_>,
     body: usize,
     fields: usize,
+    rows: Option<usize>,
+    max_rows: Option<u64>,
 ) -> Result<usize> {
     if stage == 0 {
         return schema_fields(message, body);
@@ -72,7 +91,7 @@ fn validate_stage(
             "only one flat record batch may follow schema",
         ));
     }
-    validate_message(message, body, fields)?;
+    validate_message_rows(message, body, fields, rows, max_rows)?;
     Ok(fields)
 }
 
@@ -90,21 +109,42 @@ fn schema_fields(message: &Message<'_>, body: usize) -> Result<usize> {
     Ok(fields)
 }
 
+#[cfg(test)]
 pub(super) fn validate_message(message: &Message<'_>, body: usize, fields: usize) -> Result<()> {
+    validate_message_rows(message, body, fields, Some(1), None)
+}
+
+fn validate_message_rows(
+    message: &Message<'_>,
+    body: usize,
+    fields: usize,
+    rows: Option<usize>,
+    max_rows: Option<u64>,
+) -> Result<()> {
     let batch = message
         .header_as_record_batch()
         .ok_or_else(|| framing_error("expected record batch"))?;
-    validate_record_header(&batch)?;
-    validate_field_nodes(&batch, fields)?;
+    validate_record_header(&batch, rows, max_rows)?;
+    validate_field_nodes(&batch, fields, rows)?;
     validate_buffers(&batch, body)
 }
 
-fn validate_record_header(batch: &ipc::RecordBatch<'_>) -> Result<()> {
+fn validate_record_header(
+    batch: &ipc::RecordBatch<'_>,
+    rows: Option<usize>,
+    max_rows: Option<u64>,
+) -> Result<()> {
     if batch.compression().is_some() {
         return Err(framing_error("compressed row state is not supported"));
     }
-    if batch.length() != 1 {
-        return Err(framing_error("row state must have one top-level row"));
+    if batch.length() < 1
+        || rows.is_some_and(|count| usize::try_from(batch.length()) != Ok(count))
+        || max_rows
+            .is_some_and(|limit| u64::try_from(batch.length()).is_ok_and(|count| count > limit))
+    {
+        return Err(framing_error(
+            "state batch has an invalid top-level row count",
+        ));
     }
     if batch
         .variadicBufferCounts()
@@ -117,14 +157,20 @@ fn validate_record_header(batch: &ipc::RecordBatch<'_>) -> Result<()> {
     Ok(())
 }
 
-fn validate_field_nodes(batch: &ipc::RecordBatch<'_>, fields: usize) -> Result<()> {
+fn validate_field_nodes(
+    batch: &ipc::RecordBatch<'_>,
+    fields: usize,
+    rows: Option<usize>,
+) -> Result<()> {
     let nodes = batch
         .nodes()
         .ok_or_else(|| framing_error("row field nodes are absent"))?;
     if nodes.len() != fields
-        || nodes
-            .iter()
-            .any(|node| node.length() != 1 || !(0..=1).contains(&node.null_count()))
+        || nodes.iter().any(|node| {
+            node.length() != batch.length()
+                || !(0..=batch.length()).contains(&node.null_count())
+                || rows.is_some_and(|count| usize::try_from(node.length()) != Ok(count))
+        })
     {
         return Err(framing_error(
             "flat row field nodes differ from one-row schema",

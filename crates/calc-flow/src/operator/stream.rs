@@ -562,10 +562,29 @@ pub trait StreamOperator: OperatorMetadata {
         output: &mut dyn StreamCollector,
     ) -> Result<()>;
 
+    /// Prepares a checkpoint without blocking the operator task on a full
+    /// state encoding. The runtime awaits this immediately before capture.
+    /// For example, a stateful join can finish a cancellable index encoding
+    /// here, then let `checkpoint` clone its immutable state segment.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if cancellation or state preparation fails.
+    async fn prepare_checkpoint_async(
+        &mut self,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<()> {
+        context.check_cancelled()
+    }
+
     /// Synchronously captures dirty state for `epoch` (API note A2.2).
     ///
-    /// The capture is O(dirty-key metadata), never a bulk encode on the
-    /// executor thread; durable staging is runtime-owned (D4.1).
+    /// The managed runtime first awaits
+    /// [`StreamOperator::prepare_checkpoint_async`], allowing implementations
+    /// to keep capture cheap on the executor thread. Direct callers must also
+    /// prepare first if they require that property; an implementation may use
+    /// a synchronous compatibility fallback when called directly. Durable
+    /// staging is runtime-owned (D4.1).
     ///
     /// # Errors
     ///

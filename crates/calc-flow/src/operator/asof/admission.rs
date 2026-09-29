@@ -1,15 +1,20 @@
 use super::{
     AsofJoinSide, AsofLatePolicy, StreamAsofJoinOperator, StreamAsofJoinSideStatus,
     StreamAsofJoinSpec, StreamAsofJoinStatus, reason,
-    state::{self, LeftOrder},
+    state::{self, LeftOrder, RowPayload},
 };
 use crate::{Batch, Result, StateSegment, StreamOperatorContext, StreamingFailureReason};
 use datafusion::arrow::{
-    array::{Array, TimestampMicrosecondArray},
+    array::{Array, TimestampMicrosecondArray, UInt64Array},
+    compute::take,
     record_batch::RecordBatch,
 };
 use datafusion::execution::memory_pool::MemoryReservation;
-use std::collections::BTreeSet;
+use std::{
+    collections::{HashMap, HashSet, hash_map::RandomState},
+    hash::BuildHasher,
+    sync::Arc,
+};
 
 #[derive(Clone, Copy)]
 pub(super) struct ValidatedInput {
@@ -20,7 +25,7 @@ pub(super) struct ValidatedInput {
 type InputRow<'a> = (LeftOrder, &'a RecordBatch, usize);
 
 pub(super) struct Admission {
-    pub rows: Vec<(LeftOrder, StateSegment)>,
+    pub rows: Vec<(LeftOrder, RowPayload)>,
     pub accepted: u64,
     _identity_workspace: MemoryReservation,
     _payload_workspace: MemoryReservation,
@@ -96,7 +101,12 @@ impl StreamAsofJoinOperator {
         let accepted = self.check_admission_rows(input.index, rows.len() as u64)?;
         let payload_workspace = self.input_workspace(batch, input)?;
         let limit = usize::try_from(self.spec.limits().max_state_bytes()).expect("validated");
-        let rows = encode_rows(rows, limit)?;
+        let base = if input.index == 0 {
+            self.status.left.accepted_rows
+        } else {
+            self.status.right.accepted_rows
+        };
+        let rows = encode_rows(&rows, input.index, base, limit)?;
         Ok(Admission {
             rows,
             accepted,
@@ -161,7 +171,9 @@ impl StreamAsofJoinOperator {
         context: &StreamOperatorContext<'_>,
     ) -> Result<(Vec<InputRow<'a>>, u64)> {
         let side = input.side(&self.spec);
-        let mut seen = BTreeSet::new();
+        let mut seen = HashSet::new();
+        let mut keys_by_hash = HashMap::<u64, Vec<state::Encoding>>::new();
+        let key_hasher = RandomState::new();
         let mut rows = Vec::new();
         let mut duplicates = 0;
         for batch in batches {
@@ -176,7 +188,21 @@ impl StreamAsofJoinOperator {
                 if input.is_late(time) {
                     continue;
                 }
-                let identity: LeftOrder = (time, keys.row(row), sequences.row(row));
+                let key = keys.with_row(row, |key_bytes| {
+                    let bucket = keys_by_hash
+                        .entry(key_hasher.hash_one(key_bytes))
+                        .or_default();
+                    if let Some(shared) =
+                        bucket.iter().find(|shared| shared.as_slice() == key_bytes)
+                    {
+                        shared.clone()
+                    } else {
+                        let shared = Arc::new(key_bytes.to_vec());
+                        bucket.push(shared.clone());
+                        shared
+                    }
+                });
+                let identity: LeftOrder = (time, key, sequences.row(row));
                 let exists = self.state.contains_identity(input.index, &identity);
                 if exists || !seen.insert(identity.clone()) {
                     duplicates += 1;
@@ -194,22 +220,16 @@ impl Admission {
         ingress: &str,
         state: &mut state::State,
         status: &mut StreamAsofJoinStatus,
-    ) -> state::InventoryDelta {
-        let mut delta = state::InventoryDelta::default();
+    ) {
         if ingress == "left" {
             for (identity, payload) in self.rows.drain(..) {
-                delta.insert_left(&identity.1, &identity.2, &payload);
+                state.attach(&payload);
                 state.left.insert(identity, payload);
             }
             status.left.accepted_rows = self.accepted;
         } else {
             for (identity, payload) in self.rows.drain(..) {
-                delta.insert_right(
-                    &identity.1,
-                    &identity.2,
-                    &payload,
-                    !state.right.contains_key(&identity.1),
-                );
+                state.attach(&payload);
                 state
                     .right
                     .entry(identity.1)
@@ -218,7 +238,6 @@ impl Admission {
             }
             status.right.accepted_rows = self.accepted;
         }
-        delta
     }
 }
 
@@ -308,21 +327,81 @@ fn side_status(status: &mut StreamAsofJoinStatus, index: usize) -> &mut StreamAs
     }
 }
 
-fn encode_rows(rows: Vec<InputRow<'_>>, limit: usize) -> Result<Vec<(LeftOrder, StateSegment)>> {
-    // One reusable growable scratch: each row is IPC-encoded a single time
-    // and the retained segment owns an exact copy, preserving the
-    // `len == capacity` allocation parity the inventory charge relies on.
-    let mut scratch = Vec::new();
-    rows.into_iter()
-        .map(|(identity, batch, row)| {
-            Ok((
-                identity,
-                StateSegment::new(super::codec::encode_batch(
-                    &batch.slice(row, 1),
-                    limit,
-                    &mut scratch,
-                )?),
-            ))
-        })
-        .collect()
+fn encode_rows(
+    rows: &[InputRow<'_>],
+    side: usize,
+    base: u64,
+    limit: usize,
+) -> Result<Vec<(LeftOrder, RowPayload)>> {
+    let mut result = Vec::with_capacity(rows.len());
+    let mut position = 0;
+    while position < rows.len() {
+        let batch = rows[position].1;
+        let end = position
+            + rows[position..]
+                .iter()
+                .take_while(|(_, candidate, _)| std::ptr::eq(*candidate, batch))
+                .count();
+        let compact = compact_accepted_rows(&rows[position..end], batch)?;
+        let payload = encode_payload(compact, side, base + position as u64, limit)?;
+        for (ordinal, (identity, _, _)) in rows[position..end].iter().enumerate() {
+            result.push((
+                identity.clone(),
+                RowPayload {
+                    batch: payload.clone(),
+                    row: ordinal,
+                },
+            ));
+        }
+        position = end;
+    }
+    Ok(result)
+}
+
+fn compact_accepted_rows(rows: &[InputRow<'_>], batch: &RecordBatch) -> Result<RecordBatch> {
+    if rows.len() == batch.num_rows() && can_share_batch(batch)? {
+        return Ok(batch.clone());
+    }
+    let indices = UInt64Array::from(
+        rows.iter()
+            .map(|(_, _, row)| *row as u64)
+            .collect::<Vec<_>>(),
+    );
+    let columns = batch
+        .columns()
+        .iter()
+        .map(|column| take(column, &indices, None).map_err(|error| super::arrow_error(&error)))
+        .collect::<Result<Vec<_>>>()?;
+    RecordBatch::try_new(batch.schema(), columns).map_err(|error| super::arrow_error(&error))
+}
+
+fn encode_payload(
+    record: RecordBatch,
+    side: usize,
+    id: u64,
+    limit: usize,
+) -> Result<Arc<state::PayloadBatch>> {
+    let encoded = StateSegment::new(super::codec::encode_batch(&record, limit, &mut Vec::new())?);
+    Ok(Arc::new(state::PayloadBatch {
+        key: (u8::try_from(side).expect("validated two-sided ingress"), id),
+        record: Arc::new(record),
+        body_bytes: super::codec::payload_body_bytes(encoded.bytes())?,
+        encoded,
+    }))
+}
+
+/// Reuse a complete Arrow batch only when its backing buffers contain no
+/// uncharged bytes outside the accepted slice. Even a small tail can otherwise
+/// bypass a tight state-memory limit across many admitted batches.
+fn can_share_batch(batch: &RecordBatch) -> Result<bool> {
+    let excess = batch.columns().iter().try_fold(0_u64, |total, column| {
+        let data = column.to_data();
+        let logical = data
+            .get_slice_memory_size()
+            .map_err(|error| super::arrow_error(&error))? as u64;
+        Ok::<_, crate::CalcFlowError>(
+            total.saturating_add((data.get_buffer_memory_size() as u64).saturating_sub(logical)),
+        )
+    })?;
+    Ok(excess == 0)
 }

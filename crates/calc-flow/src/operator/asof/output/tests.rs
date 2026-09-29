@@ -1,13 +1,15 @@
+use super::super::{codec, state::PayloadBatch};
 use super::*;
-use crate::{AsofJoinSide, AsofStateLimits, StreamingFailureReason};
+use crate::{AsofJoinSide, AsofStateLimits, StateSegment, StreamAsofJoinSpec};
+use datafusion::execution::memory_pool::MemoryConsumer;
 use datafusion::{
     arrow::array::{Int64Array, StringArray, TimestampMicrosecondArray},
-    arrow::datatypes::TimeUnit,
-    execution::memory_pool::MemoryConsumer,
+    arrow::datatypes::{DataType, Field, Schema, TimeUnit},
 };
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-fn fixture() -> (StreamAsofJoinSpec, [SchemaRef; 3], StateSegment) {
+fn fixture() -> (StreamAsofJoinSpec, [SchemaRef; 3], RowPayload) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("key", DataType::Utf8, false),
         Field::new(
@@ -44,65 +46,142 @@ fn fixture() -> (StreamAsofJoinSpec, [SchemaRef; 3], StateSegment) {
     )
     .unwrap();
     let bytes = StateSegment::new(codec::encode_batch(&row, 1_048_576, &mut Vec::new()).unwrap());
-    (spec, [schema.clone(), schema, output], bytes)
+    let payload = RowPayload {
+        batch: Arc::new(PayloadBatch {
+            key: (0, 0),
+            record: Arc::new(row),
+            body_bytes: codec::payload_body_bytes(bytes.bytes()).unwrap(),
+            encoded: bytes,
+        }),
+        row: 0,
+    };
+    (spec, [schema.clone(), schema, output], payload)
+}
+
+#[test]
+fn direct_materialization_preserves_order_and_missing_right_rows() {
+    let (_, schemas, first) = fixture();
+    let next = RecordBatch::try_new(
+        schemas[0].clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["A", "B"])),
+            Arc::new(TimestampMicrosecondArray::from(vec![101, 102]).with_timezone("UTC")),
+            Arc::new(Int64Array::from(vec![2, 3])),
+        ],
+    )
+    .unwrap();
+    let bytes = StateSegment::new(codec::encode_batch(&next, 1_048_576, &mut Vec::new()).unwrap());
+    let batch = Arc::new(PayloadBatch {
+        key: (0, 1),
+        record: Arc::new(next),
+        body_bytes: codec::payload_body_bytes(bytes.bytes()).unwrap(),
+        encoded: bytes,
+    });
+    let second = RowPayload {
+        batch: batch.clone(),
+        row: 0,
+    };
+    let third = RowPayload { batch, row: 1 };
+    let result = materialize_rows(
+        &[
+            (&third, Some(&first)),
+            (&first, None),
+            (&second, Some(&third)),
+        ],
+        &schemas[2],
+    )
+    .unwrap();
+    let table = result.table_payload().unwrap();
+    let output = &table.batches()[0];
+    let left_seq = output
+        .column(2)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    let right_seq = output
+        .column(5)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    assert_eq!(left_seq.values().as_ref(), &[3, 1, 2]);
+    assert_eq!(
+        right_seq.iter().collect::<Vec<_>>(),
+        vec![Some(1), None, Some(3)]
+    );
 }
 
 #[tokio::test]
-async fn cancelled_materialization_deregisters_candidates_before_reusing_runtime() {
-    let (spec, schemas, bytes) = fixture();
-    let digests = [
-        codec::schema_digest(&schemas[0]).unwrap(),
-        codec::schema_digest(&schemas[1]).unwrap(),
-    ];
+async fn cancelled_materialization_keeps_runtime_reusable() {
+    let (_, schemas, bytes) = fixture();
     let mut runtime = OutputRuntime::new(1_048_576);
-    let context = runtime.context().unwrap().clone();
     let pool = runtime.pool.clone();
     let rows = [(&bytes, Some(&bytes))];
-    let workspace = MemoryConsumer::new("test-host-workspace").register(&pool);
-    workspace.try_grow(1_024).unwrap();
-    let mut future = Box::pin(async {
-        let _workspace = workspace;
-        runtime
-            .materialize(&rows, &spec, &schemas, &digests, "asof")
-            .await
-    });
+    let reservation = MemoryConsumer::new("test-output").register(&runtime.pool);
+    let mut future = Box::pin(runtime.materialize(&rows, &schemas[2], reservation));
     assert!(futures::poll!(future.as_mut()).is_pending());
-    assert!(context.table_exist("asof_left").unwrap());
-    assert!(context.table_exist("asof_right").unwrap());
     drop(future);
-    assert!(!context.table_exist("asof_left").unwrap());
-    assert!(!context.table_exist("asof_right").unwrap());
     assert_eq!(pool.reserved(), 0);
-    let result = runtime
-        .materialize(&rows, &spec, &schemas, &digests, "asof")
+    let reservation = MemoryConsumer::new("test-output").register(&runtime.pool);
+    let (result, _reservation) = runtime
+        .materialize(&rows, &schemas[2], reservation)
         .await
         .unwrap();
     assert_eq!(result.table_payload().unwrap().batches()[0].num_rows(), 1);
-    assert!(!context.table_exist("asof_left").unwrap());
-    assert!(!context.table_exist("asof_right").unwrap());
     assert_eq!(pool.reserved(), 0);
 }
 
-#[tokio::test]
-async fn failed_datafusion_materialization_deregisters_candidates_and_releases_pool() {
-    let (spec, schemas, bytes) = fixture();
-    let digests = [
-        codec::schema_digest(&schemas[0]).unwrap(),
-        codec::schema_digest(&schemas[1]).unwrap(),
-    ];
-    let mut runtime = OutputRuntime::new(1);
-    let context = runtime.context().unwrap().clone();
-    let result = runtime
-        .materialize(&[(&bytes, Some(&bytes))], &spec, &schemas, &digests, "asof")
-        .await;
-    assert!(matches!(
-        result,
-        Err(crate::CalcFlowError::OperatorReason {
-            reason_code: StreamingFailureReason::AsofWorkspaceLimitExceeded,
-            ..
-        })
-    ));
-    assert!(!context.table_exist("asof_left").unwrap());
-    assert!(!context.table_exist("asof_right").unwrap());
-    assert_eq!(runtime.pool.reserved(), 0);
+#[tokio::test(flavor = "current_thread")]
+async fn large_materialization_leaves_executor_available_for_timers() {
+    let (_, schemas, row) = fixture();
+    let mut runtime = OutputRuntime::new(1_048_576);
+    let rows = (0..64_000)
+        .map(|index| (&row, (index % 2 == 0).then_some(&row)))
+        .collect::<Vec<_>>();
+    let timer_fired = Arc::new(AtomicBool::new(false));
+    let signal = timer_fired.clone();
+    let timer = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        signal.store(true, Ordering::SeqCst);
+    });
+    let reservation = MemoryConsumer::new("test-output").register(&runtime.pool);
+    let (result, _reservation) = runtime
+        .materialize(&rows, &schemas[2], reservation)
+        .await
+        .unwrap();
+    assert_eq!(
+        result.table_payload().unwrap().batches()[0].num_rows(),
+        64_000
+    );
+    assert!(
+        timer_fired.load(Ordering::SeqCst),
+        "Arrow output gathering blocked the Tokio executor"
+    );
+    timer.await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dropped_materialization_keeps_worker_memory_reserved_until_exit() {
+    let (_, schemas, row) = fixture();
+    let mut runtime = OutputRuntime::new(1_048_576);
+    let pool = runtime.pool.clone();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let gate = Arc::new(std::sync::Barrier::new(2));
+    runtime.worker_gate = Some((started_tx, gate.clone()));
+    let reservation = MemoryConsumer::new("test-output").register(&runtime.pool);
+    reservation.try_grow(4_096).unwrap();
+    let rows = [(&row, Some(&row))];
+    let mut future = Box::pin(runtime.materialize(&rows, &schemas[2], reservation));
+    assert!(futures::poll!(future.as_mut()).is_pending());
+    assert!(futures::poll!(future.as_mut()).is_pending());
+    started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    drop(future);
+    assert_eq!(pool.reserved(), 4_096);
+    gate.wait();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while pool.reserved() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
 }

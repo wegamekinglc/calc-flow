@@ -401,17 +401,14 @@ async fn malformed_ipc_body_length_is_rejected_before_body_allocation() {
         .await
         .unwrap();
     let mut snapshot = op.checkpoint(Epoch::INITIAL).unwrap();
-    let segment_id = snapshot.segments.keys().next().unwrap().clone();
+    let segment_id = snapshot
+        .segments
+        .keys()
+        .find(|name| name.starts_with("asof-batch-"))
+        .unwrap()
+        .clone();
     let mut bytes = snapshot.segments[&segment_id].bytes().to_vec();
-    let mut cursor = 32;
-    for _ in 0..2 {
-        let length = usize::try_from(u64::from_le_bytes(
-            bytes[cursor..cursor + 8].try_into().unwrap(),
-        ))
-        .unwrap();
-        cursor += 8 + length;
-    }
-    cursor += 8;
+    let mut cursor = 0;
     loop {
         assert_eq!(&bytes[cursor..cursor + 4], &[255; 4]);
         let metadata_length =
@@ -705,17 +702,14 @@ async fn malformed_ipc_schema_is_rejected_before_arrow_schema_conversion() {
         .await
         .unwrap();
     let mut snapshot = op.checkpoint(Epoch::INITIAL).unwrap();
-    let segment_id = snapshot.segments.keys().next().unwrap().clone();
+    let segment_id = snapshot
+        .segments
+        .keys()
+        .find(|name| name.starts_with("asof-batch-"))
+        .unwrap()
+        .clone();
     let mut bytes = snapshot.segments[&segment_id].bytes().to_vec();
-    let mut cursor = 32;
-    for _ in 0..2 {
-        let length = usize::try_from(u64::from_le_bytes(
-            bytes[cursor..cursor + 8].try_into().unwrap(),
-        ))
-        .unwrap();
-        cursor += 8 + length;
-    }
-    let start = cursor + 16;
+    let start = 8;
     let message = datafusion::arrow::ipc::root_as_message(&bytes[start..]).unwrap();
     let schema = message.header_as_schema().unwrap();
     let table = start + schema._tab.loc();
@@ -761,15 +755,52 @@ fn nested_payload_without_bounded_materialization_accounting_is_rejected() {
 }
 
 #[tokio::test]
-async fn flat_payload_types_roundtrip_through_checkpoint_and_datafusion() {
-    use calc_flow::{Batch, BatchMetadata, Epoch, StreamAsofJoinOperator};
-    use datafusion::arrow::{
-        array::new_null_array,
-        datatypes::{DataType, Field, IntervalUnit, Schema, TimeUnit},
-        record_batch::RecordBatch,
-    };
+async fn unmatched_fixed_binary_output_respects_workspace_limit() {
+    use calc_flow::{AsofStateLimits, StreamAsofJoinOperator, StreamAsofJoinSpec};
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
-    let types = vec![
+
+    let left = asof_support::schema();
+    let right = Arc::new(Schema::new(
+        left.fields()
+            .iter()
+            .map(|field| field.as_ref().clone())
+            .chain([Field::new(
+                "wide",
+                DataType::FixedSizeBinary(256 * 1024),
+                true,
+            )])
+            .collect::<Vec<_>>(),
+    ));
+    let template = asof_support::spec(0);
+    let spec = StreamAsofJoinSpec::new(
+        template.left().clone(),
+        template.right().clone(),
+        std::time::Duration::ZERO,
+        AsofStateLimits::new(10, 128 * 1024).unwrap(),
+    )
+    .unwrap();
+    let mut op = StreamAsofJoinOperator::new("asof", left, right, spec).unwrap();
+    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+    let context = StreamOperatorContext::new(&job, "asof", None);
+    let mut output = EdgeCollector::new(op.output_ports().to_vec());
+    op.process_data("left", batch(&[("A", 100, 1, 8)]), &context, &mut output)
+        .await
+        .unwrap();
+    assert!(matches!(
+        op.on_end(&context, &mut output).await,
+        Err(CalcFlowError::OperatorReason {
+            reason_code: StreamingFailureReason::AsofWorkspaceLimitExceeded,
+            ..
+        })
+    ));
+    assert!(output.drain("output").is_empty());
+    assert_eq!(op.status().pending_left_rows, 1);
+}
+
+fn flat_payload_types() -> Vec<datafusion::arrow::datatypes::DataType> {
+    use datafusion::arrow::datatypes::{DataType, IntervalUnit, TimeUnit};
+    vec![
         DataType::Null,
         DataType::Boolean,
         DataType::Int8,
@@ -803,7 +834,80 @@ async fn flat_payload_types_roundtrip_through_checkpoint_and_datafusion() {
         DataType::Binary,
         DataType::LargeBinary,
         DataType::FixedSizeBinary(7),
-    ];
+    ]
+}
+
+fn sample_flat_payload_column(
+    data_type: &datafusion::arrow::datatypes::DataType,
+) -> datafusion::arrow::array::ArrayRef {
+    use datafusion::arrow::datatypes::{
+        DataType, IntervalDayTime, IntervalMonthDayNano, IntervalUnit, TimeUnit, i256,
+    };
+    use datafusion::scalar::ScalarValue;
+    let value = match data_type {
+        DataType::Null => ScalarValue::Null,
+        DataType::Boolean => ScalarValue::Boolean(Some(true)),
+        DataType::Int8 => ScalarValue::Int8(Some(-8)),
+        DataType::Int16 => ScalarValue::Int16(Some(-16)),
+        DataType::Int32 => ScalarValue::Int32(Some(-32)),
+        DataType::Int64 => ScalarValue::Int64(Some(-64)),
+        DataType::UInt8 => ScalarValue::UInt8(Some(8)),
+        DataType::UInt16 => ScalarValue::UInt16(Some(16)),
+        DataType::UInt32 => ScalarValue::UInt32(Some(32)),
+        DataType::UInt64 => ScalarValue::UInt64(Some(64)),
+        DataType::Float16 => ScalarValue::Float16(Some(3_i8.into())),
+        DataType::Float32 => ScalarValue::Float32(Some(3.25)),
+        DataType::Float64 => ScalarValue::Float64(Some(6.5)),
+        DataType::Date32 => ScalarValue::Date32(Some(20_000)),
+        DataType::Date64 => ScalarValue::Date64(Some(1_728_000_000)),
+        DataType::Time32(TimeUnit::Second) => ScalarValue::Time32Second(Some(123)),
+        DataType::Time32(TimeUnit::Millisecond) => ScalarValue::Time32Millisecond(Some(123_456)),
+        DataType::Time64(TimeUnit::Microsecond) => {
+            ScalarValue::Time64Microsecond(Some(123_456_789))
+        }
+        DataType::Time64(TimeUnit::Nanosecond) => ScalarValue::Time64Nanosecond(Some(123_456_789)),
+        DataType::Duration(TimeUnit::Microsecond) => ScalarValue::DurationMicrosecond(Some(777)),
+        DataType::Timestamp(TimeUnit::Nanosecond, timezone) => {
+            ScalarValue::TimestampNanosecond(Some(123_456_789), timezone.clone())
+        }
+        DataType::Interval(IntervalUnit::YearMonth) => ScalarValue::IntervalYearMonth(Some(14)),
+        DataType::Interval(IntervalUnit::DayTime) => {
+            ScalarValue::IntervalDayTime(Some(IntervalDayTime::default()))
+        }
+        DataType::Interval(IntervalUnit::MonthDayNano) => {
+            ScalarValue::IntervalMonthDayNano(Some(IntervalMonthDayNano::default()))
+        }
+        DataType::Decimal32(precision, scale) => {
+            ScalarValue::Decimal32(Some(123), *precision, *scale)
+        }
+        DataType::Decimal64(precision, scale) => {
+            ScalarValue::Decimal64(Some(1234), *precision, *scale)
+        }
+        DataType::Decimal128(precision, scale) => {
+            ScalarValue::Decimal128(Some(12_345), *precision, *scale)
+        }
+        DataType::Decimal256(precision, scale) => {
+            ScalarValue::Decimal256(Some(i256::default()), *precision, *scale)
+        }
+        DataType::Utf8 => ScalarValue::Utf8(Some("alpha".into())),
+        DataType::LargeUtf8 => ScalarValue::LargeUtf8(Some("long-alpha".into())),
+        DataType::Binary => ScalarValue::Binary(Some(b"bytes".to_vec())),
+        DataType::LargeBinary => ScalarValue::LargeBinary(Some(b"large-bytes".to_vec())),
+        DataType::FixedSizeBinary(7) => ScalarValue::FixedSizeBinary(7, Some(b"payload".to_vec())),
+        _ => panic!("missing sample for {data_type:?}"),
+    };
+    value.to_array().unwrap()
+}
+
+#[tokio::test]
+async fn flat_payload_types_roundtrip_through_checkpoint_and_arrow_output() {
+    use calc_flow::{Batch, BatchMetadata, Epoch, StreamAsofJoinOperator};
+    use datafusion::arrow::{
+        datatypes::{Field, Schema},
+        record_batch::RecordBatch,
+    };
+    use std::sync::Arc;
+    let types = flat_payload_types();
     let base = batch(&[("A", 100, -1, 8)]);
     let record = &base.table_payload().unwrap().batches()[0];
     let fields = record
@@ -824,7 +928,7 @@ async fn flat_payload_types_roundtrip_through_checkpoint_and_datafusion() {
         .columns()
         .iter()
         .cloned()
-        .chain(types.iter().map(|data_type| new_null_array(data_type, 1)))
+        .chain(types.iter().map(sample_flat_payload_column))
         .collect();
     let input = Batch::table(
         vec![RecordBatch::try_new(schema.clone(), columns).unwrap()],
@@ -846,6 +950,29 @@ async fn flat_payload_types_roundtrip_through_checkpoint_and_datafusion() {
     op.reset().unwrap();
     op.restore(&snapshot).unwrap();
     op.on_end(&cx, &mut out).await.unwrap();
+    let emitted = out.drain("output");
+    assert_eq!(emitted.len(), 1);
+    let output = &emitted[0]
+        .as_data()
+        .unwrap()
+        .table_payload()
+        .unwrap()
+        .batches()[0];
+    let source = &input.table_payload().unwrap().batches()[0];
+    let source_fields = source.num_columns();
+    for (index, data_type) in types.iter().enumerate() {
+        let column = source.column(4 + index).to_data();
+        assert_eq!(
+            output.column(4 + index).to_data(),
+            column,
+            "left {data_type:?}"
+        );
+        assert_eq!(
+            output.column(source_fields + 4 + index).to_data(),
+            column,
+            "right {data_type:?}"
+        );
+    }
     assert_eq!(op.status().matched_rows, 1);
     assert_eq!(op.status().state_bytes, 0);
 }
@@ -861,21 +988,15 @@ async fn a_second_ipc_schema_is_rejected_before_arrow_conversion() {
         .await
         .unwrap();
     let mut snapshot = op.checkpoint(Epoch::INITIAL).unwrap();
-    let segment_id = snapshot.segments.keys().next().unwrap().clone();
+    let segment_id = snapshot
+        .segments
+        .keys()
+        .find(|name| name.starts_with("asof-batch-"))
+        .unwrap()
+        .clone();
     let mut bytes = snapshot.segments[&segment_id].bytes().to_vec();
-    let mut cursor = 32;
-    for _ in 0..2 {
-        let length = usize::try_from(u64::from_le_bytes(
-            bytes[cursor..cursor + 8].try_into().unwrap(),
-        ))
-        .unwrap();
-        cursor += 8 + length;
-    }
-    let payload_length = u64::from_le_bytes(bytes[cursor..cursor + 8].try_into().unwrap());
-    let start = cursor + 8;
-    let schema_length =
-        8 + u32::from_le_bytes(bytes[start + 4..start + 8].try_into().unwrap()) as usize;
-    let mut malicious = bytes[start..start + schema_length].to_vec();
+    let schema_length = 8 + u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+    let mut malicious = bytes[..schema_length].to_vec();
     let message = datafusion::arrow::ipc::root_as_message(&malicious[8..]).unwrap();
     let schema = message.header_as_schema().unwrap();
     let table = 8 + schema._tab.loc();
@@ -883,9 +1004,7 @@ async fn a_second_ipc_schema_is_rejected_before_arrow_conversion() {
     let vtable = usize::try_from(i64::try_from(table).unwrap() - i64::from(distance)).unwrap();
     let entry = vtable + usize::from(datafusion::arrow::ipc::Schema::VT_FIELDS);
     malicious[entry..entry + 2].fill(0);
-    bytes[cursor..cursor + 8]
-        .copy_from_slice(&(payload_length + schema_length as u64).to_le_bytes());
-    bytes.splice(start + schema_length..start + schema_length, malicious);
+    bytes.splice(schema_length..schema_length, malicious);
     snapshot
         .segments
         .insert(segment_id, StateSegment::new(bytes));

@@ -58,7 +58,7 @@ fn side_issues(
                 issues,
                 &format!("{name}_schema.{}", field.name()),
                 "invalid_type",
-                "ASOF v1 requires a flat Arrow payload type with bounded materialization accounting",
+                "ASOF requires a flat Arrow payload type with bounded materialization accounting",
             );
         }
         if field.name().is_empty() || !names.insert(field.name()) {

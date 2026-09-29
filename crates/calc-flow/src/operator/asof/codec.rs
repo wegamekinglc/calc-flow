@@ -26,6 +26,24 @@ impl<'a> BoundedWriter<'a> {
     pub fn growable(bytes: &'a mut Vec<u8>, limit: usize) -> Self {
         Self { bytes, limit }
     }
+
+    pub fn write_parts(&mut self, parts: &[&[u8]]) -> io::Result<()> {
+        let added = parts
+            .iter()
+            .try_fold(0_usize, |size, part| size.checked_add(part.len()));
+        if added
+            .and_then(|added| self.bytes.len().checked_add(added))
+            .is_none_or(|size| size > self.limit)
+        {
+            return Err(io::Error::other(
+                "ASOF bounded encoding workspace exhausted",
+            ));
+        }
+        for part in parts {
+            self.bytes.extend_from_slice(part);
+        }
+        Ok(())
+    }
 }
 impl Write for BoundedWriter<'_> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
@@ -74,6 +92,34 @@ pub(super) fn decode_batch(bytes: &[u8], schema_digest: &[u8; 32]) -> Result<Rec
     let mut reader = StreamReader::try_new(Cursor::new(bytes), None)
         .map_err(|error| super::arrow_error(&error))?;
     decoded_row(&mut reader)
+}
+
+pub(super) fn decode_table_batch(
+    bytes: &[u8],
+    schema_digest: &[u8; 32],
+    max_rows: u64,
+) -> Result<RecordBatch> {
+    validate_schema_digest(bytes, schema_digest)?;
+    framing::validate_ipc_framing_rows(bytes, None, Some(max_rows))?;
+    let mut reader = StreamReader::try_new(Cursor::new(bytes), None)
+        .map_err(|error| super::arrow_error(&error))?;
+    let batch = reader
+        .next()
+        .transpose()
+        .map_err(|error| super::arrow_error(&error))?
+        .ok_or_else(|| CalcFlowError::Format {
+            message: "ASOF batch payload is empty".into(),
+        })?;
+    if reader.next().is_some() {
+        return Err(CalcFlowError::Format {
+            message: "ASOF batch payload contains extra data".into(),
+        });
+    }
+    Ok(batch)
+}
+
+pub(super) fn payload_body_bytes(bytes: &[u8]) -> Result<u64> {
+    framing::payload_body_bytes(bytes)
 }
 
 fn decoded_row(reader: &mut StreamReader<Cursor<&[u8]>>) -> Result<RecordBatch> {
@@ -144,7 +190,31 @@ fn encoded_schema(bytes: &[u8]) -> Result<&[u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datafusion::arrow::ipc;
+    use datafusion::arrow::{
+        array::Int64Array,
+        datatypes::{DataType, Field},
+        ipc,
+    };
+    use std::sync::Arc;
+
+    #[test]
+    fn asof_batch_framing_rejects_rows_above_limit_before_arrow_decode() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            false,
+        )]));
+        let batch =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![1, 2]))])
+                .unwrap();
+        let bytes = encode_batch(&batch, 1 << 20, &mut Vec::new()).unwrap();
+        let digest = schema_digest(&schema).unwrap();
+        assert!(decode_table_batch(&bytes, &digest, 1).is_err());
+        assert_eq!(
+            decode_table_batch(&bytes, &digest, 2).unwrap().num_rows(),
+            2
+        );
+    }
 
     #[test]
     fn asof_codec_rejects_variadic_buffers_for_flat_rows() {

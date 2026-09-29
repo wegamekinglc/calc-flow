@@ -300,8 +300,10 @@ validation, before typed deserialization loses their original JSON shape.
 
 The new serde variant generates additive `AsofJoinSide`, `AsofStateLimits`,
 `AsofLatePolicy` and `StreamAsofJoinSpec` definitions. Project format remains 3;
-capability/operator version 1 and checkpoint state/layout version 1 are separate
-identities. All ordered field lists and resolved settings participate in the new
+capability/operator version 1 and the original checkpoint state/layout version 1
+are separate identities. The current columnar checkpoint uses an internal
+version 2 layout and accounting while the outer operator capability remains 1.
+All ordered field lists and resolved settings participate in the new
 primitive digest and fingerprint. Old inner defaults, canonical configuration
 bytes, fingerprint, schema, capability, and state readers remain byte-for-byte
 or behaviorally unchanged as specified by their frozen compatibility vectors.
@@ -381,9 +383,14 @@ charge, not a process RSS limit. State, workspace, edge queues, and runtime
 allocations must be distinguished in resource evidence.
 
 Rust's ordered index chooses at most one candidate per left row, using Arrow's
-typed row encoding. DataFusion performs the bounded candidate-table left join,
-projection and ordinal ordering. This split is internal: the public API remains
-one native operator and one table engine. No all-pairs intermediate is permitted.
+typed row encoding. The stream-only ASOF operator gathers columns directly from
+retained Arrow batches in final left-row order, preserving right nullability.
+DataFusion remains the sole SQL and table-expression engine; this output
+assembly is internal to the native streaming operator. No all-pairs
+intermediate is permitted. This performance revision changes the original
+DataFusion candidate-table materialization design without changing matching,
+output schema, or public API. Columnar state is a separate version 2 checkpoint
+layout, with version 1 restore support.
 
 The new checkpoint identity is independent of inner Join. Operator state
 contains admitted rows, identity state, emitted-output sequence, counters,
@@ -451,16 +458,40 @@ according to the existing runtime; only allocations still retained by the
 operator remain in its state charge. This does not remove the runtime's own
 checkpoint allocation budget.
 
+### Accounting version 2 and columnar checkpoint layout
+
+The current writer persists one index segment plus one immutable Arrow IPC
+segment per retained payload batch. Index entries identify a batch and row;
+version 1 row snapshots remain readable. Version 2 charges each left identity
+384 bytes plus owned key/sequence encodings and a 64-byte payload reference;
+each right identity 320 bytes plus its sequence encoding and, when present, a
+64-byte payload reference. Each distinct encoding and right bucket also has a
+64-byte allocation charge. Each retained payload batch is charged once:
+64 bytes plus IPC segment capacity, decoded IPC body length, 256 bytes, and
+64 bytes per column. The index adds 64 bytes plus its buffer capacity or its
+exact projected length while encoding is deferred. A drained view still holds
+and charges its **full original base capacity** until checkpoint preparation
+compacts it; compaction then updates the state gauge. Whole input batches are
+shared only if their Arrow backing buffers have no excess bytes outside the
+accepted slice; otherwise accepted rows are compacted before retention.
+
+This charge is deterministic operator accounting, separate from transient
+workspace and process RSS. The managed runtime awaits asynchronous index
+preparation before synchronous capture. Direct `checkpoint()` retains a
+synchronous compatibility fallback. The outer capability/state version stays
+at 1 so graph identity and managed wrapper compatibility remain stable; the
+ASOF segment metadata carries the internal state/layout/accounting version 2.
+
 Prefer keeping finalization chunks and their cursors wholly in bounded transient
 workspace until collector acceptance, while the original left rows remain
 pending. Any result/cursor retained between handlers moves into the persistent
 charge above. A snapshot never skips such retained pending work.
 
-Admission copies and typed encodings, Arrow candidate tables, DataFusion output
-materialization, snapshot/compaction serialization and restore decoding all
+Admission copies and typed encodings, Arrow output gathering,
+snapshot/compaction serialization and restore decoding all
 reserve finite workspace **before** allocation. An active operation's aggregate
 workspace reservation may not exceed `max_state_bytes`. Use a bounded writer
-for encodings and a finite DataFusion memory pool whose reservation is part of
+for encodings and a finite operator workspace pool whose reservation is part of
 that same aggregate. An after-allocation `.len()` check alone does not satisfy
 the contract. Existing positive output edge budgets add row/byte constraints;
 a single output row that cannot fit produces `asof_output_limit_exceeded`.

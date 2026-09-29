@@ -6,6 +6,7 @@ use crate::StateSegment;
 /// records the removed byte span over the shared `base`; the canonical bytes
 /// are copied and hashed once, when a capture compacts the view, instead of
 /// once per finalized chunk.
+#[derive(Clone)]
 pub(in super::super) struct PreparedSegment {
     base: StateSegment,
     drained: Option<Drained>,
@@ -35,13 +36,10 @@ impl PreparedSegment {
         self.base.bytes().len() - self.skip()
     }
 
-    /// Owned buffer capacity charged for the canonical bytes; a drained view
-    /// charges the exact-capacity buffer its materialization allocates.
+    /// Owned buffer capacity currently retained. A drained view still owns the
+    /// complete base until checkpoint preparation compacts it.
     pub(in super::super) fn capacity(&self) -> usize {
-        match self.drained {
-            None => self.base.bytes_arc().capacity(),
-            Some(_) => self.len(),
-        }
+        self.base.bytes_arc().capacity()
     }
 
     /// Drops the next `removed` encoded bytes of left rows after the header,
@@ -95,7 +93,8 @@ mod tests {
     fn drained_views_materialize_canonical_bytes_over_the_shared_base() {
         let whole = PreparedSegment::new(StateSegment::new(encoded(3, b"aaabbbcccRIGHT")));
         let first = whole.drain_left(3, 2);
-        assert_eq!((first.len(), first.capacity()), (35, 35));
+        assert_eq!(first.len(), 35);
+        assert_eq!(first.capacity(), whole.capacity());
         assert_eq!(
             first.canonical(),
             StateSegment::new(encoded(2, b"bbbcccRIGHT"))
@@ -137,12 +136,13 @@ mod tests {
         let mut base = encoded(5, &body);
         base[16..24].copy_from_slice(&7_u64.to_le_bytes());
         let mut eager = StateSegment::new(base);
+        let base_capacity = eager.bytes_arc().capacity();
         let mut view = PreparedSegment::new(eager.clone());
         for (left_rows, removed) in (0..5_u64).rev().zip([1, 4095, 70_000, 65_536, 17]) {
             eager = eager_drain(&eager, removed, left_rows);
             view = view.drain_left(removed, left_rows);
             assert_eq!(view.len(), eager.bytes().len());
-            assert_eq!(view.capacity(), eager.bytes_arc().capacity());
+            assert_eq!(view.capacity(), base_capacity);
             assert_eq!(view.canonical(), eager, "bytes and digest match");
         }
     }

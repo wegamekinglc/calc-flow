@@ -1,4 +1,4 @@
-//! Native backward ASOF state and bounded `DataFusion` finalization.
+//! Native backward ASOF state and bounded Arrow finalization.
 mod admission;
 mod checkpoint;
 mod codec;
@@ -25,7 +25,7 @@ use async_trait::async_trait;
 use datafusion::arrow::datatypes::SchemaRef;
 pub(crate) use schema::schema_issues;
 pub use spec::{AsofJoinSide, AsofLatePolicy, AsofStateLimits, StreamAsofJoinSpec};
-use state::State;
+use state::{Inventory, State};
 pub use status::{StreamAsofJoinSideStatus, StreamAsofJoinStatus};
 
 /// Eviction inputs (both ingress watermarks and ended flags) under which the
@@ -60,6 +60,9 @@ pub struct StreamAsofJoinOperator {
     schemas: [SchemaRef; 3],
     state: State,
     prepared: Option<checkpoint::PreparedSegment>,
+    /// Exact index length reserved in the state gauge, encoded on the first
+    /// output or checkpoint capture that needs canonical bytes.
+    deferred_index_len: Option<u64>,
     /// `Some` when the committed state was eviction-swept under the stamped
     /// inputs; `None` when admissions, removals or a restore may have left
     /// evictable rows behind.
@@ -113,6 +116,7 @@ impl StreamAsofJoinOperator {
             schemas,
             state: State::default(),
             prepared: None,
+            deferred_index_len: None,
             swept: None,
             terminal: false,
             next_output_sequence: 0,
@@ -134,9 +138,6 @@ impl StreamAsofJoinOperator {
         _udfs: UdfRegistrySnapshot,
     ) {
         self.runtime.configure(config);
-    }
-    pub(crate) const fn stream_runtime_initialized(&self) -> bool {
-        self.runtime.initialized()
     }
     pub(crate) fn output_frontier_candidate(
         &self,
@@ -173,24 +174,24 @@ impl StreamAsofJoinOperator {
         .await
         .map_err(|error| self.attempt_error(error))
     }
-    /// Validates the candidate state's charge against the limits and
-    /// refreshes the committed gauges from the transition's maintained
-    /// inventory delta instead of re-walking the full state. Debug builds
-    /// cross-check the delta arithmetic against `State::inventory`.
+    /// Recomputes the candidate's retained row and shared batch charge.
     fn checked_inventory(
         &self,
         state: &State,
-        delta: state::InventoryDelta,
         prepared: Option<&checkpoint::PreparedSegment>,
         status: &mut StreamAsofJoinStatus,
     ) -> Result<()> {
-        let inventory = self.candidate_inventory(delta, prepared, status)?;
-        debug_assert!(
-            state
-                .inventory(prepared, &self.name)
-                .is_ok_and(|walked| walked == inventory),
-            "ASOF maintained inventory drifted from a full state walk"
-        );
+        let inventory = state.inventory(prepared, &self.name)?;
+        self.check_inventory_values(state, inventory, status)
+    }
+
+    fn check_inventory_values(
+        &self,
+        state: &State,
+        inventory: Inventory,
+        status: &mut StreamAsofJoinStatus,
+    ) -> Result<()> {
+        self.check_inventory_limits(&inventory)?;
         status.pending_left_rows = state.left.len() as u64;
         status.retained_right_rows = inventory.right_payloads;
         status.identity_only_rows = inventory.identity_only;
@@ -199,21 +200,7 @@ impl StreamAsofJoinOperator {
         Ok(())
     }
 
-    fn candidate_inventory(
-        &self,
-        delta: state::InventoryDelta,
-        prepared: Option<&checkpoint::PreparedSegment>,
-        status: &StreamAsofJoinStatus,
-    ) -> Result<state::Inventory> {
-        let mut inventory = state::Inventory {
-            identities: status.state_rows,
-            right_payloads: status.retained_right_rows,
-            identity_only: status.identity_only_rows,
-            bytes: status.state_bytes,
-        };
-        inventory.uncharge_prepared(self.prepared.as_ref(), &self.name)?;
-        inventory.apply(delta, &self.name)?;
-        inventory.charge_prepared(prepared, &self.name)?;
+    fn check_inventory_limits(&self, inventory: &Inventory) -> Result<()> {
         if inventory.identities > self.spec.limits().max_state_rows()
             || inventory.bytes > self.spec.limits().max_state_bytes()
         {
@@ -223,8 +210,9 @@ impl StreamAsofJoinOperator {
                 "stream_asof_join state limits exceeded",
             ));
         }
-        Ok(inventory)
+        Ok(())
     }
+
     /// Installs a prepared candidate transactionally: state, status and the
     /// encoded segment swap in together. `swept` records that the candidate
     /// was eviction-swept under the installed status watermarks, letting
@@ -240,7 +228,9 @@ impl StreamAsofJoinOperator {
         self.state = state;
         self.status = status;
         self.prepared = prepared.segment;
+        self.deferred_index_len = None;
     }
+
     fn attempt_error(&mut self, error: CalcFlowError) -> CalcFlowError {
         if let CalcFlowError::OperatorReason { reason_code, .. } = &error {
             let counter = match reason_code {
@@ -312,25 +302,86 @@ impl StreamOperator for StreamAsofJoinOperator {
             .map_err(|error| self.attempt_error(error))?;
         if admission.rows.is_empty() {
             // Empty or fully late input: committed state, gauges and the
-            // prepared segment are untouched, so the clone/encode/inventory
-            // transaction would reinstall an identical state.
+            // prepared segment are untouched, so admission would reinstall
+            // an identical state.
             return Ok(());
         }
-        let state_workspace = self
-            .state_workspace()
+        let index_len = self
+            .index_length_after_admission(validated.index, &admission.rows)
             .map_err(|error| self.attempt_error(error))?;
-        let mut next = self.state.clone();
+        let previous_index_bytes = self
+            .deferred_index_len
+            .or_else(|| {
+                self.prepared
+                    .as_ref()
+                    .map(|segment| segment.capacity() as u64)
+            })
+            .map_or(0, |capacity| capacity + 64);
+        let projected = self
+            .state
+            .inventory_after_admission(
+                Inventory {
+                    identities: self.status.state_rows,
+                    right_payloads: self.status.retained_right_rows,
+                    identity_only: self.status.identity_only_rows,
+                    bytes: self.status.state_bytes,
+                },
+                previous_index_bytes,
+                index_len,
+                validated.index,
+                &admission.rows,
+                &self.name,
+            )
+            .map_err(|error| self.attempt_error(error))?;
+        self.check_inventory_limits(&projected)
+            .map_err(|error| self.attempt_error(error))?;
         let mut status = self.status.clone();
-        let delta = admission.install(ingress, &mut next, &mut status);
-        let prepared = self
-            .prepare_checkpoint(&next, context)
-            .await
+        status.pending_left_rows = checked(
+            &self.name,
+            status.pending_left_rows,
+            if validated.index == 0 {
+                admission.rows.len() as u64
+            } else {
+                0
+            },
+        )
+        .map_err(|error| self.attempt_error(error))?;
+        status.retained_right_rows = projected.right_payloads;
+        status.identity_only_rows = projected.identity_only;
+        status.state_rows = projected.identities;
+        status.state_bytes = projected.bytes;
+        let index_workspace = self
+            .reserve_workspace(index_len)
             .map_err(|error| self.attempt_error(error))?;
-        self.checked_inventory(&next, delta, prepared.segment.as_ref(), &mut status)
-            .map_err(|error| self.attempt_error(error))?;
-        self.install(next, status, prepared, false);
-        drop((admission, state_workspace));
+        context.check_cancelled()?;
+        // Everything after this point is synchronous and infallible. A dropped
+        // future or failed preflight cannot expose a partially admitted row.
+        admission.install(ingress, &mut self.state, &mut status);
+        self.status = status;
+        self.prepared = None;
+        self.deferred_index_len = Some(index_len);
+        self.swept = None;
+        debug_assert_eq!(
+            checkpoint::encoded_length(&self.state, &self.name).expect("committed index length"),
+            index_len
+        );
+        debug_assert_eq!(
+            self.state
+                .inventory(None, &self.name)
+                .expect("committed admission inventory")
+                .bytes
+                + index_len
+                + 64,
+            self.status.state_bytes
+        );
+        drop((admission, index_workspace));
         Ok(())
+    }
+    async fn prepare_checkpoint_async(
+        &mut self,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<()> {
+        self.ensure_prepared_async(context).await
     }
     fn checkpoint(&mut self, epoch: crate::Epoch) -> Result<crate::OperatorStateSnapshot> {
         self.capture(epoch)
@@ -344,10 +395,10 @@ impl StreamOperator for StreamAsofJoinOperator {
         self.state = State::default();
         self.status = StreamAsofJoinStatus::default();
         self.prepared = None;
+        self.deferred_index_len = None;
         self.swept = None;
         self.terminal = false;
         self.next_output_sequence = 0;
-        self.runtime.reset();
         Ok(())
     }
     async fn on_watermark(
@@ -414,13 +465,6 @@ pub(super) fn arrow_error(error: &datafusion::arrow::error::ArrowError) -> CalcF
         message: format!("ASOF Arrow operation failed: {error}"),
     }
 }
-pub(super) fn fusion_error(error: &datafusion::error::DataFusionError) -> CalcFlowError {
-    CalcFlowError::DataFusion {
-        node_id: None,
-        message: format!("ASOF output failed: {error}"),
-    }
-}
-
 pub(super) fn checked(name: &str, current: u64, delta: u64) -> Result<u64> {
     current.checked_add(delta).ok_or_else(|| {
         reason(

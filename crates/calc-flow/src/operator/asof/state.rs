@@ -4,23 +4,118 @@ use datafusion::arrow::{
     row::{RowConverter, Rows, SortField},
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, LazyLock},
 };
 
 pub(super) type Encoding = Arc<Vec<u8>>;
 pub(super) type LeftOrder = (i64, Encoding, Encoding);
 pub(super) type RightOrder = (i64, Encoding);
+pub(super) type BatchKey = (u8, u64);
+
+pub(super) struct PayloadBatch {
+    pub key: BatchKey,
+    pub record: Arc<RecordBatch>,
+    pub encoded: StateSegment,
+    pub body_bytes: u64,
+}
+
+#[derive(Clone)]
+pub(super) struct RowPayload {
+    pub batch: Arc<PayloadBatch>,
+    pub row: usize,
+}
 
 static EMPTY_ENCODING: LazyLock<Encoding> = LazyLock::new(|| Arc::new(Vec::new()));
 
 #[derive(Clone, Default)]
 pub(super) struct State {
-    pub left: BTreeMap<LeftOrder, StateSegment>,
-    pub right: BTreeMap<Encoding, BTreeMap<RightOrder, Option<StateSegment>>>,
+    pub left: BTreeMap<LeftOrder, RowPayload>,
+    pub right: BTreeMap<Encoding, BTreeMap<RightOrder, Option<RowPayload>>>,
+    pub batches: BTreeMap<BatchKey, (Arc<PayloadBatch>, usize)>,
+}
+
+#[derive(Default)]
+struct AdmissionSeen {
+    buckets: BTreeSet<Encoding>,
+    batches: BTreeSet<BatchKey>,
 }
 
 impl State {
+    /// Account for an admission before mutating committed state. All inserted
+    /// identities and payload batches are unique after admission validation.
+    pub fn inventory_after_admission(
+        &self,
+        mut current: Inventory,
+        previous_index_bytes: u64,
+        next_index_len: u64,
+        side: usize,
+        rows: &[(LeftOrder, RowPayload)],
+        name: &str,
+    ) -> Result<Inventory> {
+        current.bytes = current
+            .bytes
+            .checked_sub(previous_index_bytes)
+            .expect("committed index charge is included in state bytes");
+        current.bytes = super::checked(
+            name,
+            current.bytes,
+            super::checked(name, next_index_len, 64)?,
+        )?;
+        let mut seen = AdmissionSeen::default();
+        for row in rows {
+            self.charge_admission_row(&mut current, side, row, &mut seen, name)?;
+        }
+        Ok(current)
+    }
+
+    fn charge_admission_row(
+        &self,
+        inventory: &mut Inventory,
+        side: usize,
+        row: &(LeftOrder, RowPayload),
+        seen: &mut AdmissionSeen,
+        name: &str,
+    ) -> Result<()> {
+        let ((_, key, sequence), payload) = row;
+        if side == 0 {
+            inventory.charge_left(key, sequence, payload, name)?;
+        } else {
+            self.charge_right_admission(inventory, key, sequence, payload, seen, name)?;
+        }
+        if seen.batches.insert(payload.batch.key) {
+            inventory.bytes =
+                super::checked(name, inventory.bytes, batch_allocation(&payload.batch))?;
+        }
+        Ok(())
+    }
+
+    fn charge_right_admission(
+        &self,
+        inventory: &mut Inventory,
+        key: &Encoding,
+        sequence: &Encoding,
+        payload: &RowPayload,
+        seen: &mut AdmissionSeen,
+        name: &str,
+    ) -> Result<()> {
+        if !self.right.contains_key(key) && seen.buckets.insert(key.clone()) {
+            inventory.charge_allocation(key, name)?;
+        }
+        inventory.charge_right(sequence, Some(payload), name)
+    }
+
+    pub fn attach(&mut self, row: &RowPayload) {
+        self.batches
+            .entry(row.batch.key)
+            .or_insert_with(|| (row.batch.clone(), 0))
+            .1 += 1;
+    }
+
+    pub fn detach(&mut self, row: &RowPayload) {
+        detach_batch(&mut self.batches, row);
+    }
+
     pub fn contains_identity(&self, index: usize, identity: &LeftOrder) -> bool {
         if index == 0 {
             self.left.contains_key(identity)
@@ -31,7 +126,7 @@ impl State {
         }
     }
 
-    pub fn candidate(&self, key: &Encoding, time: i64, tolerance: u64) -> Option<&StateSegment> {
+    pub fn candidate(&self, key: &Encoding, time: i64, tolerance: u64) -> Option<&RowPayload> {
         let bucket = self.right.get(key)?;
         let found = if let Some(next) = time.checked_add(1) {
             bucket.range(..(next, EMPTY_ENCODING.clone())).next_back()
@@ -55,9 +150,14 @@ pub(super) struct EncodedColumns {
 }
 
 impl EncodedColumns {
+    pub(super) fn with_row<R>(&self, row: usize, use_bytes: impl FnOnce(&[u8]) -> R) -> R {
+        let encoded = self.rows.row(row);
+        use_bytes(encoded.as_ref())
+    }
+
     /// Returns the owned encoding of one row.
     pub(super) fn row(&self, row: usize) -> Encoding {
-        Arc::new(self.rows.row(row).as_ref().to_vec())
+        self.with_row(row, |bytes| Arc::new(bytes.to_vec()))
     }
 }
 
@@ -114,8 +214,7 @@ pub(super) struct Inventory {
 }
 
 impl State {
-    /// Full-walk inventory charge: the cold path used by checkpoint restore
-    /// validation and by the debug cross-check of the maintained deltas.
+    /// Charge each retained Arrow batch once, alongside its row indexes.
     pub fn inventory(
         &self,
         prepared: Option<&super::checkpoint::PreparedSegment>,
@@ -131,43 +230,67 @@ impl State {
                 total.charge_right(sequence, row.as_ref(), name)?;
             }
         }
+        for (batch, refs) in self.batches.values() {
+            if *refs == 0 {
+                return Err(super::reason(
+                    name,
+                    crate::StreamingFailureReason::AsofProtocolError,
+                    "ASOF retained an unreferenced payload batch",
+                ));
+            }
+            total.bytes = super::checked(name, total.bytes, batch_allocation(batch))?;
+        }
         if let Some(prepared) = prepared {
             total.bytes = super::checked(name, total.bytes, prepared_allocation(prepared))?;
         }
         Ok(total)
     }
 
-    pub fn evict(
-        &mut self,
-        status: &super::StreamAsofJoinStatus,
-        tolerance: u64,
-    ) -> (u64, InventoryDelta) {
+    /// Compute the committed charge of a finalized left prefix without
+    /// cloning the retained maps or their Arrow batch references.
+    pub fn inventory_after_left_prefix(
+        &self,
+        keys: &[LeftOrder],
+        mut total: Inventory,
+        previous_index_bytes: u64,
+        next_index_bytes: u64,
+        name: &str,
+    ) -> Result<Inventory> {
+        total.bytes -= previous_index_bytes;
+        let mut removed = BTreeMap::<BatchKey, usize>::new();
+        for key in keys {
+            let row = self.left.get(key).expect("pending ASOF identity");
+            total.identities -= 1;
+            total.bytes -= left_row_charge(&key.1, &key.2, row);
+            *removed.entry(row.batch.key).or_default() += 1;
+        }
+        for (key, count) in removed {
+            let (batch, references) = &self.batches[&key];
+            if count == *references {
+                total.bytes -= batch_allocation(batch);
+            }
+        }
+        total.bytes = super::checked(name, total.bytes, next_index_bytes)?;
+        Ok(total)
+    }
+
+    pub fn evict(&mut self, status: &super::StreamAsofJoinStatus, tolerance: u64) -> u64 {
         let threshold = retention_threshold(self, status);
         let mut evicted = 0;
-        let mut delta = InventoryDelta::default();
-        self.right.retain(|key, bucket| {
-            bucket.retain(|(time, sequence), row| {
+        let batches = &mut self.batches;
+        self.right.retain(|_, bucket| {
+            bucket.retain(|(time, _), row| {
                 if payload_expired(*time, tolerance, threshold)
                     && let Some(payload) = row.take()
                 {
                     evicted += 1;
-                    delta.evict_payload(&payload);
+                    detach_batch(batches, &payload);
                 }
-                if row.is_some() || !identity_expired(*time, status) {
-                    true
-                } else {
-                    delta.remove_right_identity(sequence);
-                    false
-                }
+                row.is_some() || !identity_expired(*time, status)
             });
-            if bucket.is_empty() {
-                delta.remove_bucket(key);
-                false
-            } else {
-                true
-            }
+            !bucket.is_empty()
         });
-        (evicted, delta)
+        evicted
     }
 }
 
@@ -217,23 +340,6 @@ pub(super) fn eviction_pending(
     eviction_pending_at(state, status, tolerance, threshold)
 }
 
-/// Checks the greatest retention threshold reachable while finalizing this progress tick.
-pub(super) fn right_stable_during_finalization(
-    state: &State,
-    status: &super::StreamAsofJoinStatus,
-    tolerance: u64,
-) -> bool {
-    let threshold = if status.left.ended {
-        i128::MAX
-    } else {
-        status
-            .left
-            .watermark_micros
-            .map_or(i128::MIN, |wm| i128::from(wm.as_micros()))
-    };
-    !eviction_pending_at(state, status, tolerance, threshold)
-}
-
 fn eviction_pending_at(
     state: &State,
     status: &super::StreamAsofJoinStatus,
@@ -248,65 +354,11 @@ fn eviction_pending_at(
     })
 }
 
-/// Signed mutation of the charged state inventory, accumulated while one
-/// transactional transition inserts, removes or evicts entries. The delta is
-/// applied to the committed gauges instead of re-walking the full state;
-/// debug builds cross-check the result against `State::inventory`.
-#[derive(Clone, Copy, Debug, Default)]
-pub(super) struct InventoryDelta {
-    identities: i128,
-    right_payloads: i128,
-    identity_only: i128,
-    bytes: i128,
-}
-
-impl InventoryDelta {
-    pub fn insert_left(&mut self, key: &Encoding, sequence: &Encoding, row: &StateSegment) {
-        self.identities += 1;
-        self.bytes += i128::from(left_row_charge(key, sequence, row));
-    }
-
-    pub fn remove_left(&mut self, key: &Encoding, sequence: &Encoding, row: &StateSegment) {
-        self.identities -= 1;
-        self.bytes -= i128::from(left_row_charge(key, sequence, row));
-    }
-
-    pub fn insert_right(
-        &mut self,
-        key: &Encoding,
-        sequence: &Encoding,
-        row: &StateSegment,
-        new_bucket: bool,
-    ) {
-        if new_bucket {
-            self.bytes += i128::from(encoding_allocation(key));
-        }
-        self.identities += 1;
-        self.right_payloads += 1;
-        self.bytes += i128::from(right_row_charge(sequence, Some(row)));
-    }
-
-    fn evict_payload(&mut self, row: &StateSegment) {
-        self.right_payloads -= 1;
-        self.identity_only += 1;
-        self.bytes -= i128::from(payload_allocation(row));
-    }
-
-    fn remove_right_identity(&mut self, sequence: &Encoding) {
-        self.identities -= 1;
-        self.identity_only -= 1;
-        self.bytes -= i128::from(right_row_charge(sequence, None));
-    }
-
-    fn remove_bucket(&mut self, key: &Encoding) {
-        self.bytes -= i128::from(encoding_allocation(key));
-    }
-
-    pub fn merge(&mut self, other: InventoryDelta) {
-        self.identities += other.identities;
-        self.right_payloads += other.right_payloads;
-        self.identity_only += other.identity_only;
-        self.bytes += other.bytes;
+fn detach_batch(batches: &mut BTreeMap<BatchKey, (Arc<PayloadBatch>, usize)>, row: &RowPayload) {
+    let count = &mut batches.get_mut(&row.batch.key).expect("indexed batch").1;
+    *count -= 1;
+    if *count == 0 {
+        batches.remove(&row.batch.key);
     }
 }
 
@@ -314,22 +366,34 @@ fn encoding_allocation(bytes: &Encoding) -> u64 {
     ALLOCATION_BYTES + bytes.capacity() as u64
 }
 
-fn payload_allocation(row: &StateSegment) -> u64 {
-    ALLOCATION_BYTES + row.bytes_arc().capacity() as u64
+fn payload_allocation(_row: &RowPayload) -> u64 {
+    64
+}
+
+fn batch_allocation(batch: &PayloadBatch) -> u64 {
+    // IPC readers can share one body buffer among many column slices. Arrow's
+    // per-array capacity report counts that same allocation repeatedly, and
+    // differs from the arrays made by admission. Charge the retained IPC
+    // buffer, its decoded body length, and column metadata once per batch.
+    ALLOCATION_BYTES
+        + batch.encoded.bytes_arc().capacity() as u64
+        + batch.body_bytes
+        + 256
+        + 64 * batch.record.num_columns() as u64
 }
 
 fn prepared_allocation(prepared: &super::checkpoint::PreparedSegment) -> u64 {
     ALLOCATION_BYTES + prepared.capacity() as u64
 }
 
-fn left_row_charge(key: &Encoding, sequence: &Encoding, row: &StateSegment) -> u64 {
+fn left_row_charge(key: &Encoding, sequence: &Encoding, row: &RowPayload) -> u64 {
     LEFT_IDENTITY_BYTES
         + encoding_allocation(key)
         + encoding_allocation(sequence)
         + payload_allocation(row)
 }
 
-fn right_row_charge(sequence: &Encoding, row: Option<&StateSegment>) -> u64 {
+fn right_row_charge(sequence: &Encoding, row: Option<&RowPayload>) -> u64 {
     RIGHT_IDENTITY_BYTES + encoding_allocation(sequence) + row.map_or(0, payload_allocation)
 }
 
@@ -338,7 +402,7 @@ impl Inventory {
         &mut self,
         key: &Encoding,
         sequence: &Encoding,
-        row: &StateSegment,
+        row: &RowPayload,
         name: &str,
     ) -> Result<()> {
         self.identities = super::checked(name, self.identities, 1)?;
@@ -349,7 +413,7 @@ impl Inventory {
     fn charge_right(
         &mut self,
         sequence: &Encoding,
-        row: Option<&StateSegment>,
+        row: Option<&RowPayload>,
         name: &str,
     ) -> Result<()> {
         self.identities = super::checked(name, self.identities, 1)?;
@@ -366,52 +430,4 @@ impl Inventory {
         self.bytes = super::checked(name, self.bytes, encoding_allocation(bytes))?;
         Ok(())
     }
-
-    /// Applies a signed mutation delta, failing closed if the maintained
-    /// counters would drift negative or overflow.
-    pub fn apply(&mut self, delta: InventoryDelta, name: &str) -> Result<()> {
-        self.identities = apply_delta(name, self.identities, delta.identities)?;
-        self.right_payloads = apply_delta(name, self.right_payloads, delta.right_payloads)?;
-        self.identity_only = apply_delta(name, self.identity_only, delta.identity_only)?;
-        self.bytes = apply_delta(name, self.bytes, delta.bytes)?;
-        Ok(())
-    }
-
-    /// Charges the freshly encoded checkpoint segment allocation.
-    pub fn charge_prepared(
-        &mut self,
-        prepared: Option<&super::checkpoint::PreparedSegment>,
-        name: &str,
-    ) -> Result<()> {
-        if let Some(prepared) = prepared {
-            self.bytes = super::checked(name, self.bytes, prepared_allocation(prepared))?;
-        }
-        Ok(())
-    }
-
-    /// Retires the previously installed checkpoint segment charge, failing
-    /// closed if the maintained bytes would underflow.
-    pub fn uncharge_prepared(
-        &mut self,
-        prepared: Option<&super::checkpoint::PreparedSegment>,
-        name: &str,
-    ) -> Result<()> {
-        if let Some(prepared) = prepared {
-            self.bytes = apply_delta(name, self.bytes, -i128::from(prepared_allocation(prepared)))?;
-        }
-        Ok(())
-    }
-}
-
-fn apply_delta(name: &str, base: u64, delta: i128) -> Result<u64> {
-    i128::from(base)
-        .checked_add(delta)
-        .and_then(|value| u64::try_from(value).ok())
-        .ok_or_else(|| {
-            super::reason(
-                name,
-                crate::StreamingFailureReason::AsofCounterOverflow,
-                "ASOF counter or resource arithmetic overflowed",
-            )
-        })
 }
