@@ -416,6 +416,116 @@ pub(super) struct EvictionPreview {
     pub removed_index_bytes: u64,
 }
 
+struct EvictionConditions<'a> {
+    status: &'a super::StreamAsofJoinStatus,
+    tolerance: u64,
+    threshold: i128,
+}
+
+fn preview_right_row(
+    preview: &mut EvictionPreview,
+    removed_batch_refs: &mut BTreeMap<BatchKey, usize>,
+    order: &RightOrder,
+    row: Option<&RowPayload>,
+    conditions: &EvictionConditions<'_>,
+    name: &str,
+) -> Result<bool> {
+    let (expired_payload, remove) = preview_row_disposition(order.0, row, conditions);
+    if expired_payload {
+        let payload = row.expect("expired ASOF payload");
+        preview_expired_payload(preview, removed_batch_refs, payload, remove, name)?;
+    }
+    if remove {
+        preview_removed_identity(preview, &order.1, row, name)?;
+    }
+    Ok(remove)
+}
+
+fn preview_row_disposition(
+    time: i64,
+    row: Option<&RowPayload>,
+    conditions: &EvictionConditions<'_>,
+) -> (bool, bool) {
+    let expired_payload =
+        row.is_some() && payload_expired(time, conditions.tolerance, conditions.threshold);
+    let remove = (row.is_none() || expired_payload) && identity_expired(time, conditions.status);
+    (expired_payload, remove)
+}
+
+fn preview_expired_payload(
+    preview: &mut EvictionPreview,
+    removed_batch_refs: &mut BTreeMap<BatchKey, usize>,
+    payload: &RowPayload,
+    remove: bool,
+    name: &str,
+) -> Result<()> {
+    preview.evicted_payloads = super::checked(name, preview.evicted_payloads, 1)?;
+    *removed_batch_refs.entry(payload.batch.key).or_default() += 1;
+    if !remove {
+        preview.added_identity_only = super::checked(name, preview.added_identity_only, 1)?;
+        preview.released_state_bytes = super::checked(
+            name,
+            preview.released_state_bytes,
+            payload_allocation(payload),
+        )?;
+        preview.removed_index_bytes = super::checked(name, preview.removed_index_bytes, 17)?;
+    }
+    Ok(())
+}
+
+fn preview_removed_identity(
+    preview: &mut EvictionPreview,
+    sequence: &Encoding,
+    row: Option<&RowPayload>,
+    name: &str,
+) -> Result<()> {
+    preview.removed_identities = super::checked(name, preview.removed_identities, 1)?;
+    if row.is_none() {
+        preview.removed_identity_only = super::checked(name, preview.removed_identity_only, 1)?;
+    }
+    preview.released_state_bytes = super::checked(
+        name,
+        preview.released_state_bytes,
+        right_row_charge(sequence, row),
+    )?;
+    preview.removed_index_bytes = super::checked(
+        name,
+        preview.removed_index_bytes,
+        17 + sequence.len() as u64 + if row.is_some() { 17 } else { 0 },
+    )?;
+    Ok(())
+}
+
+fn preview_bucket(
+    preview: &mut EvictionPreview,
+    removed_batch_refs: &mut BTreeMap<BatchKey, usize>,
+    key: &Encoding,
+    bucket: &RightBucket,
+    conditions: &EvictionConditions<'_>,
+    name: &str,
+) -> Result<()> {
+    let mut survivors = 0;
+    for (order, row) in bucket {
+        if !preview_right_row(
+            preview,
+            removed_batch_refs,
+            order,
+            row.as_ref(),
+            conditions,
+            name,
+        )? {
+            survivors += 1;
+        }
+    }
+    if survivors == 0 {
+        preview.released_state_bytes =
+            super::checked(name, preview.released_state_bytes, encoding_allocation(key))?;
+        preview.removed_index_bytes =
+            super::checked(name, preview.removed_index_bytes, 16 + key.len() as u64)?;
+    }
+    Ok(())
+}
+
 impl State {
     /// Compute all status and index deltas before the infallible sweep commits.
     pub fn preview_eviction(
@@ -424,61 +534,22 @@ impl State {
         tolerance: u64,
         name: &str,
     ) -> Result<EvictionPreview> {
-        let threshold = retention_threshold(self, status);
+        let conditions = EvictionConditions {
+            status,
+            tolerance,
+            threshold: retention_threshold(self, status),
+        };
         let mut preview = EvictionPreview::default();
         let mut removed_batch_refs = BTreeMap::<BatchKey, usize>::new();
         for (key, bucket) in &self.right {
-            let mut survivors = 0;
-            for ((time, sequence), row) in bucket {
-                let expired_payload = row.is_some() && payload_expired(*time, tolerance, threshold);
-                let remove = if row.is_some() {
-                    expired_payload && identity_expired(*time, status)
-                } else {
-                    identity_expired(*time, status)
-                };
-                if expired_payload {
-                    preview.evicted_payloads = super::checked(name, preview.evicted_payloads, 1)?;
-                    let payload = row.as_ref().expect("expired ASOF payload");
-                    *removed_batch_refs.entry(payload.batch.key).or_default() += 1;
-                    if !remove {
-                        preview.added_identity_only =
-                            super::checked(name, preview.added_identity_only, 1)?;
-                        preview.released_state_bytes = super::checked(
-                            name,
-                            preview.released_state_bytes,
-                            payload_allocation(payload),
-                        )?;
-                        preview.removed_index_bytes =
-                            super::checked(name, preview.removed_index_bytes, 17)?;
-                    }
-                }
-                if remove {
-                    preview.removed_identities =
-                        super::checked(name, preview.removed_identities, 1)?;
-                    if row.is_none() {
-                        preview.removed_identity_only =
-                            super::checked(name, preview.removed_identity_only, 1)?;
-                    }
-                    preview.released_state_bytes = super::checked(
-                        name,
-                        preview.released_state_bytes,
-                        right_row_charge(sequence, row.as_ref()),
-                    )?;
-                    preview.removed_index_bytes = super::checked(
-                        name,
-                        preview.removed_index_bytes,
-                        17 + sequence.len() as u64 + if row.is_some() { 17 } else { 0 },
-                    )?;
-                } else {
-                    survivors += 1;
-                }
-            }
-            if survivors == 0 {
-                preview.released_state_bytes =
-                    super::checked(name, preview.released_state_bytes, encoding_allocation(key))?;
-                preview.removed_index_bytes =
-                    super::checked(name, preview.removed_index_bytes, 16 + key.len() as u64)?;
-            }
+            preview_bucket(
+                &mut preview,
+                &mut removed_batch_refs,
+                key,
+                bucket,
+                &conditions,
+                name,
+            )?;
         }
         for (key, removed) in removed_batch_refs {
             let (batch, references) = &self.batches[&key];
