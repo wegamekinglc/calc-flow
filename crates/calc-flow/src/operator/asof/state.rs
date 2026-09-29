@@ -183,6 +183,33 @@ impl RightBucket {
         }
         payload.as_ref()
     }
+
+    pub fn cursor_at(&self, time: i64) -> usize {
+        self.rows
+            .partition_point(|((right_time, _), _)| *right_time < time)
+    }
+
+    /// Advance a per-key cursor for left times visited in nondecreasing order.
+    pub fn candidate_monotonic(
+        &self,
+        time: i64,
+        tolerance: u64,
+        next: &mut usize,
+    ) -> Option<&RowPayload> {
+        debug_assert!(*next <= self.rows.len());
+        while self
+            .rows
+            .get(*next)
+            .is_some_and(|((right_time, _), _)| *right_time <= time)
+        {
+            *next += 1;
+        }
+        let ((right_time, _), payload) = self.rows.get(next.checked_sub(1)?)?;
+        if i128::from(*right_time) < i128::from(time) - i128::from(tolerance) {
+            return None;
+        }
+        payload.as_ref()
+    }
 }
 
 impl<'a> IntoIterator for &'a RightBucket {
@@ -966,7 +993,10 @@ mod encoding_tests {
 
 #[cfg(test)]
 mod right_bucket_tests {
-    use super::{Encoding, RightBucket};
+    use super::{Encoding, PayloadBatch, RightBucket, RowPayload};
+    use crate::StateSegment;
+    use datafusion::arrow::{datatypes::Schema, record_batch::RecordBatch};
+    use std::sync::{Arc, OnceLock};
 
     #[test]
     fn ordered_run_accepts_append_and_watermark_local_disorder() {
@@ -983,5 +1013,51 @@ mod right_bucket_tests {
         );
         assert!(bucket.contains_key(&(11, Encoding::from_slice(&[1]))));
         assert!(!bucket.contains_key(&(11, Encoding::from_slice(&[2]))));
+    }
+
+    #[test]
+    fn monotonic_candidate_cursor_matches_binary_search_with_ties_and_identity_only_rows() {
+        let batch = Arc::new(PayloadBatch {
+            key: (1, 0),
+            record: Arc::new(RecordBatch::new_empty(Arc::new(Schema::empty()))),
+            encoded: OnceLock::from(StateSegment::new(Vec::new())),
+            encoded_charge_bytes: 0,
+            body_bytes: 0,
+        });
+        let payload = |row| {
+            Some(RowPayload {
+                batch: Arc::clone(&batch),
+                row,
+            })
+        };
+        let mut bucket = RightBucket::new();
+        for (time, sequence, row) in [
+            (9, 1, payload(2)),
+            (5, 2, payload(1)),
+            (7, 1, None),
+            (5, 1, payload(0)),
+        ] {
+            bucket.insert((time, Encoding::from_slice(&[sequence])), row);
+        }
+        for tolerance in [0, 1, 10] {
+            let mut next = 0;
+            for time in [4, 5, 5, 6, 7, 8, 9, 10] {
+                assert_eq!(
+                    bucket
+                        .candidate_monotonic(time, tolerance, &mut next)
+                        .map(|row| row.row),
+                    bucket.candidate(time, tolerance).map(|row| row.row),
+                );
+            }
+            let mut next = bucket.cursor_at(7);
+            for time in [7, 8, 9, 10] {
+                assert_eq!(
+                    bucket
+                        .candidate_monotonic(time, tolerance, &mut next)
+                        .map(|row| row.row),
+                    bucket.candidate(time, tolerance).map(|row| row.row),
+                );
+            }
+        }
     }
 }

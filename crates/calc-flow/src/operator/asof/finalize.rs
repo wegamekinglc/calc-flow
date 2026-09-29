@@ -7,8 +7,9 @@ use crate::{
     Batch, BatchMetadata, CalcFlowError, EventTime, JsonMap, Result, StreamCollector,
     StreamOperatorContext, StreamingFailureReason,
 };
+use ahash::RandomState;
 use datafusion::execution::memory_pool::MemoryReservation;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 mod prefix;
 
@@ -247,17 +248,23 @@ impl StreamAsofJoinOperator {
         keys: &[LeftOrder],
         context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedOutput> {
-        let mut rows = Vec::with_capacity(keys.len());
-        for (index, (key, left)) in self.state.left.iter().take(keys.len()).enumerate() {
-            if index % 1_024 == 0 {
-                context.check_cancelled()?;
-            }
-            rows.push((
-                left,
-                self.state
-                    .candidate(&key.1, key.0, self.spec.tolerance_micros()),
-            ));
-        }
+        let cursor_workspace = self.cursor_workspace(keys.len())?;
+        let rows = if cursor_workspace.is_some() {
+            monotonic_candidate_rows(
+                &self.state,
+                keys.len(),
+                self.spec.tolerance_micros(),
+                context,
+            )?
+        } else {
+            binary_search_candidate_rows(
+                &self.state,
+                keys.len(),
+                self.spec.tolerance_micros(),
+                context,
+            )?
+        };
+        drop(cursor_workspace);
         context.check_cancelled()?;
         let matched = rows.iter().filter(|(_, right)| right.is_some()).count() as u64;
         let mut workspace = self.reserve_workspace(16 * 1024)?;
@@ -275,6 +282,20 @@ impl StreamAsofJoinOperator {
             workspace,
         })
     }
+
+    fn cursor_workspace(&self, count: usize) -> Result<Option<MemoryReservation>> {
+        let right_keys = self.state.right.len();
+        if count < 1_024 || right_keys == 0 || right_keys > 4_096 || count < right_keys * 4 {
+            return Ok(None);
+        }
+        // One hash slot, key, cursor, and allocator slack per right bucket.
+        let charge = right_keys as u64 * 128 + 256;
+        match self.reserve_workspace(charge) {
+            Ok(reservation) => Ok(Some(reservation)),
+            Err(error) if retryable(&error) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
     fn output_batch(&self, result: &Batch, context: &StreamOperatorContext<'_>) -> Result<Batch> {
         let batch = Batch::table(
             result.table_payload()?.batches().to_vec(),
@@ -289,6 +310,51 @@ impl StreamAsofJoinOperator {
         }
         Ok(batch)
     }
+}
+
+fn binary_search_candidate_rows<'a>(
+    state: &'a state::State,
+    count: usize,
+    tolerance: u64,
+    context: &StreamOperatorContext<'_>,
+) -> Result<Vec<(&'a RowPayload, Option<&'a RowPayload>)>> {
+    let mut rows = Vec::with_capacity(count);
+    for (index, (key, left)) in state.left.iter().take(count).enumerate() {
+        if index % 1_024 == 0 {
+            context.check_cancelled()?;
+        }
+        rows.push((left, state.candidate(&key.1, key.0, tolerance)));
+    }
+    Ok(rows)
+}
+
+fn monotonic_candidate_rows<'a>(
+    state: &'a state::State,
+    count: usize,
+    tolerance: u64,
+    context: &StreamOperatorContext<'_>,
+) -> Result<Vec<(&'a RowPayload, Option<&'a RowPayload>)>> {
+    let first_time = state
+        .left
+        .first_key_value()
+        .expect("nonempty ASOF prefix")
+        .0
+        .0;
+    let mut cursors = HashMap::with_capacity_and_hasher(state.right.len(), RandomState::new());
+    for (key, bucket) in &state.right {
+        cursors.insert(key.clone(), (bucket, bucket.cursor_at(first_time)));
+    }
+    let mut rows = Vec::with_capacity(count);
+    for (index, (key, left)) in state.left.iter().take(count).enumerate() {
+        if index % 1_024 == 0 {
+            context.check_cancelled()?;
+        }
+        let right = cursors
+            .get_mut(&key.1)
+            .and_then(|(bucket, next)| bucket.candidate_monotonic(key.0, tolerance, next));
+        rows.push((left, right));
+    }
+    Ok(rows)
 }
 
 fn retryable(error: &CalcFlowError) -> bool {
