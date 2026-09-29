@@ -3,7 +3,7 @@ use super::{
     StreamAsofJoinSpec, StreamAsofJoinStatus, reason,
     state::{self, LeftOrder, RowPayload},
 };
-use crate::{Batch, Result, StateSegment, StreamOperatorContext, StreamingFailureReason};
+use crate::{Batch, Result, StreamOperatorContext, StreamingFailureReason};
 use ahash::RandomState;
 use datafusion::arrow::{
     array::{Array, TimestampMicrosecondArray, UInt64Array},
@@ -106,13 +106,12 @@ impl StreamAsofJoinOperator {
         self.record_duplicates(input.index, duplicates)?;
         let accepted = self.check_admission_rows(input.index, rows.len() as u64)?;
         let payload_workspace = self.input_workspace(batch, input)?;
-        let limit = usize::try_from(self.spec.limits().max_state_bytes()).expect("validated");
         let base = if input.index == 0 {
             self.status.left.accepted_rows
         } else {
             self.status.right.accepted_rows
         };
-        let mut rows = encode_rows(&rows, input.index, base, limit)?;
+        let mut rows = encode_rows(&rows, input.index, base, &self.name)?;
         if input.index == 1 && !rows.windows(2).all(|pair| pair[0].0 <= pair[1].0) {
             // Keep each admitted run ordered so a watermark-local reversal
             // does not repeatedly shift a whole per-key right vector.
@@ -365,7 +364,7 @@ fn encode_rows(
     rows: &[InputRow<'_>],
     side: usize,
     base: u64,
-    limit: usize,
+    name: &str,
 ) -> Result<Vec<(LeftOrder, RowPayload)>> {
     let mut result = Vec::with_capacity(rows.len());
     let mut position = 0;
@@ -377,7 +376,7 @@ fn encode_rows(
                 .take_while(|(_, candidate, _)| std::ptr::eq(*candidate, batch))
                 .count();
         let compact = compact_accepted_rows(&rows[position..end], batch)?;
-        let payload = encode_payload(compact, side, base + position as u64, limit)?;
+        let payload = encode_payload(compact, side, base + position as u64, name)?;
         for (ordinal, (identity, _, _)) in rows[position..end].iter().enumerate() {
             result.push((
                 identity.clone(),
@@ -413,14 +412,16 @@ fn encode_payload(
     record: RecordBatch,
     side: usize,
     id: u64,
-    limit: usize,
+    name: &str,
 ) -> Result<Arc<state::PayloadBatch>> {
-    let encoded = StateSegment::new(super::codec::encode_batch(&record, limit, &mut Vec::new())?);
+    let (encoded_charge_bytes, body_bytes) =
+        super::workspace::payload_encoded_bound(&record, name)?;
     Ok(Arc::new(state::PayloadBatch {
         key: (u8::try_from(side).expect("validated two-sided ingress"), id),
         record: Arc::new(record),
-        body_bytes: super::codec::payload_body_bytes(encoded.bytes())?,
-        encoded,
+        encoded: std::sync::OnceLock::new(),
+        encoded_charge_bytes,
+        body_bytes,
     }))
 }
 

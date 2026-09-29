@@ -537,7 +537,8 @@ mod workspace_tests {
                 batch: Arc::new(state::PayloadBatch {
                     key: (0, id),
                     record: record.clone(),
-                    encoded: StateSegment::new(Vec::new()),
+                    encoded: std::sync::OnceLock::from(StateSegment::new(Vec::new())),
+                    encoded_charge_bytes: 0,
                     body_bytes: 0,
                 }),
                 row: 0,

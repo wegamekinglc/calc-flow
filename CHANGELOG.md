@@ -9,6 +9,13 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-30: Continue stream ASOF Join acceleration. Admission retains flat
+  Arrow payload batches without eagerly writing their checkpoint IPC segments;
+  checkpoint preparation encodes each retained batch once and later captures
+  share its immutable bytes. The existing v2 checkpoint format, accounting
+  version, state charge, and v1/v2 restore behavior remain compatible. See the
+  second-round performance comparison in the associated PR for measured effects.
+
 - 2026-09-29: Require immutable `Program(engine="sql")` or
   `Program(engine="streaming")` selection at construction and add
   `Program.execute(inputs)` dispatch. SQL returns named Arrow tables;

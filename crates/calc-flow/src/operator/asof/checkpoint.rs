@@ -11,11 +11,13 @@ use crate::{
     CalcFlowError, Epoch, IngressProgressSnapshot, OperatorStateSnapshot, Result, StateSegment,
     StreamOperatorContext,
 };
+use datafusion::execution::memory_pool::MemoryReservation;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::Arc,
+    mem::size_of,
+    sync::{Arc, OnceLock},
 };
 
 use encoding::{Decoder, restore_charge};
@@ -32,7 +34,7 @@ type IdentityCache =
 #[cfg(test)]
 pub(super) struct PreparedCheckpoint {
     pub segment: Option<PreparedSegment>,
-    pub _workspace: datafusion::execution::memory_pool::MemoryReservation,
+    pub _workspace: MemoryReservation,
 }
 
 pub(super) struct DecodedSnapshot {
@@ -41,7 +43,7 @@ pub(super) struct DecodedSnapshot {
     terminal: bool,
     sequence: u64,
     prepared: Option<PreparedSegment>,
-    _workspace: datafusion::execution::memory_pool::MemoryReservation,
+    _workspace: MemoryReservation,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -114,6 +116,66 @@ impl StreamAsofJoinOperator {
         context.check_cancelled()?;
         self.prepare_deferred_index_async(context).await?;
         self.compact_prepared_async(context).await?;
+        self.prepare_payloads_async(context).await?;
+        context.check_cancelled()
+    }
+
+    fn pending_payloads(&self) -> Result<(Vec<Arc<PayloadBatch>>, MemoryReservation)> {
+        let mut count = 0_u64;
+        let mut largest = 0_u64;
+        for (batch, _) in self.state.batches.values() {
+            if !batch.has_encoded() {
+                count = super::checked(&self.name, count, 1)?;
+                largest = largest.max(batch.encoded_charge_bytes);
+            }
+        }
+        let pointers = count
+            .checked_mul(size_of::<Arc<PayloadBatch>>() as u64)
+            .ok_or_else(|| {
+                super::reason(
+                    &self.name,
+                    crate::StreamingFailureReason::AsofCounterOverflow,
+                    "ASOF payload checkpoint workspace overflowed",
+                )
+            })?;
+        let workspace = self.reserve_workspace(super::checked(&self.name, pointers, largest)?)?;
+        let mut pending = Vec::with_capacity(usize::try_from(count).expect("bounded ASOF rows"));
+        for (batch, _) in self.state.batches.values() {
+            if !batch.has_encoded() {
+                pending.push(Arc::clone(batch));
+            }
+        }
+        Ok((pending, workspace))
+    }
+
+    fn ensure_payloads_sync(&self) -> Result<()> {
+        let (pending, _workspace) = self.pending_payloads()?;
+        let limit = usize::try_from(self.spec.limits().max_state_bytes()).expect("validated");
+        for batch in pending {
+            batch.ensure_encoded(limit, &self.name)?;
+        }
+        Ok(())
+    }
+
+    async fn prepare_payloads_async(&self, context: &StreamOperatorContext<'_>) -> Result<()> {
+        let (pending, workspace) = self.pending_payloads()?;
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let limit = usize::try_from(self.spec.limits().max_state_bytes()).expect("validated");
+        let name = self.name.clone();
+        context.check_cancelled()?;
+        tokio::task::spawn_blocking(move || {
+            let _workspace = workspace;
+            for batch in pending {
+                batch.ensure_encoded(limit, &name)?;
+            }
+            Ok::<(), CalcFlowError>(())
+        })
+        .await
+        .map_err(|error| CalcFlowError::Internal {
+            message: format!("ASOF payload checkpoint task failed: {error}"),
+        })??;
         context.check_cancelled()
     }
 
@@ -202,6 +264,7 @@ impl StreamAsofJoinOperator {
     pub(super) fn capture(&mut self, epoch: Epoch) -> Result<OperatorStateSnapshot> {
         self.ensure_prepared_sync()?;
         self.compact_prepared()?;
+        self.ensure_payloads_sync()?;
         let mut metrics = self.status.clone();
         for side in [&mut metrics.left, &mut metrics.right] {
             side.watermark_micros = None;
@@ -230,7 +293,8 @@ impl StreamAsofJoinOperator {
             .map(|segment| BTreeMap::from([(INDEX_SEGMENT.into(), segment.canonical())]))
             .unwrap_or_default();
         for (key, (batch, _)) in &self.state.batches {
-            segments.insert(index_v2::batch_segment(*key), batch.encoded.clone());
+            let encoded = batch.encoded.get().expect("prepared ASOF payload");
+            segments.insert(index_v2::batch_segment(*key), encoded.clone());
         }
         Ok(OperatorStateSnapshot {
             inline_metadata,
@@ -402,7 +466,7 @@ impl StreamAsofJoinOperator {
         {
             return Err(mismatch("ASOF left identity order is not strict"));
         }
-        let payload = legacy_payload((0, state.left.len() as u64), bytes, record);
+        let payload = legacy_payload((0, state.left.len() as u64), bytes, record)?;
         state.attach(&payload);
         state.left.insert(identity, payload);
         Ok(())
@@ -456,12 +520,14 @@ impl StreamAsofJoinOperator {
         {
             return Err(mismatch("ASOF right identity order is not strict"));
         }
-        let payload = record.map(|record| {
-            let payload = legacy_payload((1, *next_id), bytes, record);
-            *next_id += 1;
-            state.attach(&payload);
-            payload
-        });
+        let payload = record
+            .map(|record| -> Result<_> {
+                let payload = legacy_payload((1, *next_id), bytes, record)?;
+                *next_id += 1;
+                state.attach(&payload);
+                Ok(payload)
+            })
+            .transpose()?;
         bucket.insert(identity, payload);
         Ok(())
     }
@@ -575,12 +641,20 @@ impl StreamAsofJoinOperator {
         {
             return Err(mismatch("ASOF batch schema or row count differs"));
         }
+        let (encoded_charge_bytes, body_bytes) =
+            super::workspace::payload_encoded_bound(&record, &self.name)
+                .map_err(|_| mismatch("ASOF payload bound cannot be computed"))?;
+        let actual_body = super::codec::payload_body_bytes(encoded.bytes())
+            .map_err(|_| mismatch("ASOF invalid Arrow batch framing"))?;
+        if encoded.bytes().len() as u64 > encoded_charge_bytes || actual_body > body_bytes {
+            return Err(mismatch("ASOF payload exceeds its memory-accounting bound"));
+        }
         Ok(Arc::new(PayloadBatch {
             key,
             record: Arc::new(record),
-            body_bytes: super::codec::payload_body_bytes(encoded.bytes())
-                .map_err(|_| mismatch("ASOF invalid Arrow batch framing"))?,
-            encoded: encoded.clone(),
+            body_bytes,
+            encoded_charge_bytes,
+            encoded: OnceLock::from(encoded.clone()),
         }))
     }
 
@@ -834,20 +908,20 @@ fn legacy_payload(
     key: BatchKey,
     bytes: &[u8],
     record: datafusion::arrow::record_batch::RecordBatch,
-) -> RowPayload {
-    RowPayload {
+) -> Result<RowPayload> {
+    let (encoded_charge_bytes, body_bytes) =
+        super::workspace::payload_encoded_bound(&record, "asof")
+            .map_err(|_| mismatch("ASOF legacy payload bound cannot be computed"))?;
+    Ok(RowPayload {
         batch: Arc::new(PayloadBatch {
             key,
             record: Arc::new(record),
-            body_bytes: if bytes.is_empty() {
-                0
-            } else {
-                super::codec::payload_body_bytes(bytes).expect("validated legacy IPC")
-            },
-            encoded: StateSegment::new(bytes.to_vec()),
+            body_bytes,
+            encoded_charge_bytes,
+            encoded: OnceLock::from(StateSegment::new(bytes.to_vec())),
         }),
         row: 0,
-    }
+    })
 }
 
 fn verify_checksum(segment: &StateSegment) -> Result<()> {
@@ -939,11 +1013,16 @@ mod tests {
     }
 
     fn dummy_payload() -> RowPayload {
-        legacy_payload(
-            (0, 0),
-            &[],
-            RecordBatch::new_empty(Arc::new(Schema::empty())),
-        )
+        RowPayload {
+            batch: Arc::new(PayloadBatch {
+                key: (0, 0),
+                record: Arc::new(RecordBatch::new_empty(Arc::new(Schema::empty()))),
+                encoded: OnceLock::new(),
+                encoded_charge_bytes: 0,
+                body_bytes: 0,
+            }),
+            row: 0,
+        }
     }
 
     fn legacy_snapshot(

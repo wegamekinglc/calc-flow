@@ -6,6 +6,7 @@ use datafusion::{
         datatypes::{DataType, Schema},
         record_batch::RecordBatch,
     },
+    common::ScalarValue,
     execution::memory_pool::{MemoryConsumer, MemoryReservation},
 };
 
@@ -233,6 +234,135 @@ fn payload_charge(schema: &Schema, name: &str) -> Result<PayloadCharge> {
     Ok(PayloadCharge {
         schema_bytes: bytes,
     })
+}
+
+/// A deterministic bound for the canonical IPC batch. A one-row schema
+/// skeleton supplies fixed framing; the full payload body is measured from
+/// logical Arrow lengths without serializing its rows. Restore recomputes the
+/// same charge whether or not the encoded segment is materialized.
+pub(super) fn payload_encoded_bound(record: &RecordBatch, name: &str) -> Result<(u64, u64)> {
+    let body = payload_ipc_body_bytes(record, name)?;
+    let header = ipc_header_bytes(record)?;
+    let encoded = checked(name, header, body)?;
+    Ok((encoded, body))
+}
+
+fn ipc_header_bytes(record: &RecordBatch) -> Result<u64> {
+    let columns = record
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| {
+            ScalarValue::new_default(field.data_type())
+                .and_then(|value| value.to_array())
+                .map_err(|error| CalcFlowError::Format {
+                    message: format!("ASOF IPC header skeleton failed: {error}"),
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let skeleton = RecordBatch::try_new(record.schema(), columns)
+        .map_err(|error| super::arrow_error(&error))?;
+    let encoded = super::codec::encode_batch(&skeleton, usize::MAX, &mut Vec::new())?;
+    let body = super::codec::payload_body_bytes(&encoded)?;
+    Ok(encoded.len() as u64 - body)
+}
+
+fn payload_ipc_body_bytes(record: &RecordBatch, name: &str) -> Result<u64> {
+    record.columns().iter().try_fold(0, |total, column| {
+        checked(name, total, column_ipc_body_bytes(column, name)?)
+    })
+}
+
+fn column_ipc_body_bytes(column: &ArrayRef, name: &str) -> Result<u64> {
+    let rows = column.len() as u64;
+    if matches!(column.data_type(), DataType::Null) {
+        return Ok(0);
+    }
+    let bitmap = ipc_aligned(rows.div_ceil(8), name)?;
+    let data = match column.data_type() {
+        DataType::Boolean => ipc_aligned(rows.div_ceil(8), name)?,
+        DataType::Utf8 | DataType::Binary => variable_ipc_bytes(column, rows, 4, name)?,
+        DataType::LargeUtf8 | DataType::LargeBinary => variable_ipc_bytes(column, rows, 8, name)?,
+        data_type => fixed_ipc_bytes(data_type, rows, name)?,
+    };
+    checked(name, bitmap, data)
+}
+
+fn variable_ipc_bytes(column: &ArrayRef, rows: u64, offset_width: u64, name: &str) -> Result<u64> {
+    let offsets = ipc_multiply(checked(name, rows, 1)?, offset_width, name)?;
+    checked(
+        name,
+        ipc_aligned(offsets, name)?,
+        ipc_aligned(value_span(column)?, name)?,
+    )
+}
+
+fn fixed_ipc_bytes(data_type: &DataType, rows: u64, name: &str) -> Result<u64> {
+    let width = match data_type {
+        DataType::FixedSizeBinary(width) => {
+            u64::try_from(*width).expect("validated flat ASOF type")
+        }
+        _ => data_type
+            .primitive_width()
+            .expect("validated flat ASOF type") as u64,
+    };
+    ipc_aligned(ipc_multiply(rows, width, name)?, name)
+}
+
+fn ipc_multiply(left: u64, right: u64, name: &str) -> Result<u64> {
+    left.checked_mul(right).ok_or_else(|| {
+        reason(
+            name,
+            StreamingFailureReason::AsofCounterOverflow,
+            "ASOF IPC buffer length overflowed",
+        )
+    })
+}
+
+fn value_span(column: &ArrayRef) -> Result<u64> {
+    let span = match column.data_type() {
+        DataType::Utf8 => span_offsets(
+            column
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("string")
+                .value_offsets(),
+        ),
+        DataType::Binary => span_offsets(
+            column
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .expect("binary")
+                .value_offsets(),
+        ),
+        DataType::LargeUtf8 => span_offsets(
+            column
+                .as_any()
+                .downcast_ref::<LargeStringArray>()
+                .expect("large string")
+                .value_offsets(),
+        ),
+        DataType::LargeBinary => span_offsets(
+            column
+                .as_any()
+                .downcast_ref::<LargeBinaryArray>()
+                .expect("large binary")
+                .value_offsets(),
+        ),
+        _ => unreachable!("validated variable ASOF type"),
+    };
+    u64::try_from(span).map_err(|_| CalcFlowError::Format {
+        message: "ASOF variable IPC offsets are invalid".into(),
+    })
+}
+
+fn span_offsets<T: Copy + Into<i128>>(offsets: &[T]) -> i128 {
+    offsets.last().copied().expect("Arrow offsets").into()
+        - offsets.first().copied().expect("Arrow offsets").into()
+}
+
+fn ipc_aligned(bytes: u64, name: &str) -> Result<u64> {
+    checked(name, bytes, 63).map(|value| value & !63)
 }
 
 /// Historical upper bound for a legacy single-row IPC encoding. Kept in the
@@ -503,6 +633,118 @@ mod tests {
                     "row {row}: charge {charge} < actual {actual}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn batch_payload_charge_bounds_ipc_encoding_and_body() {
+        use datafusion::arrow::array::{BinaryArray, BooleanArray, NullArray};
+        let nullable = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("flag", DataType::Boolean, true),
+                Field::new("text", DataType::Utf8, true),
+                Field::new("bytes", DataType::Binary, true),
+                Field::new("nothing", DataType::Null, true),
+            ])),
+            vec![
+                Arc::new(BooleanArray::from(vec![
+                    Some(true),
+                    None,
+                    Some(false),
+                    Some(true),
+                ])),
+                Arc::new(StringArray::from(vec![
+                    Some("a"),
+                    None,
+                    Some("many"),
+                    Some(""),
+                ])),
+                Arc::new(BinaryArray::from(vec![
+                    Some(b"z".as_slice()),
+                    None,
+                    Some(b"abc".as_slice()),
+                    Some(b"".as_slice()),
+                ])),
+                Arc::new(NullArray::new(4)),
+            ],
+        )
+        .unwrap();
+        for record in [
+            repro_record(8),
+            wide_string_record(),
+            metadata_record(),
+            repro_record(8).slice(2, 4),
+            nullable.clone(),
+            nullable.slice(1, 2),
+        ] {
+            let (encoded_bound, body_bound) = payload_encoded_bound(&record, "asof").unwrap();
+            let encoded = codec::encode_batch(&record, usize::MAX, &mut Vec::new()).unwrap();
+            let body = codec::payload_body_bytes(&encoded).unwrap();
+            assert_eq!(body_bound, body);
+            assert_eq!(encoded_bound, encoded.len() as u64);
+        }
+    }
+
+    #[test]
+    fn batch_payload_charge_covers_supported_flat_scalar_types() {
+        use datafusion::arrow::datatypes::IntervalUnit;
+
+        let types = [
+            DataType::Null,
+            DataType::Boolean,
+            DataType::Int8,
+            DataType::Int32,
+            DataType::Int64,
+            DataType::UInt8,
+            DataType::UInt16,
+            DataType::Int16,
+            DataType::UInt32,
+            DataType::UInt64,
+            DataType::Float16,
+            DataType::Float32,
+            DataType::Float64,
+            DataType::Date32,
+            DataType::Date64,
+            DataType::Time32(TimeUnit::Second),
+            DataType::Time32(TimeUnit::Millisecond),
+            DataType::Time64(TimeUnit::Microsecond),
+            DataType::Time64(TimeUnit::Nanosecond),
+            DataType::Timestamp(TimeUnit::Second, None),
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
+            DataType::Duration(TimeUnit::Second),
+            DataType::Duration(TimeUnit::Millisecond),
+            DataType::Duration(TimeUnit::Microsecond),
+            DataType::Duration(TimeUnit::Nanosecond),
+            DataType::Interval(IntervalUnit::YearMonth),
+            DataType::Interval(IntervalUnit::DayTime),
+            DataType::Interval(IntervalUnit::MonthDayNano),
+            DataType::Decimal32(8, 2),
+            DataType::Decimal64(16, 2),
+            DataType::Decimal128(30, 2),
+            DataType::Decimal256(70, 2),
+            DataType::FixedSizeBinary(8),
+            DataType::FixedSizeBinary(0),
+            DataType::LargeUtf8,
+            DataType::LargeBinary,
+        ];
+        for data_type in types {
+            let value = ScalarValue::new_default(&data_type).unwrap();
+            let record = RecordBatch::try_new(
+                Arc::new(Schema::new(vec![Field::new(
+                    "value",
+                    data_type.clone(),
+                    true,
+                )])),
+                vec![value.to_array().unwrap()],
+            )
+            .unwrap();
+            let (encoded_bound, body_bound) = payload_encoded_bound(&record, "asof").unwrap();
+            let encoded = codec::encode_batch(&record, usize::MAX, &mut Vec::new()).unwrap();
+            let body = codec::payload_body_bytes(&encoded).unwrap();
+            assert_eq!(body_bound, body, "{data_type:?}");
+            assert_eq!(encoded_bound, encoded.len() as u64, "{data_type:?}");
         }
     }
 

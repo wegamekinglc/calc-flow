@@ -86,6 +86,21 @@ pub(super) fn encode_batch(
     Ok(scratch.clone())
 }
 
+/// Materialize a deferred payload into its already charged exact IPC size.
+/// Preallocating avoids the growable scratch buffer and its final copy.
+pub(super) fn encode_batch_preallocated(
+    batch: &RecordBatch,
+    capacity: usize,
+    limit: usize,
+) -> Result<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(capacity);
+    write_batch(
+        batch,
+        &mut BoundedWriter::with_capacity(&mut bytes, capacity, limit),
+    )?;
+    Ok(bytes)
+}
+
 pub(super) fn decode_batch(bytes: &[u8], schema_digest: &[u8; 32]) -> Result<RecordBatch> {
     validate_schema_digest(bytes, schema_digest)?;
     framing::validate_ipc_framing(bytes)?;

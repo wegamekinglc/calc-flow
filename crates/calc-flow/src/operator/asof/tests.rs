@@ -41,6 +41,49 @@ async fn admission_prepares_index_only_when_checkpoint_is_captured() {
 }
 
 #[tokio::test]
+async fn admitted_payload_is_encoded_only_for_a_checkpoint() {
+    let (mut op, input) = fixture();
+    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+    let cx = StreamOperatorContext::new(&job, "asof", None);
+    let mut output = EdgeCollector::new(op.output_ports().to_vec());
+    op.process_data("right", input, &cx, &mut output)
+        .await
+        .unwrap();
+    assert!(!op.state.batches.is_empty());
+    assert!(
+        op.state
+            .batches
+            .values()
+            .all(|(batch, _)| !batch.has_encoded())
+    );
+    let charged = op.status.state_bytes;
+    op.prepare_checkpoint_async(&cx).await.unwrap();
+    assert!(
+        op.state
+            .batches
+            .values()
+            .all(|(batch, _)| batch.has_encoded())
+    );
+    for (batch, _) in op.state.batches.values() {
+        let encoded = batch.encoded.get().unwrap();
+        let eager = codec::encode_batch(&batch.record, usize::MAX, &mut Vec::new()).unwrap();
+        assert_eq!(encoded.bytes(), eager);
+        assert_eq!(
+            encoded.bytes_arc().capacity() as u64,
+            batch.encoded_charge_bytes
+        );
+    }
+    let snapshot = op.checkpoint(Epoch::INITIAL).unwrap();
+    assert!(
+        snapshot
+            .segments
+            .keys()
+            .any(|name| name.starts_with("asof-batch"))
+    );
+    assert_eq!(op.status.state_bytes, charged);
+}
+
+#[tokio::test]
 async fn async_checkpoint_preparation_keeps_capture_on_shared_bytes() {
     let (mut op, input) = fixture();
     let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());

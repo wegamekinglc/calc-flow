@@ -8,7 +8,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     hash::{Hash, Hasher},
     ops::Deref,
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 
 const INLINE_ENCODING_BYTES: usize = 10;
@@ -202,8 +202,39 @@ impl FromIterator<(RightOrder, Option<RowPayload>)> for RightBucket {
 pub(super) struct PayloadBatch {
     pub key: BatchKey,
     pub record: Arc<RecordBatch>,
-    pub encoded: StateSegment,
+    pub encoded: OnceLock<StateSegment>,
+    pub encoded_charge_bytes: u64,
     pub body_bytes: u64,
+}
+
+impl PayloadBatch {
+    pub fn has_encoded(&self) -> bool {
+        self.encoded.get().is_some()
+    }
+
+    pub fn ensure_encoded(&self, limit: usize, name: &str) -> Result<&StateSegment> {
+        if let Some(encoded) = self.encoded.get() {
+            return Ok(encoded);
+        }
+        let capacity = usize::try_from(self.encoded_charge_bytes).map_err(|_| {
+            super::reason(
+                name,
+                crate::StreamingFailureReason::AsofCounterOverflow,
+                "ASOF payload IPC bound exceeds platform size",
+            )
+        })?;
+        let bytes = super::codec::encode_batch_preallocated(&self.record, capacity, limit)?;
+        let body = super::codec::payload_body_bytes(&bytes)?;
+        if bytes.capacity() as u64 > self.encoded_charge_bytes || body > self.body_bytes {
+            return Err(super::reason(
+                name,
+                crate::StreamingFailureReason::AsofStateLimitExceeded,
+                "ASOF payload IPC exceeds its retained upper bound",
+            ));
+        }
+        let _ = self.encoded.set(StateSegment::new(bytes));
+        Ok(self.encoded.get().expect("encoded ASOF payload"))
+    }
 }
 
 #[derive(Clone)]
@@ -727,7 +758,7 @@ fn batch_allocation(batch: &PayloadBatch) -> u64 {
     // differs from the arrays made by admission. Charge the retained IPC
     // buffer, its decoded body length, and column metadata once per batch.
     ALLOCATION_BYTES
-        + batch.encoded.bytes_arc().capacity() as u64
+        + batch.encoded_charge_bytes
         + batch.body_bytes
         + 256
         + 64 * batch.record.num_columns() as u64
@@ -796,7 +827,8 @@ mod eviction_minima_tests {
             batch: Arc::new(PayloadBatch {
                 key: (1, 0),
                 record: Arc::new(RecordBatch::new_empty(Arc::new(Schema::empty()))),
-                encoded: StateSegment::new(Vec::new()),
+                encoded: OnceLock::from(StateSegment::new(Vec::new())),
+                encoded_charge_bytes: 0,
                 body_bytes: 0,
             }),
             row: 0,

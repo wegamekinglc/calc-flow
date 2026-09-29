@@ -51,7 +51,8 @@ fn fixture() -> (StreamAsofJoinSpec, [SchemaRef; 3], RowPayload) {
             key: (0, 0),
             record: Arc::new(row),
             body_bytes: codec::payload_body_bytes(bytes.bytes()).unwrap(),
-            encoded: bytes,
+            encoded_charge_bytes: bytes.bytes().len() as u64,
+            encoded: std::sync::OnceLock::from(bytes),
         }),
         row: 0,
     };
@@ -75,7 +76,8 @@ fn direct_materialization_preserves_order_and_missing_right_rows() {
         key: (0, 1),
         record: Arc::new(next),
         body_bytes: codec::payload_body_bytes(bytes.bytes()).unwrap(),
-        encoded: bytes,
+        encoded_charge_bytes: bytes.bytes().len() as u64,
+        encoded: std::sync::OnceLock::from(bytes),
     });
     let second = RowPayload {
         batch: batch.clone(),

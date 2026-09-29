@@ -197,10 +197,11 @@ own side's watermark passes the identity time or that side ends.
 
 Accounting version 2 charges each retained identity and key/sequence buffer,
 each Arrow payload batch once, and the prepared index segment. The batch charge
-includes its IPC bytes, the decoded record body length, and per-column metadata.
+reserves its canonical IPC bytes even before encoding, plus the decoded record
+body length and per-column metadata.
 Admission reuses immutable Arrow buffers when it accepts a whole input batch
-whose backing allocation contains no bytes beyond the accepted slice. Otherwise it compacts
-the accepted rows before retention, including small slices of much larger
+whose backing allocation contains no bytes beyond the accepted slice. Otherwise
+it compacts the accepted rows before retention, including small slices of much larger
 source buffers. Snapshot batch segments share immutable IPC buffers; a row
 index points into one batch.
 
@@ -223,14 +224,18 @@ consecutive left source rows are copied as spans, while right candidates are
 assembled with Arrow interleave on a blocking worker. This is
 the stream-only ASOF operator's output assembly; DataFusion remains the SQL and
 table-expression engine. Python only declares and lowers
-the graph. Admission encodes each accepted payload batch once, then updates the
-projected index length from the new identities. The index allocation is
-preflighted and charged immediately; canonical index bytes are written during
+the graph. Admission retains each accepted payload batch and charges its exact
+canonical IPC size before encoding. A checkpoint encodes retained payloads once
+on a blocking worker in the managed async path; later checkpoints share those
+immutable segments. The produced segment is checked against the charged size,
+and the v2 state charge stays stable before and after encoding. Admission also
+updates the projected index length from the new identities. The index allocation
+is preflighted and charged immediately; canonical index bytes are written during
 checkpoint preparation. The synchronous
 runtime capture shares the prepared bytes. The index stores identities
 and batch-row references; immutable batch segments are shared across captures.
-Direct calls to `checkpoint()` can synchronously prepare the index; the managed
-runtime first awaits asynchronous preparation before capture.
+Direct calls to `checkpoint()` can synchronously prepare the index and payloads;
+the managed runtime first awaits asynchronous preparation before capture.
 
 Finalization takes ready rows up to the smaller of the output edge's row budget
 and 64,000 rows. Key and candidate vectors reserve workspace before allocation;
