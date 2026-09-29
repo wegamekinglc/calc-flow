@@ -197,10 +197,10 @@ impl StreamAsofJoinOperator {
         context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedOutput> {
         let mut rows = Vec::with_capacity(keys.len());
-        for key in keys {
+        for (key, left) in self.state.left.iter().take(keys.len()) {
             context.check_cancelled()?;
             rows.push((
-                &self.state.left[key],
+                left,
                 self.state
                     .candidate(&key.1, key.0, self.spec.tolerance_micros()),
             ));

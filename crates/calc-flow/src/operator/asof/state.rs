@@ -258,8 +258,8 @@ impl State {
     ) -> Result<Inventory> {
         total.bytes -= previous_index_bytes;
         let mut removed = BTreeMap::<BatchKey, usize>::new();
-        for key in keys {
-            let row = self.left.get(key).expect("pending ASOF identity");
+        for ((key, row), expected) in self.left.iter().take(keys.len()).zip(keys) {
+            debug_assert_eq!(key, expected);
             total.identities -= 1;
             total.bytes -= left_row_charge(&key.1, &key.2, row);
             *removed.entry(row.batch.key).or_default() += 1;
