@@ -4,6 +4,7 @@ use super::{
     state::{self, LeftOrder, RowPayload},
 };
 use crate::{Batch, Result, StateSegment, StreamOperatorContext, StreamingFailureReason};
+use ahash::RandomState;
 use datafusion::arrow::{
     array::{Array, TimestampMicrosecondArray, UInt64Array},
     compute::take,
@@ -11,8 +12,7 @@ use datafusion::arrow::{
 };
 use datafusion::execution::memory_pool::MemoryReservation;
 use std::{
-    collections::{HashMap, HashSet, hash_map::RandomState},
-    hash::BuildHasher,
+    collections::{HashMap, HashSet},
     sync::Arc,
 };
 
@@ -177,10 +177,19 @@ impl StreamAsofJoinOperator {
         context: &StreamOperatorContext<'_>,
     ) -> Result<(Vec<InputRow<'a>>, u64)> {
         let side = input.side(&self.spec);
-        let mut seen = HashSet::new();
-        let mut keys_by_hash = HashMap::<u64, Vec<state::Encoding>>::new();
+        let capacity = if input.watermark.is_none() {
+            batches.iter().map(RecordBatch::num_rows).sum()
+        } else {
+            0
+        };
+        let mut seen = HashSet::with_capacity_and_hasher(capacity, RandomState::new());
+        let mut keys_by_hash =
+            HashMap::<u64, Vec<state::Encoding>, RandomState>::with_capacity_and_hasher(
+                capacity.min(1_024),
+                RandomState::new(),
+            );
         let key_hasher = RandomState::new();
-        let mut rows = Vec::new();
+        let mut rows = Vec::with_capacity(capacity);
         let mut duplicates = 0;
         for batch in batches {
             // Per-batch invariants are hoisted: one event-time array
@@ -189,7 +198,9 @@ impl StreamAsofJoinOperator {
             let keys = state::encode_columns(batch, side.keys())?;
             let sequences = state::encode_columns(batch, side.sequence_by())?;
             for row in 0..batch.num_rows() {
-                context.check_cancelled()?;
+                if row % 1_024 == 0 {
+                    context.check_cancelled()?;
+                }
                 let time = event_times.value(row);
                 if input.is_late(time) {
                     continue;
@@ -216,6 +227,7 @@ impl StreamAsofJoinOperator {
                 rows.push((identity, batch, row));
             }
         }
+        context.check_cancelled()?;
         Ok((rows, duplicates))
     }
 }
