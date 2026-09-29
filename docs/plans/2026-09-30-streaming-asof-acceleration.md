@@ -17,6 +17,7 @@
 按驱逐量访问 right 行、left Arrow chunk 与 checkpoint v3 仍待实施；
 载荷 IPC 已改为 checkpoint 时按需编码，并沿用 v2 状态格式与计费；
 有序批次的相邻查重和已保留状态之后的范围跳过探测也已加入；
+单列非空 `Int64`/`UInt64` 身份已走保持 Arrow row 字节一致的类型化路径；
 阶段结果及最终配对数据将在 PR 描述中记录。
 
 ## 1. 问题与测量

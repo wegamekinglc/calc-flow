@@ -22,6 +22,11 @@ measurements. Use the current guides for supported behavior.
   Watermark-local disorder still uses full duplicate detection; duplicate
   counters and checkpoint identity bytes remain unchanged.
 
+- 2026-09-30: Encode single non-null `Int64` and `UInt64` ASOF identity columns
+  directly into Arrow's canonical row bytes. Other types and nullable columns
+  keep the generic Arrow converter. This reduces admission allocation and
+  preserves checkpoint identity compatibility.
+
 - 2026-09-29: Require immutable `Program(engine="sql")` or
   `Program(engine="streaming")` selection at construction and add
   `Program.execute(inputs)` dispatch. SQL returns named Arrow tables;

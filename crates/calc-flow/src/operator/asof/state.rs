@@ -1,5 +1,6 @@
 use crate::{Result, StateSegment};
 use datafusion::arrow::{
+    array::{Array, Int64Array, UInt64Array},
     record_batch::RecordBatch,
     row::{RowConverter, Rows, SortField},
 };
@@ -368,30 +369,64 @@ impl State {
     }
 }
 
-/// Row encodings for one identity column set over a whole record batch: one
-/// `RowConverter` per batch with per-row bytes extracted on demand. The
-/// extracted bytes are identical to encoding one-row slices because the
-/// pinned Arrow 58 row format encodes each value independently of its
-/// position in the column.
-pub(super) struct EncodedColumns {
-    rows: Rows,
+/// Canonical row encodings for one identity column set. Single non-null i64
+/// and u64 columns encode directly; other shapes use one Arrow `RowConverter`
+/// per batch. Both paths produce Arrow 58 row bytes independently per row.
+pub(super) enum EncodedColumns {
+    Rows(Rows),
+    Int64(Int64Array),
+    UInt64(UInt64Array),
 }
 
 impl EncodedColumns {
     pub(super) fn with_row<R>(&self, row: usize, use_bytes: impl FnOnce(&[u8]) -> R) -> R {
-        let encoded = self.rows.row(row);
-        use_bytes(encoded.as_ref())
+        match self {
+            Self::Rows(rows) => use_bytes(rows.row(row).as_ref()),
+            Self::Int64(column) => {
+                let mut encoded = [0_u8; 9];
+                encoded[0] = 1;
+                encoded[1..].copy_from_slice(&column.value(row).to_be_bytes());
+                encoded[1] ^= 0x80;
+                use_bytes(&encoded)
+            }
+            Self::UInt64(column) => {
+                let mut encoded = [0_u8; 9];
+                encoded[0] = 1;
+                encoded[1..].copy_from_slice(&column.value(row).to_be_bytes());
+                use_bytes(&encoded)
+            }
+        }
     }
 
     /// Returns the owned encoding of one row.
     pub(super) fn row(&self, row: usize) -> Encoding {
         self.with_row(row, Encoding::from_slice)
     }
+
+    #[cfg(test)]
+    pub(super) fn is_typed(&self) -> bool {
+        !matches!(self, Self::Rows(_))
+    }
 }
 
-/// Resolves each named column once and converts the whole batch, hoisting the
-/// schema lookups and converter construction out of per-row loops.
+/// Resolves each named column once, then selects the typed scalar or generic
+/// batch converter path.
 pub(super) fn encode_columns(batch: &RecordBatch, names: &[String]) -> Result<EncodedColumns> {
+    if let [name] = names {
+        let index = batch
+            .schema()
+            .index_of(name)
+            .map_err(|error| super::arrow_error(&error))?;
+        let column = batch.column(index);
+        if column.null_count() == 0 {
+            if let Some(array) = column.as_any().downcast_ref::<Int64Array>() {
+                return Ok(EncodedColumns::Int64(array.clone()));
+            }
+            if let Some(array) = column.as_any().downcast_ref::<UInt64Array>() {
+                return Ok(EncodedColumns::UInt64(array.clone()));
+            }
+        }
+    }
     let arrays = names
         .iter()
         .map(|name| {
@@ -413,7 +448,7 @@ pub(super) fn encode_columns(batch: &RecordBatch, names: &[String]) -> Result<En
     let rows = converter
         .convert_columns(&arrays)
         .map_err(|error| super::arrow_error(&error))?;
-    Ok(EncodedColumns { rows })
+    Ok(EncodedColumns::Rows(rows))
 }
 
 pub(super) fn encoded_columns(
@@ -870,7 +905,14 @@ mod eviction_minima_tests {
 
 #[cfg(test)]
 mod encoding_tests {
-    use super::Encoding;
+    use super::{Encoding, encode_columns};
+    use datafusion::arrow::{
+        array::{Int64Array, UInt64Array},
+        datatypes::{DataType, Field, Schema},
+        record_batch::RecordBatch,
+        row::{RowConverter, SortField},
+    };
+    use std::sync::Arc;
 
     #[test]
     fn short_sequences_keep_canonical_bytes_without_heap_storage() {
@@ -881,6 +923,44 @@ mod encoding_tests {
         assert!(!large.is_inline());
         assert_eq!(small.as_slice(), &[1, 2, 3, 4, 5, 6, 7, 8, 9]);
         assert!(small < large);
+    }
+
+    #[test]
+    fn scalar_integer_identity_encoding_matches_arrow_rows() {
+        let columns: Vec<(DataType, Arc<dyn datafusion::arrow::array::Array>)> = vec![
+            (
+                DataType::Int64,
+                Arc::new(Int64Array::from(vec![i64::MIN, -1, 0, 1, i64::MAX])),
+            ),
+            (
+                DataType::UInt64,
+                Arc::new(UInt64Array::from(vec![0, 1, u64::MAX - 1, u64::MAX])),
+            ),
+            (
+                DataType::Int64,
+                Arc::new(Int64Array::from(vec![Some(1), None])),
+            ),
+        ];
+        for (data_type, column) in columns {
+            let record = RecordBatch::try_new(
+                Arc::new(Schema::new(vec![Field::new(
+                    "identity",
+                    data_type.clone(),
+                    true,
+                )])),
+                vec![column.clone()],
+            )
+            .unwrap();
+            let encoded = encode_columns(&record, &["identity".into()]).unwrap();
+            assert_eq!(encoded.is_typed(), column.null_count() == 0);
+            let reference = RowConverter::new(vec![SortField::new(data_type)])
+                .unwrap()
+                .convert_columns(&[column])
+                .unwrap();
+            for row in 0..record.num_rows() {
+                assert_eq!(encoded.row(row).as_slice(), reference.row(row).as_ref());
+            }
+        }
     }
 }
 
