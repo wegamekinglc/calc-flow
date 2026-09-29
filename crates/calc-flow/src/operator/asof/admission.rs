@@ -248,6 +248,11 @@ impl Admission {
         } else {
             for (identity, payload) in self.rows.drain(..) {
                 state.attach(&payload);
+                state.right_payload_min = Some(
+                    state
+                        .right_payload_min
+                        .map_or(identity.0, |previous| previous.min(identity.0)),
+                );
                 state
                     .right
                     .entry(identity.1)

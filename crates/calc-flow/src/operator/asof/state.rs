@@ -33,6 +33,8 @@ pub(super) struct State {
     pub left: BTreeMap<LeftOrder, RowPayload>,
     pub right: BTreeMap<Encoding, BTreeMap<RightOrder, Option<RowPayload>>>,
     pub batches: BTreeMap<BatchKey, (Arc<PayloadBatch>, usize)>,
+    pub right_payload_min: Option<i64>,
+    pub right_identity_min: Option<i64>,
 }
 
 #[derive(Default)]
@@ -42,6 +44,22 @@ struct AdmissionSeen {
 }
 
 impl State {
+    /// Rebuild the derived minima after decoding a checkpoint index.
+    pub fn rebuild_right_minima(&mut self) {
+        self.right_payload_min = None;
+        self.right_identity_min = None;
+        for bucket in self.right.values() {
+            for ((time, _), row) in bucket {
+                let minimum = if row.is_some() {
+                    &mut self.right_payload_min
+                } else {
+                    &mut self.right_identity_min
+                };
+                *minimum = Some(minimum.map_or(*time, |previous| previous.min(*time)));
+            }
+        }
+    }
+
     /// Account for an admission before mutating committed state. All inserted
     /// identities and payload batches are unique after admission validation.
     pub fn inventory_after_admission(
@@ -277,6 +295,8 @@ impl State {
     pub fn evict(&mut self, status: &super::StreamAsofJoinStatus, tolerance: u64) -> u64 {
         let threshold = retention_threshold(self, status);
         let mut evicted = 0;
+        let mut payload_min = None;
+        let mut identity_min = None;
         let batches = &mut self.batches;
         self.right.retain(|_, bucket| {
             bucket.retain(|(time, _), row| {
@@ -286,10 +306,21 @@ impl State {
                     evicted += 1;
                     detach_batch(batches, &payload);
                 }
-                row.is_some() || !identity_expired(*time, status)
+                let keep = row.is_some() || !identity_expired(*time, status);
+                if keep {
+                    let minimum = if row.is_some() {
+                        &mut payload_min
+                    } else {
+                        &mut identity_min
+                    };
+                    *minimum = Some(minimum.map_or(*time, |previous: i64| previous.min(*time)));
+                }
+                keep
             });
             !bucket.is_empty()
         });
+        self.right_payload_min = payload_min;
+        self.right_identity_min = identity_min;
         evicted
     }
 }
@@ -337,21 +368,12 @@ pub(super) fn eviction_pending(
     tolerance: u64,
 ) -> bool {
     let threshold = retention_threshold(state, status);
-    eviction_pending_at(state, status, tolerance, threshold)
-}
-
-fn eviction_pending_at(
-    state: &State,
-    status: &super::StreamAsofJoinStatus,
-    tolerance: u64,
-    threshold: i128,
-) -> bool {
-    state.right.values().any(|bucket| {
-        bucket.iter().any(|((time, _), row)| {
-            (row.is_some() && payload_expired(*time, tolerance, threshold))
-                || (row.is_none() && identity_expired(*time, status))
-        })
-    })
+    state
+        .right_payload_min
+        .is_some_and(|time| payload_expired(time, tolerance, threshold))
+        || state
+            .right_identity_min
+            .is_some_and(|time| identity_expired(time, status))
 }
 
 fn detach_batch(batches: &mut BTreeMap<BatchKey, (Arc<PayloadBatch>, usize)>, row: &RowPayload) {
@@ -395,6 +417,51 @@ fn left_row_charge(key: &Encoding, sequence: &Encoding, row: &RowPayload) -> u64
 
 fn right_row_charge(sequence: &Encoding, row: Option<&RowPayload>) -> u64 {
     RIGHT_IDENTITY_BYTES + encoding_allocation(sequence) + row.map_or(0, payload_allocation)
+}
+
+#[cfg(test)]
+mod eviction_minima_tests {
+    use super::*;
+    use crate::EventTime;
+    use datafusion::arrow::datatypes::Schema;
+
+    #[test]
+    fn minima_follow_payload_release_and_identity_expiry() {
+        let mut state = State::default();
+        let payload = RowPayload {
+            batch: Arc::new(PayloadBatch {
+                key: (1, 0),
+                record: Arc::new(RecordBatch::new_empty(Arc::new(Schema::empty()))),
+                encoded: StateSegment::new(Vec::new()),
+                body_bytes: 0,
+            }),
+            row: 0,
+        };
+        state.attach(&payload);
+        state.right.insert(
+            Arc::new(vec![1]),
+            BTreeMap::from([
+                ((10, Arc::new(vec![1])), Some(payload)),
+                ((12, Arc::new(vec![2])), None),
+            ]),
+        );
+        state.rebuild_right_minima();
+        assert_eq!(state.right_payload_min, Some(10));
+        assert_eq!(state.right_identity_min, Some(12));
+
+        let mut status = super::super::StreamAsofJoinStatus::default();
+        status.left.watermark_micros = Some(EventTime::from_micros(11));
+        status.right.watermark_micros = Some(EventTime::from_micros(11));
+        assert!(eviction_pending(&state, &status, 0));
+        assert_eq!(state.evict(&status, 0), 1);
+        assert_eq!(state.right_payload_min, None);
+        assert_eq!(state.right_identity_min, Some(12));
+        status.right.watermark_micros = Some(EventTime::from_micros(13));
+        assert!(eviction_pending(&state, &status, 0));
+        assert_eq!(state.evict(&status, 0), 0);
+        assert_eq!(state.right_identity_min, None);
+        assert!(!eviction_pending(&state, &status, 0));
+    }
 }
 
 impl Inventory {

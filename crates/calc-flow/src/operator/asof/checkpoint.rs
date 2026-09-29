@@ -690,6 +690,7 @@ impl StreamAsofJoinOperator {
         decoded: DecodedSnapshot,
     ) {
         self.state = decoded.state;
+        self.state.rebuild_right_minima();
         self.status = decoded.metrics;
         self.terminal = decoded.terminal;
         self.next_output_sequence = decoded.sequence;
