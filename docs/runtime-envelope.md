@@ -201,9 +201,13 @@ handlers are:
 Handlers never see barriers, and watermarks arrive as typed `EventTime`
 values.
 
-The state lifecycle is synchronous and executor-safe. `checkpoint(epoch)`
-captures dirty state as an `OperatorStateSnapshot` in O(dirty-key
-metadata) — never a bulk encode on the executor thread; durable staging is
+The managed state lifecycle awaits `prepare_checkpoint_async(context)` after
+barrier alignment and before synchronous `checkpoint(epoch)` capture. Built-in
+operators prepare state asynchronously, yielding during index writing and moving
+bulk hashing or compaction to blocking workers. Managed capture shares prepared
+immutable segments and bounded metadata. Direct callers
+of `checkpoint` must first await preparation if they need this property; ASOF
+retains a synchronous encoding fallback for direct calls. Durable staging is
 runtime-owned. `restore(snapshot)` applies a captured snapshot, and
 `reset()` returns the operator to its freshly constructed state. The
 defaults are stateless: capture returns an empty snapshot, restore rejects a
@@ -430,8 +434,9 @@ channel without an earlier explicit end is a failure, not synthetic EOF.
 In a checkpoint-enabled job, an operator removes only barrier-arrived
 ingresses from receive selection; their post-barrier traffic remains in the
 bounded edge while other live ingresses continue. Ended ingresses count as an
-out-of-band cut. When every required ingress reaches epoch E, the task captures
-and stages operator state, acknowledges the coordinator, immediately forwards
+out-of-band cut. When every required ingress reaches epoch E, the task awaits
+checkpoint preparation, captures and stages operator state, acknowledges the
+coordinator, then forwards
 the barrier, and reopens its live ingresses. An identical repeated barrier is
 idempotent. A foreign, conflicting, future, or regressed epoch fails closed,
 and snapshot/stage failure forwards no barrier.
@@ -451,11 +456,13 @@ microsecond; no watermark is emitted for an underflowing predecessor. This
 preserves downstream acceptance of later legal rows at `C`. The public
 `StreamOperator` trait gains no new control-injection or callback requirement.
 
-ASOF prepares one complete compacted segment during bounded asynchronous
-handlers; its synchronous `checkpoint` capture shares that allocation rather
-than encoding all retained rows. Each full-state preparation is
-`O(retained state)` and repeats for each accepted output chunk; total handler
-work includes those repeated preparations. Restore cross-validates native
+ASOF admission charges the projected index length and installs accepted rows
+without cloning the retained maps. Output prefix commits update the deferred
+length or retain a drained view of the last captured index. Managed barrier
+preparation encodes the deferred index or compacts the drained view
+asynchronously; synchronous capture then shares those bytes. An eviction sweep
+still rebuilds state and its index in bounded asynchronous handler work.
+Restore cross-validates native
 rows/counters/terminal state
 with the wrapper's ingress progress and output frontier before readiness is
 acknowledged. All sources reaching ASOF must have a non-disabled valid watermark

@@ -1050,6 +1050,15 @@ async fn capture_operator_checkpoint(
     input_progress: &OperatorInputProgress,
     epoch: Epoch,
 ) -> Result<OperatorCheckpointAck> {
+    let context = StreamOperatorContext::for_task(
+        inputs.context.job(),
+        &inputs.node_id,
+        input_progress.input_watermark(),
+        input_progress.snapshot()?,
+        effective_output_budget(&inputs.outputs),
+        Arc::new(inputs.progress.clone()),
+    );
+    inputs.operator.prepare_checkpoint_async(&context).await?;
     let transaction = inputs
         .checkpoint
         .as_ref()
@@ -2007,6 +2016,7 @@ pub(super) mod tests {
     enum Behavior {
         Forward,
         Stateful,
+        PrepareError,
         BadPort,
         BadKind,
         EmitThenError,
@@ -2097,8 +2107,36 @@ pub(super) mod tests {
             Ok(())
         }
 
+        async fn prepare_checkpoint_async(
+            &mut self,
+            context: &StreamOperatorContext<'_>,
+        ) -> Result<()> {
+            context.check_cancelled()?;
+            if matches!(self.behavior, Behavior::PrepareError) {
+                return Err(CalcFlowError::Internal {
+                    message: "checkpoint preparation failed".into(),
+                });
+            }
+            if matches!(self.behavior, Behavior::Stateful) {
+                self.observed
+                    .lock()
+                    .push(("checkpoint-prepared".into(), String::new(), 0));
+            }
+            Ok(())
+        }
+
         fn checkpoint(&mut self, _epoch: crate::Epoch) -> Result<crate::OperatorStateSnapshot> {
             if matches!(self.behavior, Behavior::Stateful) {
+                if !self
+                    .observed
+                    .lock()
+                    .iter()
+                    .any(|(event, _, _)| event == "checkpoint-prepared")
+                {
+                    return Err(CalcFlowError::Internal {
+                        message: "checkpoint capture ran before async preparation".into(),
+                    });
+                }
                 Ok(crate::OperatorStateSnapshot {
                     inline_metadata: BTreeMap::from([("layout".into(), serde_json::json!(1))]),
                     segments: BTreeMap::from([(
@@ -3433,6 +3471,51 @@ pub(super) mod tests {
                 .error
                 .to_string()
                 .contains("state transaction")
+        );
+        assert!(checkpoint_rx.recv().await.is_none());
+        assert!(harness.outputs[0].recv().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_checkpoint_preparation_forwards_no_barrier_or_ack() {
+        let output_port = Port::new("output", BatchKind::Table, false, None).unwrap();
+        let operator = ProbeOperator {
+            input_ports: vec![Port::new("input", BatchKind::Table, true, None).unwrap()],
+            output_ports: vec![output_port.clone()],
+            behavior: Behavior::PrepareError,
+            watermarks: Arc::default(),
+            ends: Arc::default(),
+            observed: Arc::default(),
+        };
+        let (checkpoint_tx, mut checkpoint_rx) = mpsc::channel(1);
+        let mut harness = harness_with_operator_capability(
+            &["input"],
+            1,
+            CompiledStreamOperator::External(Box::new(operator)),
+            OperatorCheckpointCapability::CheckpointedStateful { state_version: 1 },
+            output_port,
+            Some(OperatorCheckpointPort {
+                acks: checkpoint_tx,
+                transaction: None,
+                terminal: None,
+                alignment_fault: None,
+            }),
+            None,
+        );
+        start(&mut harness).await;
+        let sender = harness.inputs.get_mut("input").unwrap();
+        sender
+            .send(StreamMessage::barrier(crate::Epoch::INITIAL))
+            .await
+            .unwrap();
+        sender.send(StreamMessage::end_of_input()).await.unwrap();
+        let report = harness.supervisor.join_all().await;
+        assert_eq!(report.errors.len(), 1);
+        assert!(
+            report.errors[0]
+                .error
+                .to_string()
+                .contains("checkpoint preparation failed")
         );
         assert!(checkpoint_rx.recv().await.is_none());
         assert!(harness.outputs[0].recv().await.unwrap().is_none());

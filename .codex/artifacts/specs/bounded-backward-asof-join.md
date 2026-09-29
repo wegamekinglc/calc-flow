@@ -152,7 +152,8 @@
   replayable sources、sink 证明和稳定 managed checkpoint 根用于恢复验收。
   `collect`/`compute`/batch 编译必须明确拒绝 ASOF。
 - **FR22 - Capability 与 lowering。** 新 capability 必须证明 stream-only、精确端口、
-  `checkpointed_stateful`、state version/layout=1、`group_final_append_only`、
+  `checkpointed_stateful`、外层 capability state version=1（当前内部 ASOF
+  checkpoint layout/accounting=2，仍可读取版本 1）、`group_final_append_only`、
   requires-watermark、deterministic、replay-safe 和合法切分下 microbatch-invariant。
   任一缺失、伪造或未知版本均 fail closed；`requires_datafusion=True`。
   primitive digest 包含全部语义有序参数，不能和 inner 合并；同 digest 多输出共享一个
@@ -190,8 +191,10 @@
 ## Non-Functional Requirements
 
 - **单一执行引擎。** DataFusion 54 仍是表表达式/SQL 的唯一引擎；经 API note 固定的
-  Rust/Arrow 状态身份和时间选择边界每条最终左行最多提供一个候选，DataFusion
-  执行有界分块的关联、投影和顺序物化。不得先生成所有同 key 区间配对再截取结果，
+  Rust/Arrow 状态身份和时间选择边界每条最终左行最多提供一个候选。流专用 ASOF
+  算子直接从已保留的 Arrow 批次组装有界、按左侧顺序排列的输出列，不引入另一种
+  通用表查询引擎；下游表表达式和 SQL 仍由 DataFusion 执行。
+  不得先生成所有同 key 区间配对再截取结果，
   不得在 Python 重写匹配，不升级 DataFusion 作为前置依赖。原型以精确类型 oracle
   验证 key/sequence 相等与全序、无候选补空、分块预算及输出物化一致。
 - **资源验证。** 固定 1000 key、总计 100000 输入行、60 秒 tolerance、67108864

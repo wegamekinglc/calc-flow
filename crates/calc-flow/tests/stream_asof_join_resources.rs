@@ -418,8 +418,8 @@ fn test_asof_resource_advancing_watermarks_release_history() {
 }
 
 #[test]
-fn test_asof_resource_stalled_right_fails_with_correct_output_prefix() {
-    verify_trace(Trace::Stalled, true);
+fn test_asof_resource_stalled_right_completes_with_columnar_state() {
+    verify_trace(Trace::Stalled, false);
 }
 
 #[test]

@@ -401,17 +401,14 @@ async fn malformed_ipc_body_length_is_rejected_before_body_allocation() {
         .await
         .unwrap();
     let mut snapshot = op.checkpoint(Epoch::INITIAL).unwrap();
-    let segment_id = snapshot.segments.keys().next().unwrap().clone();
+    let segment_id = snapshot
+        .segments
+        .keys()
+        .find(|name| name.starts_with("asof-batch-"))
+        .unwrap()
+        .clone();
     let mut bytes = snapshot.segments[&segment_id].bytes().to_vec();
-    let mut cursor = 32;
-    for _ in 0..2 {
-        let length = usize::try_from(u64::from_le_bytes(
-            bytes[cursor..cursor + 8].try_into().unwrap(),
-        ))
-        .unwrap();
-        cursor += 8 + length;
-    }
-    cursor += 8;
+    let mut cursor = 0;
     loop {
         assert_eq!(&bytes[cursor..cursor + 4], &[255; 4]);
         let metadata_length =
@@ -705,17 +702,14 @@ async fn malformed_ipc_schema_is_rejected_before_arrow_schema_conversion() {
         .await
         .unwrap();
     let mut snapshot = op.checkpoint(Epoch::INITIAL).unwrap();
-    let segment_id = snapshot.segments.keys().next().unwrap().clone();
+    let segment_id = snapshot
+        .segments
+        .keys()
+        .find(|name| name.starts_with("asof-batch-"))
+        .unwrap()
+        .clone();
     let mut bytes = snapshot.segments[&segment_id].bytes().to_vec();
-    let mut cursor = 32;
-    for _ in 0..2 {
-        let length = usize::try_from(u64::from_le_bytes(
-            bytes[cursor..cursor + 8].try_into().unwrap(),
-        ))
-        .unwrap();
-        cursor += 8 + length;
-    }
-    let start = cursor + 16;
+    let start = 8;
     let message = datafusion::arrow::ipc::root_as_message(&bytes[start..]).unwrap();
     let schema = message.header_as_schema().unwrap();
     let table = start + schema._tab.loc();
@@ -760,16 +754,9 @@ fn nested_payload_without_bounded_materialization_accounting_is_rejected() {
     ));
 }
 
-#[tokio::test]
-async fn flat_payload_types_roundtrip_through_checkpoint_and_datafusion() {
-    use calc_flow::{Batch, BatchMetadata, Epoch, StreamAsofJoinOperator};
-    use datafusion::arrow::{
-        array::new_null_array,
-        datatypes::{DataType, Field, IntervalUnit, Schema, TimeUnit},
-        record_batch::RecordBatch,
-    };
-    use std::sync::Arc;
-    let types = vec![
+fn flat_payload_types() -> Vec<datafusion::arrow::datatypes::DataType> {
+    use datafusion::arrow::datatypes::{DataType, IntervalUnit, TimeUnit};
+    vec![
         DataType::Null,
         DataType::Boolean,
         DataType::Int8,
@@ -803,7 +790,52 @@ async fn flat_payload_types_roundtrip_through_checkpoint_and_datafusion() {
         DataType::Binary,
         DataType::LargeBinary,
         DataType::FixedSizeBinary(7),
-    ];
+    ]
+}
+
+fn sample_flat_payload_column(
+    data_type: &datafusion::arrow::datatypes::DataType,
+) -> datafusion::arrow::array::ArrayRef {
+    use datafusion::arrow::{
+        array::{
+            ArrayRef, BinaryArray, Decimal128Array, FixedSizeBinaryArray, IntervalYearMonthArray,
+            LargeStringArray, StringArray, new_null_array,
+        },
+        datatypes::{DataType, IntervalUnit},
+    };
+    use std::sync::Arc;
+    match data_type {
+        DataType::Interval(IntervalUnit::YearMonth) => {
+            Arc::new(IntervalYearMonthArray::from(vec![Some(14)])) as ArrayRef
+        }
+        DataType::Decimal128(38, 2) => Arc::new(
+            Decimal128Array::from(vec![Some(12_345)])
+                .with_precision_and_scale(38, 2)
+                .unwrap(),
+        ),
+        DataType::Utf8 => Arc::new(StringArray::from(vec![Some("alpha")])),
+        DataType::LargeUtf8 => Arc::new(LargeStringArray::from(vec![Some("long-alpha")])),
+        DataType::Binary => Arc::new(BinaryArray::from_opt_vec(vec![Some(&b"bytes"[..])])),
+        DataType::FixedSizeBinary(7) => Arc::new(
+            FixedSizeBinaryArray::try_from_sparse_iter_with_size(
+                vec![Some(*b"payload")].into_iter(),
+                7,
+            )
+            .unwrap(),
+        ),
+        _ => new_null_array(data_type, 1),
+    }
+}
+
+#[tokio::test]
+async fn flat_payload_types_roundtrip_through_checkpoint_and_arrow_output() {
+    use calc_flow::{Batch, BatchMetadata, Epoch, StreamAsofJoinOperator};
+    use datafusion::arrow::{
+        datatypes::{DataType, Field, IntervalUnit, Schema},
+        record_batch::RecordBatch,
+    };
+    use std::sync::Arc;
+    let types = flat_payload_types();
     let base = batch(&[("A", 100, -1, 8)]);
     let record = &base.table_payload().unwrap().batches()[0];
     let fields = record
@@ -824,7 +856,7 @@ async fn flat_payload_types_roundtrip_through_checkpoint_and_datafusion() {
         .columns()
         .iter()
         .cloned()
-        .chain(types.iter().map(|data_type| new_null_array(data_type, 1)))
+        .chain(types.iter().map(sample_flat_payload_column))
         .collect();
     let input = Batch::table(
         vec![RecordBatch::try_new(schema.clone(), columns).unwrap()],
@@ -846,6 +878,31 @@ async fn flat_payload_types_roundtrip_through_checkpoint_and_datafusion() {
     op.reset().unwrap();
     op.restore(&snapshot).unwrap();
     op.on_end(&cx, &mut out).await.unwrap();
+    let emitted = out.drain("output");
+    assert_eq!(emitted.len(), 1);
+    let output = &emitted[0]
+        .as_data()
+        .unwrap()
+        .table_payload()
+        .unwrap()
+        .batches()[0];
+    let source = &input.table_payload().unwrap().batches()[0];
+    let source_fields = source.num_columns();
+    for (index, data_type) in types.iter().enumerate() {
+        if matches!(
+            data_type,
+            DataType::Interval(IntervalUnit::YearMonth)
+                | DataType::Decimal128(38, 2)
+                | DataType::Utf8
+                | DataType::LargeUtf8
+                | DataType::Binary
+                | DataType::FixedSizeBinary(7)
+        ) {
+            let column = source.column(4 + index).to_data();
+            assert_eq!(output.column(4 + index).to_data(), column);
+            assert_eq!(output.column(source_fields + 4 + index).to_data(), column);
+        }
+    }
     assert_eq!(op.status().matched_rows, 1);
     assert_eq!(op.status().state_bytes, 0);
 }
@@ -861,21 +918,15 @@ async fn a_second_ipc_schema_is_rejected_before_arrow_conversion() {
         .await
         .unwrap();
     let mut snapshot = op.checkpoint(Epoch::INITIAL).unwrap();
-    let segment_id = snapshot.segments.keys().next().unwrap().clone();
+    let segment_id = snapshot
+        .segments
+        .keys()
+        .find(|name| name.starts_with("asof-batch-"))
+        .unwrap()
+        .clone();
     let mut bytes = snapshot.segments[&segment_id].bytes().to_vec();
-    let mut cursor = 32;
-    for _ in 0..2 {
-        let length = usize::try_from(u64::from_le_bytes(
-            bytes[cursor..cursor + 8].try_into().unwrap(),
-        ))
-        .unwrap();
-        cursor += 8 + length;
-    }
-    let payload_length = u64::from_le_bytes(bytes[cursor..cursor + 8].try_into().unwrap());
-    let start = cursor + 8;
-    let schema_length =
-        8 + u32::from_le_bytes(bytes[start + 4..start + 8].try_into().unwrap()) as usize;
-    let mut malicious = bytes[start..start + schema_length].to_vec();
+    let schema_length = 8 + u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+    let mut malicious = bytes[..schema_length].to_vec();
     let message = datafusion::arrow::ipc::root_as_message(&malicious[8..]).unwrap();
     let schema = message.header_as_schema().unwrap();
     let table = 8 + schema._tab.loc();
@@ -883,9 +934,7 @@ async fn a_second_ipc_schema_is_rejected_before_arrow_conversion() {
     let vtable = usize::try_from(i64::try_from(table).unwrap() - i64::from(distance)).unwrap();
     let entry = vtable + usize::from(datafusion::arrow::ipc::Schema::VT_FIELDS);
     malicious[entry..entry + 2].fill(0);
-    bytes[cursor..cursor + 8]
-        .copy_from_slice(&(payload_length + schema_length as u64).to_le_bytes());
-    bytes.splice(start + schema_length..start + schema_length, malicious);
+    bytes.splice(schema_length..schema_length, malicious);
     snapshot
         .segments
         .insert(segment_id, StateSegment::new(bytes));

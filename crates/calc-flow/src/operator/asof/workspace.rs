@@ -1,8 +1,8 @@
 use super::{StreamAsofJoinOperator, checked, reason};
-use crate::{Batch, Result, StreamingFailureReason};
+use crate::{Batch, CalcFlowError, Result, StreamingFailureReason};
 use datafusion::{
     arrow::{
-        array::ArrayRef,
+        array::{ArrayRef, BinaryArray, LargeBinaryArray, LargeStringArray, StringArray},
         datatypes::{DataType, Schema},
         record_batch::RecordBatch,
     },
@@ -19,11 +19,13 @@ const SCHEMA_ENVELOPE_BYTES: u64 = 256;
 const SCHEMA_FIELD_BYTES: u64 = 192;
 /// Per-entry headroom for schema custom metadata inside the flatbuffer.
 const SCHEMA_METADATA_ENTRY_BYTES: u64 = 64;
-/// Field-node and buffer-directory entries for one column in the per-row
+/// Field-node and buffer-directory entries for one column in a legacy row
 /// record message, plus IPC alignment slack on top of the slice bytes.
+#[cfg(test)]
 const COLUMN_FRAMING_BYTES: u64 = 48;
-/// Per-row record-message envelope: continuation, metadata length, message
+/// Legacy per-row record-message envelope: continuation, metadata length, message
 /// flatbuffer padding, and the end-of-stream marker.
+#[cfg(test)]
 const ROW_FRAMING_BYTES: u64 = 96;
 /// Framing headroom for one fixed-width identity encoding on top of the
 /// aligned slice: the Arrow row format adds one non-null marker byte to the
@@ -35,12 +37,75 @@ const FIXED_IDENTITY_FRAMING_BYTES: u64 = 16;
 /// rounding beyond the scaled bytes.
 const STRING_IDENTITY_FRAMING_BYTES: u64 = 64;
 
-/// Allocation-free per-record charge shared by every admitted row: an
-/// arithmetic upper bound on the schema message each per-row IPC encoding
-/// repeats, so an unfittable schema is rejected before any flatbuffer is
-/// materialized.
+/// Allocation-free upper bound on one batch's IPC schema message. A batch
+/// encoding writes this schema once, independent of its accepted row count.
 pub(super) struct PayloadCharge {
     schema_bytes: u64,
+}
+
+/// The fixed part of Arrow's one-row slice charge is identical for every row
+/// in a flat array. Only variable-width values need a row-specific length.
+pub(super) struct ColumnWorkspace {
+    column: ArrayRef,
+    fixed: u64,
+}
+
+impl ColumnWorkspace {
+    pub(super) fn new(column: ArrayRef) -> Result<Self> {
+        let fixed = if column.is_empty() {
+            0
+        } else {
+            column_workspace(&column, 0)?
+                .checked_sub(variable_length(&column, 0)?)
+                .ok_or_else(|| CalcFlowError::Format {
+                    message: "ASOF variable value exceeds Arrow slice workspace".into(),
+                })?
+        };
+        Ok(Self { column, fixed })
+    }
+
+    pub(super) fn bytes(&self, row: usize, name: &str) -> Result<u64> {
+        self.fixed
+            .checked_add(variable_length(&self.column, row)?)
+            .ok_or_else(|| {
+                reason(
+                    name,
+                    StreamingFailureReason::AsofCounterOverflow,
+                    "ASOF column workspace arithmetic overflowed",
+                )
+            })
+    }
+}
+
+fn variable_length(column: &ArrayRef, row: usize) -> Result<u64> {
+    let length = match column.data_type() {
+        DataType::Utf8 => column
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("validated Arrow type")
+            .value_length(row)
+            .into(),
+        DataType::LargeUtf8 => column
+            .as_any()
+            .downcast_ref::<LargeStringArray>()
+            .expect("validated Arrow type")
+            .value_length(row),
+        DataType::Binary => column
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .expect("validated Arrow type")
+            .value_length(row)
+            .into(),
+        DataType::LargeBinary => column
+            .as_any()
+            .downcast_ref::<LargeBinaryArray>()
+            .expect("validated Arrow type")
+            .value_length(row),
+        _ => return Ok(0),
+    };
+    u64::try_from(length).map_err(|_| CalcFlowError::Format {
+        message: "negative ASOF variable-length value".into(),
+    })
 }
 
 impl StreamAsofJoinOperator {
@@ -68,12 +133,47 @@ impl StreamAsofJoinOperator {
         batch: &Batch,
         input: super::admission::ValidatedInput,
     ) -> Result<MemoryReservation> {
-        self.reserve_input_rows(
-            batch,
-            input,
-            |_| (),
-            |&(), record, payload, row| row_workspace(payload, record, row, &self.name),
-        )
+        let side = input.side(&self.spec);
+        let mut bytes = 0;
+        for record in batch.table_payload()?.batches() {
+            if record.num_rows() == 0 {
+                continue;
+            }
+            let event_times = super::admission::times(record, side);
+            let _column_scratch = self.reserve_workspace(record.num_columns() as u64 * 512)?;
+            let columns = record
+                .columns()
+                .iter()
+                .cloned()
+                .map(ColumnWorkspace::new)
+                .collect::<Result<Vec<_>>>()?;
+            let mut accepted = 0_u64;
+            let mut raw = 0_u64;
+            for row in 0..record.num_rows() {
+                if input.is_late(event_times.value(row)) {
+                    continue;
+                }
+                accepted = checked(&self.name, accepted, 1)?;
+                for column in &columns {
+                    raw = checked(&self.name, raw, column.bytes(row, &self.name)?)?;
+                }
+            }
+            if accepted == 0 {
+                continue;
+            }
+            let schema = payload_charge(record.schema().as_ref(), &self.name)?.schema_bytes;
+            let estimate = checked(&self.name, schema.saturating_mul(2), raw.saturating_mul(4))?;
+            bytes = checked(
+                &self.name,
+                bytes,
+                checked(
+                    &self.name,
+                    estimate,
+                    accepted.saturating_mul(64).saturating_add(256),
+                )?,
+            )?;
+        }
+        self.reserve_workspace(bytes)
     }
 
     pub(super) fn identity_workspace(
@@ -82,32 +182,24 @@ impl StreamAsofJoinOperator {
         input: super::admission::ValidatedInput,
     ) -> Result<MemoryReservation> {
         let side = input.side(&self.spec);
-        self.reserve_input_rows(
-            batch,
-            input,
-            |record| resolve_identity_columns(record, side),
-            |columns, _, _, row| identity_row_workspace(columns, row, &self.name),
-        )
-    }
-
-    fn reserve_input_rows<C>(
-        &self,
-        batch: &Batch,
-        input: super::admission::ValidatedInput,
-        prepare: impl Fn(&RecordBatch) -> C,
-        charge: impl Fn(&C, &RecordBatch, &PayloadCharge, usize) -> Result<u64>,
-    ) -> Result<MemoryReservation> {
-        let side = input.side(&self.spec);
         let mut bytes = 0;
         for record in batch.table_payload()?.batches() {
-            let payload = payload_charge(record.schema().as_ref(), &self.name)?;
-            let prepared = prepare(record);
+            if record.num_rows() == 0 {
+                continue;
+            }
+            let identity_columns = side.keys().len() + side.sequence_by().len();
+            let _column_scratch = self.reserve_workspace(identity_columns as u64 * 512)?;
+            let columns = resolve_identity_columns(record, side)?;
             let event_times = super::admission::times(record, side);
             for row in 0..record.num_rows() {
                 if input.is_late(event_times.value(row)) {
                     continue;
                 }
-                bytes = checked(&self.name, bytes, charge(&prepared, record, &payload, row)?)?;
+                bytes = checked(
+                    &self.name,
+                    bytes,
+                    identity_row_workspace(&columns, row, &self.name)?,
+                )?;
             }
         }
         self.reserve_workspace(bytes)
@@ -148,10 +240,9 @@ fn payload_charge(schema: &Schema, name: &str) -> Result<PayloadCharge> {
     })
 }
 
-/// Allocation-free upper bound on one admitted row's bounded IPC encoding:
-/// the repeated schema-message bound plus the row's slice bytes with IPC
-/// framing and alignment headroom. Charged per row because every retained
-/// row carries its own schema message.
+/// Historical upper bound for a legacy single-row IPC encoding. Kept in the
+/// focused tests as evidence that version 1 row snapshots were bounded.
+#[cfg(test)]
 fn row_workspace(
     payload: &PayloadCharge,
     record: &RecordBatch,
@@ -168,12 +259,12 @@ fn row_workspace(
 
 /// Identity columns resolved once per record batch: the array reference plus
 /// whether the column uses Arrow's blocked string row encoding.
-type ResolvedIdentityColumns = Vec<(ArrayRef, bool)>;
+type ResolvedIdentityColumns = Vec<(ColumnWorkspace, bool)>;
 
 fn resolve_identity_columns(
     record: &RecordBatch,
     side: &super::AsofJoinSide,
-) -> ResolvedIdentityColumns {
+) -> Result<ResolvedIdentityColumns> {
     side.keys()
         .iter()
         .chain(side.sequence_by())
@@ -182,7 +273,7 @@ fn resolve_identity_columns(
                 .column(record.schema().index_of(field).expect("validated schema"))
                 .clone();
             let string = matches!(column.data_type(), DataType::Utf8 | DataType::LargeUtf8);
-            (column, string)
+            Ok((ColumnWorkspace::new(column)?, string))
         })
         .collect()
 }
@@ -198,7 +289,7 @@ fn identity_row_workspace(
 ) -> Result<u64> {
     let mut bytes = IDENTITY_ROW_BYTES;
     for (column, string) in columns {
-        let slice = aligned(column_workspace(column, row)?);
+        let slice = aligned(column.bytes(row, name)?);
         let encoded = if *string {
             checked(
                 name,
@@ -366,6 +457,43 @@ mod tests {
     }
 
     #[test]
+    fn cached_column_workspace_matches_arrow_slice_charge() {
+        use datafusion::arrow::array::{BinaryArray, BooleanArray};
+
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(BooleanArray::from(vec![
+                Some(true),
+                None,
+                Some(false),
+                Some(true),
+            ])),
+            Arc::new(StringArray::from(vec![
+                Some("short"),
+                None,
+                Some(&"x".repeat(48_000)),
+                Some(""),
+            ])),
+            Arc::new(BinaryArray::from(vec![
+                Some(b"a".as_slice()),
+                None,
+                Some(b"many bytes".as_slice()),
+                Some(b"".as_slice()),
+            ])),
+        ];
+        for column in columns {
+            for sliced in [column.clone(), column.slice(1, 3)] {
+                let cached = ColumnWorkspace::new(sliced.clone()).unwrap();
+                for row in 0..sliced.len() {
+                    assert_eq!(
+                        cached.bytes(row, "asof").unwrap(),
+                        column_workspace(&sliced, row).unwrap()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn row_workspace_bounds_the_actual_encoded_row_bytes() {
         for record in [repro_record(8), wide_string_record(), metadata_record()] {
             let payload = payload_charge(record.schema().as_ref(), "asof").unwrap();
@@ -399,7 +527,7 @@ mod tests {
     fn identity_row_workspace_bounds_the_actual_identity_encodings() {
         let record = repro_record(8);
         let side = repro_side();
-        let columns = resolve_identity_columns(&record, &side);
+        let columns = resolve_identity_columns(&record, &side).unwrap();
         for row in 0..record.num_rows() {
             let charge = identity_row_workspace(&columns, row, "asof").unwrap();
             let actual = state::encoded_columns(&record, row, side.keys())
@@ -423,7 +551,7 @@ mod tests {
         let side = repro_side();
         for length in (0..=260_usize).chain([1_000, 4_096, 48_000, 100_000]) {
             let record = string_key_record(length);
-            let columns = resolve_identity_columns(&record, &side);
+            let columns = resolve_identity_columns(&record, &side).unwrap();
             let charge = identity_row_workspace(&columns, 0, "asof").unwrap();
             let actual = state::encoded_columns(&record, 0, side.keys())
                 .unwrap()

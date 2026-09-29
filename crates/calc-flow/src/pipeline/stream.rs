@@ -489,6 +489,23 @@ impl CompiledStreamOperator {
         }
     }
 
+    pub(crate) async fn prepare_checkpoint_async(
+        &mut self,
+        context: &crate::StreamOperatorContext<'_>,
+    ) -> Result<()> {
+        match self {
+            Self::External(operator) => operator.prepare_checkpoint_async(context).await,
+            Self::Expression(operator) => operator.prepare_checkpoint_async(context).await,
+            Self::Sql(operator) => operator.prepare_checkpoint_async(context).await,
+            Self::Union(operator) => operator.prepare_checkpoint_async(context).await,
+            Self::Window(operator) => operator.prepare_checkpoint_async(context).await,
+            Self::Rolling(operator) => operator.prepare_checkpoint_async(context).await,
+            Self::CrossSection(operator) => operator.prepare_checkpoint_async(context).await,
+            Self::StreamJoin(operator) => operator.prepare_checkpoint_async(context).await,
+            Self::StreamAsofJoin(operator) => operator.prepare_checkpoint_async(context).await,
+        }
+    }
+
     #[allow(
         dead_code,
         reason = "M5 barrier coordination calls the M4 lifecycle dispatch seam"

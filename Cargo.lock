@@ -556,6 +556,7 @@ name = "calc-flow"
 version = "2026.9.25"
 dependencies = [
  "allocation-counter",
+ "arrow-data",
  "async-trait",
  "chrono",
  "command-group",
