@@ -27,6 +27,12 @@ impl PreparedPrefix {
 }
 
 impl StreamAsofJoinOperator {
+    #[tracing::instrument(
+        name = "asof.prefix_commit",
+        level = "debug",
+        skip_all,
+        fields(operator = %self.name, rows = keys.len())
+    )]
     pub(super) async fn commit_prefix_output(
         &mut self,
         keys: &[LeftOrder],

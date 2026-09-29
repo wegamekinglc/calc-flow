@@ -86,6 +86,12 @@ impl StreamAsofJoinOperator {
         Ok(())
     }
 
+    #[tracing::instrument(
+        name = "asof.admission",
+        level = "debug",
+        skip_all,
+        fields(operator = %self.name, side = input.index, rows = batch.num_rows())
+    )]
     pub(super) async fn prepare_admission(
         &mut self,
         input: ValidatedInput,

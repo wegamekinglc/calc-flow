@@ -19,6 +19,12 @@ struct PreparedOutput {
 }
 
 impl StreamAsofJoinOperator {
+    #[tracing::instrument(
+        name = "asof.finalize",
+        level = "debug",
+        skip_all,
+        fields(operator = %self.name, frontier, ended)
+    )]
     pub(super) async fn finalize(
         &mut self,
         frontier: Option<i64>,
@@ -116,6 +122,12 @@ impl StreamAsofJoinOperator {
         Ok(status)
     }
 
+    #[tracing::instrument(
+        name = "asof.sweep",
+        level = "debug",
+        skip_all,
+        fields(operator = %self.name, frontier, ended)
+    )]
     async fn finish_progress(
         &mut self,
         frontier: Option<i64>,
@@ -173,6 +185,12 @@ impl StreamAsofJoinOperator {
         }
     }
 
+    #[tracing::instrument(
+        name = "asof.output",
+        level = "debug",
+        skip_all,
+        fields(operator = %self.name, rows = keys.len())
+    )]
     async fn output_attempt(
         &mut self,
         keys: &[LeftOrder],
