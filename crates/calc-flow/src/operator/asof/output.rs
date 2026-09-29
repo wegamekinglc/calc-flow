@@ -6,7 +6,8 @@ use arrow_data::transform::MutableArrayData;
 use datafusion::execution::memory_pool::MemoryReservation;
 use datafusion::{
     arrow::{
-        array::{ArrayRef, make_array, new_null_array},
+        array::{Array, ArrayRef, make_array, new_null_array},
+        compute::interleave,
         datatypes::SchemaRef,
         record_batch::RecordBatch,
     },
@@ -73,18 +74,16 @@ impl OutputRuntime {
 }
 
 #[derive(Clone, Copy)]
-enum Span {
-    Values {
-        source: usize,
-        start: usize,
-        end: usize,
-    },
-    Nulls(usize),
+struct Span {
+    source: usize,
+    start: usize,
+    end: usize,
 }
 
 struct GatherPlan {
     batches: Vec<Arc<PayloadBatch>>,
     spans: Vec<Span>,
+    positions: Option<Vec<(usize, usize)>>,
 }
 
 impl GatherPlan {
@@ -95,14 +94,14 @@ impl GatherPlan {
         let mut batches = Vec::new();
         let mut by_key = BTreeMap::<BatchKey, usize>::new();
         let mut spans = Vec::new();
+        let mut positions = right.then(Vec::new);
         for (left, candidate) in rows {
             let selected = if right { candidate } else { Some(left) };
             let Some(row) = selected else {
-                if let Some(Span::Nulls(len)) = spans.last_mut() {
-                    *len += 1;
-                } else {
-                    spans.push(Span::Nulls(1));
-                }
+                positions
+                    .as_mut()
+                    .expect("only right rows can be null")
+                    .push((usize::MAX, 0));
                 continue;
             };
             let source = match by_key.entry(row.batch.key) {
@@ -114,7 +113,9 @@ impl GatherPlan {
                     source
                 }
             };
-            if let Some(Span::Values {
+            if let Some(positions) = positions.as_mut() {
+                positions.push((source, row.row));
+            } else if let Some(Span {
                 source: previous,
                 end,
                 ..
@@ -124,14 +125,25 @@ impl GatherPlan {
             {
                 *end += 1;
             } else {
-                spans.push(Span::Values {
+                spans.push(Span {
                     source,
                     start: row.row,
                     end: row.row + 1,
                 });
             }
         }
-        Self { batches, spans }
+        if let Some(positions) = positions.as_mut() {
+            for (source, _) in positions.iter_mut() {
+                if *source == usize::MAX {
+                    *source = batches.len();
+                }
+            }
+        }
+        Self {
+            batches,
+            spans,
+            positions,
+        }
     }
 
     fn column(
@@ -139,25 +151,37 @@ impl GatherPlan {
         index: usize,
         data_type: &datafusion::arrow::datatypes::DataType,
         len: usize,
-    ) -> ArrayRef {
+    ) -> Result<ArrayRef> {
         if self.batches.is_empty() {
-            return new_null_array(data_type, len);
+            return Ok(new_null_array(data_type, len));
+        }
+        if let Some(positions) = &self.positions {
+            let columns = self
+                .batches
+                .iter()
+                .map(|batch| batch.record.column(index).as_ref())
+                .collect::<Vec<&dyn Array>>();
+            let null_column = positions
+                .iter()
+                .any(|(source, _)| *source == self.batches.len())
+                .then(|| new_null_array(data_type, 1));
+            let mut columns = columns;
+            if let Some(null_column) = null_column.as_ref() {
+                columns.push(null_column.as_ref());
+            }
+            return interleave(&columns, positions).map_err(|error| super::arrow_error(&error));
         }
         let data = self
             .batches
             .iter()
             .map(|batch| batch.record.column(index).to_data())
             .collect::<Vec<_>>();
-        let nullable = self.spans.iter().any(|span| matches!(span, Span::Nulls(_)))
-            || data.iter().any(|data| data.nulls().is_some());
+        let nullable = data.iter().any(|data| data.nulls().is_some());
         let mut mutable = MutableArrayData::new(data.iter().collect(), nullable, len);
         for span in &self.spans {
-            match *span {
-                Span::Values { source, start, end } => mutable.extend(source, start, end),
-                Span::Nulls(count) => mutable.extend_nulls(count),
-            }
+            mutable.extend(span.source, span.start, span.end);
         }
-        make_array(mutable.freeze())
+        Ok(make_array(mutable.freeze()))
     }
 }
 
@@ -184,9 +208,9 @@ fn materialize_plans(
     let mut columns = Vec::with_capacity(schema.fields().len());
     for (index, field) in schema.fields().iter().enumerate() {
         let column = if index < left_fields {
-            left.column(index, field.data_type(), len)
+            left.column(index, field.data_type(), len)?
         } else {
-            right.column(index - left_fields, field.data_type(), len)
+            right.column(index - left_fields, field.data_type(), len)?
         };
         columns.push(column);
     }
