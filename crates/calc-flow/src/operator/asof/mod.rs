@@ -174,32 +174,6 @@ impl StreamAsofJoinOperator {
         .await
         .map_err(|error| self.attempt_error(error))
     }
-    /// Recomputes the candidate's retained row and shared batch charge.
-    fn checked_inventory(
-        &self,
-        state: &State,
-        prepared: Option<&checkpoint::PreparedSegment>,
-        status: &mut StreamAsofJoinStatus,
-    ) -> Result<()> {
-        let inventory = state.inventory(prepared, &self.name)?;
-        self.check_inventory_values(state, inventory, status)
-    }
-
-    fn check_inventory_values(
-        &self,
-        state: &State,
-        inventory: Inventory,
-        status: &mut StreamAsofJoinStatus,
-    ) -> Result<()> {
-        self.check_inventory_limits(&inventory)?;
-        status.pending_left_rows = state.left.len() as u64;
-        status.retained_right_rows = inventory.right_payloads;
-        status.identity_only_rows = inventory.identity_only;
-        status.state_rows = inventory.identities;
-        status.state_bytes = inventory.bytes;
-        Ok(())
-    }
-
     fn check_inventory_limits(&self, inventory: &Inventory) -> Result<()> {
         if inventory.identities > self.spec.limits().max_state_rows()
             || inventory.bytes > self.spec.limits().max_state_bytes()
@@ -211,24 +185,6 @@ impl StreamAsofJoinOperator {
             ));
         }
         Ok(())
-    }
-
-    /// Installs a prepared candidate transactionally: state, status and the
-    /// encoded segment swap in together. `swept` records that the candidate
-    /// was eviction-swept under the installed status watermarks, letting
-    /// progress-only watermark ticks skip re-encoding.
-    fn install(
-        &mut self,
-        state: State,
-        status: StreamAsofJoinStatus,
-        prepared: checkpoint::PreparedCheckpoint,
-        swept: bool,
-    ) {
-        self.swept = swept.then(|| SweepStamp::current(&status));
-        self.state = state;
-        self.status = status;
-        self.prepared = prepared.segment;
-        self.deferred_index_len = None;
     }
 
     fn attempt_error(&mut self, error: CalcFlowError) -> CalcFlowError {

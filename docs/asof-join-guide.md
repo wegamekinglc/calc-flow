@@ -218,13 +218,14 @@ are not withdrawn.
 
 Native Rust/Arrow indexes choose at most one candidate per left row. Candidate
 rows are gathered directly from retained Arrow batches in final left-row order;
-consecutive source rows are copied as spans on a blocking worker. This is
+consecutive left source rows are copied as spans, while right candidates are
+assembled with Arrow interleave on a blocking worker. This is
 the stream-only ASOF operator's output assembly; DataFusion remains the SQL and
 table-expression engine. Python only declares and lowers
 the graph. Admission encodes each accepted payload batch once, then updates the
 projected index length from the new identities. The index allocation is
 preflighted and charged immediately; canonical index bytes are written during
-asynchronous checkpoint preparation or an eviction sweep. The synchronous
+checkpoint preparation. The synchronous
 runtime capture shares the prepared bytes. The index stores identities
 and batch-row references; immutable batch segments are shared across captures.
 Direct calls to `checkpoint()` can synchronously prepare the index; the managed
@@ -242,10 +243,12 @@ its checkpoint still contains the accepted output prefix and every remaining
 pending row.
 
 Admission preflights exact incremental identity, batch and index charges before
-synchronously installing new rows; it does not clone the retained maps. A
-right-side eviction sweep still clones state and rebuilds the index in
-`O(retained identities)`; both paths reuse unchanged Arrow batch segments. This does
-not turn state limits into a process RSS bound. The output edge and workspace
+synchronously installing new rows. An eviction sweep preflights its row, shared
+batch, and index deltas before changing state in place; it defers index encoding
+until checkpoint preparation. A tick with nothing to evict uses cached minimum
+right-side times, while a sweep that changes state still traverses retained
+right buckets. Both paths reuse unchanged Arrow batch segments. This does not
+turn state limits into a process RSS bound. The output edge and workspace
 budgets continue to bound each emitted chunk. No
 throughput or latency guarantee follows from the configured resource bounds.
 See the [ASOF benchmark boundary and workloads](benchmark-suite.md#asof-settlement-measurements)

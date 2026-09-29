@@ -231,7 +231,90 @@ pub(super) struct Inventory {
     pub bytes: u64,
 }
 
+#[derive(Default)]
+pub(super) struct EvictionPreview {
+    pub evicted_payloads: u64,
+    pub removed_identities: u64,
+    pub added_identity_only: u64,
+    pub removed_identity_only: u64,
+    pub released_state_bytes: u64,
+    pub removed_index_bytes: u64,
+}
+
 impl State {
+    /// Compute all status and index deltas before the infallible sweep commits.
+    pub fn preview_eviction(
+        &self,
+        status: &super::StreamAsofJoinStatus,
+        tolerance: u64,
+        name: &str,
+    ) -> Result<EvictionPreview> {
+        let threshold = retention_threshold(self, status);
+        let mut preview = EvictionPreview::default();
+        let mut removed_batch_refs = BTreeMap::<BatchKey, usize>::new();
+        for (key, bucket) in &self.right {
+            let mut survivors = 0;
+            for ((time, sequence), row) in bucket {
+                let expired_payload = row.is_some() && payload_expired(*time, tolerance, threshold);
+                let remove = if row.is_some() {
+                    expired_payload && identity_expired(*time, status)
+                } else {
+                    identity_expired(*time, status)
+                };
+                if expired_payload {
+                    preview.evicted_payloads = super::checked(name, preview.evicted_payloads, 1)?;
+                    let payload = row.as_ref().expect("expired ASOF payload");
+                    *removed_batch_refs.entry(payload.batch.key).or_default() += 1;
+                    if !remove {
+                        preview.added_identity_only =
+                            super::checked(name, preview.added_identity_only, 1)?;
+                        preview.released_state_bytes = super::checked(
+                            name,
+                            preview.released_state_bytes,
+                            payload_allocation(payload),
+                        )?;
+                        preview.removed_index_bytes =
+                            super::checked(name, preview.removed_index_bytes, 17)?;
+                    }
+                }
+                if remove {
+                    preview.removed_identities =
+                        super::checked(name, preview.removed_identities, 1)?;
+                    if row.is_none() {
+                        preview.removed_identity_only =
+                            super::checked(name, preview.removed_identity_only, 1)?;
+                    }
+                    preview.released_state_bytes = super::checked(
+                        name,
+                        preview.released_state_bytes,
+                        right_row_charge(sequence, row.as_ref()),
+                    )?;
+                    preview.removed_index_bytes = super::checked(
+                        name,
+                        preview.removed_index_bytes,
+                        17 + sequence.len() as u64 + if row.is_some() { 17 } else { 0 },
+                    )?;
+                } else {
+                    survivors += 1;
+                }
+            }
+            if survivors == 0 {
+                preview.released_state_bytes =
+                    super::checked(name, preview.released_state_bytes, encoding_allocation(key))?;
+                preview.removed_index_bytes =
+                    super::checked(name, preview.removed_index_bytes, 16 + key.len() as u64)?;
+            }
+        }
+        for (key, removed) in removed_batch_refs {
+            let (batch, references) = &self.batches[&key];
+            if removed == *references {
+                preview.released_state_bytes =
+                    super::checked(name, preview.released_state_bytes, batch_allocation(batch))?;
+            }
+        }
+        Ok(preview)
+    }
+
     /// Charge each retained Arrow batch once, alongside its row indexes.
     pub fn inventory(
         &self,
@@ -419,6 +502,41 @@ fn right_row_charge(sequence: &Encoding, row: Option<&RowPayload>) -> u64 {
     RIGHT_IDENTITY_BYTES + encoding_allocation(sequence) + row.map_or(0, payload_allocation)
 }
 
+impl Inventory {
+    fn charge_left(
+        &mut self,
+        key: &Encoding,
+        sequence: &Encoding,
+        row: &RowPayload,
+        name: &str,
+    ) -> Result<()> {
+        self.identities = super::checked(name, self.identities, 1)?;
+        self.bytes = super::checked(name, self.bytes, left_row_charge(key, sequence, row))?;
+        Ok(())
+    }
+
+    fn charge_right(
+        &mut self,
+        sequence: &Encoding,
+        row: Option<&RowPayload>,
+        name: &str,
+    ) -> Result<()> {
+        self.identities = super::checked(name, self.identities, 1)?;
+        self.bytes = super::checked(name, self.bytes, right_row_charge(sequence, row))?;
+        if row.is_some() {
+            self.right_payloads = super::checked(name, self.right_payloads, 1)?;
+        } else {
+            self.identity_only = super::checked(name, self.identity_only, 1)?;
+        }
+        Ok(())
+    }
+
+    fn charge_allocation(&mut self, bytes: &Encoding, name: &str) -> Result<()> {
+        self.bytes = super::checked(name, self.bytes, encoding_allocation(bytes))?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod eviction_minima_tests {
     use super::*;
@@ -453,6 +571,10 @@ mod eviction_minima_tests {
         status.left.watermark_micros = Some(EventTime::from_micros(11));
         status.right.watermark_micros = Some(EventTime::from_micros(11));
         assert!(eviction_pending(&state, &status, 0));
+        let preview = state.preview_eviction(&status, 0, "asof").unwrap();
+        assert_eq!(preview.evicted_payloads, 1);
+        assert_eq!(preview.removed_identities, 1);
+        assert_eq!(preview.removed_index_bytes, 35);
         assert_eq!(state.evict(&status, 0), 1);
         assert_eq!(state.right_payload_min, None);
         assert_eq!(state.right_identity_min, Some(12));
@@ -461,40 +583,5 @@ mod eviction_minima_tests {
         assert_eq!(state.evict(&status, 0), 0);
         assert_eq!(state.right_identity_min, None);
         assert!(!eviction_pending(&state, &status, 0));
-    }
-}
-
-impl Inventory {
-    fn charge_left(
-        &mut self,
-        key: &Encoding,
-        sequence: &Encoding,
-        row: &RowPayload,
-        name: &str,
-    ) -> Result<()> {
-        self.identities = super::checked(name, self.identities, 1)?;
-        self.bytes = super::checked(name, self.bytes, left_row_charge(key, sequence, row))?;
-        Ok(())
-    }
-
-    fn charge_right(
-        &mut self,
-        sequence: &Encoding,
-        row: Option<&RowPayload>,
-        name: &str,
-    ) -> Result<()> {
-        self.identities = super::checked(name, self.identities, 1)?;
-        self.bytes = super::checked(name, self.bytes, right_row_charge(sequence, row))?;
-        if row.is_some() {
-            self.right_payloads = super::checked(name, self.right_payloads, 1)?;
-        } else {
-            self.identity_only = super::checked(name, self.identity_only, 1)?;
-        }
-        Ok(())
-    }
-
-    fn charge_allocation(&mut self, bytes: &Encoding, name: &str) -> Result<()> {
-        self.bytes = super::checked(name, self.bytes, encoding_allocation(bytes))?;
-        Ok(())
     }
 }

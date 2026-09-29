@@ -149,19 +149,64 @@ impl StreamAsofJoinOperator {
             self.swept = Some(stamp);
             return Ok(());
         }
-        let workspace = self.state_workspace()?;
-        let mut next = self.state.clone();
+        let workspace = self.reserve_workspace(self.state.batches.len() as u64 * 96)?;
+        let preview =
+            self.state
+                .preview_eviction(&self.status, self.spec.tolerance_micros(), &self.name)?;
         let mut status = self.status.clone();
-        let evicted = next.evict(&status, self.spec.tolerance_micros());
-        status.evicted_right_rows = checked(&self.name, status.evicted_right_rows, evicted)?;
-        let prepared = self.prepare_checkpoint(&next, context).await?;
-        self.checked_inventory(&next, prepared.segment.as_ref(), &mut status)?;
+        status.evicted_right_rows = checked(
+            &self.name,
+            status.evicted_right_rows,
+            preview.evicted_payloads,
+        )?;
+        status.retained_right_rows -= preview.evicted_payloads;
+        status.identity_only_rows = checked(
+            &self.name,
+            status.identity_only_rows,
+            preview.added_identity_only,
+        )? - preview.removed_identity_only;
+        status.state_rows -= preview.removed_identities;
+        let previous_index_len = self
+            .deferred_index_len
+            .or_else(|| self.prepared.as_ref().map(|segment| segment.len() as u64))
+            .expect("nonempty ASOF sweep has an index");
+        let previous_index_bytes = self
+            .prepared
+            .as_ref()
+            .map(|segment| segment.capacity() as u64)
+            .or(self.deferred_index_len)
+            .expect("nonempty ASOF sweep has an index")
+            + 64;
+        let next_index_len = previous_index_len - preview.removed_index_bytes;
+        let next_index_bytes = if status.state_rows == 0 {
+            0
+        } else {
+            next_index_len + 64
+        };
+        status.state_bytes =
+            status.state_bytes - previous_index_bytes - preview.released_state_bytes
+                + next_index_bytes;
         status.output_watermark_micros = frontier
             .and_then(|time| time.checked_sub(1))
             .map(EventTime::from_micros)
             .or(status.output_watermark_micros);
-        self.install(next, status, prepared, true);
+        context.check_cancelled()?;
+        let evicted = self.state.evict(&status, self.spec.tolerance_micros());
+        debug_assert_eq!(evicted, preview.evicted_payloads);
+        self.status = status;
+        self.prepared = None;
+        self.deferred_index_len = (self.status.state_rows > 0).then_some(next_index_len);
+        self.swept = Some(SweepStamp::current(&self.status));
         self.terminal = ended;
+        debug_assert_eq!(
+            self.state
+                .inventory(None, &self.name)
+                .expect("committed ASOF sweep inventory")
+                .bytes
+                + next_index_bytes,
+            self.status.state_bytes,
+            "swept inventory must match committed gauge"
+        );
         drop(workspace);
         Ok(())
     }

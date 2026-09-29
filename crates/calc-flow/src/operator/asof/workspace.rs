@@ -218,25 +218,6 @@ impl StreamAsofJoinOperator {
         }
         Ok(bytes)
     }
-
-    /// Clone headroom for the next transactional candidate, from the
-    /// maintained committed gauges: per-identity headroom plus one
-    /// ordered-map allocation per right bucket.
-    pub(super) fn state_workspace(&self) -> Result<MemoryReservation> {
-        let bytes = self
-            .status
-            .state_rows
-            .checked_mul(IDENTITY_ROW_BYTES)
-            .and_then(|value| value.checked_add(self.state.right.len() as u64 * 64))
-            .ok_or_else(|| {
-                reason(
-                    &self.name,
-                    StreamingFailureReason::AsofCounterOverflow,
-                    "ASOF state clone workspace arithmetic overflowed",
-                )
-            })?;
-        self.reserve_workspace(bytes)
-    }
 }
 
 fn payload_charge(schema: &Schema, name: &str) -> Result<PayloadCharge> {

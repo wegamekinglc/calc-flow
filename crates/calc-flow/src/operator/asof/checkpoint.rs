@@ -29,6 +29,7 @@ const INDEX_SEGMENT: &str = index_v2::INDEX_SEGMENT;
 type IdentityCache =
     BTreeMap<BatchKey, (super::state::EncodedColumns, super::state::EncodedColumns)>;
 
+#[cfg(test)]
 pub(super) struct PreparedCheckpoint {
     pub segment: Option<PreparedSegment>,
     pub _workspace: datafusion::execution::memory_pool::MemoryReservation,
@@ -132,26 +133,7 @@ impl StreamAsofJoinOperator {
         Ok(())
     }
 
-    async fn compact_prepared_async(&mut self, context: &StreamOperatorContext<'_>) -> Result<()> {
-        if let Some(prepared) = self.prepared.as_ref().filter(|view| view.is_drained()) {
-            let workspace = self.reserve_workspace(prepared.len() as u64)?;
-            let retained_capacity = prepared.capacity();
-            let prepared = prepared.clone();
-            context.check_cancelled()?;
-            let canonical = tokio::task::spawn_blocking(move || {
-                let _workspace = workspace;
-                prepared.canonical()
-            })
-            .await
-            .map_err(|error| CalcFlowError::Internal {
-                message: format!("ASOF checkpoint compaction task failed: {error}"),
-            })?;
-            context.check_cancelled()?;
-            self.install_compacted_prepared(canonical, retained_capacity);
-        }
-        Ok(())
-    }
-
+    #[cfg(test)]
     pub(super) async fn prepare_checkpoint(
         &self,
         state: &State,
@@ -171,6 +153,26 @@ impl StreamAsofJoinOperator {
             segment,
             _workspace: workspace,
         })
+    }
+
+    async fn compact_prepared_async(&mut self, context: &StreamOperatorContext<'_>) -> Result<()> {
+        if let Some(prepared) = self.prepared.as_ref().filter(|view| view.is_drained()) {
+            let workspace = self.reserve_workspace(prepared.len() as u64)?;
+            let retained_capacity = prepared.capacity();
+            let prepared = prepared.clone();
+            context.check_cancelled()?;
+            let canonical = tokio::task::spawn_blocking(move || {
+                let _workspace = workspace;
+                prepared.canonical()
+            })
+            .await
+            .map_err(|error| CalcFlowError::Internal {
+                message: format!("ASOF checkpoint compaction task failed: {error}"),
+            })?;
+            context.check_cancelled()?;
+            self.install_compacted_prepared(canonical, retained_capacity);
+        }
+        Ok(())
     }
 
     /// Replaces a drained view with its canonical bytes so the snapshot and
