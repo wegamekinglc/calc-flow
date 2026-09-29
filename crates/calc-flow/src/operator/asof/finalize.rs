@@ -79,10 +79,13 @@ impl StreamAsofJoinOperator {
         let count = self.count_finalizable_keys(limit, frontier, ended, context)?;
         let (count, reservation) = self.reserve_finalizable_keys(count)?;
         let mut keys = Vec::with_capacity(count);
-        for key in self.state.left.keys().take(count) {
-            context.check_cancelled()?;
+        for (index, key) in self.state.left.keys().take(count).enumerate() {
+            if index % 1_024 == 0 {
+                context.check_cancelled()?;
+            }
             keys.push(key.clone());
         }
+        context.check_cancelled()?;
         Ok((keys, reservation))
     }
 
@@ -94,13 +97,16 @@ impl StreamAsofJoinOperator {
         context: &StreamOperatorContext<'_>,
     ) -> Result<usize> {
         let mut count = 0;
-        for (time, _, _) in self.state.left.keys().take(limit) {
-            context.check_cancelled()?;
+        for (index, (time, _, _)) in self.state.left.keys().take(limit).enumerate() {
+            if index % 1_024 == 0 {
+                context.check_cancelled()?;
+            }
             if !ended && frontier.is_none_or(|bound| *time >= bound) {
                 break;
             }
             count += 1;
         }
+        context.check_cancelled()?;
         Ok(count)
     }
 
@@ -242,14 +248,17 @@ impl StreamAsofJoinOperator {
         context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedOutput> {
         let mut rows = Vec::with_capacity(keys.len());
-        for (key, left) in self.state.left.iter().take(keys.len()) {
-            context.check_cancelled()?;
+        for (index, (key, left)) in self.state.left.iter().take(keys.len()).enumerate() {
+            if index % 1_024 == 0 {
+                context.check_cancelled()?;
+            }
             rows.push((
                 left,
                 self.state
                     .candidate(&key.1, key.0, self.spec.tolerance_micros()),
             ));
         }
+        context.check_cancelled()?;
         let matched = rows.iter().filter(|(_, right)| right.is_some()).count() as u64;
         let mut workspace = self.reserve_workspace(16 * 1024)?;
         let bytes = output_workspace(&rows, &self.schemas[1], &mut workspace, &self.name)?;
