@@ -214,7 +214,7 @@ impl StreamAsofJoinOperator {
                     {
                         shared.clone()
                     } else {
-                        let shared = Arc::new(key_bytes.to_vec());
+                        let shared = state::Encoding::from_slice(key_bytes);
                         bucket.push(shared.clone());
                         shared
                     }

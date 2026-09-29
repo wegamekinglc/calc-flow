@@ -483,7 +483,13 @@ mod workspace_tests {
     fn output_retry_releases_key_and_candidate_scratch() {
         let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
         let mut keys = (0..4_096)
-            .map(|time| (time, Arc::new(vec![1]), Arc::new(vec![1])))
+            .map(|time| {
+                (
+                    time,
+                    state::Encoding::from_slice(&[1]),
+                    state::Encoding::from_slice(&[1]),
+                )
+            })
             .collect::<Vec<_>>();
         let reservation = MemoryConsumer::new("asof-test-keys").register(&pool);
         reservation

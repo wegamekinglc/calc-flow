@@ -4,11 +4,106 @@ use datafusion::arrow::{
     row::{RowConverter, Rows, SortField},
 };
 use std::{
+    cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
-    sync::{Arc, LazyLock},
+    hash::{Hash, Hasher},
+    ops::Deref,
+    sync::Arc,
 };
 
-pub(super) type Encoding = Arc<Vec<u8>>;
+const INLINE_ENCODING_BYTES: usize = 10;
+
+/// Canonical Arrow row bytes, with short scalar identities stored inline.
+#[derive(Clone, Debug)]
+pub(super) enum Encoding {
+    Inline {
+        len: u8,
+        bytes: [u8; INLINE_ENCODING_BYTES],
+    },
+    Shared(Arc<Vec<u8>>),
+}
+
+impl Encoding {
+    pub fn from_slice(bytes: &[u8]) -> Self {
+        if bytes.len() <= INLINE_ENCODING_BYTES {
+            let mut inline = [0; INLINE_ENCODING_BYTES];
+            inline[..bytes.len()].copy_from_slice(bytes);
+            Self::Inline {
+                len: u8::try_from(bytes.len()).expect("bounded inline encoding"),
+                bytes: inline,
+            }
+        } else {
+            Self::Shared(Arc::new(bytes.to_vec()))
+        }
+    }
+
+    pub const fn empty() -> Self {
+        Self::Inline {
+            len: 0,
+            bytes: [0; INLINE_ENCODING_BYTES],
+        }
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Inline { len, bytes } => &bytes[..usize::from(*len)],
+            Self::Shared(bytes) => bytes.as_slice(),
+        }
+    }
+
+    pub fn capacity(&self) -> usize {
+        match self {
+            Self::Inline { len, .. } => usize::from(*len),
+            Self::Shared(bytes) => bytes.capacity(),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn is_inline(&self) -> bool {
+        matches!(self, Self::Inline { .. })
+    }
+}
+
+impl AsRef<[u8]> for Encoding {
+    fn as_ref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+impl Deref for Encoding {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+impl PartialEq for Encoding {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl Eq for Encoding {}
+
+impl PartialOrd for Encoding {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Encoding {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.as_slice().cmp(other.as_slice())
+    }
+}
+
+impl Hash for Encoding {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_slice().hash(state);
+    }
+}
+
 pub(super) type LeftOrder = (i64, Encoding, Encoding);
 pub(super) type RightOrder = (i64, Encoding);
 pub(super) type BatchKey = (u8, u64);
@@ -25,8 +120,6 @@ pub(super) struct RowPayload {
     pub batch: Arc<PayloadBatch>,
     pub row: usize,
 }
-
-static EMPTY_ENCODING: LazyLock<Encoding> = LazyLock::new(|| Arc::new(Vec::new()));
 
 #[derive(Clone, Default)]
 pub(super) struct State {
@@ -147,7 +240,7 @@ impl State {
     pub fn candidate(&self, key: &Encoding, time: i64, tolerance: u64) -> Option<&RowPayload> {
         let bucket = self.right.get(key)?;
         let found = if let Some(next) = time.checked_add(1) {
-            bucket.range(..(next, EMPTY_ENCODING.clone())).next_back()
+            bucket.range(..(next, Encoding::empty())).next_back()
         } else {
             bucket.last_key_value()
         }?;
@@ -175,7 +268,7 @@ impl EncodedColumns {
 
     /// Returns the owned encoding of one row.
     pub(super) fn row(&self, row: usize) -> Encoding {
-        self.with_row(row, |bytes| Arc::new(bytes.to_vec()))
+        self.with_row(row, Encoding::from_slice)
     }
 }
 
@@ -557,10 +650,10 @@ mod eviction_minima_tests {
         };
         state.attach(&payload);
         state.right.insert(
-            Arc::new(vec![1]),
+            Encoding::from_slice(&[1]),
             BTreeMap::from([
-                ((10, Arc::new(vec![1])), Some(payload)),
-                ((12, Arc::new(vec![2])), None),
+                ((10, Encoding::from_slice(&[1])), Some(payload)),
+                ((12, Encoding::from_slice(&[2])), None),
             ]),
         );
         state.rebuild_right_minima();
@@ -583,5 +676,21 @@ mod eviction_minima_tests {
         assert_eq!(state.evict(&status, 0), 0);
         assert_eq!(state.right_identity_min, None);
         assert!(!eviction_pending(&state, &status, 0));
+    }
+}
+
+#[cfg(test)]
+mod encoding_tests {
+    use super::Encoding;
+
+    #[test]
+    fn short_sequences_keep_canonical_bytes_without_heap_storage() {
+        assert_eq!(size_of::<Encoding>(), 16);
+        let small = Encoding::from_slice(&[1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        let large = Encoding::from_slice(&[7; 32]);
+        assert!(small.is_inline());
+        assert!(!large.is_inline());
+        assert_eq!(small.as_slice(), &[1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert!(small < large);
     }
 }

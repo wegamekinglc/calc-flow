@@ -390,8 +390,8 @@ impl StreamAsofJoinOperator {
     fn decode_left_row(&self, decoder: &mut Decoder<'_>, state: &mut State) -> Result<()> {
         decoder.row()?;
         let time = decoder.time()?;
-        let key = Arc::new(decoder.blob()?.to_vec());
-        let sequence = Arc::new(decoder.blob()?.to_vec());
+        let key = Encoding::from_slice(decoder.blob()?);
+        let sequence = Encoding::from_slice(decoder.blob()?);
         let bytes = decoder.blob()?;
         let record = self.validate_payload(bytes, false, &(time, key.clone(), sequence.clone()))?;
         let identity = (time, key, sequence);
@@ -414,7 +414,7 @@ impl StreamAsofJoinOperator {
         state: &mut State,
         next_id: &mut u64,
     ) -> Result<()> {
-        let key = Arc::new(decoder.blob()?.to_vec());
+        let key = Encoding::from_slice(decoder.blob()?);
         super::identity::validate(&key, &self.schemas[1], self.spec.right().keys())?;
         if state
             .right
@@ -481,7 +481,7 @@ impl StreamAsofJoinOperator {
     }
 
     fn decode_right_sequence(&self, decoder: &mut Decoder<'_>) -> Result<Encoding> {
-        let sequence = Arc::new(decoder.blob()?.to_vec());
+        let sequence = Encoding::from_slice(decoder.blob()?);
         super::identity::validate(&sequence, &self.schemas[1], self.spec.right().sequence_by())?;
         Ok(sequence)
     }
@@ -1242,9 +1242,9 @@ mod tests {
         let mut operator =
             StreamAsofJoinOperator::new("asof", schema.clone(), schema, spec).unwrap();
         operator.state.right.insert(
-            Arc::new(vec![1]),
+            Encoding::from_slice(&[1]),
             (0..32)
-                .map(|ordinal| ((ordinal, Arc::new(vec![1])), None))
+                .map(|ordinal| ((ordinal, Encoding::from_slice(&[1])), None))
                 .collect(),
         );
         let length = encoded_length(&operator.state, "asof").unwrap();
@@ -1405,12 +1405,13 @@ mod tests {
     #[test]
     fn asof_restore_rejects_identity_only_that_can_still_match_pending() {
         let mut state = State::default();
-        state
-            .left
-            .insert((105, Arc::new(vec![1]), Arc::new(vec![1])), dummy_payload());
+        state.left.insert(
+            (105, Encoding::from_slice(&[1]), Encoding::from_slice(&[1])),
+            dummy_payload(),
+        );
         state.right.insert(
-            Arc::new(vec![1]),
-            BTreeMap::from([((100, Arc::new(vec![1])), None)]),
+            Encoding::from_slice(&[1]),
+            BTreeMap::from([((100, Encoding::from_slice(&[1])), None)]),
         );
         assert!(
             validate_progress(
@@ -1427,9 +1428,10 @@ mod tests {
     #[test]
     fn asof_restore_rejects_ready_pending_before_stale_frontier() {
         let mut state = State::default();
-        state
-            .left
-            .insert((105, Arc::new(vec![1]), Arc::new(vec![1])), dummy_payload());
+        state.left.insert(
+            (105, Encoding::from_slice(&[1]), Encoding::from_slice(&[1])),
+            dummy_payload(),
+        );
         assert!(
             validate_progress(
                 &state,
@@ -1446,8 +1448,8 @@ mod tests {
     fn asof_restore_rejects_expired_identity_only_and_unproven_output_frontier() {
         let mut state = State::default();
         state.right.insert(
-            Arc::new(vec![1]),
-            BTreeMap::from([((100, Arc::new(vec![1])), None)]),
+            Encoding::from_slice(&[1]),
+            BTreeMap::from([((100, Encoding::from_slice(&[1])), None)]),
         );
         assert!(
             validate_progress(&state, 10, false, &progress(Some(1000), Some(101)), None).is_err()

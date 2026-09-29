@@ -295,7 +295,7 @@ impl<'a> Reader<'a> {
     fn blob(&mut self) -> Result<Encoding> {
         let count = usize::try_from(self.integer()?)
             .map_err(|_| mismatch("ASOF index field exceeds address domain"))?;
-        Ok(std::sync::Arc::new(self.take(count)?.to_vec()))
+        Ok(Encoding::from_slice(self.take(count)?))
     }
     fn skip_blob(&mut self) -> Result<()> {
         let count = usize::try_from(self.integer()?)
