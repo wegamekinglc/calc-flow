@@ -15,10 +15,12 @@ from scripts.toolkit import write_json
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def child_environment(site: Path | None = None) -> dict[str, str]:
+def child_environment(
+    site: Path | None = None, *, source: Path = ROOT
+) -> dict[str, str]:
     return {
         **os.environ,
-        "PYTHONPATH": os.pathsep.join(str(p) for p in (site, ROOT) if p is not None),
+        "PYTHONPATH": os.pathsep.join(str(p) for p in (site, source) if p is not None),
         "PYTHONDONTWRITEBYTECODE": "1",
         "TOKIO_WORKER_THREADS": str(THREADS),
         "POLARS_MAX_THREADS": str(THREADS),
@@ -124,7 +126,7 @@ class Worker:
         self.process, self.log = process, log
 
     @classmethod
-    async def start(cls, site: Path, root: Path):
+    async def start(cls, site: Path, root: Path, *, source: Path):
         root.mkdir(parents=True, exist_ok=True)
         log = (root / "stderr.log").open("wb")
         try:
@@ -135,8 +137,8 @@ class Worker:
                 "worker",
                 "--root",
                 str(root),
-                cwd=ROOT,
-                env=child_environment(site),
+                cwd=source,
+                env=child_environment(site, source=source),
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=log,

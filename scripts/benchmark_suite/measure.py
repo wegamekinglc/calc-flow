@@ -13,7 +13,7 @@ from scripts.benchmark_suite.catalog import (
     comparison_kind,
     shard_cases,
 )
-from scripts.benchmark_suite.process import Worker, install
+from scripts.benchmark_suite.process import ROOT, Worker, install
 from scripts.benchmark_suite.provenance import harness_sha256
 from scripts.benchmark_suite.report import ROUNDS, SAMPLES, comparison
 
@@ -80,11 +80,11 @@ def _check_latest_cursors(collected: dict) -> None:
         raise ValueError("warm base/head sample cursors differ")
 
 
-async def _round(case: dict, sites: dict, releases: dict, root: Path) -> dict:
+async def _round(case: dict, workers_by_side: dict, releases: dict, root: Path) -> dict:
     workers = {}
     try:
-        for side, site in sites.items():
-            workers[side] = await Worker.start(site, root / side)
+        for side, (site, source) in workers_by_side.items():
+            workers[side] = await Worker.start(site, root / side, source=source)
         environment = await _prepare(workers, releases, case)
         samples = await _samples(workers)
         completion = {}
@@ -107,9 +107,13 @@ async def _round(case: dict, sites: dict, releases: dict, root: Path) -> dict:
 
 
 async def measure_case(
-    case: dict, kind: str, sites: dict, releases: dict, root: Path
+    case: dict, kind: str, workers_by_side: dict, releases: dict, root: Path
 ) -> dict:
-    selected = sites if kind == "interleaved" else {"candidate": sites["candidate"]}
+    selected = (
+        workers_by_side
+        if kind == "interleaved"
+        else {"candidate": workers_by_side["candidate"]}
+    )
     evidence = []
     try:
         for index in range(ROUNDS):
@@ -154,10 +158,18 @@ async def measure_shard(
 ) -> dict:
     import numpy as np
 
+    from scripts.benchmark_suite.legacy import validate_sources
+
+    if baseline_source is None:
+        raise ValueError("paired comparison requires a baseline source checkout")
+    sources = {"baseline": baseline_source.resolve(), "candidate": ROOT}
+    await validate_sources(sources, releases)
+
     root.mkdir(parents=True, exist_ok=True)
     sites = {
         side: await install(release, root / side) for side, release in releases.items()
     }
+    workers_by_side = {side: (site, sources[side]) for side, site in sites.items()}
     baseline_ids = baseline_case_ids(baseline_source, shard)
     cases = shard_cases(shard)
     report = {
@@ -174,7 +186,9 @@ async def measure_shard(
         case = cases[int(index)]
         print(f"Measuring {case['id']}", flush=True)
         kind = comparison_kind(case, baseline_ids)
-        row = await measure_case(case, kind, sites, releases, root / f"case-{index}")
+        row = await measure_case(
+            case, kind, workers_by_side, releases, root / f"case-{index}"
+        )
         report["cases"].append(row)
         (root / "results.json").write_text(
             json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8"
