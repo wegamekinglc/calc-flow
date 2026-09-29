@@ -8,10 +8,35 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.benchmark_suite.process import child_environment, command
+from scripts.benchmark_suite.process import Worker, child_environment, command
 
 
 class BenchmarkProcessTests(unittest.IsolatedAsyncioTestCase):
+    async def test_worker_runs_workload_from_its_release_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            site = root / "site"
+            site.mkdir()
+            for side in ("baseline", "candidate"):
+                source = root / side
+                package = source / "scripts" / "benchmark_suite"
+                package.mkdir(parents=True)
+                (source / "scripts" / "__init__.py").write_text("")
+                (package / "__init__.py").write_text("")
+                (package / "__main__.py").write_text(
+                    "import json\n"
+                    "import sys\n"
+                    "for line in sys.stdin:\n"
+                    f"    print(json.dumps({{'source': {side!r}}}), flush=True)\n"
+                )
+                worker = await Worker.start(site, root / "runs" / side, source=source)
+                try:
+                    self.assertEqual(
+                        await worker.request(operation="hello"), {"source": side}
+                    )
+                finally:
+                    await worker.close()
+
     async def test_python_command_preserves_the_managed_interpreter_prefix(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

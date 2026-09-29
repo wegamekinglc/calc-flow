@@ -338,8 +338,10 @@ fallback to a different successful run or debug wheel.
 For every Calc Flow engine/warm case:
 
 1. Install both sealed wheels into separate import directories on one runner.
-2. Start a fresh worker pair, verify loaded native hashes, dependencies,
-   machine/thread identities and workload dimensions; warm up outside timing.
+2. Start each worker from the source checkout matching its sealed wheel, so it
+   loads that revision's benchmark adapters. Verify loaded native hashes,
+   dependencies, machine/thread identities and workload dimensions; warm up
+   outside timing.
 3. Collect ten pairs in alternating AB/BA order. Warm workers advance through
    exactly the same input cursors. No forced GC is included in the interval.
 4. Repeat with a fresh worker pair. Retain every original pair; estimate each

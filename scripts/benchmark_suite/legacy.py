@@ -289,13 +289,17 @@ async def validate_sources(roots: dict, releases: dict) -> None:
             raise ValueError(f"{side} source checkout differs from the sealed release")
 
 
-async def observe_workers(sites: dict, releases: dict, output: Path) -> dict:
+async def observe_workers(
+    sites: dict, releases: dict, roots: dict, output: Path
+) -> dict:
     from scripts.benchmark_suite.measure import validate_environment
     from scripts.benchmark_suite.process import Worker
 
     observed = {}
     for side, site in sites.items():
-        worker = await Worker.start(site, output / side / "identity")
+        worker = await Worker.start(
+            site, output / side / "identity", source=roots[side]
+        )
         try:
             observed[side] = validate_environment(
                 await worker.request(operation="hello"), releases[side]
@@ -319,7 +323,7 @@ async def measure_legacy(
 
         return await measure_rust(shard, releases, roots, output)
     sites = await _setup(shard, releases, roots, output)
-    environment = await observe_workers(sites, releases, output)
+    environment = await observe_workers(sites, releases, roots, output)
     blocks = {"baseline": [], "candidate": []}
     report = {
         "contract": CONTRACT,
