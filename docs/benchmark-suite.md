@@ -261,6 +261,26 @@ Keep product refs, benchmark source, compiled dependencies, binary hashes,
 machine identity, and any separately sourced comparison harness with that
 evidence. Do not transfer a measured verdict to a later source or build.
 
+`stream_asof_e2e` measures `operator-admission-settlement` separately from the
+settlement-only target. Each case admits 100,000 rows per side with 64 keys,
+settles the output, and validates every matched row outside timing. The four
+cases are `admit_settle_100k` (64,000-row batches), `eviction_ticks` (1,024-row
+batches with a watermark after each), `out_of_order_within_watermark` (reversed
+rows within each admitted batch), and `composite_key` (two key columns). It
+reports elapsed seconds, total allocated bytes, peak active bytes, and
+allocation count for each invocation. This operator boundary excludes source,
+sink, checkpoint publication, and Python adapter time.
+
+```bash
+cargo bench --locked -p calc-flow --bench stream_asof_e2e -- --output ../../target/asof-e2e.json
+cargo bench --locked -p calc-flow --bench stream_asof_e2e -- --check --output ../../target/asof-e2e-check.json
+```
+
+Normal mode records one correctness oracle and 20 samples per case. Check mode
+records only the oracle. The Rust benchmark adapter requires all four cases and
+retains each timing and allocation observation under the
+`calc-flow.asof-e2e.v1` report contract.
+
 ## Join materialization measurements
 
 `stream_join_materialization` is an independent Rust benchmark target.

@@ -71,3 +71,7 @@ workspace = true
 [[bench]]
 name = "stream_asof_perf"
 harness = false
+
+[[bench]]
+name = "stream_asof_e2e"
+harness = false
