@@ -112,7 +112,18 @@ impl StreamAsofJoinOperator {
         } else {
             self.status.right.accepted_rows
         };
-        let rows = encode_rows(&rows, input.index, base, limit)?;
+        let mut rows = encode_rows(&rows, input.index, base, limit)?;
+        if input.index == 1 && !rows.windows(2).all(|pair| pair[0].0 <= pair[1].0) {
+            // Keep each admitted run ordered so a watermark-local reversal
+            // does not repeatedly shift a whole per-key right vector.
+            rows.sort_unstable_by(|left, right| {
+                left.0
+                    .1
+                    .cmp(&right.0.1)
+                    .then_with(|| left.0.0.cmp(&right.0.0))
+                    .then_with(|| left.0.2.cmp(&right.0.2))
+            });
+        }
         Ok(Admission {
             rows,
             accepted,

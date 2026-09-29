@@ -13,8 +13,8 @@
 
 当前分支已加入 Polars ASOF 外部参考、四个 100k Rust 端到端场景、批次级 tracing，
 以及 watermark 乱序与恢复的随机测试。前缀提交、admission 哈希、右侧 Arrow
-输出、原地驱逐和短 identity 编码已有第一批优化。按驱逐量访问 right 行、延迟 IPC、
-列式状态与 checkpoint v3 仍待实施；
+输出、原地驱逐、短 identity 编码和按 key 的有序 right 数组已有第一批优化。
+按驱逐量访问 right 行、延迟 IPC、left Arrow chunk 与 checkpoint v3 仍待实施；
 阶段结果及最终配对数据将在 PR 描述中记录。
 
 ## 1. 问题与测量

@@ -216,7 +216,8 @@ chooses a worse match to fit a limit. Failed batch admission leaves no partial
 accepted state or corresponding output. Results previously accepted by a sink
 are not withdrawn.
 
-Native Rust/Arrow indexes choose at most one candidate per left row. Candidate
+Native Rust/Arrow indexes keep each right key's identities in time and sequence
+order and choose at most one candidate per left row. Candidate
 rows are gathered directly from retained Arrow batches in final left-row order;
 consecutive left source rows are copied as spans, while right candidates are
 assembled with Arrow interleave on a blocking worker. This is

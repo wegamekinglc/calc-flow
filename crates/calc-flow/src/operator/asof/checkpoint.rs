@@ -5,7 +5,7 @@ mod validation;
 
 use super::{
     StreamAsofJoinOperator, StreamAsofJoinStatus,
-    state::{BatchKey, Encoding, Inventory, PayloadBatch, RightOrder, RowPayload, State},
+    state::{BatchKey, Encoding, Inventory, PayloadBatch, RightBucket, RowPayload, State},
 };
 use crate::{
     CalcFlowError, Epoch, IngressProgressSnapshot, OperatorStateSnapshot, Result, StateSegment,
@@ -427,7 +427,8 @@ impl StreamAsofJoinOperator {
         if count == 0 {
             return Err(mismatch("ASOF empty right bucket is noncanonical"));
         }
-        let mut bucket = BTreeMap::new();
+        let mut bucket =
+            RightBucket::with_capacity(usize::try_from(count).expect("bounded ASOF rows"));
         for _ in 0..count {
             self.decode_right_row(decoder, &key, &mut bucket, state, next_id)?;
         }
@@ -439,7 +440,7 @@ impl StreamAsofJoinOperator {
         &self,
         decoder: &mut Decoder<'_>,
         key: &Encoding,
-        bucket: &mut BTreeMap<RightOrder, Option<RowPayload>>,
+        bucket: &mut RightBucket,
         state: &mut State,
         next_id: &mut u64,
     ) -> Result<()> {
@@ -633,7 +634,7 @@ impl StreamAsofJoinOperator {
     fn validate_right_indexed_bucket(
         &self,
         key: &Encoding,
-        bucket: &BTreeMap<RightOrder, Option<RowPayload>>,
+        bucket: &RightBucket,
         identities: &IdentityCache,
     ) -> Result<()> {
         for ((time, sequence), payload) in bucket {
@@ -1411,7 +1412,7 @@ mod tests {
         );
         state.right.insert(
             Encoding::from_slice(&[1]),
-            BTreeMap::from([((100, Encoding::from_slice(&[1])), None)]),
+            RightBucket::from_iter([((100, Encoding::from_slice(&[1])), None)]),
         );
         assert!(
             validate_progress(
@@ -1449,7 +1450,7 @@ mod tests {
         let mut state = State::default();
         state.right.insert(
             Encoding::from_slice(&[1]),
-            BTreeMap::from([((100, Encoding::from_slice(&[1])), None)]),
+            RightBucket::from_iter([((100, Encoding::from_slice(&[1])), None)]),
         );
         assert!(
             validate_progress(&state, 10, false, &progress(Some(1000), Some(101)), None).is_err()

@@ -37,13 +37,6 @@ impl Encoding {
         }
     }
 
-    pub const fn empty() -> Self {
-        Self::Inline {
-            len: 0,
-            bytes: [0; INLINE_ENCODING_BYTES],
-        }
-    }
-
     pub fn as_slice(&self) -> &[u8] {
         match self {
             Self::Inline { len, bytes } => &bytes[..usize::from(*len)],
@@ -108,6 +101,104 @@ pub(super) type LeftOrder = (i64, Encoding, Encoding);
 pub(super) type RightOrder = (i64, Encoding);
 pub(super) type BatchKey = (u8, u64);
 
+/// One key's right identities in canonical `(time, sequence)` order.
+#[derive(Clone, Default)]
+pub(super) struct RightBucket {
+    rows: Vec<(RightOrder, Option<RowPayload>)>,
+}
+
+impl RightBucket {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            rows: Vec::with_capacity(capacity),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&RightOrder, &Option<RowPayload>)> {
+        self.rows.iter().map(|(order, payload)| (order, payload))
+    }
+
+    #[cfg(test)]
+    pub fn values(&self) -> impl Iterator<Item = &Option<RowPayload>> {
+        self.rows.iter().map(|(_, payload)| payload)
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &RightOrder> {
+        self.rows.iter().map(|(order, _)| order)
+    }
+
+    pub fn last_key_value(&self) -> Option<(&RightOrder, &Option<RowPayload>)> {
+        self.rows.last().map(|(order, payload)| (order, payload))
+    }
+
+    pub fn contains_key(&self, order: &RightOrder) -> bool {
+        self.rows
+            .binary_search_by(|(current, _)| current.cmp(order))
+            .is_ok()
+    }
+
+    pub fn insert(&mut self, order: RightOrder, payload: Option<RowPayload>) {
+        if self.rows.last().is_none_or(|(last, _)| last < &order) {
+            self.rows.push((order, payload));
+            return;
+        }
+        match self
+            .rows
+            .binary_search_by(|(current, _)| current.cmp(&order))
+        {
+            Ok(index) => self.rows[index].1 = payload,
+            Err(index) => self.rows.insert(index, (order, payload)),
+        }
+    }
+
+    pub fn retain(&mut self, mut keep: impl FnMut(&RightOrder, &mut Option<RowPayload>) -> bool) {
+        self.rows
+            .retain_mut(|(order, payload)| keep(order, payload));
+    }
+
+    pub fn candidate(&self, time: i64, tolerance: u64) -> Option<&RowPayload> {
+        let index = self
+            .rows
+            .partition_point(|((right_time, _), _)| *right_time <= time);
+        let ((right_time, _), payload) = self.rows.get(index.checked_sub(1)?)?;
+        if i128::from(*right_time) < i128::from(time) - i128::from(tolerance) {
+            return None;
+        }
+        payload.as_ref()
+    }
+}
+
+impl<'a> IntoIterator for &'a RightBucket {
+    type Item = &'a (RightOrder, Option<RowPayload>);
+    type IntoIter = std::slice::Iter<'a, (RightOrder, Option<RowPayload>)>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.rows.iter()
+    }
+}
+
+impl FromIterator<(RightOrder, Option<RowPayload>)> for RightBucket {
+    fn from_iter<T: IntoIterator<Item = (RightOrder, Option<RowPayload>)>>(iter: T) -> Self {
+        let mut bucket = Self::new();
+        for (order, payload) in iter {
+            bucket.insert(order, payload);
+        }
+        bucket
+    }
+}
+
 pub(super) struct PayloadBatch {
     pub key: BatchKey,
     pub record: Arc<RecordBatch>,
@@ -124,7 +215,7 @@ pub(super) struct RowPayload {
 #[derive(Clone, Default)]
 pub(super) struct State {
     pub left: BTreeMap<LeftOrder, RowPayload>,
-    pub right: BTreeMap<Encoding, BTreeMap<RightOrder, Option<RowPayload>>>,
+    pub right: BTreeMap<Encoding, RightBucket>,
     pub batches: BTreeMap<BatchKey, (Arc<PayloadBatch>, usize)>,
     pub right_payload_min: Option<i64>,
     pub right_identity_min: Option<i64>,
@@ -238,16 +329,7 @@ impl State {
     }
 
     pub fn candidate(&self, key: &Encoding, time: i64, tolerance: u64) -> Option<&RowPayload> {
-        let bucket = self.right.get(key)?;
-        let found = if let Some(next) = time.checked_add(1) {
-            bucket.range(..(next, Encoding::empty())).next_back()
-        } else {
-            bucket.last_key_value()
-        }?;
-        if i128::from(found.0.0) < i128::from(time) - i128::from(tolerance) {
-            return None;
-        }
-        found.1.as_ref()
+        self.right.get(key)?.candidate(time, tolerance)
     }
 }
 
@@ -651,7 +733,7 @@ mod eviction_minima_tests {
         state.attach(&payload);
         state.right.insert(
             Encoding::from_slice(&[1]),
-            BTreeMap::from([
+            RightBucket::from_iter([
                 ((10, Encoding::from_slice(&[1])), Some(payload)),
                 ((12, Encoding::from_slice(&[2])), None),
             ]),
@@ -692,5 +774,27 @@ mod encoding_tests {
         assert!(!large.is_inline());
         assert_eq!(small.as_slice(), &[1, 2, 3, 4, 5, 6, 7, 8, 9]);
         assert!(small < large);
+    }
+}
+
+#[cfg(test)]
+mod right_bucket_tests {
+    use super::{Encoding, RightBucket};
+
+    #[test]
+    fn ordered_run_accepts_append_and_watermark_local_disorder() {
+        let mut bucket = RightBucket::new();
+        for time in [10, 12, 11, 9] {
+            bucket.insert((time, Encoding::from_slice(&[1])), None);
+        }
+        assert_eq!(
+            bucket
+                .iter()
+                .map(|((time, _), _)| *time)
+                .collect::<Vec<_>>(),
+            vec![9, 10, 11, 12]
+        );
+        assert!(bucket.contains_key(&(11, Encoding::from_slice(&[1]))));
+        assert!(!bucket.contains_key(&(11, Encoding::from_slice(&[2]))));
     }
 }

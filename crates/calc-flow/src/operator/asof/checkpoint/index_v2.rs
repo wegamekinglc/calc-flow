@@ -5,7 +5,7 @@ use super::{
     super::{
         checked,
         codec::BoundedWriter,
-        state::{BatchKey, Encoding, LeftOrder, RowPayload, State},
+        state::{BatchKey, Encoding, LeftOrder, RightBucket, RowPayload, State},
     },
     mismatch,
 };
@@ -67,10 +67,7 @@ fn right_encoded_length(state: &State, name: &str) -> Result<u64> {
     Ok(size)
 }
 
-fn right_bucket_length(
-    bucket: &BTreeMap<(i64, Encoding), Option<RowPayload>>,
-    name: &str,
-) -> Result<u64> {
+fn right_bucket_length(bucket: &RightBucket, name: &str) -> Result<u64> {
     bucket.iter().try_fold(0, |size, ((_, sequence), row)| {
         checked(
             name,
@@ -498,8 +495,8 @@ fn decode_right_bucket(
     count: u64,
     batches: &BTreeMap<BatchKey, std::sync::Arc<super::super::state::PayloadBatch>>,
     state: &mut State,
-) -> Result<BTreeMap<(i64, Encoding), Option<RowPayload>>> {
-    let mut bucket = BTreeMap::new();
+) -> Result<RightBucket> {
+    let mut bucket = RightBucket::with_capacity(usize::try_from(count).expect("bounded ASOF rows"));
     for _ in 0..count {
         let (identity, payload) = read_right_entry(reader, batches)?;
         if bucket
