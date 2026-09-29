@@ -78,6 +78,7 @@ no regression verdict.
 |------------------|-------------|-------------|-------------|-------------|-------------|-------------|-------------|
 | Native streaming | Yes         | Yes         | Yes         | Yes         | Yes         | Through 10k | Through 10k |
 | Finance-Python   | Yes         | Yes         | Yes         | Yes         | Yes         | Unsupported | Unsupported |
+| Polars           | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Yes         |
 | Other libraries  | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported | Unsupported |
 
 Unsupported operations are explicit cells, not silent dependency skips.

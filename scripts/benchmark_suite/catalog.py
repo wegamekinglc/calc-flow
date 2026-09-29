@@ -42,7 +42,7 @@ REPORT_CASES = SQL_CASES + tuple(
 CAPABILITIES = {
     "calc-flow-sql": SQL_CASES,
     "datafusion": SQL_CASES,
-    "polars": SQL_CASES,
+    "polars": SQL_CASES + ("asof_join",),
     "calc-flow-stream": STREAM_CASES,
     "ta-lib": ROLLING_CASES,
     "finance-python": FINANCE_CASES,
