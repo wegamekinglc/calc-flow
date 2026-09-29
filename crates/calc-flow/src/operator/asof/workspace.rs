@@ -181,28 +181,42 @@ impl StreamAsofJoinOperator {
         batch: &Batch,
         input: super::admission::ValidatedInput,
     ) -> Result<MemoryReservation> {
-        let side = input.side(&self.spec);
         let mut bytes = 0;
         for record in batch.table_payload()?.batches() {
-            if record.num_rows() == 0 {
-                continue;
-            }
-            let identity_columns = side.keys().len() + side.sequence_by().len();
-            let _column_scratch = self.reserve_workspace(identity_columns as u64 * 512)?;
-            let columns = resolve_identity_columns(record, side)?;
-            let event_times = super::admission::times(record, side);
-            for row in 0..record.num_rows() {
-                if input.is_late(event_times.value(row)) {
-                    continue;
-                }
-                bytes = checked(
-                    &self.name,
-                    bytes,
-                    identity_row_workspace(&columns, row, &self.name)?,
-                )?;
-            }
+            bytes = checked(
+                &self.name,
+                bytes,
+                self.identity_record_workspace(record, input)?,
+            )?;
         }
         self.reserve_workspace(bytes)
+    }
+
+    fn identity_record_workspace(
+        &self,
+        record: &RecordBatch,
+        input: super::admission::ValidatedInput,
+    ) -> Result<u64> {
+        if record.num_rows() == 0 {
+            return Ok(0);
+        }
+        let side = input.side(&self.spec);
+        let identity_columns = side.keys().len() + side.sequence_by().len();
+        let _column_scratch = self.reserve_workspace(identity_columns as u64 * 512)?;
+        let columns = resolve_identity_columns(record, side)?;
+        let event_times = super::admission::times(record, side);
+        let mut bytes = 0;
+        for row in 0..record.num_rows() {
+            if input.is_late(event_times.value(row)) {
+                continue;
+            }
+            bytes = checked(
+                &self.name,
+                bytes,
+                identity_row_workspace(&columns, row, &self.name)?,
+            )?;
+        }
+        Ok(bytes)
     }
 
     /// Clone headroom for the next transactional candidate, from the

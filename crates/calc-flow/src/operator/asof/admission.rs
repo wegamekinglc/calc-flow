@@ -342,39 +342,8 @@ fn encode_rows(
                 .iter()
                 .take_while(|(_, candidate, _)| std::ptr::eq(*candidate, batch))
                 .count();
-        let compact = if end - position == batch.num_rows() && can_share_batch(batch)? {
-            batch.clone()
-        } else {
-            let indices = UInt64Array::from(
-                rows[position..end]
-                    .iter()
-                    .map(|(_, _, row)| *row as u64)
-                    .collect::<Vec<_>>(),
-            );
-            let columns = batch
-                .columns()
-                .iter()
-                .map(|column| {
-                    take(column, &indices, None).map_err(|error| super::arrow_error(&error))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            RecordBatch::try_new(batch.schema(), columns)
-                .map_err(|error| super::arrow_error(&error))?
-        };
-        let encoded = StateSegment::new(super::codec::encode_batch(
-            &compact,
-            limit,
-            &mut Vec::new(),
-        )?);
-        let payload = Arc::new(state::PayloadBatch {
-            key: (
-                u8::try_from(side).expect("validated two-sided ingress"),
-                base + position as u64,
-            ),
-            record: Arc::new(compact),
-            body_bytes: super::codec::payload_body_bytes(encoded.bytes())?,
-            encoded,
-        });
+        let compact = compact_accepted_rows(&rows[position..end], batch)?;
+        let payload = encode_payload(compact, side, base + position as u64, limit)?;
         for (ordinal, (identity, _, _)) in rows[position..end].iter().enumerate() {
             result.push((
                 identity.clone(),
@@ -387,6 +356,38 @@ fn encode_rows(
         position = end;
     }
     Ok(result)
+}
+
+fn compact_accepted_rows(rows: &[InputRow<'_>], batch: &RecordBatch) -> Result<RecordBatch> {
+    if rows.len() == batch.num_rows() && can_share_batch(batch)? {
+        return Ok(batch.clone());
+    }
+    let indices = UInt64Array::from(
+        rows.iter()
+            .map(|(_, _, row)| *row as u64)
+            .collect::<Vec<_>>(),
+    );
+    let columns = batch
+        .columns()
+        .iter()
+        .map(|column| take(column, &indices, None).map_err(|error| super::arrow_error(&error)))
+        .collect::<Result<Vec<_>>>()?;
+    RecordBatch::try_new(batch.schema(), columns).map_err(|error| super::arrow_error(&error))
+}
+
+fn encode_payload(
+    record: RecordBatch,
+    side: usize,
+    id: u64,
+    limit: usize,
+) -> Result<Arc<state::PayloadBatch>> {
+    let encoded = StateSegment::new(super::codec::encode_batch(&record, limit, &mut Vec::new())?);
+    Ok(Arc::new(state::PayloadBatch {
+        key: (u8::try_from(side).expect("validated two-sided ingress"), id),
+        record: Arc::new(record),
+        body_bytes: super::codec::payload_body_bytes(encoded.bytes())?,
+        encoded,
+    }))
 }
 
 /// Reuse a complete Arrow batch only when its backing buffers contain no

@@ -35,6 +35,12 @@ pub(super) struct State {
     pub batches: BTreeMap<BatchKey, (Arc<PayloadBatch>, usize)>,
 }
 
+#[derive(Default)]
+struct AdmissionSeen {
+    buckets: BTreeSet<Encoding>,
+    batches: BTreeSet<BatchKey>,
+}
+
 impl State {
     /// Account for an admission before mutating committed state. All inserted
     /// identities and payload batches are unique after admission validation.
@@ -56,23 +62,47 @@ impl State {
             current.bytes,
             super::checked(name, next_index_len, 64)?,
         )?;
-        let mut new_buckets = BTreeSet::new();
-        let mut new_batches = BTreeSet::new();
-        for ((_, key, sequence), payload) in rows {
-            if side == 0 {
-                current.charge_left(key, sequence, payload, name)?;
-            } else {
-                if !self.right.contains_key(key) && new_buckets.insert(key) {
-                    current.charge_allocation(key, name)?;
-                }
-                current.charge_right(sequence, Some(payload), name)?;
-            }
-            if new_batches.insert(payload.batch.key) {
-                current.bytes =
-                    super::checked(name, current.bytes, batch_allocation(&payload.batch))?;
-            }
+        let mut seen = AdmissionSeen::default();
+        for row in rows {
+            self.charge_admission_row(&mut current, side, row, &mut seen, name)?;
         }
         Ok(current)
+    }
+
+    fn charge_admission_row(
+        &self,
+        inventory: &mut Inventory,
+        side: usize,
+        row: &(LeftOrder, RowPayload),
+        seen: &mut AdmissionSeen,
+        name: &str,
+    ) -> Result<()> {
+        let ((_, key, sequence), payload) = row;
+        if side == 0 {
+            inventory.charge_left(key, sequence, payload, name)?;
+        } else {
+            self.charge_right_admission(inventory, key, sequence, payload, seen, name)?;
+        }
+        if seen.batches.insert(payload.batch.key) {
+            inventory.bytes =
+                super::checked(name, inventory.bytes, batch_allocation(&payload.batch))?;
+        }
+        Ok(())
+    }
+
+    fn charge_right_admission(
+        &self,
+        inventory: &mut Inventory,
+        key: &Encoding,
+        sequence: &Encoding,
+        payload: &RowPayload,
+        seen: &mut AdmissionSeen,
+        name: &str,
+    ) -> Result<()> {
+        if !self.right.contains_key(key) && seen.buckets.insert(key.clone()) {
+            inventory.charge_allocation(key, name)?;
+        }
+        inventory.charge_right(sequence, Some(payload), name)
     }
 
     pub fn attach(&mut self, row: &RowPayload) {

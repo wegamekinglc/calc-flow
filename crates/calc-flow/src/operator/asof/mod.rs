@@ -139,9 +139,6 @@ impl StreamAsofJoinOperator {
     ) {
         self.runtime.configure(config);
     }
-    pub(crate) const fn stream_runtime_initialized(&self) -> bool {
-        self.runtime.initialized()
-    }
     pub(crate) fn output_frontier_candidate(
         &self,
         progress: &IngressProgressSnapshot,
@@ -402,7 +399,6 @@ impl StreamOperator for StreamAsofJoinOperator {
         self.swept = None;
         self.terminal = false;
         self.next_output_sequence = 0;
-        self.runtime.reset();
         Ok(())
     }
     async fn on_watermark(

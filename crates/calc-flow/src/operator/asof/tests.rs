@@ -181,6 +181,10 @@ async fn finalizable_prefix_can_use_full_edge_row_budget() {
             .num_rows(),
         rows
     );
+    assert!(
+        !crate::pipeline::CompiledStreamOperator::StreamAsofJoin(Box::new(op))
+            .datafusion_runtime_initialized()
+    );
 }
 
 #[tokio::test]

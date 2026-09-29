@@ -754,6 +754,50 @@ fn nested_payload_without_bounded_materialization_accounting_is_rejected() {
     ));
 }
 
+#[tokio::test]
+async fn unmatched_fixed_binary_output_respects_workspace_limit() {
+    use calc_flow::{AsofStateLimits, StreamAsofJoinOperator, StreamAsofJoinSpec};
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use std::sync::Arc;
+
+    let left = asof_support::schema();
+    let right = Arc::new(Schema::new(
+        left.fields()
+            .iter()
+            .map(|field| field.as_ref().clone())
+            .chain([Field::new(
+                "wide",
+                DataType::FixedSizeBinary(256 * 1024),
+                true,
+            )])
+            .collect::<Vec<_>>(),
+    ));
+    let template = asof_support::spec(0);
+    let spec = StreamAsofJoinSpec::new(
+        template.left().clone(),
+        template.right().clone(),
+        std::time::Duration::ZERO,
+        AsofStateLimits::new(10, 128 * 1024).unwrap(),
+    )
+    .unwrap();
+    let mut op = StreamAsofJoinOperator::new("asof", left, right, spec).unwrap();
+    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+    let context = StreamOperatorContext::new(&job, "asof", None);
+    let mut output = EdgeCollector::new(op.output_ports().to_vec());
+    op.process_data("left", batch(&[("A", 100, 1, 8)]), &context, &mut output)
+        .await
+        .unwrap();
+    assert!(matches!(
+        op.on_end(&context, &mut output).await,
+        Err(CalcFlowError::OperatorReason {
+            reason_code: StreamingFailureReason::AsofWorkspaceLimitExceeded,
+            ..
+        })
+    ));
+    assert!(output.drain("output").is_empty());
+    assert_eq!(op.status().pending_left_rows, 1);
+}
+
 fn flat_payload_types() -> Vec<datafusion::arrow::datatypes::DataType> {
     use datafusion::arrow::datatypes::{DataType, IntervalUnit, TimeUnit};
     vec![
@@ -796,42 +840,70 @@ fn flat_payload_types() -> Vec<datafusion::arrow::datatypes::DataType> {
 fn sample_flat_payload_column(
     data_type: &datafusion::arrow::datatypes::DataType,
 ) -> datafusion::arrow::array::ArrayRef {
-    use datafusion::arrow::{
-        array::{
-            ArrayRef, BinaryArray, Decimal128Array, FixedSizeBinaryArray, IntervalYearMonthArray,
-            LargeStringArray, StringArray, new_null_array,
-        },
-        datatypes::{DataType, IntervalUnit},
+    use datafusion::arrow::datatypes::{
+        DataType, IntervalDayTime, IntervalMonthDayNano, IntervalUnit, TimeUnit, i256,
     };
-    use std::sync::Arc;
-    match data_type {
-        DataType::Interval(IntervalUnit::YearMonth) => {
-            Arc::new(IntervalYearMonthArray::from(vec![Some(14)])) as ArrayRef
+    use datafusion::scalar::ScalarValue;
+    let value = match data_type {
+        DataType::Null => ScalarValue::Null,
+        DataType::Boolean => ScalarValue::Boolean(Some(true)),
+        DataType::Int8 => ScalarValue::Int8(Some(-8)),
+        DataType::Int16 => ScalarValue::Int16(Some(-16)),
+        DataType::Int32 => ScalarValue::Int32(Some(-32)),
+        DataType::Int64 => ScalarValue::Int64(Some(-64)),
+        DataType::UInt8 => ScalarValue::UInt8(Some(8)),
+        DataType::UInt16 => ScalarValue::UInt16(Some(16)),
+        DataType::UInt32 => ScalarValue::UInt32(Some(32)),
+        DataType::UInt64 => ScalarValue::UInt64(Some(64)),
+        DataType::Float16 => ScalarValue::Float16(Some(3_i8.into())),
+        DataType::Float32 => ScalarValue::Float32(Some(3.25)),
+        DataType::Float64 => ScalarValue::Float64(Some(6.5)),
+        DataType::Date32 => ScalarValue::Date32(Some(20_000)),
+        DataType::Date64 => ScalarValue::Date64(Some(1_728_000_000)),
+        DataType::Time32(TimeUnit::Second) => ScalarValue::Time32Second(Some(123)),
+        DataType::Time32(TimeUnit::Millisecond) => ScalarValue::Time32Millisecond(Some(123_456)),
+        DataType::Time64(TimeUnit::Microsecond) => {
+            ScalarValue::Time64Microsecond(Some(123_456_789))
         }
-        DataType::Decimal128(38, 2) => Arc::new(
-            Decimal128Array::from(vec![Some(12_345)])
-                .with_precision_and_scale(38, 2)
-                .unwrap(),
-        ),
-        DataType::Utf8 => Arc::new(StringArray::from(vec![Some("alpha")])),
-        DataType::LargeUtf8 => Arc::new(LargeStringArray::from(vec![Some("long-alpha")])),
-        DataType::Binary => Arc::new(BinaryArray::from_opt_vec(vec![Some(&b"bytes"[..])])),
-        DataType::FixedSizeBinary(7) => Arc::new(
-            FixedSizeBinaryArray::try_from_sparse_iter_with_size(
-                vec![Some(*b"payload")].into_iter(),
-                7,
-            )
-            .unwrap(),
-        ),
-        _ => new_null_array(data_type, 1),
-    }
+        DataType::Time64(TimeUnit::Nanosecond) => ScalarValue::Time64Nanosecond(Some(123_456_789)),
+        DataType::Duration(TimeUnit::Microsecond) => ScalarValue::DurationMicrosecond(Some(777)),
+        DataType::Timestamp(TimeUnit::Nanosecond, timezone) => {
+            ScalarValue::TimestampNanosecond(Some(123_456_789), timezone.clone())
+        }
+        DataType::Interval(IntervalUnit::YearMonth) => ScalarValue::IntervalYearMonth(Some(14)),
+        DataType::Interval(IntervalUnit::DayTime) => {
+            ScalarValue::IntervalDayTime(Some(IntervalDayTime::default()))
+        }
+        DataType::Interval(IntervalUnit::MonthDayNano) => {
+            ScalarValue::IntervalMonthDayNano(Some(IntervalMonthDayNano::default()))
+        }
+        DataType::Decimal32(precision, scale) => {
+            ScalarValue::Decimal32(Some(123), *precision, *scale)
+        }
+        DataType::Decimal64(precision, scale) => {
+            ScalarValue::Decimal64(Some(1234), *precision, *scale)
+        }
+        DataType::Decimal128(precision, scale) => {
+            ScalarValue::Decimal128(Some(12_345), *precision, *scale)
+        }
+        DataType::Decimal256(precision, scale) => {
+            ScalarValue::Decimal256(Some(i256::default()), *precision, *scale)
+        }
+        DataType::Utf8 => ScalarValue::Utf8(Some("alpha".into())),
+        DataType::LargeUtf8 => ScalarValue::LargeUtf8(Some("long-alpha".into())),
+        DataType::Binary => ScalarValue::Binary(Some(b"bytes".to_vec())),
+        DataType::LargeBinary => ScalarValue::LargeBinary(Some(b"large-bytes".to_vec())),
+        DataType::FixedSizeBinary(7) => ScalarValue::FixedSizeBinary(7, Some(b"payload".to_vec())),
+        _ => panic!("missing sample for {data_type:?}"),
+    };
+    value.to_array().unwrap()
 }
 
 #[tokio::test]
 async fn flat_payload_types_roundtrip_through_checkpoint_and_arrow_output() {
     use calc_flow::{Batch, BatchMetadata, Epoch, StreamAsofJoinOperator};
     use datafusion::arrow::{
-        datatypes::{DataType, Field, IntervalUnit, Schema},
+        datatypes::{Field, Schema},
         record_batch::RecordBatch,
     };
     use std::sync::Arc;
@@ -889,19 +961,17 @@ async fn flat_payload_types_roundtrip_through_checkpoint_and_arrow_output() {
     let source = &input.table_payload().unwrap().batches()[0];
     let source_fields = source.num_columns();
     for (index, data_type) in types.iter().enumerate() {
-        if matches!(
-            data_type,
-            DataType::Interval(IntervalUnit::YearMonth)
-                | DataType::Decimal128(38, 2)
-                | DataType::Utf8
-                | DataType::LargeUtf8
-                | DataType::Binary
-                | DataType::FixedSizeBinary(7)
-        ) {
-            let column = source.column(4 + index).to_data();
-            assert_eq!(output.column(4 + index).to_data(), column);
-            assert_eq!(output.column(source_fields + 4 + index).to_data(), column);
-        }
+        let column = source.column(4 + index).to_data();
+        assert_eq!(
+            output.column(4 + index).to_data(),
+            column,
+            "left {data_type:?}"
+        );
+        assert_eq!(
+            output.column(source_fields + 4 + index).to_data(),
+            column,
+            "right {data_type:?}"
+        );
     }
     assert_eq!(op.status().matched_rows, 1);
     assert_eq!(op.status().state_bytes, 0);

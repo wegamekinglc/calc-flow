@@ -15,7 +15,6 @@ use datafusion::{
 use std::{collections::BTreeMap, sync::Arc};
 
 pub(super) struct OutputRuntime {
-    initialized: bool,
     pub pool: Arc<dyn MemoryPool>,
     config: DataFusionConfig,
     #[cfg(test)]
@@ -25,20 +24,11 @@ pub(super) struct OutputRuntime {
 impl OutputRuntime {
     pub fn new(limit: usize) -> Self {
         Self {
-            initialized: false,
             pool: Arc::new(GreedyMemoryPool::new(limit)),
             config: DataFusionConfig::default(),
             #[cfg(test)]
             worker_gate: None,
         }
-    }
-
-    pub const fn initialized(&self) -> bool {
-        self.initialized
-    }
-
-    pub fn reset(&mut self) {
-        self.initialized = false;
     }
 
     pub fn configure(&mut self, config: DataFusionConfig) {
@@ -78,7 +68,6 @@ impl OutputRuntime {
         .map_err(|error| crate::CalcFlowError::Internal {
             message: format!("ASOF output materialization task failed: {error}"),
         })??;
-        self.initialized = true;
         Ok((result, workspace))
     }
 }

@@ -632,8 +632,8 @@ impl CompiledStreamOperator {
             Self::Expression(operator) => operator.stream_runtime_initialized(),
             Self::Sql(operator) => operator.stream_runtime_initialized(),
             Self::StreamJoin(operator) => operator.stream_runtime_initialized(),
-            Self::StreamAsofJoin(operator) => operator.stream_runtime_initialized(),
-            Self::External(_)
+            Self::StreamAsofJoin(_)
+            | Self::External(_)
             | Self::Union(_)
             | Self::Window(_)
             | Self::Rolling(_)

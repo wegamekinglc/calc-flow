@@ -45,21 +45,39 @@ pub(in super::super) fn encoded_length(state: &State, name: &str) -> Result<u64>
     if state.left.is_empty() && state.right.is_empty() {
         return Ok(0);
     }
-    let mut size = 24_u64;
-    for (_, key, sequence) in state.left.keys() {
-        size = checked(name, size, 41 + key.len() as u64 + sequence.len() as u64)?;
-    }
+    let left = state
+        .left
+        .keys()
+        .try_fold(0_u64, |size, (_, key, sequence)| {
+            checked(name, size, 41 + key.len() as u64 + sequence.len() as u64)
+        })?;
+    checked(
+        name,
+        checked(name, 24, left)?,
+        right_encoded_length(state, name)?,
+    )
+}
+
+fn right_encoded_length(state: &State, name: &str) -> Result<u64> {
+    let mut size = 0_u64;
     for (key, bucket) in &state.right {
         size = checked(name, size, 16 + key.len() as u64)?;
-        for ((_, sequence), row) in bucket {
-            size = checked(
-                name,
-                size,
-                17 + sequence.len() as u64 + if row.is_some() { 17 } else { 0 },
-            )?;
-        }
+        size = checked(name, size, right_bucket_length(bucket, name)?)?;
     }
     Ok(size)
+}
+
+fn right_bucket_length(
+    bucket: &BTreeMap<(i64, Encoding), Option<RowPayload>>,
+    name: &str,
+) -> Result<u64> {
+    bucket.iter().try_fold(0, |size, ((_, sequence), row)| {
+        checked(
+            name,
+            size,
+            17 + sequence.len() as u64 + if row.is_some() { 17 } else { 0 },
+        )
+    })
 }
 
 pub(in super::super) fn left_prefix_length(state: &State, count: usize, name: &str) -> Result<u64> {
@@ -79,41 +97,7 @@ pub(super) async fn encode(
     context: &StreamOperatorContext<'_>,
     workspace: MemoryReservation,
 ) -> Result<(StateSegment, MemoryReservation)> {
-    let capacity = usize::try_from(length).expect("reserved address domain");
-    let mut bytes = Vec::with_capacity(capacity);
-    {
-        let mut writer = BoundedWriter::with_capacity(&mut bytes, capacity, limit);
-        write_header(&mut writer, state)?;
-        context.check_cancelled()?;
-        tokio::task::yield_now().await;
-        for (ordinal, ((time, key, sequence), payload)) in state.left.iter().enumerate() {
-            write_left(&mut writer, *time, key, sequence, payload)?;
-            if ordinal % CHECK_EVERY == CHECK_EVERY - 1 {
-                context.check_cancelled()?;
-            }
-            if ordinal % YIELD_EVERY == YIELD_EVERY - 1 {
-                tokio::task::yield_now().await;
-            }
-        }
-        let mut ordinal = 0;
-        for (key, bucket) in &state.right {
-            write_bucket_header(&mut writer, key, bucket.len())?;
-            for ((time, sequence), payload) in bucket {
-                write_right(&mut writer, *time, sequence, payload.as_ref())?;
-                ordinal += 1;
-                if ordinal % CHECK_EVERY == 0 {
-                    context.check_cancelled()?;
-                }
-                if ordinal % YIELD_EVERY == 0 {
-                    tokio::task::yield_now().await;
-                }
-            }
-        }
-        context.check_cancelled()?;
-    }
-    if bytes.len() != capacity {
-        return Err(mismatch("ASOF index encoded length differs"));
-    }
+    let bytes = encode_bytes(state, length, limit, context).await?;
     let result = tokio::task::spawn_blocking(move || (StateSegment::new(bytes), workspace))
         .await
         .map_err(|error| CalcFlowError::Internal {
@@ -123,26 +107,93 @@ pub(super) async fn encode(
     Ok(result)
 }
 
+async fn encode_bytes(
+    state: &State,
+    length: u64,
+    limit: usize,
+    context: &StreamOperatorContext<'_>,
+) -> Result<Vec<u8>> {
+    let capacity = usize::try_from(length).expect("reserved address domain");
+    let mut bytes = Vec::with_capacity(capacity);
+    {
+        let mut writer = BoundedWriter::with_capacity(&mut bytes, capacity, limit);
+        write_header(&mut writer, state)?;
+        context.check_cancelled()?;
+        tokio::task::yield_now().await;
+        write_left_async(&mut writer, state, context).await?;
+        write_right_async(&mut writer, state, context).await?;
+        context.check_cancelled()?;
+    }
+    if bytes.len() != capacity {
+        return Err(mismatch("ASOF index encoded length differs"));
+    }
+    Ok(bytes)
+}
+
+async fn write_left_async(
+    writer: &mut BoundedWriter<'_>,
+    state: &State,
+    context: &StreamOperatorContext<'_>,
+) -> Result<()> {
+    for (ordinal, ((time, key, sequence), payload)) in state.left.iter().enumerate() {
+        write_left(writer, *time, key, sequence, payload)?;
+        checkpoint_tick(ordinal + 1, context).await?;
+    }
+    Ok(())
+}
+
+async fn write_right_async(
+    writer: &mut BoundedWriter<'_>,
+    state: &State,
+    context: &StreamOperatorContext<'_>,
+) -> Result<()> {
+    let mut ordinal = 0;
+    for (key, bucket) in &state.right {
+        write_bucket_header(writer, key, bucket.len())?;
+        for ((time, sequence), payload) in bucket {
+            write_right(writer, *time, sequence, payload.as_ref())?;
+            ordinal += 1;
+            checkpoint_tick(ordinal, context).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn checkpoint_tick(ordinal: usize, context: &StreamOperatorContext<'_>) -> Result<()> {
+    if ordinal % CHECK_EVERY == 0 {
+        context.check_cancelled()?;
+    }
+    if ordinal % YIELD_EVERY == 0 {
+        tokio::task::yield_now().await;
+    }
+    Ok(())
+}
+
 pub(super) fn encode_sync(state: &State, length: u64, limit: usize) -> Result<StateSegment> {
     let capacity = usize::try_from(length).expect("reserved address domain");
     let mut bytes = Vec::with_capacity(capacity);
     {
         let mut writer = BoundedWriter::with_capacity(&mut bytes, capacity, limit);
         write_header(&mut writer, state)?;
-        for ((time, key, sequence), payload) in &state.left {
-            write_left(&mut writer, *time, key, sequence, payload)?;
-        }
-        for (key, bucket) in &state.right {
-            write_bucket_header(&mut writer, key, bucket.len())?;
-            for ((time, sequence), payload) in bucket {
-                write_right(&mut writer, *time, sequence, payload.as_ref())?;
-            }
-        }
+        write_state_sync(&mut writer, state)?;
     }
     if bytes.len() != capacity {
         return Err(mismatch("ASOF index encoded length differs"));
     }
     Ok(StateSegment::new(bytes))
+}
+
+fn write_state_sync(writer: &mut BoundedWriter<'_>, state: &State) -> Result<()> {
+    for ((time, key, sequence), payload) in &state.left {
+        write_left(writer, *time, key, sequence, payload)?;
+    }
+    for (key, bucket) in &state.right {
+        write_bucket_header(writer, key, bucket.len())?;
+        for ((time, sequence), payload) in bucket {
+            write_right(writer, *time, sequence, payload.as_ref())?;
+        }
+    }
+    Ok(())
 }
 
 fn write_header(writer: &mut BoundedWriter<'_>, state: &State) -> Result<()> {
@@ -277,9 +328,7 @@ impl<'a> Reader<'a> {
         let batch = batches
             .get(&key)
             .ok_or_else(|| mismatch("ASOF index references a missing batch"))?;
-        if actual_side != side || row >= batch.record.num_rows() {
-            return Err(mismatch("ASOF index references an invalid batch row"));
-        }
+        validate_row_ref(actual_side, side, row, batch.record.num_rows())?;
         Ok(RowPayload {
             batch: batch.clone(),
             row,
@@ -287,10 +336,25 @@ impl<'a> Reader<'a> {
     }
 }
 
+fn validate_row_ref(actual_side: u8, expected_side: u8, row: usize, rows: usize) -> Result<()> {
+    if actual_side != expected_side || row >= rows {
+        return Err(mismatch("ASOF index references an invalid batch row"));
+    }
+    Ok(())
+}
+
 /// Scan untrusted index bytes before any row/map allocation. The index bytes
 /// cover copied identity buffers; per-row and bucket headroom is counted from
 /// the actual encoded entries, independent of snapshot metrics.
 pub(super) fn restore_charge(bytes: &[u8], max_rows: u64) -> Result<u64> {
+    let (mut reader, left, buckets) = read_index_header(bytes, max_rows)?;
+    scan_left_charge(&mut reader, left)?;
+    scan_right_charge(&mut reader, buckets)?;
+    ensure_consumed(&reader)?;
+    index_restore_charge(bytes.len() as u64, reader.rows, buckets)
+}
+
+fn read_index_header(bytes: &[u8], max_rows: u64) -> Result<(Reader<'_>, u64, u64)> {
     let mut reader = Reader {
         bytes,
         max_rows,
@@ -301,6 +365,10 @@ pub(super) fn restore_charge(bytes: &[u8], max_rows: u64) -> Result<u64> {
     }
     let left = reader.count()?;
     let buckets = reader.count()?;
+    Ok((reader, left, buckets))
+}
+
+fn scan_left_charge(reader: &mut Reader<'_>, left: u64) -> Result<()> {
     for _ in 0..left {
         reader.row()?;
         reader.take(8)?;
@@ -308,31 +376,46 @@ pub(super) fn restore_charge(bytes: &[u8], max_rows: u64) -> Result<u64> {
         reader.skip_blob()?;
         reader.take(17)?;
     }
+    Ok(())
+}
+
+fn scan_right_charge(reader: &mut Reader<'_>, buckets: u64) -> Result<()> {
     for _ in 0..buckets {
         reader.skip_blob()?;
         let count = reader.count()?;
         if count == 0 {
             return Err(mismatch("ASOF empty right bucket"));
         }
-        for _ in 0..count {
-            reader.row()?;
-            reader.take(8)?;
-            reader.skip_blob()?;
-            let marker = reader.take(1)?[0];
-            match marker {
-                0 => {}
-                1 => {
-                    reader.take(17)?;
-                }
-                _ => return Err(mismatch("ASOF right payload marker differs")),
+        scan_right_rows(reader, count)?;
+    }
+    Ok(())
+}
+
+fn scan_right_rows(reader: &mut Reader<'_>, count: u64) -> Result<()> {
+    for _ in 0..count {
+        reader.row()?;
+        reader.take(8)?;
+        reader.skip_blob()?;
+        match reader.take(1)?[0] {
+            0 => {}
+            1 => {
+                reader.take(17)?;
             }
+            _ => return Err(mismatch("ASOF right payload marker differs")),
         }
     }
+    Ok(())
+}
+
+fn ensure_consumed(reader: &Reader<'_>) -> Result<()> {
     if !reader.bytes.is_empty() {
         return Err(mismatch("ASOF index has trailing data"));
     }
-    let rows = reader.rows;
-    let charge = (bytes.len() as u64)
+    Ok(())
+}
+
+fn index_restore_charge(bytes: u64, rows: u64, buckets: u64) -> Result<u64> {
+    let charge = bytes
         .checked_mul(2)
         .and_then(|value| value.checked_add(rows.checked_mul(384)?))
         .and_then(|value| value.checked_add(buckets.checked_mul(64)?))
@@ -345,21 +428,24 @@ pub(super) fn decode(
     batches: &BTreeMap<BatchKey, std::sync::Arc<super::super::state::PayloadBatch>>,
     max_rows: u64,
 ) -> Result<State> {
-    let mut reader = Reader {
-        bytes,
-        max_rows,
-        rows: 0,
-    };
-    if reader.take(8)? != MAGIC {
-        return Err(mismatch("ASOF index magic differs"));
-    }
-    let left_count = reader.count()?;
-    let bucket_count = reader.count()?;
+    let (mut reader, left_count, bucket_count) = read_index_header(bytes, max_rows)?;
     let mut state = State::default();
-    for _ in 0..left_count {
-        reader.row()?;
-        let identity: LeftOrder = (reader.time()?, reader.blob()?, reader.blob()?);
-        let payload = reader.row_ref(batches, 0)?;
+    decode_left_index(&mut reader, left_count, batches, &mut state)?;
+    decode_right_index(&mut reader, bucket_count, batches, &mut state)?;
+    if !reader.bytes.is_empty() || state.batches.len() != batches.len() {
+        return Err(mismatch("ASOF index has trailing data or unused batches"));
+    }
+    Ok(state)
+}
+
+fn decode_left_index(
+    reader: &mut Reader<'_>,
+    count: u64,
+    batches: &BTreeMap<BatchKey, std::sync::Arc<super::super::state::PayloadBatch>>,
+    state: &mut State,
+) -> Result<()> {
+    for _ in 0..count {
+        let (identity, payload) = read_left_entry(reader, batches)?;
         if state
             .left
             .last_key_value()
@@ -370,7 +456,25 @@ pub(super) fn decode(
         state.attach(&payload);
         state.left.insert(identity, payload);
     }
-    for _ in 0..bucket_count {
+    Ok(())
+}
+
+fn read_left_entry(
+    reader: &mut Reader<'_>,
+    batches: &BTreeMap<BatchKey, std::sync::Arc<super::super::state::PayloadBatch>>,
+) -> Result<(LeftOrder, RowPayload)> {
+    reader.row()?;
+    let identity: LeftOrder = (reader.time()?, reader.blob()?, reader.blob()?);
+    Ok((identity, reader.row_ref(batches, 0)?))
+}
+
+fn decode_right_index(
+    reader: &mut Reader<'_>,
+    count: u64,
+    batches: &BTreeMap<BatchKey, std::sync::Arc<super::super::state::PayloadBatch>>,
+    state: &mut State,
+) -> Result<()> {
+    for _ in 0..count {
         let key = reader.blob()?;
         if state
             .right
@@ -383,31 +487,45 @@ pub(super) fn decode(
         if count == 0 {
             return Err(mismatch("ASOF empty right bucket"));
         }
-        let mut bucket = BTreeMap::new();
-        for _ in 0..count {
-            reader.row()?;
-            let identity = (reader.time()?, reader.blob()?);
-            let marker = reader.take(1)?[0];
-            let payload = match marker {
-                0 => None,
-                1 => Some(reader.row_ref(batches, 1)?),
-                _ => return Err(mismatch("ASOF right payload marker differs")),
-            };
-            if bucket
-                .last_key_value()
-                .is_some_and(|(last, _)| last >= &identity)
-            {
-                return Err(mismatch("ASOF right index order is not strict"));
-            }
-            if let Some(payload) = &payload {
-                state.attach(payload);
-            }
-            bucket.insert(identity, payload);
-        }
+        let bucket = decode_right_bucket(reader, count, batches, state)?;
         state.right.insert(key, bucket);
     }
-    if !reader.bytes.is_empty() || state.batches.len() != batches.len() {
-        return Err(mismatch("ASOF index has trailing data or unused batches"));
+    Ok(())
+}
+
+fn decode_right_bucket(
+    reader: &mut Reader<'_>,
+    count: u64,
+    batches: &BTreeMap<BatchKey, std::sync::Arc<super::super::state::PayloadBatch>>,
+    state: &mut State,
+) -> Result<BTreeMap<(i64, Encoding), Option<RowPayload>>> {
+    let mut bucket = BTreeMap::new();
+    for _ in 0..count {
+        let (identity, payload) = read_right_entry(reader, batches)?;
+        if bucket
+            .last_key_value()
+            .is_some_and(|(last, _)| last >= &identity)
+        {
+            return Err(mismatch("ASOF right index order is not strict"));
+        }
+        if let Some(payload) = &payload {
+            state.attach(payload);
+        }
+        bucket.insert(identity, payload);
     }
-    Ok(state)
+    Ok(bucket)
+}
+
+fn read_right_entry(
+    reader: &mut Reader<'_>,
+    batches: &BTreeMap<BatchKey, std::sync::Arc<super::super::state::PayloadBatch>>,
+) -> Result<((i64, Encoding), Option<RowPayload>)> {
+    reader.row()?;
+    let identity = (reader.time()?, reader.blob()?);
+    let payload = match reader.take(1)?[0] {
+        0 => None,
+        1 => Some(reader.row_ref(batches, 1)?),
+        _ => return Err(mismatch("ASOF right payload marker differs")),
+    };
+    Ok((identity, payload))
 }

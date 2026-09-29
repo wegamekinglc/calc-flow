@@ -120,7 +120,6 @@ async fn cancelled_materialization_keeps_runtime_reusable() {
     let mut future = Box::pin(runtime.materialize(&rows, &schemas[2], reservation));
     assert!(futures::poll!(future.as_mut()).is_pending());
     drop(future);
-    assert!(!runtime.initialized());
     assert_eq!(pool.reserved(), 0);
     let reservation = MemoryConsumer::new("test-output").register(&runtime.pool);
     let (result, _reservation) = runtime
@@ -128,7 +127,6 @@ async fn cancelled_materialization_keeps_runtime_reusable() {
         .await
         .unwrap();
     assert_eq!(result.table_payload().unwrap().batches()[0].num_rows(), 1);
-    assert!(runtime.initialized());
     assert_eq!(pool.reserved(), 0);
 }
 
@@ -177,7 +175,6 @@ async fn dropped_materialization_keeps_worker_memory_reserved_until_exit() {
     assert!(futures::poll!(future.as_mut()).is_pending());
     started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
     drop(future);
-    assert!(!runtime.initialized());
     assert_eq!(pool.reserved(), 4_096);
     gate.wait();
     tokio::time::timeout(Duration::from_secs(1), async {

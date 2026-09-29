@@ -70,6 +70,23 @@ impl StreamAsofJoinOperator {
     ) -> Result<(Vec<LeftOrder>, MemoryReservation)> {
         const MAX_KEYS: usize = 64_000;
         let limit = context.output_budget().max_rows.min(MAX_KEYS);
+        let count = self.count_finalizable_keys(limit, frontier, ended, context)?;
+        let (count, reservation) = self.reserve_finalizable_keys(count)?;
+        let mut keys = Vec::with_capacity(count);
+        for key in self.state.left.keys().take(count) {
+            context.check_cancelled()?;
+            keys.push(key.clone());
+        }
+        Ok((keys, reservation))
+    }
+
+    fn count_finalizable_keys(
+        &self,
+        limit: usize,
+        frontier: Option<i64>,
+        ended: bool,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<usize> {
         let mut count = 0;
         for (time, _, _) in self.state.left.keys().take(limit) {
             context.check_cancelled()?;
@@ -78,19 +95,17 @@ impl StreamAsofJoinOperator {
             }
             count += 1;
         }
-        let reservation = loop {
+        Ok(count)
+    }
+
+    fn reserve_finalizable_keys(&self, mut count: usize) -> Result<(usize, MemoryReservation)> {
+        loop {
             match self.reserve_workspace(key_workspace_bytes(count, count)) {
-                Ok(reservation) => break reservation,
+                Ok(reservation) => return Ok((count, reservation)),
                 Err(_) if count > 1 => count /= 2,
                 Err(error) => return Err(error),
             }
-        };
-        let mut keys = Vec::with_capacity(count);
-        for key in self.state.left.keys().take(count) {
-            context.check_cancelled()?;
-            keys.push(key.clone());
         }
-        Ok((keys, reservation))
     }
 
     fn output_status(&self, rows: usize, matched: u64) -> Result<StreamAsofJoinStatus> {
@@ -174,7 +189,7 @@ impl StreamAsofJoinOperator {
         }
         let matched = rows.iter().filter(|(_, right)| right.is_some()).count() as u64;
         let mut workspace = self.reserve_workspace(16 * 1024)?;
-        let bytes = output_workspace(&rows, &mut workspace, &self.name)?;
+        let bytes = output_workspace(&rows, &self.schemas[1], &mut workspace, &self.name)?;
         let remaining = bytes.saturating_sub(workspace.size() as u64);
         grow_output_workspace(&mut workspace, remaining, &self.name)?;
         let (result, workspace) = self
@@ -235,52 +250,94 @@ fn shrink_key_workspace(keys: &mut Vec<LeftOrder>, reservation: &MemoryReservati
 /// multiplier covers a growing output buffer and a simultaneous old buffer.
 fn output_workspace(
     rows: &[(&RowPayload, Option<&RowPayload>)],
+    right_schema: &datafusion::arrow::datatypes::Schema,
     workspace: &mut MemoryReservation,
     name: &str,
 ) -> Result<u64> {
     let mut columns = BTreeMap::<BatchKey, Vec<ColumnWorkspace>>::new();
-    let raw = rows.iter().try_fold(0, |total, (left, right)| {
-        let row = checked(
-            name,
-            row_slice_bytes(left, &mut columns, workspace, name)?,
-            right
-                .map(|row| row_slice_bytes(row, &mut columns, workspace, name))
-                .transpose()?
-                .unwrap_or(0),
-        )?;
-        checked(name, total, row)
-    })?;
+    let raw = raw_output_bytes(rows, &mut columns, workspace, name)?;
+    let buffers = output_buffer_bytes(rows, right_schema, raw, name)?;
+    checked(
+        name,
+        buffers,
+        output_bookkeeping_bytes(rows.len(), &columns, name)?,
+    )
+}
+
+fn raw_output_bytes(
+    rows: &[(&RowPayload, Option<&RowPayload>)],
+    columns: &mut BTreeMap<BatchKey, Vec<ColumnWorkspace>>,
+    workspace: &mut MemoryReservation,
+    name: &str,
+) -> Result<u64> {
+    let mut raw = 0;
+    for (left, right) in rows {
+        raw = checked(name, raw, row_slice_bytes(left, columns, workspace, name)?)?;
+        if let Some(right) = right {
+            raw = checked(name, raw, row_slice_bytes(right, columns, workspace, name)?)?;
+        }
+    }
+    Ok(raw)
+}
+
+fn output_buffer_bytes(
+    rows: &[(&RowPayload, Option<&RowPayload>)],
+    right_schema: &datafusion::arrow::datatypes::Schema,
+    raw: u64,
+    name: &str,
+) -> Result<u64> {
+    let unmatched = rows.iter().filter(|(_, right)| right.is_none()).count() as u64;
+    let null_bytes = null_output_row_bytes(right_schema, name)?
+        .checked_mul(unmatched)
+        .ok_or_else(|| workspace_overflow(name))?;
+    checked(name, raw, null_bytes)?
+        .checked_mul(4)
+        .ok_or_else(|| workspace_overflow(name))
+}
+
+fn output_bookkeeping_bytes(
+    rows: usize,
+    columns: &BTreeMap<BatchKey, Vec<ColumnWorkspace>>,
+    name: &str,
+) -> Result<u64> {
     let source_columns = columns
         .values()
         .try_fold(0, |count, fields| checked(name, count, fields.len() as u64))?;
-    let variable = raw.checked_mul(4).ok_or_else(|| {
-        reason(
-            name,
-            StreamingFailureReason::AsofCounterOverflow,
-            "ASOF output workspace arithmetic overflowed",
-        )
-    })?;
-    let row_scratch = (rows.len() as u64).checked_mul(256).ok_or_else(|| {
-        reason(
-            name,
-            StreamingFailureReason::AsofCounterOverflow,
-            "ASOF output workspace arithmetic overflowed",
-        )
-    })?;
+    let row_scratch = (rows as u64)
+        .checked_mul(256)
+        .ok_or_else(|| workspace_overflow(name))?;
     let source_scratch = source_columns
         .checked_mul(512)
         .and_then(|value| value.checked_add(columns.len() as u64 * 128))
-        .ok_or_else(|| {
-            reason(
-                name,
-                StreamingFailureReason::AsofCounterOverflow,
-                "ASOF output workspace arithmetic overflowed",
-            )
-        })?;
-    checked(
+        .ok_or_else(|| workspace_overflow(name))?;
+    checked(name, row_scratch, checked(name, source_scratch, 16 * 1024)?)
+}
+
+fn null_output_row_bytes(schema: &datafusion::arrow::datatypes::Schema, name: &str) -> Result<u64> {
+    use datafusion::arrow::datatypes::DataType;
+    schema.fields().iter().try_fold(0, |total, field| {
+        let data_type = field.data_type();
+        let value_bytes = match data_type {
+            DataType::Null => 0,
+            DataType::Boolean => 1,
+            DataType::Utf8 | DataType::Binary => 4,
+            DataType::LargeUtf8 | DataType::LargeBinary => 8,
+            DataType::FixedSizeBinary(width) => {
+                u64::try_from(*width).expect("validated ASOF fixed binary width")
+            }
+            _ => data_type
+                .primitive_width()
+                .expect("validated flat ASOF type") as u64,
+        };
+        checked(name, total, checked(name, value_bytes, 1)?)
+    })
+}
+
+fn workspace_overflow(name: &str) -> CalcFlowError {
+    reason(
         name,
-        checked(name, variable, row_scratch)?,
-        checked(name, source_scratch, 16 * 1024)?,
+        StreamingFailureReason::AsofCounterOverflow,
+        "ASOF output workspace arithmetic overflowed",
     )
 }
 
@@ -412,7 +469,7 @@ mod workspace_tests {
         let mut reservation = MemoryConsumer::new("asof-test-output").register(&pool);
         reservation.try_grow(16 * 1024).unwrap();
         assert!(matches!(
-            output_workspace(&rows, &mut reservation, "asof"),
+            output_workspace(&rows, &record.schema(), &mut reservation, "asof"),
             Err(CalcFlowError::OperatorReason {
                 reason_code: StreamingFailureReason::AsofWorkspaceLimitExceeded,
                 ..

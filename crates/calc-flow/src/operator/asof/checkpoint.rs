@@ -26,6 +26,8 @@ use validation::{validate_counters, validate_progress};
 const MAGIC: &[u8; 8] = b"CFASOF01";
 const SEGMENT: &str = "asof-state-v1";
 const INDEX_SEGMENT: &str = index_v2::INDEX_SEGMENT;
+type IdentityCache =
+    BTreeMap<BatchKey, (super::state::EncodedColumns, super::state::EncodedColumns)>;
 
 pub(super) struct PreparedCheckpoint {
     pub segment: Option<PreparedSegment>,
@@ -109,14 +111,28 @@ impl StreamAsofJoinOperator {
         context: &StreamOperatorContext<'_>,
     ) -> Result<()> {
         context.check_cancelled()?;
-        if let Some(length) = self.deferred_index_len {
-            let workspace = self.reserve_workspace(length)?;
-            let limit = usize::try_from(self.spec.limits().max_state_bytes()).expect("validated");
-            let (segment, _workspace) =
-                index_v2::encode(&self.state, length, limit, context, workspace).await?;
-            self.prepared = Some(PreparedSegment::new(segment));
-            self.deferred_index_len = None;
-        }
+        self.prepare_deferred_index_async(context).await?;
+        self.compact_prepared_async(context).await?;
+        context.check_cancelled()
+    }
+
+    async fn prepare_deferred_index_async(
+        &mut self,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<()> {
+        let Some(length) = self.deferred_index_len else {
+            return Ok(());
+        };
+        let workspace = self.reserve_workspace(length)?;
+        let limit = usize::try_from(self.spec.limits().max_state_bytes()).expect("validated");
+        let (segment, _workspace) =
+            index_v2::encode(&self.state, length, limit, context, workspace).await?;
+        self.prepared = Some(PreparedSegment::new(segment));
+        self.deferred_index_len = None;
+        Ok(())
+    }
+
+    async fn compact_prepared_async(&mut self, context: &StreamOperatorContext<'_>) -> Result<()> {
         if let Some(prepared) = self.prepared.as_ref().filter(|view| view.is_drained()) {
             let workspace = self.reserve_workspace(prepared.len() as u64)?;
             let retained_capacity = prepared.capacity();
@@ -133,7 +149,7 @@ impl StreamAsofJoinOperator {
             context.check_cancelled()?;
             self.install_compacted_prepared(canonical, retained_capacity);
         }
-        context.check_cancelled()
+        Ok(())
     }
 
     pub(super) async fn prepare_checkpoint(
@@ -255,7 +271,7 @@ impl StreamAsofJoinOperator {
                 .transpose()?
                 .unwrap_or_default()
         } else {
-            self.decode_state_v2(snapshot, segment)?
+            self.decode_state_v2(snapshot, segment, &metadata.metrics)?
         };
         if version == 1 {
             let legacy = legacy_inventory(segment, self.spec.limits().max_state_rows())?;
@@ -503,41 +519,14 @@ impl StreamAsofJoinOperator {
         &self,
         snapshot: &OperatorStateSnapshot,
         segment: Option<&StateSegment>,
+        metrics: &StreamAsofJoinStatus,
     ) -> Result<State> {
         let Some(segment) = segment else {
             return Ok(State::default());
         };
         verify_checksum(segment)?;
-        let mut batches = BTreeMap::new();
-        for (name, encoded) in &snapshot.segments {
-            if name == INDEX_SEGMENT {
-                continue;
-            }
-            let key = index_v2::parse_batch_segment(name)?;
-            verify_checksum(encoded)?;
-            let side = usize::from(key.0);
-            let record = super::codec::decode_table_batch(
-                encoded.bytes(),
-                &self.schema_digests[side],
-                self.spec.limits().max_state_rows(),
-            )
-            .map_err(|_| mismatch("ASOF invalid Arrow batch encoding"))?;
-            if record.schema() != self.schemas[side]
-                || record.num_rows() as u64 > self.spec.limits().max_state_rows()
-            {
-                return Err(mismatch("ASOF batch schema or row count differs"));
-            }
-            let payload = Arc::new(PayloadBatch {
-                key,
-                record: Arc::new(record),
-                body_bytes: super::codec::payload_body_bytes(encoded.bytes())
-                    .map_err(|_| mismatch("ASOF invalid Arrow batch framing"))?,
-                encoded: encoded.clone(),
-            });
-            if batches.insert(key, payload).is_some() {
-                return Err(mismatch("ASOF duplicate batch segment"));
-            }
-        }
+        let batches = self.decode_payload_batches(snapshot)?;
+        validate_batch_ranges(&batches, metrics)?;
         let state = index_v2::decode(
             segment.bytes(),
             &batches,
@@ -547,7 +536,58 @@ impl StreamAsofJoinOperator {
         Ok(state)
     }
 
+    fn decode_payload_batches(
+        &self,
+        snapshot: &OperatorStateSnapshot,
+    ) -> Result<BTreeMap<BatchKey, Arc<PayloadBatch>>> {
+        let mut batches = BTreeMap::new();
+        for (name, encoded) in &snapshot.segments {
+            if name == INDEX_SEGMENT {
+                continue;
+            }
+            let key = index_v2::parse_batch_segment(name)?;
+            let payload = self.decode_payload_batch(key, encoded)?;
+            if batches.insert(key, payload).is_some() {
+                return Err(mismatch("ASOF duplicate batch segment"));
+            }
+        }
+        Ok(batches)
+    }
+
+    fn decode_payload_batch(
+        &self,
+        key: BatchKey,
+        encoded: &StateSegment,
+    ) -> Result<Arc<PayloadBatch>> {
+        verify_checksum(encoded)?;
+        let side = usize::from(key.0);
+        let record = super::codec::decode_table_batch(
+            encoded.bytes(),
+            &self.schema_digests[side],
+            self.spec.limits().max_state_rows(),
+        )
+        .map_err(|_| mismatch("ASOF invalid Arrow batch encoding"))?;
+        if record.schema() != self.schemas[side]
+            || record.num_rows() as u64 > self.spec.limits().max_state_rows()
+        {
+            return Err(mismatch("ASOF batch schema or row count differs"));
+        }
+        Ok(Arc::new(PayloadBatch {
+            key,
+            record: Arc::new(record),
+            body_bytes: super::codec::payload_body_bytes(encoded.bytes())
+                .map_err(|_| mismatch("ASOF invalid Arrow batch framing"))?,
+            encoded: encoded.clone(),
+        }))
+    }
+
     fn validate_indexed_rows(&self, state: &State) -> Result<()> {
+        let identities = self.indexed_batch_identities(state)?;
+        self.validate_left_indexed_rows(state, &identities)?;
+        self.validate_right_indexed_rows(state, &identities)
+    }
+
+    fn indexed_batch_identities(&self, state: &State) -> Result<IdentityCache> {
         let mut identities = BTreeMap::new();
         for (key, (batch, _)) in &state.batches {
             let side = if key.0 == 0 {
@@ -564,6 +604,10 @@ impl StreamAsofJoinOperator {
                 ),
             );
         }
+        Ok(identities)
+    }
+
+    fn validate_left_indexed_rows(&self, state: &State, identities: &IdentityCache) -> Result<()> {
         for (identity, payload) in &state.left {
             super::identity::validate(&identity.1, &self.schemas[0], self.spec.left().keys())?;
             super::identity::validate(
@@ -571,20 +615,30 @@ impl StreamAsofJoinOperator {
                 &self.schemas[0],
                 self.spec.left().sequence_by(),
             )?;
-            validate_index_identity(identity, payload, &identities, self.spec.left())?;
+            validate_index_identity(identity, payload, identities, self.spec.left())?;
         }
+        Ok(())
+    }
+
+    fn validate_right_indexed_rows(&self, state: &State, identities: &IdentityCache) -> Result<()> {
         for (key, bucket) in &state.right {
             super::identity::validate(key, &self.schemas[1], self.spec.right().keys())?;
-            for ((time, sequence), payload) in bucket {
-                super::identity::validate(
-                    sequence,
-                    &self.schemas[1],
-                    self.spec.right().sequence_by(),
-                )?;
-                if let Some(payload) = payload {
-                    let identity = (*time, key.clone(), sequence.clone());
-                    validate_index_identity(&identity, payload, &identities, self.spec.right())?;
-                }
+            self.validate_right_indexed_bucket(key, bucket, identities)?;
+        }
+        Ok(())
+    }
+
+    fn validate_right_indexed_bucket(
+        &self,
+        key: &Encoding,
+        bucket: &BTreeMap<RightOrder, Option<RowPayload>>,
+        identities: &IdentityCache,
+    ) -> Result<()> {
+        for ((time, sequence), payload) in bucket {
+            super::identity::validate(sequence, &self.schemas[1], self.spec.right().sequence_by())?;
+            if let Some(payload) = payload {
+                let identity = (*time, key.clone(), sequence.clone());
+                validate_index_identity(&identity, payload, identities, self.spec.right())?;
             }
         }
         Ok(())
@@ -645,6 +699,27 @@ impl StreamAsofJoinOperator {
     }
 }
 
+fn validate_batch_ranges(
+    batches: &BTreeMap<BatchKey, Arc<PayloadBatch>>,
+    metrics: &StreamAsofJoinStatus,
+) -> Result<()> {
+    let accepted = [metrics.left.accepted_rows, metrics.right.accepted_rows];
+    let mut previous_end = [0_u64; 2];
+    for ((side, start), batch) in batches {
+        let index = usize::from(*side);
+        let end = start
+            .checked_add(batch.record.num_rows() as u64)
+            .ok_or_else(|| mismatch("ASOF restored batch ID range overflowed"))?;
+        if batch.record.num_rows() == 0 || *start < previous_end[index] || end > accepted[index] {
+            return Err(mismatch(
+                "ASOF restored batch ID lies outside accepted rows",
+            ));
+        }
+        previous_end[index] = end;
+    }
+    Ok(())
+}
+
 fn snapshot_segment(
     snapshot: &OperatorStateSnapshot,
     version: u32,
@@ -679,40 +754,71 @@ fn legacy_inventory(segment: Option<&StateSegment>, max_rows: u64) -> Result<Inv
         ..Inventory::default()
     };
     for _ in 0..left_count {
-        decoder.row()?;
-        decoder.time()?;
-        let key = decoder.blob()?;
-        let sequence = decoder.blob()?;
-        let payload = decoder.blob()?;
-        inventory.identities = legacy_add(inventory.identities, 1)?;
-        inventory.bytes = legacy_add(inventory.bytes, 384)?;
-        for value in [key, sequence, payload] {
-            inventory.bytes = legacy_add(inventory.bytes, legacy_add(64, value.len() as u64)?)?;
-        }
+        legacy_left_inventory_row(&mut decoder, &mut inventory)?;
     }
     for _ in 0..bucket_count {
-        let key = decoder.blob()?;
-        inventory.bytes = legacy_add(inventory.bytes, legacy_add(64, key.len() as u64)?)?;
-        let rows = decoder.count()?;
-        for _ in 0..rows {
-            decoder.row()?;
-            decoder.time()?;
-            let sequence = decoder.blob()?;
-            let payload = decoder.blob()?;
-            inventory.identities = legacy_add(inventory.identities, 1)?;
-            inventory.bytes = legacy_add(inventory.bytes, 320)?;
-            inventory.bytes = legacy_add(inventory.bytes, legacy_add(64, sequence.len() as u64)?)?;
-            if payload.is_empty() {
-                inventory.identity_only = legacy_add(inventory.identity_only, 1)?;
-            } else {
-                inventory.right_payloads = legacy_add(inventory.right_payloads, 1)?;
-                inventory.bytes =
-                    legacy_add(inventory.bytes, legacy_add(64, payload.len() as u64)?)?;
-            }
-        }
+        legacy_right_inventory_bucket(&mut decoder, &mut inventory)?;
     }
     decoder.finish("ASOF legacy segment has trailing data")?;
     Ok(inventory)
+}
+
+fn legacy_left_inventory_row(decoder: &mut Decoder<'_>, inventory: &mut Inventory) -> Result<()> {
+    let (key, sequence, payload) = read_legacy_left_row(decoder)?;
+    inventory.identities = legacy_add(inventory.identities, 1)?;
+    inventory.bytes = legacy_add(inventory.bytes, 384)?;
+    for value in [key, sequence, payload] {
+        charge_legacy_blob(inventory, value)?;
+    }
+    Ok(())
+}
+
+fn read_legacy_left_row<'a>(decoder: &mut Decoder<'a>) -> Result<(&'a [u8], &'a [u8], &'a [u8])> {
+    decoder.row()?;
+    decoder.time()?;
+    Ok((decoder.blob()?, decoder.blob()?, decoder.blob()?))
+}
+
+fn legacy_right_inventory_bucket(
+    decoder: &mut Decoder<'_>,
+    inventory: &mut Inventory,
+) -> Result<()> {
+    let key = decoder.blob()?;
+    charge_legacy_blob(inventory, key)?;
+    let rows = decoder.count()?;
+    for _ in 0..rows {
+        legacy_right_inventory_row(decoder, inventory)?;
+    }
+    Ok(())
+}
+
+fn legacy_right_inventory_row(decoder: &mut Decoder<'_>, inventory: &mut Inventory) -> Result<()> {
+    let (sequence, payload) = read_legacy_right_row(decoder)?;
+    inventory.identities = legacy_add(inventory.identities, 1)?;
+    inventory.bytes = legacy_add(inventory.bytes, 320)?;
+    charge_legacy_blob(inventory, sequence)?;
+    charge_legacy_right_payload(inventory, payload)
+}
+
+fn read_legacy_right_row<'a>(decoder: &mut Decoder<'a>) -> Result<(&'a [u8], &'a [u8])> {
+    decoder.row()?;
+    decoder.time()?;
+    Ok((decoder.blob()?, decoder.blob()?))
+}
+
+fn charge_legacy_right_payload(inventory: &mut Inventory, payload: &[u8]) -> Result<()> {
+    if payload.is_empty() {
+        inventory.identity_only = legacy_add(inventory.identity_only, 1)?;
+    } else {
+        inventory.right_payloads = legacy_add(inventory.right_payloads, 1)?;
+        charge_legacy_blob(inventory, payload)?;
+    }
+    Ok(())
+}
+
+fn charge_legacy_blob(inventory: &mut Inventory, value: &[u8]) -> Result<()> {
+    inventory.bytes = legacy_add(inventory.bytes, legacy_add(64, value.len() as u64)?)?;
+    Ok(())
 }
 
 fn legacy_add(base: u64, value: u64) -> Result<u64> {
@@ -750,7 +856,7 @@ fn verify_checksum(segment: &StateSegment) -> Result<()> {
 fn validate_index_identity(
     identity: &super::state::LeftOrder,
     payload: &RowPayload,
-    cache: &BTreeMap<BatchKey, (super::state::EncodedColumns, super::state::EncodedColumns)>,
+    cache: &IdentityCache,
     side: &super::AsofJoinSide,
 ) -> Result<()> {
     let record = &payload.batch.record;
@@ -1157,6 +1263,69 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn v2_restore_rejects_batch_id_at_next_admission_boundary() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("key", DataType::Utf8, false),
+            Field::new(
+                "time",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                false,
+            ),
+            Field::new("seq", DataType::Int64, false),
+        ]));
+        let side = |prefix: &str| {
+            AsofJoinSide::new(
+                vec!["key".into()],
+                "time".into(),
+                vec!["seq".into()],
+                prefix.into(),
+            )
+            .unwrap()
+        };
+        let spec = super::super::StreamAsofJoinSpec::new(
+            side("left"),
+            side("right"),
+            Duration::ZERO,
+            AsofStateLimits::new(10, 1 << 20).unwrap(),
+        )
+        .unwrap();
+        let mut operator =
+            StreamAsofJoinOperator::new("asof", schema.clone(), schema.clone(), spec).unwrap();
+        let record = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["A"])),
+                Arc::new(TimestampMicrosecondArray::from(vec![100]).with_timezone("UTC")),
+                Arc::new(Int64Array::from(vec![1])),
+            ],
+        )
+        .unwrap();
+        let batch = Batch::table(vec![record], BatchMetadata::default()).unwrap();
+        let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+        let context = StreamOperatorContext::new(&job, "asof", None);
+        let mut output = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("left", batch, &context, &mut output)
+            .await
+            .unwrap();
+        let mut snapshot = operator.capture(Epoch::INITIAL).unwrap();
+        let payload = snapshot.segments.remove("asof-batch-0-0").unwrap();
+        snapshot.segments.insert("asof-batch-0-1".into(), payload);
+        let mut index = snapshot.segments[INDEX_SEGMENT].bytes().to_vec();
+        let id_offset = index.len() - 16;
+        index[id_offset..id_offset + 8].copy_from_slice(&1_u64.to_le_bytes());
+        snapshot
+            .segments
+            .insert(INDEX_SEGMENT.into(), StateSegment::new(index));
+        let before = operator.status();
+        assert!(matches!(
+            operator.restore(&snapshot),
+            Err(CalcFlowError::CheckpointMismatch { .. })
+        ));
+        assert_eq!(operator.status(), before);
     }
 
     #[tokio::test]
