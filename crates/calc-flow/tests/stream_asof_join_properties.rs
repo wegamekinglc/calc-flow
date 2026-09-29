@@ -3,10 +3,13 @@ mod asof_support;
 mod materialization;
 use asof_support::{batch, operator};
 use calc_flow::{
-    CancellationToken, EdgeCollector, JsonMap, OperatorMetadata, StreamJobContext, StreamOperator,
-    StreamOperatorContext,
+    CalcFlowError, CancellationToken, EdgeCollector, Epoch, EventTime, IngressProgress,
+    IngressProgressSnapshot, IngressState, JsonMap, OperatorMetadata, StreamJobContext,
+    StreamOperator, StreamOperatorContext, StreamingFailureReason,
 };
 use datafusion::arrow::array::{Array, Int64Array};
+use proptest::prelude::*;
+use std::collections::BTreeMap;
 
 #[tokio::test]
 async fn backward_asof_is_inclusive_left_preserving_and_final() {
@@ -102,6 +105,124 @@ async fn typed_ties_and_legal_batch_interleavings_match_independent_oracle() {
         }
         op.on_end(&cx, &mut out).await.unwrap();
         assert_eq!(output_rows(&mut out), expected, "seed {seed}");
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    #[test]
+    fn shuffled_rows_across_watermark_and_restore_match_oracle(
+        left_values in proptest::collection::vec(any::<u8>(), 1..24),
+        right_values in proptest::collection::vec(any::<u8>(), 1..24),
+        seed in any::<u64>(),
+        restore in any::<bool>(),
+    ) {
+        let make_rows = |values: &[u8]| -> Vec<InputRow<'static>> {
+            values.iter().enumerate().map(|(index, value)| {
+                let key = ["A", "B", "C"][usize::from(value % 3)];
+                let time = if value % 2 == 0 { 90 } else { 110 } + i64::from(value % 10);
+                let sequence = i64::try_from(index).expect("bounded property input");
+                (key, time, sequence, i64::from(*value) * 10 + sequence)
+            }).collect()
+        };
+        let left = make_rows(&left_values);
+        let right = make_rows(&right_values);
+        let expected = oracle(&left, &right);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let actual = runtime.block_on(async {
+            let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+            let cx = StreamOperatorContext::new(&job, "asof", None);
+            let mut op = operator(10);
+            let mut output = EdgeCollector::new(op.output_ports().to_vec());
+            let mut emitted = Vec::new();
+            for phase in 0..2 {
+                for (ingress, source, salt) in [
+                    ("right", &right, 37_u64),
+                    ("left", &left, 71_u64),
+                ] {
+                    let mut rows: Vec<_> = source.iter().copied()
+                        .filter(|row| (row.1 >= 100) == (phase == 1))
+                        .collect();
+                    shuffle(&mut rows, seed.wrapping_add(salt).wrapping_add(phase));
+                    for chunk in rows.chunks(3) {
+                        op.process_data(ingress, batch(chunk), &cx, &mut output)
+                            .await
+                            .unwrap();
+                    }
+                }
+                if phase == 0 {
+                    let ingress = IngressProgressSnapshot::new(BTreeMap::from([
+                        ("left".into(), IngressProgress::new(
+                            IngressState::Active, Some(EventTime::from_micros(100)))),
+                        ("right".into(), IngressProgress::new(
+                            IngressState::Active, Some(EventTime::from_micros(100)))),
+                    ]));
+                    let progress = StreamOperatorContext::with_ingress_progress(
+                        &job, "asof", Some(EventTime::from_micros(100)), ingress);
+                    op.on_watermark(EventTime::from_micros(100), &progress, &mut output)
+                        .await
+                        .unwrap();
+                    emitted.extend(output_rows(&mut output));
+                    if restore {
+                        op.prepare_checkpoint_async(&cx).await.unwrap();
+                        let snapshot = op.checkpoint(Epoch::INITIAL).unwrap();
+                        let mut recovered = operator(10);
+                        recovered.restore(&snapshot).unwrap();
+                        op = recovered;
+                    }
+                }
+            }
+            op.on_end(&cx, &mut output).await.unwrap();
+            emitted.extend(output_rows(&mut output));
+            assert_eq!(op.status().emitted_left_rows, left.len() as u64);
+            assert_eq!(op.status().left.accepted_rows, left.len() as u64);
+            assert_eq!(op.status().right.accepted_rows, right.len() as u64);
+            emitted
+        });
+        prop_assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn duplicate_or_cancelled_admission_leaves_no_partial_state(
+        time in 0_i64..1_000,
+        sequence in any::<i64>(),
+        value in any::<i64>(),
+    ) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let row = ("A", time, sequence, value);
+            let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+            let cx = StreamOperatorContext::new(&job, "asof", None);
+            let mut op = operator(10);
+            let mut output = EdgeCollector::new(op.output_ports().to_vec());
+            let error = op.process_data("left", batch(&[row, row]), &cx, &mut output)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, CalcFlowError::OperatorReason {
+                reason_code: StreamingFailureReason::AsofDuplicateIdentity, ..
+            }));
+            assert_eq!(op.status().left.duplicate_rows, 1);
+            assert_eq!(op.status().left.accepted_rows, 0);
+            assert_eq!(op.status().state_rows, 0);
+
+            let token = CancellationToken::new();
+            token.cancel();
+            let cancelled = StreamJobContext::new(2, "asof", JsonMap::new(), None, token);
+            let cancelled_cx = StreamOperatorContext::new(&cancelled, "asof", None);
+            let mut op = operator(10);
+            assert!(op.process_data("right", batch(&[row]), &cancelled_cx, &mut output)
+                .await
+                .is_err());
+            assert_eq!(op.status().right.accepted_rows, 0);
+            assert_eq!(op.status().state_rows, 0);
+        });
     }
 }
 
