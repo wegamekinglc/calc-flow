@@ -110,33 +110,11 @@ pub(super) fn restore_charge(cursor: &mut Cursor<'_>) -> Result<u64> {
     let mut charge = count as u64 * 256;
     let mut largest = 0;
     for _ in 0..count {
-        let kind = cursor.byte()?;
-        if cursor.byte()? != 0 {
-            return Err(mismatch("ASOF v3 owner padding differs"));
-        }
-        let rows = cursor.address()?;
-        let capacity = cursor.capacity(1)?;
-        let length = cursor.address()?;
-        require_capacity(capacity, length)?;
-        let width = match kind {
-            0 => 0,
-            1 => 4,
-            2 => 8,
-            _ => return Err(mismatch("ASOF v3 owner kind differs")),
-        };
-        let offsets = cursor.capacity(width)?;
-        cursor.take(length)?;
-        largest = largest.max(length as u64);
-        if width != 0 {
-            let count = offset_count(rows, offsets)?;
-            super::skip_rows(cursor, count, width)?;
-        } else if rows != 1 || offsets != 0 || length <= 10 {
-            return Err(mismatch("ASOF v3 shared owner shape differs"));
-        }
-        charge = super::restore_add(charge, capacity as u64)?;
-        charge = super::restore_add(charge, super::allocation(offsets, width, cursor.limit)?)?;
-        charge = super::restore_add(charge, 512)?;
+        let (length, bytes) = scan_owner(cursor)?;
+        largest = largest.max(length);
+        charge = super::restore_add(charge, bytes)?;
     }
+
     super::restore_add(charge, largest)
 }
 
@@ -219,7 +197,15 @@ fn inline_reference(bytes: &[u8]) -> Result<Encoding> {
     Ok(Encoding::from_slice(&bytes[2..2 + length]))
 }
 
-fn read_owner(cursor: &mut Cursor<'_>) -> Result<Owner> {
+#[derive(Clone, Copy)]
+struct OwnerShape {
+    kind: u8,
+    rows: usize,
+    capacity: usize,
+    length: usize,
+}
+
+fn read_owner_shape(cursor: &mut Cursor<'_>) -> Result<OwnerShape> {
     let kind = cursor.byte()?;
     if cursor.byte()? != 0 {
         return Err(mismatch("ASOF v3 owner padding differs"));
@@ -228,10 +214,75 @@ fn read_owner(cursor: &mut Cursor<'_>) -> Result<Owner> {
     let capacity = cursor.capacity(1)?;
     let length = cursor.address()?;
     require_capacity(capacity, length)?;
+    Ok(OwnerShape {
+        kind,
+        rows,
+        capacity,
+        length,
+    })
+}
+
+fn owner_offset_width(kind: u8) -> Result<usize> {
+    match kind {
+        0 => Ok(0),
+        1 => Ok(4),
+        2 => Ok(8),
+        _ => Err(mismatch("ASOF v3 owner kind differs")),
+    }
+}
+
+fn scan_owner(cursor: &mut Cursor<'_>) -> Result<(u64, u64)> {
+    let shape = read_owner_shape(cursor)?;
+    let width = owner_offset_width(shape.kind)?;
+    let offsets = cursor.capacity(width)?;
+    cursor.take(shape.length)?;
+    scan_owner_offsets(cursor, &shape, width, offsets)?;
+    let charge = super::restore_add(
+        shape.capacity as u64,
+        super::allocation(offsets, width, cursor.limit)?,
+    )?;
+    Ok((shape.length as u64, super::restore_add(charge, 512)?))
+}
+
+fn scan_owner_offsets(
+    cursor: &mut Cursor<'_>,
+    shape: &OwnerShape,
+    width: usize,
+    offsets: usize,
+) -> Result<()> {
+    if width != 0 {
+        let count = offset_count(shape.rows, offsets)?;
+        super::skip_rows(cursor, count, width)?;
+    } else if shape.rows != 1 || offsets != 0 || shape.length <= 10 {
+        return Err(mismatch("ASOF v3 shared owner shape differs"));
+    }
+    Ok(())
+}
+
+fn read_owner(cursor: &mut Cursor<'_>) -> Result<Owner> {
+    let shape = read_owner_shape(cursor)?;
+    let OwnerShape {
+        kind,
+        rows: _,
+        capacity,
+        length,
+    } = shape;
     let offsets = cursor.capacity(if kind == 1 { 4 } else { 8 })?;
     let values = cursor.take(length)?;
     let mut buffer = Vec::with_capacity(capacity);
     buffer.extend_from_slice(values);
+    build_owner(cursor, shape, offsets, buffer)
+}
+
+fn build_owner(
+    cursor: &mut Cursor<'_>,
+    shape: OwnerShape,
+    offsets: usize,
+    buffer: Vec<u8>,
+) -> Result<Owner> {
+    let OwnerShape {
+        kind, rows, length, ..
+    } = shape;
     match kind {
         0 if rows == 1 && offsets == 0 && length > 10 => Ok(Owner::Shared(Arc::new(buffer))),
         1 => read_binary(cursor, rows, offsets, buffer),

@@ -463,14 +463,8 @@ impl LeftState {
                 .iter()
                 .find(|(current, _)| *current == index)
                 .map(|(_, data)| data);
-            let retained = if let Some(data) = replacement {
-                data.retained_input_bytes(name)? - data.owners.buffers_bytes() + 128
-            } else {
-                let after = chunk.data.owners.projected_metadata_bytes(&owners);
-                chunk.data.retained_input_bytes(name)? - chunk.data.owners.allocation_bytes()
-                    + after
-                    + 128
-            };
+            let retained =
+                projected_chunk_bytes(&chunk.data, replacement.map(AsRef::as_ref), &owners, name)?;
             bytes = checked(name, bytes, retained)?;
         }
         Ok((bytes, removed_index))
@@ -821,6 +815,20 @@ impl LeftState {
     pub fn is_ordered(&self) -> bool {
         self.legacy.is_ordered()
     }
+}
+
+fn projected_chunk_bytes(
+    data: &ChunkData,
+    replacement: Option<&ChunkData>,
+    owners: &super::OwnerRemovals,
+    name: &str,
+) -> Result<u64> {
+    Ok(if let Some(replacement) = replacement {
+        replacement.retained_input_bytes(name)? - replacement.owners.buffers_bytes() + 128
+    } else {
+        let after = data.owners.projected_metadata_bytes(owners);
+        data.retained_input_bytes(name)? - data.owners.allocation_bytes() + after + 128
+    })
 }
 
 fn chunk_metadata(data: &ChunkData) -> u64 {

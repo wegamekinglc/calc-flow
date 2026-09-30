@@ -78,6 +78,94 @@ pub struct StreamAsofJoinOperator {
 }
 
 impl StreamAsofJoinOperator {
+    async fn install_admission(
+        &mut self,
+        ingress: &str,
+        mut admission: admission::Admission,
+        validated: admission::ValidatedInput,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<()> {
+        let staging_workspace = self
+            .reserve_workspace(self.state.admission_staging_bytes(
+                &admission.rows,
+                &admission.batches,
+                &self.name,
+            )?)
+            .map_err(|error| self.attempt_error(error))?;
+        let (index_len, projected, owners) = self
+            .state
+            .project_capacity_admission(
+                self.capacity_snapshot(),
+                &admission.rows,
+                admission.left_chunks.as_deref(),
+                &admission.right_capacities,
+                &admission.batches,
+                &self.name,
+            )
+            .map_err(|error| self.attempt_error(error))?;
+        self.check_inventory_limits(&projected)
+            .map_err(|error| self.attempt_error(error))?;
+        let mut status = self
+            .admitted_status(validated.index, admission.rows.len(), &projected)
+            .map_err(|error| self.attempt_error(error))?;
+        let index_workspace = self
+            .reserve_workspace(index_len)
+            .map_err(|error| self.attempt_error(error))?;
+        let batches = self
+            .state
+            .batches
+            .project_admission(&admission.batches, &self.name)?
+            .new_batches;
+        let copies = self
+            .prepare_right_admission_copies(&admission.right_capacities, context)
+            .await
+            .map_err(|error| self.attempt_error(error))?;
+        context.check_cancelled()?;
+        // Everything after this point is synchronous and infallible. A dropped
+        // future or failed preflight cannot expose a partially admitted row.
+        copies.install(&mut self.state.right);
+        self.state.batches.reserve_admission(batches);
+        admission.install(ingress, &mut self.state, &mut status);
+        self.state.install_encoding_owners(owners);
+        self.status = status;
+        self.prepared = None;
+        self.deferred_index_len = Some(index_len);
+        self.swept = None;
+        debug_assert_eq!(
+            checkpoint::v3_encoded_length(&self.state, &self.name).expect("committed index length"),
+            index_len
+        );
+        debug_assert_eq!(
+            self.current_inventory(None)
+                .expect("committed admission inventory")
+                .bytes
+                + index_len
+                + 256,
+            self.status.state_bytes
+        );
+        drop((admission, index_workspace, staging_workspace));
+        Ok(())
+    }
+
+    fn admitted_status(
+        &self,
+        side: usize,
+        count: usize,
+        projected: &Inventory,
+    ) -> Result<StreamAsofJoinStatus> {
+        let mut status = self.status.clone();
+        status.pending_left_rows = checked(
+            &self.name,
+            status.pending_left_rows,
+            if side == 0 { count as u64 } else { 0 },
+        )?;
+        status.retained_right_rows = projected.right_payloads;
+        status.identity_only_rows = projected.identity_only;
+        status.state_rows = projected.identities;
+        status.state_bytes = projected.bytes;
+        Ok(status)
+    }
+
     /// Constructs an independent bounded backward ASOF operator.
     ///
     /// # Errors
@@ -287,7 +375,7 @@ impl StreamOperator for StreamAsofJoinOperator {
         context.check_cancelled()?;
         self.observe(context.ingress_progress());
         let validated = self.validate_admission(ingress, &batch)?;
-        let mut admission = self
+        let admission = self
             .prepare_admission(validated, &batch, context)
             .await
             .map_err(|error| self.attempt_error(error))?;
@@ -297,78 +385,8 @@ impl StreamOperator for StreamAsofJoinOperator {
             // an identical state.
             return Ok(());
         }
-        let staging_workspace = self
-            .reserve_workspace(self.state.admission_staging_bytes(
-                &admission.rows,
-                &admission.batches,
-                &self.name,
-            )?)
-            .map_err(|error| self.attempt_error(error))?;
-        let (index_len, projected, owners) = self
-            .state
-            .project_capacity_admission(
-                self.capacity_snapshot(),
-                &admission.rows,
-                admission.left_chunks.as_deref(),
-                &admission.right_capacities,
-                &admission.batches,
-                &self.name,
-            )
-            .map_err(|error| self.attempt_error(error))?;
-        self.check_inventory_limits(&projected)
-            .map_err(|error| self.attempt_error(error))?;
-        let mut status = self.status.clone();
-        status.pending_left_rows = checked(
-            &self.name,
-            status.pending_left_rows,
-            if validated.index == 0 {
-                admission.rows.len() as u64
-            } else {
-                0
-            },
-        )
-        .map_err(|error| self.attempt_error(error))?;
-        status.retained_right_rows = projected.right_payloads;
-        status.identity_only_rows = projected.identity_only;
-        status.state_rows = projected.identities;
-        status.state_bytes = projected.bytes;
-        let index_workspace = self
-            .reserve_workspace(index_len)
-            .map_err(|error| self.attempt_error(error))?;
-        let batches = self
-            .state
-            .batches
-            .project_admission(&admission.batches, &self.name)?
-            .new_batches;
-        let copies = self
-            .prepare_right_admission_copies(&admission.right_capacities, context)
+        self.install_admission(ingress, admission, validated, context)
             .await
-            .map_err(|error| self.attempt_error(error))?;
-        context.check_cancelled()?;
-        // Everything after this point is synchronous and infallible. A dropped
-        // future or failed preflight cannot expose a partially admitted row.
-        copies.install(&mut self.state.right);
-        self.state.batches.reserve_admission(batches);
-        admission.install(ingress, &mut self.state, &mut status);
-        self.state.install_encoding_owners(owners);
-        self.status = status;
-        self.prepared = None;
-        self.deferred_index_len = Some(index_len);
-        self.swept = None;
-        debug_assert_eq!(
-            checkpoint::v3_encoded_length(&self.state, &self.name).expect("committed index length"),
-            index_len
-        );
-        debug_assert_eq!(
-            self.current_inventory(None)
-                .expect("committed admission inventory")
-                .bytes
-                + index_len
-                + 256,
-            self.status.state_bytes
-        );
-        drop((admission, index_workspace, staging_workspace));
-        Ok(())
     }
     async fn prepare_checkpoint_async(
         &mut self,

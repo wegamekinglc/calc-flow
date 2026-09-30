@@ -92,22 +92,8 @@ impl StreamAsofJoinOperator {
         metadata: Metadata<'_>,
     ) -> Result<DecodedSnapshot> {
         let segment = snapshot_segment(snapshot)?;
-        let index_workspace = segment.map_or(Ok(0), |segment| {
-            verify_checksum(segment)?;
-            index_v3::restore_charge(
-                segment.bytes(),
-                self.spec.limits().max_state_rows(),
-                self.spec.limits().max_state_bytes(),
-            )
-        })?;
-        let payload_workspace = self.payload_restore_workspace(snapshot)?;
-        let workspace = self.reserve_workspace(super::checked(
-            &self.name,
-            index_workspace,
-            payload_workspace,
-        )?)?;
-        let batches = self.decode_payload_batches(snapshot)?;
-        validate_batch_ranges(&batches, &metadata.metrics)?;
+        let workspace = self.snapshot_restore_workspace(snapshot, segment)?;
+        let batches = self.decode_validated_payloads(snapshot, &metadata.metrics)?;
         let mut state = if let Some(segment) = segment {
             index_v3::decode(
                 segment,
@@ -124,16 +110,7 @@ impl StreamAsofJoinOperator {
         let prepared = segment.cloned().map(PreparedSegment::new);
         let inventory = state.capacity_inventory(prepared.as_ref(), &self.name)?;
         validate_gauges(&inventory, state.left.len() as u64, &metadata.metrics)?;
-        if inventory.identities > self.spec.limits().max_state_rows()
-            || inventory.bytes > self.spec.limits().max_state_bytes()
-        {
-            return Err(mismatch("ASOF restored v3 state exceeds current limits"));
-        }
-        validate_counters(
-            &metadata.metrics,
-            metadata.terminal,
-            metadata.next_output_sequence,
-        )?;
+        self.validate_restored_limits(&inventory, &metadata)?;
         Ok(DecodedSnapshot {
             state,
             metrics: metadata.metrics,
@@ -144,6 +121,55 @@ impl StreamAsofJoinOperator {
             _workspace: workspace,
         })
     }
+    fn decode_validated_payloads(
+        &self,
+        snapshot: &OperatorStateSnapshot,
+        metrics: &StreamAsofJoinStatus,
+    ) -> Result<BTreeMap<BatchKey, Arc<PayloadBatch>>> {
+        let batches = self.decode_payload_batches(snapshot)?;
+        validate_batch_ranges(&batches, metrics)?;
+        Ok(batches)
+    }
+
+    fn validate_restored_limits(
+        &self,
+        inventory: &Inventory,
+        metadata: &Metadata<'_>,
+    ) -> Result<()> {
+        if inventory.identities > self.spec.limits().max_state_rows()
+            || inventory.bytes > self.spec.limits().max_state_bytes()
+        {
+            return Err(mismatch("ASOF restored v3 state exceeds current limits"));
+        }
+        validate_counters(
+            &metadata.metrics,
+            metadata.terminal,
+            metadata.next_output_sequence,
+        )?;
+        Ok(())
+    }
+
+    fn snapshot_restore_workspace(
+        &self,
+        snapshot: &OperatorStateSnapshot,
+        segment: Option<&StateSegment>,
+    ) -> Result<MemoryReservation> {
+        let index_workspace = segment.map_or(Ok(0), |segment| {
+            verify_checksum(segment)?;
+            index_v3::restore_charge(
+                segment.bytes(),
+                self.spec.limits().max_state_rows(),
+                self.spec.limits().max_state_bytes(),
+            )
+        })?;
+        let payload_workspace = self.payload_restore_workspace(snapshot)?;
+        self.reserve_workspace(super::checked(
+            &self.name,
+            index_workspace,
+            payload_workspace,
+        )?)
+    }
+
     fn payload_restore_workspace(&self, snapshot: &OperatorStateSnapshot) -> Result<u64> {
         let mut retained = 0;
         let mut scratch = 0;
@@ -465,21 +491,24 @@ impl StreamAsofJoinOperator {
             )?;
             validate_index_identity(&identity, state.batches.view(payload), self.spec.left())?;
         }
+        self.validate_right_indexed_rows(state, &mut seen)?;
+        Ok(())
+    }
+
+    fn validate_right_indexed_rows(
+        &self,
+        state: &State,
+        seen: &mut std::collections::BTreeSet<(usize, u8)>,
+    ) -> Result<()> {
         for (key, bucket) in &state.right {
-            validate_encoding(
-                key,
-                &self.schemas[1],
-                self.spec.right().keys(),
-                2,
-                &mut seen,
-            )?;
+            validate_encoding(key, &self.schemas[1], self.spec.right().keys(), 2, seen)?;
             for ((time, sequence), payload) in bucket {
                 validate_encoding(
                     sequence.as_ref(),
                     &self.schemas[1],
                     self.spec.right().sequence_by(),
                     3,
-                    &mut seen,
+                    seen,
                 )?;
                 if let Some(payload) = payload {
                     validate_index_identity(

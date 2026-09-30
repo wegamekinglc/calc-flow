@@ -68,15 +68,8 @@ impl State {
         let updates = owners.project_add(rows.iter().flat_map(|(order, _)| [&order.1, &order.2]));
         let pool = self.batches.project_admission(batches, name)?;
         let mut inventory = snapshot.inventory_without_index();
-        inventory.identities = checked(name, inventory.identities, rows.len() as u64)?;
-        let growth = if let Some(chunks) = chunks {
-            self.left.projected_admission_bytes(chunks, name)? - self.left.capacity_bytes(name)?
-        } else {
-            inventory.right_payloads = checked(name, inventory.right_payloads, rows.len() as u64)?;
-            self.right
-                .projected_admission_growth(right_counts, self.sequence_kinds[1])
-        };
-        inventory.bytes = checked(name, inventory.bytes, growth)?;
+        inventory =
+            self.admission_column_inventory(inventory, rows.len(), chunks, right_counts, name)?;
         inventory.bytes = checked(
             name,
             inventory.bytes,
@@ -90,6 +83,39 @@ impl State {
             length,
             EncodingOwners::projected_encoded_length(&updates) - owners.encoded_length(),
         )?;
+        length = self.admission_index_length(length, chunks, right_counts, name)?;
+        super::validate_key_count((self.batches.len() + pool.new_batches) as u64, name)?;
+        inventory.bytes = checked(name, inventory.bytes, checked(name, length, 256)?)?;
+        Ok((length, inventory, updates))
+    }
+
+    fn admission_column_inventory(
+        &self,
+        mut inventory: Inventory,
+        count: usize,
+        chunks: Option<&[PreparedLeftChunk]>,
+        right_counts: &[(Encoding, usize)],
+        name: &str,
+    ) -> Result<Inventory> {
+        inventory.identities = checked(name, inventory.identities, count as u64)?;
+        let growth = if let Some(chunks) = chunks {
+            self.left.projected_admission_bytes(chunks, name)? - self.left.capacity_bytes(name)?
+        } else {
+            inventory.right_payloads = checked(name, inventory.right_payloads, count as u64)?;
+            self.right
+                .projected_admission_growth(right_counts, self.sequence_kinds[1])
+        };
+        inventory.bytes = checked(name, inventory.bytes, growth)?;
+        Ok(inventory)
+    }
+
+    fn admission_index_length(
+        &self,
+        mut length: u64,
+        chunks: Option<&[PreparedLeftChunk]>,
+        right_counts: &[(Encoding, usize)],
+        name: &str,
+    ) -> Result<u64> {
         if let Some(chunks) = chunks {
             for chunk in chunks {
                 length = checked(name, length, chunk.v3_length(self.sequence_kinds[0]))?;
@@ -109,9 +135,7 @@ impl State {
             }
             super::validate_key_count((self.right.len() + new_keys) as u64, name)?;
         }
-        super::validate_key_count((self.batches.len() + pool.new_batches) as u64, name)?;
-        inventory.bytes = checked(name, inventory.bytes, checked(name, length, 256)?)?;
-        Ok((length, inventory, updates))
+        Ok(length)
     }
 
     pub fn project_capacity_prefix(

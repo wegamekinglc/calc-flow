@@ -13,6 +13,8 @@ use std::collections::{BTreeMap, HashMap};
 
 mod prefix;
 
+type EvictionProjection = (state::EvictionPreview, u64, state::Inventory, u64);
+
 struct PreparedOutput {
     batch: Batch,
     matched: u64,
@@ -135,13 +137,7 @@ impl StreamAsofJoinOperator {
             .await
     }
 
-    async fn finish_capacity_progress(
-        &mut self,
-        frontier: Option<i64>,
-        ended: bool,
-        context: &StreamOperatorContext<'_>,
-    ) -> Result<()> {
-        let staging = self.reserve_workspace(self.state.eviction_workspace_bytes(&self.name)?)?;
+    fn capacity_eviction_projection(&self) -> Result<EvictionProjection> {
         let preview =
             self.state
                 .preview_eviction(&self.status, self.spec.tolerance_micros(), &self.name)?;
@@ -153,6 +149,17 @@ impl StreamAsofJoinOperator {
             &self.name,
         )?;
         self.check_inventory_limits(&inventory)?;
+        Ok((preview, length, inventory, bytes))
+    }
+
+    async fn finish_capacity_progress(
+        &mut self,
+        frontier: Option<i64>,
+        ended: bool,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<()> {
+        let staging = self.reserve_workspace(self.state.eviction_workspace_bytes(&self.name)?)?;
+        let (preview, length, inventory, bytes) = self.capacity_eviction_projection()?;
         let columns = self.reserve_workspace(bytes)?;
         let mut status = self.status.clone();
         status.evicted_right_rows = checked(
@@ -229,24 +236,14 @@ impl StreamAsofJoinOperator {
         context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedOutput> {
         let cursor_workspace = self.cursor_workspace(count)?;
-        let MatchedPrefix { rows, prefix } = if cursor_workspace.is_some() {
-            monotonic_candidate_rows(
-                &self.state,
-                count,
-                self.spec.tolerance_micros(),
-                context,
-                &self.name,
-            )?
-        } else {
-            binary_search_candidate_rows(
-                &self.state,
-                count,
-                self.spec.tolerance_micros(),
-                context,
-                &self.name,
-            )?
-        };
-        drop(cursor_workspace);
+        let MatchedPrefix { rows, prefix } = match_output_prefix(
+            &self.state,
+            count,
+            self.spec.tolerance_micros(),
+            context,
+            &self.name,
+            cursor_workspace,
+        )?;
         context.check_cancelled()?;
         let matched = rows.iter().filter(|(_, right)| right.is_some()).count() as u64;
         let mut workspace = self.reserve_workspace(16 * 1024)?;
@@ -295,6 +292,23 @@ impl StreamAsofJoinOperator {
         }
         Ok(batch)
     }
+}
+
+fn match_output_prefix<'a>(
+    state: &'a state::State,
+    count: usize,
+    tolerance: u64,
+    context: &StreamOperatorContext<'_>,
+    name: &str,
+    cursor_workspace: Option<MemoryReservation>,
+) -> Result<MatchedPrefix<'a>> {
+    let matched = if cursor_workspace.is_some() {
+        monotonic_candidate_rows(state, count, tolerance, context, name)?
+    } else {
+        binary_search_candidate_rows(state, count, tolerance, context, name)?
+    };
+    drop(cursor_workspace);
+    Ok(matched)
 }
 
 fn binary_search_candidate_rows<'a>(

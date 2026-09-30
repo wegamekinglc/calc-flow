@@ -3,7 +3,7 @@
 
 use super::{
     StreamAsofJoinOperator, checked,
-    state::{BatchKey, Encoding, PreparedPayloadRemoval, RightBucket, RightState},
+    state::{BatchKey, Encoding, PayloadRemoval, PreparedPayloadRemoval, RightBucket, RightState},
 };
 use crate::{CalcFlowError, Result, StreamOperatorContext};
 use datafusion::execution::memory_pool::MemoryReservation;
@@ -58,26 +58,26 @@ impl StreamAsofJoinOperator {
             .pool_compaction_workspace(removals, layout.metadata_bytes, layout.remaining, context)
             .await?;
         let workspace = self.reserve_workspace(bytes)?;
-        let mut prepared = PreparedPayloadRemoval::capture(&self.state.batches, &layout, workspace);
+        let prepared = self
+            .capture_pool_inputs(removals, &layout, workspace, context)
+            .await?;
+        populate_pool(prepared, layout, context).await
+    }
+
+    async fn capture_pool_inputs(
+        &self,
+        removals: &std::collections::BTreeMap<BatchKey, usize>,
+        layout: &PayloadRemoval,
+        workspace: MemoryReservation,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<PreparedPayloadRemoval> {
+        let mut prepared = PreparedPayloadRemoval::capture(&self.state.batches, layout, workspace);
         for (ordinal, (id, batch, references)) in
             self.state.batches.compaction_entries(removals).enumerate()
         {
             cooperate(ordinal, context).await?;
             prepared.retain(id, batch, references);
         }
-        context.check_cancelled()?;
-        let worker = tokio::task::spawn_blocking(move || {
-            prepared.populate(&layout);
-            prepared
-        });
-        let prepared = tokio::select! {
-            result = worker => result.map_err(|error| CalcFlowError::Internal { message: format!("ASOF pool compaction task failed: {error}") })?,
-            () = context.job().cancellation().cancelled() => {
-                context.check_cancelled()?;
-                unreachable!("cancelled ASOF pool compaction")
-            }
-        };
-        context.check_cancelled()?;
         Ok(prepared)
     }
 
@@ -159,50 +159,15 @@ impl StreamAsofJoinOperator {
             .right_copy_buffer_bytes(selected.clone(), context)
             .await?;
         let workspace = self.reserve_workspace(checked(&self.name, bytes, buffers)?)?;
-        let mut originals = Vec::with_capacity(count);
-        for (ordinal, (id, bucket)) in selected.enumerate() {
-            if ordinal % 256 == 0 {
-                context.check_cancelled()?;
-            }
-            if ordinal > 0 && ordinal % 8_192 == 0 {
-                tokio::task::yield_now().await;
-            }
-            originals.push((id, bucket.clone()));
-        }
-        let cancellation = context.job().cancellation().clone();
-        let run_id = context.job().job_id();
-        let deadline = context.job().deadline().copied();
-        context.check_cancelled()?;
-        let worker = copy_worker(originals, workspace, move || {
-            if cancellation.is_cancelled()
-                || deadline.is_some_and(|deadline| chrono::Utc::now() >= deadline)
-            {
-                Err(CalcFlowError::Cancelled {
-                    run_id: run_id.to_string(),
-                })
-            } else {
-                Ok(())
-            }
-        });
-        let prepared = tokio::select! {
-            result = worker => result?,
-            () = context.job().cancellation().cancelled() => {
-                context.check_cancelled()?;
-                unreachable!("cancelled ASOF right column copy")
-            }
-        };
-        context.check_cancelled()?;
-        Ok(prepared)
+        let originals = capture_right_buckets(selected, count, context).await?;
+        copy_right_buckets(originals, workspace, context).await
     }
 
-    async fn right_copy_buffer_bytes<'a>(
+    fn right_copy_scratch_bytes<'a>(
         &self,
-        selected: impl Iterator<Item = (u32, &'a Arc<RightBucket>)> + Clone,
-        context: &StreamOperatorContext<'_>,
+        mut selected: impl Iterator<Item = (u32, &'a Arc<RightBucket>)>,
     ) -> Result<u64> {
-        // The global owner count bounds address-set scratch, but unrelated
-        // buffers are not retained by a right-column copy and need no lease.
-        let rows = selected.clone().try_fold(0, |rows, (_, bucket)| {
+        let rows = selected.try_fold(0, |rows, (_, bucket)| {
             checked(&self.name, rows, bucket.len() as u64)
         })?;
         let selected_metadata = rows
@@ -215,14 +180,24 @@ impl StreamAsofJoinOperator {
                     "ASOF selected owner scratch overflowed",
                 )
             })?;
-        let _scratch = self.reserve_workspace(checked(
+        checked(
             &self.name,
             self.state
                 .encoding_owner_allocation()
                 .1
                 .min(selected_metadata),
             256,
-        )?)?;
+        )
+    }
+
+    async fn right_copy_buffer_bytes<'a>(
+        &self,
+        selected: impl Iterator<Item = (u32, &'a Arc<RightBucket>)> + Clone,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<u64> {
+        // The global owner count bounds address-set scratch, but unrelated
+        // buffers are not retained by a right-column copy and need no lease.
+        let _scratch = self.reserve_workspace(self.right_copy_scratch_bytes(selected.clone())?)?;
         let mut owners = std::collections::BTreeSet::new();
         let mut bytes = 0;
         let mut ordinal = 0;
@@ -239,6 +214,76 @@ impl StreamAsofJoinOperator {
         }
         Ok(bytes)
     }
+}
+
+async fn populate_pool(
+    mut prepared: PreparedPayloadRemoval,
+    layout: PayloadRemoval,
+    context: &StreamOperatorContext<'_>,
+) -> Result<PreparedPayloadRemoval> {
+    context.check_cancelled()?;
+    let worker = tokio::task::spawn_blocking(move || {
+        prepared.populate(&layout);
+        prepared
+    });
+    let prepared = tokio::select! {
+        result = worker => result.map_err(|error| CalcFlowError::Internal { message: format!("ASOF pool compaction task failed: {error}") })?,
+        () = context.job().cancellation().cancelled() => {
+        context.check_cancelled()?;
+        unreachable!("cancelled ASOF pool compaction")
+        }
+    };
+    context.check_cancelled()?;
+    Ok(prepared)
+}
+
+async fn capture_right_buckets<'a>(
+    selected: impl Iterator<Item = (u32, &'a Arc<RightBucket>)>,
+    count: usize,
+    context: &StreamOperatorContext<'_>,
+) -> Result<Buckets> {
+    let mut originals = Vec::with_capacity(count);
+    for (ordinal, (id, bucket)) in selected.enumerate() {
+        if ordinal % 256 == 0 {
+            context.check_cancelled()?;
+        }
+        if ordinal > 0 && ordinal % 8_192 == 0 {
+            tokio::task::yield_now().await;
+        }
+        originals.push((id, bucket.clone()));
+    }
+    Ok(originals)
+}
+
+async fn copy_right_buckets(
+    originals: Buckets,
+    workspace: MemoryReservation,
+    context: &StreamOperatorContext<'_>,
+) -> Result<PreparedRightCopies> {
+    let cancellation = context.job().cancellation().clone();
+    let run_id = context.job().job_id();
+    let deadline = context.job().deadline().copied();
+    context.check_cancelled()?;
+    let worker = copy_worker(originals, workspace, move || {
+        if cancellation.is_cancelled()
+            || deadline.is_some_and(|deadline| chrono::Utc::now() >= deadline)
+        {
+            Err(CalcFlowError::Cancelled {
+                run_id: run_id.to_string(),
+            })
+        } else {
+            Ok(())
+        }
+    });
+    let prepared = tokio::select! {
+        result = worker => result?,
+        () = context.job().cancellation().cancelled() => {
+        context.check_cancelled()?;
+        unreachable!("cancelled ASOF right column copy")
+        }
+    };
+    context.check_cancelled()?;
+    Ok(prepared)
 }
 
 async fn cooperate(ordinal: usize, context: &StreamOperatorContext<'_>) -> Result<()> {

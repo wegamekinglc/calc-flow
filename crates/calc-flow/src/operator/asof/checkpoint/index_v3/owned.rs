@@ -41,33 +41,38 @@ pub(super) fn workspace_bytes(state: &State, length: u64, owned: bool, name: &st
     // fee; captured columns and all sorting descriptors are funded below.
     let mut bytes = checked(name, length, checked(name, metadata + 256, sorting)?)?;
     if owned {
-        bytes = checked(name, bytes, buffers)?;
-        bytes = checked(name, bytes, state.left.capacity_bytes(name)?)?;
-        bytes = checked(
-            name,
-            bytes,
-            (state.left.checkpoint_chunks(&state.batches).len() * size_of::<LeftChunk>()) as u64,
-        )?;
-        bytes = checked(
-            name,
-            bytes,
-            (state.right.len() * size_of::<Bucket>()) as u64,
-        )?;
-        bytes = checked(
-            name,
-            bytes,
-            (state.batches.len() * size_of::<(u32, u64)>()) as u64,
-        )?;
-        for bucket in state.right.values() {
-            bytes = checked(
-                name,
-                bytes,
-                bucket.metadata_bytes()
-                    + (size_of::<RightBucket>() + 2 * size_of::<usize>()) as u64,
-            )?;
-        }
+        bytes = checked(name, bytes, captured_input_bytes(state, buffers, name)?)?;
     } else {
         bytes = checked(name, bytes, state.right.len() as u64 * 4)?;
+    }
+    Ok(bytes)
+}
+
+fn captured_input_bytes(state: &State, buffers: u64, name: &str) -> Result<u64> {
+    let mut bytes = 0;
+    bytes = checked(name, bytes, buffers)?;
+    bytes = checked(name, bytes, state.left.capacity_bytes(name)?)?;
+    bytes = checked(
+        name,
+        bytes,
+        (state.left.checkpoint_chunks(&state.batches).len() * size_of::<LeftChunk>()) as u64,
+    )?;
+    bytes = checked(
+        name,
+        bytes,
+        (state.right.len() * size_of::<Bucket>()) as u64,
+    )?;
+    bytes = checked(
+        name,
+        bytes,
+        (state.batches.len() * size_of::<(u32, u64)>()) as u64,
+    )?;
+    for bucket in state.right.values() {
+        bytes = checked(
+            name,
+            bytes,
+            bucket.metadata_bytes() + (size_of::<RightBucket>() + 2 * size_of::<usize>()) as u64,
+        )?;
     }
     Ok(bytes)
 }

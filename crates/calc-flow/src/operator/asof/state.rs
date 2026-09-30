@@ -294,7 +294,9 @@ pub(super) struct RowPayload {
 }
 
 mod payload;
-pub(super) use payload::{PayloadPool, PayloadView, PreparedPayloadRemoval, RowRef};
+pub(super) use payload::{
+    PayloadPool, PayloadRemoval, PayloadView, PreparedPayloadRemoval, RowRef,
+};
 
 /// Keep the common ordered left stream contiguous. An overlapping batch
 /// promotes to the tree so late and out-of-order identities retain their
@@ -732,9 +734,7 @@ impl EncodedColumns {
     }
 }
 
-/// Resolves each named column once, then selects the typed scalar or generic
-/// batch converter path.
-pub(super) fn encode_columns(batch: &RecordBatch, names: &[String]) -> Result<EncodedColumns> {
+fn scalar_column(batch: &RecordBatch, names: &[String]) -> Result<Option<EncodedColumns>> {
     if let [name] = names {
         let index = batch
             .schema()
@@ -743,15 +743,24 @@ pub(super) fn encode_columns(batch: &RecordBatch, names: &[String]) -> Result<En
         let column = batch.column(index);
         if column.null_count() == 0 {
             if let Some(array) = column.as_any().downcast_ref::<Int64Array>() {
-                return Ok(EncodedColumns::Int64(array.clone()));
+                return Ok(Some(EncodedColumns::Int64(array.clone())));
             }
             if let Some(array) = column.as_any().downcast_ref::<UInt64Array>() {
-                return Ok(EncodedColumns::UInt64(array.clone()));
+                return Ok(Some(EncodedColumns::UInt64(array.clone())));
             }
             if let Some(integer) = IntegerColumn::from_array(column.as_ref()) {
-                return Ok(EncodedColumns::Integer(integer));
+                return Ok(Some(EncodedColumns::Integer(integer)));
             }
         }
+    }
+    Ok(None)
+}
+
+/// Resolves each named column once, then selects the typed scalar or generic
+/// batch converter path.
+pub(super) fn encode_columns(batch: &RecordBatch, names: &[String]) -> Result<EncodedColumns> {
+    if let Some(column) = scalar_column(batch, names)? {
+        return Ok(column);
     }
     let arrays = names
         .iter()
@@ -1015,11 +1024,37 @@ fn preview_bucket(
 }
 
 impl State {
-    pub fn capacity_inventory(
-        &self,
-        prepared: Option<&super::checkpoint::PreparedSegment>,
-        name: &str,
-    ) -> Result<Inventory> {
+    fn scan_encoding_owners(&self) -> EncodingOwners {
+        let mut scanned = EncodingOwners::default();
+        for ((_, key, sequence), _) in self.left.unordered_iter() {
+            scanned.attach(key);
+            scanned.attach(sequence.as_ref());
+        }
+        for (key, bucket) in &self.right {
+            for ((_, sequence), _) in bucket {
+                scanned.attach(key);
+                scanned.attach(sequence.as_ref());
+            }
+        }
+        scanned
+    }
+
+    fn payload_capacity_bytes(&self, name: &str) -> Result<u64> {
+        let mut bytes = 0;
+        for (batch, references) in self.batches.values() {
+            if *references == 0 {
+                return Err(super::reason(
+                    name,
+                    crate::StreamingFailureReason::AsofProtocolError,
+                    "ASOF retained an unreferenced payload batch",
+                ));
+            }
+            bytes = super::checked(name, bytes, capacity_batch_allocation(batch, name)?)?;
+        }
+        Ok(bytes)
+    }
+
+    fn index_capacity_inventory(&self, name: &str) -> Result<Inventory> {
         let mut total = Inventory {
             identities: self.left.len() as u64,
             bytes: self.left.capacity_bytes(name)?,
@@ -1030,43 +1065,25 @@ impl State {
         let owners = if let Some(owners) = &self.encoding_owners {
             owners
         } else {
-            let mut scanned = EncodingOwners::default();
-            for ((_, key, sequence), _) in self.left.unordered_iter() {
-                scanned.attach(key);
-                scanned.attach(sequence.as_ref());
-            }
-            for (key, bucket) in &self.right {
-                for ((_, sequence), _) in bucket {
-                    scanned.attach(key);
-                    scanned.attach(sequence.as_ref());
-                }
-            }
+            let scanned = self.scan_encoding_owners();
             fallback = scanned;
             &fallback
         };
         total.bytes = super::checked(name, total.bytes, owners.allocation_bytes())?;
         for bucket in self.right.values() {
-            total.identities = super::checked(name, total.identities, bucket.len() as u64)?;
-            total.right_payloads =
-                super::checked(name, total.right_payloads, bucket.payload_len() as u64)?;
-            total.identity_only = super::checked(
-                name,
-                total.identity_only,
-                (bucket.len() - bucket.payload_len()) as u64,
-            )?;
+            total = add_right_inventory(total, bucket, name)?;
         }
+        Ok(total)
+    }
+
+    pub fn capacity_inventory(
+        &self,
+        prepared: Option<&super::checkpoint::PreparedSegment>,
+        name: &str,
+    ) -> Result<Inventory> {
+        let mut total = self.index_capacity_inventory(name)?;
         total.bytes = super::checked(name, total.bytes, self.batches.metadata_bytes())?;
-        for (batch, references) in self.batches.values() {
-            if *references == 0 {
-                return Err(super::reason(
-                    name,
-                    crate::StreamingFailureReason::AsofProtocolError,
-                    "ASOF retained an unreferenced payload batch",
-                ));
-            }
-            total.bytes =
-                super::checked(name, total.bytes, capacity_batch_allocation(batch, name)?)?;
-        }
+        total.bytes = super::checked(name, total.bytes, self.payload_capacity_bytes(name)?)?;
         if let Some(prepared) = prepared {
             total.bytes = super::checked(name, total.bytes, prepared.capacity() as u64 + 256)?;
         }
@@ -1298,6 +1315,21 @@ pub(super) fn capacity_batch_allocation(batch: &PayloadBatch, name: &str) -> Res
 #[cfg(test)]
 fn prepared_allocation(prepared: &super::checkpoint::PreparedSegment) -> u64 {
     ALLOCATION_BYTES + prepared.capacity() as u64
+}
+
+fn add_right_inventory(
+    mut total: Inventory,
+    bucket: &RightBucket,
+    name: &str,
+) -> Result<Inventory> {
+    total.identities = super::checked(name, total.identities, bucket.len() as u64)?;
+    total.right_payloads = super::checked(name, total.right_payloads, bucket.payload_len() as u64)?;
+    total.identity_only = super::checked(
+        name,
+        total.identity_only,
+        (bucket.len() - bucket.payload_len()) as u64,
+    )?;
+    Ok(total)
 }
 
 fn left_row_charge<T>(key: &Encoding, sequence: &Encoding, row: &T) -> u64 {

@@ -34,6 +34,29 @@ impl<'a> Cursor<'a> {
         Self { bytes, limit }
     }
 
+    fn addresses<const N: usize>(&mut self) -> Result<[usize; N]> {
+        let mut values = [0; N];
+        for value in &mut values {
+            *value = self.address()?;
+        }
+        Ok(values)
+    }
+
+    fn capacities<const N: usize>(&mut self, widths: [usize; N]) -> Result<[usize; N]> {
+        let mut values = [0; N];
+        for (value, width) in values.iter_mut().zip(widths) {
+            *value = self.capacity(width)?;
+        }
+        Ok(values)
+    }
+
+    fn column(&mut self, rows: usize, width: usize) -> Result<&'a [u8]> {
+        let length = rows
+            .checked_mul(width)
+            .ok_or_else(|| mismatch("ASOF v3 column length overflowed"))?;
+        self.take(length)
+    }
+
     fn take(&mut self, count: usize) -> Result<&'a [u8]> {
         if count > self.bytes.len() {
             return Err(mismatch("ASOF truncated v3 index"));
@@ -127,28 +150,53 @@ pub(in super::super) fn encoded_length(state: &State, name: &str) -> Result<u64>
         .owners_encoded_length()
         .unwrap_or_else(|| source_owners(state).encoded_length());
     let mut bytes = checked(name, BASE_BYTES, owners)?;
+    bytes = checked(name, bytes, left_lengths(state, name)?)?;
+    bytes = checked(name, bytes, right_lengths(state, name)?)?;
+    Ok(bytes)
+}
+
+fn left_lengths(state: &State, name: &str) -> Result<u64> {
+    let mut bytes = 0;
     for (_, data, head) in state.left.checkpoint_chunks(&state.batches) {
-        let rows = (data.sequences.len() - head) as u64;
-        let keys = data.keys.iter().filter(|key| key.is_some()).count() as u64;
-        let columns = rows
-            .checked_mul(16 + state.sequence_kinds[0].reference_bytes())
-            .ok_or_else(|| mismatch("ASOF v3 left index length overflowed"))?;
-        bytes = checked(name, bytes, LEFT_HEADER + 16 * keys)?;
-        bytes = checked(name, bytes, columns)?;
-    }
-    for bucket in state.right.values() {
-        let rows = bucket.len() as u64;
-        let columns = rows
-            .checked_mul(9 + state.sequence_kinds[1].reference_bytes())
-            .ok_or_else(|| mismatch("ASOF v3 right index length overflowed"))?;
-        bytes = checked(name, bytes, RIGHT_HEADER)?;
         bytes = checked(
             name,
             bytes,
-            checked(name, columns, bucket.payload_len() as u64 * 12)?,
+            left_length(data, head, state.sequence_kinds[0], name)?,
         )?;
     }
     Ok(bytes)
+}
+
+fn right_lengths(state: &State, name: &str) -> Result<u64> {
+    let mut bytes = 0;
+    for bucket in state.right.values() {
+        bytes = checked(
+            name,
+            bytes,
+            right_length(bucket, state.sequence_kinds[1], name)?,
+        )?;
+    }
+    Ok(bytes)
+}
+
+fn left_length(data: &ChunkData, head: usize, kind: SequenceKind, name: &str) -> Result<u64> {
+    let rows = (data.sequences.len() - head) as u64;
+    let keys = data.keys.iter().filter(|key| key.is_some()).count() as u64;
+    let columns = rows
+        .checked_mul(16 + kind.reference_bytes())
+        .ok_or_else(|| mismatch("ASOF v3 left index length overflowed"))?;
+    checked(name, LEFT_HEADER + 16 * keys, columns)
+}
+
+fn right_length(bucket: &RightBucket, kind: SequenceKind, name: &str) -> Result<u64> {
+    let columns = (bucket.len() as u64)
+        .checked_mul(9 + kind.reference_bytes())
+        .ok_or_else(|| mismatch("ASOF v3 right index length overflowed"))?;
+    checked(
+        name,
+        RIGHT_HEADER,
+        checked(name, columns, bucket.payload_len() as u64 * 12)?,
+    )
 }
 
 pub(super) fn workspace_bytes(state: &State, length: u64, owned: bool, name: &str) -> Result<u64> {
@@ -331,12 +379,7 @@ fn write_right_columns(
             bytes.len() + bucket.len(),
             u8::from(bucket.payload_len() != 0),
         );
-        if let Some(rows) = bucket.checkpoint_payload_refs() {
-            for row in rows.iter().flatten() {
-                put(bytes, batch_id(*row));
-                bytes.extend_from_slice(&row.row.to_le_bytes());
-            }
-        }
+        write_right_payload_refs(bytes, bucket, &batch_id);
         return;
     }
     for ((time, _), _) in bucket {
@@ -348,10 +391,25 @@ fn write_right_columns(
     for (_, _, tag) in bucket.checkpoint_rows() {
         bytes.push(tag);
     }
-    for (_, row) in bucket {
-        if let Some(row) = row {
+    write_right_payload_refs(bytes, bucket, &batch_id);
+}
+
+fn write_right_payload_refs(
+    bytes: &mut Vec<u8>,
+    bucket: &RightBucket,
+    batch_id: &impl Fn(RowRef) -> u64,
+) {
+    if let Some(rows) = bucket.checkpoint_payload_refs() {
+        for row in rows.iter().flatten() {
             put(bytes, batch_id(*row));
             bytes.extend_from_slice(&row.row.to_le_bytes());
+        }
+    } else {
+        for (_, row) in bucket {
+            if let Some(row) = row {
+                put(bytes, batch_id(*row));
+                bytes.extend_from_slice(&row.row.to_le_bytes());
+            }
         }
     }
 }
@@ -396,30 +454,40 @@ fn read_header(cursor: &mut Cursor<'_>, max_rows: u64) -> Result<Header> {
     if cursor.take(8)? != MAGIC {
         return Err(mismatch("ASOF v3 index magic differs"));
     }
-    let chunks = cursor.address()?;
-    let buckets = cursor.address()?;
-    let left_rows = cursor.address()?;
-    if left_rows as u64 > max_rows || chunks > left_rows || buckets as u64 > max_rows {
-        return Err(mismatch("ASOF v3 counts exceed row limits"));
-    }
-    let mut capacities = [0; 5];
-    for (capacity, width) in capacities.iter_mut().zip([25, 25, 40, 5, 32]) {
-        *capacity = cursor.capacity(width)?;
-    }
-    validate_hash_capacity(capacities[0])?;
-    validate_hash_capacity(capacities[1])?;
-    validate_hash_capacity(capacities[3])?;
-    require_capacity(capacities[2], buckets)?;
-    require_capacity(capacities[4], chunks)?;
-    if capacities[3] < buckets {
-        return Err(mismatch("ASOF v3 hash capacity is too small"));
-    }
+    let [chunks, buckets, left_rows] = cursor.addresses()?;
+    validate_header_counts(chunks, buckets, left_rows, max_rows)?;
+    let capacities = cursor.capacities([25, 25, 40, 5, 32])?;
+    validate_header_capacities(capacities, chunks, buckets)?;
     Ok(Header {
         chunks,
         buckets,
         left_rows,
         capacities,
     })
+}
+
+fn validate_header_counts(
+    chunks: usize,
+    buckets: usize,
+    left_rows: usize,
+    max_rows: u64,
+) -> Result<()> {
+    if left_rows as u64 > max_rows || chunks > left_rows || buckets as u64 > max_rows {
+        return Err(mismatch("ASOF v3 counts exceed row limits"));
+    }
+    Ok(())
+}
+
+fn validate_header_capacities(capacities: [usize; 5], chunks: usize, buckets: usize) -> Result<()> {
+    for index in [0, 1, 3] {
+        validate_hash_capacity(capacities[index])?;
+    }
+    require_capacity(capacities[2], buckets)?;
+    require_capacity(capacities[4], chunks)?;
+    if capacities[3] < buckets {
+        return Err(mismatch("ASOF v3 hash capacity is too small"));
+    }
+    Ok(())
 }
 
 fn validate_hash_capacity(capacity: usize) -> Result<()> {
@@ -435,34 +503,89 @@ fn validate_hash_capacity(capacity: usize) -> Result<()> {
 pub(super) fn restore_charge(bytes: &[u8], max_rows: u64, max_bytes: u64) -> Result<u64> {
     let mut cursor = Cursor::new(bytes, max_bytes);
     let header = read_header(&mut cursor, max_rows)?;
+    let mut charge = header_restore_charge(&header, max_bytes)?;
+    charge = restore_add(charge, owners::restore_charge(&mut cursor)?)?;
+    let (rows, left_charge) = scan_left_chunks(&mut cursor, &header, max_rows)?;
+    charge = restore_add(charge, left_charge)?;
+    charge = restore_add(
+        charge,
+        scan_right_buckets(&mut cursor, header.buckets, rows, max_rows)?,
+    )?;
+    cursor.finish()?;
+    Ok(charge)
+}
+
+fn header_restore_charge(header: &Header, max_bytes: u64) -> Result<u64> {
     let mut charge = 0;
     for (capacity, width) in header.capacities.into_iter().zip([25, 25, 40, 5, 32]) {
         charge = restore_add(charge, allocation(capacity, width, max_bytes)?)?;
     }
-    charge = restore_add(
+    restore_add(
         charge,
         restore_add(512, allocation(header.buckets, 256, u64::MAX)?)?,
-    )?;
-    charge = restore_add(charge, owners::restore_charge(&mut cursor)?)?;
-    let mut rows = 0_u64;
+    )
+}
+
+fn scan_left_chunks(cursor: &mut Cursor<'_>, header: &Header, max_rows: u64) -> Result<(u64, u64)> {
+    let mut rows = 0;
+    let mut charge = 0;
     for _ in 0..header.chunks {
-        let (count, allocation) = scan_left(&mut cursor, max_rows)?;
+        let (count, allocation) = scan_left(cursor, max_rows)?;
         rows = restore_add(rows, count)?;
         charge = restore_add(charge, allocation)?;
     }
     if rows != header.left_rows as u64 {
         return Err(mismatch("ASOF v3 left count differs"));
     }
-    for _ in 0..header.buckets {
-        let (count, allocation) = scan_right(&mut cursor, max_rows - rows)?;
+    Ok((rows, charge))
+}
+
+fn scan_right_buckets(
+    cursor: &mut Cursor<'_>,
+    buckets: usize,
+    mut rows: u64,
+    max_rows: u64,
+) -> Result<u64> {
+    let mut charge = 0;
+    for _ in 0..buckets {
+        let (count, allocation) = scan_right(cursor, max_rows - rows)?;
         rows = restore_add(rows, count)?;
         if rows > max_rows {
             return Err(mismatch("ASOF v3 row count exceeds limits"));
         }
         charge = restore_add(charge, allocation)?;
     }
-    cursor.finish()?;
     Ok(charge)
+}
+
+fn scan_capacities<const N: usize>(
+    cursor: &mut Cursor<'_>,
+    widths: [usize; N],
+    mut charge: u64,
+) -> Result<u64> {
+    for width in widths {
+        let capacity = cursor.capacity(width)?;
+        charge = restore_add(charge, allocation(capacity, width, cursor.limit)?)?;
+    }
+    Ok(charge)
+}
+
+fn validate_left_counts(rows: usize, keys: usize, remaining: u64, message: &str) -> Result<()> {
+    if rows == 0 || rows as u64 > remaining || keys == 0 || keys > rows {
+        return Err(mismatch(message));
+    }
+    Ok(())
+}
+
+fn storage_tag_counts(tags: &[u8]) -> Result<[usize; 3]> {
+    let mut counts = [0; 3];
+    for &tag in tags {
+        let count = counts
+            .get_mut(usize::from(tag))
+            .ok_or_else(|| mismatch("ASOF v3 storage tag differs"))?;
+        *count += 1;
+    }
+    Ok(counts)
 }
 
 fn restore_add(left: u64, right: u64) -> Result<u64> {
@@ -485,24 +608,21 @@ fn scan_kind(cursor: &mut Cursor<'_>) -> Result<SequenceKind> {
 
 fn scan_left(cursor: &mut Cursor<'_>, remaining: u64) -> Result<(u64, u64)> {
     cursor.integer()?;
-    let rows = cursor.address()?;
-    let keys = cursor.address()?;
+    let [rows, keys] = cursor.addresses()?;
     let kind = scan_kind(cursor)?;
-    if rows == 0 || rows as u64 > remaining || keys == 0 || keys > rows {
-        return Err(mismatch("ASOF v3 left counts differ"));
-    }
-    let mut charge = 1_024_u64;
-    for width in [
-        8,
-        4,
-        size_of::<Option<Encoding>>(),
-        8,
-        4,
-        kind.storage_bytes(),
-    ] {
-        let capacity = cursor.capacity(width)?;
-        charge = restore_add(charge, allocation(capacity, width, cursor.limit)?)?;
-    }
+    validate_left_counts(rows, keys, remaining, "ASOF v3 left counts differ")?;
+    let charge = scan_capacities(
+        cursor,
+        [
+            8,
+            4,
+            size_of::<Option<Encoding>>(),
+            8,
+            4,
+            kind.storage_bytes(),
+        ],
+        1_024,
+    )?;
     skip_rows(cursor, keys, 16)?;
     skip_rows(cursor, rows, 16 + kind.storage_bytes())?;
     Ok((rows as u64, charge))
@@ -515,23 +635,24 @@ fn scan_right(cursor: &mut Cursor<'_>, remaining: u64) -> Result<(u64, u64)> {
     if rows == 0 || rows as u64 > remaining {
         return Err(mismatch("ASOF v3 right row count exceeds limits"));
     }
-    let mut charge = 256_u64;
-    for width in [8, kind.storage_bytes(), 8, 8, kind.storage_bytes()] {
-        let capacity = cursor.capacity(width)?;
-        charge = restore_add(charge, allocation(capacity, width, cursor.limit)?)?;
-    }
+    let charge = scan_capacities(
+        cursor,
+        [8, kind.storage_bytes(), 8, 8, kind.storage_bytes()],
+        256,
+    )?;
+    scan_right_rows(cursor, rows, kind, charge)
+}
+
+fn scan_right_rows(
+    cursor: &mut Cursor<'_>,
+    rows: usize,
+    kind: SequenceKind,
+    charge: u64,
+) -> Result<(u64, u64)> {
     skip_rows(cursor, rows, 8 + kind.storage_bytes())?;
     let tags = cursor.take(rows)?;
-    if tags.iter().any(|tag| *tag > 2) {
-        return Err(mismatch("ASOF v3 storage tag differs"));
-    }
-    let payloads = tags
-        .iter()
-        .fold(0, |count, &tag| count + usize::from(tag == 1));
-    let general = tags
-        .iter()
-        .fold(0, |count, &tag| count + usize::from(tag == 2));
-    charge = restore_add(charge, allocation(general, 512, u64::MAX)?)?;
+    let [_, payloads, general] = storage_tag_counts(tags)?;
+    let charge = restore_add(charge, allocation(general, 512, u64::MAX)?)?;
     skip_rows(cursor, payloads, 12)?;
     Ok((rows as u64, charge))
 }
@@ -551,13 +672,49 @@ pub(super) fn decode(
     state.batches = PayloadPool::with_backing_buckets(header.capacities[0], header.capacities[1]);
     state.right = RightState::with_capacities(header.capacities[2], header.capacities[3]);
     state.left.reserve_chunks_exact(header.capacities[4]);
+    decode_left_chunks(
+        &mut cursor,
+        &mut owners,
+        batches,
+        &mut state,
+        &header,
+        max_rows,
+    )?;
+    decode_right_buckets(
+        &mut cursor,
+        &mut owners,
+        batches,
+        &mut state,
+        &header,
+        max_rows,
+    )?;
+    cursor.finish()?;
+    owners.finish()?;
+    if state.batches.len() != batches.len() {
+        return Err(mismatch("ASOF v3 contains unreferenced payload batches"));
+    }
+    validate_left_order(&state)?;
+    state.rebuild_encoding_owners();
+    state.rebuild_right_minima();
+    validate_reconstructed_capacities(&state, &header)?;
+    Ok(state)
+}
+
+fn decode_left_chunks(
+    cursor: &mut Cursor<'_>,
+    owners: &mut OwnerReader,
+    batches: &BTreeMap<BatchKey, Arc<PayloadBatch>>,
+    state: &mut State,
+    header: &Header,
+    max_rows: u64,
+) -> Result<()> {
     let mut previous = None;
     for _ in 0..header.chunks {
         let chunk = read_left(
-            &mut cursor,
-            &mut owners,
+            cursor,
+            owners,
             batches,
-            kinds[0],
+            state.sequence_kinds[0],
             max_rows,
             &mut previous,
         )?;
@@ -566,14 +723,25 @@ pub(super) fn decode(
     if state.left.len() != header.left_rows {
         return Err(mismatch("ASOF v3 left row count differs"));
     }
+    Ok(())
+}
+
+fn decode_right_buckets(
+    cursor: &mut Cursor<'_>,
+    owners: &mut OwnerReader,
+    batches: &BTreeMap<BatchKey, Arc<PayloadBatch>>,
+    state: &mut State,
+    header: &Header,
+    max_rows: u64,
+) -> Result<()> {
     let mut rows = header.left_rows as u64;
     for _ in 0..header.buckets {
         let (key, bucket) = read_right(
-            &mut cursor,
-            &mut owners,
+            cursor,
+            owners,
             batches,
             &mut state.batches,
-            kinds[1],
+            state.sequence_kinds[1],
             max_rows - rows,
         )?;
         rows += bucket.len() as u64;
@@ -586,21 +754,17 @@ pub(super) fn decode(
         }
         state.right.insert(key, bucket);
     }
-    cursor.finish()?;
-    owners.finish()?;
-    if state.batches.len() != batches.len() {
-        return Err(mismatch("ASOF v3 contains unreferenced payload batches"));
-    }
-    validate_left_order(&state)?;
-    state.rebuild_encoding_owners();
-    state.rebuild_right_minima();
+    Ok(())
+}
+
+fn validate_reconstructed_capacities(state: &State, header: &Header) -> Result<()> {
     if state.batches.backing_buckets() != (header.capacities[0], header.capacities[1])
         || state.right.checkpoint_capacities() != [header.capacities[2], header.capacities[3]]
         || state.left.chunk_capacity() != header.capacities[4]
     {
         return Err(mismatch("ASOF v3 capacity reconstruction differs"));
     }
-    Ok(state)
+    Ok(())
 }
 
 fn validate_left_order(state: &State) -> Result<()> {
@@ -680,36 +844,52 @@ fn read_left_positions(
     Ok((positions, start))
 }
 
-fn read_left(
+struct LeftHeader {
+    batch: BatchKey,
+    rows: usize,
+    count: usize,
+    kind: SequenceKind,
+    capacities: [usize; 6],
+}
+
+fn read_left_header(
     cursor: &mut Cursor<'_>,
-    owners: &mut OwnerReader,
-    batches: &BTreeMap<BatchKey, Arc<PayloadBatch>>,
     expected: SequenceKind,
     max_rows: u64,
     previous: &mut Option<BatchKey>,
-) -> Result<PreparedLeftChunk> {
+) -> Result<LeftHeader> {
     let batch = (0, cursor.integer()?);
     if previous.is_some_and(|last| last >= batch) {
         return Err(mismatch("ASOF v3 left batch order is not strict"));
     }
     *previous = Some(batch);
-    let rows = cursor.address()?;
-    let count = cursor.address()?;
-    if rows == 0 || rows as u64 > max_rows || count == 0 || count > rows {
-        return Err(mismatch("ASOF v3 left chunk counts differ"));
-    }
+    let [rows, count] = cursor.addresses()?;
+    validate_left_counts(rows, count, max_rows, "ASOF v3 left chunk counts differ")?;
     let kind = sequence_kind(cursor, expected)?;
-    let mut capacities = [0; 6];
-    for (capacity, width) in capacities.iter_mut().zip([
+    let capacities = left_capacities(cursor, rows, count, kind)?;
+    Ok(LeftHeader {
+        batch,
+        rows,
+        count,
+        kind,
+        capacities,
+    })
+}
+
+fn left_capacities(
+    cursor: &mut Cursor<'_>,
+    rows: usize,
+    count: usize,
+    kind: SequenceKind,
+) -> Result<[usize; 6]> {
+    let capacities = cursor.capacities([
         8,
         4,
         size_of::<Option<Encoding>>(),
         8,
         4,
         kind.storage_bytes(),
-    ]) {
-        *capacity = cursor.capacity(width)?;
-    }
+    ])?;
     for index in [0, 4, 5] {
         require_capacity(capacities[index], rows)?;
     }
@@ -718,8 +898,20 @@ fn read_left(
     if capacities[1] != 0 {
         require_capacity(capacities[1], rows)?;
     }
-    let mut keys = Vec::with_capacity(capacities[2]);
-    let mut key_counts = Vec::with_capacity(capacities[3]);
+    Ok(capacities)
+}
+
+type LeftDictionary = (Vec<Option<Encoding>>, Vec<usize>);
+
+fn read_left_dictionary(
+    cursor: &mut Cursor<'_>,
+    owners: &mut OwnerReader,
+    count: usize,
+    key_capacity: usize,
+    count_capacity: usize,
+) -> Result<LeftDictionary> {
+    let mut keys = Vec::with_capacity(key_capacity);
+    let mut key_counts = Vec::with_capacity(count_capacity);
     for _ in 0..count {
         let key = owners.reference(cursor)?;
         if keys
@@ -732,13 +924,26 @@ fn read_left(
         keys.push(Some(key));
         key_counts.push(0);
     }
-    let mut times = Vec::with_capacity(capacities[0]);
+    Ok((keys, key_counts))
+}
+
+fn read_times(cursor: &mut Cursor<'_>, rows: usize, capacity: usize) -> Result<Vec<i64>> {
+    let mut times = Vec::with_capacity(capacity);
     for _ in 0..rows {
         times.push(i64::from_le_bytes(
             cursor.take(8)?.try_into().expect("eight bytes"),
         ));
     }
-    let mut key_ids = Vec::with_capacity(capacities[4]);
+    Ok(times)
+}
+
+fn read_left_key_ids(
+    cursor: &mut Cursor<'_>,
+    rows: usize,
+    capacity: usize,
+    key_counts: &mut [usize],
+) -> Result<Vec<u32>> {
+    let mut key_ids = Vec::with_capacity(capacity);
     for _ in 0..rows {
         let id = cursor.small()?;
         let references = key_counts
@@ -750,7 +955,75 @@ fn read_left(
     if key_counts.contains(&0) {
         return Err(mismatch("ASOF v3 contains an unused left key"));
     }
+    Ok(key_ids)
+}
+
+struct LeftColumns {
+    keys: Vec<Option<Encoding>>,
+    key_counts: Vec<usize>,
+    times: Vec<i64>,
+    key_ids: Vec<u32>,
+    sequences: SequenceColumn,
+}
+
+fn read_left_columns(
+    cursor: &mut Cursor<'_>,
+    owners: &mut OwnerReader,
+    header: &LeftHeader,
+) -> Result<LeftColumns> {
+    let LeftHeader {
+        rows,
+        count,
+        kind,
+        capacities,
+        ..
+    } = *header;
+    let (keys, mut key_counts) =
+        read_left_dictionary(cursor, owners, count, capacities[2], capacities[3])?;
+    let times = read_times(cursor, rows, capacities[0])?;
+    let key_ids = read_left_key_ids(cursor, rows, capacities[4], &mut key_counts)?;
     let sequences = read_sequence_column(cursor, rows, capacities[5], kind, owners)?;
+    Ok(LeftColumns {
+        keys,
+        key_counts,
+        times,
+        key_ids,
+        sequences,
+    })
+}
+
+fn read_left(
+    cursor: &mut Cursor<'_>,
+    owners: &mut OwnerReader,
+    batches: &BTreeMap<BatchKey, Arc<PayloadBatch>>,
+    expected: SequenceKind,
+    max_rows: u64,
+    previous: &mut Option<BatchKey>,
+) -> Result<PreparedLeftChunk> {
+    let LeftHeader {
+        batch,
+        rows,
+        count,
+        kind,
+        capacities,
+    } = read_left_header(cursor, expected, max_rows, previous)?;
+    let LeftColumns {
+        keys,
+        key_counts,
+        times,
+        key_ids,
+        sequences,
+    } = read_left_columns(
+        cursor,
+        owners,
+        &LeftHeader {
+            batch,
+            rows,
+            count,
+            kind,
+            capacities,
+        },
+    )?;
     let owner = batches
         .get(&batch)
         .ok_or_else(|| mismatch("ASOF v3 left payload batch is missing"))?;
@@ -797,49 +1070,49 @@ fn read_sequence_column(
     Ok(column)
 }
 
-fn read_right(
+struct RightColumns<'a> {
+    kind: SequenceKind,
+    capacities: [usize; 5],
+    times: &'a [u8],
+    sequences: &'a [u8],
+    tags: &'a [u8],
+}
+
+fn read_right_layout(
     cursor: &mut Cursor<'_>,
-    owners: &mut OwnerReader,
-    batches: &BTreeMap<BatchKey, Arc<PayloadBatch>>,
-    pool: &mut PayloadPool,
     expected: SequenceKind,
     remaining: u64,
-) -> Result<(Encoding, RightBucket)> {
-    let key = owners.reference(cursor)?;
+) -> Result<(usize, SequenceKind, [usize; 5])> {
     let count = cursor.address()?;
     if count == 0 || count as u64 > remaining {
         return Err(mismatch("ASOF v3 right row count exceeds limits"));
     }
     let kind = sequence_kind(cursor, expected)?;
-    let mut capacities = [0; 5];
-    for (capacity, width) in
-        capacities
-            .iter_mut()
-            .zip([8, kind.storage_bytes(), 8, 8, kind.storage_bytes()])
-    {
-        *capacity = cursor.capacity(width)?;
-    }
-    let times = cursor.take(
-        count
-            .checked_mul(8)
-            .ok_or_else(|| mismatch("ASOF v3 time column length overflowed"))?,
-    )?;
-    let encoded = cursor.take(
-        count
-            .checked_mul(kind.storage_bytes())
-            .ok_or_else(|| mismatch("ASOF v3 sequence column length overflowed"))?,
-    )?;
-    let mut sequences = Cursor::new(encoded, cursor.limit);
+    let capacities = cursor.capacities([8, kind.storage_bytes(), 8, 8, kind.storage_bytes()])?;
+    Ok((count, kind, capacities))
+}
+
+fn read_right_columns<'a>(
+    cursor: &mut Cursor<'a>,
+    expected: SequenceKind,
+    remaining: u64,
+) -> Result<RightColumns<'a>> {
+    let (count, kind, capacities) = read_right_layout(cursor, expected, remaining)?;
+    let times = cursor.column(count, 8)?;
+    let sequences = cursor.column(count, kind.storage_bytes())?;
     let tags = cursor.take(count)?;
-    let payloads = tags
-        .iter()
-        .fold(0, |count, &tag| count + usize::from(tag == 1));
-    let identities = tags
-        .iter()
-        .fold(0, |count, &tag| count + usize::from(tag == 0));
-    if tags.iter().any(|tag| *tag > 2) {
-        return Err(mismatch("ASOF v3 storage tag differs"));
-    }
+    validate_right_capacities(capacities, storage_tag_counts(tags)?)?;
+    Ok(RightColumns {
+        kind,
+        capacities,
+        times,
+        sequences,
+        tags,
+    })
+}
+
+fn validate_right_capacities(capacities: [usize; 5], counts: [usize; 3]) -> Result<()> {
+    let [identities, payloads, _] = counts;
     for capacity in &capacities[..3] {
         require_capacity(*capacity, payloads)?;
     }
@@ -849,6 +1122,49 @@ fn read_right(
     if payloads == 0 && capacities[..3] != [0; 3] {
         return Err(mismatch("ASOF v3 contains empty payload storage"));
     }
+    Ok(())
+}
+
+fn read_right_payload(
+    cursor: &mut Cursor<'_>,
+    batches: &BTreeMap<BatchKey, Arc<PayloadBatch>>,
+    pool: &mut PayloadPool,
+    tag: u8,
+) -> Result<Option<RowRef>> {
+    if tag != 1 {
+        return Ok(None);
+    }
+    let id = cursor.integer()?;
+    let row = cursor.small()? as usize;
+    let batch = batches
+        .get(&(1, id))
+        .ok_or_else(|| mismatch("ASOF v3 right payload batch is missing"))?;
+    if row >= batch.record.num_rows() {
+        return Err(mismatch("ASOF v3 right payload row differs"));
+    }
+    Ok(Some(pool.attach(&RowPayload {
+        batch: batch.clone(),
+        row,
+    })))
+}
+
+fn read_right(
+    cursor: &mut Cursor<'_>,
+    owners: &mut OwnerReader,
+    batches: &BTreeMap<BatchKey, Arc<PayloadBatch>>,
+    pool: &mut PayloadPool,
+    expected: SequenceKind,
+    remaining: u64,
+) -> Result<(Encoding, RightBucket)> {
+    let key = owners.reference(cursor)?;
+    let RightColumns {
+        kind,
+        capacities,
+        times,
+        sequences: encoded,
+        tags,
+    } = read_right_columns(cursor, expected, remaining)?;
+    let mut sequences = Cursor::new(encoded, cursor.limit);
     let mut bucket = RightBucket::with_index_capacities(capacities, kind);
     let mut previous = None;
     for (time, &tag) in times.chunks_exact(8).zip(tags) {
@@ -859,22 +1175,7 @@ fn read_right(
             return Err(mismatch("ASOF v3 right identity order is not strict"));
         }
         previous = Some(order.clone());
-        let row = if tag == 1 {
-            let id = cursor.integer()?;
-            let row = cursor.small()? as usize;
-            let batch = batches
-                .get(&(1, id))
-                .ok_or_else(|| mismatch("ASOF v3 right payload batch is missing"))?;
-            if row >= batch.record.num_rows() {
-                return Err(mismatch("ASOF v3 right payload row differs"));
-            }
-            Some(pool.attach(&RowPayload {
-                batch: batch.clone(),
-                row,
-            }))
-        } else {
-            None
-        };
+        let row = read_right_payload(cursor, batches, pool, tag)?;
         bucket.push_index(order, tag, row);
     }
     sequences.finish()?;

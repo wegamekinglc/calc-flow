@@ -20,6 +20,12 @@ pub(super) struct ValidatedInput {
     pub watermark: Option<i64>,
 }
 
+type PreparedInput = (
+    Vec<(LeftOrder, RowPayload)>,
+    Option<Vec<state::PreparedLeftChunk>>,
+    AdmissionWorkspace,
+);
+
 type InputRow<'a> = (LeftOrder, &'a RecordBatch, usize);
 
 pub(super) struct Admission {
@@ -301,8 +307,51 @@ impl StreamAsofJoinOperator {
             duplicates,
             right_capacities,
             key_workspace,
-        } = match self.admission_identities(batch.table_payload()?.batches(), input, context) {
-            Ok(identities) => identities,
+        } = self
+            .validated_input_identities(batch, input, context)
+            .await?;
+        self.record_duplicates(input.index, duplicates)?;
+        let accepted = self.check_admission_rows(input.index, rows.len() as u64)?;
+        let payload_workspace = self.input_workspace(batch, input)?;
+        let base = if input.index == 0 {
+            self.status.left.accepted_rows
+        } else {
+            self.status.right.accepted_rows
+        };
+        let (rows, batches) = encode_rows(
+            rows,
+            input.index,
+            base,
+            self.payload_header_bytes[input.index],
+            &self.name,
+        )?;
+        let rows = ordered_admission_rows(rows, input.index);
+        let workspace = AdmissionWorkspace {
+            _identity: identity_workspace,
+            _payload: payload_workspace,
+            _keys: key_workspace,
+        };
+        let (rows, left_chunks, workspace) = self
+            .prepare_input_chunks(rows, workspace, input.index, context)
+            .await?;
+        Ok(Admission {
+            rows,
+            batches,
+            left_chunks,
+            accepted,
+            right_capacities,
+            _workspace: workspace,
+        })
+    }
+
+    async fn validated_input_identities<'a>(
+        &mut self,
+        batch: &'a Batch,
+        input: ValidatedInput,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<InputIdentities<'a>> {
+        match self.admission_identities(batch.table_payload()?.batches(), input, context) {
+            Ok(identities) => Ok(identities),
             Err(error)
                 if matches!(
                     &error,
@@ -314,42 +363,20 @@ impl StreamAsofJoinOperator {
             {
                 self.validate_duplicates_without_workspace(batch, input, context)
                     .await?;
-                return Err(error);
+                Err(error)
             }
-            Err(error) => return Err(error),
-        };
-        self.record_duplicates(input.index, duplicates)?;
-        let accepted = self.check_admission_rows(input.index, rows.len() as u64)?;
-        let payload_workspace = self.input_workspace(batch, input)?;
-        let base = if input.index == 0 {
-            self.status.left.accepted_rows
-        } else {
-            self.status.right.accepted_rows
-        };
-        let (mut rows, batches) = encode_rows(
-            rows,
-            input.index,
-            base,
-            self.payload_header_bytes[input.index],
-            &self.name,
-        )?;
-        if input.index == 1 && !rows.windows(2).all(|pair| pair[0].0 <= pair[1].0) {
-            // Keep each admitted run ordered so a watermark-local reversal
-            // does not repeatedly shift a whole per-key right vector.
-            rows.sort_unstable_by(|left, right| {
-                left.0
-                    .1
-                    .cmp(&right.0.1)
-                    .then_with(|| left.0.0.cmp(&right.0.0))
-                    .then_with(|| left.0.2.cmp(&right.0.2))
-            });
+            Err(error) => Err(error),
         }
-        let workspace = AdmissionWorkspace {
-            _identity: identity_workspace,
-            _payload: payload_workspace,
-            _keys: key_workspace,
-        };
-        let (rows, left_chunks, workspace) = if input.index == 0 {
+    }
+
+    async fn prepare_input_chunks(
+        &self,
+        rows: Vec<(LeftOrder, RowPayload)>,
+        workspace: AdmissionWorkspace,
+        side: usize,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<PreparedInput> {
+        Ok(if side == 0 {
             let side = self.spec.left().clone();
             let name = self.name.clone();
             context.check_cancelled()?;
@@ -368,14 +395,6 @@ impl StreamAsofJoinOperator {
             (rows, Some(chunks), workspace)
         } else {
             (rows, None, workspace)
-        };
-        Ok(Admission {
-            rows,
-            batches,
-            left_chunks,
-            accepted,
-            right_capacities,
-            _workspace: workspace,
         })
     }
 
@@ -428,6 +447,24 @@ impl StreamAsofJoinOperator {
         Ok(accepted)
     }
 
+    fn input_identity(
+        &self,
+        encodings: &mut InputEncodings<'_>,
+        keys: &mut InputKeys,
+        input: ValidatedInput,
+        time: i64,
+        row: usize,
+    ) -> Result<LeftOrder> {
+        encodings.with_row(row, |bytes, hash, sequence| {
+            let key = if input.index == 0 && state::Encoding::fits_inline(bytes) {
+                state::Encoding::from_slice(bytes)
+            } else {
+                keys.intern(bytes, hash, self)?
+            };
+            Ok((time, key, sequence))
+        })
+    }
+
     fn admission_identities<'a>(
         &self,
         batches: &'a [RecordBatch],
@@ -448,21 +485,12 @@ impl StreamAsofJoinOperator {
             };
             let event_times = times(batch, side);
             for row in 0..batch.num_rows() {
-                if row % 1_024 == 0 {
-                    context.check_cancelled()?;
-                }
+                check_input_cancellation(row, context)?;
                 let time = event_times.value(row);
                 if input.is_late(time) {
                     continue;
                 }
-                let identity = encodings.with_row(row, |bytes, hash, sequence| {
-                    let key = if input.index == 0 && state::Encoding::fits_inline(bytes) {
-                        state::Encoding::from_slice(bytes)
-                    } else {
-                        keys.intern(bytes, hash, self)?
-                    };
-                    Ok((time, key, sequence))
-                })?;
+                let identity = self.input_identity(&mut encodings, &mut keys, input, time, row)?;
                 rows.push((identity, batch, row));
             }
         }
@@ -487,6 +515,13 @@ impl StreamAsofJoinOperator {
             key_workspace: keys.workspace,
         })
     }
+}
+
+fn check_input_cancellation(row: usize, context: &StreamOperatorContext<'_>) -> Result<()> {
+    if row.is_multiple_of(1_024) {
+        context.check_cancelled()?;
+    }
+    Ok(())
 }
 
 fn count_duplicate_identities<'a>(
@@ -717,6 +752,24 @@ fn side_status(status: &mut StreamAsofJoinStatus, index: usize) -> &mut StreamAs
 }
 
 type EncodedInput = (Vec<(LeftOrder, RowPayload)>, Vec<Arc<state::PayloadBatch>>);
+
+fn ordered_admission_rows(
+    mut rows: Vec<(LeftOrder, RowPayload)>,
+    side: usize,
+) -> Vec<(LeftOrder, RowPayload)> {
+    if side == 1 && !rows.windows(2).all(|pair| pair[0].0 <= pair[1].0) {
+        // Keep each admitted run ordered so a watermark-local reversal
+        // does not repeatedly shift a whole per-key right vector.
+        rows.sort_unstable_by(|left, right| {
+            left.0
+                .1
+                .cmp(&right.0.1)
+                .then_with(|| left.0.0.cmp(&right.0.0))
+                .then_with(|| left.0.2.cmp(&right.0.2))
+        });
+    }
+    rows
+}
 
 fn encode_rows(
     rows: Vec<InputRow<'_>>,
