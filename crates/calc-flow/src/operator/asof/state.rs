@@ -365,11 +365,14 @@ impl LeftState {
             for (_, payload) in self.ordered.drain(..count) {
                 detach_batch(batches, &payload);
             }
-            // Release capacity along with finalized rows: the committed
-            // state charge only covers identities that remain reachable.
-            self.ordered = std::mem::take(&mut self.ordered)
-                .into_boxed_slice()
-                .into_vec();
+            // Each retained left identity is charged enough for two vector
+            // slots. Compact only after crossing that threshold, avoiding a
+            // full copy for every output prefix.
+            if self.ordered.capacity() > self.ordered.len().saturating_mul(2) {
+                self.ordered = std::mem::take(&mut self.ordered)
+                    .into_boxed_slice()
+                    .into_vec();
+            }
         } else {
             let split_key = self.general.keys().nth(count).cloned();
             let removed = if let Some(split_key) = split_key {
@@ -630,7 +633,9 @@ pub(super) fn encoded_columns(
 
 /// Ordered-map node and inline headroom charged per left identity, on top of
 /// the key, sequence and payload buffer allocations.
-const LEFT_IDENTITY_BYTES: u64 = 256 + 64 + 64;
+const LEFT_IDENTITY_SLOT_BYTES: usize = 256 + 64 + 64;
+const LEFT_IDENTITY_BYTES: u64 = LEFT_IDENTITY_SLOT_BYTES as u64;
+const _: () = assert!(2 * size_of::<(LeftOrder, RowPayload)>() <= LEFT_IDENTITY_SLOT_BYTES);
 /// Ordered-map node charged per right identity; the bucket key allocation is
 /// charged separately, once per bucket.
 const RIGHT_IDENTITY_BYTES: u64 = 256 + 64;

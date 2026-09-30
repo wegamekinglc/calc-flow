@@ -35,7 +35,8 @@ measurements. Use the current guides for supported behavior.
 - 2026-09-30: Store globally ordered pending ASOF left rows contiguously and
   append later non-overlapping batches without per-row tree insertion.
   Overlapping batches retain the tree fallback. Finalized prefixes release
-  their batch references and vector capacity before the next state charge;
+  their batch references and compact vector capacity when it exceeds the
+  remaining identities' charged headroom;
   checkpoint index bytes and v1/v2 recovery remain unchanged.
 
 - 2026-09-29: Require immutable `Program(engine="sql")` or
