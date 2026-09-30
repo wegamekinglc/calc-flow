@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import shlex
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
@@ -145,6 +146,36 @@ class CoverageRecoveryTests(unittest.TestCase):
         self.assertIn("COVERAGE_CORE: sysmon", python_studio)
         self.assertNotIn("benchmarks/test_warm_stream.py", python_studio)
         self.assertNotIn("coverage-baseline", workflow)
+
+    def test_workflow_builds_abi3_wheel_before_inspection(self):
+        root = Path(__file__).resolve().parents[1]
+        workflow = (root / ".github/workflows/coverage-recovery.yml").read_text(
+            encoding="utf-8"
+        )
+        step = workflow.split(
+            "      - name: Build and inspect the measured wheel\n", 1
+        )[1].split("      - name: Install Python dependencies\n", 1)[0]
+        command = next(
+            line.strip()
+            for line in step.splitlines()
+            if line.strip().startswith("uv build --wheel")
+        )
+        self.assertEqual(
+            shlex.split(command),
+            [
+                "uv",
+                "build",
+                "--wheel",
+                "--out-dir",
+                "target/recovery-dist",
+                "--config-setting",
+                "build-args=--features pyo3/abi3-py313",
+            ],
+        )
+        self.assertLess(
+            step.index(command),
+            step.index("python scripts/inspect_wheel.py core-wheel"),
+        )
 
     def test_workflow_repairs_pinned_toolchain_before_each_rust_setup(self):
         root = Path(__file__).resolve().parents[1]

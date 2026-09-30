@@ -211,7 +211,7 @@ jobs:
           cache-dependency-path: source/web-ui/package-lock.json
       - name: Build and inspect the measured wheel
         run: |
-          uv build --wheel --out-dir target/recovery-dist
+          uv build --wheel --out-dir target/recovery-dist --config-setting 'build-args=--features pyo3/abi3-py313'
           python scripts/inspect_wheel.py core-wheel target/recovery-dist/calc_flow_python-*.whl
           sha256sum target/recovery-dist/*.whl > ../evidence/wheel.sha256
       - name: Install Python dependencies
