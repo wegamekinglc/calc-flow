@@ -10,8 +10,12 @@ pub(in super::super) struct RowRef {
     pub row: u32,
 }
 
-#[cfg(test)]
 impl RowRef {
+    pub fn with_row(self, row: u32) -> Self {
+        Self { row, ..self }
+    }
+
+    #[cfg(test)]
     pub fn fixture(row: u32) -> Self {
         Self {
             batch: NonZeroU32::MIN,
@@ -66,19 +70,20 @@ impl PayloadPool {
 
     pub fn attach(&mut self, row: &RowPayload) -> RowRef {
         let row_index = u32::try_from(row.row).expect("preflighted ASOF payload row index");
-        let id = if let Some(id) = self.by_key.get(&row.batch.key) {
+        self.attach_batch(&row.batch, 1).with_row(row_index)
+    }
+
+    pub fn attach_batch(&mut self, batch: &Arc<PayloadBatch>, count: usize) -> RowRef {
+        let id = if let Some(id) = self.by_key.get(&batch.key) {
             *id
         } else {
             let id = self.allocate_id();
-            self.by_key.insert(row.batch.key, id);
-            self.by_id.insert(id, (row.batch.clone(), 0));
+            self.by_key.insert(batch.key, id);
+            self.by_id.insert(id, (batch.clone(), 0));
             id
         };
-        self.by_id.get_mut(&id).expect("indexed ASOF batch").1 += 1;
-        RowRef {
-            batch: id,
-            row: row_index,
-        }
+        self.by_id.get_mut(&id).expect("indexed ASOF batch").1 += count;
+        RowRef { batch: id, row: 0 }
     }
 
     fn allocate_id(&mut self) -> NonZeroU32 {

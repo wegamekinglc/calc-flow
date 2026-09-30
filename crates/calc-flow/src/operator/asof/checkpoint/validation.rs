@@ -76,7 +76,7 @@ fn validate_output_frontier(
 ) -> Result<()> {
     if state
         .left
-        .keys()
+        .unordered_keys()
         .any(|(time, _, _)| output_frontier.is_some_and(|frontier| *time <= frontier.as_micros()))
     {
         return Err(mismatch("ASOF pending row is behind output frontier"));
@@ -100,7 +100,7 @@ fn validate_pending_finality(
     let input = super::super::frontier(progress);
     if state
         .left
-        .keys()
+        .unordered_keys()
         .any(|(time, _, _)| input.is_some_and(|frontier| *time < frontier))
     {
         return Err(mismatch(
@@ -128,7 +128,7 @@ fn retention_threshold(state: &State, progress: &IngressProgressSnapshot) -> i12
     let pending = state
         .left
         .first_key_value()
-        .map_or(i128::MAX, |(key, _)| i128::from(key.0));
+        .map_or(i128::MAX, |(key, _)| i128::from(*key.0));
     future.min(pending)
 }
 

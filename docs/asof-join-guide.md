@@ -250,6 +250,17 @@ the managed async path performs that sort on a blocking worker.
 Retained payload rows use eight-byte batch/row references to one owning batch
 pool. Finalized and evicted references release their batch when its final row
 is removed, and sparse pool indexes shrink within the existing batch charge.
+Pending left rows retain owned compact Arrow time buffers, a per-chunk key dictionary,
+sequence encodings, and optional compact positions. Unordered input is sorted
+on a blocking worker; borrowed cursor heads merge overlapping chunks in
+canonical `(time, key, sequence)` order. Cached row counts and extrema avoid
+rescanning all chunks on admission and progress queries. Prefix compaction
+reserves scratch and builds replacement buffers before output acceptance, so
+committing accepted output does not allocate. Its worker also reserves the
+retained input capacities, keeping Arrow and identity buffers funded when a
+cancelled or dropped call is followed by reset. Restore constructs chunks only
+from validated live index offsets. These in-memory changes retain the v2
+checkpoint format and its conservative per-identity charges.
 
 Finalization takes ready rows up to the smaller of the output edge's row budget
 and 64,000 rows. Key and candidate vectors reserve workspace before allocation;

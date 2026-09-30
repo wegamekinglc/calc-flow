@@ -14,13 +14,18 @@
 当前分支已加入 Polars ASOF 外部参考、四个 100k Rust 端到端场景、批次级 tracing，
 以及 watermark 乱序与恢复的随机测试。前缀提交、admission 哈希、右侧 Arrow
 输出、原地驱逐、短 identity 编码和按 key 的有序 right 数组已有第一批优化。
-left Arrow chunk 与 checkpoint v3 仍待实施；
+left Arrow chunk 已接入，checkpoint v3 仍待实施；
 载荷 IPC 已改为 checkpoint 时按需编码，并沿用 v2 状态格式与计费；
 有序批次的相邻查重和已保留状态之后的范围跳过探测也已加入；
 单列非空 `Int64`/`UInt64` 身份已走保持 Arrow row 字节一致的类型化路径；
 大块输出已加入按 key 的单调候选游标，资源不足时退回二分查找；
-全局有序且不重叠的 left 批次现存于连续向量，跨批重叠时退回树结构；
-这一步保持现有行式身份和 v2 checkpoint，并非 P2.3 的 Arrow chunk 实现；
+left 批次现存于 Arrow chunk，拥有紧凑时间列，按 chunk 保留 key 字典、sequence
+编码与可选 `u32` 位置；未证明有序的批次在线程池用 Arrow lexsort 排序，
+重叠 chunk 由借用游标按 `(time, key, sequence)` 归并；行数和全局首尾缓存，
+恢复仅迁移经过严格验证的存活 index 行；输出接受前预留并在线程池准备
+前缀压缩缓冲，旧输入容量的预留随 worker 存活，覆盖取消后 reset；提交不分配；
+sequence 列仍暂保留逐行 Encoding，计费和
+checkpoint 仍为 v2，实际容量记账、批次 sequence 数组和 v3 index 仍待实施；
 admission 的已校验身份现在直接移入保留行，v2 index 长度与状态费用在同一
 遍历中预检；
 right 桶已由 `HashTable<u32>` key 字典定位，批量哈希使用 DataFusion 工具且

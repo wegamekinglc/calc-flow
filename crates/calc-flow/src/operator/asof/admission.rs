@@ -25,10 +25,15 @@ type InputRow<'a> = (LeftOrder, &'a RecordBatch, usize);
 pub(super) struct Admission {
     pub rows: Vec<(LeftOrder, RowPayload)>,
     pub accepted: u64,
+    left_chunks: Option<Vec<state::PreparedLeftChunk>>,
     right_capacities: Vec<(state::Encoding, usize)>,
-    _identity_workspace: MemoryReservation,
-    _payload_workspace: MemoryReservation,
-    _key_workspace: Option<MemoryReservation>,
+    _workspace: AdmissionWorkspace,
+}
+
+struct AdmissionWorkspace {
+    _identity: MemoryReservation,
+    _payload: MemoryReservation,
+    _keys: Option<MemoryReservation>,
 }
 
 struct AdmittedKey {
@@ -314,13 +319,37 @@ impl StreamAsofJoinOperator {
                     .then_with(|| left.0.2.cmp(&right.0.2))
             });
         }
+        let workspace = AdmissionWorkspace {
+            _identity: identity_workspace,
+            _payload: payload_workspace,
+            _keys: key_workspace,
+        };
+        let (rows, left_chunks, workspace) = if input.index == 0 {
+            let side = self.spec.left().clone();
+            let name = self.name.clone();
+            context.check_cancelled()?;
+            let work = chunk_worker(workspace, move || {
+                let chunks = state::PreparedLeftChunk::prepare(&rows, &side, &name)?;
+                Ok((rows, chunks))
+            });
+            let ((rows, chunks), workspace) = tokio::select! {
+                result = work => result?,
+                () = context.job().cancellation().cancelled() => {
+                    context.check_cancelled()?;
+                    unreachable!("cancelled ASOF admission")
+                }
+            };
+            context.check_cancelled()?;
+            (rows, Some(chunks), workspace)
+        } else {
+            (rows, None, workspace)
+        };
         Ok(Admission {
             rows,
+            left_chunks,
             accepted,
             right_capacities,
-            _identity_workspace: identity_workspace,
-            _payload_workspace: payload_workspace,
-            _key_workspace: key_workspace,
+            _workspace: workspace,
         })
     }
 
@@ -493,7 +522,7 @@ fn identities_are_after_state<'a>(
         state
             .left
             .last_key_value()
-            .is_none_or(|(last, _)| last < first)
+            .is_none_or(|(last, _)| last < (&first.0, &first.1, &first.2))
     } else {
         state
             .right
@@ -512,15 +541,11 @@ impl Admission {
         status: &mut StreamAsofJoinStatus,
     ) {
         if ingress == "left" {
-            let rows = self
-                .rows
-                .drain(..)
-                .map(|(identity, payload)| {
-                    let reference = state.attach(&payload);
-                    (identity, reference)
-                })
-                .collect();
-            state.left.append_admission(rows);
+            state.left.install(
+                self.left_chunks.take().expect("prepared left chunks"),
+                &mut state.batches,
+            );
+            self.rows.clear();
             status.left.accepted_rows = self.accepted;
         } else {
             for (key, count) in self.right_capacities.drain(..) {
@@ -544,6 +569,19 @@ impl Admission {
             status.right.accepted_rows = self.accepted;
         }
     }
+}
+
+/// Detached blocking work owns its reservations until every retained input
+/// and temporary sort buffer has been released, even if admission is dropped.
+async fn chunk_worker<R: Send + 'static>(
+    workspace: AdmissionWorkspace,
+    work: impl FnOnce() -> Result<R> + Send + 'static,
+) -> Result<(R, AdmissionWorkspace)> {
+    tokio::task::spawn_blocking(move || Ok((work()?, workspace)))
+        .await
+        .map_err(|error| crate::CalcFlowError::Internal {
+            message: format!("ASOF chunk preparation task failed: {error}"),
+        })?
 }
 
 /// Identity columns in declaration order: keys, sequence columns, event time.
@@ -724,6 +762,50 @@ fn can_share_batch(batch: &RecordBatch) -> Result<bool> {
 mod identity_tests {
     use super::*;
     use crate::{CancellationToken, JsonMap, StreamJobContext};
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn chunk_worker_leaves_timers_running_and_keeps_workspace_until_exit() {
+        let (operator, _) = identity_fixture();
+        let pool = operator.runtime.pool.clone();
+        let workspace = AdmissionWorkspace {
+            _identity: operator.reserve_workspace(4_096).unwrap(),
+            _payload: operator.reserve_workspace(0).unwrap(),
+            _keys: None,
+        };
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let gate = Arc::new(std::sync::Barrier::new(2));
+        let worker_gate = gate.clone();
+        // A timeout releases the gate even when the synchronous red version
+        // blocks polling, so the regression fails instead of hanging.
+        let releaser = std::thread::spawn(move || {
+            let _ = release_rx.recv_timeout(std::time::Duration::from_secs(1));
+            gate.wait();
+        });
+        let mut future = Box::pin(chunk_worker(workspace, move || {
+            started_tx.send(()).unwrap();
+            worker_gate.wait();
+            Ok(())
+        }));
+        assert!(futures::poll!(future.as_mut()).is_pending());
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        drop(future);
+        assert_eq!(pool.reserved(), 4_096);
+        release_tx.send(()).unwrap();
+        tokio::task::spawn_blocking(move || releaser.join().unwrap())
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while pool.reserved() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
 
     #[tokio::test]
     async fn duplicate_identity_precedes_new_key_copy_workspace_failure() {

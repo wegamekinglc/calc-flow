@@ -5,7 +5,7 @@ use crate::operator::asof::{
     StreamAsofJoinOperator, checked,
     checkpoint::PreparedSegment,
     reason,
-    state::{Inventory, LeftPrefix},
+    state::{Inventory, LeftPrefix, PreparedLeftDrain},
 };
 use crate::{Result, StreamCollector, StreamOperatorContext, StreamingFailureReason};
 use datafusion::execution::memory_pool::MemoryReservation;
@@ -13,7 +13,9 @@ use datafusion::execution::memory_pool::MemoryReservation;
 struct PreparedPrefix {
     segment: Option<PreparedSegment>,
     deferred_len: Option<u64>,
+    drain: PreparedLeftDrain,
     _workspace: MemoryReservation,
+    _drain_workspace: MemoryReservation,
 }
 
 impl PreparedPrefix {
@@ -82,7 +84,8 @@ impl StreamAsofJoinOperator {
         status.state_bytes = inventory.bytes;
         emit_output(output.batch, context, collector).await?;
         // Nothing after sink acceptance can fail or yield before installation.
-        self.state.commit_matched_left_prefix(&output.prefix);
+        self.state
+            .commit_matched_left_prefix(&output.prefix, prepared.drain);
         // Right payloads remain until finish_progress sweeps them once.
         self.swept = None;
         self.status = status;
@@ -109,12 +112,15 @@ impl StreamAsofJoinOperator {
         prefix: &LeftPrefix,
         context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedPrefix> {
+        let (drain, drain_workspace) = self.prepare_left_drain(prefix, context).await?;
         let remaining = self.state.left.len() - prefix.count;
         if remaining == 0 && self.state.right.is_empty() {
             return Ok(PreparedPrefix {
                 segment: None,
                 deferred_len: None,
+                drain,
                 _workspace: self.reserve_workspace(0)?,
+                _drain_workspace: drain_workspace,
             });
         }
         let removed = prefix.index_bytes;
@@ -127,7 +133,9 @@ impl StreamAsofJoinOperator {
             return Ok(PreparedPrefix {
                 segment: None,
                 deferred_len: Some(remaining_len),
+                drain,
                 _workspace: workspace,
+                _drain_workspace: drain_workspace,
             });
         }
         let current = self
@@ -144,7 +152,104 @@ impl StreamAsofJoinOperator {
         Ok(PreparedPrefix {
             segment: Some(current.drain_left(removed, remaining as u64)),
             deferred_len: None,
+            drain,
             _workspace: workspace,
+            _drain_workspace: drain_workspace,
         })
+    }
+
+    async fn prepare_left_drain(
+        &self,
+        prefix: &LeftPrefix,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<(PreparedLeftDrain, MemoryReservation)> {
+        let bytes = self.state.left.drain_workspace_bytes(
+            &prefix.batches,
+            &self.state.batches,
+            &self.name,
+        )?;
+        let workspace = self.reserve_workspace(bytes)?;
+        let input = self
+            .state
+            .left
+            .drain_input(&prefix.batches, &self.state.batches);
+        if bytes == 0 {
+            return Ok((input.prepare(), workspace));
+        }
+        context.check_cancelled()?;
+        // The reservation and immutable metadata follow detached work, so
+        // cancellation cannot release its workspace before its buffers.
+        let worker = drain_worker(workspace, move || input.prepare());
+        let prepared = tokio::select! {
+            result = worker => result?,
+            () = context.job().cancellation().cancelled() => {
+                context.check_cancelled()?;
+                unreachable!("cancelled ASOF prefix compaction")
+            }
+        };
+        context.check_cancelled()?;
+        Ok(prepared)
+    }
+}
+
+async fn drain_worker<R: Send + 'static>(
+    workspace: MemoryReservation,
+    work: impl FnOnce() -> R + Send + 'static,
+) -> Result<(R, MemoryReservation)> {
+    tokio::task::spawn_blocking(move || (work(), workspace))
+        .await
+        .map_err(|error| crate::CalcFlowError::Internal {
+            message: format!("ASOF prefix compaction task failed: {error}"),
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryConsumer, MemoryPool};
+    use std::sync::Arc;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropped_compaction_worker_retains_input_reservation_until_exit() {
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(8_192));
+        let workspace = MemoryConsumer::new("drain-test").register(&pool);
+        workspace.try_grow(4_096).unwrap();
+        let owner = Arc::new(vec![0_u8; 4_096]);
+        let retained = owner.clone();
+        let weak = Arc::downgrade(&owner);
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let gate = Arc::new(std::sync::Barrier::new(2));
+        let worker_gate = gate.clone();
+        let releaser = std::thread::spawn(move || {
+            let _ = release_rx.recv_timeout(std::time::Duration::from_secs(1));
+            gate.wait();
+        });
+        let mut future = Box::pin(drain_worker(workspace, move || {
+            started_tx.send(()).unwrap();
+            worker_gate.wait();
+            drop(retained);
+        }));
+        assert!(futures::poll!(future.as_mut()).is_pending());
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        drop(future);
+        drop(owner);
+        assert!(weak.upgrade().is_some());
+        assert_eq!(pool.reserved(), 4_096);
+        release_tx.send(()).unwrap();
+        tokio::task::spawn_blocking(move || releaser.join().unwrap())
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while pool.reserved() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(weak.upgrade().is_none());
     }
 }

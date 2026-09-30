@@ -34,7 +34,11 @@ pub(super) fn workspace_bytes(state: &State, length: u64, owned: bool, name: &st
                 "ASOF checkpoint key workspace overflowed",
             )
         })?;
-    checked(name, length, sorting)
+    checked(
+        name,
+        checked(name, length, sorting)?,
+        state.left.iter_workspace_bytes(),
+    )
 }
 
 pub(super) fn batch_segment(key: BatchKey) -> String {
@@ -64,12 +68,7 @@ pub(in super::super) fn encoded_length(state: &State, name: &str) -> Result<u64>
     if state.left.is_empty() && state.right.is_empty() {
         return Ok(0);
     }
-    let left = state
-        .left
-        .keys()
-        .try_fold(0_u64, |size, (_, key, sequence)| {
-            checked(name, size, 41 + key.len() as u64 + sequence.len() as u64)
-        })?;
+    let left = state.left.encoded_length(name)?;
     checked(
         name,
         checked(name, 24, left)?,
@@ -179,7 +178,7 @@ async fn write_left_async(
     context: &StreamOperatorContext<'_>,
 ) -> Result<()> {
     for (ordinal, ((time, key, sequence), payload)) in state.left.iter().enumerate() {
-        write_left(writer, *time, key, sequence, state.batches.view(*payload))?;
+        write_left(writer, *time, key, sequence, state.batches.view(payload))?;
         checkpoint_tick(ordinal + 1, context).await?;
     }
     Ok(())
@@ -234,8 +233,8 @@ pub(super) fn encode_sync(state: &State, length: u64, limit: usize) -> Result<St
 }
 
 fn write_state_sync(writer: &mut BoundedWriter<'_>, state: &State) -> Result<()> {
-    for ((time, key, sequence), payload) in &state.left {
-        write_left(writer, *time, key, sequence, state.batches.view(*payload))?;
+    for ((time, key, sequence), payload) in state.left.iter() {
+        write_left(writer, *time, key, sequence, state.batches.view(payload))?;
     }
     for (key, bucket) in state.right.ordered_iter() {
         write_bucket_header(writer, key, bucket.len())?;
@@ -509,7 +508,7 @@ fn decode_left_index(
         if state
             .left
             .last_key_value()
-            .is_some_and(|(last, _)| last >= &identity)
+            .is_some_and(|(last, _)| last >= (&identity.0, &identity.1, &identity.2))
         {
             return Err(mismatch("ASOF left index order is not strict"));
         }

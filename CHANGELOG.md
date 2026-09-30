@@ -96,6 +96,15 @@ measurements. Use the current guides for supported behavior.
   checkpoint preparation borrow pool entries. Canonical v2 checkpoint bytes,
   state charges, and strict v1/v2 recovery checks remain compatible.
 
+- 2026-09-30: Retain pending ASOF left rows in sorted Arrow chunks with one
+  canonical key owner per chunk and compact row positions. Borrowed cursors
+  merge overlapping chunks in canonical time, key, and sequence order.
+  Preparation and prefix compaction run on blocking workers with owned
+  workspace, including retained input buffers after cancellation and reset;
+  accepted output commits prebuilt buffers without allocation.
+  Recovery migrates only validated live index rows. Checkpoint bytes and
+  accounting remain v2 compatible.
+
 - 2026-09-29: Require immutable `Program(engine="sql")` or
   `Program(engine="streaming")` selection at construction and add
   `Program.execute(inputs)` dispatch. SQL returns named Arrow tables;

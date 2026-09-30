@@ -42,6 +42,133 @@ async fn retained_payload_batch_has_one_state_owner() {
 }
 
 #[tokio::test]
+async fn left_rows_share_one_key_owner_within_their_arrow_chunk() {
+    let (mut op, _) = fixture();
+    let key = "a repeated long left key with Unicode 字符";
+    let input = Batch::table(
+        vec![
+            RecordBatch::try_new(
+                op.schemas[0].clone(),
+                vec![
+                    Arc::new(StringArray::from(vec![key; 3])),
+                    Arc::new(TimestampMicrosecondArray::from(vec![10; 3]).with_timezone("UTC")),
+                    Arc::new(Int64Array::from(vec![3, 1, 2])),
+                ],
+            )
+            .unwrap(),
+        ],
+        BatchMetadata::default(),
+    )
+    .unwrap();
+    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+    let cx = StreamOperatorContext::new(&job, "asof", None);
+    let mut output = EdgeCollector::new(op.output_ports().to_vec());
+    op.process_data("left", input, &cx, &mut output)
+        .await
+        .unwrap();
+    let (_, key, _) = op.state.left.keys().next().unwrap();
+    let state::Encoding::Shared(bytes) = key else {
+        panic!("long key must use shared encoding");
+    };
+    assert_eq!(
+        Arc::strong_count(bytes),
+        1,
+        "the left chunk must own each distinct canonical key once"
+    );
+}
+
+#[tokio::test]
+async fn overlapping_left_chunks_restore_only_live_sparse_rows() {
+    let (mut op, _, _) = prefix_fixture();
+    let input = |times: Vec<i64>, sequences: Vec<i64>| {
+        Batch::table(
+            vec![
+                RecordBatch::try_new(
+                    op.schemas[0].clone(),
+                    vec![
+                        Arc::new(StringArray::from(vec!["A"; times.len()])),
+                        Arc::new(TimestampMicrosecondArray::from(times).with_timezone("UTC")),
+                        Arc::new(Int64Array::from(sequences)),
+                    ],
+                )
+                .unwrap(),
+            ],
+            BatchMetadata::default(),
+        )
+        .unwrap()
+    };
+    let first = input(vec![102, 100, 101], vec![3, 1, 2]);
+    let second = input(vec![104, 101], vec![5, 4]);
+    let next = input(vec![103], vec![6]);
+    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+    let cx = StreamOperatorContext::new(&job, "asof", None);
+    let mut output = EdgeCollector::new(op.output_ports().to_vec());
+    op.process_data("left", first, &cx, &mut output)
+        .await
+        .unwrap();
+    op.process_data("left", second, &cx, &mut output)
+        .await
+        .unwrap();
+    op.on_watermark(EventTime::from_micros(102), &cx, &mut output)
+        .await
+        .unwrap();
+    let emitted = output.drain("output");
+    let record = &emitted[0]
+        .as_data()
+        .unwrap()
+        .table_payload()
+        .unwrap()
+        .batches()[0];
+    assert_eq!(
+        record
+            .column(2)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .values()
+            .as_ref(),
+        &[1, 2, 4]
+    );
+    let snapshot = op.capture(Epoch::INITIAL).unwrap();
+    let (mut restored, _, _) = prefix_fixture();
+    restored.restore(&snapshot).unwrap();
+    let live = restored
+        .state
+        .left
+        .iter()
+        .map(|(identity, row)| (*identity.0, row.row))
+        .collect::<Vec<_>>();
+    assert_eq!(live, vec![(102, 0), (104, 0)]);
+    restored
+        .process_data("left", next, &cx, &mut output)
+        .await
+        .unwrap();
+    restored
+        .on_watermark(EventTime::from_micros(105), &cx, &mut output)
+        .await
+        .unwrap();
+    let remaining = output.drain("output");
+    let record = &remaining[0]
+        .as_data()
+        .unwrap()
+        .table_payload()
+        .unwrap()
+        .batches()[0];
+    assert_eq!(
+        record
+            .column(2)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .values()
+            .as_ref(),
+        &[3, 6, 5]
+    );
+    assert_eq!(restored.status.emitted_left_rows, 6);
+    assert_eq!(restored.status.pending_left_rows, 0);
+}
+
+#[tokio::test]
 async fn later_admission_reuses_the_resident_right_key_bytes() {
     let (mut op, initial) = fixture();
     let schema = initial.table_payload().unwrap().batches()[0].schema();

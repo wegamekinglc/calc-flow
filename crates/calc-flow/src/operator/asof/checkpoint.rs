@@ -318,7 +318,7 @@ impl StreamAsofJoinOperator {
             )?
         };
         let workspace = self.reserve_workspace(workspace_bytes)?;
-        let state = if version == 1 {
+        let mut state = if version == 1 {
             segment
                 .map(|segment| self.decode_state(segment))
                 .transpose()?
@@ -348,6 +348,11 @@ impl StreamAsofJoinOperator {
         let mut metrics = metadata.metrics;
         metrics.state_bytes = inventory.bytes;
         validate_counters(&metrics, metadata.terminal, metadata.next_output_sequence)?;
+        // Only validated, still-indexed payload rows enter Arrow chunks.
+        // Gauges and provenance above use the original v1/v2 representation.
+        state
+            .left
+            .migrate(&state.batches, self.spec.left(), &self.name)?;
         Ok(DecodedSnapshot {
             state,
             metrics,
@@ -449,7 +454,7 @@ impl StreamAsofJoinOperator {
         if state
             .left
             .last_key_value()
-            .is_some_and(|(last, _)| last >= &identity)
+            .is_some_and(|(last, _)| last >= (&identity.0, &identity.1, &identity.2))
         {
             return Err(mismatch("ASOF left identity order is not strict"));
         }
@@ -566,7 +571,10 @@ impl StreamAsofJoinOperator {
         if &(time, key, sequence) != identity {
             return Err(mismatch("ASOF row payload identity differs from index"));
         }
-        Ok(row)
+        // Reuse the already-validated schema owner instead of retaining one
+        // parsed IPC schema per sparse payload batch.
+        row.with_schema(self.schemas[usize::from(right)].clone())
+            .map_err(|_| mismatch("ASOF row schema differs"))
     }
 
     fn decode_state_v2(
@@ -628,6 +636,9 @@ impl StreamAsofJoinOperator {
         {
             return Err(mismatch("ASOF batch schema or row count differs"));
         }
+        let record = record
+            .with_schema(self.schemas[side].clone())
+            .map_err(|_| mismatch("ASOF batch schema differs"))?;
         let (encoded_charge_bytes, body_bytes) =
             super::workspace::payload_encoded_bound(&record, &self.name)
                 .map_err(|_| mismatch("ASOF payload bound cannot be computed"))?;
@@ -672,16 +683,16 @@ impl StreamAsofJoinOperator {
     }
 
     fn validate_left_indexed_rows(&self, state: &State, identities: &IdentityCache) -> Result<()> {
-        for (identity, payload) in &state.left {
-            super::identity::validate(&identity.1, &self.schemas[0], self.spec.left().keys())?;
+        for (identity, payload) in state.left.unordered_iter() {
+            super::identity::validate(identity.1, &self.schemas[0], self.spec.left().keys())?;
             super::identity::validate(
-                &identity.2,
+                identity.2,
                 &self.schemas[0],
                 self.spec.left().sequence_by(),
             )?;
             validate_index_identity(
                 identity,
-                state.batches.view(*payload),
+                state.batches.view(payload),
                 identities,
                 self.spec.left(),
             )?;
@@ -707,9 +718,9 @@ impl StreamAsofJoinOperator {
         for ((time, sequence), payload) in bucket {
             super::identity::validate(sequence, &self.schemas[1], self.spec.right().sequence_by())?;
             if let Some(payload) = payload {
-                let identity = (*time, key.clone(), sequence.clone());
+                let identity = (time, key, sequence);
                 validate_index_identity(
-                    &identity,
+                    identity,
                     batches.view(*payload),
                     identities,
                     self.spec.right(),
@@ -930,7 +941,7 @@ fn verify_checksum(segment: &StateSegment) -> Result<()> {
 }
 
 fn validate_index_identity(
-    identity: &super::state::LeftOrder,
+    identity: super::state::LeftView<'_>,
     payload: PayloadView<'_>,
     cache: &IdentityCache,
     side: &super::AsofJoinSide,
@@ -939,9 +950,9 @@ fn validate_index_identity(
     let (keys, sequences) = cache
         .get(&payload.batch.key)
         .ok_or_else(|| mismatch("ASOF indexed batch is missing"))?;
-    if super::admission::times(record, side).value(payload.row) != identity.0
-        || keys.row(payload.row) != identity.1
-        || sequences.row(payload.row) != identity.2
+    if super::admission::times(record, side).value(payload.row) != *identity.0
+        || keys.row(payload.row).as_slice() != identity.1.as_slice()
+        || sequences.row(payload.row).as_slice() != identity.2.as_slice()
     {
         return Err(mismatch("ASOF batch row identity differs from index"));
     }
@@ -1080,6 +1091,126 @@ mod tests {
         metrics["right"]["accepted_rows"] = serde_json::json!(right_rows);
         snapshot.segments.insert(SEGMENT.into(), segment);
         snapshot
+    }
+
+    #[test]
+    fn singleton_left_migration_fits_restore_workspace_and_identity_charge() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("key", DataType::Utf8, false),
+            Field::new(
+                "time",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                false,
+            ),
+            Field::new("seq", DataType::Int64, false),
+        ]));
+        let side = |prefix: &str| {
+            AsofJoinSide::new(
+                vec!["key".into()],
+                "time".into(),
+                vec!["seq".into()],
+                prefix.into(),
+            )
+            .unwrap()
+        };
+        let spec = super::super::StreamAsofJoinSpec::new(
+            side("left"),
+            side("right"),
+            Duration::ZERO,
+            AsofStateLimits::new(10_000, 32 << 20).unwrap(),
+        )
+        .unwrap();
+        for count in [1_u64, 2, 3, 4, 16, 64] {
+            let mut operator =
+                StreamAsofJoinOperator::new("asof", schema.clone(), schema.clone(), spec.clone())
+                    .unwrap();
+            let mut bytes = MAGIC.to_vec();
+            bytes.extend_from_slice(&count.to_le_bytes());
+            bytes.extend_from_slice(&0_u64.to_le_bytes());
+            for ordinal in 0..count {
+                let ordinal = i64::try_from(ordinal).unwrap();
+                let record = RecordBatch::try_new(
+                    schema.clone(),
+                    vec![
+                        Arc::new(StringArray::from(vec!["A"])),
+                        Arc::new(
+                            TimestampMicrosecondArray::from(vec![ordinal]).with_timezone("UTC"),
+                        ),
+                        Arc::new(Int64Array::from(vec![ordinal])),
+                    ],
+                )
+                .unwrap();
+                let key =
+                    super::super::state::encoded_columns(&record, 0, spec.left().keys()).unwrap();
+                let sequence =
+                    super::super::state::encoded_columns(&record, 0, spec.left().sequence_by())
+                        .unwrap();
+                let payload =
+                    super::super::codec::encode_batch(&record, 1 << 20, &mut Vec::new()).unwrap();
+                bytes.extend_from_slice(&ordinal.to_le_bytes());
+                for blob in [key.as_slice(), sequence.as_slice(), payload.as_slice()] {
+                    bytes.extend_from_slice(&(blob.len() as u64).to_le_bytes());
+                    bytes.extend_from_slice(blob);
+                }
+            }
+            let v1 = legacy_snapshot(&mut operator, StateSegment::new(bytes), count, 0);
+            assert_restore_allocation_bound(&operator, &v1);
+            operator.restore(&v1).unwrap();
+            let v2 = operator.capture(Epoch::INITIAL).unwrap();
+            assert_restore_allocation_bound(&operator, &v2);
+            operator
+                .state
+                .commit_left_prefix(usize::try_from(count / 2).unwrap());
+            assert!(
+                operator.state.inventory(None, "asof").unwrap().bytes
+                    <= operator.status.state_bytes
+            );
+        }
+    }
+
+    fn assert_restore_allocation_bound(
+        operator: &StreamAsofJoinOperator,
+        snapshot: &OperatorStateSnapshot,
+    ) {
+        let metadata = operator.restore_metadata(snapshot).unwrap();
+        // Validate the full restore and retain its actual workspace. Existing
+        // payload allocations belong to state; measure the new migration's
+        // temporary grouping and column storage independently.
+        let DecodedSnapshot {
+            _workspace: reservation,
+            ..
+        } = operator.decoded_snapshot(snapshot).unwrap();
+        let mut state = if metadata.state_version == 1 {
+            operator.decode_state(&snapshot.segments[SEGMENT]).unwrap()
+        } else {
+            operator
+                .decode_state_v2(
+                    snapshot,
+                    snapshot.segments.get(INDEX_SEGMENT),
+                    &metadata.metrics,
+                )
+                .unwrap()
+        };
+        let allocation = allocation_counter::measure(|| {
+            state
+                .left
+                .migrate(&state.batches, operator.spec.left(), &operator.name)
+                .unwrap();
+        });
+        let workspace = reservation.size() as u64;
+        assert!(
+            allocation.bytes_max <= workspace,
+            "left migration peak exceeds restore workspace: {allocation:?}, workspace={workspace}"
+        );
+        let before = state.inventory(None, "asof").unwrap().bytes;
+        let left =
+            allocation_counter::measure(|| state.left = super::super::state::LeftState::default());
+        let left_charge = before - state.inventory(None, "asof").unwrap().bytes;
+        let freed = u64::try_from(-left.bytes_current).unwrap();
+        assert!(
+            freed <= left_charge,
+            "restored chunk metadata exceeds legacy identity charge: freed={freed}, charge={left_charge}"
+        );
     }
 
     #[test]

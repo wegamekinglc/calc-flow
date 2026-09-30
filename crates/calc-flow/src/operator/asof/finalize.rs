@@ -86,7 +86,9 @@ impl StreamAsofJoinOperator {
         let limit = context.output_budget().max_rows.min(MAX_ROWS);
         let mut count = self.state.left.ready_prefix_len(limit, frontier, ended);
         loop {
-            match self.reserve_workspace(prefix_workspace_bytes(count)) {
+            match self.reserve_workspace(
+                prefix_workspace_bytes(count) + self.state.left.iter_workspace_bytes(),
+            ) {
                 Ok(reservation) => return Ok((count, reservation)),
                 Err(_) if count > 1 => count /= 2,
                 Err(error) => return Err(error),
@@ -203,7 +205,11 @@ impl StreamAsofJoinOperator {
                 Ok(output) => return Ok(output),
                 Err(error) if *count > 1 && retryable(&error) => {
                     *count /= 2;
-                    shrink_prefix_workspace(*count, prefix_workspace);
+                    shrink_prefix_workspace(
+                        *count,
+                        self.state.left.iter_workspace_bytes(),
+                        prefix_workspace,
+                    );
                 }
                 Err(error) => return Err(error),
             }
@@ -304,12 +310,12 @@ fn binary_search_candidate_rows<'a>(
             context.check_cancelled()?;
         }
         rows.push((
-            state.batches.view(*left),
+            state.batches.view(left),
             state
-                .candidate(&key.1, key.0, tolerance)
+                .candidate(key.1, *key.0, tolerance)
                 .map(|row| state.batches.view(*row)),
         ));
-        prefix.visit(key, *left, &state.batches, name)?;
+        prefix.visit(key, left, &state.batches, name)?;
     }
     Ok(MatchedPrefix { rows, prefix })
 }
@@ -327,6 +333,7 @@ fn monotonic_candidate_rows<'a>(
         .expect("nonempty ASOF prefix")
         .0
         .0;
+    let first_time = *first_time;
     let mut cursors = HashMap::with_capacity_and_hasher(state.right.len(), RandomState::new());
     for (key, bucket) in &state.right {
         cursors.insert(key.clone(), (bucket, bucket.cursor_at(first_time)));
@@ -338,13 +345,13 @@ fn monotonic_candidate_rows<'a>(
             context.check_cancelled()?;
         }
         let right = cursors
-            .get_mut(&key.1)
-            .and_then(|(bucket, next)| bucket.candidate_monotonic(key.0, tolerance, next));
+            .get_mut(key.1)
+            .and_then(|(bucket, next)| bucket.candidate_monotonic(*key.0, tolerance, next));
         rows.push((
-            state.batches.view(*left),
+            state.batches.view(left),
             right.map(|row| state.batches.view(*row)),
         ));
-        prefix.visit(key, *left, &state.batches, name)?;
+        prefix.visit(key, left, &state.batches, name)?;
     }
     Ok(MatchedPrefix { rows, prefix })
 }
@@ -366,9 +373,9 @@ fn prefix_workspace_bytes(count: usize) -> u64 {
     (count * (size_of::<(PayloadView<'_>, Option<PayloadView<'_>>)>() + 96) + 256) as u64
 }
 
-fn shrink_prefix_workspace(count: usize, reservation: &MemoryReservation) {
-    let needed =
-        usize::try_from(prefix_workspace_bytes(count)).expect("bounded ASOF prefix scratch");
+fn shrink_prefix_workspace(count: usize, heap_bytes: u64, reservation: &MemoryReservation) {
+    let needed = usize::try_from(prefix_workspace_bytes(count) + heap_bytes)
+        .expect("bounded ASOF prefix scratch");
     reservation.shrink(reservation.size() - needed);
 }
 
@@ -554,7 +561,7 @@ mod workspace_tests {
             .unwrap();
         let initial = reservation.size();
         count = 1;
-        shrink_prefix_workspace(count, &reservation);
+        shrink_prefix_workspace(count, 0, &reservation);
         assert!(reservation.size() < initial / 100);
         assert_eq!(
             reservation.size(),

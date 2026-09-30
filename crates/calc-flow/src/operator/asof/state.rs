@@ -183,12 +183,12 @@ pub(super) use payload::{PayloadPool, PayloadView, RowRef};
 /// promotes to the tree so late and out-of-order identities retain their
 /// existing ordering and duplicate semantics.
 #[derive(Clone, Default)]
-pub(super) struct LeftState {
+pub(super) struct LegacyLeftState {
     ordered: Vec<(LeftOrder, RowRef)>,
     general: BTreeMap<LeftOrder, RowRef>,
 }
 
-impl LeftState {
+impl LegacyLeftState {
     pub fn len(&self) -> usize {
         self.ordered.len() + self.general.len()
     }
@@ -260,6 +260,7 @@ impl LeftState {
         }
     }
 
+    #[cfg(test)]
     pub fn append_admission(&mut self, mut rows: Vec<(LeftOrder, RowRef)>) {
         if rows.is_empty() {
             return;
@@ -315,7 +316,7 @@ impl LeftState {
     }
 }
 
-impl<'a> IntoIterator for &'a LeftState {
+impl<'a> IntoIterator for &'a LegacyLeftState {
     type Item = (&'a LeftOrder, &'a RowRef);
     type IntoIter = std::iter::Chain<
         std::iter::Map<
@@ -339,6 +340,9 @@ impl<'a> IntoIterator for &'a LeftState {
             )
     }
 }
+
+mod left;
+pub(super) use left::{LeftState, LeftView, PreparedLeftChunk, PreparedLeftDrain};
 
 mod key_dictionary;
 pub(super) use key_dictionary::{RightState, validate_key_count};
@@ -447,8 +451,9 @@ impl State {
         self.batches.attach(row)
     }
 
-    pub fn commit_matched_left_prefix(&mut self, prefix: &LeftPrefix) {
-        self.left.drain_prefix(prefix.count);
+    pub fn commit_matched_left_prefix(&mut self, prefix: &LeftPrefix, drain: PreparedLeftDrain) {
+        self.left
+            .drain_prefix(prefix.count, &prefix.batches, &self.batches, drain);
         for (&key, &removed) in &prefix.batches {
             self.batches.detach_count(key, removed);
         }
@@ -458,11 +463,13 @@ impl State {
     pub fn commit_left_prefix(&mut self, count: usize) {
         let mut prefix = LeftPrefix::default();
         for (order, payload) in self.left.iter().take(count) {
-            prefix
-                .visit(order, *payload, &self.batches, "asof")
-                .unwrap();
+            prefix.visit(order, payload, &self.batches, "asof").unwrap();
         }
-        self.commit_matched_left_prefix(&prefix);
+        let drain = self
+            .left
+            .drain_input(&prefix.batches, &self.batches)
+            .prepare();
+        self.commit_matched_left_prefix(&prefix, drain);
     }
 
     pub fn contains_identity(&self, index: usize, identity: &LeftOrder) -> bool {
@@ -626,13 +633,13 @@ pub(super) struct LeftPrefix {
     pub count: usize,
     pub index_bytes: u64,
     row_bytes: u64,
-    batches: BTreeMap<BatchKey, usize>,
+    pub batches: BTreeMap<BatchKey, usize>,
 }
 
 impl LeftPrefix {
     pub fn visit(
         &mut self,
-        order: &LeftOrder,
+        order: LeftView<'_>,
         row: RowRef,
         batches: &PayloadPool,
         name: &str,
@@ -646,7 +653,7 @@ impl LeftPrefix {
         self.row_bytes = super::checked(
             name,
             self.row_bytes,
-            left_row_charge(&order.1, &order.2, &row),
+            left_row_charge(order.1, order.2, &row),
         )?;
         *self.batches.entry(batches.key(row)).or_default() += 1;
         Ok(())
@@ -843,9 +850,11 @@ impl State {
         name: &str,
     ) -> Result<Inventory> {
         let mut total = Inventory::default();
-        self.left.iter().try_for_each(|((_, key, sequence), row)| {
-            total.charge_left(key, sequence, row, name)
-        })?;
+        self.left
+            .unordered_iter()
+            .try_for_each(|((_, key, sequence), row)| {
+                total.charge_left(key, sequence, &row, name)
+            })?;
         for (key, bucket) in &self.right {
             total.charge_allocation(key, name)?;
             for ((_, sequence), row) in bucket {
@@ -927,7 +936,7 @@ fn retention_threshold(state: &State, status: &super::StreamAsofJoinStatus) -> i
     let pending = state
         .left
         .first_key_value()
-        .map_or(i128::MAX, |(key, _)| i128::from(key.0));
+        .map_or(i128::MAX, |(key, _)| i128::from(*key.0));
     future.min(pending)
 }
 
@@ -1424,7 +1433,7 @@ mod left_storage_tests {
         left.append_admission(vec![row(4)]);
         assert!(left.is_ordered());
         assert_eq!(
-            left.keys().map(|key| key.0).collect::<Vec<_>>(),
+            left.keys().map(|key| *key.0).collect::<Vec<_>>(),
             vec![1, 2, 4]
         );
         let mut ordered_state = State {
@@ -1442,16 +1451,16 @@ mod left_storage_tests {
             ordered_state
                 .left
                 .keys()
-                .map(|key| key.0)
+                .map(|key| *key.0)
                 .collect::<Vec<_>>(),
             vec![4]
         );
-        assert_eq!(ordered_state.left.ordered.capacity(), 1);
+        assert_eq!(ordered_state.left.legacy.ordered.capacity(), 1);
         assert_eq!(ordered_state.batches[&(0, 0)].1, 1);
         left.append_admission(vec![row(3)]);
         assert!(!left.is_ordered());
         assert_eq!(
-            left.keys().map(|key| key.0).collect::<Vec<_>>(),
+            left.keys().map(|key| *key.0).collect::<Vec<_>>(),
             vec![1, 2, 3, 4]
         );
         let mut general_state = State {
@@ -1469,7 +1478,7 @@ mod left_storage_tests {
             general_state
                 .left
                 .keys()
-                .map(|key| key.0)
+                .map(|key| *key.0)
                 .collect::<Vec<_>>(),
             vec![3, 4]
         );
