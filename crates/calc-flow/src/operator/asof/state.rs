@@ -107,133 +107,8 @@ pub(super) type LeftOrder = (i64, Encoding, Encoding);
 pub(super) type RightOrder = (i64, Encoding);
 pub(super) type BatchKey = (u8, u64);
 
-/// One key's right identities in canonical `(time, sequence)` order.
-#[derive(Clone, Default)]
-pub(super) struct RightBucket {
-    rows: Vec<(RightOrder, Option<RowPayload>)>,
-}
-
-impl RightBucket {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            rows: Vec::with_capacity(capacity),
-        }
-    }
-
-    pub fn len(&self) -> usize {
-        self.rows.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.rows.is_empty()
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = (&RightOrder, &Option<RowPayload>)> {
-        self.rows.iter().map(|(order, payload)| (order, payload))
-    }
-
-    #[cfg(test)]
-    pub fn values(&self) -> impl Iterator<Item = &Option<RowPayload>> {
-        self.rows.iter().map(|(_, payload)| payload)
-    }
-
-    pub fn keys(&self) -> impl Iterator<Item = &RightOrder> {
-        self.rows.iter().map(|(order, _)| order)
-    }
-
-    pub fn last_key_value(&self) -> Option<(&RightOrder, &Option<RowPayload>)> {
-        self.rows.last().map(|(order, payload)| (order, payload))
-    }
-
-    pub fn contains_key(&self, order: &RightOrder) -> bool {
-        self.rows
-            .binary_search_by(|(current, _)| current.cmp(order))
-            .is_ok()
-    }
-
-    pub fn insert(&mut self, order: RightOrder, payload: Option<RowPayload>) {
-        if self.rows.last().is_none_or(|(last, _)| last < &order) {
-            self.rows.push((order, payload));
-            return;
-        }
-        match self
-            .rows
-            .binary_search_by(|(current, _)| current.cmp(&order))
-        {
-            Ok(index) => self.rows[index].1 = payload,
-            Err(index) => self.rows.insert(index, (order, payload)),
-        }
-    }
-
-    pub fn retain(&mut self, mut keep: impl FnMut(&RightOrder, &mut Option<RowPayload>) -> bool) {
-        self.rows
-            .retain_mut(|(order, payload)| keep(order, payload));
-        if self.rows.capacity() > self.rows.len().saturating_mul(2) {
-            self.rows = std::mem::take(&mut self.rows).into_boxed_slice().into_vec();
-        }
-    }
-
-    pub fn candidate(&self, time: i64, tolerance: u64) -> Option<&RowPayload> {
-        let index = self
-            .rows
-            .partition_point(|((right_time, _), _)| *right_time <= time);
-        let ((right_time, _), payload) = self.rows.get(index.checked_sub(1)?)?;
-        if i128::from(*right_time) < i128::from(time) - i128::from(tolerance) {
-            return None;
-        }
-        payload.as_ref()
-    }
-
-    pub fn cursor_at(&self, time: i64) -> usize {
-        self.rows
-            .partition_point(|((right_time, _), _)| *right_time < time)
-    }
-
-    /// Advance a per-key cursor for left times visited in nondecreasing order.
-    pub fn candidate_monotonic(
-        &self,
-        time: i64,
-        tolerance: u64,
-        next: &mut usize,
-    ) -> Option<&RowPayload> {
-        debug_assert!(*next <= self.rows.len());
-        while self
-            .rows
-            .get(*next)
-            .is_some_and(|((right_time, _), _)| *right_time <= time)
-        {
-            *next += 1;
-        }
-        let ((right_time, _), payload) = self.rows.get(next.checked_sub(1)?)?;
-        if i128::from(*right_time) < i128::from(time) - i128::from(tolerance) {
-            return None;
-        }
-        payload.as_ref()
-    }
-}
-
-impl<'a> IntoIterator for &'a RightBucket {
-    type Item = &'a (RightOrder, Option<RowPayload>);
-    type IntoIter = std::slice::Iter<'a, (RightOrder, Option<RowPayload>)>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.rows.iter()
-    }
-}
-
-impl FromIterator<(RightOrder, Option<RowPayload>)> for RightBucket {
-    fn from_iter<T: IntoIterator<Item = (RightOrder, Option<RowPayload>)>>(iter: T) -> Self {
-        let mut bucket = Self::new();
-        for (order, payload) in iter {
-            bucket.insert(order, payload);
-        }
-        bucket
-    }
-}
+mod right;
+pub(super) use right::RightBucket;
 
 pub(super) struct PayloadBatch {
     pub key: BatchKey,
@@ -428,8 +303,8 @@ impl<'a> IntoIterator for &'a LeftState {
 /// canonical key order for checkpoint encoding and restore validation.
 #[derive(Clone, Default)]
 pub(super) struct RightState {
-    buckets: HashMap<Encoding, RightBucket, RandomState>,
-    ordered_keys: BTreeSet<Encoding>,
+    buckets: HashMap<Encoding, Box<RightBucket>, RandomState>,
+    ordered_keys: BTreeSet<Arc<Encoding>>,
 }
 
 impl RightState {
@@ -442,7 +317,7 @@ impl RightState {
     }
 
     pub fn values(&self) -> impl Iterator<Item = &RightBucket> {
-        self.buckets.values()
+        self.buckets.values().map(Box::as_ref)
     }
 
     pub fn contains_key(&self, key: &Encoding) -> bool {
@@ -450,14 +325,17 @@ impl RightState {
     }
 
     pub fn get(&self, key: &Encoding) -> Option<&RightBucket> {
-        self.buckets.get(key)
+        self.buckets.get(key).map(Box::as_ref)
     }
 
     pub fn ordered_iter(&self) -> impl Iterator<Item = (&Encoding, &RightBucket)> {
         self.ordered_keys.iter().map(|key| {
             (
-                key,
-                self.buckets.get(key).expect("indexed ASOF right bucket"),
+                key.as_ref(),
+                self.buckets
+                    .get(key.as_ref())
+                    .expect("indexed ASOF right bucket")
+                    .as_ref(),
             )
         })
     }
@@ -465,42 +343,59 @@ impl RightState {
     pub fn last_key_value(&self) -> Option<(&Encoding, &RightBucket)> {
         let key = self.ordered_keys.last()?;
         Some((
-            key,
-            self.buckets.get(key).expect("indexed ASOF right bucket"),
+            key.as_ref(),
+            self.buckets
+                .get(key.as_ref())
+                .expect("indexed ASOF right bucket")
+                .as_ref(),
         ))
     }
 
     pub fn bucket_mut_or_default(&mut self, key: Encoding) -> &mut RightBucket {
         match self.buckets.entry(key) {
-            hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            hash_map::Entry::Occupied(entry) => entry.into_mut().as_mut(),
             hash_map::Entry::Vacant(entry) => {
-                self.ordered_keys.insert(entry.key().clone());
-                entry.insert(RightBucket::default())
+                self.ordered_keys.insert(Arc::new(entry.key().clone()));
+                entry.insert(Box::default()).as_mut()
             }
         }
     }
 
     pub fn insert(&mut self, key: Encoding, bucket: RightBucket) {
-        self.ordered_keys.insert(key.clone());
-        self.buckets.insert(key, bucket);
+        self.ordered_keys.insert(Arc::new(key.clone()));
+        self.buckets.insert(key, Box::new(bucket));
     }
 
     pub fn retain(&mut self, mut keep: impl FnMut(&Encoding, &mut RightBucket) -> bool) {
-        self.buckets.retain(|key, bucket| keep(key, bucket));
+        self.buckets
+            .retain(|key, bucket| keep(key, bucket.as_mut()));
         self.ordered_keys
-            .retain(|key| self.buckets.contains_key(key));
-        if self.buckets.capacity() > self.buckets.len().saturating_mul(2).max(4) {
+            .retain(|key| self.buckets.contains_key(key.as_ref()));
+        if self.buckets.is_empty() {
+            self.ordered_keys = BTreeSet::new();
+            self.buckets.shrink_to_fit();
+        } else if self.buckets.capacity() > self.buckets.len().saturating_mul(2).max(4) {
             self.buckets.shrink_to_fit();
         }
     }
 }
 
+pub(super) struct RightStateIter<'a>(hash_map::Iter<'a, Encoding, Box<RightBucket>>);
+
+impl<'a> Iterator for RightStateIter<'a> {
+    type Item = (&'a Encoding, &'a RightBucket);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(|(key, bucket)| (key, bucket.as_ref()))
+    }
+}
+
 impl<'a> IntoIterator for &'a RightState {
     type Item = (&'a Encoding, &'a RightBucket);
-    type IntoIter = hash_map::Iter<'a, Encoding, RightBucket>;
+    type IntoIter = RightStateIter<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.buckets.iter()
+        RightStateIter(self.buckets.iter())
     }
 }
 
@@ -525,13 +420,17 @@ impl State {
         self.right_payload_min = None;
         self.right_identity_min = None;
         for bucket in self.right.values() {
-            for ((time, _), row) in bucket {
-                let minimum = if row.is_some() {
-                    &mut self.right_payload_min
-                } else {
-                    &mut self.right_identity_min
-                };
-                *minimum = Some(minimum.map_or(*time, |previous| previous.min(*time)));
+            if let Some(time) = bucket.payload_min() {
+                self.right_payload_min = Some(
+                    self.right_payload_min
+                        .map_or(time, |previous| previous.min(time)),
+                );
+            }
+            if let Some(time) = bucket.identity_min() {
+                self.right_identity_min = Some(
+                    self.right_identity_min
+                        .map_or(time, |previous| previous.min(time)),
+                );
             }
         }
     }
@@ -734,6 +633,8 @@ pub(super) struct EvictionPreview {
     pub removed_identity_only: u64,
     pub released_state_bytes: u64,
     pub removed_index_bytes: u64,
+    #[cfg(test)]
+    pub visited_rows: usize,
 }
 
 struct EvictionConditions<'a> {
@@ -745,18 +646,22 @@ struct EvictionConditions<'a> {
 fn preview_right_row(
     preview: &mut EvictionPreview,
     removed_batch_refs: &mut BTreeMap<BatchKey, usize>,
-    order: &RightOrder,
+    order: (&i64, &Encoding),
     row: Option<&RowPayload>,
     conditions: &EvictionConditions<'_>,
     name: &str,
 ) -> Result<bool> {
-    let (expired_payload, remove) = preview_row_disposition(order.0, row, conditions);
+    #[cfg(test)]
+    {
+        preview.visited_rows += 1;
+    }
+    let (expired_payload, remove) = preview_row_disposition(*order.0, row, conditions);
     if expired_payload {
         let payload = row.expect("expired ASOF payload");
         preview_expired_payload(preview, removed_batch_refs, payload, remove, name)?;
     }
     if remove {
-        preview_removed_identity(preview, &order.1, row, name)?;
+        preview_removed_identity(preview, order.1, row, name)?;
     }
     Ok(remove)
 }
@@ -824,17 +729,14 @@ fn preview_bucket(
     conditions: &EvictionConditions<'_>,
     name: &str,
 ) -> Result<()> {
-    let mut survivors = 0;
-    for (order, row) in bucket {
-        if !preview_right_row(
-            preview,
-            removed_batch_refs,
-            order,
-            row.as_ref(),
-            conditions,
-            name,
-        )? {
-            survivors += 1;
+    let mut survivors = bucket.len();
+    for (order, row) in bucket.expired_rows(
+        conditions.status,
+        conditions.tolerance,
+        conditions.threshold,
+    ) {
+        if preview_right_row(preview, removed_batch_refs, order, row, conditions, name)? {
+            survivors -= 1;
         }
     }
     if survivors == 0 {
@@ -847,6 +749,21 @@ fn preview_bucket(
 }
 
 impl State {
+    /// Bound the batch-reference counting tree, including its minimum leaf.
+    pub fn eviction_workspace_bytes(&self, name: &str) -> Result<u64> {
+        if self.batches.is_empty() {
+            return Ok(0);
+        }
+        let rows = (self.batches.len() as u64).checked_mul(96).ok_or_else(|| {
+            super::reason(
+                name,
+                crate::StreamingFailureReason::AsofCounterOverflow,
+                "ASOF eviction workspace overflowed",
+            )
+        })?;
+        super::checked(name, rows, 256)
+    }
+
     /// Compute all status and index deltas before the infallible sweep commits.
     pub fn preview_eviction(
         &self,
@@ -894,7 +811,7 @@ impl State {
         for (key, bucket) in &self.right {
             total.charge_allocation(key, name)?;
             for ((_, sequence), row) in bucket {
-                total.charge_right(sequence, row.as_ref(), name)?;
+                total.charge_right(sequence, row, name)?;
             }
         }
         for (batch, refs) in self.batches.values() {
@@ -948,24 +865,13 @@ impl State {
         let mut identity_min = None;
         let batches = &mut self.batches;
         self.right.retain(|_, bucket| {
-            bucket.retain(|(time, _), row| {
-                if payload_expired(*time, tolerance, threshold)
-                    && let Some(payload) = row.take()
-                {
-                    evicted += 1;
-                    detach_batch(batches, &payload);
-                }
-                let keep = row.is_some() || !identity_expired(*time, status);
-                if keep {
-                    let minimum = if row.is_some() {
-                        &mut payload_min
-                    } else {
-                        &mut identity_min
-                    };
-                    *minimum = Some(minimum.map_or(*time, |previous: i64| previous.min(*time)));
-                }
-                keep
-            });
+            evicted += bucket.evict(status, tolerance, threshold, batches);
+            if let Some(time) = bucket.payload_min() {
+                payload_min = Some(payload_min.map_or(time, |previous: i64| previous.min(time)));
+            }
+            if let Some(time) = bucket.identity_min() {
+                identity_min = Some(identity_min.map_or(time, |previous: i64| previous.min(time)));
+            }
             !bucket.is_empty()
         });
         self.right_payload_min = payload_min;
@@ -1030,6 +936,9 @@ fn detach_batch(batches: &mut BTreeMap<BatchKey, (Arc<PayloadBatch>, usize)>, ro
     *count -= 1;
     if *count == 0 {
         batches.remove(&row.batch.key);
+        if batches.is_empty() {
+            *batches = BTreeMap::new();
+        }
     }
 }
 
@@ -1108,6 +1017,73 @@ mod eviction_minima_tests {
     use super::*;
     use crate::EventTime;
     use datafusion::arrow::datatypes::Schema;
+
+    #[test]
+    fn eviction_preview_visits_only_expired_rows() {
+        let mut state = State::default();
+        let payload = RowPayload {
+            batch: Arc::new(PayloadBatch {
+                key: (1, 0),
+                record: Arc::new(RecordBatch::new_empty(Arc::new(Schema::empty()))),
+                encoded: OnceLock::from(StateSegment::new(Vec::new())),
+                encoded_charge_bytes: 0,
+                body_bytes: 0,
+            }),
+            row: 0,
+        };
+        let mut bucket = RightBucket::new();
+        for time in 0..1_000 {
+            state.attach(&payload);
+            bucket.insert((time, Encoding::from_slice(&[1])), Some(payload.clone()));
+        }
+        state.right.insert(Encoding::from_slice(&[1]), bucket);
+        let mut status = super::super::StreamAsofJoinStatus::default();
+        status.left.watermark_micros = Some(EventTime::from_micros(1));
+        status.right.watermark_micros = Some(EventTime::from_micros(1));
+        let preview = state.preview_eviction(&status, 0, "asof").unwrap();
+        assert_eq!(preview.evicted_payloads, 1);
+        assert_eq!(preview.visited_rows, 1);
+    }
+
+    #[test]
+    fn stalled_identity_history_is_skipped_until_its_own_frontier_closes() {
+        let mut state = State::default();
+        let payload = RowPayload {
+            batch: Arc::new(PayloadBatch {
+                key: (1, 0),
+                record: Arc::new(RecordBatch::new_empty(Arc::new(Schema::empty()))),
+                encoded: OnceLock::from(StateSegment::new(Vec::new())),
+                encoded_charge_bytes: 0,
+                body_bytes: 0,
+            }),
+            row: 0,
+        };
+        state.attach(&payload);
+        let mut bucket = RightBucket::new();
+        for time in 0..1_000 {
+            bucket.insert((time, Encoding::from_slice(&[1])), None);
+        }
+        bucket.insert((1_000, Encoding::from_slice(&[1])), Some(payload));
+        state.right.insert(Encoding::from_slice(&[1]), bucket);
+        let mut status = super::super::StreamAsofJoinStatus::default();
+        status.left.watermark_micros = Some(EventTime::from_micros(1_001));
+        status.right.watermark_micros = Some(EventTime::from_micros(0));
+        let preview = state.preview_eviction(&status, 0, "asof").unwrap();
+        assert_eq!(preview.visited_rows, 1);
+        assert_eq!(preview.added_identity_only, 1);
+        assert_eq!(preview.removed_identities, 0);
+        assert_eq!(state.evict(&status, 0), 1);
+        assert_eq!(state.right_identity_min, Some(0));
+        assert!(state.batches.is_empty());
+
+        status.right.watermark_micros = Some(EventTime::from_micros(1_000));
+        let preview = state.preview_eviction(&status, 0, "asof").unwrap();
+        assert_eq!(preview.visited_rows, 1_000);
+        assert_eq!(preview.removed_identity_only, 1_000);
+        assert_eq!(state.evict(&status, 0), 0);
+        assert_eq!(state.right_identity_min, Some(1_000));
+        assert_eq!(state.right.values().next().unwrap().len(), 1);
+    }
 
     #[test]
     fn minima_follow_payload_release_and_identity_expiry() {
@@ -1216,10 +1192,58 @@ mod encoding_tests {
 
 #[cfg(test)]
 mod right_bucket_tests {
-    use super::{Encoding, PayloadBatch, RightBucket, RowPayload};
+    use super::{
+        Encoding, PayloadBatch, RightBucket, RowPayload, State,
+        right::{RightCursor, take_column_moves},
+    };
     use crate::StateSegment;
     use datafusion::arrow::{datatypes::Schema, record_batch::RecordBatch};
     use std::sync::{Arc, OnceLock};
+
+    #[test]
+    fn older_payload_expiry_does_not_move_retained_identity_columns() {
+        let batch = Arc::new(PayloadBatch {
+            key: (1, 0),
+            record: Arc::new(RecordBatch::new_empty(Arc::new(Schema::empty()))),
+            encoded: OnceLock::new(),
+            encoded_charge_bytes: 0,
+            body_bytes: 0,
+        });
+        let key = Encoding::from_slice(&[1]);
+        let mut state = State::default();
+        for time in 1_000..2_000 {
+            state
+                .right
+                .bucket_mut_or_default(key.clone())
+                .insert((time, Encoding::from_slice(&[1])), None);
+        }
+        for time in 0..1_000 {
+            let row = RowPayload {
+                batch: Arc::clone(&batch),
+                row: 0,
+            };
+            state.attach(&row);
+            state
+                .right
+                .bucket_mut_or_default(key.clone())
+                .insert((time, Encoding::from_slice(&[1])), Some(row));
+        }
+        let mut status = super::super::StreamAsofJoinStatus::default();
+        status.left.watermark_micros = Some(crate::EventTime::from_micros(2_000));
+        status.right.watermark_micros = Some(crate::EventTime::from_micros(0));
+        take_column_moves();
+        state.evict(&status, 0);
+        assert_eq!(
+            take_column_moves(),
+            0,
+            "expired payload identities moved retained columns"
+        );
+        let bucket = state.right.get(&key).unwrap();
+        assert_eq!(bucket.len(), 2_000);
+        assert!(bucket.values().all(|payload| payload.is_none()));
+        assert!(bucket.keys().map(|order| *order.0).eq(0..2_000));
+        assert!(state.batches.is_empty());
+    }
 
     #[test]
     fn ordered_run_accepts_append_and_watermark_local_disorder() {
@@ -1259,11 +1283,16 @@ mod right_bucket_tests {
             (5, 2, payload(1)),
             (7, 1, None),
             (5, 1, payload(0)),
+            (6, 1, None),
+            (5, 3, None),
         ] {
             bucket.insert((time, Encoding::from_slice(&[sequence])), row);
         }
+        assert!(bucket.candidate(5, 10).is_none());
+        assert!(bucket.candidate(6, 10).is_none());
+        assert_eq!(bucket.candidate(9, 10).map(|row| row.row), Some(2));
         for tolerance in [0, 1, 10] {
-            let mut next = 0;
+            let mut next = RightCursor::default();
             for time in [4, 5, 5, 6, 7, 8, 9, 10] {
                 assert_eq!(
                     bucket
@@ -1364,7 +1393,175 @@ mod left_storage_tests {
 
 #[cfg(test)]
 mod right_storage_tests {
-    use super::{Encoding, RightBucket, RightState};
+    use super::{Encoding, RightBucket, RightState, State};
+
+    #[test]
+    fn reverse_unique_right_keys_keep_canonical_checkpoint_order() {
+        let mut right = RightState::default();
+        let keys = 4_096_u32;
+        for key in (0..keys).rev() {
+            right.bucket_mut_or_default(Encoding::from_slice(&key.to_be_bytes()));
+        }
+        assert_eq!(right.len(), keys as usize);
+        assert!(
+            right
+                .ordered_iter()
+                .map(|(key, _)| key.as_slice())
+                .eq((0..keys)
+                    .map(u32::to_be_bytes)
+                    .collect::<Vec<_>>()
+                    .iter()
+                    .map(<[u8; 4]>::as_slice))
+        );
+    }
+
+    #[test]
+    fn sparse_right_buckets_fit_the_committed_state_charge() {
+        for keys in [1_u32, 2, 4, 16, 128] {
+            let mut state = State::default();
+            let mut prepared = None;
+            let allocation = allocation_counter::measure(|| {
+                for key in 0..keys {
+                    let mut bucket = RightBucket::default();
+                    bucket.insert((1, Encoding::from_slice(&[1])), None);
+                    state
+                        .right
+                        .insert(Encoding::from_slice(&key.to_le_bytes()), bucket);
+                }
+                let length = super::super::checkpoint::encoded_length(&state, "asof").unwrap();
+                prepared = Some(super::super::checkpoint::PreparedSegment::new(
+                    crate::StateSegment::new(vec![0; usize::try_from(length).unwrap()]),
+                ));
+            });
+            let charged = state.inventory(prepared.as_ref(), "asof").unwrap().bytes;
+            assert!(
+                u64::try_from(allocation.bytes_current).unwrap() <= charged,
+                "keys={keys}, retained={}, charged={charged}",
+                allocation.bytes_current
+            );
+        }
+    }
+
+    #[test]
+    fn empty_right_state_releases_its_owned_indexes() {
+        let mut right = RightState::default();
+        let allocation = allocation_counter::measure(|| {
+            right
+                .bucket_mut_or_default(Encoding::from_slice(&[1]))
+                .insert((1, Encoding::from_slice(&[1])), None);
+            right.retain(|_, _| false);
+        });
+        assert_eq!(allocation.bytes_current, 0);
+    }
+
+    #[test]
+    fn empty_payload_state_releases_its_batch_reference_index() {
+        let mut state = State::default();
+        let mut status = super::super::StreamAsofJoinStatus::default();
+        status.left.ended = true;
+        status.right.ended = true;
+        let batch = std::sync::Arc::new(super::PayloadBatch {
+            key: (1, 0),
+            record: std::sync::Arc::new(datafusion::arrow::record_batch::RecordBatch::new_empty(
+                std::sync::Arc::new(datafusion::arrow::datatypes::Schema::empty()),
+            )),
+            encoded: std::sync::OnceLock::new(),
+            encoded_charge_bytes: 0,
+            body_bytes: 0,
+        });
+        let allocation = allocation_counter::measure(|| {
+            let row = super::RowPayload {
+                batch: std::sync::Arc::clone(&batch),
+                row: 0,
+            };
+            state.attach(&row);
+            state
+                .right
+                .bucket_mut_or_default(Encoding::from_slice(&[1]))
+                .insert((1, Encoding::from_slice(&[1])), Some(row));
+            state.evict(&status, 0);
+        });
+        assert_eq!(state.inventory(None, "asof").unwrap().bytes, 0);
+        assert_eq!(allocation.bytes_current, 0);
+    }
+
+    #[test]
+    fn disordered_identity_history_fits_charge_after_partial_expiry() {
+        for (arrivals, frontier) in [&[10, 9][..], &[10, 12, 11, 9][..]]
+            .into_iter()
+            .flat_map(|arrivals| [0, 10, 11, 12, 13].map(|frontier| (arrivals, frontier)))
+        {
+            let mut state = State::default();
+            let mut prepared = None;
+            let mut status = super::super::StreamAsofJoinStatus::default();
+            status.right.watermark_micros = Some(crate::EventTime::from_micros(frontier));
+            let allocation = allocation_counter::measure(|| {
+                for &time in arrivals {
+                    state
+                        .right
+                        .bucket_mut_or_default(Encoding::from_slice(&[1]))
+                        .insert((time, Encoding::from_slice(&[1])), None);
+                }
+                state.evict(&status, 0);
+                let length = super::super::checkpoint::encoded_length(&state, "asof").unwrap();
+                if length != 0 {
+                    prepared = Some(super::super::checkpoint::PreparedSegment::new(
+                        crate::StateSegment::new(vec![0; usize::try_from(length).unwrap()]),
+                    ));
+                }
+            });
+            let charge = state.inventory(prepared.as_ref(), "asof").unwrap().bytes;
+            assert!(
+                u64::try_from(allocation.bytes_current).unwrap() <= charge,
+                "frontier={frontier}, retained={}, charge={charge}",
+                allocation.bytes_current
+            );
+        }
+    }
+
+    #[test]
+    fn eviction_workspace_bounds_small_batch_reference_trees() {
+        for count in [0, 1, 2, 4, 16, 128] {
+            let mut state = State::default();
+            for id in 0..count {
+                let row = super::RowPayload {
+                    batch: std::sync::Arc::new(super::PayloadBatch {
+                        key: (1, id),
+                        record: std::sync::Arc::new(
+                            datafusion::arrow::record_batch::RecordBatch::new_empty(
+                                std::sync::Arc::new(datafusion::arrow::datatypes::Schema::empty()),
+                            ),
+                        ),
+                        encoded: std::sync::OnceLock::new(),
+                        encoded_charge_bytes: 0,
+                        body_bytes: 0,
+                    }),
+                    row: 0,
+                };
+                state.attach(&row);
+                state
+                    .right
+                    .bucket_mut_or_default(Encoding::from_slice(&[1]))
+                    .insert(
+                        (i64::try_from(id).unwrap(), Encoding::from_slice(&[1])),
+                        Some(row),
+                    );
+            }
+            let mut status = super::super::StreamAsofJoinStatus::default();
+            status.left.ended = true;
+            status.right.ended = true;
+            let charge = state.eviction_workspace_bytes("asof").unwrap();
+            let allocation = allocation_counter::measure(|| {
+                let preview = state.preview_eviction(&status, 0, "asof").unwrap();
+                assert_eq!(preview.evicted_payloads, count);
+            });
+            assert!(
+                allocation.bytes_max <= charge,
+                "batches={count}, allocated={}, charge={charge}",
+                allocation.bytes_max
+            );
+        }
+    }
 
     #[test]
     fn hashed_right_buckets_keep_canonical_order_after_retain_and_reinsert() {
@@ -1409,8 +1606,15 @@ mod right_storage_tests {
         for time in 0..64 {
             bucket.insert((time, Encoding::from_slice(&[1])), None);
         }
-        bucket.retain(|(time, _), _| *time == 63);
+        let mut status = super::super::StreamAsofJoinStatus::default();
+        status.right.watermark_micros = Some(crate::EventTime::from_micros(63));
+        bucket.evict(
+            &status,
+            0,
+            i128::MIN,
+            &mut std::collections::BTreeMap::new(),
+        );
         assert_eq!(bucket.len(), 1);
-        assert!(bucket.rows.capacity() <= 2 * bucket.len());
+        assert!(bucket.capacity() <= 2 * bucket.len());
     }
 }

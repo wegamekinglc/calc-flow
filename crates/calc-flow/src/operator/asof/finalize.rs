@@ -156,7 +156,7 @@ impl StreamAsofJoinOperator {
             self.swept = Some(stamp);
             return Ok(());
         }
-        let workspace = self.reserve_workspace(self.state.batches.len() as u64 * 96)?;
+        let workspace = self.reserve_workspace(self.state.eviction_workspace_bytes(&self.name)?)?;
         let preview =
             self.state
                 .preview_eviction(&self.status, self.spec.tolerance_micros(), &self.name)?;

@@ -404,7 +404,14 @@ fn verify_trace(trace: Trace, should_fail: bool) {
         "{observation:?}"
     );
     assert!(observation.peak_snapshot_capacity > 0);
-    assert!(observation.reset_released_bytes > 0);
+    if should_fail {
+        assert!(observation.reset_released_bytes > 0);
+    } else {
+        assert_eq!(
+            observation.reset_released_bytes, 0,
+            "EOF must release all state indexes before reset"
+        );
+    }
     eprintln!(
         "ASOF resource {trace:?}: keys={KEYS}, generated_inputs=100000, left:right=1:1, seed=0 (formula), schema=(UInt64,UTC-us,Int64,Utf8), payload_bytes=8 (Wide after round0:16384), key_distribution=uniform (HotKey after round0:900/1000 at key0), round_step_us={ROUND_STEP}, generated_final_left_time_us=735000005, watermarks=round_time+6 (Stalled/Wide right freezes at6), tolerance_us={TOLERANCE}, batch_rows={BATCH_ROWS}, state_rows=100000, state_bytes={STATE_BYTES}, workspace_limit={STATE_BYTES}, edge={:?}; {observation:?}; current_thread_heap_peak={} (includes harness and DataFusion; not workspace or RSS)",
         EdgeBudget::default(),

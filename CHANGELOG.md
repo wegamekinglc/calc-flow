@@ -53,6 +53,20 @@ measurements. Use the current guides for supported behavior.
   existing v2 index bytes, state charge, and v1/v2 restore rules remain
   compatible.
 
+- 2026-09-30: Keep ASOF right payload and identity-only histories in separate
+  ordered time and sequence columns. Eviction previews inspect their expired
+  prefixes, and committed sweeps advance head cursors and release dead payload
+  references before periodically compacting capacity. Stalled identity history
+  no longer makes each payload sweep revisit all retained rows. Canonical key
+  ordering uses a tree, including reverse arrivals of many distinct keys; sparse
+  identity-only buckets allocate no payload column. Existing v2 checkpoint bytes
+  and v1/v2 recovery remain compatible. Older payloads enter a separate identity
+  tree when their order overlaps retained history, without moving retained
+  identity columns. Empty key and batch-reference indexes release their owned
+  allocations when the committed state charge reaches zero. Eviction workspace
+  reserves the batch-reference tree's minimum leaf allocation as well as its
+  per-batch slots, retaining the configured workspace cap.
+
 - 2026-09-29: Require immutable `Program(engine="sql")` or
   `Program(engine="streaming")` selection at construction and add
   `Program.execute(inputs)` dispatch. SQL returns named Arrow tables;

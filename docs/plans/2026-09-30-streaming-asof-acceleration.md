@@ -14,7 +14,7 @@
 当前分支已加入 Polars ASOF 外部参考、四个 100k Rust 端到端场景、批次级 tracing，
 以及 watermark 乱序与恢复的随机测试。前缀提交、admission 哈希、右侧 Arrow
 输出、原地驱逐、短 identity 编码和按 key 的有序 right 数组已有第一批优化。
-按驱逐量访问 right 行、left Arrow chunk 与 checkpoint v3 仍待实施；
+left Arrow chunk 与 checkpoint v3 仍待实施；
 载荷 IPC 已改为 checkpoint 时按需编码，并沿用 v2 状态格式与计费；
 有序批次的相邻查重和已保留状态之后的范围跳过探测也已加入；
 单列非空 `Int64`/`UInt64` 身份已走保持 Arrow row 字节一致的类型化路径；
@@ -25,6 +25,12 @@ admission 的已校验身份现在直接移入保留行，v2 index 长度与状�
 遍历中预检；
 right 桶用哈希定位并保留排序 key 集合供 checkpoint 写出，驱逐后回收过大的
 桶和哈希表容量；仍未引入 P2.1 的 `u32` key 字典或 v3 checkpoint；
+right 的载荷行和 identity-only 历史现有独立时间、sequence 列与 head，
+驱逐预检仅访问各自过期的前缀，提交后按桶重算最小时间；有序列路径为
+`O(keys + expired)`，较旧载荷转为身份时用乱序树索引，代价另加
+`O(expired × log(identity_history))`，不搬移尚未过期的身份列；
+refs 仍使用现有 `RowPayload`，尚未完成 P2.2 的紧凑批次引用；
+稀疏 identity-only 桶不分配载荷列，排序 key 使用树以避免逆序到达的二次搬移；
 阶段结果及最终配对数据将在 PR 描述中记录。
 
 ## 1. 问题与测量

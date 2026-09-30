@@ -148,7 +148,7 @@ async fn write_right_async(
     for (key, bucket) in state.right.ordered_iter() {
         write_bucket_header(writer, key, bucket.len())?;
         for ((time, sequence), payload) in bucket {
-            write_right(writer, *time, sequence, payload.as_ref())?;
+            write_right(writer, *time, sequence, payload)?;
             ordinal += 1;
             checkpoint_tick(ordinal, context).await?;
         }
@@ -187,7 +187,7 @@ fn write_state_sync(writer: &mut BoundedWriter<'_>, state: &State) -> Result<()>
     for (key, bucket) in state.right.ordered_iter() {
         write_bucket_header(writer, key, bucket.len())?;
         for ((time, sequence), payload) in bucket {
-            write_right(writer, *time, sequence, payload.as_ref())?;
+            write_right(writer, *time, sequence, payload)?;
         }
     }
     Ok(())
@@ -496,12 +496,12 @@ fn decode_right_bucket(
     batches: &BTreeMap<BatchKey, std::sync::Arc<super::super::state::PayloadBatch>>,
     state: &mut State,
 ) -> Result<RightBucket> {
-    let mut bucket = RightBucket::with_capacity(usize::try_from(count).expect("bounded ASOF rows"));
+    let mut bucket = RightBucket::new();
     for _ in 0..count {
         let (identity, payload) = read_right_entry(reader, batches)?;
         if bucket
             .last_key_value()
-            .is_some_and(|(last, _)| last >= &identity)
+            .is_some_and(|(last, _)| last >= (&identity.0, &identity.1))
         {
             return Err(mismatch("ASOF right index order is not strict"));
         }

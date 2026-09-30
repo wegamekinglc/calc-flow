@@ -300,7 +300,6 @@ async fn full_admission_does_not_retain_unbilled_small_slice_tail() {
         .values()
         .next()
         .unwrap()
-        .as_ref()
         .unwrap();
     let data = retained.batch.record.column(0).to_data();
     assert!(

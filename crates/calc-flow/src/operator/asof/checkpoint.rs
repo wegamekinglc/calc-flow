@@ -465,8 +465,7 @@ impl StreamAsofJoinOperator {
         if count == 0 {
             return Err(mismatch("ASOF empty right bucket is noncanonical"));
         }
-        let mut bucket =
-            RightBucket::with_capacity(usize::try_from(count).expect("bounded ASOF rows"));
+        let mut bucket = RightBucket::new();
         for _ in 0..count {
             self.decode_right_row(decoder, &key, &mut bucket, state, next_id)?;
         }
@@ -490,7 +489,7 @@ impl StreamAsofJoinOperator {
         let identity = (time, sequence);
         if bucket
             .last_key_value()
-            .is_some_and(|(last, _)| last >= &identity)
+            .is_some_and(|(last, _)| last >= (&identity.0, &identity.1))
         {
             return Err(mismatch("ASOF right identity order is not strict"));
         }
