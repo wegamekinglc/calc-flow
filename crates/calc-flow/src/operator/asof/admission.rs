@@ -111,7 +111,7 @@ impl StreamAsofJoinOperator {
         } else {
             self.status.right.accepted_rows
         };
-        let mut rows = encode_rows(&rows, input.index, base, &self.name)?;
+        let mut rows = encode_rows(rows, input.index, base, &self.name)?;
         if input.index == 1 && !rows.windows(2).all(|pair| pair[0].0 <= pair[1].0) {
             // Keep each admitted run ordered so a watermark-local reversal
             // does not repeatedly shift a whole per-key right vector.
@@ -430,12 +430,12 @@ fn side_status(status: &mut StreamAsofJoinStatus, index: usize) -> &mut StreamAs
 }
 
 fn encode_rows(
-    rows: &[InputRow<'_>],
+    rows: Vec<InputRow<'_>>,
     side: usize,
     base: u64,
     name: &str,
 ) -> Result<Vec<(LeftOrder, RowPayload)>> {
-    let mut result = Vec::with_capacity(rows.len());
+    let mut payloads = Vec::new();
     let mut position = 0;
     while position < rows.len() {
         let batch = rows[position].1;
@@ -446,17 +446,24 @@ fn encode_rows(
                 .count();
         let compact = compact_accepted_rows(&rows[position..end], batch)?;
         let payload = encode_payload(compact, side, base + position as u64, name)?;
-        for (ordinal, (identity, _, _)) in rows[position..end].iter().enumerate() {
+        payloads.push((end - position, payload));
+        position = end;
+    }
+    let mut input = rows.into_iter();
+    let mut result = Vec::with_capacity(input.len());
+    for (count, payload) in payloads {
+        for ordinal in 0..count {
+            let (identity, _, _) = input.next().expect("partitioned ASOF input row");
             result.push((
-                identity.clone(),
+                identity,
                 RowPayload {
-                    batch: payload.clone(),
+                    batch: Arc::clone(&payload),
                     row: ordinal,
                 },
             ));
         }
-        position = end;
     }
+    debug_assert!(input.next().is_none());
     Ok(result)
 }
 
