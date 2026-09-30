@@ -134,90 +134,119 @@ async fn accepted_prefix_installs_pool_compaction_without_allocating() {
     assert_eq!(collector.batch.unwrap().num_rows(), 800);
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn shared_right_columns_are_copied_outside_the_executor() {
-    for admission in [false, true] {
-        let (template, _) = fixture();
-        let schema = template.schemas[0].clone();
-        let spec = StreamAsofJoinSpec::new(
-            template.spec.left().clone(),
-            template.spec.right().clone(),
-            Duration::ZERO,
-            AsofStateLimits::new(10_000, 64 << 20).unwrap(),
-        )
+#[test]
+fn shared_right_columns_are_copied_outside_the_executor() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
         .unwrap();
-        let mut op =
-            StreamAsofJoinOperator::new("asof", schema.clone(), schema.clone(), spec).unwrap();
-        let input = |range: std::ops::Range<i64>| {
-            let rows = usize::try_from(range.end - range.start).unwrap();
-            Batch::table(
-                vec![
-                    RecordBatch::try_new(
-                        schema.clone(),
-                        vec![
-                            Arc::new(StringArray::from(vec!["A"; rows])),
-                            Arc::new(
-                                TimestampMicrosecondArray::from_iter_values(range.clone())
-                                    .with_timezone("UTC"),
-                            ),
-                            Arc::new(Int64Array::from_iter_values(range)),
-                        ],
-                    )
-                    .unwrap(),
-                ],
-                BatchMetadata::default(),
-            )
-            .unwrap()
-        };
-        let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
-        let cx = StreamOperatorContext::new(&job, "asof", None);
-        let mut out = EdgeCollector::new(op.output_ports().to_vec());
-        op.process_data("right", input(0..4_096), &cx, &mut out)
-            .await
-            .unwrap();
-        let frozen = op.state.right.owned_buckets().next().unwrap().1;
-        let progress = IngressProgressSnapshot::new(BTreeMap::from([
-            (
-                "left".into(),
-                IngressProgress::new(IngressState::Active, Some(EventTime::from_micros(1))),
-            ),
-            (
-                "right".into(),
-                IngressProgress::new(IngressState::Active, Some(EventTime::from_micros(1))),
-            ),
-        ]));
-        let progress_cx = StreamOperatorContext::with_ingress_progress(
-            &job,
-            "asof",
-            Some(EventTime::from_micros(1)),
-            progress,
-        );
-        let mut operation: std::pin::Pin<Box<dyn Future<Output = Result<()>> + '_>> = if admission {
-            Box::pin(op.process_data("right", input(4_096..4_097), &cx, &mut out))
-        } else {
-            Box::pin(op.on_ingress_progress_with_output("right", &progress_cx, &mut out))
-        };
-        let waker = futures::task::noop_waker();
-        let mut poll_context = std::task::Context::from_waker(&waker);
-        let mut first = None;
-        let allocations = allocation_counter::measure(|| {
-            first = Some(operation.as_mut().poll(&mut poll_context));
-        });
-        assert!(
-            allocations.bytes_max < 32_768,
-            "shared bucket copied on the executor: admission={admission}, {allocations:?}"
-        );
-        assert!(
-            first.unwrap().is_pending(),
-            "shared column preparation must yield to its worker"
-        );
-        operation.await.unwrap();
-        assert_eq!(frozen.len(), 4_096);
-        assert_eq!(
-            op.status.retained_right_rows,
-            if admission { 4_097 } else { 4_095 }
-        );
-    }
+    runtime.block_on(async {
+        for admission in [false, true] {
+            assert_shared_right_copy_preparation(admission).await;
+        }
+    });
+}
+
+fn shared_right_copy_fixture() -> (
+    StreamAsofJoinOperator,
+    impl Fn(std::ops::Range<i64>) -> Batch,
+) {
+    let (template, _) = fixture();
+    let schema = template.schemas[0].clone();
+    let spec = StreamAsofJoinSpec::new(
+        template.spec.left().clone(),
+        template.spec.right().clone(),
+        Duration::ZERO,
+        AsofStateLimits::new(10_000, 64 << 20).unwrap(),
+    )
+    .unwrap();
+    let op = StreamAsofJoinOperator::new("asof", schema.clone(), schema.clone(), spec).unwrap();
+    let input = move |range: std::ops::Range<i64>| {
+        let rows = usize::try_from(range.end - range.start).unwrap();
+        Batch::table(
+            vec![
+                RecordBatch::try_new(
+                    schema.clone(),
+                    vec![
+                        Arc::new(StringArray::from(vec!["A"; rows])),
+                        Arc::new(
+                            TimestampMicrosecondArray::from_iter_values(range.clone())
+                                .with_timezone("UTC"),
+                        ),
+                        Arc::new(Int64Array::from_iter_values(range)),
+                    ],
+                )
+                .unwrap(),
+            ],
+            BatchMetadata::default(),
+        )
+        .unwrap()
+    };
+    (op, input)
+}
+
+async fn assert_shared_right_copy_preparation(admission: bool) {
+    let (mut op, input) = shared_right_copy_fixture();
+    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+    let cx = StreamOperatorContext::new(&job, "asof", None);
+    let mut out = EdgeCollector::new(op.output_ports().to_vec());
+    op.process_data("right", input(0..4_096), &cx, &mut out)
+        .await
+        .unwrap();
+    let frozen = op.state.right.owned_buckets().next().unwrap().1;
+    let progress = IngressProgressSnapshot::new(BTreeMap::from([
+        (
+            "left".into(),
+            IngressProgress::new(IngressState::Active, Some(EventTime::from_micros(1))),
+        ),
+        (
+            "right".into(),
+            IngressProgress::new(IngressState::Active, Some(EventTime::from_micros(1))),
+        ),
+    ]));
+    let progress_cx = StreamOperatorContext::with_ingress_progress(
+        &job,
+        "asof",
+        Some(EventTime::from_micros(1)),
+        progress,
+    );
+    // Keep the only blocking worker occupied so this poll measures preparation
+    // and scheduling, regardless of how quickly a platform can copy columns.
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let blocker = tokio::task::spawn_blocking(move || {
+        started_tx.send(()).unwrap();
+        let _released = release_rx.recv();
+    });
+    started_rx.await.unwrap();
+    let mut operation: std::pin::Pin<Box<dyn Future<Output = Result<()>> + '_>> = if admission {
+        Box::pin(op.process_data("right", input(4_096..4_097), &cx, &mut out))
+    } else {
+        Box::pin(op.on_ingress_progress_with_output("right", &progress_cx, &mut out))
+    };
+    let waker = futures::task::noop_waker();
+    let mut poll_context = std::task::Context::from_waker(&waker);
+    let mut first = None;
+    let allocations = allocation_counter::measure(|| {
+        first = Some(operation.as_mut().poll(&mut poll_context));
+    });
+    assert!(
+        allocations.bytes_max < 32_768,
+        "shared bucket copied on the executor: admission={admission}, {allocations:?}"
+    );
+    assert!(
+        first.unwrap().is_pending(),
+        "shared column preparation must yield to its worker"
+    );
+    release_tx.send(()).unwrap();
+    blocker.await.unwrap();
+    operation.await.unwrap();
+    assert_eq!(frozen.len(), 4_096);
+    assert_eq!(
+        op.status.retained_right_rows,
+        if admission { 4_097 } else { 4_095 }
+    );
 }
 
 #[tokio::test]
