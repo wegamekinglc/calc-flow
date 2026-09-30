@@ -39,16 +39,16 @@ PYTHON_TEST_COMMAND = (
 )
 SYNC_COMMAND = ("uv", "sync", "--extra", "dev", "--no-install-project")
 NATIVE_BUILD_COMMAND = ("cargo", "build", "-p", "calc-flow-python")
+RUST_TEST_COMMAND = (sys.executable, "scripts/run_rust_tests.py")
 
 
 def coverage_commands(*, no_run: bool = False) -> tuple[tuple[str, ...], ...]:
     """Return the deterministic command plan for one combined coverage run."""
     if no_run:
-        return (
-            SYNC_COMMAND,
-            ("cargo", "test", "--workspace", "--all-features", "--no-run"),
-            NATIVE_BUILD_COMMAND,
-        )
+        # Cargo unifies features per package selection. Precompile exactly the
+        # harness and extension selections the run phase uses; a workspace-wide
+        # build would be recompiled by every per-package run command.
+        return (SYNC_COMMAND, (*RUST_TEST_COMMAND, "--no-run"), NATIVE_BUILD_COMMAND)
     connector = (
         "cargo",
         "test",
@@ -59,7 +59,7 @@ def coverage_commands(*, no_run: bool = False) -> tuple[tuple[str, ...], ...]:
     return (
         SYNC_COMMAND,
         # Reuse the serial, runtime-bounded PyO3 harness after precompilation.
-        (sys.executable, "scripts/run_rust_tests.py"),
+        RUST_TEST_COMMAND,
         (
             "cargo",
             "test",

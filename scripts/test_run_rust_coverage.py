@@ -31,16 +31,39 @@ def connector_environment() -> dict[str, str]:
 
 
 class RustCoverageRunnerTests(unittest.TestCase):
-    def test_compile_phase_builds_every_target_without_running_tests(self) -> None:
+    def test_compile_phase_builds_the_run_phase_package_selections(self) -> None:
         commands = coverage_commands(no_run=True)
+        run_commands = coverage_commands()
 
-        self.assertEqual(len(commands), 3)
         self.assertEqual(
-            commands[1],
-            ("cargo", "test", "--workspace", "--all-features", "--no-run"),
+            commands,
+            (
+                ("uv", "sync", "--extra", "dev", "--no-install-project"),
+                (sys.executable, "scripts/run_rust_tests.py", "--no-run"),
+                ("cargo", "build", "-p", "calc-flow-python"),
+            ),
         )
-        self.assertEqual(commands[-1], ("cargo", "build", "-p", "calc-flow-python"))
+        # Cargo unifies features per package selection, so the per-package
+        # run commands would recompile rather than reuse a workspace build.
+        self.assertFalse(any("--workspace" in command for command in commands))
+        self.assertIn(commands[1][:2], run_commands)
+        self.assertIn(commands[2], run_commands)
         self.assertFalse(any("report" in command for command in commands))
+
+    def test_run_phase_cargo_tests_reuse_the_harness_package_selections(self) -> None:
+        harness_packages = {"calc-flow", "calc-flow-connectors"}
+        cargo_tests = [
+            command
+            for command in coverage_commands()
+            if command[:2] == ("cargo", "test")
+        ]
+
+        self.assertTrue(cargo_tests)
+        for command in cargo_tests:
+            with self.subTest(command=command):
+                self.assertNotIn("--workspace", command)
+                self.assertIn("--all-features", command)
+                self.assertIn(command[command.index("-p") + 1], harness_packages)
 
     @patch("scripts.run_rust_coverage.run_python_suite")
     @patch("scripts.run_rust_coverage.subprocess.run")

@@ -517,12 +517,15 @@ class ReleaseConfigTests(unittest.TestCase):
             "  rust-supply-chain:\n", 1
         )[0]
         header = coverage.split("    steps:\n", 1)[0]
-        self.assertIn('CARGO_BUILD_JOBS: "1"', header)
+        self.assertIn('CARGO_BUILD_JOBS: "3"', header)
         self.assertIn('CARGO_PROFILE_DEV_DEBUG: "0"', header)
         self.assertIn('CARGO_PROFILE_TEST_DEBUG: "0"', header)
-        compile_step = coverage.split(
-            "      - name: Compile instrumented Rust targets\n", 1
-        )[1].split("      - name:", 1)[0]
+        swap_name = "      - name: Add swap headroom for instrumented linking\n"
+        compile_name = "      - name: Compile instrumented Rust targets\n"
+        self.assertLess(coverage.index(swap_name), coverage.index(compile_name))
+        swap_step = coverage.split(swap_name, 1)[1].split("      - name:", 1)[0]
+        self.assertIn("sudo swapon", swap_step)
+        compile_step = coverage.split(compile_name, 1)[1].split("      - name:", 1)[0]
         self.assertIn("timeout-minutes: 45", compile_step)
         self.assertIn("scripts/run_rust_coverage.py --no-run", compile_step)
         self.assertIn("free -m", compile_step)
