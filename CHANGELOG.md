@@ -7,6 +7,13 @@ the [documentation index](docs/README.md).
 Entries describe the state at their date, including superseded decisions and
 measurements. Use the current guides for supported behavior.
 
+## 2026-10
+
+- 2026-10-01: Preserve input focus during Studio schema-field and Source/Sink
+  binding renames (DAL-313). Unfinished Options JSON stays with its binding
+  across renames and adjacent additions/removals; project switches and
+  external binding replacements reset local drafts.
+
 ## 2026-09
 
 - 2026-09-29: Require immutable `Program(engine="sql")` or
