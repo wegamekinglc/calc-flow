@@ -1,7 +1,8 @@
 //! Sorted Arrow chunks, merged through borrowed cursor heads.
 
 use super::{
-    BatchKey, Encoding, LeftOrder, LegacyLeftState, PayloadBatch, PayloadPool, RowPayload, RowRef,
+    BatchKey, Encoding, EncodingOwners, LeftOrder, LegacyLeftState, PayloadBatch, PayloadPool,
+    RowPayload, RowRef, SequenceColumn, SequenceKind, SequenceRef,
 };
 use crate::{
     Result,
@@ -13,37 +14,29 @@ use datafusion::arrow::{
     compute::{SortColumn, lexsort_to_indices, take},
 };
 use std::{
+    borrow::Cow,
     cmp::{Ordering, Reverse},
     collections::{BTreeMap, BinaryHeap, HashMap},
     sync::Arc,
 };
 
-pub(in super::super) type LeftView<'a> = (&'a i64, &'a Encoding, &'a Encoding);
+pub(in super::super) type LeftView<'a> = (&'a i64, &'a Encoding, SequenceRef<'a>);
 
 fn borrowed(order: &LeftOrder) -> LeftView<'_> {
-    (&order.0, &order.1, &order.2)
+    (&order.0, &order.1, Cow::Borrowed(&order.2))
 }
 
 #[derive(Clone)]
-struct ChunkData {
-    times: ScalarBuffer<i64>,
-    positions: Option<Vec<u32>>,
-    start: u32,
-    keys: Vec<Option<Encoding>>,
-    key_counts: Vec<usize>,
-    key_ids: Vec<u32>,
-    sequences: Vec<Encoding>,
-    index_bytes: u64,
-    encoding_bytes: u64,
-}
-
-fn shared_encoding_bytes(encoding: &Encoding) -> u64 {
-    match encoding {
-        Encoding::Inline { .. } => 0,
-        Encoding::Shared(bytes) => {
-            (bytes.capacity() + size_of::<Vec<u8>>() + 2 * size_of::<usize>()) as u64
-        }
-    }
+pub(in super::super) struct ChunkData {
+    pub times: ScalarBuffer<i64>,
+    pub positions: Option<Vec<u32>>,
+    pub start: u32,
+    pub keys: Vec<Option<Encoding>>,
+    pub key_counts: Vec<usize>,
+    pub key_ids: Vec<u32>,
+    pub sequences: SequenceColumn,
+    pub index_bytes: u64,
+    pub owners: EncodingOwners,
 }
 
 fn chunk_sort_indices(
@@ -105,7 +98,7 @@ fn intern_chunk_key(
     interned: &mut HashMap<Encoding, u32, ahash::RandomState>,
     keys: &mut Vec<Option<Encoding>>,
     key_counts: &mut Vec<usize>,
-    encoding_bytes: &mut u64,
+    owners: &mut EncodingOwners,
     key: &Encoding,
     name: &str,
 ) -> Result<u32> {
@@ -121,7 +114,7 @@ fn intern_chunk_key(
     }
     keys.push(Some(key.clone()));
     key_counts.push(0);
-    *encoding_bytes = checked(name, *encoding_bytes, shared_encoding_bytes(key))?;
+    owners.attach(key);
     Ok(id)
 }
 
@@ -146,11 +139,14 @@ impl ChunkData {
         let mut keys = Vec::with_capacity(1);
         let mut key_counts = Vec::with_capacity(1);
         let mut key_ids = Vec::with_capacity(rows.len());
-        let mut sequences = Vec::with_capacity(rows.len());
+        let mut sequences = SequenceColumn::with_capacity(
+            rows.len(),
+            SequenceKind::for_side(&batch.record.schema(), side),
+        );
         let mut time_values = Vec::with_capacity(rows.len());
         let mut interned = HashMap::<Encoding, u32, ahash::RandomState>::default();
         let mut index_bytes = 0;
-        let mut encoding_bytes = 0;
+        let mut owners = EncodingOwners::default();
         for ordinal in 0..rows.len() {
             let row = sorted
                 .as_ref()
@@ -161,14 +157,14 @@ impl ChunkData {
                 &mut interned,
                 &mut keys,
                 &mut key_counts,
-                &mut encoding_bytes,
+                &mut owners,
                 key,
                 name,
             )?;
             key_counts[id as usize] += 1;
             key_ids.push(id);
             sequences.push(sequence.clone());
-            encoding_bytes = checked(name, encoding_bytes, shared_encoding_bytes(sequence))?;
+            owners.attach(sequence);
             index_bytes = checked(
                 name,
                 index_bytes,
@@ -187,7 +183,7 @@ impl ChunkData {
             key_ids,
             sequences,
             index_bytes,
-            encoding_bytes,
+            owners,
         })
     }
 
@@ -202,10 +198,10 @@ impl ChunkData {
             self.keys.capacity() * size_of::<Option<Encoding>>(),
             self.key_counts.capacity() * size_of::<usize>(),
             self.key_ids.capacity() * size_of::<u32>(),
-            self.sequences.capacity() * size_of::<Encoding>(),
+            self.sequences.allocation_bytes(),
         ]
         .into_iter()
-        .try_fold(self.encoding_bytes, |bytes, capacity| {
+        .try_fold(self.owners.allocation_bytes(), |bytes, capacity| {
             checked(name, bytes, capacity as u64)
         })
     }
@@ -218,15 +214,16 @@ impl ChunkData {
                 * (size_of::<Option<Encoding>>()
                     + size_of::<usize>()
                     + size_of::<u32>()
-                    + size_of::<Encoding>()
+                    + self.sequences.element_bytes()
                     + size_of::<u32>()
                     + size_of::<i64>())
             + size_of::<Self>()
             + 256;
-        checked(name, self.retained_input_bytes(name)?, scratch as u64)
+        let scratch = checked(name, scratch as u64, self.owners.metadata_bytes())?;
+        checked(name, self.retained_input_bytes(name)?, scratch)
     }
 
-    fn position(&self, ordinal: usize) -> u32 {
+    pub fn position(&self, ordinal: usize) -> u32 {
         self.positions.as_ref().map_or_else(
             || self.start + u32::try_from(ordinal).expect("compact left row"),
             |rows| rows[ordinal],
@@ -239,24 +236,24 @@ impl ChunkData {
             self.keys[self.key_ids[ordinal] as usize]
                 .as_ref()
                 .expect("live left key"),
-            &self.sequences[ordinal],
+            self.sequences.get(ordinal).expect("live left sequence"),
         )
     }
 
     fn consume(&mut self, range: std::ops::Range<usize>) {
         for ordinal in range {
             let key = self.key_ids[ordinal] as usize;
+            let sequence = self.sequences.take(ordinal);
             self.index_bytes -= 41
                 + self.keys[key].as_ref().expect("consumed live key").len() as u64
-                + self.sequences[ordinal].len() as u64;
+                + sequence.len() as u64;
             self.key_counts[key] -= 1;
             if self.key_counts[key] == 0 {
-                self.encoding_bytes -=
-                    shared_encoding_bytes(self.keys[key].as_ref().expect("consumed live key"));
+                self.owners
+                    .detach(self.keys[key].as_ref().expect("consumed live key"));
                 self.keys[key] = None;
             }
-            self.encoding_bytes -= shared_encoding_bytes(&self.sequences[ordinal]);
-            self.sequences[ordinal] = Encoding::from_slice(&[]);
+            self.owners.detach(&sequence);
         }
     }
 
@@ -281,22 +278,22 @@ impl ChunkData {
         let mut keys = vec![None; unique as usize];
         let mut key_counts = vec![0; unique as usize];
         let mut key_ids = Vec::with_capacity(self.sequences.len() - head);
-        let mut sequences = Vec::with_capacity(key_ids.capacity());
+        let sequences = self.sequences.suffix(head);
         let mut index_bytes = 0;
-        let mut encoding_bytes = 0;
+        let mut owners = EncodingOwners::default();
         for ordinal in head..self.sequences.len() {
             let old = self.key_ids[ordinal] as usize;
             let id = remap[old];
             let key = self.keys[old].as_ref().expect("live suffix key");
             if key_counts[id as usize] == 0 {
                 keys[id as usize] = Some(key.clone());
-                encoding_bytes += shared_encoding_bytes(key);
+                owners.attach(key);
             }
             key_counts[id as usize] += 1;
             key_ids.push(id);
-            sequences.push(self.sequences[ordinal].clone());
-            encoding_bytes += shared_encoding_bytes(&self.sequences[ordinal]);
-            index_bytes += 41 + key.len() as u64 + self.sequences[ordinal].len() as u64;
+            let sequence = sequences.get(ordinal - head).expect("live suffix sequence");
+            owners.attach(sequence.as_ref());
+            index_bytes += 41 + key.len() as u64 + sequence.len() as u64;
         }
         Self {
             times: self.times[head..].to_vec().into(),
@@ -307,7 +304,7 @@ impl ChunkData {
             key_ids,
             sequences,
             index_bytes,
-            encoding_bytes,
+            owners,
         }
     }
 }
@@ -318,6 +315,21 @@ pub(in super::super) struct PreparedLeftChunk {
 }
 
 impl PreparedLeftChunk {
+    pub fn capacity_bytes(&self, name: &str) -> Result<u64> {
+        checked(
+            name,
+            self.data.retained_input_bytes(name)? - self.data.owners.buffers_bytes(),
+            128,
+        )
+    }
+
+    pub fn v3_length(&self, kind: SequenceKind) -> u64 {
+        73 + 16 * self.data.keys.len() as u64
+            + self.data.sequences.len() as u64 * (16 + kind.reference_bytes())
+    }
+    pub fn from_index(owner: Arc<PayloadBatch>, data: ChunkData) -> Self {
+        Self { owner, data }
+    }
     pub fn prepare(
         rows: &[(LeftOrder, RowPayload)],
         side: &AsofJoinSide,
@@ -389,15 +401,135 @@ impl LeftChunk {
 
 #[derive(Clone, Default)]
 pub(in super::super) struct LeftState {
-    // Used only while validating legacy checkpoint gauges and by fixtures.
-    pub(super) legacy: LegacyLeftState,
+    // Row fixtures use the small reference representation.
+    pub(in super::super) legacy: LegacyLeftState,
     chunks: Vec<LeftChunk>,
     rows: usize,
+    chunk_bytes: u64,
     first: Option<usize>,
     last: Option<usize>,
 }
 
 impl LeftState {
+    pub fn projected_drain(
+        &self,
+        prefix: &super::LeftPrefix,
+        prepared: &PreparedLeftDrain,
+        pool: &PayloadPool,
+        kind: SequenceKind,
+        name: &str,
+    ) -> Result<(u64, u64)> {
+        let capacity = prepared
+            .replacement
+            .as_ref()
+            .map_or(self.chunks.capacity(), Vec::capacity);
+        let mut bytes = (capacity * size_of::<LeftChunk>()) as u64;
+        let mut removed_index = 0;
+        for (index, chunk) in self.chunks.iter().enumerate() {
+            let batch = pool.key(chunk.reference);
+            let amount = prefix.batches.get(&batch).copied().unwrap_or(0);
+            if amount == 0 {
+                bytes = checked(name, bytes, chunk_metadata(&chunk.data))?;
+                continue;
+            }
+            let rows = chunk.len() - amount;
+            let removed_rows = amount as u64 * (16 + kind.reference_bytes());
+            removed_index += removed_rows;
+            if rows == 0 {
+                removed_index +=
+                    73 + 16 * chunk.data.keys.iter().filter(|key| key.is_some()).count() as u64;
+                continue;
+            }
+            let mut owners = prefix
+                .sequence_owners
+                .get(&batch)
+                .cloned()
+                .unwrap_or_default();
+            for (id, key) in chunk
+                .data
+                .keys
+                .iter()
+                .enumerate()
+                .filter_map(|(id, key)| key.as_ref().map(|key| (id, key)))
+            {
+                let removed = prefix.keys.get(&(batch, key.clone())).copied().unwrap_or(0);
+                if removed == chunk.data.key_counts[id] {
+                    removed_index += 16;
+                    EncodingOwners::record_remove(&mut owners, key, 1);
+                }
+            }
+            let replacement = prepared
+                .compacted
+                .iter()
+                .find(|(current, _)| *current == index)
+                .map(|(_, data)| data);
+            let retained = if let Some(data) = replacement {
+                data.retained_input_bytes(name)? - data.owners.buffers_bytes() + 128
+            } else {
+                let after = chunk.data.owners.projected_metadata_bytes(&owners);
+                chunk.data.retained_input_bytes(name)? - chunk.data.owners.allocation_bytes()
+                    + after
+                    + 128
+            };
+            bytes = checked(name, bytes, retained)?;
+        }
+        Ok((bytes, removed_index))
+    }
+    pub fn projected_admission_bytes(
+        &self,
+        chunks: &[PreparedLeftChunk],
+        name: &str,
+    ) -> Result<u64> {
+        let mut capacity = self.chunks.capacity();
+        for len in self.chunks.len()..self.chunks.len() + chunks.len() {
+            if len == capacity {
+                capacity += len.max(1);
+            }
+        }
+        let mut bytes = checked(
+            name,
+            self.capacity_bytes(name)?,
+            ((capacity - self.chunks.capacity()) * size_of::<LeftChunk>()) as u64,
+        )?;
+        for chunk in chunks {
+            bytes = checked(name, bytes, chunk.capacity_bytes(name)?)?;
+        }
+        Ok(bytes)
+    }
+    pub fn chunk_capacity(&self) -> usize {
+        self.chunks.capacity()
+    }
+
+    pub fn reserve_chunks_exact(&mut self, capacity: usize) {
+        self.chunks
+            .reserve_exact(capacity.saturating_sub(self.chunks.len()));
+    }
+
+    pub fn checkpoint_chunks<'a>(
+        &'a self,
+        pool: &'a PayloadPool,
+    ) -> impl ExactSizeIterator<Item = (BatchKey, &'a ChunkData, usize)> + Clone {
+        self.chunks
+            .iter()
+            .map(|chunk| (pool.key(chunk.reference), chunk.data.as_ref(), chunk.head))
+    }
+    pub fn checkpoint_owned_chunks<'a>(
+        &'a self,
+        pool: &'a PayloadPool,
+    ) -> impl ExactSizeIterator<Item = (BatchKey, Arc<ChunkData>, usize)> + 'a {
+        self.chunks
+            .iter()
+            .map(|chunk| (pool.key(chunk.reference), chunk.data.clone(), chunk.head))
+    }
+    pub fn capacity_bytes(&self, name: &str) -> Result<u64> {
+        let chunks = (self.chunks.capacity() * size_of::<LeftChunk>()) as u64;
+        let chunks = checked(name, chunks, self.chunk_bytes)?;
+        let legacy = self.legacy.iter().try_fold(0, |bytes, (order, row)| {
+            checked(name, bytes, super::left_row_charge(&order.1, &order.2, row))
+        })?;
+        checked(name, chunks, legacy)
+    }
+
     pub fn len(&self) -> usize {
         self.legacy.len() + self.rows
     }
@@ -438,18 +570,6 @@ impl LeftState {
     }
     pub fn unordered_keys(&self) -> impl Iterator<Item = LeftView<'_>> {
         self.unordered_iter().map(|(key, _)| key)
-    }
-
-    pub fn encoded_length(&self, name: &str) -> Result<u64> {
-        let legacy = self
-            .legacy
-            .keys()
-            .try_fold(0, |bytes, (_, key, sequence)| {
-                checked(name, bytes, 41 + key.len() as u64 + sequence.len() as u64)
-            })?;
-        self.chunks.iter().try_fold(legacy, |bytes, chunk| {
-            checked(name, bytes, chunk.data.index_bytes)
-        })
     }
 
     pub fn ready_prefix_len(&self, limit: usize, frontier: Option<i64>, ended: bool) -> usize {
@@ -518,6 +638,7 @@ impl LeftState {
             })
     }
 
+    #[cfg(test)]
     pub fn insert(&mut self, key: LeftOrder, row: RowRef) {
         assert!(
             self.chunks.is_empty(),
@@ -558,6 +679,7 @@ impl LeftState {
             self.last = Some(index);
         }
         self.rows += chunk.len();
+        self.chunk_bytes += chunk_metadata(&chunk.data);
         if index == self.chunks.capacity() {
             self.chunks.reserve_exact(index.max(1));
         }
@@ -577,27 +699,6 @@ impl LeftState {
             .enumerate()
             .max_by_key(|(_, chunk)| chunk.data.view(chunk.data.sequences.len() - 1))
             .map(|(index, _)| index);
-    }
-
-    pub fn migrate(&mut self, pool: &PayloadPool, side: &AsofJoinSide, name: &str) -> Result<()> {
-        let mut groups = BTreeMap::<BatchKey, (RowRef, Vec<(LeftOrder, u32)>)>::new();
-        let legacy = std::mem::take(&mut self.legacy);
-        for (identity, row) in legacy.ordered.into_iter().chain(legacy.general) {
-            groups
-                .entry(pool.key(row))
-                .or_insert_with(|| (row, Vec::new()))
-                .1
-                .push((identity, row.row));
-        }
-        for (_, (reference, rows)) in groups {
-            let data = ChunkData::prepare(&rows, pool.view(reference).batch, side, name)?;
-            self.push(LeftChunk {
-                data: Arc::new(data),
-                reference,
-                head: 0,
-            });
-        }
-        Ok(())
     }
 
     pub fn drain_workspace_bytes(
@@ -704,6 +805,11 @@ impl LeftState {
             self.chunks.retain(|chunk| chunk.len() > 0);
         }
         self.rows -= count;
+        self.chunk_bytes = self
+            .chunks
+            .iter()
+            .map(|chunk| chunk_metadata(&chunk.data))
+            .sum();
         self.refresh_extrema();
     }
 
@@ -715,6 +821,13 @@ impl LeftState {
     pub fn is_ordered(&self) -> bool {
         self.legacy.is_ordered()
     }
+}
+
+fn chunk_metadata(data: &ChunkData) -> u64 {
+    data.retained_input_bytes("asof")
+        .expect("preflighted ASOF chunk metadata")
+        - data.owners.buffers_bytes()
+        + 128
 }
 
 pub(in super::super) struct LeftDrainInput {
@@ -921,7 +1034,7 @@ mod tests {
                 let actual = (0..rows.len())
                     .map(|row| {
                         let (time, key, sequence) = data.view(row);
-                        (*time, key.clone(), sequence.clone())
+                        (*time, key.clone(), sequence.into_owned())
                     })
                     .collect::<Vec<_>>();
                 assert_eq!(
@@ -1089,7 +1202,7 @@ mod tests {
         drop(rows);
         let mut prefix = super::super::LeftPrefix::default();
         for (order, row) in state.left.iter().take(32) {
-            prefix.visit(order, row, &state.batches, "asof").unwrap();
+            prefix.visit(&order, row, &state.batches, "asof").unwrap();
         }
         let input = state.left.drain_input(&prefix.batches, &state.batches);
         drop(state);
@@ -1117,7 +1230,7 @@ mod tests {
         drop(rows);
         let mut prefix = super::super::LeftPrefix::default();
         for (order, row) in state.left.iter().take(count / 2) {
-            prefix.visit(order, row, &state.batches, "asof").unwrap();
+            prefix.visit(&order, row, &state.batches, "asof").unwrap();
         }
         let charge = state
             .left
@@ -1148,7 +1261,7 @@ mod tests {
         assert_eq!(state.left.chunks[0].head, 4_999);
         let mut prefix = super::super::LeftPrefix::default();
         for (order, row) in state.left.iter().take(1) {
-            prefix.visit(order, row, &state.batches, "asof").unwrap();
+            prefix.visit(&order, row, &state.batches, "asof").unwrap();
         }
         let charge = state
             .left
@@ -1180,5 +1293,62 @@ mod tests {
         );
         assert_eq!(state.left.chunks[0].head, 0);
         assert_eq!(state.left.len(), 5_000);
+    }
+
+    #[test]
+    fn integer_chunks_allocate_only_the_declared_sequence_width() {
+        use datafusion::common::ScalarValue;
+
+        let count = 4_096;
+        for (data_type, width) in [
+            (DataType::Int8, 1),
+            (DataType::Int16, 2),
+            (DataType::Int32, 4),
+            (DataType::Int64, 8),
+            (DataType::UInt8, 1),
+            (DataType::UInt16, 2),
+            (DataType::UInt32, 4),
+            (DataType::UInt64, 8),
+        ] {
+            let key = Arc::new(StringArray::from(vec!["A"; count])) as ArrayRef;
+            let sequence = ScalarValue::new_default(&data_type)
+                .unwrap()
+                .to_array_of_size(count)
+                .unwrap();
+            let (original, side, mut rows) = fixture(key, sequence, 0);
+            let mut columns = original.record.columns().to_vec();
+            columns[1] = Arc::new(
+                TimestampMicrosecondArray::from_iter_values(0..count as i64).with_timezone("UTC"),
+            );
+            let owner = Arc::new(PayloadBatch {
+                record: Arc::new(RecordBatch::try_new(original.record.schema(), columns).unwrap()),
+                key: original.key,
+                encoded: OnceLock::new(),
+                encoded_charge_bytes: 0,
+                body_bytes: 0,
+            });
+            for (ordinal, (identity, row)) in rows.iter_mut().enumerate() {
+                identity.0 = ordinal as i64;
+                row.batch = owner.clone();
+            }
+            let mut retained = None;
+            let allocation = allocation_counter::measure(|| {
+                retained = Some(PreparedLeftChunk::prepare(&rows, &side, "asof").unwrap());
+            });
+            assert_eq!(retained.as_ref().unwrap()[0].data.positions, None);
+            let bound =
+                (12 + width) * count as u64 + (4 * size_of::<PreparedLeftChunk>() + 512) as u64;
+            assert_eq!(
+                retained.as_ref().unwrap()[0]
+                    .data
+                    .sequences
+                    .allocation_bytes(),
+                width as usize * count
+            );
+            assert!(
+                allocation.bytes_current >= 0 && allocation.bytes_current as u64 <= bound,
+                "{data_type:?}: sequence storage exceeds its declared width: {allocation:?}, bound={bound}"
+            );
+        }
     }
 }

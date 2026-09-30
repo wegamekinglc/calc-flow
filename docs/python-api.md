@@ -610,7 +610,7 @@ the engine implementation:
 | `expression@1`       | batch, stream | per_row_final           | stateless             | —             | —             |
 | `rolling@1`          | batch, stream | per_row_final           | checkpointed_stateful | 1             | 1, 2          |
 | `sql@1`              | batch, stream | unproven                | checkpointed_stateful | 1             | 1             |
-| `stream_asof_join@1` | stream        | group_final_append_only | checkpointed_stateful | 1             | 1             |
+| `stream_asof_join@1` | stream        | group_final_append_only | checkpointed_stateful | 3             | 3             |
 | `stream_join@1`      | stream        | unproven                | checkpointed_stateful | 1             | 1             |
 | `window@1`           | stream        | group_final_append_only | checkpointed_stateful | 1             | 1             |
 

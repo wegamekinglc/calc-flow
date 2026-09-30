@@ -553,10 +553,19 @@ async fn restored_identity_only_encoding_is_validated_without_payload() {
         .unwrap();
     assert_eq!(op.status().identity_only_rows, 1);
     let mut snapshot = op.checkpoint(Epoch::INITIAL).unwrap();
-    let key = snapshot.segments.keys().next().unwrap().clone();
-    let mut bytes = snapshot.segments[&key].bytes().to_vec();
-    bytes[32] = 0;
-    snapshot.segments.insert(key, StateSegment::new(bytes));
+    let key = "asof-index-v3";
+    let mut bytes = snapshot.segments[key].bytes().to_vec();
+    // No left chunks or shared owners: the first inline key follows the
+    // 72-byte columnar header and the 8-byte owner count. Corrupt its
+    // canonical non-null marker, independently of any Arrow payload.
+    assert_eq!(&bytes[..8], b"CFASOF03");
+    assert_eq!(&bytes[72..80], &[0; 8]);
+    assert_eq!(bytes[80], 0);
+    assert_eq!(bytes[82], 2);
+    bytes[82] = 0;
+    snapshot
+        .segments
+        .insert(key.into(), StateSegment::new(bytes));
     let previous = op.status();
     assert!(matches!(
         op.restore(&snapshot),

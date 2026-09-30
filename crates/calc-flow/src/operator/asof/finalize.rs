@@ -131,65 +131,66 @@ impl StreamAsofJoinOperator {
             self.swept = Some(stamp);
             return Ok(());
         }
-        let workspace = self.reserve_workspace(self.state.eviction_workspace_bytes(&self.name)?)?;
+        self.finish_capacity_progress(frontier, ended, context)
+            .await
+    }
+
+    async fn finish_capacity_progress(
+        &mut self,
+        frontier: Option<i64>,
+        ended: bool,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<()> {
+        let staging = self.reserve_workspace(self.state.eviction_workspace_bytes(&self.name)?)?;
         let preview =
             self.state
                 .preview_eviction(&self.status, self.spec.tolerance_micros(), &self.name)?;
+        let (length, inventory, bytes) = self.state.project_capacity_eviction(
+            self.capacity_snapshot(),
+            &preview,
+            &self.status,
+            self.spec.tolerance_micros(),
+            &self.name,
+        )?;
+        self.check_inventory_limits(&inventory)?;
+        let columns = self.reserve_workspace(bytes)?;
         let mut status = self.status.clone();
         status.evicted_right_rows = checked(
             &self.name,
             status.evicted_right_rows,
             preview.evicted_payloads,
         )?;
-        status.retained_right_rows -= preview.evicted_payloads;
-        status.identity_only_rows = checked(
-            &self.name,
-            status.identity_only_rows,
-            preview.added_identity_only,
-        )? - preview.removed_identity_only;
-        status.state_rows -= preview.removed_identities;
-        let previous_index_len = self
-            .deferred_index_len
-            .or_else(|| self.prepared.as_ref().map(|segment| segment.len() as u64))
-            .expect("nonempty ASOF sweep has an index");
-        let previous_index_bytes = self
-            .prepared
-            .as_ref()
-            .map(|segment| segment.capacity() as u64)
-            .or(self.deferred_index_len)
-            .expect("nonempty ASOF sweep has an index")
-            + 64;
-        let next_index_len = previous_index_len - preview.removed_index_bytes;
-        let next_index_bytes = if status.state_rows == 0 {
-            0
-        } else {
-            next_index_len + 64
-        };
-        status.state_bytes =
-            status.state_bytes - previous_index_bytes - preview.released_state_bytes
-                + next_index_bytes;
+        status.retained_right_rows = inventory.right_payloads;
+        status.identity_only_rows = inventory.identity_only;
+        status.state_rows = inventory.identities;
+        status.state_bytes = inventory.bytes;
         status.output_watermark_micros = frontier
             .and_then(|time| time.checked_sub(1))
             .map(EventTime::from_micros)
             .or(status.output_watermark_micros);
+        let pool = self
+            .prepare_pool_compaction(&preview.batches, context)
+            .await?;
+        let copies = self.prepare_right_eviction_copies(context).await?;
         context.check_cancelled()?;
-        let evicted = self.state.evict(&status, self.spec.tolerance_micros());
+        copies.install(&mut self.state.right);
+        let evicted = self
+            .state
+            .evict_prepared(&status, self.spec.tolerance_micros(), pool);
         debug_assert_eq!(evicted, preview.evicted_payloads);
         self.status = status;
         self.prepared = None;
-        self.deferred_index_len = (self.status.state_rows > 0).then_some(next_index_len);
+        self.deferred_index_len = (length != 0).then_some(length);
         self.swept = Some(SweepStamp::current(&self.status));
         self.terminal = ended;
         debug_assert_eq!(
-            self.state
-                .inventory(None, &self.name)
-                .expect("committed ASOF sweep inventory")
+            self.current_inventory(None)
+                .expect("committed eviction inventory")
                 .bytes
-                + next_index_bytes,
-            self.status.state_bytes,
-            "swept inventory must match committed gauge"
+                + if length == 0 { 0 } else { length + 256 },
+            self.status.state_bytes
         );
-        drop(workspace);
+        drop((columns, staging));
         Ok(())
     }
 
@@ -315,7 +316,7 @@ fn binary_search_candidate_rows<'a>(
                 .candidate(key.1, *key.0, tolerance)
                 .map(|row| state.batches.view(*row)),
         ));
-        prefix.visit(key, left, &state.batches, name)?;
+        prefix.visit(&key, left, &state.batches, name)?;
     }
     Ok(MatchedPrefix { rows, prefix })
 }
@@ -351,7 +352,7 @@ fn monotonic_candidate_rows<'a>(
             state.batches.view(left),
             right.map(|row| state.batches.view(*row)),
         ));
-        prefix.visit(key, left, &state.batches, name)?;
+        prefix.visit(&key, left, &state.batches, name)?;
     }
     Ok(MatchedPrefix { rows, prefix })
 }
@@ -370,7 +371,7 @@ fn retryable(error: &CalcFlowError) -> bool {
 fn prefix_workspace_bytes(count: usize) -> u64 {
     // Candidate references, batch-reference count tree (including a minimum
     // leaf), and allocator slack. No owned identity vector is constructed.
-    (count * (size_of::<(PayloadView<'_>, Option<PayloadView<'_>>)>() + 96) + 256) as u64
+    (count * (size_of::<(PayloadView<'_>, Option<PayloadView<'_>>)>() + 640) + 2_048) as u64
 }
 
 fn shrink_prefix_workspace(count: usize, heap_bytes: u64, reservation: &MemoryReservation) {
@@ -554,7 +555,7 @@ mod workspace_tests {
     #[test]
     fn output_retry_releases_key_and_candidate_scratch() {
         let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
-        let mut count = 4_096;
+        let mut count = 1_024;
         let reservation = MemoryConsumer::new("asof-test-keys").register(&pool);
         reservation
             .try_grow(usize::try_from(prefix_workspace_bytes(count)).unwrap())

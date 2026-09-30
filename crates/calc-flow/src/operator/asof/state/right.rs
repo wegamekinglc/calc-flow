@@ -1,10 +1,11 @@
-use super::{Encoding, PayloadPool, RightOrder, RowRef};
+use super::{Encoding, PayloadPool, RightOrder, RowRef, SequenceColumn, SequenceKind, SequenceRef};
 use std::{
+    borrow::Cow,
     cmp::Ordering,
     collections::{BTreeSet, btree_set},
 };
 
-type OrderRef<'a> = (&'a i64, &'a Encoding);
+type OrderRef<'a> = (&'a i64, SequenceRef<'a>);
 type RightRow<'a> = (OrderRef<'a>, Option<&'a RowRef>);
 
 #[cfg(test)]
@@ -30,15 +31,14 @@ pub(in super::super) struct RightBucket {
 
 static EMPTY_PAYLOADS: RightRun<Vec<Option<RowRef>>> = RightRun {
     times: Vec::new(),
-    sequences: Vec::new(),
+    sequences: SequenceColumn::empty(SequenceKind::Canonical),
     values: Vec::new(),
     head: 0,
 };
 
-#[derive(Clone)]
 struct RightRun<V> {
     times: Vec<i64>,
-    sequences: Vec<Encoding>,
+    sequences: SequenceColumn,
     values: V,
     head: usize,
 }
@@ -46,6 +46,7 @@ struct RightRun<V> {
 trait RunValues: Clone {
     type Value;
 
+    fn clone_with_capacity(&self) -> Self;
     fn with_capacity(capacity: usize) -> Self;
     fn get(&self, index: usize) -> &Self::Value;
     fn push(&mut self, value: Self::Value);
@@ -59,6 +60,12 @@ trait RunValues: Clone {
 
 impl RunValues for Vec<Option<RowRef>> {
     type Value = RowRef;
+
+    fn clone_with_capacity(&self) -> Self {
+        let mut values = Vec::with_capacity(self.capacity());
+        values.extend_from_slice(self);
+        values
+    }
 
     fn with_capacity(capacity: usize) -> Self {
         Vec::with_capacity(capacity)
@@ -101,6 +108,8 @@ impl RunValues for Vec<Option<RowRef>> {
 impl RunValues for () {
     type Value = ();
 
+    fn clone_with_capacity(&self) -> Self {}
+
     fn with_capacity(_: usize) -> Self {}
 
     fn get(&self, _: usize) -> &() {
@@ -124,17 +133,67 @@ impl RunValues for () {
     fn compact(&mut self, _: usize) {}
 }
 
+impl<V: RunValues> Clone for RightRun<V> {
+    fn clone(&self) -> Self {
+        let mut times = Vec::with_capacity(self.times.capacity());
+        times.extend_from_slice(&self.times);
+        Self {
+            times,
+            sequences: self.sequences.clone(),
+            values: self.values.clone_with_capacity(),
+            head: self.head,
+        }
+    }
+}
+
 impl<V: RunValues> Default for RightRun<V> {
     fn default() -> Self {
-        Self::with_capacity(0)
+        Self::with_capacity(0, SequenceKind::Canonical)
     }
 }
 
 impl<V: RunValues> RightRun<V> {
-    fn with_capacity(capacity: usize) -> Self {
+    fn integer_columns(&self) -> Option<(&[i64], &[u8])> {
+        Some((
+            &self.times[self.head..],
+            self.sequences.integer_slice(self.head..self.times.len())?,
+        ))
+    }
+
+    fn projected_capacities(&self, removed: usize, appended: usize) -> [usize; 3] {
+        let mut capacities = [
+            self.times.capacity(),
+            self.sequences.capacity(),
+            self.values.capacity(),
+        ];
+        if capacities[0] == 0 && appended > 0 {
+            capacities[0] = 1;
+            capacities[1] = 1;
+            if size_of::<V>() != 0 {
+                capacities[2] = 1;
+            }
+        }
+        let required = self.times.len() + appended;
+        for capacity in &mut capacities[..2] {
+            while *capacity < required {
+                *capacity = (*capacity * 2).max(4);
+            }
+        }
+        if size_of::<V>() != 0 {
+            while capacities[2] < required {
+                capacities[2] = (capacities[2] * 2).max(4);
+            }
+        }
+        let live = self.len() - removed + appended;
+        if capacities.iter().any(|capacity| *capacity > live * 2) {
+            capacities = [live, live, if size_of::<V>() == 0 { 0 } else { live }];
+        }
+        capacities
+    }
+    fn with_capacity(capacity: usize, kind: SequenceKind) -> Self {
         Self {
             times: Vec::with_capacity(capacity),
-            sequences: Vec::with_capacity(capacity),
+            sequences: SequenceColumn::with_capacity(capacity, kind),
             values: V::with_capacity(capacity),
             head: 0,
         }
@@ -149,7 +208,7 @@ impl<V: RunValues> RightRun<V> {
             return None;
         }
         Some((
-            (self.times.get(index)?, &self.sequences[index]),
+            (self.times.get(index)?, self.sequences.get(index)?),
             self.values.get(index),
         ))
     }
@@ -161,10 +220,7 @@ impl<V: RunValues> RightRun<V> {
     fn locate(&self, order: &RightOrder) -> Result<usize, usize> {
         let start = self.times[self.head..].partition_point(|time| *time < order.0) + self.head;
         let end = self.times[self.head..].partition_point(|time| *time <= order.0) + self.head;
-        self.sequences[start..end]
-            .binary_search(&order.1)
-            .map(|index| start + index)
-            .map_err(|index| start + index)
+        self.sequences.binary_search(start..end, &order.1)
     }
 
     fn insert(&mut self, order: RightOrder, value: V::Value) {
@@ -172,13 +228,10 @@ impl<V: RunValues> RightRun<V> {
             // Avoid Vec's four-element minimum for sparse buckets: even one
             // identity must fit the existing committed state charge.
             self.times = Vec::with_capacity(1);
-            self.sequences = Vec::with_capacity(1);
+            self.sequences = SequenceColumn::with_capacity(1, self.sequences.kind());
             self.values = V::with_capacity(1);
         }
-        if self
-            .last()
-            .is_none_or(|(last, _)| last < (&order.0, &order.1))
-        {
+        if self.last().is_none_or(|(last, _)| last < order_ref(&order)) {
             self.times.push(order.0);
             self.sequences.push(order.1);
             self.values.push(value);
@@ -212,7 +265,7 @@ impl<V: RunValues> RightRun<V> {
     fn take_prefix(&mut self, count: usize, mut take: impl FnMut(i64, Encoding, V::Value)) {
         let end = self.head + count;
         for index in self.head..end {
-            let sequence = std::mem::replace(&mut self.sequences[index], Encoding::from_slice(&[]));
+            let sequence = self.sequences.take(index);
             let value = self.values.take(index);
             take(self.times[index], sequence, value);
         }
@@ -232,11 +285,7 @@ impl<V: RunValues> RightRun<V> {
             .split_off(self.head)
             .into_boxed_slice()
             .into_vec();
-        self.sequences = self
-            .sequences
-            .split_off(self.head)
-            .into_boxed_slice()
-            .into_vec();
+        self.sequences.compact(self.head);
         self.values.compact(self.head);
         self.head = 0;
     }
@@ -257,8 +306,198 @@ pub(in super::super) struct RightCursor {
 }
 
 impl RightBucket {
+    pub fn eviction_pending(
+        &self,
+        status: &super::super::StreamAsofJoinStatus,
+        tolerance: u64,
+        threshold: i128,
+    ) -> bool {
+        self.payload_min()
+            .is_some_and(|time| super::payload_expired(time, tolerance, threshold))
+            || self
+                .identity_min()
+                .is_some_and(|time| super::identity_expired(time, status))
+    }
+
+    pub fn projected_eviction(
+        &self,
+        status: &super::super::StreamAsofJoinStatus,
+        tolerance: u64,
+        threshold: i128,
+    ) -> (usize, u64, u64) {
+        let payloads = self.payloads();
+        let removed_payloads =
+            payloads.prefix_len(|time| super::payload_expired(time, tolerance, threshold));
+        let removed_ordered = self
+            .identities
+            .prefix_len(|time| super::identity_expired(time, status));
+        let removed_general = self
+            .general_identities
+            .iter()
+            .take_while(|row| super::identity_expired(row.0, status))
+            .count();
+        let mut general = self.general_identities.len() - removed_general;
+        let mut append = 0;
+        let mut last = self
+            .identities
+            .last()
+            .map(|(order, ())| order)
+            .filter(|order| !super::identity_expired(*order.0, status));
+        for index in payloads.head..payloads.head + removed_payloads {
+            let (order, _) = payloads.at(index).expect("expired payload");
+            if super::identity_expired(*order.0, status) {
+                continue;
+            }
+            if last.as_ref().is_none_or(|last| last < &order) {
+                append += 1;
+                last = Some(order);
+            } else {
+                general += 1;
+            }
+        }
+        let payload_rows = payloads.len() - removed_payloads;
+        let ordered_rows = self.identities.len() - removed_ordered;
+        if ordered_rows + append == 0 && general == 1 {
+            append += 1;
+            general = 0;
+        }
+        let rows = payload_rows + ordered_rows + append + general;
+        let payload_capacities = payloads.projected_capacities(removed_payloads, 0);
+        let identity_capacities = self
+            .identities
+            .projected_capacities(removed_ordered, append);
+        let width = self.identities.sequences.element_bytes();
+        let payload_bytes = if payload_rows == 0 {
+            0
+        } else {
+            size_of::<RightRun<Vec<Option<RowRef>>>>() as u64
+                + columns_bytes(payload_capacities, width)
+        };
+        let general_bytes = if general == 0 {
+            0
+        } else {
+            256 + general as u64 * 512
+        };
+        let metadata = payload_bytes + columns_bytes(identity_capacities, width) + general_bytes;
+        let changed = removed_payloads + removed_ordered + removed_general > 0;
+        (rows, metadata, if changed { metadata + 256 } else { 0 })
+    }
+    pub fn projected_admission_bytes(&self, additional: usize) -> u64 {
+        let current = self.metadata_bytes();
+        let Some(run) = &self.payloads else {
+            return current
+                + size_of::<RightRun<Vec<Option<RowRef>>>>() as u64
+                + additional as u64 * (16 + self.identities.sequences.element_bytes() as u64);
+        };
+        let growth = |capacity: usize, width: usize| {
+            let required = run.times.len() + additional;
+            let next = if capacity >= required {
+                capacity
+            } else {
+                required.max(capacity * 2).max(4)
+            };
+            ((next - capacity) * width) as u64
+        };
+        current
+            + growth(run.times.capacity(), 8)
+            + growth(run.sequences.capacity(), run.sequences.element_bytes())
+            + growth(run.values.capacity(), 8)
+    }
+    pub fn checkpoint_capacities(&self) -> [usize; 5] {
+        [
+            self.payloads().times.capacity(),
+            self.payloads().sequences.capacity(),
+            self.payloads().values.capacity(),
+            self.identities.times.capacity(),
+            self.identities.sequences.capacity(),
+        ]
+    }
+
+    pub fn checkpoint_integer_columns(&self) -> Option<(&[i64], &[u8])> {
+        if !self.general_identities.is_empty() {
+            return None;
+        }
+        let run = if self.identities.len() == 0 {
+            self.payloads().integer_columns()?
+        } else if self.payloads().len() == 0 {
+            self.identities.integer_columns()?
+        } else {
+            return None;
+        };
+        Some(run)
+    }
+
+    pub fn checkpoint_payload_refs(&self) -> Option<&[Option<RowRef>]> {
+        if self.identities.len() != 0 || !self.general_identities.is_empty() {
+            return None;
+        }
+        let run = self.payloads();
+        Some(&run.values[run.head..])
+    }
+
+    pub fn with_index_capacities(capacities: [usize; 5], kind: SequenceKind) -> Self {
+        let mut bucket = Self::with_sequence_kind(kind);
+        if capacities[0] != 0 {
+            bucket.payloads = Some(Box::new(RightRun {
+                times: Vec::with_capacity(capacities[0]),
+                sequences: SequenceColumn::with_capacity(capacities[1], kind),
+                values: Vec::with_capacity(capacities[2]),
+                head: 0,
+            }));
+        }
+        bucket.identities.times = Vec::with_capacity(capacities[3]);
+        bucket.identities.sequences = SequenceColumn::with_capacity(capacities[4], kind);
+        bucket
+    }
+
+    pub fn push_index(&mut self, (time, sequence): RightOrder, tag: u8, row: Option<RowRef>) {
+        match tag {
+            1 => {
+                let payloads = self.payloads.as_mut().expect("validated payload capacity");
+                payloads.times.push(time);
+                payloads.sequences.push(sequence);
+                payloads.values.push(row);
+            }
+            0 => {
+                self.identities.times.push(time);
+                self.identities.sequences.push(sequence);
+            }
+            _ => {
+                self.general_identities.insert((time, sequence));
+            }
+        }
+    }
+
+    pub fn payload_len(&self) -> usize {
+        self.payloads().len()
+    }
+
+    pub fn metadata_bytes(&self) -> u64 {
+        let payloads = self.payloads.as_ref().map_or(0, |run| {
+            size_of::<RightRun<Vec<Option<RowRef>>>>()
+                + run.times.capacity() * size_of::<i64>()
+                + run.sequences.allocation_bytes()
+                + run.values.capacity() * size_of::<Option<RowRef>>()
+        });
+        let identities = self.identities.times.capacity() * size_of::<i64>()
+            + self.identities.sequences.allocation_bytes();
+        let general = if self.general_identities.is_empty() {
+            0
+        } else {
+            256 + self.general_identities.len() * 512
+        };
+        (payloads + identities + general) as u64
+    }
+
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_sequence_kind(kind: SequenceKind) -> Self {
+        Self {
+            identities: RightRun::with_capacity(0, kind),
+            ..Self::default()
+        }
     }
 
     pub fn reserve_payloads(&mut self, additional: usize) {
@@ -273,7 +512,12 @@ impl RightBucket {
                 run.sequences.reserve(additional);
                 run.values.reserve(additional);
             }
-            None => self.payloads = Some(Box::new(RightRun::with_capacity(additional))),
+            None => {
+                self.payloads = Some(Box::new(RightRun::with_capacity(
+                    additional,
+                    self.identities.sequences.kind(),
+                )));
+            }
         }
     }
 
@@ -308,6 +552,11 @@ impl RightBucket {
             general,
             next_general,
         }
+    }
+
+    pub fn checkpoint_rows(&self) -> impl Iterator<Item = (OrderRef<'_>, Option<&RowRef>, u8)> {
+        let mut rows = self.iter();
+        std::iter::from_fn(move || rows.next_tagged())
     }
 
     #[cfg(test)]
@@ -352,8 +601,9 @@ impl RightBucket {
             self.identities.remove(&order);
             self.general_identities.remove(&order);
             self.compact_identity_storage();
+            let kind = self.identities.sequences.kind();
             self.payloads
-                .get_or_insert_with(Box::default)
+                .get_or_insert_with(|| Box::new(RightRun::with_capacity(0, kind)))
                 .insert(order, payload);
         } else {
             if let Some(payloads) = self.payloads.as_mut() {
@@ -448,17 +698,23 @@ impl RightBucket {
         tolerance: u64,
         threshold: i128,
         batches: &mut PayloadPool,
+        mut released: impl FnMut(&Encoding),
     ) -> u64 {
         let identity_count = self
             .identities
             .prefix_len(|time| super::identity_expired(time, status));
-        self.identities.take_prefix(identity_count, |_, _, ()| {});
+        self.identities
+            .take_prefix(identity_count, |_, sequence, ()| released(&sequence));
         while self
             .general_identities
             .first()
             .is_some_and(|order| super::identity_expired(order.0, status))
         {
-            self.general_identities.pop_first();
+            let (_, sequence) = self
+                .general_identities
+                .pop_first()
+                .expect("expired ASOF identity");
+            released(&sequence);
         }
         let Some(payloads) = self.payloads.as_mut() else {
             self.compact_identity_storage();
@@ -470,7 +726,9 @@ impl RightBucket {
         let general = &mut self.general_identities;
         payloads.take_prefix(payload_count, |time, sequence, payload| {
             batches.detach(payload);
-            if !super::identity_expired(time, status) {
+            if super::identity_expired(time, status) {
+                released(&sequence);
+            } else {
                 insert_identity(identities, general, (time, sequence));
             }
         });
@@ -514,8 +772,8 @@ impl RightBucket {
     }
 
     fn compact_identity_storage(&mut self) {
-        // A lone tree entry's minimum node allocation would exceed its v2
-        // row charge. Moving just that row back to an empty column is O(1).
+        // A lone tree entry's minimum node allocation exceeds the compact
+        // column charge. Moving just that row back to an empty column is O(1).
         if self.identities.len() == 0 && self.general_identities.len() == 1 {
             let order = self
                 .general_identities
@@ -530,8 +788,12 @@ impl RightBucket {
     }
 }
 
+fn columns_bytes(capacities: [usize; 3], sequence_bytes: usize) -> u64 {
+    (capacities[0] * 8 + capacities[1] * sequence_bytes + capacities[2] * 8) as u64
+}
+
 fn order_ref(order: &RightOrder) -> OrderRef<'_> {
-    (&order.0, &order.1)
+    (&order.0, Cow::Borrowed(&order.1))
 }
 
 fn later_identity<'a>(
@@ -548,11 +810,7 @@ fn insert_identity(run: &mut RightRun<()>, general: &mut BTreeSet<RightOrder>, o
     if general.contains(&order) {
         return;
     }
-    if run
-        .last()
-        .is_none_or(|(last, ())| last < (&order.0, &order.1))
-        || run.locate(&order).is_ok()
-    {
+    if run.last().is_none_or(|(last, ())| last < order_ref(&order)) || run.locate(&order).is_ok() {
         run.insert(order, ());
     } else {
         general.insert(order);
@@ -588,34 +846,40 @@ pub(in super::super) struct RightRows<'a> {
     next_general: Option<OrderRef<'a>>,
 }
 
-impl<'a> Iterator for RightRows<'a> {
-    type Item = RightRow<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
+impl<'a> RightRows<'a> {
+    fn next_tagged(&mut self) -> Option<(OrderRef<'a>, Option<&'a RowRef>, u8)> {
         let payload = self.bucket.payloads().at(self.payload);
         let ordered = self
             .bucket
             .identities
             .at(self.identity)
             .map(|(order, ())| order);
-        let (identity, in_general) = earlier_identity(ordered, self.next_general);
-        let order = match (payload, identity) {
-            (Some((left, _)), Some(right)) => left.cmp(&right),
+        let (identity, in_general) = earlier_identity(ordered, self.next_general.clone());
+        let order = match (&payload, &identity) {
+            (Some((left, _)), Some(right)) => left.cmp(right),
             (Some(_), None) => Ordering::Less,
             (None, Some(_)) => Ordering::Greater,
             (None, None) => return None,
         };
         if order == Ordering::Less {
             self.payload += 1;
-            payload.map(|(order, row)| (order, Some(row)))
+            payload.map(|(order, row)| (order, Some(row), 1))
         } else {
             if in_general {
                 self.next_general = self.general.next().map(order_ref);
             } else {
                 self.identity += 1;
             }
-            identity.map(|order| (order, None))
+            identity.map(|order| (order, None, if in_general { 2 } else { 0 }))
         }
+    }
+}
+
+impl<'a> Iterator for RightRows<'a> {
+    type Item = RightRow<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_tagged().map(|(order, row, _)| (order, row))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {

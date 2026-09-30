@@ -245,11 +245,27 @@ fn payload_charge(schema: &Schema, name: &str) -> Result<PayloadCharge> {
 /// skeleton supplies fixed framing; the full payload body is measured from
 /// logical Arrow lengths without serializing its rows. Restore recomputes the
 /// same charge whether or not the encoded segment is materialized.
+#[cfg(test)]
 pub(super) fn payload_encoded_bound(record: &RecordBatch, name: &str) -> Result<(u64, u64)> {
     let body = payload_ipc_body_bytes(record, name)?;
     let header = ipc_header_bytes(record)?;
     let encoded = checked(name, header, body)?;
     Ok((encoded, body))
+}
+
+pub(super) fn payload_header_bytes(
+    schema: &datafusion::arrow::datatypes::SchemaRef,
+) -> Result<u64> {
+    ipc_header_bytes(&RecordBatch::new_empty(schema.clone()))
+}
+
+pub(super) fn payload_bound_with_header(
+    record: &RecordBatch,
+    header: u64,
+    name: &str,
+) -> Result<(u64, u64)> {
+    let body = payload_ipc_body_bytes(record, name)?;
+    Ok((checked(name, header, body)?, body))
 }
 
 fn ipc_header_bytes(record: &RecordBatch) -> Result<u64> {

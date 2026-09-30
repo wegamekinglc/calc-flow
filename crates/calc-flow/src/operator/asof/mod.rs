@@ -2,6 +2,7 @@
 mod admission;
 mod checkpoint;
 mod codec;
+mod copy;
 mod duplicate_fallback;
 mod finalize;
 mod identity;
@@ -73,6 +74,7 @@ pub struct StreamAsofJoinOperator {
     runtime: output::OutputRuntime,
     fingerprint: String,
     schema_digests: [[u8; 32]; 2],
+    payload_header_bytes: [u64; 2],
 }
 
 impl StreamAsofJoinOperator {
@@ -106,15 +108,25 @@ impl StreamAsofJoinOperator {
             codec::schema_digest(&schemas[0])?,
             codec::schema_digest(&schemas[1])?,
         ];
+        let payload_header_bytes = [
+            workspace::payload_header_bytes(&schemas[0])?,
+            workspace::payload_header_bytes(&schemas[1])?,
+        ];
+        let mut state = State::empty_tracked();
+        state.sequence_kinds = [
+            state::SequenceKind::for_side(&schemas[0], spec.left()),
+            state::SequenceKind::for_side(&schemas[1], spec.right()),
+        ];
         Ok(Self {
             fingerprint,
             schema_digests,
+            payload_header_bytes,
             name: name.into(),
             spec,
             inputs,
             outputs,
             schemas,
-            state: State::default(),
+            state,
             prepared: None,
             deferred_index_len: None,
             swept: None,
@@ -210,6 +222,29 @@ impl StreamAsofJoinOperator {
         }
         error
     }
+    fn capacity_snapshot(&self) -> state::CapacitySnapshot {
+        state::CapacitySnapshot {
+            inventory: Inventory {
+                identities: self.status.state_rows,
+                right_payloads: self.status.retained_right_rows,
+                identity_only: self.status.identity_only_rows,
+                bytes: self.status.state_bytes,
+            },
+            index_length: self
+                .deferred_index_len
+                .or_else(|| self.prepared.as_ref().map(|segment| segment.len() as u64))
+                .unwrap_or(0),
+            index_bytes: self
+                .deferred_index_len
+                .or_else(|| {
+                    self.prepared
+                        .as_ref()
+                        .map(|segment| segment.capacity() as u64)
+                })
+                .map_or(0, |bytes| bytes + 256),
+        }
+    }
+
     fn observe(&mut self, progress: &IngressProgressSnapshot) {
         for (name, side) in [
             ("left", &mut self.status.left),
@@ -262,30 +297,21 @@ impl StreamOperator for StreamAsofJoinOperator {
             // an identical state.
             return Ok(());
         }
-        let previous_index_len = self
-            .deferred_index_len
-            .or_else(|| self.prepared.as_ref().map(|segment| segment.len() as u64));
-        let previous_index_bytes = self
-            .deferred_index_len
-            .or_else(|| {
-                self.prepared
-                    .as_ref()
-                    .map(|segment| segment.capacity() as u64)
-            })
-            .map_or(0, |capacity| capacity + 64);
-        let (index_len, projected) = self
-            .state
-            .project_admission(
-                Inventory {
-                    identities: self.status.state_rows,
-                    right_payloads: self.status.retained_right_rows,
-                    identity_only: self.status.identity_only_rows,
-                    bytes: self.status.state_bytes,
-                },
-                previous_index_bytes,
-                previous_index_len.unwrap_or(24),
-                validated.index,
+        let staging_workspace = self
+            .reserve_workspace(self.state.admission_staging_bytes(
                 &admission.rows,
+                &admission.batches,
+                &self.name,
+            )?)
+            .map_err(|error| self.attempt_error(error))?;
+        let (index_len, projected, owners) = self
+            .state
+            .project_capacity_admission(
+                self.capacity_snapshot(),
+                &admission.rows,
+                admission.left_chunks.as_deref(),
+                &admission.right_capacities,
+                &admission.batches,
                 &self.name,
             )
             .map_err(|error| self.attempt_error(error))?;
@@ -309,28 +335,39 @@ impl StreamOperator for StreamAsofJoinOperator {
         let index_workspace = self
             .reserve_workspace(index_len)
             .map_err(|error| self.attempt_error(error))?;
+        let batches = self
+            .state
+            .batches
+            .project_admission(&admission.batches, &self.name)?
+            .new_batches;
+        let copies = self
+            .prepare_right_admission_copies(&admission.right_capacities, context)
+            .await
+            .map_err(|error| self.attempt_error(error))?;
         context.check_cancelled()?;
         // Everything after this point is synchronous and infallible. A dropped
         // future or failed preflight cannot expose a partially admitted row.
+        copies.install(&mut self.state.right);
+        self.state.batches.reserve_admission(batches);
         admission.install(ingress, &mut self.state, &mut status);
+        self.state.install_encoding_owners(owners);
         self.status = status;
         self.prepared = None;
         self.deferred_index_len = Some(index_len);
         self.swept = None;
         debug_assert_eq!(
-            checkpoint::encoded_length(&self.state, &self.name).expect("committed index length"),
+            checkpoint::v3_encoded_length(&self.state, &self.name).expect("committed index length"),
             index_len
         );
         debug_assert_eq!(
-            self.state
-                .inventory(None, &self.name)
+            self.current_inventory(None)
                 .expect("committed admission inventory")
                 .bytes
                 + index_len
-                + 64,
+                + 256,
             self.status.state_bytes
         );
-        drop((admission, index_workspace));
+        drop((admission, index_workspace, staging_workspace));
         Ok(())
     }
     async fn prepare_checkpoint_async(
@@ -348,7 +385,8 @@ impl StreamOperator for StreamAsofJoinOperator {
         Ok(())
     }
     fn reset(&mut self) -> Result<()> {
-        self.state = State::default();
+        self.state = State::empty_tracked();
+        self.state.sequence_kinds = self.sequence_kinds();
         self.status = StreamAsofJoinStatus::default();
         self.prepared = None;
         self.deferred_index_len = None;

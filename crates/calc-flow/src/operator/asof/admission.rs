@@ -24,9 +24,10 @@ type InputRow<'a> = (LeftOrder, &'a RecordBatch, usize);
 
 pub(super) struct Admission {
     pub rows: Vec<(LeftOrder, RowPayload)>,
+    pub batches: Vec<Arc<state::PayloadBatch>>,
     pub accepted: u64,
-    left_chunks: Option<Vec<state::PreparedLeftChunk>>,
-    right_capacities: Vec<(state::Encoding, usize)>,
+    pub left_chunks: Option<Vec<state::PreparedLeftChunk>>,
+    pub right_capacities: Vec<(state::Encoding, usize)>,
     _workspace: AdmissionWorkspace,
 }
 
@@ -325,7 +326,13 @@ impl StreamAsofJoinOperator {
         } else {
             self.status.right.accepted_rows
         };
-        let mut rows = encode_rows(rows, input.index, base, &self.name)?;
+        let (mut rows, batches) = encode_rows(
+            rows,
+            input.index,
+            base,
+            self.payload_header_bytes[input.index],
+            &self.name,
+        )?;
         if input.index == 1 && !rows.windows(2).all(|pair| pair[0].0 <= pair[1].0) {
             // Keep each admitted run ordered so a watermark-local reversal
             // does not repeatedly shift a whole per-key right vector.
@@ -364,6 +371,7 @@ impl StreamAsofJoinOperator {
         };
         Ok(Admission {
             rows,
+            batches,
             left_chunks,
             accepted,
             right_capacities,
@@ -558,10 +566,9 @@ fn identities_are_after_state<'a>(
         return true;
     };
     if side == 0 {
-        state
-            .left
-            .last_key_value()
-            .is_none_or(|(last, _)| last < (&first.0, &first.1, &first.2))
+        state.left.last_key_value().is_none_or(|(last, _)| {
+            last < (&first.0, &first.1, std::borrow::Cow::Borrowed(&first.2))
+        })
     } else {
         state
             .right
@@ -590,7 +597,7 @@ impl Admission {
             for (key, count) in self.right_capacities.drain(..) {
                 state
                     .right
-                    .bucket_mut_or_default(key)
+                    .bucket_mut_or_kind(key, state.sequence_kinds[1])
                     .reserve_payloads(count);
             }
             for (identity, payload) in self.rows.drain(..) {
@@ -709,12 +716,15 @@ fn side_status(status: &mut StreamAsofJoinStatus, index: usize) -> &mut StreamAs
     }
 }
 
+type EncodedInput = (Vec<(LeftOrder, RowPayload)>, Vec<Arc<state::PayloadBatch>>);
+
 fn encode_rows(
     rows: Vec<InputRow<'_>>,
     side: usize,
     base: u64,
+    header: u64,
     name: &str,
-) -> Result<Vec<(LeftOrder, RowPayload)>> {
+) -> Result<EncodedInput> {
     let mut payloads = Vec::new();
     let mut position = 0;
     while position < rows.len() {
@@ -725,10 +735,14 @@ fn encode_rows(
                 .take_while(|(_, candidate, _)| std::ptr::eq(*candidate, batch))
                 .count();
         let compact = compact_accepted_rows(&rows[position..end], batch)?;
-        let payload = encode_payload(compact, side, base + position as u64, name)?;
+        let payload = encode_payload(compact, side, base + position as u64, header, name)?;
         payloads.push((end - position, payload));
         position = end;
     }
+    let batches = payloads
+        .iter()
+        .map(|(_, payload)| payload.clone())
+        .collect();
     let mut input = rows.into_iter();
     let mut result = Vec::with_capacity(input.len());
     for (count, payload) in payloads {
@@ -744,7 +758,7 @@ fn encode_rows(
         }
     }
     debug_assert!(input.next().is_none());
-    Ok(result)
+    Ok((result, batches))
 }
 
 fn compact_accepted_rows(rows: &[InputRow<'_>], batch: &RecordBatch) -> Result<RecordBatch> {
@@ -768,10 +782,11 @@ fn encode_payload(
     record: RecordBatch,
     side: usize,
     id: u64,
+    header: u64,
     name: &str,
 ) -> Result<Arc<state::PayloadBatch>> {
     let (encoded_charge_bytes, body_bytes) =
-        super::workspace::payload_encoded_bound(&record, name)?;
+        super::workspace::payload_bound_with_header(&record, header, name)?;
     Ok(Arc::new(state::PayloadBatch {
         key: (u8::try_from(side).expect("validated two-sided ingress"), id),
         record: Arc::new(record),

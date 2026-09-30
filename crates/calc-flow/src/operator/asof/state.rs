@@ -1,12 +1,12 @@
 use crate::{Result, StateSegment};
 use datafusion::arrow::{
-    array::{Array, BinaryArray, Int64Array, UInt64Array},
+    array::{Array, BinaryArray, Int64Array, LargeBinaryArray, LargeBinaryBuilder, UInt64Array},
     record_batch::RecordBatch,
-    row::{RowConverter, Rows, SortField},
+    row::{RowConverter, SortField},
 };
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     hash::{BuildHasher, Hash, Hasher},
     ops::Deref,
     sync::{Arc, OnceLock},
@@ -44,6 +44,86 @@ pub(super) enum Encoding {
         bytes: [u8; INLINE_ENCODING_BYTES],
     },
     Shared(Arc<Vec<u8>>),
+    Batch {
+        rows: Arc<EncodedBatch>,
+        row: u32,
+    },
+}
+
+pub(super) struct EncodedBatch {
+    storage: EncodedBatchStorage,
+}
+
+enum EncodedBatchStorage {
+    Binary(BinaryArray),
+    LargeBinary(LargeBinaryArray),
+}
+
+impl std::fmt::Debug for EncodedBatch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EncodedBatch")
+            .finish_non_exhaustive()
+    }
+}
+
+impl EncodedBatch {
+    fn row(&self, row: usize) -> &[u8] {
+        match &self.storage {
+            EncodedBatchStorage::Binary(rows) => rows.value(row),
+            EncodedBatchStorage::LargeBinary(rows) => rows.value(row),
+        }
+    }
+
+    fn allocation_bytes(&self) -> usize {
+        self.values().capacity() + self.offset_capacity_bytes() + 512
+    }
+
+    pub fn values(&self) -> &datafusion::arrow::buffer::Buffer {
+        match &self.storage {
+            EncodedBatchStorage::Binary(rows) => rows.values(),
+            EncodedBatchStorage::LargeBinary(rows) => rows.values(),
+        }
+    }
+
+    pub fn offset_bytes(&self) -> &[u8] {
+        match &self.storage {
+            EncodedBatchStorage::Binary(rows) => rows.offsets().inner().inner().as_slice(),
+            EncodedBatchStorage::LargeBinary(rows) => rows.offsets().inner().inner().as_slice(),
+        }
+    }
+
+    pub fn offset_capacity_bytes(&self) -> usize {
+        match &self.storage {
+            EncodedBatchStorage::Binary(rows) => rows.offsets().inner().inner().capacity(),
+            EncodedBatchStorage::LargeBinary(rows) => rows.offsets().inner().inner().capacity(),
+        }
+    }
+
+    pub fn offset_width(&self) -> usize {
+        match &self.storage {
+            EncodedBatchStorage::Binary(_) => 4,
+            EncodedBatchStorage::LargeBinary(_) => 8,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match &self.storage {
+            EncodedBatchStorage::Binary(rows) => rows.len(),
+            EncodedBatchStorage::LargeBinary(rows) => rows.len(),
+        }
+    }
+
+    pub fn with_binary(rows: BinaryArray) -> Self {
+        Self {
+            storage: EncodedBatchStorage::Binary(rows),
+        }
+    }
+    pub fn with_large_binary(rows: LargeBinaryArray) -> Self {
+        Self {
+            storage: EncodedBatchStorage::LargeBinary(rows),
+        }
+    }
 }
 
 impl Encoding {
@@ -68,13 +148,50 @@ impl Encoding {
         match self {
             Self::Inline { len, bytes } => &bytes[..usize::from(*len)],
             Self::Shared(bytes) => bytes.as_slice(),
+            Self::Batch { rows, row } => rows.row(*row as usize),
         }
+    }
+
+    pub fn owner_values(&self) -> impl Iterator<Item = &[u8]> {
+        let count = match self {
+            Self::Batch { rows, .. } => rows.len(),
+            _ => 1,
+        };
+        (0..count).map(move |row| match self {
+            Self::Batch { rows, .. } => rows.row(row),
+            _ => self.as_slice(),
+        })
     }
 
     pub fn capacity(&self) -> usize {
         match self {
             Self::Inline { len, .. } => usize::from(*len),
             Self::Shared(bytes) => bytes.capacity(),
+            // The legacy row charge counts the canonical bytes of this row.
+            // The capacity ledger separately owns and charges the whole batch.
+            Self::Batch { rows, row } => rows.row(*row as usize).len(),
+        }
+    }
+
+    pub fn allocation(&self) -> Option<(usize, u64)> {
+        match self {
+            Self::Inline { .. } => None,
+            Self::Shared(bytes) => {
+                Some((Arc::as_ptr(bytes) as usize, bytes.capacity() as u64 + 64))
+            }
+            Self::Batch { rows, .. } => {
+                Some((Arc::as_ptr(rows) as usize, rows.allocation_bytes() as u64))
+            }
+        }
+    }
+
+    pub fn owner_wire_length(&self) -> u64 {
+        match self {
+            Self::Inline { .. } => 0,
+            Self::Shared(bytes) => 34 + bytes.len() as u64,
+            Self::Batch { rows, .. } => {
+                34 + rows.values().len() as u64 + rows.offset_bytes().len() as u64
+            }
         }
     }
 
@@ -177,7 +294,7 @@ pub(super) struct RowPayload {
 }
 
 mod payload;
-pub(super) use payload::{PayloadPool, PayloadView, RowRef};
+pub(super) use payload::{PayloadPool, PayloadView, PreparedPayloadRemoval, RowRef};
 
 /// Keep the common ordered left stream contiguous. An overlapping batch
 /// promotes to the tree so late and out-of-order identities retain their
@@ -202,10 +319,6 @@ impl LegacyLeftState {
             .iter()
             .map(left_row_refs)
             .chain(self.general.iter().map(left_tree_refs))
-    }
-
-    pub fn keys(&self) -> impl Iterator<Item = &LeftOrder> {
-        self.iter().map(|(key, _)| key)
     }
 
     pub fn ready_prefix_len(&self, limit: usize, frontier: Option<i64>, ended: bool) -> usize {
@@ -251,6 +364,7 @@ impl LegacyLeftState {
         }
     }
 
+    #[cfg(test)]
     pub fn insert(&mut self, key: LeftOrder, payload: RowRef) {
         if self.general.is_empty() && self.ordered.last().is_none_or(|(last, _)| last < &key) {
             self.ordered.push((key, payload));
@@ -304,6 +418,7 @@ impl LegacyLeftState {
         }
     }
 
+    #[cfg(test)]
     fn promote(&mut self) {
         if !self.ordered.is_empty() {
             self.general.extend(std::mem::take(&mut self.ordered));
@@ -342,7 +457,15 @@ impl<'a> IntoIterator for &'a LegacyLeftState {
 }
 
 mod left;
-pub(super) use left::{LeftState, LeftView, PreparedLeftChunk, PreparedLeftDrain};
+pub(super) use left::{ChunkData, LeftState, LeftView, PreparedLeftChunk, PreparedLeftDrain};
+
+mod capacity;
+pub(super) use capacity::CapacitySnapshot;
+mod ownership;
+pub(super) use ownership::{EncodingOwners, OwnerRemovals, OwnerUpdates};
+
+mod sequences;
+pub(super) use sequences::{SequenceColumn, SequenceKind, SequenceRef};
 
 mod key_dictionary;
 pub(super) use key_dictionary::{RightState, validate_key_count};
@@ -354,16 +477,51 @@ pub(super) struct State {
     pub batches: PayloadPool,
     pub right_payload_min: Option<i64>,
     pub right_identity_min: Option<i64>,
-}
-
-#[derive(Default)]
-struct AdmissionSeen {
-    buckets: BTreeSet<Encoding>,
-    batches: BTreeSet<BatchKey>,
+    encoding_owners: Option<EncodingOwners>,
+    pub sequence_kinds: [SequenceKind; 2],
 }
 
 impl State {
-    /// Rebuild the derived minima after decoding a checkpoint index.
+    pub fn install_encoding_owners(&mut self, updates: OwnerUpdates) {
+        self.encoding_owners
+            .as_mut()
+            .expect("tracked native state")
+            .commit_add(updates);
+    }
+
+    pub fn encoding_owner_allocation(&self) -> (u64, u64) {
+        self.encoding_owners.as_ref().map_or((0, 0), |owners| {
+            (owners.buffers_bytes(), owners.metadata_bytes())
+        })
+    }
+
+    pub fn owners_encoded_length(&self) -> Option<u64> {
+        self.encoding_owners
+            .as_ref()
+            .map(EncodingOwners::encoded_length)
+    }
+    pub fn empty_tracked() -> Self {
+        Self {
+            encoding_owners: Some(EncodingOwners::default()),
+            ..Self::default()
+        }
+    }
+
+    pub fn rebuild_encoding_owners(&mut self) {
+        let mut owners = EncodingOwners::default();
+        for ((_, key, sequence), _) in self.left.unordered_iter() {
+            owners.attach(key);
+            owners.attach(sequence.as_ref());
+        }
+        for (key, bucket) in &self.right {
+            for ((_, sequence), _) in bucket {
+                owners.attach(key);
+                owners.attach(sequence.as_ref());
+            }
+        }
+        self.encoding_owners = Some(owners);
+    }
+
     pub fn rebuild_right_minima(&mut self) {
         self.right_payload_min = None;
         self.right_identity_min = None;
@@ -383,110 +541,41 @@ impl State {
         }
     }
 
-    /// Project the v2 index length and committed state charge in one scan.
-    /// Identities and payload batch keys are unique after validation.
-    pub fn project_admission(
-        &self,
-        mut current: Inventory,
-        previous_index_bytes: u64,
-        mut index_len: u64,
-        side: usize,
-        rows: &[(LeftOrder, RowPayload)],
-        name: &str,
-    ) -> Result<(u64, Inventory)> {
-        current.bytes = current
-            .bytes
-            .checked_sub(previous_index_bytes)
-            .expect("committed index charge is included in state bytes");
-        let mut seen = AdmissionSeen::default();
-        for row in rows {
-            self.project_admission_row(&mut current, &mut index_len, side, row, &mut seen, name)?;
-        }
-        current.bytes = super::checked(name, current.bytes, super::checked(name, index_len, 64)?)?;
-        Ok((index_len, current))
-    }
-
-    fn project_admission_row(
-        &self,
-        inventory: &mut Inventory,
-        index_len: &mut u64,
-        side: usize,
-        row: &(LeftOrder, RowPayload),
-        seen: &mut AdmissionSeen,
-        name: &str,
-    ) -> Result<()> {
-        let ((_, key, sequence), payload) = row;
-        u32::try_from(payload.row).map_err(|_| {
-            super::reason(
-                name,
-                crate::StreamingFailureReason::AsofCounterOverflow,
-                "ASOF payload row exceeds compact reference range",
-            )
-        })?;
-        if side == 0 {
-            inventory.charge_left(key, sequence, payload, name)?;
-            *index_len = super::checked(
-                name,
-                *index_len,
-                41 + key.len() as u64 + sequence.len() as u64,
-            )?;
-        } else {
-            self.project_right_admission_row(inventory, index_len, row, seen, name)?;
-        }
-        self.project_admitted_batch(inventory, payload, seen, name)
-    }
-
-    fn project_right_admission_row(
-        &self,
-        inventory: &mut Inventory,
-        index_len: &mut u64,
-        row: &(LeftOrder, RowPayload),
-        seen: &mut AdmissionSeen,
-        name: &str,
-    ) -> Result<()> {
-        let ((_, key, sequence), payload) = row;
-        if !self.right.contains_key(key) && seen.buckets.insert(key.clone()) {
-            validate_key_count(self.right.len() as u64 + seen.buckets.len() as u64, name)?;
-            inventory.charge_allocation(key, name)?;
-            *index_len = super::checked(name, *index_len, 16 + key.len() as u64)?;
-        }
-        inventory.charge_right(sequence, Some(payload), name)?;
-        *index_len = super::checked(name, *index_len, 34 + sequence.len() as u64)?;
-        Ok(())
-    }
-
-    fn project_admitted_batch(
-        &self,
-        inventory: &mut Inventory,
-        payload: &RowPayload,
-        seen: &mut AdmissionSeen,
-        name: &str,
-    ) -> Result<()> {
-        if seen.batches.insert(payload.batch.key) {
-            validate_key_count(self.batches.len() as u64 + seen.batches.len() as u64, name)?;
-            inventory.bytes =
-                super::checked(name, inventory.bytes, batch_allocation(&payload.batch))?;
-        }
-        Ok(())
-    }
-
     pub fn attach(&mut self, row: &RowPayload) -> RowRef {
         self.batches.attach(row)
     }
 
-    pub fn commit_matched_left_prefix(&mut self, prefix: &LeftPrefix, drain: PreparedLeftDrain) {
+    pub fn commit_prepared_left_prefix(
+        &mut self,
+        prefix: &LeftPrefix,
+        drain: PreparedLeftDrain,
+        compaction: PreparedPayloadRemoval,
+    ) {
         self.left
             .drain_prefix(prefix.count, &prefix.batches, &self.batches, drain);
+        self.batches.defer_compaction();
         for (&key, &removed) in &prefix.batches {
             self.batches.detach_count(key, removed);
         }
+        self.batches.install_compaction(compaction);
+        if let Some(owners) = &mut self.encoding_owners {
+            owners.remove(&prefix.owners);
+        }
+    }
+
+    #[cfg(test)]
+    pub fn commit_matched_left_prefix(&mut self, prefix: &LeftPrefix, drain: PreparedLeftDrain) {
+        let compaction = self.batches.prepare_removal(&prefix.batches);
+        self.commit_prepared_left_prefix(prefix, drain, compaction);
     }
 
     #[cfg(test)]
     pub fn commit_left_prefix(&mut self, count: usize) {
         let mut prefix = LeftPrefix::default();
         for (order, payload) in self.left.iter().take(count) {
-            prefix.visit(order, payload, &self.batches, "asof").unwrap();
+            prefix
+                .visit(&order, payload, &self.batches, "asof")
+                .unwrap();
         }
         let drain = self
             .left
@@ -514,17 +603,74 @@ impl State {
 /// and u64 columns encode directly; other shapes use one Arrow `RowConverter`
 /// per batch. Both paths produce Arrow 58 row bytes independently per row.
 pub(super) enum EncodedColumns {
-    Rows(Rows),
-    Binary(BinaryArray),
+    Rows(Arc<EncodedBatch>),
+    Binary(Arc<EncodedBatch>),
     Int64(Int64Array),
     UInt64(UInt64Array),
+    Integer(IntegerColumn),
+}
+
+pub(super) struct IntegerColumn {
+    values: datafusion::arrow::buffer::Buffer,
+    offset: usize,
+    width: usize,
+    signed: bool,
+}
+
+fn signed_width(data_type: &datafusion::arrow::datatypes::DataType) -> Option<usize> {
+    use datafusion::arrow::datatypes::DataType;
+    match data_type {
+        DataType::Int8 => Some(1),
+        DataType::Int16 => Some(2),
+        DataType::Int32 => Some(4),
+        DataType::Int64 => Some(8),
+        _ => None,
+    }
+}
+
+fn unsigned_width(data_type: &datafusion::arrow::datatypes::DataType) -> Option<usize> {
+    use datafusion::arrow::datatypes::DataType;
+    match data_type {
+        DataType::UInt8 => Some(1),
+        DataType::UInt16 => Some(2),
+        DataType::UInt32 => Some(4),
+        DataType::UInt64 => Some(8),
+        _ => None,
+    }
+}
+
+impl IntegerColumn {
+    fn from_array(array: &dyn Array) -> Option<Self> {
+        let signed = signed_width(array.data_type());
+        let width = signed.or_else(|| unsigned_width(array.data_type()))?;
+        let data = array.to_data();
+        Some(Self {
+            values: data.buffers()[0].clone(),
+            offset: data.offset() * width,
+            width,
+            signed: signed.is_some(),
+        })
+    }
+
+    fn with_row<R>(&self, row: usize, use_bytes: impl FnOnce(&[u8]) -> R) -> R {
+        let mut encoded = [0_u8; 9];
+        encoded[0] = 1;
+        let start = self.offset + row * self.width;
+        encoded[1..=self.width].copy_from_slice(&self.values.as_slice()[start..start + self.width]);
+        #[cfg(target_endian = "little")]
+        encoded[1..=self.width].reverse();
+        if self.signed {
+            encoded[1] ^= 0x80;
+        }
+        use_bytes(&encoded[..=self.width])
+    }
 }
 
 impl EncodedColumns {
     pub(super) fn with_row<R>(&self, row: usize, use_bytes: impl FnOnce(&[u8]) -> R) -> R {
         match self {
-            Self::Rows(rows) => use_bytes(rows.row(row).as_ref()),
-            Self::Binary(rows) => use_bytes(rows.value(row)),
+            Self::Integer(column) => column.with_row(row, use_bytes),
+            Self::Rows(rows) | Self::Binary(rows) => use_bytes(rows.row(row)),
             Self::Int64(column) => {
                 let mut encoded = [0_u8; 9];
                 encoded[0] = 1;
@@ -543,7 +689,15 @@ impl EncodedColumns {
 
     /// Returns the owned encoding of one row.
     pub(super) fn row(&self, row: usize) -> Encoding {
-        self.with_row(row, Encoding::from_slice)
+        match self {
+            Self::Rows(rows) | Self::Binary(rows) if !Encoding::fits_inline(rows.row(row)) => {
+                Encoding::Batch {
+                    rows: rows.clone(),
+                    row: u32::try_from(row).expect("preflighted encoding batch"),
+                }
+            }
+            _ => self.with_row(row, Encoding::from_slice),
+        }
     }
 
     pub(super) fn hashes(
@@ -553,10 +707,17 @@ impl EncodedColumns {
     ) -> Result<Vec<u64>> {
         let mut hashes = vec![0; count];
         if let Self::Binary(rows) = self {
-            datafusion::common::hash_utils::create_hashes([rows as &dyn Array], seed, &mut hashes)
-                .map_err(|error| crate::CalcFlowError::Format {
-                    message: format!("ASOF canonical key hashing failed: {error}"),
-                })?;
+            let EncodedBatchStorage::Binary(binary) = &rows.storage else {
+                unreachable!("binary ASOF row storage")
+            };
+            datafusion::common::hash_utils::create_hashes(
+                [binary as &dyn Array],
+                seed,
+                &mut hashes,
+            )
+            .map_err(|error| crate::CalcFlowError::Format {
+                message: format!("ASOF canonical key hashing failed: {error}"),
+            })?;
         } else {
             for (row, hash) in hashes.iter_mut().enumerate() {
                 *hash = self.with_row(row, |bytes| seed.hash_one(bytes));
@@ -567,7 +728,7 @@ impl EncodedColumns {
 
     #[cfg(test)]
     pub(super) fn is_typed(&self) -> bool {
-        matches!(self, Self::Int64(_) | Self::UInt64(_))
+        matches!(self, Self::Int64(_) | Self::UInt64(_) | Self::Integer(_))
     }
 }
 
@@ -586,6 +747,9 @@ pub(super) fn encode_columns(batch: &RecordBatch, names: &[String]) -> Result<En
             }
             if let Some(array) = column.as_any().downcast_ref::<UInt64Array>() {
                 return Ok(EncodedColumns::UInt64(array.clone()));
+            }
+            if let Some(integer) = IntegerColumn::from_array(column.as_ref()) {
+                return Ok(EncodedColumns::Integer(integer));
             }
         }
     }
@@ -614,14 +778,24 @@ pub(super) fn encode_columns(batch: &RecordBatch, names: &[String]) -> Result<En
         let binary = rows
             .try_into_binary()
             .map_err(|error| super::arrow_error(&error))?;
-        Ok(EncodedColumns::Binary(binary))
+        Ok(EncodedColumns::Binary(Arc::new(EncodedBatch {
+            storage: EncodedBatchStorage::Binary(binary),
+        })))
     } else {
-        // Keep the canonical row buffer when Binary's offset domain is too
-        // small. This path also hashes each row without a second large copy.
-        Ok(EncodedColumns::Rows(rows))
+        // The admission reservation covers both buffers during the wide-offset
+        // conversion. Retained batches own plain Arrow binary columns.
+        let bytes = rows.lengths().sum();
+        let mut builder = LargeBinaryBuilder::with_capacity(rows.num_rows(), bytes);
+        for row in &rows {
+            builder.append_value(row.data());
+        }
+        Ok(EncodedColumns::Rows(Arc::new(EncodedBatch {
+            storage: EncodedBatchStorage::LargeBinary(builder.finish()),
+        })))
     }
 }
 
+#[cfg(test)]
 pub(super) fn encoded_columns(
     batch: &RecordBatch,
     row: usize,
@@ -657,12 +831,15 @@ pub(super) struct LeftPrefix {
     pub index_bytes: u64,
     row_bytes: u64,
     pub batches: BTreeMap<BatchKey, usize>,
+    pub keys: BTreeMap<(BatchKey, Encoding), usize>,
+    pub owners: OwnerRemovals,
+    pub sequence_owners: BTreeMap<BatchKey, OwnerRemovals>,
 }
 
 impl LeftPrefix {
     pub fn visit(
         &mut self,
-        order: LeftView<'_>,
+        order: &LeftView<'_>,
         row: RowRef,
         batches: &PayloadPool,
         name: &str,
@@ -676,9 +853,20 @@ impl LeftPrefix {
         self.row_bytes = super::checked(
             name,
             self.row_bytes,
-            left_row_charge(order.1, order.2, &row),
+            left_row_charge(order.1, order.2.as_ref(), &row),
         )?;
-        *self.batches.entry(batches.key(row)).or_default() += 1;
+        let batch = batches.key(row);
+        *self.batches.entry(batch).or_default() += 1;
+        *self.keys.entry((batch, order.1.clone())).or_default() += 1;
+        EncodingOwners::record_remove(&mut self.owners, order.1, 1);
+        EncodingOwners::record_remove(&mut self.owners, order.2.as_ref(), 1);
+        if order.2.allocation().is_some() {
+            EncodingOwners::record_remove(
+                self.sequence_owners.entry(batch).or_default(),
+                order.2.as_ref(),
+                1,
+            );
+        }
         Ok(())
     }
 }
@@ -691,6 +879,8 @@ pub(super) struct EvictionPreview {
     pub removed_identity_only: u64,
     pub released_state_bytes: u64,
     pub removed_index_bytes: u64,
+    pub owners: OwnerRemovals,
+    pub batches: BTreeMap<BatchKey, usize>,
     #[cfg(test)]
     pub visited_rows: usize,
 }
@@ -802,7 +992,16 @@ fn preview_bucket(
         conditions.tolerance,
         conditions.threshold,
     ) {
-        if preview_right_row(preview, removed_batch_refs, order, row, conditions, name)? {
+        if preview_right_row(
+            preview,
+            removed_batch_refs,
+            (order.0, order.1.as_ref()),
+            row,
+            conditions,
+            name,
+        )? {
+            EncodingOwners::record_remove(&mut preview.owners, key, 1);
+            EncodingOwners::record_remove(&mut preview.owners, order.1.as_ref(), 1);
             survivors -= 1;
         }
     }
@@ -816,6 +1015,64 @@ fn preview_bucket(
 }
 
 impl State {
+    pub fn capacity_inventory(
+        &self,
+        prepared: Option<&super::checkpoint::PreparedSegment>,
+        name: &str,
+    ) -> Result<Inventory> {
+        let mut total = Inventory {
+            identities: self.left.len() as u64,
+            bytes: self.left.capacity_bytes(name)?,
+            ..Inventory::default()
+        };
+        total.bytes = super::checked(name, total.bytes, self.right.metadata_bytes())?;
+        let fallback;
+        let owners = if let Some(owners) = &self.encoding_owners {
+            owners
+        } else {
+            let mut scanned = EncodingOwners::default();
+            for ((_, key, sequence), _) in self.left.unordered_iter() {
+                scanned.attach(key);
+                scanned.attach(sequence.as_ref());
+            }
+            for (key, bucket) in &self.right {
+                for ((_, sequence), _) in bucket {
+                    scanned.attach(key);
+                    scanned.attach(sequence.as_ref());
+                }
+            }
+            fallback = scanned;
+            &fallback
+        };
+        total.bytes = super::checked(name, total.bytes, owners.allocation_bytes())?;
+        for bucket in self.right.values() {
+            total.identities = super::checked(name, total.identities, bucket.len() as u64)?;
+            total.right_payloads =
+                super::checked(name, total.right_payloads, bucket.payload_len() as u64)?;
+            total.identity_only = super::checked(
+                name,
+                total.identity_only,
+                (bucket.len() - bucket.payload_len()) as u64,
+            )?;
+        }
+        total.bytes = super::checked(name, total.bytes, self.batches.metadata_bytes())?;
+        for (batch, references) in self.batches.values() {
+            if *references == 0 {
+                return Err(super::reason(
+                    name,
+                    crate::StreamingFailureReason::AsofProtocolError,
+                    "ASOF retained an unreferenced payload batch",
+                ));
+            }
+            total.bytes =
+                super::checked(name, total.bytes, capacity_batch_allocation(batch, name)?)?;
+        }
+        if let Some(prepared) = prepared {
+            total.bytes = super::checked(name, total.bytes, prepared.capacity() as u64 + 256)?;
+        }
+        Ok(total)
+    }
+
     /// Bound the batch-reference counting tree, including its minimum leaf.
     pub fn eviction_workspace_bytes(&self, name: &str) -> Result<u64> {
         if self.batches.is_empty() {
@@ -856,17 +1113,19 @@ impl State {
                 name,
             )?;
         }
-        for (key, removed) in removed_batch_refs {
+        for (&key, &removed) in &removed_batch_refs {
             let (batch, references) = &self.batches[&key];
             if removed == *references {
                 preview.released_state_bytes =
                     super::checked(name, preview.released_state_bytes, batch_allocation(batch))?;
             }
         }
+        preview.batches = removed_batch_refs;
         Ok(preview)
     }
 
     /// Charge each retained Arrow batch once, alongside its row indexes.
+    #[cfg(test)]
     pub fn inventory(
         &self,
         prepared: Option<&super::checkpoint::PreparedSegment>,
@@ -876,12 +1135,12 @@ impl State {
         self.left
             .unordered_iter()
             .try_for_each(|((_, key, sequence), row)| {
-                total.charge_left(key, sequence, &row, name)
+                total.charge_left(key, sequence.as_ref(), &row, name)
             })?;
         for (key, bucket) in &self.right {
             total.charge_allocation(key, name)?;
             for ((_, sequence), row) in bucket {
-                total.charge_right(sequence, row, name)?;
+                total.charge_right(sequence.as_ref(), row, name)?;
             }
         }
         for (batch, refs) in self.batches.values() {
@@ -900,37 +1159,29 @@ impl State {
         Ok(total)
     }
 
-    /// Compute the committed charge of a finalized left prefix without
-    /// cloning the retained maps or their Arrow batch references.
-    pub fn inventory_after_left_prefix(
-        &self,
-        prefix: &LeftPrefix,
-        mut total: Inventory,
-        previous_index_bytes: u64,
-        next_index_bytes: u64,
-        name: &str,
-    ) -> Result<Inventory> {
-        total.bytes -= previous_index_bytes;
-        total.identities -= prefix.count as u64;
-        total.bytes -= prefix.row_bytes;
-        for (key, count) in &prefix.batches {
-            let (batch, references) = &self.batches[key];
-            if count == references {
-                total.bytes -= batch_allocation(batch);
-            }
-        }
-        total.bytes = super::checked(name, total.bytes, next_index_bytes)?;
-        Ok(total)
-    }
-
+    /// Release expired right payloads and identities, preserving live columns.
     pub fn evict(&mut self, status: &super::StreamAsofJoinStatus, tolerance: u64) -> u64 {
         let threshold = retention_threshold(self, status);
         let mut evicted = 0;
         let mut payload_min = None;
         let mut identity_min = None;
         let batches = &mut self.batches;
-        self.right.retain(|_, bucket| {
-            evicted += bucket.evict(status, tolerance, threshold, batches);
+        let owners = &mut self.encoding_owners;
+        self.right.retain(|key, bucket| {
+            if bucket.eviction_pending(status, tolerance, threshold) {
+                evicted += Arc::make_mut(bucket).evict(
+                    status,
+                    tolerance,
+                    threshold,
+                    batches,
+                    |sequence| {
+                        if let Some(owners) = owners {
+                            owners.detach(key);
+                            owners.detach(sequence);
+                        }
+                    },
+                );
+            }
             if let Some(time) = bucket.payload_min() {
                 payload_min = Some(payload_min.map_or(time, |previous: i64| previous.min(time)));
             }
@@ -943,11 +1194,23 @@ impl State {
         self.right_identity_min = identity_min;
         evicted
     }
+
+    pub fn evict_prepared(
+        &mut self,
+        status: &super::StreamAsofJoinStatus,
+        tolerance: u64,
+        compaction: PreparedPayloadRemoval,
+    ) -> u64 {
+        self.batches.defer_compaction();
+        let evicted = self.evict(status, tolerance);
+        self.batches.install_compaction(compaction);
+        evicted
+    }
 }
 
 /// Retention threshold shared by `evict` and `eviction_pending`: the more
 /// conservative of the left frontier and the oldest pending left row.
-fn retention_threshold(state: &State, status: &super::StreamAsofJoinStatus) -> i128 {
+pub(super) fn retention_threshold(state: &State, status: &super::StreamAsofJoinStatus) -> i128 {
     let future = if status.left.ended {
         i128::MAX
     } else {
@@ -1016,6 +1279,23 @@ fn batch_allocation(batch: &PayloadBatch) -> u64 {
         + 64 * batch.record.num_columns() as u64
 }
 
+pub(super) fn capacity_batch_allocation(batch: &PayloadBatch, name: &str) -> Result<u64> {
+    let encoded = batch
+        .encoded
+        .get()
+        .map_or(batch.encoded_charge_bytes, |segment| {
+            batch
+                .encoded_charge_bytes
+                .max(segment.bytes_arc().capacity() as u64)
+        });
+    super::checked(
+        name,
+        super::checked(name, encoded, batch.body_bytes)?,
+        512 + batch.record.num_columns() as u64 * 256,
+    )
+}
+
+#[cfg(test)]
 fn prepared_allocation(prepared: &super::checkpoint::PreparedSegment) -> u64 {
     ALLOCATION_BYTES + prepared.capacity() as u64
 }
@@ -1031,6 +1311,7 @@ fn right_row_charge<T>(sequence: &Encoding, row: Option<&T>) -> u64 {
     RIGHT_IDENTITY_BYTES + encoding_allocation(sequence) + row.map_or(0, payload_allocation)
 }
 
+#[cfg(test)]
 impl Inventory {
     fn charge_left<T>(
         &mut self,
@@ -1190,8 +1471,79 @@ mod encoding_tests {
     use std::sync::Arc;
 
     #[test]
+    fn generic_sequence_rows_share_one_batch_allocation() {
+        use datafusion::arrow::array::StringArray;
+
+        let column = Arc::new(StringArray::from(vec!["long sequence identity"; 10_000]));
+        let record = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "identity",
+                DataType::Utf8,
+                false,
+            )])),
+            vec![column.clone()],
+        )
+        .unwrap();
+        let encoded = encode_columns(&record, &["identity".into()]).unwrap();
+        let mut retained = Vec::new();
+        let allocation = allocation_counter::measure(|| {
+            retained = (0..record.num_rows()).map(|row| encoded.row(row)).collect();
+        });
+        assert!(
+            allocation.count_total <= 2,
+            "generic sequences allocated separately per row: {allocation:?}"
+        );
+        let reference = RowConverter::new(vec![SortField::new(DataType::Utf8)])
+            .unwrap()
+            .convert_columns(&[column])
+            .unwrap();
+        drop(encoded);
+        for (row, identity) in retained.iter().enumerate() {
+            assert_eq!(identity.as_slice(), reference.row(row).as_ref());
+        }
+    }
+
+    #[test]
+    fn retained_sequence_capacity_is_charged_after_large_identity_expires() {
+        use super::{RightBucket, State};
+        use crate::EventTime;
+        use datafusion::arrow::array::StringArray;
+
+        let long = "x".repeat(128 * 1024);
+        let column = Arc::new(StringArray::from(vec![long.as_str(), "survivor sequence"]));
+        let record = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "identity",
+                DataType::Utf8,
+                false,
+            )])),
+            vec![column],
+        )
+        .unwrap();
+        let mut state = State::default();
+        let measured = allocation_counter::measure(|| {
+            let encoded = encode_columns(&record, &["identity".into()]).unwrap();
+            let mut bucket = RightBucket::new();
+            for time in 0..2 {
+                bucket.insert((time, encoded.row(time as usize)), None);
+            }
+            state.right.insert(Encoding::from_slice(&[1]), bucket);
+            drop(encoded);
+            let mut status = super::super::StreamAsofJoinStatus::default();
+            status.right.watermark_micros = Some(EventTime::from_micros(1));
+            state.evict(&status, 0);
+        });
+        assert_eq!(state.right.values().next().unwrap().len(), 1);
+        let charged = state.capacity_inventory(None, "asof").unwrap().bytes;
+        assert!(
+            charged >= u64::try_from(measured.bytes_current).unwrap(),
+            "one identity stopped funding its retained sequence batch: {charged}, {measured:?}"
+        );
+    }
+
+    #[test]
     fn short_sequences_keep_canonical_bytes_without_heap_storage() {
-        assert_eq!(size_of::<Encoding>(), 16);
+        assert!(size_of::<Encoding>() <= 16);
         let small = Encoding::from_slice(&[1, 2, 3, 4, 5, 6, 7, 8, 9]);
         let large = Encoding::from_slice(&[7; 32]);
         assert!(small.is_inline());
@@ -1202,7 +1554,34 @@ mod encoding_tests {
 
     #[test]
     fn scalar_integer_identity_encoding_matches_arrow_rows() {
+        use datafusion::arrow::array::{
+            Int8Array, Int16Array, Int32Array, UInt8Array, UInt16Array, UInt32Array,
+        };
         let columns: Vec<(DataType, Arc<dyn datafusion::arrow::array::Array>)> = vec![
+            (
+                DataType::Int8,
+                Arc::new(Int8Array::from(vec![i8::MIN, -1, 0, i8::MAX])),
+            ),
+            (
+                DataType::Int16,
+                Arc::new(Int16Array::from(vec![i16::MIN, -1, 0, i16::MAX])),
+            ),
+            (
+                DataType::Int32,
+                Arc::new(Int32Array::from(vec![i32::MIN, -1, 0, i32::MAX])),
+            ),
+            (
+                DataType::UInt8,
+                Arc::new(UInt8Array::from(vec![0, 1, u8::MAX])),
+            ),
+            (
+                DataType::UInt16,
+                Arc::new(UInt16Array::from(vec![0, 1, u16::MAX])),
+            ),
+            (
+                DataType::UInt32,
+                Arc::new(UInt32Array::from(vec![0, 1, u32::MAX])),
+            ),
             (
                 DataType::Int64,
                 Arc::new(Int64Array::from(vec![i64::MIN, -1, 0, 1, i64::MAX])),
@@ -1514,6 +1893,52 @@ mod right_storage_tests {
     use super::{Encoding, RightBucket, RightState, State};
 
     #[test]
+    fn one_row_capacity_projection_allocates_independently_of_retained_batches() {
+        let mut state = State::empty_tracked();
+        let payload = |id| super::RowPayload {
+            batch: std::sync::Arc::new(super::PayloadBatch {
+                key: (1, id),
+                record: std::sync::Arc::new(
+                    datafusion::arrow::record_batch::RecordBatch::new_empty(std::sync::Arc::new(
+                        datafusion::arrow::datatypes::Schema::empty(),
+                    )),
+                ),
+                encoded: std::sync::OnceLock::new(),
+                encoded_charge_bytes: 0,
+                body_bytes: 0,
+            }),
+            row: 0,
+        };
+        let key = Encoding::from_slice(&[1]);
+        let sequence = Encoding::from_slice(&[1]);
+        for time in 0..4_096 {
+            let row = state.attach(&payload(time));
+            state
+                .right
+                .bucket_mut_or_default(key.clone())
+                .insert((time as i64, sequence.clone()), Some(row));
+        }
+        let rows = vec![((4_096, key.clone(), sequence), payload(4_096))];
+        let counts = vec![(key, 1)];
+        let measured = allocation_counter::measure(|| {
+            state
+                .project_capacity_admission(
+                    state.capacity_snapshot("asof"),
+                    &rows,
+                    None,
+                    &counts,
+                    &[rows[0].1.batch.clone()],
+                    "asof",
+                )
+                .unwrap();
+        });
+        assert!(
+            measured.bytes_max <= 8_192,
+            "one-row preflight copied retained batches: {measured:?}"
+        );
+    }
+
+    #[test]
     fn reverse_unique_right_keys_keep_canonical_checkpoint_order() {
         let mut right = RightState::default();
         let keys = 4_096_u32;
@@ -1546,7 +1971,7 @@ mod right_storage_tests {
                         .right
                         .insert(Encoding::from_slice(&key.to_le_bytes()), bucket);
                 }
-                let length = super::super::checkpoint::encoded_length(&state, "asof").unwrap();
+                let length = super::super::checkpoint::v3_encoded_length(&state, "asof").unwrap();
                 prepared = Some(super::super::checkpoint::PreparedSegment::new(
                     crate::StateSegment::new(vec![0; usize::try_from(length).unwrap()]),
                 ));
@@ -1621,7 +2046,7 @@ mod right_storage_tests {
                         .insert((time, Encoding::from_slice(&[1])), None);
                 }
                 state.evict(&status, 0);
-                let length = super::super::checkpoint::encoded_length(&state, "asof").unwrap();
+                let length = super::super::checkpoint::v3_encoded_length(&state, "asof").unwrap();
                 if length != 0 {
                     prepared = Some(super::super::checkpoint::PreparedSegment::new(
                         crate::StateSegment::new(vec![0; usize::try_from(length).unwrap()]),
@@ -1726,7 +2151,13 @@ mod right_storage_tests {
         }
         let mut status = super::super::StreamAsofJoinStatus::default();
         status.right.watermark_micros = Some(crate::EventTime::from_micros(63));
-        bucket.evict(&status, 0, i128::MIN, &mut super::PayloadPool::default());
+        bucket.evict(
+            &status,
+            0,
+            i128::MIN,
+            &mut super::PayloadPool::default(),
+            |_| {},
+        );
         assert_eq!(bucket.len(), 1);
         assert!(bucket.capacity() <= 2 * bucket.len());
     }

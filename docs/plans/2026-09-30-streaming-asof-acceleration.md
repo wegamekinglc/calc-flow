@@ -2,7 +2,7 @@
 
 日期：2026-09-30。分析基线：`feature/accelerate-streaming-asof` 的 commit
 `3a0ab5e`（`perf: Accelerate streaming ASOF joins` 与 review 修复之后）。
-状态：实施中。本文记录问题定位、必须保持的不变量、分阶段实施项和验证
+状态：实现完成，交付测量见 PR。本文记录问题定位、必须保持的不变量、分阶段实施项和验证
 门禁；它不是性能验收记录。最终交付行为以
 [ASOF 指南](../asof-join-guide.md)、[CHANGELOG](../../CHANGELOG.md) 和实际交付
 记录为准。
@@ -11,43 +11,24 @@
 性能结论必须按[配对比较合同](../benchmark-suite.md#revision-comparisons-and-regression-gate)
 重新测量。
 
-当前分支已加入 Polars ASOF 外部参考、四个 100k Rust 端到端场景、批次级 tracing，
-以及 watermark 乱序与恢复的随机测试。前缀提交、admission 哈希、右侧 Arrow
-输出、原地驱逐、短 identity 编码和按 key 的有序 right 数组已有第一批优化。
-left Arrow chunk 已接入，checkpoint v3 仍待实施；
-载荷 IPC 已改为 checkpoint 时按需编码，并沿用 v2 状态格式与计费；
-有序批次的相邻查重和已保留状态之后的范围跳过探测也已加入；
-单列非空 `Int64`/`UInt64` 身份已走保持 Arrow row 字节一致的类型化路径；
-大块输出已加入按 key 的单调候选游标，资源不足时退回二分查找；
-left 批次现存于 Arrow chunk，拥有紧凑时间列，按 chunk 保留 key 字典、sequence
-编码与可选 `u32` 位置；未证明有序的批次在线程池用 Arrow lexsort 排序，
-重叠 chunk 由借用游标按 `(time, key, sequence)` 归并；行数和全局首尾缓存，
-恢复仅迁移经过严格验证的存活 index 行；输出接受前预留并在线程池准备
-前缀压缩缓冲，旧输入容量的预留随 worker 存活，覆盖取消后 reset；提交不分配；
-sequence 列仍暂保留逐行 Encoding，计费和
-checkpoint 仍为 v2，实际容量记账、批次 sequence 数组和 v3 index 仍待实施；
-admission 的已校验身份现在直接移入保留行，v2 index 长度与状态费用在同一
-遍历中预检；
-right 桶已由 `HashTable<u32>` key 字典定位，批量哈希使用 DataFusion 工具且
-同一实例的标量哈希保持相同字节域；重复批次复用驻留 key 字节，
-驱逐后压缩 arena 并回收过大的桶和哈希表容量；checkpoint 单独预留排序
-空间并按 key 字节规范写出，托管异步排序放在线程池；仍未引入 v3 checkpoint；
-right 的载荷行和 identity-only 历史现有独立时间、sequence 列与 head，
-驱逐预检仅访问各自过期的前缀，提交后按桶重算最小时间；有序列路径为
-`O(keys + expired)`，较旧载荷转为身份时用乱序树索引，代价另加
-`O(expired × log(identity_history))`，不搬移尚未过期的身份列；
-refs 已改为 8 字节的批次/行引用，私有批次池只拥有一份 Arrow 载荷；
-可选引用同样为 8 字节，输出与 checkpoint 借用池中数据；
-最后一个行引用释放后删除批次并收缩稀疏索引，沿用 v2 计费与恢复校验；
-稀疏 identity-only 桶不分配载荷列，排序 key 使用树以避免逆序到达的二次搬移；
-right 接纳计数与 key 驻留同一遍计算，按接纳批次预留各列容量，接纳提交不再
-重复探测 identity-only 历史；输出 worker 仅持有唯一 Arrow 批次及位置索引；
-前缀匹配同时累计 index、行费用和批次引用差，输出接受后按批次提交；
-有序 left 的就绪前缀用二分截取，不再克隆逐行 key 或重复遍历前缀记账；
-identity workspace 覆盖批次编码、sequence 副本与 converter 头；新的唯一
-key 副本在分配前追加预留，驻留 key 复用缓冲；被丢弃的 late 行不创建身份编码，
-连续接纳区间共用 converter，批量哈希 scratch 不足时保留标量路径；
-阶段结果及最终配对数据将在 PR 描述中记录。
+2026-10-01 实施状态：P0–P2 已接入，定向测试与 lint 通过；最终配对测量与审查记录见 PR。
+按用户最新范围，直接实现 v3，不保留 v1/v2 checkpoint 恢复与迁移。
+
+right 由 `HashTable<u32>` key 字典定位，批量哈希使用 DataFusion 工具，标量
+探测使用相同字节域；保留独立的载荷与 identity-only 时间、sequence 列和 head。
+有序驱逐访问 key 与过期前缀；较旧载荷转为身份时使用树索引，不搬移未过期列。
+left 保留 Arrow chunk、key 字典、时间列、sequence 列与可选 `u32` 位置；
+乱序 chunk 在线程池 lexsort，重叠 chunk 按 `(time, key, sequence)` 归并。
+八种整数 sequence 使用实际 1/2/4/8 字节宽度；generic sequence 共用每批连续
+Arrow binary 缓冲。8 字节批次/行引用指向唯一载荷池，输出 worker 仅持有唯一
+Arrow 批次与位置索引。载荷 IPC 在 checkpoint 时按需编码。
+
+v3 index 规范编码 key、共享编码 owner、列、批次引用及容量提示；整数列直接
+复制原始 sequence 字节。计费覆盖实际容量、唯一 owner、载荷与预留 index，
+接纳和前缀/驱逐投影只处理本次变化。共享 right 列和稀疏载荷池替换在线程池
+预备，旧输入与新缓冲预留随 worker 存活，覆盖取消后 reset。sink 接受输出后
+同步提交前缀。Rust/Python checkpoint 能力版本均为 3，算子身份仍为
+`stream_asof_join@1`。性能结果须以最终源码的配对测量为准，并写入 PR 描述。
 
 ## 1. 问题与测量
 
@@ -149,7 +130,7 @@ fail-closed 的有界内存和可 checkpoint 状态。在输入有序的常见�
 6. **eviction 保守性。** right 历史只在 `r + T < min(left_future_bound,
    earliest_pending_left)` 时释放；identity-only 条目的保留规则不变。
 7. **checkpoint 与恢复。** 快照确定且可规范化；sink 接受输出后才提交前缀；
-   v1、v2 快照继续可恢复；恢复后的 gauges 与重算 inventory 一致。
+   仅支持 v3 快照，拒绝 v1、v2；恢复后的 gauges 与重算 inventory 一致。
 8. **公开表面。** Python API、`StreamAsofJoinSpec`、状态 reason 和 status 字段
    不变；DataFusion 仍是 SQL 与表达式引擎。
 
@@ -235,7 +216,7 @@ fail-closed 的有界内存和可 checkpoint 状态。在输入有序的常见�
   `Vec` 容量增长按实际 capacity 计费，保证计费仍是上界。
 - **P2.7 列式 checkpoint index v3。** 编码 key 字典、每 key 数组和 left chunk
   引用，编码接近内存拷贝，长度增量用算术维护。state/layout/accounting version
-  升级为 3；v1、v2 快照在 restore 时迁移。fingerprint 与恢复校验规则不放宽。
+  升级为 3；仅恢复 v3 快照。fingerprint 与恢复校验规则不放宽。
 
 ### 阶段 3：可选扩展
 
@@ -254,7 +235,7 @@ fail-closed 的有界内存和可 checkpoint 状态。在输入有序的常见�
 | P1.4 | 向量化输出拼装      | `output.rs`、`finalize.rs`                       | 5–10 ms            | 空值与类型覆盖       |
 | P1.5 | 合并 admission 遍历 | `admission.rs`、`workspace.rs`、`mod.rs`         | 20–30 ms           | 失败路径不留部分状态 |
 | P1.6 | 无堆 sequence       | `state.rs`、`admission.rs`                       | 5–10 ms            | 编码兼容             |
-| P2   | 列式状态重构        | `state.rs`、`admission.rs`、`checkpoint/`        | 降到 20–30 ms      | v3 迁移与乱序路径    |
+| P2   | 列式状态重构        | `state.rs`、`admission.rs`、`checkpoint/`        | 降到 20–30 ms      | v3 恢复与乱序路径    |
 
 各项收益来自 1.3 节的分段比例估算，彼此有重叠，不能简单相加。建议按
 P0 → P1.1 → P1.2 → P1.5 → P1.3 → P1.4 → P1.6 → P2 顺序实施，每项独立提交并保留
@@ -265,7 +246,7 @@ P0 → P1.1 → P1.2 → P1.5 → P1.3 → P1.4 → P1.6 → P2 顺序实施，�
 1. **正确性。** 现有 `crates/calc-flow/tests/stream_asof_join_*.rs`、
    `stream_asof_inner_compatibility.rs`、模块内单元测试和 P0.4 随机对照测试全部
    通过；输出与 oracle 逐行一致，status 计数一致。
-2. **恢复。** 每个状态格式变更都覆盖 v1、v2（阶段 2 起含 v3）快照恢复、损坏快照
+2. **恢复。** 覆盖 v3 快照恢复、旧版本与损坏快照
    拒绝和中途 checkpoint 后继续输出；`stream_asof_join_restore_corruption.rs`
    不放宽。
 3. **资源。** `stream_asof_join_resources.rs` 覆盖紧限制下的 fail-closed；新增
@@ -288,7 +269,7 @@ P0 → P1.1 → P1.2 → P1.5 → P1.3 → P1.4 → P1.6 → P2 顺序实施，�
   由 `out_of_order_within_watermark` 基准与随机测试同时覆盖。
 - **计费上界。** 延迟 IPC 与按批计费改变了计费来源，必须有上界测试；上界过松会
   让紧限制场景提前失败，需要在资源测试中同时检查不过度保守。
-- **格式迁移。** v3 index 需要确定性编码、fingerprint 校验和 v1/v2 迁移；迁移失败
-  必须拒绝恢复，而不是静默重建。
+- **格式恢复。** v3 index 需要确定性编码、fingerprint 校验和容量上界预检；
+  旧版本和损坏快照必须拒绝恢复，不得静默重建。
 - **收益归因。** 基准噪声较大（同配置样本相差 10–20%），任何单项收益都需要配对
   测量，不能用独立样本或历史二进制作为基线。

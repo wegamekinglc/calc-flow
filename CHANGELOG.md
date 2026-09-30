@@ -7,6 +7,17 @@ the [documentation index](docs/README.md).
 Entries describe the state at their date, including superseded decisions and
 measurements. Use the current guides for supported behavior.
 
+## 2026-10
+
+- 2026-10-01: Move stream ASOF state, layout, and accounting to version 3.
+  Checkpoints use a canonical columnar index with key dictionaries, typed
+  integer sequence columns, shared generic identity buffers, batch references,
+  and capacity hints. Resource charges cover retained capacities and unique
+  buffer owners. Shared right columns and sparse payload pool replacements are
+  prepared on blocking workers with reservations retained through cancellation.
+  Rust and Python capabilities advertise state/layout 3; the operator identity
+  remains `stream_asof_join@1`. Versions 1 and 2 are rejected.
+
 ## 2026-09
 
 - 2026-09-30: Verify coverage comparison baselines from successful Linux CI

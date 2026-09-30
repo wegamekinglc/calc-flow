@@ -5,7 +5,7 @@ use crate::operator::asof::{
     StreamAsofJoinOperator, checked,
     checkpoint::PreparedSegment,
     reason,
-    state::{Inventory, LeftPrefix, PreparedLeftDrain},
+    state::{Inventory, LeftPrefix, PreparedLeftDrain, PreparedPayloadRemoval},
 };
 use crate::{Result, StreamCollector, StreamOperatorContext, StreamingFailureReason};
 use datafusion::execution::memory_pool::MemoryReservation;
@@ -15,18 +15,10 @@ struct PreparedPrefix {
     segment: Option<PreparedSegment>,
     deferred_len: Option<u64>,
     drain: PreparedLeftDrain,
+    inventory: Inventory,
+    pool: PreparedPayloadRemoval,
     _workspace: MemoryReservation,
     _drain_workspace: MemoryReservation,
-}
-
-impl PreparedPrefix {
-    fn index_bytes(&self) -> u64 {
-        self.segment
-            .as_ref()
-            .map(|segment| segment.capacity() as u64)
-            .or(self.deferred_len)
-            .map_or(0, |capacity| capacity + 64)
-    }
 }
 
 impl StreamAsofJoinOperator {
@@ -50,25 +42,7 @@ impl StreamAsofJoinOperator {
         let prepared = self
             .prepare_prefix_checkpoint(&output.prefix, context)
             .await?;
-        let current = Inventory {
-            identities: self.status.state_rows,
-            right_payloads: self.status.retained_right_rows,
-            identity_only: self.status.identity_only_rows,
-            bytes: self.status.state_bytes,
-        };
-        let previous_index_bytes = self
-            .prepared
-            .as_ref()
-            .map(|segment| segment.capacity() as u64)
-            .or(self.deferred_index_len)
-            .map_or(0, |capacity| capacity + 64);
-        let inventory = self.state.inventory_after_left_prefix(
-            &output.prefix,
-            current,
-            previous_index_bytes,
-            prepared.index_bytes(),
-            &self.name,
-        )?;
+        let inventory = prepared.inventory;
         if inventory.identities > self.spec.limits().max_state_rows()
             || inventory.bytes > self.spec.limits().max_state_bytes()
         {
@@ -86,7 +60,7 @@ impl StreamAsofJoinOperator {
         emit_output(output.batch, context, collector).await?;
         // Nothing after sink acceptance can fail or yield before installation.
         self.state
-            .commit_matched_left_prefix(&output.prefix, prepared.drain);
+            .commit_prepared_left_prefix(&output.prefix, prepared.drain, prepared.pool);
         // Right payloads remain until finish_progress sweeps them once.
         self.swept = None;
         self.status = status;
@@ -96,10 +70,9 @@ impl StreamAsofJoinOperator {
         debug_assert!(
             {
                 let inventory = self
-                    .state
-                    .inventory(self.prepared.as_ref(), &self.name)
+                    .current_inventory(self.prepared.as_ref())
                     .expect("committed prefix inventory");
-                inventory.bytes + self.deferred_index_len.map_or(0, |length| length + 64)
+                inventory.bytes + self.deferred_index_len.map_or(0, |length| length + 256)
                     == self.status.state_bytes
             },
             "prefix inventory must match committed gauge"
@@ -114,46 +87,25 @@ impl StreamAsofJoinOperator {
         context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedPrefix> {
         let (drain, drain_workspace) = self.prepare_left_drain(prefix, context).await?;
-        let remaining = self.state.left.len() - prefix.count;
-        if remaining == 0 && self.state.right.is_empty() {
-            return Ok(PreparedPrefix {
-                segment: None,
-                deferred_len: None,
-                drain,
-                _workspace: self.reserve_workspace(0)?,
-                _drain_workspace: drain_workspace,
-            });
-        }
-        let removed = prefix.index_bytes;
-        if let Some(length) = self.deferred_index_len {
-            let remaining_len = length - removed;
-            let workspace = self.reserve_workspace(remaining_len)?;
-            context.check_cancelled()?;
-            tokio::task::yield_now().await;
-            context.check_cancelled()?;
-            return Ok(PreparedPrefix {
-                segment: None,
-                deferred_len: Some(remaining_len),
-                drain,
-                _workspace: workspace,
-                _drain_workspace: drain_workspace,
-            });
-        }
-        let current = self
-            .prepared
-            .as_ref()
-            .expect("committed ASOF state has a prepared segment");
-        let removed = usize::try_from(removed).expect("encoded state fits address domain");
-        // Same reservation the eager copy took, so workspace failures stay put;
-        // capture later materializes exactly these canonical bytes.
-        let workspace = self.reserve_workspace((current.len() - removed) as u64)?;
+        let (length, inventory, _) = self.state.project_capacity_prefix(
+            self.capacity_snapshot(),
+            prefix,
+            &drain,
+            &self.name,
+        )?;
+        let workspace = self.reserve_workspace(length)?;
+        let pool = self
+            .prepare_pool_compaction(&prefix.batches, context)
+            .await?;
         context.check_cancelled()?;
         tokio::task::yield_now().await;
         context.check_cancelled()?;
         Ok(PreparedPrefix {
-            segment: Some(current.drain_left(removed, remaining as u64)),
-            deferred_len: None,
+            segment: None,
+            deferred_len: (length != 0).then_some(length),
             drain,
+            inventory,
+            pool,
             _workspace: workspace,
             _drain_workspace: drain_workspace,
         })
