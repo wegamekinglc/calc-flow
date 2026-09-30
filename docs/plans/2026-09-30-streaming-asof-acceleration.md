@@ -31,7 +31,9 @@ right 的载荷行和 identity-only 历史现有独立时间、sequence 列与 h
 驱逐预检仅访问各自过期的前缀，提交后按桶重算最小时间；有序列路径为
 `O(keys + expired)`，较旧载荷转为身份时用乱序树索引，代价另加
 `O(expired × log(identity_history))`，不搬移尚未过期的身份列；
-refs 仍使用现有 `RowPayload`，尚未完成 P2.2 的紧凑批次引用；
+refs 已改为 8 字节的批次/行引用，私有批次池只拥有一份 Arrow 载荷；
+可选引用同样为 8 字节，输出与 checkpoint 借用池中数据；
+最后一个行引用释放后删除批次并收缩稀疏索引，沿用 v2 计费与恢复校验；
 稀疏 identity-only 桶不分配载荷列，排序 key 使用树以避免逆序到达的二次搬移；
 right 接纳计数与 key 驻留同一遍计算，按接纳批次预留各列容量，接纳提交不再
 重复探测 identity-only 历史；输出 worker 仅持有唯一 Arrow 批次及位置索引；

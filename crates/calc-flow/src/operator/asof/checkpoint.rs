@@ -5,7 +5,9 @@ mod validation;
 
 use super::{
     StreamAsofJoinOperator, StreamAsofJoinStatus,
-    state::{BatchKey, Encoding, Inventory, PayloadBatch, RightBucket, RowPayload, State},
+    state::{
+        BatchKey, Encoding, Inventory, PayloadBatch, PayloadView, RightBucket, RowPayload, State,
+    },
 };
 use crate::{
     CalcFlowError, Epoch, IngressProgressSnapshot, OperatorStateSnapshot, Result, StateSegment,
@@ -277,7 +279,7 @@ impl StreamAsofJoinOperator {
             .as_ref()
             .map(|segment| BTreeMap::from([(INDEX_SEGMENT.into(), segment.canonical())]))
             .unwrap_or_default();
-        for (key, (batch, _)) in &self.state.batches {
+        for (key, (batch, _)) in self.state.batches.iter() {
             let encoded = batch.encoded.get().expect("prepared ASOF payload");
             segments.insert(index_v2::batch_segment(*key), encoded.clone());
         }
@@ -441,7 +443,7 @@ impl StreamAsofJoinOperator {
         let time = decoder.time()?;
         let key = Encoding::from_slice(decoder.blob()?);
         let sequence = Encoding::from_slice(decoder.blob()?);
-        let bytes = decoder.blob()?;
+        let bytes = decoder.payload_blob()?;
         let record = self.validate_payload(bytes, false, &(time, key.clone(), sequence.clone()))?;
         let identity = (time, key, sequence);
         if state
@@ -452,7 +454,7 @@ impl StreamAsofJoinOperator {
             return Err(mismatch("ASOF left identity order is not strict"));
         }
         let payload = legacy_payload((0, state.left.len() as u64), bytes, record)?;
-        state.attach(&payload);
+        let payload = state.attach(&payload);
         state.left.insert(identity, payload);
         Ok(())
     }
@@ -495,7 +497,7 @@ impl StreamAsofJoinOperator {
         decoder.row()?;
         let time = decoder.time()?;
         let sequence = self.decode_right_sequence(decoder)?;
-        let bytes = decoder.blob()?;
+        let bytes = decoder.payload_blob()?;
         let record = self.validate_right_payload(bytes, time, key, &sequence)?;
         let identity = (time, sequence);
         if bucket
@@ -508,8 +510,7 @@ impl StreamAsofJoinOperator {
             .map(|record| -> Result<_> {
                 let payload = legacy_payload((1, *next_id), bytes, record)?;
                 *next_id += 1;
-                state.attach(&payload);
-                Ok(payload)
+                Ok(state.attach(&payload))
             })
             .transpose()?;
         bucket.insert(identity, payload);
@@ -593,6 +594,8 @@ impl StreamAsofJoinOperator {
         &self,
         snapshot: &OperatorStateSnapshot,
     ) -> Result<BTreeMap<BatchKey, Arc<PayloadBatch>>> {
+        u32::try_from(snapshot.segments.len().saturating_sub(1))
+            .map_err(|_| mismatch("ASOF payload batches exceed compact reference range"))?;
         let mut batches = BTreeMap::new();
         for (name, encoded) in &snapshot.segments {
             if name == INDEX_SEGMENT {
@@ -617,7 +620,7 @@ impl StreamAsofJoinOperator {
         let record = super::codec::decode_table_batch(
             encoded.bytes(),
             &self.schema_digests[side],
-            self.spec.limits().max_state_rows(),
+            self.spec.limits().max_state_rows().min(u64::from(u32::MAX)),
         )
         .map_err(|_| mismatch("ASOF invalid Arrow batch encoding"))?;
         if record.schema() != self.schemas[side]
@@ -650,7 +653,7 @@ impl StreamAsofJoinOperator {
 
     fn indexed_batch_identities(&self, state: &State) -> Result<IdentityCache> {
         let mut identities = BTreeMap::new();
-        for (key, (batch, _)) in &state.batches {
+        for (key, (batch, _)) in state.batches.iter() {
             let side = if key.0 == 0 {
                 self.spec.left()
             } else {
@@ -676,7 +679,12 @@ impl StreamAsofJoinOperator {
                 &self.schemas[0],
                 self.spec.left().sequence_by(),
             )?;
-            validate_index_identity(identity, payload, identities, self.spec.left())?;
+            validate_index_identity(
+                identity,
+                state.batches.view(*payload),
+                identities,
+                self.spec.left(),
+            )?;
         }
         Ok(())
     }
@@ -684,7 +692,7 @@ impl StreamAsofJoinOperator {
     fn validate_right_indexed_rows(&self, state: &State, identities: &IdentityCache) -> Result<()> {
         for (key, bucket) in &state.right {
             super::identity::validate(key, &self.schemas[1], self.spec.right().keys())?;
-            self.validate_right_indexed_bucket(key, bucket, identities)?;
+            self.validate_right_indexed_bucket(key, bucket, identities, &state.batches)?;
         }
         Ok(())
     }
@@ -694,12 +702,18 @@ impl StreamAsofJoinOperator {
         key: &Encoding,
         bucket: &RightBucket,
         identities: &IdentityCache,
+        batches: &super::state::PayloadPool,
     ) -> Result<()> {
         for ((time, sequence), payload) in bucket {
             super::identity::validate(sequence, &self.schemas[1], self.spec.right().sequence_by())?;
             if let Some(payload) = payload {
                 let identity = (*time, key.clone(), sequence.clone());
-                validate_index_identity(&identity, payload, identities, self.spec.right())?;
+                validate_index_identity(
+                    &identity,
+                    batches.view(*payload),
+                    identities,
+                    self.spec.right(),
+                )?;
             }
         }
         Ok(())
@@ -917,7 +931,7 @@ fn verify_checksum(segment: &StateSegment) -> Result<()> {
 
 fn validate_index_identity(
     identity: &super::state::LeftOrder,
-    payload: &RowPayload,
+    payload: PayloadView<'_>,
     cache: &IdentityCache,
     side: &super::AsofJoinSide,
 ) -> Result<()> {
@@ -1487,9 +1501,10 @@ mod tests {
     #[test]
     fn asof_restore_rejects_identity_only_that_can_still_match_pending() {
         let mut state = State::default();
+        let payload = state.attach(&dummy_payload());
         state.left.insert(
             (105, Encoding::from_slice(&[1]), Encoding::from_slice(&[1])),
-            dummy_payload(),
+            payload,
         );
         state.right.insert(
             Encoding::from_slice(&[1]),
@@ -1510,9 +1525,10 @@ mod tests {
     #[test]
     fn asof_restore_rejects_ready_pending_before_stale_frontier() {
         let mut state = State::default();
+        let payload = state.attach(&dummy_payload());
         state.left.insert(
             (105, Encoding::from_slice(&[1]), Encoding::from_slice(&[1])),
-            dummy_payload(),
+            payload,
         );
         assert!(
             validate_progress(

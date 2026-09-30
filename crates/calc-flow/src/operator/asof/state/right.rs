@@ -1,12 +1,11 @@
-use super::{BatchKey, Encoding, PayloadBatch, RightOrder, RowPayload};
+use super::{Encoding, PayloadPool, RightOrder, RowRef};
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, BTreeSet, btree_set},
-    sync::Arc,
+    collections::{BTreeSet, btree_set},
 };
 
 type OrderRef<'a> = (&'a i64, &'a Encoding);
-type RightRow<'a> = (OrderRef<'a>, Option<&'a RowPayload>);
+type RightRow<'a> = (OrderRef<'a>, Option<&'a RowRef>);
 
 #[cfg(test)]
 thread_local! {
@@ -22,14 +21,14 @@ pub(super) fn take_column_moves() -> usize {
 /// the two lifetimes separate lets each sweep visit only an expired prefix.
 #[derive(Clone, Default)]
 pub(in super::super) struct RightBucket {
-    payloads: Option<Box<RightRun<Vec<Option<RowPayload>>>>>,
+    payloads: Option<Box<RightRun<Vec<Option<RowRef>>>>>,
     identities: RightRun<()>,
     // Older payloads can expire after later identity-only history was retained.
     // A tree absorbs those rows without shifting the whole identity column.
     general_identities: BTreeSet<RightOrder>,
 }
 
-static EMPTY_PAYLOADS: RightRun<Vec<Option<RowPayload>>> = RightRun {
+static EMPTY_PAYLOADS: RightRun<Vec<Option<RowRef>>> = RightRun {
     times: Vec::new(),
     sequences: Vec::new(),
     values: Vec::new(),
@@ -58,26 +57,26 @@ trait RunValues: Clone {
     fn compact(&mut self, head: usize);
 }
 
-impl RunValues for Vec<Option<RowPayload>> {
-    type Value = RowPayload;
+impl RunValues for Vec<Option<RowRef>> {
+    type Value = RowRef;
 
     fn with_capacity(capacity: usize) -> Self {
         Vec::with_capacity(capacity)
     }
 
-    fn get(&self, index: usize) -> &RowPayload {
+    fn get(&self, index: usize) -> &RowRef {
         self[index].as_ref().expect("live ASOF run value")
     }
 
-    fn push(&mut self, value: RowPayload) {
+    fn push(&mut self, value: RowRef) {
         Vec::push(self, Some(value));
     }
 
-    fn insert(&mut self, index: usize, value: RowPayload) {
+    fn insert(&mut self, index: usize, value: RowRef) {
         Vec::insert(self, index, Some(value));
     }
 
-    fn replace(&mut self, index: usize, value: RowPayload) {
+    fn replace(&mut self, index: usize, value: RowRef) {
         self[index] = Some(value);
     }
 
@@ -85,7 +84,7 @@ impl RunValues for Vec<Option<RowPayload>> {
         Vec::remove(self, index);
     }
 
-    fn take(&mut self, index: usize) -> RowPayload {
+    fn take(&mut self, index: usize) -> RowRef {
         self[index].take().expect("live ASOF run value")
     }
 
@@ -280,14 +279,14 @@ impl RightBucket {
 
     /// Admission already rejected every live identity collision. Do not
     /// search or compact the identity-only histories again for each new row.
-    pub fn insert_admitted(&mut self, order: RightOrder, payload: RowPayload) {
+    pub fn insert_admitted(&mut self, order: RightOrder, payload: RowRef) {
         self.payloads
             .as_mut()
             .expect("reserved ASOF payload columns")
             .insert(order, payload);
     }
 
-    fn payloads(&self) -> &RightRun<Vec<Option<RowPayload>>> {
+    fn payloads(&self) -> &RightRun<Vec<Option<RowRef>>> {
         self.payloads.as_deref().unwrap_or(&EMPTY_PAYLOADS)
     }
 
@@ -312,7 +311,7 @@ impl RightBucket {
     }
 
     #[cfg(test)]
-    pub fn values(&self) -> impl Iterator<Item = Option<&RowPayload>> {
+    pub fn values(&self) -> impl Iterator<Item = Option<&RowRef>> {
         self.iter().map(|(_, payload)| payload)
     }
 
@@ -348,7 +347,7 @@ impl RightBucket {
             || self.general_identities.contains(order)
     }
 
-    pub fn insert(&mut self, order: RightOrder, payload: Option<RowPayload>) {
+    pub fn insert(&mut self, order: RightOrder, payload: Option<RowRef>) {
         if let Some(payload) = payload {
             self.identities.remove(&order);
             self.general_identities.remove(&order);
@@ -367,7 +366,7 @@ impl RightBucket {
         }
     }
 
-    pub fn candidate(&self, time: i64, tolerance: u64) -> Option<&RowPayload> {
+    pub fn candidate(&self, time: i64, tolerance: u64) -> Option<&RowRef> {
         let payloads = self.payloads();
         let payload = payloads.head + payloads.prefix_len(|value| value <= time);
         let identity = self.identities.head + self.identities.prefix_len(|value| value <= time);
@@ -400,7 +399,7 @@ impl RightBucket {
         time: i64,
         tolerance: u64,
         next: &mut RightCursor,
-    ) -> Option<&RowPayload> {
+    ) -> Option<&RowRef> {
         let identity = later_identity(
             self.identities
                 .advance(time, &mut next.identity)
@@ -448,7 +447,7 @@ impl RightBucket {
         status: &super::super::StreamAsofJoinStatus,
         tolerance: u64,
         threshold: i128,
-        batches: &mut BTreeMap<BatchKey, (Arc<PayloadBatch>, usize)>,
+        batches: &mut PayloadPool,
     ) -> u64 {
         let identity_count = self
             .identities
@@ -470,7 +469,7 @@ impl RightBucket {
         let identities = &mut self.identities;
         let general = &mut self.general_identities;
         payloads.take_prefix(payload_count, |time, sequence, payload| {
-            super::detach_batch(batches, &payload);
+            batches.detach(payload);
             if !super::identity_expired(time, status) {
                 insert_identity(identities, general, (time, sequence));
             }
@@ -561,7 +560,7 @@ fn insert_identity(run: &mut RightRun<()>, general: &mut BTreeSet<RightOrder>, o
 }
 
 fn merge_row<'a>(
-    payload: Option<(OrderRef<'a>, &'a RowPayload)>,
+    payload: Option<(OrderRef<'a>, &'a RowRef)>,
     identity: Option<(OrderRef<'a>, &'a ())>,
 ) -> Option<RightRow<'a>> {
     match (payload, identity) {
@@ -574,7 +573,7 @@ fn merge_row<'a>(
     }
 }
 
-fn bounded_candidate(row: Option<RightRow<'_>>, time: i64, tolerance: u64) -> Option<&RowPayload> {
+fn bounded_candidate(row: Option<RightRow<'_>>, time: i64, tolerance: u64) -> Option<&RowRef> {
     let ((right_time, _), payload) = row?;
     (i128::from(*right_time) >= i128::from(time) - i128::from(tolerance))
         .then_some(payload)
@@ -651,8 +650,8 @@ impl<'a> IntoIterator for &'a RightBucket {
     }
 }
 
-impl FromIterator<(RightOrder, Option<RowPayload>)> for RightBucket {
-    fn from_iter<T: IntoIterator<Item = (RightOrder, Option<RowPayload>)>>(iter: T) -> Self {
+impl FromIterator<(RightOrder, Option<RowRef>)> for RightBucket {
+    fn from_iter<T: IntoIterator<Item = (RightOrder, Option<RowRef>)>>(iter: T) -> Self {
         let mut bucket = Self::new();
         for (order, payload) in iter {
             bucket.insert(order, payload);

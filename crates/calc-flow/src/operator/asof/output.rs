@@ -1,6 +1,6 @@
 //! Materialize an already matched ASOF prefix directly from Arrow batches.
 
-use super::state::{BatchKey, RowPayload};
+use super::state::{BatchKey, PayloadView};
 use crate::{Batch, BatchMetadata, DataFusionConfig, Result};
 use ahash::RandomState;
 use arrow_data::transform::MutableArrayData;
@@ -39,7 +39,7 @@ impl OutputRuntime {
 
     pub async fn materialize(
         &mut self,
-        rows: &[(&RowPayload, Option<&RowPayload>)],
+        rows: &[(PayloadView<'_>, Option<PayloadView<'_>>)],
         schema: &SchemaRef,
         workspace: MemoryReservation,
         check_cancelled: impl Fn() -> Result<()> + Send + Sync,
@@ -95,7 +95,7 @@ type SourceMap = HashMap<BatchKey, usize, RandomState>;
 
 impl OutputRows {
     async fn capture(
-        rows: &[(&RowPayload, Option<&RowPayload>)],
+        rows: &[(PayloadView<'_>, Option<PayloadView<'_>>)],
         check_cancelled: &(impl Fn() -> Result<()> + Sync),
     ) -> Result<Self> {
         let mut output = Self::empty(rows.len());
@@ -124,7 +124,7 @@ impl OutputRows {
     }
 
     #[cfg(test)]
-    fn new(rows: &[(&RowPayload, Option<&RowPayload>)]) -> Self {
+    fn new(rows: &[(PayloadView<'_>, Option<PayloadView<'_>>)]) -> Self {
         let mut output = Self::empty(rows.len());
         let mut left_sources = SourceMap::with_hasher(RandomState::new());
         let mut right_sources = SourceMap::with_hasher(RandomState::new());
@@ -144,7 +144,7 @@ impl OutputSide {
         }
     }
 
-    fn push(&mut self, selected: Option<&RowPayload>, by_key: &mut SourceMap) {
+    fn push(&mut self, selected: Option<PayloadView<'_>>, by_key: &mut SourceMap) {
         let Some(row) = selected else {
             self.positions.push((usize::MAX, 0));
             return;
@@ -259,7 +259,7 @@ impl<'a> GatherPlan<'a> {
 
 #[cfg(test)]
 fn materialize_rows(
-    rows: &[(&RowPayload, Option<&RowPayload>)],
+    rows: &[(PayloadView<'_>, Option<PayloadView<'_>>)],
     schema: &SchemaRef,
 ) -> Result<Batch> {
     let owned = OutputRows::new(rows);

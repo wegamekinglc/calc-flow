@@ -512,10 +512,15 @@ impl Admission {
         status: &mut StreamAsofJoinStatus,
     ) {
         if ingress == "left" {
-            for (_, payload) in &self.rows {
-                state.attach(payload);
-            }
-            state.left.append_admission(std::mem::take(&mut self.rows));
+            let rows = self
+                .rows
+                .drain(..)
+                .map(|(identity, payload)| {
+                    let reference = state.attach(&payload);
+                    (identity, reference)
+                })
+                .collect();
+            state.left.append_admission(rows);
             status.left.accepted_rows = self.accepted;
         } else {
             for (key, count) in self.right_capacities.drain(..) {
@@ -525,7 +530,7 @@ impl Admission {
                     .reserve_payloads(count);
             }
             for (identity, payload) in self.rows.drain(..) {
-                state.attach(&payload);
+                let payload = state.attach(&payload);
                 state.right_payload_min = Some(
                     state
                         .right_payload_min

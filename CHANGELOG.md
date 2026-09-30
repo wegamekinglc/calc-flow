@@ -90,6 +90,12 @@ measurements. Use the current guides for supported behavior.
   their batch converter. Tight hash workspace
   uses scalar probing with the same equality semantics.
 
+- 2026-09-30: Retain ASOF payload rows as eight-byte batch and row handles.
+  One private pool owns each Arrow payload batch, releases it after its final
+  row reference, and trims its indexes as history contracts. Output and
+  checkpoint preparation borrow pool entries. Canonical v2 checkpoint bytes,
+  state charges, and strict v1/v2 recovery checks remain compatible.
+
 - 2026-09-29: Require immutable `Program(engine="sql")` or
   `Program(engine="streaming")` selection at construction and add
   `Program.execute(inputs)` dispatch. SQL returns named Arrow tables;

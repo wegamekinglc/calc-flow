@@ -1,6 +1,6 @@
 use super::{
     StreamAsofJoinOperator, StreamAsofJoinStatus, SweepStamp, checked, reason,
-    state::{self, BatchKey, LeftPrefix, RowPayload},
+    state::{self, BatchKey, LeftPrefix, PayloadView},
     workspace::ColumnWorkspace,
 };
 use crate::{
@@ -21,7 +21,7 @@ struct PreparedOutput {
 }
 
 struct MatchedPrefix<'a> {
-    rows: Vec<(&'a RowPayload, Option<&'a RowPayload>)>,
+    rows: Vec<(PayloadView<'a>, Option<PayloadView<'a>>)>,
     prefix: LeftPrefix,
 }
 
@@ -303,8 +303,13 @@ fn binary_search_candidate_rows<'a>(
         if index % 1_024 == 0 {
             context.check_cancelled()?;
         }
-        rows.push((left, state.candidate(&key.1, key.0, tolerance)));
-        prefix.visit(key, left, name)?;
+        rows.push((
+            state.batches.view(*left),
+            state
+                .candidate(&key.1, key.0, tolerance)
+                .map(|row| state.batches.view(*row)),
+        ));
+        prefix.visit(key, *left, &state.batches, name)?;
     }
     Ok(MatchedPrefix { rows, prefix })
 }
@@ -335,8 +340,11 @@ fn monotonic_candidate_rows<'a>(
         let right = cursors
             .get_mut(&key.1)
             .and_then(|(bucket, next)| bucket.candidate_monotonic(key.0, tolerance, next));
-        rows.push((left, right));
-        prefix.visit(key, left, name)?;
+        rows.push((
+            state.batches.view(*left),
+            right.map(|row| state.batches.view(*row)),
+        ));
+        prefix.visit(key, *left, &state.batches, name)?;
     }
     Ok(MatchedPrefix { rows, prefix })
 }
@@ -355,7 +363,7 @@ fn retryable(error: &CalcFlowError) -> bool {
 fn prefix_workspace_bytes(count: usize) -> u64 {
     // Candidate references, batch-reference count tree (including a minimum
     // leaf), and allocator slack. No owned identity vector is constructed.
-    (count * (size_of::<(&RowPayload, Option<&RowPayload>)>() + 96) + 256) as u64
+    (count * (size_of::<(PayloadView<'_>, Option<PayloadView<'_>>)>() + 96) + 256) as u64
 }
 
 fn shrink_prefix_workspace(count: usize, reservation: &MemoryReservation) {
@@ -369,7 +377,7 @@ fn shrink_prefix_workspace(count: usize, reservation: &MemoryReservation) {
 /// actual Arrow slice widths, including repeated right candidates; the fourfold
 /// multiplier covers a growing output buffer and a simultaneous old buffer.
 fn output_workspace(
-    rows: &[(&RowPayload, Option<&RowPayload>)],
+    rows: &[(PayloadView<'_>, Option<PayloadView<'_>>)],
     right_schema: &datafusion::arrow::datatypes::Schema,
     workspace: &mut MemoryReservation,
     name: &str,
@@ -385,7 +393,7 @@ fn output_workspace(
 }
 
 fn raw_output_bytes(
-    rows: &[(&RowPayload, Option<&RowPayload>)],
+    rows: &[(PayloadView<'_>, Option<PayloadView<'_>>)],
     columns: &mut BTreeMap<BatchKey, Vec<ColumnWorkspace>>,
     workspace: &mut MemoryReservation,
     name: &str,
@@ -401,7 +409,7 @@ fn raw_output_bytes(
 }
 
 fn output_buffer_bytes(
-    rows: &[(&RowPayload, Option<&RowPayload>)],
+    rows: &[(PayloadView<'_>, Option<PayloadView<'_>>)],
     right_schema: &datafusion::arrow::datatypes::Schema,
     raw: u64,
     name: &str,
@@ -462,7 +470,7 @@ fn workspace_overflow(name: &str) -> CalcFlowError {
 }
 
 fn row_slice_bytes(
-    row: &RowPayload,
+    row: &PayloadView<'_>,
     cache: &mut BTreeMap<BatchKey, Vec<ColumnWorkspace>>,
     workspace: &mut MemoryReservation,
     name: &str,
@@ -573,7 +581,7 @@ mod workspace_tests {
             .unwrap(),
         );
         let payloads = (0..4)
-            .map(|id| RowPayload {
+            .map(|id| state::RowPayload {
                 batch: Arc::new(state::PayloadBatch {
                     key: (0, id),
                     record: record.clone(),
@@ -584,7 +592,10 @@ mod workspace_tests {
                 row: 0,
             })
             .collect::<Vec<_>>();
-        let rows = payloads.iter().map(|row| (row, None)).collect::<Vec<_>>();
+        let rows = payloads
+            .iter()
+            .map(|row| (row.view(), None))
+            .collect::<Vec<_>>();
         let mut reservation = MemoryConsumer::new("asof-test-output").register(&pool);
         reservation.try_grow(16 * 1024).unwrap();
         assert!(matches!(

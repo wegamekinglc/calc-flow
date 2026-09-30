@@ -5,6 +5,7 @@ pub(super) struct Decoder<'a> {
     bytes: &'a [u8],
     max_rows: u64,
     rows: u64,
+    payloads: u64,
 }
 
 impl<'a> Decoder<'a> {
@@ -13,6 +14,7 @@ impl<'a> Decoder<'a> {
             bytes,
             max_rows,
             rows: 0,
+            payloads: 0,
         }
     }
 
@@ -22,6 +24,9 @@ impl<'a> Decoder<'a> {
         }
         let left = self.count()?;
         let buckets = self.count()?;
+        if left > u64::from(u32::MAX) {
+            return Err(mismatch("ASOF payload count exceeds handle domain"));
+        }
         if buckets > u64::from(u32::MAX) {
             return Err(mismatch("ASOF key count exceeds handle domain"));
         }
@@ -72,6 +77,18 @@ impl<'a> Decoder<'a> {
         self.take(size)
     }
 
+    pub(super) fn payload_blob(&mut self) -> Result<&'a [u8]> {
+        let payload = self.blob()?;
+        if !payload.is_empty() {
+            self.payloads = self
+                .payloads
+                .checked_add(1)
+                .filter(|count| u32::try_from(*count).is_ok())
+                .ok_or_else(|| mismatch("ASOF payload count exceeds handle domain"))?;
+        }
+        Ok(payload)
+    }
+
     pub(super) fn finish(&self, message: &str) -> Result<()> {
         if !self.bytes.is_empty() {
             return Err(mismatch(message));
@@ -92,7 +109,9 @@ impl DecodeCharge {
         decoder.time()?;
         self.largest_identity = self.largest_identity.max(decoder.blob()?.len() as u64);
         self.largest_identity = self.largest_identity.max(decoder.blob()?.len() as u64);
-        self.largest_payload = self.largest_payload.max(decoder.blob()?.len() as u64);
+        self.largest_payload = self
+            .largest_payload
+            .max(decoder.payload_blob()?.len() as u64);
         Ok(())
     }
 
@@ -109,7 +128,9 @@ impl DecodeCharge {
         decoder.row()?;
         decoder.time()?;
         self.largest_identity = self.largest_identity.max(decoder.blob()?.len() as u64);
-        self.largest_payload = self.largest_payload.max(decoder.blob()?.len() as u64);
+        self.largest_payload = self
+            .largest_payload
+            .max(decoder.payload_blob()?.len() as u64);
         Ok(())
     }
 
@@ -143,6 +164,37 @@ pub(super) fn restore_charge(bytes: &[u8], max_rows: u64) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn v1_payload_counter_rejects_overflow_but_allows_identity_only_rows() {
+        let mut bytes = Vec::from(0_u64.to_le_bytes());
+        bytes.extend_from_slice(&1_u64.to_le_bytes());
+        bytes.push(9);
+        let mut decoder = Decoder::new(&bytes, u64::MAX);
+        decoder.payloads = u64::from(u32::MAX);
+        assert!(decoder.payload_blob().unwrap().is_empty());
+        let error = decoder.payload_blob().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("payload count exceeds handle domain")
+        );
+    }
+
+    #[test]
+    fn v1_header_rejects_unaddressable_left_payload_count_before_reading_rows() {
+        let count = u64::from(u32::MAX) + 1;
+        let mut bytes = Vec::from(MAGIC.as_slice());
+        bytes.extend_from_slice(&count.to_le_bytes());
+        bytes.extend_from_slice(&0_u64.to_le_bytes());
+        let error = restore_charge(&bytes, count).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("payload count exceeds handle domain"),
+            "{error}"
+        );
+    }
 
     #[test]
     fn v1_header_rejects_unaddressable_key_count_before_reading_rows() {

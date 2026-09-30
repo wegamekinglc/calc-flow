@@ -247,6 +247,9 @@ the managed runtime first awaits asynchronous preparation before capture.
 Right key dictionaries use private integer handles for lookup. Checkpoint
 preparation reserves key sorting scratch and writes canonical key-byte order;
 the managed async path performs that sort on a blocking worker.
+Retained payload rows use eight-byte batch/row references to one owning batch
+pool. Finalized and evicted references release their batch when its final row
+is removed, and sparse pool indexes shrink within the existing batch charge.
 
 Finalization takes ready rows up to the smaller of the output edge's row budget
 and 64,000 rows. Key and candidate vectors reserve workspace before allocation;

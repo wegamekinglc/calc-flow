@@ -1,4 +1,7 @@
-use super::super::{codec, state::PayloadBatch};
+use super::super::{
+    codec,
+    state::{PayloadBatch, RowPayload},
+};
 use super::*;
 use crate::{AsofJoinSide, AsofStateLimits, StateSegment, StreamAsofJoinSpec};
 use datafusion::execution::memory_pool::MemoryConsumer;
@@ -86,9 +89,9 @@ fn direct_materialization_preserves_order_and_missing_right_rows() {
     let third = RowPayload { batch, row: 1 };
     let result = materialize_rows(
         &[
-            (&third, Some(&first)),
-            (&first, None),
-            (&second, Some(&third)),
+            (third.view(), Some(first.view())),
+            (first.view(), None),
+            (second.view(), Some(third.view())),
         ],
         &schemas[2],
     )
@@ -117,7 +120,7 @@ async fn cancelled_materialization_keeps_runtime_reusable() {
     let (_, schemas, bytes) = fixture();
     let mut runtime = OutputRuntime::new(1_048_576);
     let pool = runtime.pool.clone();
-    let rows = [(&bytes, Some(&bytes))];
+    let rows = [(bytes.view(), Some(bytes.view()))];
     let reservation = MemoryConsumer::new("test-output").register(&runtime.pool);
     let mut future = Box::pin(runtime.materialize(&rows, &schemas[2], reservation, || Ok(())));
     assert!(futures::poll!(future.as_mut()).is_pending());
@@ -137,7 +140,7 @@ async fn large_materialization_leaves_executor_available_for_timers() {
     let (_, schemas, row) = fixture();
     let mut runtime = OutputRuntime::new(1_048_576);
     let rows = (0..64_000)
-        .map(|index| (&row, (index % 2 == 0).then_some(&row)))
+        .map(|index| (row.view(), (index % 2 == 0).then_some(row.view())))
         .collect::<Vec<_>>();
     let timer_fired = Arc::new(AtomicBool::new(false));
     let signal = timer_fired.clone();
@@ -171,7 +174,7 @@ async fn cancellation_during_manifest_capture_releases_its_workspace() {
         crate::StreamJobContext::new(1, "asof", crate::JsonMap::new(), None, cancellation.clone());
     let context = crate::StreamOperatorContext::new(&job, "asof", None);
     let calls = std::sync::atomic::AtomicUsize::new(0);
-    let rows = vec![(&row, Some(&row)); 2_048];
+    let rows = vec![(row.view(), Some(row.view())); 2_048];
     let reservation = MemoryConsumer::new("test-output").register(&runtime.pool);
     reservation.try_grow(4_096).unwrap();
     let result = runtime
@@ -196,7 +199,7 @@ async fn materialization_worker_owns_unique_batches_without_row_payload_clones()
     let (started_tx, started_rx) = std::sync::mpsc::channel();
     let gate = Arc::new(std::sync::Barrier::new(2));
     runtime.worker_gate = Some((started_tx, gate.clone()));
-    let rows = vec![(&row, Some(&row)); 128];
+    let rows = vec![(row.view(), Some(row.view())); 128];
     let before = Arc::strong_count(&row.batch);
     let reservation = MemoryConsumer::new("test-output").register(&runtime.pool);
     let mut future = Box::pin(runtime.materialize(&rows, &schemas[2], reservation, || Ok(())));
@@ -219,7 +222,7 @@ async fn dropped_materialization_keeps_worker_memory_reserved_until_exit() {
     runtime.worker_gate = Some((started_tx, gate.clone()));
     let reservation = MemoryConsumer::new("test-output").register(&runtime.pool);
     reservation.try_grow(4_096).unwrap();
-    let rows = [(&row, Some(&row))];
+    let rows = [(row.view(), Some(row.view()))];
     let mut future = Box::pin(runtime.materialize(&rows, &schemas[2], reservation, || Ok(())));
     assert!(futures::poll!(future.as_mut()).is_pending());
     assert!(futures::poll!(future.as_mut()).is_pending());

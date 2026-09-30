@@ -5,7 +5,7 @@ use super::{
     super::{
         checked,
         codec::BoundedWriter,
-        state::{BatchKey, Encoding, LeftOrder, RightBucket, RowPayload, State},
+        state::{BatchKey, Encoding, LeftOrder, PayloadView, RightBucket, RowPayload, State},
     },
     mismatch,
 };
@@ -179,7 +179,7 @@ async fn write_left_async(
     context: &StreamOperatorContext<'_>,
 ) -> Result<()> {
     for (ordinal, ((time, key, sequence), payload)) in state.left.iter().enumerate() {
-        write_left(writer, *time, key, sequence, payload)?;
+        write_left(writer, *time, key, sequence, state.batches.view(*payload))?;
         checkpoint_tick(ordinal + 1, context).await?;
     }
     Ok(())
@@ -196,7 +196,12 @@ async fn write_right_async(
         let bucket = state.right.bucket_by_id(*id);
         write_bucket_header(writer, key, bucket.len())?;
         for ((time, sequence), payload) in bucket {
-            write_right(writer, *time, sequence, payload)?;
+            write_right(
+                writer,
+                *time,
+                sequence,
+                payload.map(|row| state.batches.view(*row)),
+            )?;
             ordinal += 1;
             checkpoint_tick(ordinal, context).await?;
         }
@@ -230,12 +235,17 @@ pub(super) fn encode_sync(state: &State, length: u64, limit: usize) -> Result<St
 
 fn write_state_sync(writer: &mut BoundedWriter<'_>, state: &State) -> Result<()> {
     for ((time, key, sequence), payload) in &state.left {
-        write_left(writer, *time, key, sequence, payload)?;
+        write_left(writer, *time, key, sequence, state.batches.view(*payload))?;
     }
     for (key, bucket) in state.right.ordered_iter() {
         write_bucket_header(writer, key, bucket.len())?;
         for ((time, sequence), payload) in bucket {
-            write_right(writer, *time, sequence, payload)?;
+            write_right(
+                writer,
+                *time,
+                sequence,
+                payload.map(|row| state.batches.view(*row)),
+            )?;
         }
     }
     Ok(())
@@ -252,7 +262,7 @@ fn write_left(
     time: i64,
     key: &Encoding,
     sequence: &Encoding,
-    payload: &RowPayload,
+    payload: PayloadView<'_>,
 ) -> Result<()> {
     let time = time.to_le_bytes();
     let key_len = (key.len() as u64).to_le_bytes();
@@ -281,7 +291,7 @@ fn write_right(
     writer: &mut BoundedWriter<'_>,
     time: i64,
     sequence: &Encoding,
-    payload: Option<&RowPayload>,
+    payload: Option<PayloadView<'_>>,
 ) -> Result<()> {
     let time = time.to_le_bytes();
     let sequence_len = (sequence.len() as u64).to_le_bytes();
@@ -297,7 +307,7 @@ fn write_right(
     }
 }
 
-fn ref_bytes(row: &RowPayload) -> [u8; 17] {
+fn ref_bytes(row: PayloadView<'_>) -> [u8; 17] {
     let mut bytes = [0; 17];
     bytes[0] = row.batch.key.0;
     bytes[1..9].copy_from_slice(&row.batch.key.1.to_le_bytes());
@@ -370,6 +380,8 @@ impl<'a> Reader<'a> {
         let key = (actual_side, self.integer()?);
         let row = usize::try_from(self.integer()?)
             .map_err(|_| mismatch("ASOF row offset exceeds address domain"))?;
+        u32::try_from(row)
+            .map_err(|_| mismatch("ASOF row offset exceeds compact reference range"))?;
         let batch = batches
             .get(&key)
             .ok_or_else(|| mismatch("ASOF index references a missing batch"))?;
@@ -501,7 +513,7 @@ fn decode_left_index(
         {
             return Err(mismatch("ASOF left index order is not strict"));
         }
-        state.attach(&payload);
+        let payload = state.attach(&payload);
         state.left.insert(identity, payload);
     }
     Ok(())
@@ -556,9 +568,7 @@ fn decode_right_bucket(
         {
             return Err(mismatch("ASOF right index order is not strict"));
         }
-        if let Some(payload) = &payload {
-            state.attach(payload);
-        }
+        let payload = payload.as_ref().map(|payload| state.attach(payload));
         bucket.insert(identity, payload);
     }
     Ok(bucket)

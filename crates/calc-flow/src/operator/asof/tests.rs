@@ -24,6 +24,24 @@ struct RetainedPayloadCollector {
 }
 
 #[tokio::test]
+async fn retained_payload_batch_has_one_state_owner() {
+    let (mut op, input) = fixture();
+    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+    let cx = StreamOperatorContext::new(&job, "asof", None);
+    let mut output = EdgeCollector::new(op.output_ports().to_vec());
+    op.process_data("right", input, &cx, &mut output)
+        .await
+        .unwrap();
+    for (batch, _) in op.state.batches.values() {
+        assert_eq!(
+            Arc::strong_count(batch),
+            1,
+            "retained rows must refer to a batch through compact pool handles"
+        );
+    }
+}
+
+#[tokio::test]
 async fn later_admission_reuses_the_resident_right_key_bytes() {
     let (mut op, initial) = fixture();
     let schema = initial.table_payload().unwrap().batches()[0].schema();
@@ -309,9 +327,10 @@ async fn full_admission_of_a_tiny_slice_compacts_large_backing_buffers() {
         .values()
         .next()
         .unwrap();
-    let bytes = retained
-        .as_ref()
-        .unwrap()
+    let bytes = op
+        .state
+        .batches
+        .view(**retained.as_ref().unwrap())
         .batch
         .record
         .column(0)
@@ -350,7 +369,14 @@ async fn full_admission_does_not_retain_unbilled_small_slice_tail() {
         .next()
         .unwrap()
         .unwrap();
-    let data = retained.batch.record.column(0).to_data();
+    let data = op
+        .state
+        .batches
+        .view(*retained)
+        .batch
+        .record
+        .column(0)
+        .to_data();
     assert!(
         data.get_buffer_memory_size() < 64,
         "admitted slice retained backing bytes outside its charged payload"
@@ -378,19 +404,7 @@ async fn finalization_without_eviction_does_not_clone_retained_state() {
     op.process_data("left", left, &cx, &mut preload)
         .await
         .unwrap();
-    let payload = op
-        .state
-        .right
-        .values()
-        .next()
-        .unwrap()
-        .values()
-        .next()
-        .unwrap()
-        .as_ref()
-        .unwrap()
-        .batch
-        .clone();
+    let payload = op.state.batches.values().next().unwrap().0.clone();
     let owners = Arc::strong_count(&payload);
     let mut output = RetainedPayloadCollector {
         payload,
