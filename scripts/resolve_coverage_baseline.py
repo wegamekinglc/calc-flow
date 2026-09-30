@@ -296,13 +296,17 @@ def _utc_time(value: object) -> datetime:
         ) from error
 
 
-def _check_artifact(artifact: dict, run: dict, job: dict) -> None:
+def _check_artifact_content(artifact: dict) -> None:
     if artifact["expired"] is not False or not re.fullmatch(
         r"sha256:[0-9a-f]{64}", artifact.get("digest") or ""
     ):
         raise ValueError("coverage artifact is expired or has no SHA256 digest")
     if type(artifact["size_in_bytes"]) is not int or artifact["size_in_bytes"] <= 0:
         raise ValueError("coverage artifact is empty")
+
+
+def _check_artifact(artifact: dict, run: dict, job: dict) -> None:
+    _check_artifact_content(artifact)
     expected = {
         "id": run["id"],
         "head_sha": run["head_sha"],

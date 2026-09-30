@@ -190,31 +190,7 @@ impl<'a> GatherPlan<'a> {
         Self {
             batches: &rows.batches,
             spans,
-            positions: right.then(|| {
-                if rows
-                    .positions
-                    .iter()
-                    .any(|(source, _)| *source == usize::MAX)
-                {
-                    Cow::Owned(
-                        rows.positions
-                            .iter()
-                            .map(|&(source, row)| {
-                                (
-                                    if source == usize::MAX {
-                                        rows.batches.len()
-                                    } else {
-                                        source
-                                    },
-                                    row,
-                                )
-                            })
-                            .collect(),
-                    )
-                } else {
-                    Cow::Borrowed(rows.positions.as_slice())
-                }
-            }),
+            positions: right.then(|| right_positions(rows)),
         }
     }
 
@@ -254,6 +230,32 @@ impl<'a> GatherPlan<'a> {
             mutable.extend(span.source, span.start, span.end);
         }
         Ok(make_array(mutable.freeze()))
+    }
+}
+
+fn right_positions(rows: &OutputSide) -> Cow<'_, [(usize, usize)]> {
+    if rows
+        .positions
+        .iter()
+        .any(|(source, _)| *source == usize::MAX)
+    {
+        Cow::Owned(
+            rows.positions
+                .iter()
+                .map(|&(source, row)| {
+                    (
+                        if source == usize::MAX {
+                            rows.batches.len()
+                        } else {
+                            source
+                        },
+                        row,
+                    )
+                })
+                .collect(),
+        )
+    } else {
+        Cow::Borrowed(rows.positions.as_slice())
     }
 }
 

@@ -9,6 +9,7 @@ use crate::operator::asof::{
 };
 use crate::{Result, StreamCollector, StreamOperatorContext, StreamingFailureReason};
 use datafusion::execution::memory_pool::MemoryReservation;
+use std::future::Future;
 
 struct PreparedPrefix {
     segment: Option<PreparedSegment>,
@@ -180,15 +181,22 @@ impl StreamAsofJoinOperator {
         // The reservation and immutable metadata follow detached work, so
         // cancellation cannot release its workspace before its buffers.
         let worker = drain_worker(workspace, move || input.prepare());
-        let prepared = tokio::select! {
-            result = worker => result?,
-            () = context.job().cancellation().cancelled() => {
-                context.check_cancelled()?;
-                unreachable!("cancelled ASOF prefix compaction")
-            }
-        };
+        let prepared = await_drain(worker, context).await?;
         context.check_cancelled()?;
         Ok(prepared)
+    }
+}
+
+async fn await_drain(
+    worker: impl Future<Output = Result<(PreparedLeftDrain, MemoryReservation)>>,
+    context: &StreamOperatorContext<'_>,
+) -> Result<(PreparedLeftDrain, MemoryReservation)> {
+    tokio::select! {
+        result = worker => result,
+        () = context.job().cancellation().cancelled() => {
+            context.check_cancelled()?;
+            unreachable!("cancelled ASOF prefix compaction")
+        }
     }
 }
 

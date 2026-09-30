@@ -431,14 +431,37 @@ impl State {
                 41 + key.len() as u64 + sequence.len() as u64,
             )?;
         } else {
-            if !self.right.contains_key(key) && seen.buckets.insert(key.clone()) {
-                validate_key_count(self.right.len() as u64 + seen.buckets.len() as u64, name)?;
-                inventory.charge_allocation(key, name)?;
-                *index_len = super::checked(name, *index_len, 16 + key.len() as u64)?;
-            }
-            inventory.charge_right(sequence, Some(payload), name)?;
-            *index_len = super::checked(name, *index_len, 34 + sequence.len() as u64)?;
+            self.project_right_admission_row(inventory, index_len, row, seen, name)?;
         }
+        self.project_admitted_batch(inventory, payload, seen, name)
+    }
+
+    fn project_right_admission_row(
+        &self,
+        inventory: &mut Inventory,
+        index_len: &mut u64,
+        row: &(LeftOrder, RowPayload),
+        seen: &mut AdmissionSeen,
+        name: &str,
+    ) -> Result<()> {
+        let ((_, key, sequence), payload) = row;
+        if !self.right.contains_key(key) && seen.buckets.insert(key.clone()) {
+            validate_key_count(self.right.len() as u64 + seen.buckets.len() as u64, name)?;
+            inventory.charge_allocation(key, name)?;
+            *index_len = super::checked(name, *index_len, 16 + key.len() as u64)?;
+        }
+        inventory.charge_right(sequence, Some(payload), name)?;
+        *index_len = super::checked(name, *index_len, 34 + sequence.len() as u64)?;
+        Ok(())
+    }
+
+    fn project_admitted_batch(
+        &self,
+        inventory: &mut Inventory,
+        payload: &RowPayload,
+        seen: &mut AdmissionSeen,
+        name: &str,
+    ) -> Result<()> {
         if seen.batches.insert(payload.batch.key) {
             validate_key_count(self.batches.len() as u64 + seen.batches.len() as u64, name)?;
             inventory.bytes =

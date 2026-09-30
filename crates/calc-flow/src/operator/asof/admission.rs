@@ -71,23 +71,7 @@ impl InputKeys {
         let encoding = if let Some(existing) = resident.encoding_hashed(hash, bytes) {
             existing.clone()
         } else {
-            if !state::Encoding::fits_inline(bytes) {
-                if self.workspace.is_none() {
-                    self.workspace = Some(operator.reserve_workspace(0)?);
-                }
-                self.workspace
-                    .as_ref()
-                    .expect("ASOF key copy workspace")
-                    .try_grow(bytes.len())
-                    .map_err(|_| {
-                        reason(
-                            name,
-                            StreamingFailureReason::AsofWorkspaceLimitExceeded,
-                            "ASOF owned key copies exceed max_state_bytes workspace",
-                        )
-                    })?;
-            }
-            state::Encoding::from_slice(bytes)
+            self.copy_owned_key(bytes, operator)?
         };
         self.values.push(AdmittedKey {
             encoding: encoding.clone(),
@@ -97,6 +81,30 @@ impl InputKeys {
         self.index
             .insert_unique(hash, id, |id| self.values[*id as usize].hash);
         Ok(encoding)
+    }
+
+    fn copy_owned_key(
+        &mut self,
+        bytes: &[u8],
+        operator: &StreamAsofJoinOperator,
+    ) -> Result<state::Encoding> {
+        if !state::Encoding::fits_inline(bytes) {
+            if self.workspace.is_none() {
+                self.workspace = Some(operator.reserve_workspace(0)?);
+            }
+            self.workspace
+                .as_ref()
+                .expect("ASOF key copy workspace")
+                .try_grow(bytes.len())
+                .map_err(|_| {
+                    reason(
+                        &operator.name,
+                        StreamingFailureReason::AsofWorkspaceLimitExceeded,
+                        "ASOF owned key copies exceed max_state_bytes workspace",
+                    )
+                })?;
+        }
+        Ok(state::Encoding::from_slice(bytes))
     }
 }
 
@@ -137,22 +145,8 @@ impl<'a> InputEncodings<'a> {
                 ))
             })
             .transpose()?;
-        let hash_workspace = columns
-            .as_ref()
-            .filter(|(keys, _)| {
-                input.index == 1 && matches!(keys, state::EncodedColumns::Binary(_))
-            })
-            .and_then(|_| {
-                operator
-                    .reserve_workspace((batch.num_rows() as u64).saturating_mul(8))
-                    .ok()
-            });
-        let hashes = match (&columns, &hash_workspace) {
-            (Some((keys, _)), Some(_)) => {
-                Some(keys.hashes(operator.state.right.hasher(), batch.num_rows())?)
-            }
-            _ => None,
-        };
+        let (hashes, hash_workspace) =
+            Self::batch_key_hashes(operator, batch, input, columns.as_ref())?;
         let range = if columns.is_some() {
             0..batch.num_rows()
         } else {
@@ -167,6 +161,30 @@ impl<'a> InputEncodings<'a> {
             input,
             range,
         }))
+    }
+
+    fn batch_key_hashes(
+        operator: &StreamAsofJoinOperator,
+        batch: &RecordBatch,
+        input: ValidatedInput,
+        columns: Option<&(state::EncodedColumns, state::EncodedColumns)>,
+    ) -> Result<(Option<Vec<u64>>, Option<MemoryReservation>)> {
+        let workspace = columns
+            .filter(|(keys, _)| {
+                input.index == 1 && matches!(keys, state::EncodedColumns::Binary(_))
+            })
+            .and_then(|_| {
+                operator
+                    .reserve_workspace((batch.num_rows() as u64).saturating_mul(8))
+                    .ok()
+            });
+        let hashes = match (columns, &workspace) {
+            (Some((keys, _)), Some(_)) => {
+                Some(keys.hashes(operator.state.right.hasher(), batch.num_rows())?)
+            }
+            _ => None,
+        };
+        Ok((hashes, workspace))
     }
 
     fn with_row<R>(
@@ -469,28 +487,49 @@ fn count_duplicate_identities<'a>(
     identities: impl ExactSizeIterator<Item = &'a LeftOrder> + Clone,
     context: &StreamOperatorContext<'_>,
 ) -> Result<u64> {
-    let sorted = identities_are_sorted(identities.clone(), context)?;
-    let skip_resident = sorted && identities_are_after_state(state, side, identities.clone());
-    let mut seen =
-        (!sorted).then(|| HashSet::with_capacity_and_hasher(identities.len(), RandomState::new()));
+    let (skip_resident, mut seen) = prepare_duplicate_probes(state, side, &identities, context)?;
     let mut previous = None;
     let mut duplicates = 0;
     for (position, identity) in identities.enumerate() {
         if position % 1_024 == 0 {
             context.check_cancelled()?;
         }
-        let repeated = if let Some(seen) = &mut seen {
-            !seen.insert(identity.clone())
-        } else {
-            previous == Some(identity)
-        };
-        if repeated || (!skip_resident && state.contains_identity(side, identity)) {
+        if repeated_identity(state, side, identity, &mut seen, previous, skip_resident) {
             duplicates += 1;
         }
         previous = Some(identity);
     }
     context.check_cancelled()?;
     Ok(duplicates)
+}
+
+fn prepare_duplicate_probes<'a>(
+    state: &state::State,
+    side: usize,
+    identities: &(impl ExactSizeIterator<Item = &'a LeftOrder> + Clone),
+    context: &StreamOperatorContext<'_>,
+) -> Result<(bool, Option<HashSet<LeftOrder, RandomState>>)> {
+    let sorted = identities_are_sorted((*identities).clone(), context)?;
+    let skip_resident = sorted && identities_are_after_state(state, side, (*identities).clone());
+    let seen =
+        (!sorted).then(|| HashSet::with_capacity_and_hasher(identities.len(), RandomState::new()));
+    Ok((skip_resident, seen))
+}
+
+fn repeated_identity(
+    state: &state::State,
+    side: usize,
+    identity: &LeftOrder,
+    seen: &mut Option<HashSet<LeftOrder, RandomState>>,
+    previous: Option<&LeftOrder>,
+    skip_resident: bool,
+) -> bool {
+    let repeated = if let Some(seen) = seen {
+        !seen.insert(identity.clone())
+    } else {
+        previous == Some(identity)
+    };
+    repeated || (!skip_resident && state.contains_identity(side, identity))
 }
 
 fn identities_are_sorted<'a>(

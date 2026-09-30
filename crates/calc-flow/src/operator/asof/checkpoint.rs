@@ -33,6 +33,18 @@ const INDEX_SEGMENT: &str = index_v2::INDEX_SEGMENT;
 type IdentityCache =
     BTreeMap<BatchKey, (super::state::EncodedColumns, super::state::EncodedColumns)>;
 
+fn encode_payloads(
+    pending: Vec<Arc<PayloadBatch>>,
+    _workspace: MemoryReservation,
+    limit: usize,
+    name: &str,
+) -> Result<()> {
+    for batch in pending {
+        batch.ensure_encoded(limit, name)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 pub(super) struct PreparedCheckpoint {
     pub segment: Option<PreparedSegment>,
@@ -102,14 +114,7 @@ impl StreamAsofJoinOperator {
     }
 
     fn pending_payloads(&self) -> Result<(Vec<Arc<PayloadBatch>>, MemoryReservation)> {
-        let mut count = 0_u64;
-        let mut largest = 0_u64;
-        for (batch, _) in self.state.batches.values() {
-            if !batch.has_encoded() {
-                count = super::checked(&self.name, count, 1)?;
-                largest = largest.max(batch.encoded_charge_bytes);
-            }
-        }
+        let (count, largest) = self.pending_payload_extent()?;
         let pointers = count
             .checked_mul(size_of::<Arc<PayloadBatch>>() as u64)
             .ok_or_else(|| {
@@ -129,13 +134,22 @@ impl StreamAsofJoinOperator {
         Ok((pending, workspace))
     }
 
-    fn ensure_payloads_sync(&self) -> Result<()> {
-        let (pending, _workspace) = self.pending_payloads()?;
-        let limit = usize::try_from(self.spec.limits().max_state_bytes()).expect("validated");
-        for batch in pending {
-            batch.ensure_encoded(limit, &self.name)?;
+    fn pending_payload_extent(&self) -> Result<(u64, u64)> {
+        let mut count = 0_u64;
+        let mut largest = 0_u64;
+        for (batch, _) in self.state.batches.values() {
+            if !batch.has_encoded() {
+                count = super::checked(&self.name, count, 1)?;
+                largest = largest.max(batch.encoded_charge_bytes);
+            }
         }
-        Ok(())
+        Ok((count, largest))
+    }
+
+    fn ensure_payloads_sync(&self) -> Result<()> {
+        let (pending, workspace) = self.pending_payloads()?;
+        let limit = usize::try_from(self.spec.limits().max_state_bytes()).expect("validated");
+        encode_payloads(pending, workspace, limit, &self.name)
     }
 
     async fn prepare_payloads_async(&self, context: &StreamOperatorContext<'_>) -> Result<()> {
@@ -146,17 +160,11 @@ impl StreamAsofJoinOperator {
         let limit = usize::try_from(self.spec.limits().max_state_bytes()).expect("validated");
         let name = self.name.clone();
         context.check_cancelled()?;
-        tokio::task::spawn_blocking(move || {
-            let _workspace = workspace;
-            for batch in pending {
-                batch.ensure_encoded(limit, &name)?;
-            }
-            Ok::<(), CalcFlowError>(())
-        })
-        .await
-        .map_err(|error| CalcFlowError::Internal {
-            message: format!("ASOF payload checkpoint task failed: {error}"),
-        })??;
+        tokio::task::spawn_blocking(move || encode_payloads(pending, workspace, limit, &name))
+            .await
+            .map_err(|error| CalcFlowError::Internal {
+                message: format!("ASOF payload checkpoint task failed: {error}"),
+            })??;
         context.check_cancelled()
     }
 

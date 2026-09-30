@@ -82,6 +82,49 @@ fn chunk_sort_indices(
     lexsort_to_indices(&columns, None).map_err(|error| arrow_error(&error))
 }
 
+fn chunk_positions(
+    rows: &[(LeftOrder, u32)],
+    sorted: Option<&UInt32Array>,
+    contiguous: bool,
+) -> Option<Vec<u32>> {
+    if sorted.is_none() && contiguous {
+        None
+    } else {
+        Some(
+            (0..rows.len())
+                .map(|row| {
+                    let ordinal = sorted.map_or(row, |indices| indices.value(row) as usize);
+                    rows[ordinal].1
+                })
+                .collect(),
+        )
+    }
+}
+
+fn intern_chunk_key(
+    interned: &mut HashMap<Encoding, u32, ahash::RandomState>,
+    keys: &mut Vec<Option<Encoding>>,
+    key_counts: &mut Vec<usize>,
+    encoding_bytes: &mut u64,
+    key: &Encoding,
+    name: &str,
+) -> Result<u32> {
+    if let Some(id) = interned.get(key) {
+        return Ok(*id);
+    }
+    super::validate_key_count(keys.len() as u64 + 1, name)?;
+    let id = u32::try_from(keys.len()).expect("validated left key count");
+    interned.insert(key.clone(), id);
+    if keys.len() == keys.capacity() {
+        keys.reserve_exact(keys.len().max(1));
+        key_counts.reserve_exact(key_counts.len().max(1));
+    }
+    keys.push(Some(key.clone()));
+    key_counts.push(0);
+    *encoding_bytes = checked(name, *encoding_bytes, shared_encoding_bytes(key))?;
+    Ok(id)
+}
+
 impl ChunkData {
     fn prepare(
         rows: &[(LeftOrder, u32)],
@@ -99,20 +142,7 @@ impl ChunkData {
         } else {
             Some(chunk_sort_indices(rows, batch, side, contiguous)?)
         };
-        let positions = if sorted.is_none() && contiguous {
-            None
-        } else {
-            Some(
-                (0..rows.len())
-                    .map(|row| {
-                        let ordinal = sorted
-                            .as_ref()
-                            .map_or(row, |indices| indices.value(row) as usize);
-                        rows[ordinal].1
-                    })
-                    .collect::<Vec<_>>(),
-            )
-        };
+        let positions = chunk_positions(rows, sorted.as_ref(), contiguous);
         let mut keys = Vec::with_capacity(1);
         let mut key_counts = Vec::with_capacity(1);
         let mut key_ids = Vec::with_capacity(rows.len());
@@ -127,21 +157,14 @@ impl ChunkData {
                 .map_or(ordinal, |indices| indices.value(ordinal) as usize);
             let (_, key, sequence) = &rows[row].0;
             time_values.push(rows[row].0.0);
-            let id = if let Some(id) = interned.get(key) {
-                *id
-            } else {
-                super::validate_key_count(keys.len() as u64 + 1, name)?;
-                let id = u32::try_from(keys.len()).expect("validated left key count");
-                interned.insert(key.clone(), id);
-                if keys.len() == keys.capacity() {
-                    keys.reserve_exact(keys.len().max(1));
-                    key_counts.reserve_exact(key_counts.len().max(1));
-                }
-                keys.push(Some(key.clone()));
-                key_counts.push(0);
-                encoding_bytes = checked(name, encoding_bytes, shared_encoding_bytes(key))?;
-                id
-            };
+            let id = intern_chunk_key(
+                &mut interned,
+                &mut keys,
+                &mut key_counts,
+                &mut encoding_bytes,
+                key,
+                name,
+            )?;
             key_counts[id as usize] += 1;
             key_ids.push(id);
             sequences.push(sequence.clone());
@@ -185,6 +208,22 @@ impl ChunkData {
         .try_fold(self.encoding_bytes, |bytes, capacity| {
             checked(name, bytes, capacity as u64)
         })
+    }
+
+    fn compaction_workspace_bytes(&self, remaining: usize, name: &str) -> Result<u64> {
+        // A detached worker can outlive reset and the original state. Fund
+        // both its retained buffers and the replacement column allocations.
+        let scratch = self.keys.len() * size_of::<u32>()
+            + remaining
+                * (size_of::<Option<Encoding>>()
+                    + size_of::<usize>()
+                    + size_of::<u32>()
+                    + size_of::<Encoding>()
+                    + size_of::<u32>()
+                    + size_of::<i64>())
+            + size_of::<Self>()
+            + 256;
+        checked(name, self.retained_input_bytes(name)?, scratch as u64)
     }
 
     fn position(&self, ordinal: usize) -> u32 {
@@ -341,6 +380,10 @@ impl LeftChunk {
 
     fn len(&self) -> usize {
         self.data.sequences.len() - self.head
+    }
+
+    fn needs_compaction(&self, amount: usize, remaining: usize) -> bool {
+        amount > 0 && (self.head + amount >= remaining || Arc::strong_count(&self.data) > 1)
     }
 }
 
@@ -575,26 +618,11 @@ impl LeftState {
                 continue;
             }
             remaining_chunks += 1;
-            if amount > 0
-                && (chunk.head + amount >= remaining || Arc::strong_count(&chunk.data) > 1)
-            {
-                // A detached worker can outlive reset and the original state.
-                // Fund its retained buffers before cloning the chunk, including
-                // the entire allocation behind a sliced Arrow time buffer.
-                bytes = checked(name, bytes, chunk.data.retained_input_bytes(name)?)?;
+            if chunk.needs_compaction(amount, remaining) {
                 bytes = checked(
                     name,
                     bytes,
-                    (chunk.data.keys.len() * size_of::<u32>()
-                        + remaining
-                            * (size_of::<Option<Encoding>>()
-                                + size_of::<usize>()
-                                + size_of::<u32>()
-                                + size_of::<Encoding>()
-                                + size_of::<u32>()
-                                + size_of::<i64>())
-                        + size_of::<ChunkData>()
-                        + 256) as u64,
+                    chunk.data.compaction_workspace_bytes(remaining, name)?,
                 )?;
             }
         }
@@ -625,9 +653,7 @@ impl LeftState {
                 continue;
             }
             remaining_chunks += 1;
-            if amount > 0
-                && (chunk.head + amount >= remaining || Arc::strong_count(&chunk.data) > 1)
-            {
+            if chunk.needs_compaction(amount, remaining) {
                 selected.push((index, chunk.data.clone(), chunk.head + amount));
             }
         }
