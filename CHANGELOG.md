@@ -9,6 +9,12 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-09
 
+- 2026-09-30: Verify coverage comparison baselines from successful Linux CI
+  reruns. The resolver checks the latest attempt's three coverage jobs and
+  required steps, and binds each checksum-bearing artifact to its successful
+  job's execution interval, including jobs carried forward from earlier
+  attempts. Source-tree, repository, and coverage threshold checks still apply.
+
 - 2026-09-30: Continue stream ASOF Join acceleration. Admission retains flat
   Arrow payload batches without eagerly writing their checkpoint IPC segments;
   checkpoint preparation encodes each retained batch once and later captures

@@ -158,7 +158,8 @@ fail-closed 的有界内存和可 checkpoint 状态。在输入有序的常见�
   `stream_asof_perf`，以免改变现有 target 的 workload fingerprint。用例：
   `admit_settle_100k`（两侧各 100k、64 key、64k 批，计时包含 `process_data` 与
   settlement）、`eviction_ticks`（小批且每批推进 watermark，持续驱逐）、
-  `out_of_order_within_watermark` 和 `composite_key`。报告保留分配总量与峰值。
+  `out_of_order_within_watermark` 和 `composite_key`。报告保留测量线程的分配
+  总量与峰值；该计数不包含 `spawn_blocking` 输出线程，不能代表算子总内存。
 - **P0.3 分段诊断。** 用已有 `tracing` 依赖在批次粒度（不在行粒度）记录
   admission、output、prefix 提交和 sweep 的 debug span，取代临时 `Instant` 探针。
 - **P0.4 随机对照测试。** 扩展 `crates/calc-flow/tests/stream_asof_join_properties.rs`，

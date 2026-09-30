@@ -7,6 +7,7 @@ import json
 import re
 import subprocess  # nosec B404 - fixed gh GET command and validated identifiers
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 
 try:
@@ -229,7 +230,7 @@ def _check_merged_pull(pull: dict, repository: str, base_sha: str, number: int) 
             raise ValueError("merged PR belongs to a different repository")
 
 
-def _original_run(repository: str, pull: dict, report: dict) -> dict:
+def _successful_run(repository: str, pull: dict, report: dict) -> dict:
     run = _github_object(f"repos/{repository}/actions/runs/{report['run_id']}")
     expected = {
         "id": report["run_id"],
@@ -238,29 +239,31 @@ def _original_run(repository: str, pull: dict, report: dict) -> dict:
         "path": ".github/workflows/ci-linux.yml",
         "status": "completed",
         "conclusion": "success",
-        "run_attempt": 1,
         "html_url": report["build"]["url"],
     }
     if any(run.get(key) != value for key, value in expected.items()):
-        raise ValueError("candidate is not its successful original Linux CI attempt")
+        raise ValueError("candidate is not a successful Linux CI run")
+    if type(run.get("run_attempt")) is not int or run["run_attempt"] < 1:
+        raise ValueError("candidate Linux CI run has an invalid attempt number")
     for key in ("repository", "head_repository"):
         if (
             run[key]["full_name"] != repository
             or run[key]["id"] != pull["base"]["repo"]["id"]
         ):
-            raise ValueError("original Linux run repository differs")
+            raise ValueError("Linux run repository differs")
     return run
 
 
 def _check_coverage_job(job: dict, run: dict, step_name: str) -> None:
     expected = {
         "run_id": run["id"],
+        "run_attempt": run["run_attempt"],
         "head_sha": run["head_sha"],
         "status": "completed",
         "conclusion": "success",
     }
     if any(job.get(key) != value for key, value in expected.items()):
-        raise ValueError("original coverage job did not succeed for this run/head")
+        raise ValueError("coverage job did not succeed for this run/attempt/head")
     step = _one(
         [step for step in job["steps"] if step["name"] == step_name],
         "required coverage step",
@@ -270,7 +273,10 @@ def _check_coverage_job(job: dict, run: dict, step_name: str) -> None:
 
 
 def _coverage_jobs(repository: str, run: dict) -> dict:
-    jobs = _rows(f"repos/{repository}/actions/runs/{run['id']}/attempts/1/jobs", "jobs")
+    jobs = _rows(
+        f"repos/{repository}/actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs",
+        "jobs",
+    )
     result = {}
     for flag, (name, step, _) in COVERAGE.items():
         job = _one([job for job in jobs if job["name"] == name], f"{flag} coverage job")
@@ -279,7 +285,18 @@ def _coverage_jobs(repository: str, run: dict) -> dict:
     return result
 
 
-def _check_artifact(artifact: dict, run: dict) -> None:
+def _utc_time(value: object) -> datetime:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise ValueError("coverage artifact or job has an invalid UTC timestamp")
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError(
+            "coverage artifact or job has an invalid UTC timestamp"
+        ) from error
+
+
+def _check_artifact(artifact: dict, run: dict, job: dict) -> None:
     if artifact["expired"] is not False or not re.fullmatch(
         r"sha256:[0-9a-f]{64}", artifact.get("digest") or ""
     ):
@@ -296,9 +313,14 @@ def _check_artifact(artifact: dict, run: dict) -> None:
         artifact["workflow_run"].get(key) != value for key, value in expected.items()
     ):
         raise ValueError("coverage artifact belongs to another run/head/repository")
+    created = _utc_time(artifact.get("created_at"))
+    started = _utc_time(job.get("started_at"))
+    completed = _utc_time(job.get("completed_at"))
+    if not started <= created <= completed:
+        raise ValueError("coverage artifact was not created during its successful job")
 
 
-def _coverage_artifacts(repository: str, run: dict) -> dict:
+def _coverage_artifacts(repository: str, run: dict, jobs: dict) -> dict:
     artifacts = _rows(
         f"repos/{repository}/actions/runs/{run['id']}/artifacts", "artifacts"
     )
@@ -308,7 +330,7 @@ def _coverage_artifacts(repository: str, run: dict) -> dict:
             [item for item in artifacts if item["name"] == name],
             f"{flag} coverage artifact",
         )
-        _check_artifact(artifact, run)
+        _check_artifact(artifact, run, jobs[flag])
         result[flag] = artifact
     return result
 
@@ -326,7 +348,8 @@ def _equivalent_candidate(repository: str, base_sha: str, tree: str) -> dict:
     measurement = report["build"]["commit_sha"]
     if _tree(repository, measurement) != tree:
         raise ValueError("actual measurement full tree differs from the base")
-    run = _original_run(repository, pull, report)
+    run = _successful_run(repository, pull, report)
+    jobs = _coverage_jobs(repository, run)
     return {
         "pull_request": pull,
         "head_sha": head,
@@ -335,8 +358,8 @@ def _equivalent_candidate(repository: str, base_sha: str, tree: str) -> dict:
         "measurement_tree": tree,
         "report": report,
         "run": run,
-        "jobs": _coverage_jobs(repository, run),
-        "artifacts": _coverage_artifacts(repository, run),
+        "jobs": jobs,
+        "artifacts": _coverage_artifacts(repository, run, jobs),
     }
 
 

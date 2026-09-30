@@ -68,10 +68,14 @@ does not prove coverage or block a scoped handoff that records CI as unverified.
 Linux CI validates the Coveralls comparison before uploading its Rust, Python,
 and Studio reports. If a base build contains only some of those flags, the
 [baseline resolver](../scripts/resolve_coverage_baseline.py) requires a complete,
-successful first-attempt Linux run from that base's merged PR, with the same
-full source tree at the actual measurement commit. All three uploads use that
-verified comparison SHA; the original measurement identities and failed runs
-remain intact. CI retains the comparison provenance as an artifact. An
+successful Linux run from that base's merged PR, with the same full source tree
+at the actual measurement commit. Its latest attempt must contain all three
+successful coverage jobs and required test steps. Each coverage artifact must
+match the run, head, and repository and have been created during its successful
+job. This accepts successful jobs carried forward by a rerun, whose original
+execution timestamps remain in GitHub's latest-attempt job records. All three
+uploads use that verified comparison SHA; earlier failed attempts remain in the
+run history. CI retains the run, attempt, jobs, and artifact provenance. An
 unverifiable partial base blocks CI. Complete bases and absent reports keep the
 default comparison, and coverage thresholds remain unchanged.
 
