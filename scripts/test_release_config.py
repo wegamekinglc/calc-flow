@@ -511,6 +511,28 @@ class ReleaseConfigTests(unittest.TestCase):
             rust_core.index("      - name: Run Rust tests\n"),
         )
 
+    def test_coverage_bounds_build_resources_and_separates_compile_budget(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
+        coverage = workflow.split("  rust-coverage:\n", 1)[1].split(
+            "  rust-supply-chain:\n", 1
+        )[0]
+        header = coverage.split("    steps:\n", 1)[0]
+        self.assertIn('CARGO_BUILD_JOBS: "1"', header)
+        self.assertIn('CARGO_PROFILE_DEV_DEBUG: "0"', header)
+        self.assertIn('CARGO_PROFILE_TEST_DEBUG: "0"', header)
+        compile_step = coverage.split(
+            "      - name: Compile instrumented Rust targets\n", 1
+        )[1].split("      - name:", 1)[0]
+        self.assertIn("timeout-minutes: 45", compile_step)
+        self.assertIn("scripts/run_rust_coverage.py --no-run", compile_step)
+        self.assertIn("free -m", compile_step)
+        self.assertIn("--sort=-rss", compile_step)
+        run_step = coverage.split(
+            "      - name: Enforce combined Rust and connector line coverage\n", 1
+        )[1].split("      - name:", 1)[0]
+        self.assertIn("timeout-minutes: 30", run_step)
+        self.assertIn("scripts/run_rust_coverage.py --no-clean", run_step)
+
     def test_rust_tests_and_coverage_run_in_parallel_jobs(self) -> None:
         workflow = (ROOT / ".github/workflows/ci-linux.yml").read_text(encoding="utf-8")
         rust_core = workflow.split("  rust-core:\n", 1)[1].split(

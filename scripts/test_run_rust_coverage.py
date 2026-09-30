@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -30,19 +31,80 @@ def connector_environment() -> dict[str, str]:
 
 
 class RustCoverageRunnerTests(unittest.TestCase):
+    def test_compile_phase_builds_every_target_without_running_tests(self) -> None:
+        commands = coverage_commands(no_run=True)
+
+        self.assertEqual(len(commands), 3)
+        self.assertEqual(
+            commands[1],
+            ("cargo", "test", "--workspace", "--all-features", "--no-run"),
+        )
+        self.assertEqual(commands[-1], ("cargo", "build", "-p", "calc-flow-python"))
+        self.assertFalse(any("report" in command for command in commands))
+
+    @patch("scripts.run_rust_coverage.run_python_suite")
+    @patch("scripts.run_rust_coverage.subprocess.run")
+    def test_compile_phase_cleans_once_and_defers_python_execution(
+        self, execute, python_suite
+    ) -> None:
+        execute.return_value = SimpleNamespace(
+            stdout=(
+                "export LLVM_PROFILE_FILE='/repo-%p.profraw'\n"
+                "export CARGO_LLVM_COV=1\n"
+                "export CARGO_LLVM_COV_TARGET_DIR='/repo/target'\n"
+            ),
+        )
+
+        run(connector_environment(), no_run=True)
+
+        commands = [call.args[0] for call in execute.call_args_list]
+        self.assertEqual(
+            commands, [SHOW_ENV_COMMAND, CLEAN_COMMAND, *coverage_commands(no_run=True)]
+        )
+        python_suite.assert_not_called()
+
+    @patch("scripts.run_rust_coverage.run_python_suite")
+    @patch("scripts.run_rust_coverage.subprocess.run")
+    def test_run_phase_preserves_precompiled_instrumented_artifacts(
+        self, execute, python_suite
+    ) -> None:
+        execute.return_value = SimpleNamespace(
+            stdout=(
+                "export LLVM_PROFILE_FILE='/repo-%p.profraw'\n"
+                "export CARGO_LLVM_COV=1\n"
+                "export CARGO_LLVM_COV_TARGET_DIR='/repo/target'\n"
+            ),
+        )
+
+        run(connector_environment(), no_clean=True)
+
+        self.assertNotIn(
+            CLEAN_COMMAND, [call.args[0] for call in execute.call_args_list]
+        )
+        self.assertIn(
+            (sys.executable, "scripts/run_rust_tests.py"),
+            [call.args[0] for call in execute.call_args_list],
+        )
+        python_suite.assert_called_once()
+
     def test_plan_accumulates_all_real_connector_tests_before_enforcement(self) -> None:
         commands = coverage_commands()
 
-        self.assertEqual(len(commands), 9)
+        self.assertEqual(len(commands), 10)
         self.assertEqual(
-            commands[0], ("cargo", "test", "--workspace", "--all-features")
-        )
-        self.assertEqual(
-            commands[1],
+            commands[0],
             ("uv", "sync", "--extra", "dev", "--no-install-project"),
         )
         self.assertEqual(
+            commands[1],
+            (sys.executable, "scripts/run_rust_tests.py"),
+        )
+        self.assertEqual(
             commands[2],
+            ("cargo", "test", "-p", "calc-flow", "--doc", "--all-features"),
+        )
+        self.assertEqual(
+            commands[3],
             (
                 "cargo",
                 "build",
@@ -53,7 +115,7 @@ class RustCoverageRunnerTests(unittest.TestCase):
         self.assertEqual(
             [
                 target
-                for command in commands[3:7]
+                for command in commands[4:8]
                 for index, target in enumerate(command)
                 if index > 0 and command[index - 1] == "--test"
             ],
@@ -65,7 +127,7 @@ class RustCoverageRunnerTests(unittest.TestCase):
                 "mysql_connector",
             ],
         )
-        for command in commands[3:7]:
+        for command in commands[4:8]:
             self.assertIn("--ignored", command)
         export, enforce = commands[-2:]
         self.assertEqual(export[0:3], ("cargo", "llvm-cov", "report"))
@@ -138,7 +200,7 @@ class RustCoverageRunnerTests(unittest.TestCase):
 
         run(environment)
 
-        self.assertEqual(execute.call_count, 11)
+        self.assertEqual(execute.call_count, len(coverage_commands()) + 2)
         self.assertEqual(execute.call_args_list[0].args, (SHOW_ENV_COMMAND,))
         self.assertEqual(
             execute.call_args_list[0].kwargs,

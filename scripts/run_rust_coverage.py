@@ -9,10 +9,12 @@ excluded from the unchanged 90 percent production-line floor.
 
 from __future__ import annotations
 
+import argparse
 import os
 import shlex
 import shutil
 import subprocess  # nosec B404 -- fixed, module-owned cargo commands only
+import sys
 import tempfile
 from pathlib import Path
 
@@ -35,10 +37,18 @@ PYTHON_TEST_COMMAND = (
     "-p",
     "no:benchmark",
 )
+SYNC_COMMAND = ("uv", "sync", "--extra", "dev", "--no-install-project")
+NATIVE_BUILD_COMMAND = ("cargo", "build", "-p", "calc-flow-python")
 
 
-def coverage_commands() -> tuple[tuple[str, ...], ...]:
+def coverage_commands(*, no_run: bool = False) -> tuple[tuple[str, ...], ...]:
     """Return the deterministic command plan for one combined coverage run."""
+    if no_run:
+        return (
+            SYNC_COMMAND,
+            ("cargo", "test", "--workspace", "--all-features", "--no-run"),
+            NATIVE_BUILD_COMMAND,
+        )
     connector = (
         "cargo",
         "test",
@@ -47,14 +57,18 @@ def coverage_commands() -> tuple[tuple[str, ...], ...]:
         "--all-features",
     )
     return (
-        ("cargo", "test", "--workspace", "--all-features"),
-        ("uv", "sync", "--extra", "dev", "--no-install-project"),
+        SYNC_COMMAND,
+        # Reuse the serial, runtime-bounded PyO3 harness after precompilation.
+        (sys.executable, "scripts/run_rust_tests.py"),
         (
             "cargo",
-            "build",
+            "test",
             "-p",
-            "calc-flow-python",
+            "calc-flow",
+            "--doc",
+            "--all-features",
         ),
+        NATIVE_BUILD_COMMAND,
         (
             *connector,
             "--test",
@@ -181,25 +195,39 @@ def require_connector_environment(environment: dict[str, str]) -> None:
         raise SystemExit(f"connector coverage environment is incomplete: {joined}")
 
 
-def run(environment: dict[str, str]) -> None:
+def run(
+    environment: dict[str, str], *, no_run: bool = False, no_clean: bool = False
+) -> None:
     """Execute the combined coverage plan and propagate the first failure."""
     require_connector_environment(environment)
     environment = instrumented_environment(environment)
-    subprocess.run(  # nosec B603  # nosemgrep
-        CLEAN_COMMAND, cwd=ROOT, env=environment, check=True
-    )
-    for index, command in enumerate(coverage_commands()):
+    if not no_clean:
+        subprocess.run(  # nosec B603  # nosemgrep
+            CLEAN_COMMAND, cwd=ROOT, env=environment, check=True
+        )
+    for command in coverage_commands(no_run=no_run):
         # The tuple comes exclusively from coverage_commands and shell
         # expansion is disabled.
+        print(f"+ {shlex.join(command)}", flush=True)
         subprocess.run(  # nosec B603  # nosemgrep
             command, cwd=ROOT, env=environment, check=True
         )
-        if index == 2:
+        if not no_run and command == NATIVE_BUILD_COMMAND:
             run_python_suite(environment)
 
 
 def main() -> None:
-    run(dict(os.environ))
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--no-run", action="store_true", help="compile instrumented targets only"
+    )
+    parser.add_argument(
+        "--no-clean",
+        action="store_true",
+        help="reuse the precompiled instrumented targets and profile set",
+    )
+    options = parser.parse_args()
+    run(dict(os.environ), no_run=options.no_run, no_clean=options.no_clean)
 
 
 if __name__ == "__main__":
