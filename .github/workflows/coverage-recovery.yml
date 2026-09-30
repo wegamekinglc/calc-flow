@@ -1,14 +1,14 @@
 name: Recover exact main coverage
 on:
   push:
-    branches: [fix/dal-296-coverage-recovery-execute]
+    branches: [fix/dal-313-coverage-recovery-execute]
 permissions:
   contents: read
 concurrency:
-  group: dal-296-coverage-recovery
+  group: dal-313-coverage-recovery
   cancel-in-progress: false
 env:
-  SOURCE_SHA: 2fcc36fd224dd1c8a9f6396bddd5fbe0b60b0987
+  SOURCE_SHA: d5906260f2518ba4544a7d717fced83bd49bd26f
 defaults:
   run:
     working-directory: source
@@ -144,6 +144,8 @@ jobs:
           enable-cache: true
       - name: Install compatible Python test dependencies
         run: python -m pip install "numpy>=2.0.0" "pyarrow==24.0.0"
+      - name: Repair incomplete pinned Rust toolchain
+        run: python scripts/repair_rust_toolchain.py
       - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
         with:
           components: llvm-tools-preview
@@ -194,6 +196,8 @@ jobs:
           python ../control/scripts/coverage_recovery.py
           --source . --control ../control
           --output ../evidence/preflight-${{ github.job }}.json
+      - name: Repair incomplete pinned Rust toolchain
+        run: python scripts/repair_rust_toolchain.py
       - uses: dtolnay/rust-toolchain@4e529fb27e59237866a6523e61ab248308c068b4 # 1.88.0
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
@@ -216,10 +220,11 @@ jobs:
           uv pip install --python .venv/bin/python --no-deps target/recovery-dist/calc_flow_python-*.whl
       - name: Run unit, property, and coverage tests
         env:
+          COVERAGE_CORE: sysmon
           PYTEST_XDIST_AUTO_NUM_WORKERS: 2
         run: >-
           uv run --no-sync pytest -q -n auto --dist load -p no:benchmark
-          python/tests benchmarks/test_warm_stream.py
+          python/tests
           --cov=calc_flow --cov-report=term-missing --cov-report=xml
       - name: Install Studio dependencies
         run: |
@@ -259,7 +264,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      COVERALLS_GIT_COMMIT: 2fcc36fd224dd1c8a9f6396bddd5fbe0b60b0987
+      COVERALLS_GIT_COMMIT: d5906260f2518ba4544a7d717fced83bd49bd26f
       COVERALLS_GIT_BRANCH: main
       COVERALLS_REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:

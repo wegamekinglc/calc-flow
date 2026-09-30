@@ -1,4 +1,4 @@
-"""Record the exact source and run used by the DAL-296 coverage recovery."""
+"""Record the exact source and run used by the DAL-313 coverage recovery."""
 
 from __future__ import annotations
 
@@ -26,8 +26,8 @@ except ImportError:
         write_json,
     )
 
-SOURCE_SHA = "2fcc36fd224dd1c8a9f6396bddd5fbe0b60b0987"
-EXECUTION_REF = "refs/heads/fix/dal-296-coverage-recovery-execute"
+SOURCE_SHA = "d5906260f2518ba4544a7d717fced83bd49bd26f"
+EXECUTION_REF = "refs/heads/fix/dal-313-coverage-recovery-execute"
 REPORTS = {
     "rust": "rust-lcov.info",
     "python": "coverage.xml",

@@ -20,7 +20,7 @@ def _environment() -> dict[str, str]:
         "GITHUB_RUN_ID": "123",
         "GITHUB_RUN_ATTEMPT": "1",
         "GITHUB_EVENT_NAME": "push",
-        "GITHUB_REF": "refs/heads/fix/dal-296-coverage-recovery-execute",
+        "GITHUB_REF": "refs/heads/fix/dal-313-coverage-recovery-execute",
     }
 
 
@@ -30,7 +30,11 @@ class CoverageRecoveryTests(unittest.TestCase):
         workflow = (root / ".github/workflows/coverage-recovery.yml").read_text(
             encoding="utf-8"
         )
-        self.assertIn("branches: [fix/dal-296-coverage-recovery-execute]", workflow)
+        self.assertEqual(
+            recovery.SOURCE_SHA, "d5906260f2518ba4544a7d717fced83bd49bd26f"
+        )
+        self.assertIn("branches: [fix/dal-313-coverage-recovery-execute]", workflow)
+        self.assertIn("group: dal-313-coverage-recovery", workflow)
         self.assertNotIn("pull_request:", workflow)
         self.assertNotIn("workflow_dispatch:", workflow)
         self.assertIn(recovery.SOURCE_SHA, workflow)
@@ -121,7 +125,7 @@ class CoverageRecoveryTests(unittest.TestCase):
         )
         for command in (
             "python3.13 scripts/run_rust_coverage.py",
-            "python/tests benchmarks/test_warm_stream.py",
+            "python/tests\n          --cov=calc_flow",
             "--cov=calc_flow --cov-report=term-missing --cov-report=xml",
             "--cov=calc_flow_studio --cov-report=term-missing --cov-report=xml",
         ):
@@ -135,7 +139,28 @@ class CoverageRecoveryTests(unittest.TestCase):
             self.assertIn(image, workflow)
         self.assertIn("--no-install-workspace", workflow)
         self.assertIn("uv build --wheel", workflow)
+        python_studio = workflow.split("  python-studio:\n", 1)[1].split(
+            "  publish:\n", 1
+        )[0]
+        self.assertIn("COVERAGE_CORE: sysmon", python_studio)
+        self.assertNotIn("benchmarks/test_warm_stream.py", python_studio)
         self.assertNotIn("coverage-baseline", workflow)
+
+    def test_workflow_repairs_pinned_toolchain_before_each_rust_setup(self):
+        root = Path(__file__).resolve().parents[1]
+        workflow = (root / ".github/workflows/coverage-recovery.yml").read_text(
+            encoding="utf-8"
+        )
+        for job, following in (("rust", "python-studio"), ("python-studio", "publish")):
+            steps = workflow.split(f"  {job}:\n", 1)[1].split(f"\n  {following}:\n", 1)[
+                0
+            ]
+            with self.subTest(job=job):
+                self.assertIn("run: python scripts/repair_rust_toolchain.py", steps)
+                self.assertLess(
+                    steps.index("run: python scripts/repair_rust_toolchain.py"),
+                    steps.index("uses: dtolnay/rust-toolchain@"),
+                )
 
     def test_record_distinguishes_measured_source_from_workflow_revision(self):
         with (
@@ -170,6 +195,7 @@ class CoverageRecoveryTests(unittest.TestCase):
             ("GITHUB_RUN_ATTEMPT", "2"),
             ("GITHUB_EVENT_NAME", "pull_request"),
             ("GITHUB_REF", "refs/heads/main"),
+            ("GITHUB_REF", "refs/heads/fix/dal-296-coverage-recovery-execute"),
         ):
             with self.subTest(name=name), self.assertRaises(ValueError):
                 recovery.record(
