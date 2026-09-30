@@ -13,6 +13,7 @@ import time
 import traceback
 import weakref
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -67,6 +68,19 @@ class Observer:
         self.callbacks: dict[int, dict[str, Any]] = {}
         self.dropped = 0
         self.sample_ns = 0
+        self.health_errors: list[dict[str, str]] = []
+
+    def observe(self, operation: str, action: Callable[[], Any]) -> Any:
+        try:
+            return action()
+        except (OSError, ValueError) as error:
+            with self.lock:
+                if len(self.health_errors) < 64:
+                    self.health_errors.append(
+                        {"operation": operation, "error": repr(error)}
+                    )
+            self.emit("observation_error", operation=operation, error=repr(error))
+            return None
 
     def emit(self, event: str, **data: object) -> None:
         with self.lock:
@@ -204,10 +218,19 @@ class Observer:
                 return await original_wait_for(future, timeout)
             loop = asyncio.get_running_loop()
             sample = loop.call_later(0.8, self.snapshot, "before_original_1s_deadline")
-            stack = (self.output / "before-original-1s-deadline-stacks.log").open(
-                "w", encoding="utf-8"
+            stack = self.observe(
+                "deadline-stack.open",
+                lambda: (self.output / "before-original-1s-deadline-stacks.log").open(
+                    "w", encoding="utf-8"
+                ),
             )
-            faulthandler.dump_traceback_later(0.9, file=stack, exit=False)
+            if stack is not None:
+                self.observe(
+                    "deadline-stack.timer",
+                    lambda: faulthandler.dump_traceback_later(
+                        0.9, file=stack, exit=False
+                    ),
+                )
             self.emit("deadline_enter", timeout=timeout)
             try:
                 result = await original_wait_for(future, timeout)
@@ -220,7 +243,8 @@ class Observer:
             finally:
                 sample.cancel()
                 faulthandler.cancel_dump_traceback_later()
-                stack.close()
+                if stack is not None:
+                    self.observe("deadline-stack.close", stack.close)
 
         patch.setattr(asyncio, "wait_for", wait_for)
         for name in ("shutdown_async", "cancel_async", "wait_async"):
@@ -281,10 +305,19 @@ class Observer:
                 )
             prefix = "import dal313_child_observer as _dal313; _dal313.start();\n"
             observed = [*command[:3], prefix + command[3], *command[4:]]
-            parent = (self.output / "example-parent-stacks.log").open(
-                "w", encoding="utf-8"
+            parent = self.observe(
+                "parent-stack.open",
+                lambda: (self.output / "example-parent-stacks.log").open(
+                    "w", encoding="utf-8"
+                ),
             )
-            faulthandler.dump_traceback_later(50, file=parent, exit=False)
+            if parent is not None:
+                self.observe(
+                    "parent-stack.timer",
+                    lambda: faulthandler.dump_traceback_later(
+                        50, file=parent, exit=False
+                    ),
+                )
             self.emit(
                 "child_enter",
                 original_command=command,
@@ -294,16 +327,23 @@ class Observer:
             )
             try:
                 result = original(observed, *args, **kwargs)
-                self.save_output(result.stdout, result.stderr)
+                self.observe(
+                    "child-output",
+                    lambda: self.save_output(result.stdout, result.stderr),
+                )
                 self.emit("child_return", returncode=result.returncode)
                 return result
             except subprocess.TimeoutExpired as error:
-                self.save_output(error.stdout, error.stderr)
+                self.observe(
+                    "child-output",
+                    lambda error=error: self.save_output(error.stdout, error.stderr),
+                )
                 self.emit("child_timeout", timeout=error.timeout)
                 raise
             finally:
                 faulthandler.cancel_dump_traceback_later()
-                parent.close()
+                if parent is not None:
+                    self.observe("parent-stack.close", parent.close)
 
         patch.setattr(subprocess, "run", run)
 
@@ -316,7 +356,12 @@ class Observer:
         ):
             if isinstance(value, bytes):
                 value = value.decode("utf-8", errors="replace")
-            (self.output / name).write_text(value or "", encoding="utf-8")
+            self.observe(
+                name,
+                lambda name=name, value=value: (self.output / name).write_text(
+                    value or "", encoding="utf-8"
+                ),
+            )
 
     def save(self) -> None:
         with self.lock:
@@ -329,9 +374,32 @@ class Observer:
                 "tracemalloc": False,
                 "continuous_profiler": False,
             }
-            (self.output / "python-events.json").write_text(
-                json.dumps(data, indent=2, default=str), encoding="utf-8"
+            self.observe(
+                "python-events.json",
+                lambda: (self.output / "python-events.json").write_text(
+                    json.dumps(data, indent=2, default=str), encoding="utf-8"
+                ),
             )
+            health = {
+                "healthy": not self.health_errors,
+                "errors": self.health_errors,
+                "node": self.node,
+            }
+            before = len(self.health_errors)
+            self.observe(
+                "observation-health.json",
+                lambda: (self.output / "observation-health.json").write_text(
+                    json.dumps(health, indent=2), encoding="utf-8"
+                ),
+            )
+            if len(self.health_errors) != before:
+                health["healthy"] = False
+            if self.health_errors:
+                with suppress(OSError, ValueError):
+                    print(
+                        "DAL313 observation unhealthy: " + json.dumps(health),
+                        file=sys.stderr,
+                    )
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -345,8 +413,8 @@ def pytest_runtest_call(item: pytest.Item) -> object:
         / worker
         / item.name.replace("[", "-").replace("]", "")
     )
-    output.mkdir(parents=True, exist_ok=True)
     observer = Observer(item.nodeid, output)
+    observer.observe("output.mkdir", lambda: output.mkdir(parents=True, exist_ok=True))
     with pytest.MonkeyPatch.context() as patch:
         if "test_example" in item.nodeid:
             patch.setenv("DAL313_CHILD_OUTPUT", str(output))

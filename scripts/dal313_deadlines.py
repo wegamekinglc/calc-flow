@@ -8,11 +8,13 @@ import json
 import os
 import platform
 import re
+import signal
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -70,6 +72,148 @@ def validate_environment(environment: Mapping[str, str], surface: str) -> None:
 
 def write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, indent=2, default=str) + "\n", encoding="utf-8")
+
+
+class ObservationHealth:
+    def __init__(self, output: Path) -> None:
+        self.output = output
+        self.errors: list[dict[str, str]] = []
+        self.lock = threading.Lock()
+
+    def record(self, operation: str, error: Exception) -> None:
+        with self.lock:
+            if len(self.errors) < 64:
+                self.errors.append({"operation": operation, "error": repr(error)})
+
+    def save_json(self, name: str, value: object) -> None:
+        try:
+            write_json(self.output / name, value)
+        except (OSError, ValueError) as error:
+            self.record(name, error)
+
+    def finish(self, name: str = "observation-health.json", **outcome: object) -> None:
+        record = {"healthy": not self.errors, "errors": self.errors, **outcome}
+        try:
+            write_json(self.output / name, record)
+        except (OSError, ValueError) as error:
+            self.record(name, error)
+            record["healthy"] = False
+        if self.errors:
+            with suppress(OSError, ValueError):
+                print(
+                    "DAL313 observation unhealthy: " + json.dumps(record),
+                    file=sys.stderr,
+                )
+
+
+class WindowsProcessTree:
+    def __init__(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        class BasicLimits(ctypes.Structure):
+            _fields_ = [
+                ("process_time", ctypes.c_int64),
+                ("job_time", ctypes.c_int64),
+                ("flags", wintypes.DWORD),
+                ("minimum_working_set", ctypes.c_size_t),
+                ("maximum_working_set", ctypes.c_size_t),
+                ("active_process_limit", wintypes.DWORD),
+                ("affinity", ctypes.c_size_t),
+                ("priority", wintypes.DWORD),
+                ("scheduling", wintypes.DWORD),
+            ]
+
+        class ExtendedLimits(ctypes.Structure):
+            _fields_ = [
+                ("basic", BasicLimits),
+                ("io_counters", ctypes.c_uint64 * 6),
+                ("memory_limits", ctypes.c_size_t * 4),
+            ]
+
+        class ThreadEntry(ctypes.Structure):
+            _fields_ = [
+                ("size", wintypes.DWORD),
+                ("usage", wintypes.DWORD),
+                ("thread", wintypes.DWORD),
+                ("owner", wintypes.DWORD),
+                ("priority", wintypes.LONG),
+                ("delta", wintypes.LONG),
+                ("flags", wintypes.DWORD),
+            ]
+
+        self.ctypes, self.ThreadEntry = ctypes, ThreadEntry
+        self.api = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle, dword, boolean = wintypes.HANDLE, wintypes.DWORD, wintypes.BOOL
+        signatures = {
+            "CreateJobObjectW": ([ctypes.c_void_p, wintypes.LPCWSTR], handle),
+            "SetInformationJobObject": (
+                [handle, ctypes.c_int, ctypes.c_void_p, dword],
+                boolean,
+            ),
+            "AssignProcessToJobObject": ([handle, handle], boolean),
+            "OpenProcess": ([dword, boolean, dword], handle),
+            "OpenThread": ([dword, boolean, dword], handle),
+            "ResumeThread": ([handle], dword),
+            "CreateToolhelp32Snapshot": ([dword, dword], handle),
+            "Thread32First": ([handle, ctypes.POINTER(ThreadEntry)], boolean),
+            "Thread32Next": ([handle, ctypes.POINTER(ThreadEntry)], boolean),
+            "CloseHandle": ([handle], boolean),
+        }
+        for name, (arguments, result) in signatures.items():
+            function = getattr(self.api, name)
+            function.argtypes, function.restype = arguments, result
+        self.handle = self.api.CreateJobObjectW(None, None)
+        if not self.handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        limits = ExtendedLimits()
+        limits.basic.flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE only.
+        if not self.api.SetInformationJobObject(
+            self.handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)
+        ):
+            self.close()
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    def attach_and_resume(self, pid: int) -> None:
+        ctypes, api = self.ctypes, self.api
+        process = api.OpenProcess(0x101, False, pid)  # SET_QUOTA | TERMINATE.
+        if not process:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            if not api.AssignProcessToJobObject(self.handle, process):
+                raise ctypes.WinError(ctypes.get_last_error())
+        finally:
+            api.CloseHandle(process)
+        snapshot = api.CreateToolhelp32Snapshot(4, 0)  # TH32CS_SNAPTHREAD.
+        if snapshot == ctypes.c_void_p(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            entry = self.ThreadEntry()
+            entry.size = ctypes.sizeof(entry)
+            found = api.Thread32First(snapshot, ctypes.byref(entry))
+            while found:
+                if entry.owner == pid:
+                    thread = api.OpenThread(2, False, entry.thread)
+                    if not thread:
+                        raise ctypes.WinError(ctypes.get_last_error())
+                    try:
+                        if api.ResumeThread(thread) != 1:
+                            raise OSError(
+                                "owned suspended primary thread did not resume once"
+                            )
+                        return
+                    finally:
+                        api.CloseHandle(thread)
+                found = api.Thread32Next(snapshot, ctypes.byref(entry))
+            raise OSError("owned suspended primary thread not found")
+        finally:
+            api.CloseHandle(snapshot)
+
+    def close(self) -> None:
+        if self.handle:
+            handle, self.handle = self.handle, None
+            if not self.api.CloseHandle(handle):
+                raise self.ctypes.WinError(self.ctypes.get_last_error())
 
 
 def git(source: Path, *arguments: str) -> str:
@@ -236,46 +380,148 @@ def capture_command(
 ) -> int:
     output.mkdir(parents=True, exist_ok=True)
     started = time.time_ns()
-    write_json(
-        output / "invocation.json",
+    health = ObservationHealth(output)
+    health.save_json(
+        "invocation.json",
         {"command": list(command), "cwd": str(source), "started_ns": started},
     )
+    read_failed = threading.Event()
 
     def copy_stream(stream: object, path: Path, console: object) -> None:
-        with path.open("wb") as log:
-            while chunk := stream.readline():
-                log.write(chunk)
-                log.flush()
-                console.write(chunk)
-                console.flush()
+        log = None
+        try:
+            try:
+                log = path.open("wb")
+            except (OSError, ValueError) as error:
+                health.record(path.name, error)
+            while chunk := stream.read1(65536):
+                if log is not None:
+                    try:
+                        log.write(chunk)
+                        log.flush()
+                    except (OSError, ValueError) as error:
+                        health.record(path.name, error)
+                        try:
+                            log.close()
+                        except (OSError, ValueError) as close_error:
+                            health.record(path.name + ".close", close_error)
+                        log = None
+                if console is not None:
+                    try:
+                        console.write(chunk)
+                        console.flush()
+                    except (OSError, ValueError) as error:
+                        health.record(path.name + ".console", error)
+                        console = None
+        except Exception as error:
+            health.record(path.name + ".reader", error)
+            read_failed.set()
+        finally:
+            for handle in (log, stream):
+                if handle is not None:
+                    try:
+                        handle.close()
+                    except (OSError, ValueError) as error:
+                        health.record(path.name + ".close", error)
 
-    with (
-        subprocess.Popen(
+    tree = WindowsProcessTree() if sys.platform == "win32" else None
+    process = None
+    readers = []
+    code = None
+    interrupted = None
+    previous_signal = None
+    manage_signal = threading.current_thread() is threading.main_thread()
+
+    def cancel(signum: int, frame: object) -> None:
+        raise SystemExit(128 + signum)
+
+    try:
+        if manage_signal:
+            previous_signal = signal.signal(signal.SIGTERM, cancel)
+        # Attach Windows children while suspended, before they can spawn descendants.
+        process = subprocess.Popen(
             command,
             cwd=source,
             env=dict(environment),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-        ) as process,
-        ThreadPoolExecutor(max_workers=2) as pool,
-    ):
-        stdout = pool.submit(
-            copy_stream, process.stdout, output / "stdout.log", sys.stdout.buffer
+            creationflags=4 if tree is not None else 0,  # CREATE_SUSPENDED.
+            start_new_session=tree is None,
         )
-        stderr = pool.submit(
-            copy_stream, process.stderr, output / "stderr.log", sys.stderr.buffer
-        )
-        code = process.wait()
-        stdout.result()
-        stderr.result()
-    write_json(
-        output / "exit.json",
-        {
+        if tree is not None:
+            tree.attach_and_resume(process.pid)
+        for stream, name, console in (
+            (process.stdout, "stdout.log", sys.stdout.buffer),
+            (process.stderr, "stderr.log", sys.stderr.buffer),
+        ):
+            reader = threading.Thread(
+                target=copy_stream,
+                args=(stream, output / name, console),
+                name="dal313-" + name,
+                daemon=True,
+            )
+            readers.append(reader)
+            reader.start()
+        while True:
+            try:
+                code = process.wait(timeout=0.1)
+                break
+            except subprocess.TimeoutExpired:
+                if read_failed.is_set():
+                    raise OSError(
+                        "diagnostic pipe read failed; original result unavailable"
+                    ) from None
+    except BaseException as error:
+        interrupted = type(error).__name__
+        raise
+    finally:
+        # This bound covers teardown only; the original command/test deadlines remain.
+        deadline = time.monotonic() + 4
+        if tree is not None:
+            try:
+                tree.close()
+            except OSError as error:
+                health.record("process_tree.close", error)
+        elif process is not None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except OSError as error:
+                health.record("process_tree.kill", error)
+        if process is not None:
+            if process.poll() is None:
+                try:
+                    process.kill()
+                except OSError as error:
+                    health.record("process.kill", error)
+            try:
+                process.wait(timeout=max(0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired as error:
+                health.record("process_tree.reap", error)
+            for reader in readers:
+                reader.join(timeout=max(0, deadline - time.monotonic()))
+                if reader.is_alive():
+                    health.record(
+                        reader.name + ".join", TimeoutError("cleanup bound reached")
+                    )
+            if not readers:
+                for stream in (process.stdout, process.stderr):
+                    if stream is not None:
+                        stream.close()
+        if manage_signal:
+            signal.signal(signal.SIGTERM, previous_signal)
+        record = {
             "command": list(command),
             "exit_code": code,
             "elapsed_ns": time.time_ns() - started,
-        },
-    )
+            "interrupted": interrupted,
+            "reader_threads_alive": [
+                reader.name for reader in readers if reader.is_alive()
+            ],
+        }
+        health.save_json("exit.json", record)
+        health.finish(**record)
     return code
 
 
@@ -542,13 +788,15 @@ def main(arguments: Sequence[str] | None = None) -> int:
             )
         finally:
             fixture.write_bytes(original)
-            write_json(
-                output / "restored.json",
+            health = ObservationHealth(output)
+            health.save_json(
+                "restored.json",
                 {
                     "fixture_sha256": hashlib.sha256(fixture.read_bytes()).hexdigest(),
                     "tracked_diff": git(source, "diff", "--name-only"),
                 },
             )
+            health.finish("restore-health.json")
     except (
         ValueError,
         subprocess.CalledProcessError,
