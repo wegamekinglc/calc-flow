@@ -1,7 +1,7 @@
 name: Recover exact main coverage
 on:
   push:
-    branches: [fix/dal-313-coverage-recovery-execute]
+    branches: [fix/dal-313-coverage-recovery-fresh-execute]
 permissions:
   contents: read
 concurrency:

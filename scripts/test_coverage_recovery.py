@@ -21,7 +21,7 @@ def _environment() -> dict[str, str]:
         "GITHUB_RUN_ID": "123",
         "GITHUB_RUN_ATTEMPT": "1",
         "GITHUB_EVENT_NAME": "push",
-        "GITHUB_REF": "refs/heads/fix/dal-313-coverage-recovery-execute",
+        "GITHUB_REF": "refs/heads/fix/dal-313-coverage-recovery-fresh-execute",
     }
 
 
@@ -34,7 +34,9 @@ class CoverageRecoveryTests(unittest.TestCase):
         self.assertEqual(
             recovery.SOURCE_SHA, "d5906260f2518ba4544a7d717fced83bd49bd26f"
         )
-        self.assertIn("branches: [fix/dal-313-coverage-recovery-execute]", workflow)
+        self.assertIn(
+            "branches: [fix/dal-313-coverage-recovery-fresh-execute]", workflow
+        )
         self.assertIn("group: dal-313-coverage-recovery", workflow)
         self.assertNotIn("pull_request:", workflow)
         self.assertNotIn("workflow_dispatch:", workflow)
@@ -226,9 +228,23 @@ class CoverageRecoveryTests(unittest.TestCase):
             ("GITHUB_RUN_ATTEMPT", "2"),
             ("GITHUB_EVENT_NAME", "pull_request"),
             ("GITHUB_REF", "refs/heads/main"),
+            ("GITHUB_REF", "refs/heads/fix/dal-313-coverage-recovery-execute"),
             ("GITHUB_REF", "refs/heads/fix/dal-296-coverage-recovery-execute"),
         ):
-            with self.subTest(name=name), self.assertRaises(ValueError):
+            with (
+                self.subTest(name=name, value=value),
+                patch.object(
+                    recovery,
+                    "command_output",
+                    side_effect=[recovery.SOURCE_SHA, "b" * 40, "", "a" * 40, ""],
+                ),
+                patch.object(
+                    recovery, "require_executable", return_value="/usr/bin/git"
+                ),
+                self.assertRaisesRegex(
+                    ValueError, "dedicated push and original attempt"
+                ),
+            ):
                 recovery.record(
                     Path("source"), Path("control"), {**_environment(), name: value}
                 )

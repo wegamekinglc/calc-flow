@@ -27,7 +27,7 @@ except ImportError:
     )
 
 SOURCE_SHA = "d5906260f2518ba4544a7d717fced83bd49bd26f"
-EXECUTION_REF = "refs/heads/fix/dal-313-coverage-recovery-execute"
+EXECUTION_REF = "refs/heads/fix/dal-313-coverage-recovery-fresh-execute"
 REPORTS = {
     "rust": "rust-lcov.info",
     "python": "coverage.xml",
