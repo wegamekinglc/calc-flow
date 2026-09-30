@@ -622,6 +622,25 @@ fn prefix_fixture() -> (StreamAsofJoinOperator, Batch, Batch) {
 }
 
 #[tokio::test]
+async fn finalization_reads_a_ready_left_prefix_once() {
+    let (mut op, left, _) = prefix_fixture();
+    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+    let cx = StreamOperatorContext::new(&job, "asof", None);
+    let mut output = EdgeCollector::new(op.output_ports().to_vec());
+    op.process_data("left", left, &cx, &mut output)
+        .await
+        .unwrap();
+    state::take_left_visits();
+    op.on_end(&cx, &mut output).await.unwrap();
+    assert_eq!(
+        state::take_left_visits(),
+        3,
+        "ready prefix was repeatedly scanned"
+    );
+    assert_eq!(op.status.emitted_left_rows, 3);
+}
+
+#[tokio::test]
 async fn finalized_prefix_keeps_index_deferred_until_capture() {
     let (mut op, left, right) = prefix_fixture();
     let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());

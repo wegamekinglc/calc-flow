@@ -262,6 +262,29 @@ impl RightBucket {
         Self::default()
     }
 
+    pub fn reserve_payloads(&mut self, additional: usize) {
+        if additional == 0 {
+            return;
+        }
+        match self.payloads.as_mut() {
+            Some(run) => {
+                run.times.reserve_exact(additional);
+                run.sequences.reserve_exact(additional);
+                run.values.reserve_exact(additional);
+            }
+            None => self.payloads = Some(Box::new(RightRun::with_capacity(additional))),
+        }
+    }
+
+    /// Admission already rejected every live identity collision. Do not
+    /// search or compact the identity-only histories again for each new row.
+    pub fn insert_admitted(&mut self, order: RightOrder, payload: RowPayload) {
+        self.payloads
+            .as_mut()
+            .expect("reserved ASOF payload columns")
+            .insert(order, payload);
+    }
+
     fn payloads(&self) -> &RightRun<Vec<Option<RowPayload>>> {
         self.payloads.as_deref().unwrap_or(&EMPTY_PAYLOADS)
     }

@@ -67,6 +67,17 @@ measurements. Use the current guides for supported behavior.
   reserves the batch-reference tree's minimum leaf allocation as well as its
   per-batch slots, retaining the configured workspace cap.
 
+- 2026-09-30: Accumulate ASOF right row counts while admitting identities,
+  reserve each right column for the accepted batch, and skip the identity-only
+  history probes already covered by duplicate validation. Output workers own
+  one Arrow reference per distinct source and primitive row positions instead
+  of cloning a payload handle for each output row. Prefix matching accumulates
+  checkpoint-length, row-charge, and batch-reference changes in the same walk;
+  ordered prefix selection uses binary search, and sink acceptance commits
+  aggregated batch-reference changes without constructing an owned key vector.
+  Checkpoint bytes, counters, cancellation, and configured resource caps retain
+  their existing contracts.
+
 - 2026-09-29: Require immutable `Program(engine="sql")` or
   `Program(engine="streaming")` selection at construction and add
   `Program.execute(inputs)` dispatch. SQL returns named Arrow tables;

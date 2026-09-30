@@ -21,7 +21,7 @@ use std::{
 };
 
 use encoding::{Decoder, restore_charge};
-pub(super) use index_v2::{encoded_length, left_prefix_length};
+pub(super) use index_v2::encoded_length;
 pub(super) use prepared::PreparedSegment;
 use validation::{validate_counters, validate_progress};
 

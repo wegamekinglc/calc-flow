@@ -27,8 +27,20 @@ type InputRow<'a> = (LeftOrder, &'a RecordBatch, usize);
 pub(super) struct Admission {
     pub rows: Vec<(LeftOrder, RowPayload)>,
     pub accepted: u64,
+    right_capacities: Vec<(state::Encoding, usize)>,
     _identity_workspace: MemoryReservation,
     _payload_workspace: MemoryReservation,
+}
+
+struct AdmittedKey {
+    encoding: state::Encoding,
+    rows: usize,
+}
+
+struct InputIdentities<'a> {
+    rows: Vec<InputRow<'a>>,
+    duplicates: u64,
+    right_capacities: Vec<(state::Encoding, usize)>,
 }
 
 impl StreamAsofJoinOperator {
@@ -101,8 +113,11 @@ impl StreamAsofJoinOperator {
         let identity_workspace = self
             .reserve_admission_identities(batch, input, context)
             .await?;
-        let (rows, duplicates) =
-            self.admission_identities(batch.table_payload()?.batches(), input, context)?;
+        let InputIdentities {
+            rows,
+            duplicates,
+            right_capacities,
+        } = self.admission_identities(batch.table_payload()?.batches(), input, context)?;
         self.record_duplicates(input.index, duplicates)?;
         let accepted = self.check_admission_rows(input.index, rows.len() as u64)?;
         let payload_workspace = self.input_workspace(batch, input)?;
@@ -126,6 +141,7 @@ impl StreamAsofJoinOperator {
         Ok(Admission {
             rows,
             accepted,
+            right_capacities,
             _identity_workspace: identity_workspace,
             _payload_workspace: payload_workspace,
         })
@@ -185,7 +201,7 @@ impl StreamAsofJoinOperator {
         batches: &'a [RecordBatch],
         input: ValidatedInput,
         context: &StreamOperatorContext<'_>,
-    ) -> Result<(Vec<InputRow<'a>>, u64)> {
+    ) -> Result<InputIdentities<'a>> {
         let side = input.side(&self.spec);
         let capacity = if input.watermark.is_none() {
             batches.iter().map(RecordBatch::num_rows).sum()
@@ -193,7 +209,7 @@ impl StreamAsofJoinOperator {
             0
         };
         let mut keys_by_hash =
-            HashMap::<u64, Vec<state::Encoding>, RandomState>::with_hasher(RandomState::new());
+            HashMap::<u64, Vec<AdmittedKey>, RandomState>::with_hasher(RandomState::new());
         let key_hasher = RandomState::new();
         let mut rows = Vec::with_capacity(capacity);
         for batch in batches {
@@ -211,19 +227,24 @@ impl StreamAsofJoinOperator {
                     continue;
                 }
                 let key = keys.with_row(row, |key_bytes| {
-                    if state::Encoding::fits_inline(key_bytes) {
+                    if input.index == 0 && state::Encoding::fits_inline(key_bytes) {
                         return state::Encoding::from_slice(key_bytes);
                     }
                     let bucket = keys_by_hash
                         .entry(key_hasher.hash_one(key_bytes))
                         .or_default();
-                    if let Some(shared) =
-                        bucket.iter().find(|shared| shared.as_slice() == key_bytes)
+                    if let Some(shared) = bucket
+                        .iter_mut()
+                        .find(|shared| shared.encoding.as_slice() == key_bytes)
                     {
-                        shared.clone()
+                        shared.rows += 1;
+                        shared.encoding.clone()
                     } else {
                         let shared = state::Encoding::from_slice(key_bytes);
-                        bucket.push(shared.clone());
+                        bucket.push(AdmittedKey {
+                            encoding: shared.clone(),
+                            rows: 1,
+                        });
                         shared
                     }
                 });
@@ -237,7 +258,20 @@ impl StreamAsofJoinOperator {
             rows.iter().map(|(identity, _, _)| identity),
             context,
         )?;
-        Ok((rows, duplicates))
+        let right_capacities = if input.index == 1 {
+            keys_by_hash
+                .into_values()
+                .flatten()
+                .map(|key| (key.encoding, key.rows))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Ok(InputIdentities {
+            rows,
+            duplicates,
+            right_capacities,
+        })
     }
 }
 
@@ -325,6 +359,12 @@ impl Admission {
             state.left.append_admission(std::mem::take(&mut self.rows));
             status.left.accepted_rows = self.accepted;
         } else {
+            for (key, count) in self.right_capacities.drain(..) {
+                state
+                    .right
+                    .bucket_mut_or_default(key)
+                    .reserve_payloads(count);
+            }
             for (identity, payload) in self.rows.drain(..) {
                 state.attach(&payload);
                 state.right_payload_min = Some(
@@ -335,7 +375,7 @@ impl Admission {
                 state
                     .right
                     .bucket_mut_or_default(identity.1)
-                    .insert((identity.0, identity.2), Some(payload));
+                    .insert_admitted((identity.0, identity.2), payload);
             }
             status.right.accepted_rows = self.accepted;
         }

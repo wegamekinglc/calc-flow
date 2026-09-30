@@ -77,16 +77,6 @@ fn right_bucket_length(bucket: &RightBucket, name: &str) -> Result<u64> {
     })
 }
 
-pub(in super::super) fn left_prefix_length(state: &State, count: usize, name: &str) -> Result<u64> {
-    state
-        .left
-        .iter()
-        .take(count)
-        .try_fold(0, |size, ((_, key, sequence), _)| {
-            checked(name, size, 41 + key.len() as u64 + sequence.len() as u64)
-        })
-}
-
 pub(super) async fn encode(
     state: &State,
     length: u64,

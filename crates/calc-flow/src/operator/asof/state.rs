@@ -15,6 +15,28 @@ use std::{
 
 const INLINE_ENCODING_BYTES: usize = 10;
 
+#[cfg(test)]
+thread_local! {
+    static LEFT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn take_left_visits() -> usize {
+    LEFT_VISITS.with(|visits| visits.replace(0))
+}
+
+fn left_row_refs(row: &(LeftOrder, RowPayload)) -> (&LeftOrder, &RowPayload) {
+    #[cfg(test)]
+    LEFT_VISITS.with(|visits| visits.set(visits.get() + 1));
+    (&row.0, &row.1)
+}
+
+fn left_tree_refs(row: LeftRefs<'_>) -> LeftRefs<'_> {
+    #[cfg(test)]
+    LEFT_VISITS.with(|visits| visits.set(visits.get() + 1));
+    row
+}
+
 /// Canonical Arrow row bytes, with short scalar identities stored inline.
 #[derive(Clone, Debug)]
 pub(super) enum Encoding {
@@ -104,6 +126,7 @@ impl Hash for Encoding {
 }
 
 pub(super) type LeftOrder = (i64, Encoding, Encoding);
+type LeftRefs<'a> = (&'a LeftOrder, &'a RowPayload);
 pub(super) type RightOrder = (i64, Encoding);
 pub(super) type BatchKey = (u8, u64);
 
@@ -175,12 +198,32 @@ impl LeftState {
     pub fn iter(&self) -> impl Iterator<Item = (&LeftOrder, &RowPayload)> {
         self.ordered
             .iter()
-            .map(|(key, payload)| (key, payload))
-            .chain(self.general.iter())
+            .map(left_row_refs)
+            .chain(self.general.iter().map(left_tree_refs))
     }
 
     pub fn keys(&self) -> impl Iterator<Item = &LeftOrder> {
         self.iter().map(|(key, _)| key)
+    }
+
+    pub fn ready_prefix_len(&self, limit: usize, frontier: Option<i64>, ended: bool) -> usize {
+        if ended {
+            return self.len().min(limit);
+        }
+        let Some(frontier) = frontier else {
+            return 0;
+        };
+        if self.general.is_empty() {
+            self.ordered
+                .partition_point(|(order, _)| order.0 < frontier)
+                .min(limit)
+        } else {
+            self.general
+                .keys()
+                .take(limit)
+                .take_while(|order| order.0 < frontier)
+                .count()
+        }
     }
 
     pub fn first_key_value(&self) -> Option<(&LeftOrder, &RowPayload)> {
@@ -235,15 +278,9 @@ impl LeftState {
         }
     }
 
-    pub fn drain_prefix(
-        &mut self,
-        count: usize,
-        batches: &mut BTreeMap<BatchKey, (Arc<PayloadBatch>, usize)>,
-    ) {
+    pub fn drain_prefix(&mut self, count: usize) {
         if self.general.is_empty() {
-            for (_, payload) in self.ordered.drain(..count) {
-                detach_batch(batches, &payload);
-            }
+            self.ordered.drain(..count);
             // Each retained left identity is charged enough for two vector
             // slots. Compact only after crossing that threshold, avoiding a
             // full copy for every output prefix.
@@ -260,9 +297,7 @@ impl LeftState {
             } else {
                 std::mem::take(&mut self.general)
             };
-            for payload in removed.into_values() {
-                detach_batch(batches, &payload);
-            }
+            drop(removed);
         }
     }
 
@@ -285,17 +320,21 @@ impl<'a> IntoIterator for &'a LeftState {
             std::slice::Iter<'a, (LeftOrder, RowPayload)>,
             fn(&(LeftOrder, RowPayload)) -> (&LeftOrder, &RowPayload),
         >,
-        std::collections::btree_map::Iter<'a, LeftOrder, RowPayload>,
+        std::iter::Map<
+            std::collections::btree_map::Iter<'a, LeftOrder, RowPayload>,
+            fn(LeftRefs<'a>) -> LeftRefs<'a>,
+        >,
     >;
 
     fn into_iter(self) -> Self::IntoIter {
-        fn as_refs(row: &(LeftOrder, RowPayload)) -> (&LeftOrder, &RowPayload) {
-            (&row.0, &row.1)
-        }
         self.ordered
             .iter()
-            .map(as_refs as fn(&(LeftOrder, RowPayload)) -> (&LeftOrder, &RowPayload))
-            .chain(self.general.iter())
+            .map(left_row_refs as fn(&(LeftOrder, RowPayload)) -> (&LeftOrder, &RowPayload))
+            .chain(
+                self.general
+                    .iter()
+                    .map(left_tree_refs as fn(LeftRefs<'a>) -> LeftRefs<'a>),
+            )
     }
 }
 
@@ -497,8 +536,27 @@ impl State {
             .1 += 1;
     }
 
+    pub fn commit_matched_left_prefix(&mut self, prefix: &LeftPrefix) {
+        self.left.drain_prefix(prefix.count);
+        for (&key, &removed) in &prefix.batches {
+            let references = &mut self.batches.get_mut(&key).expect("indexed ASOF batch").1;
+            *references -= removed;
+            if *references == 0 {
+                self.batches.remove(&key);
+            }
+        }
+        if self.batches.is_empty() {
+            self.batches = BTreeMap::new();
+        }
+    }
+
+    #[cfg(test)]
     pub fn commit_left_prefix(&mut self, count: usize) {
-        self.left.drain_prefix(count, &mut self.batches);
+        let mut prefix = LeftPrefix::default();
+        for (order, payload) in self.left.iter().take(count) {
+            prefix.visit(order, payload, "asof").unwrap();
+        }
+        self.commit_matched_left_prefix(&prefix);
     }
 
     pub fn contains_identity(&self, index: usize, identity: &LeftOrder) -> bool {
@@ -623,6 +681,34 @@ pub(super) struct Inventory {
     pub right_payloads: u64,
     pub identity_only: u64,
     pub bytes: u64,
+}
+
+/// Matching visits each selected left identity once, accumulating all
+/// infallible post-delivery changes before the sink accepts the output.
+#[derive(Default)]
+pub(super) struct LeftPrefix {
+    pub count: usize,
+    pub index_bytes: u64,
+    row_bytes: u64,
+    batches: BTreeMap<BatchKey, usize>,
+}
+
+impl LeftPrefix {
+    pub fn visit(&mut self, order: &LeftOrder, row: &RowPayload, name: &str) -> Result<()> {
+        self.count += 1;
+        self.index_bytes = super::checked(
+            name,
+            self.index_bytes,
+            41 + order.1.len() as u64 + order.2.len() as u64,
+        )?;
+        self.row_bytes = super::checked(
+            name,
+            self.row_bytes,
+            left_row_charge(&order.1, &order.2, row),
+        )?;
+        *self.batches.entry(row.batch.key).or_default() += 1;
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -834,23 +920,18 @@ impl State {
     /// cloning the retained maps or their Arrow batch references.
     pub fn inventory_after_left_prefix(
         &self,
-        keys: &[LeftOrder],
+        prefix: &LeftPrefix,
         mut total: Inventory,
         previous_index_bytes: u64,
         next_index_bytes: u64,
         name: &str,
     ) -> Result<Inventory> {
         total.bytes -= previous_index_bytes;
-        let mut removed = BTreeMap::<BatchKey, usize>::new();
-        for ((key, row), expected) in self.left.iter().take(keys.len()).zip(keys) {
-            debug_assert_eq!(key, expected);
-            total.identities -= 1;
-            total.bytes -= left_row_charge(&key.1, &key.2, row);
-            *removed.entry(row.batch.key).or_default() += 1;
-        }
-        for (key, count) in removed {
-            let (batch, references) = &self.batches[&key];
-            if count == *references {
+        total.identities -= prefix.count as u64;
+        total.bytes -= prefix.row_bytes;
+        for (key, count) in &prefix.batches {
+            let (batch, references) = &self.batches[key];
+            if count == references {
                 total.bytes -= batch_allocation(batch);
             }
         }
@@ -1199,6 +1280,36 @@ mod right_bucket_tests {
     use crate::StateSegment;
     use datafusion::arrow::{datatypes::Schema, record_batch::RecordBatch};
     use std::sync::{Arc, OnceLock};
+
+    #[test]
+    fn admitted_right_run_reserves_each_column_once() {
+        let batch = Arc::new(PayloadBatch {
+            key: (1, 0),
+            record: Arc::new(RecordBatch::new_empty(Arc::new(Schema::empty()))),
+            encoded: OnceLock::new(),
+            encoded_charge_bytes: 0,
+            body_bytes: 0,
+        });
+        let mut bucket = RightBucket::new();
+        let allocations = allocation_counter::measure(|| {
+            bucket.reserve_payloads(1_000);
+            for time in 0..1_000 {
+                bucket.insert(
+                    (time, Encoding::from_slice(&[1])),
+                    Some(RowPayload {
+                        batch: Arc::clone(&batch),
+                        row: 0,
+                    }),
+                );
+            }
+        });
+        assert!(
+            allocations.count_total <= 4,
+            "right columns repeatedly grew: {allocations:?}"
+        );
+        assert_eq!(bucket.len(), 1_000);
+        assert_eq!(bucket.candidate(999, 0).unwrap().row, 0);
+    }
 
     #[test]
     fn older_payload_expiry_does_not_move_retained_identity_columns() {

@@ -1,6 +1,6 @@
 use super::{
     StreamAsofJoinOperator, StreamAsofJoinStatus, SweepStamp, checked, reason,
-    state::{self, BatchKey, LeftOrder, RowPayload},
+    state::{self, BatchKey, LeftPrefix, RowPayload},
     workspace::ColumnWorkspace,
 };
 use crate::{
@@ -17,6 +17,12 @@ struct PreparedOutput {
     batch: Batch,
     matched: u64,
     workspace: MemoryReservation,
+    prefix: LeftPrefix,
+}
+
+struct MatchedPrefix<'a> {
+    rows: Vec<(&'a RowPayload, Option<&'a RowPayload>)>,
+    prefix: LeftPrefix,
 }
 
 impl StreamAsofJoinOperator {
@@ -41,13 +47,13 @@ impl StreamAsofJoinOperator {
             // Defer right-side eviction until all ready left rows are emitted.
             // Each accepted prefix can then share the committed right segment.
             let headroom = self.checkpoint_workspace()?;
-            let (mut keys, key_workspace) = self.finalizable_keys(frontier, ended, context)?;
+            let (mut count, prefix_workspace) = self.finalizable_rows(frontier, ended, context)?;
             let prepared_output = self
-                .prepare_output(&mut keys, &key_workspace, context)
+                .prepare_output(&mut count, &prefix_workspace, context)
                 .await?;
-            self.commit_prefix_output(&keys, prepared_output, headroom, context, output)
+            self.commit_prefix_output(prepared_output, headroom, context, output)
                 .await?;
-            drop(key_workspace);
+            drop(prefix_workspace);
         }
         self.finish_progress(frontier, ended, context).await
     }
@@ -69,51 +75,18 @@ impl StreamAsofJoinOperator {
             .is_some_and(|((time, _, _), _)| ended || frontier.is_some_and(|bound| *time < bound))
     }
 
-    fn finalizable_keys(
+    fn finalizable_rows(
         &self,
         frontier: Option<i64>,
         ended: bool,
         context: &StreamOperatorContext<'_>,
-    ) -> Result<(Vec<LeftOrder>, MemoryReservation)> {
-        const MAX_KEYS: usize = 64_000;
-        let limit = context.output_budget().max_rows.min(MAX_KEYS);
-        let count = self.count_finalizable_keys(limit, frontier, ended, context)?;
-        let (count, reservation) = self.reserve_finalizable_keys(count)?;
-        let mut keys = Vec::with_capacity(count);
-        for (index, key) in self.state.left.keys().take(count).enumerate() {
-            if index % 1_024 == 0 {
-                context.check_cancelled()?;
-            }
-            keys.push(key.clone());
-        }
+    ) -> Result<(usize, MemoryReservation)> {
+        const MAX_ROWS: usize = 64_000;
         context.check_cancelled()?;
-        Ok((keys, reservation))
-    }
-
-    fn count_finalizable_keys(
-        &self,
-        limit: usize,
-        frontier: Option<i64>,
-        ended: bool,
-        context: &StreamOperatorContext<'_>,
-    ) -> Result<usize> {
-        let mut count = 0;
-        for (index, (time, _, _)) in self.state.left.keys().take(limit).enumerate() {
-            if index % 1_024 == 0 {
-                context.check_cancelled()?;
-            }
-            if !ended && frontier.is_none_or(|bound| *time >= bound) {
-                break;
-            }
-            count += 1;
-        }
-        context.check_cancelled()?;
-        Ok(count)
-    }
-
-    fn reserve_finalizable_keys(&self, mut count: usize) -> Result<(usize, MemoryReservation)> {
+        let limit = context.output_budget().max_rows.min(MAX_ROWS);
+        let mut count = self.state.left.ready_prefix_len(limit, frontier, ended);
         loop {
-            match self.reserve_workspace(key_workspace_bytes(count, count)) {
+            match self.reserve_workspace(prefix_workspace_bytes(count)) {
                 Ok(reservation) => return Ok((count, reservation)),
                 Err(_) if count > 1 => count /= 2,
                 Err(error) => return Err(error),
@@ -220,17 +193,17 @@ impl StreamAsofJoinOperator {
 
     async fn prepare_output(
         &mut self,
-        keys: &mut Vec<LeftOrder>,
-        key_workspace: &MemoryReservation,
+        count: &mut usize,
+        prefix_workspace: &MemoryReservation,
         context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedOutput> {
         loop {
             context.check_cancelled()?;
-            match self.output_attempt(keys, context).await {
+            match self.output_attempt(*count, context).await {
                 Ok(output) => return Ok(output),
-                Err(error) if keys.len() > 1 && retryable(&error) => {
-                    keys.truncate(keys.len() / 2);
-                    shrink_key_workspace(keys, key_workspace);
+                Err(error) if *count > 1 && retryable(&error) => {
+                    *count /= 2;
+                    shrink_prefix_workspace(*count, prefix_workspace);
                 }
                 Err(error) => return Err(error),
             }
@@ -241,27 +214,29 @@ impl StreamAsofJoinOperator {
         name = "asof.output",
         level = "debug",
         skip_all,
-        fields(operator = %self.name, rows = keys.len())
+        fields(operator = %self.name, rows = count)
     )]
     async fn output_attempt(
         &mut self,
-        keys: &[LeftOrder],
+        count: usize,
         context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedOutput> {
-        let cursor_workspace = self.cursor_workspace(keys.len())?;
-        let rows = if cursor_workspace.is_some() {
+        let cursor_workspace = self.cursor_workspace(count)?;
+        let MatchedPrefix { rows, prefix } = if cursor_workspace.is_some() {
             monotonic_candidate_rows(
                 &self.state,
-                keys.len(),
+                count,
                 self.spec.tolerance_micros(),
                 context,
+                &self.name,
             )?
         } else {
             binary_search_candidate_rows(
                 &self.state,
-                keys.len(),
+                count,
                 self.spec.tolerance_micros(),
                 context,
+                &self.name,
             )?
         };
         drop(cursor_workspace);
@@ -273,13 +248,16 @@ impl StreamAsofJoinOperator {
         grow_output_workspace(&mut workspace, remaining, &self.name)?;
         let (result, workspace) = self
             .runtime
-            .materialize(&rows, &self.schemas[2], workspace)
+            .materialize(&rows, &self.schemas[2], workspace, || {
+                context.check_cancelled()
+            })
             .await?;
         let batch = self.output_batch(&result, context)?;
         Ok(PreparedOutput {
             batch,
             matched,
             workspace,
+            prefix,
         })
     }
 
@@ -317,15 +295,18 @@ fn binary_search_candidate_rows<'a>(
     count: usize,
     tolerance: u64,
     context: &StreamOperatorContext<'_>,
-) -> Result<Vec<(&'a RowPayload, Option<&'a RowPayload>)>> {
+    name: &str,
+) -> Result<MatchedPrefix<'a>> {
     let mut rows = Vec::with_capacity(count);
+    let mut prefix = LeftPrefix::default();
     for (index, (key, left)) in state.left.iter().take(count).enumerate() {
         if index % 1_024 == 0 {
             context.check_cancelled()?;
         }
         rows.push((left, state.candidate(&key.1, key.0, tolerance)));
+        prefix.visit(key, left, name)?;
     }
-    Ok(rows)
+    Ok(MatchedPrefix { rows, prefix })
 }
 
 fn monotonic_candidate_rows<'a>(
@@ -333,7 +314,8 @@ fn monotonic_candidate_rows<'a>(
     count: usize,
     tolerance: u64,
     context: &StreamOperatorContext<'_>,
-) -> Result<Vec<(&'a RowPayload, Option<&'a RowPayload>)>> {
+    name: &str,
+) -> Result<MatchedPrefix<'a>> {
     let first_time = state
         .left
         .first_key_value()
@@ -345,6 +327,7 @@ fn monotonic_candidate_rows<'a>(
         cursors.insert(key.clone(), (bucket, bucket.cursor_at(first_time)));
     }
     let mut rows = Vec::with_capacity(count);
+    let mut prefix = LeftPrefix::default();
     for (index, (key, left)) in state.left.iter().take(count).enumerate() {
         if index % 1_024 == 0 {
             context.check_cancelled()?;
@@ -353,8 +336,9 @@ fn monotonic_candidate_rows<'a>(
             .get_mut(&key.1)
             .and_then(|(bucket, next)| bucket.candidate_monotonic(key.0, tolerance, next));
         rows.push((left, right));
+        prefix.visit(key, left, name)?;
     }
-    Ok(rows)
+    Ok(MatchedPrefix { rows, prefix })
 }
 
 fn retryable(error: &CalcFlowError) -> bool {
@@ -368,17 +352,15 @@ fn retryable(error: &CalcFlowError) -> bool {
     )
 }
 
-fn key_workspace_bytes(key_capacity: usize, candidate_rows: usize) -> u64 {
-    (key_capacity * size_of::<LeftOrder>()
-        + candidate_rows * size_of::<(&RowPayload, Option<&RowPayload>)>()
-        + key_capacity * 80 // bounded batch-reference counts during commit
-        + 128) as u64
+fn prefix_workspace_bytes(count: usize) -> u64 {
+    // Candidate references, batch-reference count tree (including a minimum
+    // leaf), and allocator slack. No owned identity vector is constructed.
+    (count * (size_of::<(&RowPayload, Option<&RowPayload>)>() + 96) + 256) as u64
 }
 
-fn shrink_key_workspace(keys: &mut Vec<LeftOrder>, reservation: &MemoryReservation) {
-    keys.shrink_to_fit();
-    let needed = usize::try_from(key_workspace_bytes(keys.capacity(), keys.len()))
-        .expect("bounded ASOF key scratch");
+fn shrink_prefix_workspace(count: usize, reservation: &MemoryReservation) {
+    let needed =
+        usize::try_from(prefix_workspace_bytes(count)).expect("bounded ASOF prefix scratch");
     reservation.shrink(reservation.size() - needed);
 }
 
@@ -557,26 +539,18 @@ mod workspace_tests {
     #[test]
     fn output_retry_releases_key_and_candidate_scratch() {
         let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
-        let mut keys = (0..4_096)
-            .map(|time| {
-                (
-                    time,
-                    state::Encoding::from_slice(&[1]),
-                    state::Encoding::from_slice(&[1]),
-                )
-            })
-            .collect::<Vec<_>>();
+        let mut count = 4_096;
         let reservation = MemoryConsumer::new("asof-test-keys").register(&pool);
         reservation
-            .try_grow(usize::try_from(key_workspace_bytes(keys.capacity(), keys.len())).unwrap())
+            .try_grow(usize::try_from(prefix_workspace_bytes(count)).unwrap())
             .unwrap();
         let initial = reservation.size();
-        keys.truncate(1);
-        shrink_key_workspace(&mut keys, &reservation);
+        count = 1;
+        shrink_prefix_workspace(count, &reservation);
         assert!(reservation.size() < initial / 100);
         assert_eq!(
             reservation.size(),
-            usize::try_from(key_workspace_bytes(keys.capacity(), keys.len())).unwrap()
+            usize::try_from(prefix_workspace_bytes(count)).unwrap()
         );
         assert_eq!(pool.reserved(), reservation.size());
     }

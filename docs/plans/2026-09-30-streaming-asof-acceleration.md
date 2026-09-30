@@ -31,6 +31,10 @@ right 的载荷行和 identity-only 历史现有独立时间、sequence 列与 h
 `O(expired × log(identity_history))`，不搬移尚未过期的身份列；
 refs 仍使用现有 `RowPayload`，尚未完成 P2.2 的紧凑批次引用；
 稀疏 identity-only 桶不分配载荷列，排序 key 使用树以避免逆序到达的二次搬移；
+right 接纳计数与 key 驻留同一遍计算，按接纳批次预留各列容量，接纳提交不再
+重复探测 identity-only 历史；输出 worker 仅持有唯一 Arrow 批次及位置索引；
+前缀匹配同时累计 index、行费用和批次引用差，输出接受后按批次提交；
+有序 left 的就绪前缀用二分截取，不再克隆逐行 key 或重复遍历前缀记账；
 阶段结果及最终配对数据将在 PR 描述中记录。
 
 ## 1. 问题与测量
