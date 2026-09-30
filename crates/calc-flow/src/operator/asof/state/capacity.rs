@@ -34,13 +34,14 @@ impl State {
     pub fn admission_staging_bytes(
         &self,
         rows: &[(LeftOrder, RowPayload)],
+        chunks: Option<&[PreparedLeftChunk]>,
+        right_counts: &[(Encoding, usize)],
         batches: &[std::sync::Arc<super::PayloadBatch>],
         name: &str,
     ) -> Result<u64> {
-        let owners = rows
-            .iter()
-            .flat_map(|(order, _)| [&order.1, &order.2])
-            .filter(|encoding| encoding.allocation().is_some())
+        let owners = self
+            .admission_owned_encodings(rows, chunks, right_counts)
+            .filter(|(encoding, _)| encoding.allocation().is_some())
             .count() as u64;
         let owner_workspace = owners
             .checked_mul(128)
@@ -54,7 +55,11 @@ impl State {
             })?;
         checked(
             name,
-            owner_workspace,
+            checked(
+                name,
+                owner_workspace,
+                (batches.len() * size_of::<super::RowRef>()) as u64,
+            )?,
             self.batches.project_admission(batches, name)?.workspace,
         )
     }
@@ -69,7 +74,8 @@ impl State {
         name: &str,
     ) -> Result<(u64, Inventory, OwnerUpdates)> {
         let owners = self.encoding_owners.as_ref().expect("tracked native state");
-        let updates = owners.project_add(rows.iter().flat_map(|(order, _)| [&order.1, &order.2]));
+        let updates =
+            owners.project_add_counts(self.admission_owned_encodings(rows, chunks, right_counts));
         let pool = self.batches.project_admission(batches, name)?;
         let mut inventory = snapshot.inventory_without_index();
         inventory =
@@ -91,6 +97,35 @@ impl State {
         super::validate_key_count((self.batches.len() + pool.new_batches) as u64, name)?;
         inventory.bytes = indexed_inventory_bytes(inventory.bytes, length, name)?;
         Ok((length, inventory, updates))
+    }
+
+    /// Integer sequence columns own no canonical encoding allocations. Reuse
+    /// admission's per-key row counts instead of visiting every row again.
+    fn admission_owned_encodings<'a>(
+        &self,
+        rows: &'a [(LeftOrder, RowPayload)],
+        chunks: Option<&'a [PreparedLeftChunk]>,
+        right_counts: &'a [(Encoding, usize)],
+    ) -> impl Iterator<Item = (&'a Encoding, usize)> {
+        let left = chunks.filter(|_| self.sequence_kinds[0].width().is_some());
+        let right = chunks.is_none()
+            && !right_counts.is_empty()
+            && self.sequence_kinds[1].width().is_some();
+        let generic = if left.is_some() || right {
+            &[][..]
+        } else {
+            rows
+        };
+        let right_counts = if right { right_counts } else { &[][..] };
+        generic
+            .iter()
+            .flat_map(|(order, _)| [(&order.1, 1), (&order.2, 1)])
+            .chain(
+                left.unwrap_or(&[])
+                    .iter()
+                    .flat_map(PreparedLeftChunk::key_counts),
+            )
+            .chain(right_counts.iter().map(|(key, count)| (key, *count)))
     }
 
     fn project_admission_length(

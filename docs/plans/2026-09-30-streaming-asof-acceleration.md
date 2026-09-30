@@ -19,8 +19,10 @@ right 由 `HashTable<u32>` key 字典定位，批量哈希使用 DataFusion 工�
 有序驱逐访问 key 与过期前缀；较旧载荷转为身份时使用树索引，不搬移未过期列。
 left 保留 Arrow chunk、key 字典、时间列、sequence 列与可选 `u32` 位置；
 乱序 chunk 在线程池 lexsort，重叠 chunk 按 `(time, key, sequence)` 归并。
-八种整数 sequence 使用实际 1/2/4/8 字节宽度；generic sequence 共用每批连续
-Arrow binary 缓冲。8 字节批次/行引用指向唯一载荷池，输出 worker 仅持有唯一
+八种整数 sequence 使用实际 1/2/4/8 字节宽度；有序连续输入直接复制 Arrow 值区间。
+单个非空 Utf8/LargeUtf8 key 加整数 sequence 使用类型化字符串探测和批次字典，
+每个唯一值只编码一次，Arrow take 的临时值缓冲在分配前预留 workspace；
+generic sequence 共用每批连续 Arrow binary 缓冲。8 字节批次/行引用指向唯一载荷池，输出 worker 仅持有唯一
 Arrow 批次与位置索引。载荷 IPC 在 checkpoint 时按需编码。
 
 v3 index 规范编码 key、共享编码 owner、列、批次引用及容量提示；整数列直接
@@ -29,6 +31,12 @@ v3 index 规范编码 key、共享编码 owner、列、批次引用及容量提�
 预备，旧输入与新缓冲预留随 worker 存活，覆盖取消后 reset。sink 接受输出后
 同步提交前缀。Rust/Python checkpoint 能力版本均为 3，算子身份仍为
 `stream_asof_join@1`。性能结果须以最终源码的配对测量为准，并写入 PR 描述。
+
+接纳仍按验证、身份构建、workspace 和容量投影分阶段执行；固定宽度列按区间计费，
+整数 sequence 的 owner 增量复用每 key 计数。驱逐提交按批次和唯一编码 owner
+汇总释放；无变化 tick 使用缓存最小时间，有变化 sweep 仍遍历 right bucket 和
+过期前缀。PR 单独记录这些实施选择与单遍接纳、严格 `O(evicted)` 和调查耗时目标
+之间的差距。
 
 ## 1. 问题与测量
 

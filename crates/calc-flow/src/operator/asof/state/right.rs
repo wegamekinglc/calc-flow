@@ -1,4 +1,4 @@
-use super::{Encoding, PayloadPool, RightOrder, RowRef, SequenceColumn, SequenceKind, SequenceRef};
+use super::{Encoding, RightOrder, RowRef, SequenceColumn, SequenceKind, SequenceRef};
 use std::{
     borrow::Cow,
     cmp::Ordering,
@@ -7,6 +7,7 @@ use std::{
 
 type OrderRef<'a> = (&'a i64, SequenceRef<'a>);
 type RightRow<'a> = (OrderRef<'a>, Option<&'a RowRef>);
+type ExpiredRow<'a> = (i64, Option<&'a Encoding>, Option<&'a RowRef>);
 
 #[cfg(test)]
 thread_local! {
@@ -258,12 +259,11 @@ impl<V: RunValues> RightRun<V> {
         self.times[self.head..].partition_point(|time| predicate(*time))
     }
 
-    fn take_prefix(&mut self, count: usize, mut take: impl FnMut(i64, Encoding, V::Value)) {
+    fn drop_prefix(&mut self, count: usize) {
         let end = self.head + count;
         for index in self.head..end {
-            let sequence = self.sequences.take(index);
-            let value = self.values.take(index);
-            take(self.times[index], sequence, value);
+            self.sequences.take_owner(index);
+            self.values.take(index);
         }
         self.head = end;
     }
@@ -286,12 +286,16 @@ impl<V: RunValues> RightRun<V> {
         self.head = 0;
     }
 
-    fn advance(&self, time: i64, next: &mut usize) -> Option<(OrderRef<'_>, &V::Value)> {
+    fn advance_index(&self, time: i64, next: &mut usize) -> Option<usize> {
         *next = (*next).max(self.head);
         while self.times.get(*next).is_some_and(|value| *value <= time) {
             *next += 1;
         }
-        self.at(next.checked_sub(1)?)
+        next.checked_sub(1).filter(|index| *index >= self.head)
+    }
+
+    fn advance(&self, time: i64, next: &mut usize) -> Option<(OrderRef<'_>, &V::Value)> {
+        self.at(self.advance_index(time, next)?)
     }
 }
 
@@ -340,10 +344,10 @@ impl RightBucket {
             .map(|(order, ())| order)
             .filter(|order| !super::identity_expired(*order.0, status));
         for index in payloads.head..payloads.head + removed_payloads {
-            let (order, _) = payloads.at(index).expect("expired payload");
-            if super::identity_expired(*order.0, status) {
+            if super::identity_expired(payloads.times[index], status) {
                 continue;
             }
+            let (order, _) = payloads.at(index).expect("expired payload");
             if last.as_ref().is_none_or(|last| last < &order) {
                 append += 1;
                 last = Some(order);
@@ -610,6 +614,9 @@ impl RightBucket {
     pub fn candidate(&self, time: i64, tolerance: u64) -> Option<&RowRef> {
         let payloads = self.payloads();
         let payload = payloads.head + payloads.prefix_len(|value| value <= time);
+        if self.identities.len() == 0 && self.general_identities.is_empty() {
+            return self.payload_candidate(payload.checked_sub(1)?, time, tolerance);
+        }
         let identity = self.identities.head + self.identities.prefix_len(|value| value <= time);
         let identity = later_identity(
             identity
@@ -628,6 +635,19 @@ impl RightBucket {
         )
     }
 
+    /// A sorted payload column already places the greatest sequence last at
+    /// each time. With no identity-only candidates, reconstructing sequence
+    /// encodings cannot affect the selected row.
+    fn payload_candidate(&self, index: usize, time: i64, tolerance: u64) -> Option<&RowRef> {
+        let payloads = self.payloads();
+        if index < payloads.head {
+            return None;
+        }
+        let right_time = *payloads.times.get(index)?;
+        (i128::from(right_time) >= i128::from(time) - i128::from(tolerance))
+            .then(|| payloads.values.get(index))
+    }
+
     pub fn cursor_at(&self, time: i64) -> RightCursor {
         RightCursor {
             payload: self.payloads().head + self.payloads().prefix_len(|value| value < time),
@@ -641,6 +661,10 @@ impl RightBucket {
         tolerance: u64,
         next: &mut RightCursor,
     ) -> Option<&RowRef> {
+        if self.identities.len() == 0 && self.general_identities.is_empty() {
+            let index = self.payloads().advance_index(time, &mut next.payload)?;
+            return self.payload_candidate(index, time, tolerance);
+        }
         let identity = later_identity(
             self.identities
                 .advance(time, &mut next.identity)
@@ -662,24 +686,33 @@ impl RightBucket {
         status: &'a super::super::StreamAsofJoinStatus,
         tolerance: u64,
         threshold: i128,
-    ) -> impl Iterator<Item = RightRow<'a>> {
+    ) -> impl Iterator<Item = ExpiredRow<'a>> {
         let payloads = self.payloads();
         let payload_count =
             payloads.prefix_len(|time| super::payload_expired(time, tolerance, threshold));
         let identity_count = self
             .identities
             .prefix_len(|time| super::identity_expired(time, status));
-        let payloads = (payloads.head..payloads.head + payload_count)
-            .map(|index| payloads.at(index).expect("expired ASOF payload"))
-            .map(|(order, row)| (order, Some(row)));
-        let identities = (self.identities.head..self.identities.head + identity_count)
-            .map(|index| self.identities.at(index).expect("expired ASOF identity"))
-            .map(|(order, ())| (order, None));
+        let payloads = (payloads.head..payloads.head + payload_count).map(|index| {
+            (
+                payloads.times[index],
+                payloads.sequences.owner_encoding(index),
+                Some(payloads.values.get(index)),
+            )
+        });
+        let identities =
+            (self.identities.head..self.identities.head + identity_count).map(|index| {
+                (
+                    self.identities.times[index],
+                    self.identities.sequences.owner_encoding(index),
+                    None,
+                )
+            });
         let general = self
             .general_identities
             .iter()
             .take_while(move |order| super::identity_expired(order.0, status))
-            .map(|order| (order_ref(order), None));
+            .map(|order| (order.0, Some(&order.1), None));
         payloads.chain(identities).chain(general)
     }
 
@@ -688,24 +721,17 @@ impl RightBucket {
         status: &super::super::StreamAsofJoinStatus,
         tolerance: u64,
         threshold: i128,
-        batches: &mut PayloadPool,
-        mut released: impl FnMut(&Encoding),
     ) -> u64 {
         let identity_count = self
             .identities
             .prefix_len(|time| super::identity_expired(time, status));
-        self.identities
-            .take_prefix(identity_count, |_, sequence, ()| released(&sequence));
+        self.identities.drop_prefix(identity_count);
         while self
             .general_identities
             .first()
             .is_some_and(|order| super::identity_expired(order.0, status))
         {
-            let (_, sequence) = self
-                .general_identities
-                .pop_first()
-                .expect("expired ASOF identity");
-            released(&sequence);
+            self.general_identities.pop_first();
         }
         let Some(payloads) = self.payloads.as_mut() else {
             self.compact_identity_storage();
@@ -715,14 +741,18 @@ impl RightBucket {
             payloads.prefix_len(|time| super::payload_expired(time, tolerance, threshold));
         let identities = &mut self.identities;
         let general = &mut self.general_identities;
-        payloads.take_prefix(payload_count, |time, sequence, payload| {
-            batches.detach(payload);
+        let end = payloads.head + payload_count;
+        for index in payloads.head..end {
+            let time = payloads.times[index];
+            payloads.values.take(index);
             if super::identity_expired(time, status) {
-                released(&sequence);
+                payloads.sequences.take_owner(index);
             } else {
+                let sequence = payloads.sequences.take(index);
                 insert_identity(identities, general, (time, sequence));
             }
-        });
+        }
+        payloads.head = end;
         payloads.compact();
         if payloads.len() == 0 {
             self.payloads = None;
@@ -732,16 +762,11 @@ impl RightBucket {
     }
 
     pub fn payload_min(&self) -> Option<i64> {
-        self.payloads()
-            .at(self.payloads().head)
-            .map(|(order, _)| *order.0)
+        self.payloads().times.get(self.payloads().head).copied()
     }
 
     pub fn identity_min(&self) -> Option<i64> {
-        let ordered = self
-            .identities
-            .at(self.identities.head)
-            .map(|(order, ())| *order.0);
+        let ordered = self.identities.times.get(self.identities.head).copied();
         match (
             ordered,
             self.general_identities.first().map(|order| order.0),

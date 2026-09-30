@@ -212,9 +212,14 @@ bounded by runtime edge rows/bytes. A 64 MiB state limit therefore is not a
 64 MiB process RSS limit; sources, edges, checkpoint publication, runtime
 allocations, and caller-owned tables have their own ownership and budgets.
 Identity workspace includes the canonical batch encoding, retained sequence
-copies, and converter headers. New owned key copies reserve additional
-workspace once per unique key before allocation; shared resident keys reuse
-their buffers. Dropped late rows do not allocate
+copies, and converter headers. A single non-null Utf8 or LargeUtf8 key with an
+integer sequence is hashed from its Arrow values and encoded once per distinct
+value. The temporary distinct-value copy reserves workspace before Arrow take;
+row dictionary IDs retain the same canonical key bytes and checkpoint order.
+Other key shapes use the existing typed scalar or batch row converter paths;
+generic sequences use the batch row converter. New owned key copies reserve
+additional workspace once per unique key before allocation; shared resident
+keys reuse their buffers. Dropped late rows do not allocate
 identity buffers. Batch hash vectors reserve additional workspace and fall back
 to scalar probing when that scratch cannot fit.
 
@@ -253,7 +258,8 @@ pool. Finalized and evicted references release their batch when its final row
 is removed, and sparse pool indexes shrink using preflighted replacement storage.
 Pending left rows retain owned compact Arrow time buffers, a per-chunk key dictionary,
 sequence columns, and optional compact positions. All eight signed and unsigned
-integer sequence types use their native 1/2/4/8-byte width. Generic sequences
+integer sequence types use their native 1/2/4/8-byte width. Ordered contiguous
+integer sequences copy the accepted Arrow value range directly. Generic sequences
 share one continuous Arrow binary buffer per admitted batch. Unordered input is sorted
 on a blocking worker; borrowed cursor heads merge overlapping chunks in
 canonical `(time, key, sequence)` order. Cached row counts and extrema avoid
@@ -283,7 +289,10 @@ synchronously installing new rows. An eviction sweep preflights its row, shared
 batch, and index deltas before changing state in place; it defers index encoding
 until checkpoint preparation. A tick with nothing to evict uses cached minimum
 right-side times, while a sweep that changes state still traverses retained
-right buckets and their expired prefixes. Shared right columns are copied on a
+right buckets and their expired prefixes. The preview reserves scratch for batch
+reference counts and unique encoding-owner removals, including identity-only
+history. Commit releases each batch and encoding allocation by its aggregated
+reference count. Shared right columns are copied on a
 blocking worker before admission or eviction commits; unchanged buckets keep
 their allocation. The worker's reservation retains its inputs and replacement
 columns through cancellation and reset. Both paths reuse unchanged Arrow batch segments. This does not

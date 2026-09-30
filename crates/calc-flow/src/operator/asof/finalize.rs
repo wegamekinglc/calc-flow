@@ -167,9 +167,9 @@ impl StreamAsofJoinOperator {
             .await?;
         let copies = self.checked_right_eviction_copies(context).await?;
         copies.install(&mut self.state.right);
-        let evicted = self
-            .state
-            .evict_prepared(&status, self.spec.tolerance_micros(), pool);
+        let evicted =
+            self.state
+                .evict_prepared(&status, self.spec.tolerance_micros(), pool, &preview);
         debug_assert_eq!(evicted, preview.evicted_payloads);
         self.status = status;
         self.prepared = None;
@@ -342,17 +342,18 @@ fn binary_search_candidate_rows<'a>(
 ) -> Result<MatchedPrefix<'a>> {
     let mut rows = Vec::with_capacity(count);
     let mut prefix = LeftPrefix::default();
-    for (index, (key, left)) in state.left.iter().take(count).enumerate() {
+    for (index, (key, left)) in state.left.output_iter().take(count).enumerate() {
         if index % 1_024 == 0 {
             context.check_cancelled()?;
         }
+        let left = state.batches.view(left);
         rows.push((
-            state.batches.view(left),
+            left,
             state
                 .candidate(key.1, *key.0, tolerance)
                 .map(|row| state.batches.view(*row)),
         ));
-        prefix.visit(&key, left, &state.batches, name)?;
+        prefix.visit_owners(key.1, key.2, left.batch.key, name)?;
     }
     Ok(MatchedPrefix { rows, prefix })
 }
@@ -377,18 +378,16 @@ fn monotonic_candidate_rows<'a>(
     }
     let mut rows = Vec::with_capacity(count);
     let mut prefix = LeftPrefix::default();
-    for (index, (key, left)) in state.left.iter().take(count).enumerate() {
+    for (index, (key, left)) in state.left.output_iter().take(count).enumerate() {
         if index % 1_024 == 0 {
             context.check_cancelled()?;
         }
         let right = cursors
             .get_mut(key.1)
             .and_then(|(bucket, next)| bucket.candidate_monotonic(*key.0, tolerance, next));
-        rows.push((
-            state.batches.view(left),
-            right.map(|row| state.batches.view(*row)),
-        ));
-        prefix.visit(&key, left, &state.batches, name)?;
+        let left = state.batches.view(left);
+        rows.push((left, right.map(|row| state.batches.view(*row))));
+        prefix.visit_owners(key.1, key.2, left.batch.key, name)?;
     }
     Ok(MatchedPrefix { rows, prefix })
 }
@@ -442,12 +441,38 @@ fn raw_output_bytes(
     workspace: &mut MemoryReservation,
     name: &str,
 ) -> Result<u64> {
+    let left = raw_side_bytes(rows.iter().map(|(left, _)| *left), columns, workspace, name)?;
+    let right = raw_side_bytes(
+        rows.iter().filter_map(|(_, right)| *right),
+        columns,
+        workspace,
+        name,
+    )?;
+    checked(name, left, right)
+}
+
+fn raw_side_bytes<'a>(
+    rows: impl Iterator<Item = PayloadView<'a>>,
+    columns: &mut BTreeMap<BatchKey, Vec<ColumnWorkspace>>,
+    workspace: &mut MemoryReservation,
+    name: &str,
+) -> Result<u64> {
+    let mut rows = rows.peekable();
     let mut raw = 0;
-    for (left, right) in rows {
-        raw = checked(name, raw, row_slice_bytes(left, columns, workspace, name)?)?;
-        if let Some(right) = right {
-            raw = checked(name, raw, row_slice_bytes(right, columns, workspace, name)?)?;
+    while let Some(row) = rows.next() {
+        let mut end = row.row + 1;
+        while rows
+            .peek()
+            .is_some_and(|next| next.batch.key == row.batch.key && next.row == end)
+        {
+            rows.next();
+            end += 1;
         }
+        raw = checked(
+            name,
+            raw,
+            range_slice_bytes(&row, row.row..end, columns, workspace, name)?,
+        )?;
     }
     Ok(raw)
 }
@@ -513,8 +538,9 @@ fn workspace_overflow(name: &str) -> CalcFlowError {
     )
 }
 
-fn row_slice_bytes(
+fn range_slice_bytes(
     row: &PayloadView<'_>,
+    range: std::ops::Range<usize>,
     cache: &mut BTreeMap<BatchKey, Vec<ColumnWorkspace>>,
     workspace: &mut MemoryReservation,
     name: &str,
@@ -539,7 +565,7 @@ fn row_slice_bytes(
         }
     };
     columns.iter().try_fold(0, |total, column| {
-        checked(name, total, column.bytes(row.row, name)?)
+        checked(name, total, column.range_bytes(range.clone(), name)?)
     })
 }
 

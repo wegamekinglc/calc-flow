@@ -17,6 +17,11 @@ measurements. Use the current guides for supported behavior.
   prepared on blocking workers with reservations retained through cancellation.
   Rust and Python capabilities advertise state/layout 3; the operator identity
   remains `stream_asof_join@1`. Versions 1 and 2 are rejected.
+  Admission uses typed string-key dictionaries with integer sequences, copies
+  ordered integer sequence ranges, and aggregates shared owner counts. Output
+  workspace uses Arrow offset ranges; finalization and eviction avoid encoding
+  integer sequences that need no owned buffer. Eviction previews reserve their
+  encoding-owner removal scratch before changing state.
 
 ## 2026-09
 

@@ -543,6 +543,7 @@ impl State {
         }
     }
 
+    #[cfg(test)]
     pub fn attach(&mut self, row: &RowPayload) -> RowRef {
         self.batches.attach(row)
     }
@@ -610,7 +611,13 @@ pub(super) enum EncodedColumns {
     Int64(Int64Array),
     UInt64(UInt64Array),
     Integer(IntegerColumn),
+    StringKeys {
+        rows: Arc<EncodedBatch>,
+        ids: Vec<u32>,
+    },
 }
+
+mod string_keys;
 
 pub(super) struct IntegerColumn {
     values: datafusion::arrow::buffer::Buffer,
@@ -673,6 +680,7 @@ impl EncodedColumns {
         match self {
             Self::Integer(column) => column.with_row(row, use_bytes),
             Self::Rows(rows) | Self::Binary(rows) => use_bytes(rows.row(row)),
+            Self::StringKeys { rows, ids } => use_bytes(rows.row(ids[row] as usize)),
             Self::Int64(column) => {
                 let mut encoded = [0_u8; 9];
                 encoded[0] = 1;
@@ -692,6 +700,17 @@ impl EncodedColumns {
     /// Returns the owned encoding of one row.
     pub(super) fn row(&self, row: usize) -> Encoding {
         match self {
+            Self::StringKeys { rows, ids } => {
+                let id = ids[row];
+                if Encoding::fits_inline(rows.row(id as usize)) {
+                    Encoding::from_slice(rows.row(id as usize))
+                } else {
+                    Encoding::Batch {
+                        rows: rows.clone(),
+                        row: id,
+                    }
+                }
+            }
             Self::Rows(rows) | Self::Binary(rows) if !Encoding::fits_inline(rows.row(row)) => {
                 Encoding::Batch {
                     rows: rows.clone(),
@@ -707,6 +726,14 @@ impl EncodedColumns {
         seed: &datafusion::common::hash_utils::RandomState,
         count: usize,
     ) -> Result<Vec<u64>> {
+        if let Self::StringKeys { rows, ids } = self {
+            let values = match rows.storage {
+                EncodedBatchStorage::Binary(_) => Self::Binary(rows.clone()),
+                EncodedBatchStorage::LargeBinary(_) => Self::Rows(rows.clone()),
+            };
+            let unique = values.hashes(seed, rows.len())?;
+            return Ok(ids[..count].iter().map(|id| unique[*id as usize]).collect());
+        }
         let mut hashes = vec![0; count];
         if let Self::Binary(rows) = self {
             let EncodedBatchStorage::Binary(binary) = &rows.storage else {
@@ -730,7 +757,10 @@ impl EncodedColumns {
 
     #[cfg(test)]
     pub(super) fn is_typed(&self) -> bool {
-        matches!(self, Self::Int64(_) | Self::UInt64(_) | Self::Integer(_))
+        matches!(
+            self,
+            Self::Int64(_) | Self::UInt64(_) | Self::Integer(_) | Self::StringKeys { .. }
+        )
     }
 }
 
@@ -775,13 +805,17 @@ pub(super) fn encode_columns(batch: &RecordBatch, names: &[String]) -> Result<En
                 .clone())
         })
         .collect::<Result<Vec<_>>>()?;
+    encode_row_columns(&arrays)
+}
+
+fn encode_row_columns(arrays: &[datafusion::arrow::array::ArrayRef]) -> Result<EncodedColumns> {
     let fields = arrays
         .iter()
         .map(|array| SortField::new(array.data_type().clone()))
         .collect();
     let converter = RowConverter::new(fields).map_err(|error| super::arrow_error(&error))?;
     let rows = converter
-        .convert_columns(&arrays)
+        .convert_columns(arrays)
         .map_err(|error| super::arrow_error(&error))?;
     if i32::try_from(rows.size()).is_ok() {
         let binary = rows
@@ -804,6 +838,25 @@ pub(super) fn encode_columns(batch: &RecordBatch, names: &[String]) -> Result<En
     }
 }
 
+/// Read a single non-null string key through its typed Arrow array, encode
+/// distinct values once, and address them with compact dictionary ids.
+pub(super) fn encode_key_columns<R>(
+    batch: &RecordBatch,
+    names: &[String],
+    reserve: impl FnOnce(u64) -> Result<R>,
+) -> Result<EncodedColumns> {
+    if let [name] = names {
+        let index = batch
+            .schema()
+            .index_of(name)
+            .map_err(|error| super::arrow_error(&error))?;
+        if let Some(keys) = string_keys::encode(batch.column(index), reserve)? {
+            return Ok(keys);
+        }
+    }
+    encode_columns(batch, names)
+}
+
 #[cfg(test)]
 pub(super) fn encoded_columns(
     batch: &RecordBatch,
@@ -820,6 +873,7 @@ const LEFT_IDENTITY_BYTES: u64 = LEFT_IDENTITY_SLOT_BYTES as u64;
 const _: () = assert!(2 * size_of::<(LeftOrder, RowRef)>() <= LEFT_IDENTITY_SLOT_BYTES);
 /// Ordered-map node charged per right identity; the bucket key allocation is
 /// charged separately, once per bucket.
+#[cfg(test)]
 const RIGHT_IDENTITY_BYTES: u64 = 256 + 64;
 /// Per-allocation header charged on top of each owned buffer's capacity.
 const ALLOCATION_BYTES: u64 = 64;
@@ -837,15 +891,14 @@ pub(super) struct Inventory {
 #[derive(Default)]
 pub(super) struct LeftPrefix {
     pub count: usize,
-    pub index_bytes: u64,
-    row_bytes: u64,
     pub batches: BTreeMap<BatchKey, usize>,
-    pub keys: BTreeMap<(BatchKey, Encoding), usize>,
+    pub keys: std::collections::HashMap<(BatchKey, Encoding), usize, ahash::RandomState>,
     pub owners: OwnerRemovals,
     pub sequence_owners: BTreeMap<BatchKey, OwnerRemovals>,
 }
 
 impl LeftPrefix {
+    #[cfg(test)]
     pub fn visit(
         &mut self,
         order: &LeftView<'_>,
@@ -853,26 +906,33 @@ impl LeftPrefix {
         batches: &PayloadPool,
         name: &str,
     ) -> Result<()> {
-        self.count += 1;
-        self.index_bytes = super::checked(
-            name,
-            self.index_bytes,
-            41 + order.1.len() as u64 + order.2.len() as u64,
-        )?;
-        self.row_bytes = super::checked(
-            name,
-            self.row_bytes,
-            left_row_charge(order.1, order.2.as_ref(), &row),
-        )?;
-        let batch = batches.key(row);
+        self.visit_owners(order.1, Some(order.2.as_ref()), batches.key(row), name)
+    }
+
+    pub fn visit_owners(
+        &mut self,
+        key: &Encoding,
+        sequence: Option<&Encoding>,
+        batch: BatchKey,
+        name: &str,
+    ) -> Result<()> {
+        self.count = self.count.checked_add(1).ok_or_else(|| {
+            super::reason(
+                name,
+                crate::StreamingFailureReason::AsofCounterOverflow,
+                "ASOF prefix row count overflowed",
+            )
+        })?;
         *self.batches.entry(batch).or_default() += 1;
-        *self.keys.entry((batch, order.1.clone())).or_default() += 1;
-        EncodingOwners::record_remove(&mut self.owners, order.1, 1);
-        EncodingOwners::record_remove(&mut self.owners, order.2.as_ref(), 1);
-        if order.2.allocation().is_some() {
+        *self.keys.entry((batch, key.clone())).or_default() += 1;
+        EncodingOwners::record_remove(&mut self.owners, key, 1);
+        if let Some(sequence) = sequence {
+            EncodingOwners::record_remove(&mut self.owners, sequence, 1);
+        }
+        if let Some(sequence) = sequence.filter(|sequence| sequence.allocation().is_some()) {
             EncodingOwners::record_remove(
                 self.sequence_owners.entry(batch).or_default(),
-                order.2.as_ref(),
+                sequence,
                 1,
             );
         }
@@ -886,8 +946,6 @@ pub(super) struct EvictionPreview {
     pub removed_identities: u64,
     pub added_identity_only: u64,
     pub removed_identity_only: u64,
-    pub released_state_bytes: u64,
-    pub removed_index_bytes: u64,
     pub owners: OwnerRemovals,
     pub batches: BTreeMap<BatchKey, usize>,
     #[cfg(test)]
@@ -904,7 +962,7 @@ struct EvictionConditions<'a> {
 fn preview_right_row(
     preview: &mut EvictionPreview,
     removed_batch_refs: &mut BTreeMap<BatchKey, usize>,
-    order: (&i64, &Encoding),
+    time: i64,
     row: Option<&RowRef>,
     conditions: &EvictionConditions<'_>,
     name: &str,
@@ -913,7 +971,7 @@ fn preview_right_row(
     {
         preview.visited_rows += 1;
     }
-    let (expired_payload, remove) = preview_row_disposition(*order.0, row, conditions);
+    let (expired_payload, remove) = preview_row_disposition(time, row, conditions);
     if expired_payload {
         let payload = row.expect("expired ASOF payload");
         preview_expired_payload(
@@ -926,7 +984,7 @@ fn preview_right_row(
         )?;
     }
     if remove {
-        preview_removed_identity(preview, order.1, row, name)?;
+        preview_removed_identity(preview, row, name)?;
     }
     Ok(remove)
 }
@@ -954,19 +1012,12 @@ fn preview_expired_payload(
     *removed_batch_refs.entry(batches.key(payload)).or_default() += 1;
     if !remove {
         preview.added_identity_only = super::checked(name, preview.added_identity_only, 1)?;
-        preview.released_state_bytes = super::checked(
-            name,
-            preview.released_state_bytes,
-            payload_allocation(&payload),
-        )?;
-        preview.removed_index_bytes = super::checked(name, preview.removed_index_bytes, 17)?;
     }
     Ok(())
 }
 
 fn preview_removed_identity(
     preview: &mut EvictionPreview,
-    sequence: &Encoding,
     row: Option<&RowRef>,
     name: &str,
 ) -> Result<()> {
@@ -974,16 +1025,6 @@ fn preview_removed_identity(
     if row.is_none() {
         preview.removed_identity_only = super::checked(name, preview.removed_identity_only, 1)?;
     }
-    preview.released_state_bytes = super::checked(
-        name,
-        preview.released_state_bytes,
-        right_row_charge(sequence, row),
-    )?;
-    preview.removed_index_bytes = super::checked(
-        name,
-        preview.removed_index_bytes,
-        17 + sequence.len() as u64 + if row.is_some() { 17 } else { 0 },
-    )?;
     Ok(())
 }
 
@@ -996,29 +1037,20 @@ fn preview_bucket(
     name: &str,
 ) -> Result<()> {
     let mut survivors = bucket.len();
-    for (order, row) in bucket.expired_rows(
+    for (time, sequence_owner, row) in bucket.expired_rows(
         conditions.status,
         conditions.tolerance,
         conditions.threshold,
     ) {
-        if preview_right_row(
-            preview,
-            removed_batch_refs,
-            (order.0, order.1.as_ref()),
-            row,
-            conditions,
-            name,
-        )? {
-            EncodingOwners::record_remove(&mut preview.owners, key, 1);
-            EncodingOwners::record_remove(&mut preview.owners, order.1.as_ref(), 1);
+        if preview_right_row(preview, removed_batch_refs, time, row, conditions, name)? {
+            if let Some(sequence) = sequence_owner {
+                EncodingOwners::record_remove(&mut preview.owners, sequence, 1);
+            }
             survivors -= 1;
         }
     }
-    if survivors == 0 {
-        preview.released_state_bytes =
-            super::checked(name, preview.released_state_bytes, encoding_allocation(key))?;
-        preview.removed_index_bytes =
-            super::checked(name, preview.removed_index_bytes, 16 + key.len() as u64)?;
+    if survivors < bucket.len() {
+        EncodingOwners::record_remove(&mut preview.owners, key, bucket.len() - survivors);
     }
     Ok(())
 }
@@ -1090,19 +1122,35 @@ impl State {
         Ok(total)
     }
 
-    /// Bound the batch-reference counting tree, including its minimum leaf.
+    /// Bound both batch-reference counts and removal entries for every owned
+    /// encoding allocation. Identity-only history can still own encodings
+    /// when no payload batch remains.
     pub fn eviction_workspace_bytes(&self, name: &str) -> Result<u64> {
-        if self.batches.is_empty() {
-            return Ok(0);
-        }
-        let rows = (self.batches.len() as u64).checked_mul(96).ok_or_else(|| {
+        let batches = (self.batches.len() as u64).checked_mul(96).ok_or_else(|| {
             super::reason(
                 name,
                 crate::StreamingFailureReason::AsofCounterOverflow,
                 "ASOF eviction workspace overflowed",
             )
         })?;
-        super::checked(name, rows, 256)
+        let batches = if batches == 0 {
+            0
+        } else {
+            super::checked(name, batches, 256)?
+        };
+        let owners = if let Some(owners) = &self.encoding_owners {
+            owners.metadata_bytes()
+        } else {
+            // Only private untracked fixtures use this conservative fallback;
+            // native admission and restore always install the owner ledger.
+            let rows = self.right.values().map(RightBucket::len).sum::<usize>() as u64;
+            if rows == 0 {
+                0
+            } else {
+                rows.saturating_mul(256).saturating_add(384)
+            }
+        };
+        super::checked(name, batches, owners)
     }
 
     /// Compute all status and index deltas before the infallible sweep commits.
@@ -1129,13 +1177,6 @@ impl State {
                 &conditions,
                 name,
             )?;
-        }
-        for (&key, &removed) in &removed_batch_refs {
-            let (batch, references) = &self.batches[&key];
-            if removed == *references {
-                preview.released_state_bytes =
-                    super::checked(name, preview.released_state_bytes, batch_allocation(batch))?;
-            }
         }
         preview.batches = removed_batch_refs;
         Ok(preview)
@@ -1176,28 +1217,31 @@ impl State {
         Ok(total)
     }
 
-    /// Release expired right payloads and identities, preserving live columns.
+    #[cfg(test)]
     pub fn evict(&mut self, status: &super::StreamAsofJoinStatus, tolerance: u64) -> u64 {
+        let preview = self.preview_eviction(status, tolerance, "asof").unwrap();
+        let compaction = self.batches.prepare_removal(&preview.batches);
+        self.evict_prepared(status, tolerance, compaction, &preview)
+    }
+
+    /// Release expired columns and commit the preflighted batch and encoding
+    /// owner removals once per owner. No sequence reconstruction is needed
+    /// for integer identities that disappear at this boundary.
+    pub fn evict_prepared(
+        &mut self,
+        status: &super::StreamAsofJoinStatus,
+        tolerance: u64,
+        compaction: PreparedPayloadRemoval,
+        preview: &EvictionPreview,
+    ) -> u64 {
         let threshold = retention_threshold(self, status);
         let mut evicted = 0;
         let mut payload_min = None;
         let mut identity_min = None;
-        let batches = &mut self.batches;
-        let owners = &mut self.encoding_owners;
-        self.right.retain(|key, bucket| {
+        self.batches.defer_compaction();
+        self.right.retain(|_, bucket| {
             if bucket.eviction_pending(status, tolerance, threshold) {
-                evicted += Arc::make_mut(bucket).evict(
-                    status,
-                    tolerance,
-                    threshold,
-                    batches,
-                    |sequence| {
-                        if let Some(owners) = owners {
-                            owners.detach(key);
-                            owners.detach(sequence);
-                        }
-                    },
-                );
+                evicted += Arc::make_mut(bucket).evict(status, tolerance, threshold);
             }
             if let Some(time) = bucket.payload_min() {
                 payload_min = Some(payload_min.map_or(time, |previous: i64| previous.min(time)));
@@ -1209,17 +1253,12 @@ impl State {
         });
         self.right_payload_min = payload_min;
         self.right_identity_min = identity_min;
-        evicted
-    }
-
-    pub fn evict_prepared(
-        &mut self,
-        status: &super::StreamAsofJoinStatus,
-        tolerance: u64,
-        compaction: PreparedPayloadRemoval,
-    ) -> u64 {
-        self.batches.defer_compaction();
-        let evicted = self.evict(status, tolerance);
+        for (&batch, &removed) in &preview.batches {
+            self.batches.detach_count(batch, removed);
+        }
+        if let Some(owners) = &mut self.encoding_owners {
+            owners.remove(&preview.owners);
+        }
         self.batches.install_compaction(compaction);
         evicted
     }
@@ -1284,6 +1323,7 @@ fn payload_allocation<T>(_row: &T) -> u64 {
     64
 }
 
+#[cfg(test)]
 fn batch_allocation(batch: &PayloadBatch) -> u64 {
     // IPC readers can share one body buffer among many column slices. Arrow's
     // per-array capacity report counts that same allocation repeatedly, and
@@ -1339,6 +1379,7 @@ fn left_row_charge<T>(key: &Encoding, sequence: &Encoding, row: &T) -> u64 {
         + payload_allocation(row)
 }
 
+#[cfg(test)]
 fn right_row_charge<T>(sequence: &Encoding, row: Option<&T>) -> u64 {
     RIGHT_IDENTITY_BYTES + encoding_allocation(sequence) + row.map_or(0, payload_allocation)
 }
@@ -1479,7 +1520,7 @@ mod eviction_minima_tests {
         let preview = state.preview_eviction(&status, 0, "asof").unwrap();
         assert_eq!(preview.evicted_payloads, 1);
         assert_eq!(preview.removed_identities, 1);
-        assert_eq!(preview.removed_index_bytes, 35);
+        assert_eq!(preview.batches.get(&(1, 0)), Some(&1));
         assert_eq!(state.evict(&status, 0), 1);
         assert_eq!(state.right_payload_min, None);
         assert_eq!(state.right_identity_min, Some(12));
@@ -1493,7 +1534,7 @@ mod eviction_minima_tests {
 
 #[cfg(test)]
 mod encoding_tests {
-    use super::{Encoding, encode_columns};
+    use super::{EncodedColumns, Encoding, encode_columns, encode_key_columns};
     use datafusion::arrow::{
         array::{Int64Array, UInt64Array},
         datatypes::{DataType, Field, Schema},
@@ -1645,6 +1686,58 @@ mod encoding_tests {
                 .unwrap();
             for row in 0..record.num_rows() {
                 assert_eq!(encoded.row(row).as_slice(), reference.row(row).as_ref());
+            }
+        }
+    }
+
+    #[test]
+    fn typed_string_key_dictionary_preserves_sliced_rows_and_canonical_hashes() {
+        use datafusion::arrow::array::{ArrayRef, LargeStringArray, StringArray};
+        use std::hash::BuildHasher;
+        let long = "long-key-".repeat(32);
+        let values = vec![
+            "ignored",
+            long.as_str(),
+            long.as_str(),
+            "",
+            "é\0文",
+            "é\0文",
+            "ignored",
+        ];
+        let cases: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from(values.clone()).slice(1, 5)),
+            Arc::new(LargeStringArray::from(values).slice(1, 5)),
+            Arc::new(StringArray::from(vec![Some("k"), None])),
+        ];
+        let seed = datafusion::common::hash_utils::RandomState::with_seed(123);
+        for column in cases {
+            let record = RecordBatch::try_new(
+                Arc::new(Schema::new(vec![Field::new(
+                    "key",
+                    column.data_type().clone(),
+                    true,
+                )])),
+                vec![column.clone()],
+            )
+            .unwrap();
+            let encoded = encode_key_columns(&record, &["key".into()], |_| Ok(())).unwrap();
+            assert_eq!(encoded.is_typed(), column.null_count() == 0);
+            let expected = RowConverter::new(vec![SortField::new(column.data_type().clone())])
+                .unwrap()
+                .convert_columns(&[column])
+                .unwrap();
+            let hashes = encoded.hashes(&seed, record.num_rows()).unwrap();
+            for (row, hash) in hashes.into_iter().enumerate() {
+                assert_eq!(encoded.row(row).as_slice(), expected.row(row).data());
+                assert_eq!(hash, seed.hash_one(expected.row(row).data()));
+            }
+            if record.num_rows() == 5 {
+                let EncodedColumns::StringKeys { rows, ids } = encoded else {
+                    panic!("typed string keys");
+                };
+                assert_eq!(rows.len(), 3, "encode each distinct typed value once");
+                assert_eq!(ids[0], ids[1]);
+                assert_eq!(ids[3], ids[4]);
             }
         }
     }
@@ -2183,13 +2276,7 @@ mod right_storage_tests {
         }
         let mut status = super::super::StreamAsofJoinStatus::default();
         status.right.watermark_micros = Some(crate::EventTime::from_micros(63));
-        bucket.evict(
-            &status,
-            0,
-            i128::MIN,
-            &mut super::PayloadPool::default(),
-            |_| {},
-        );
+        bucket.evict(&status, 0, i128::MIN);
         assert_eq!(bucket.len(), 1);
         assert!(bucket.capacity() <= 2 * bucket.len());
     }

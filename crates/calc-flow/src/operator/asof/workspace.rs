@@ -65,6 +65,21 @@ impl ColumnWorkspace {
         Ok(Self { column, fixed })
     }
 
+    pub(super) fn range_bytes(&self, range: std::ops::Range<usize>, name: &str) -> Result<u64> {
+        let variable = variable_range_length(&self.column, range.clone())?;
+        let bytes = self
+            .fixed
+            .checked_mul((range.end - range.start) as u64)
+            .and_then(|fixed| fixed.checked_add(variable));
+        bytes.ok_or_else(|| {
+            reason(
+                name,
+                StreamingFailureReason::AsofCounterOverflow,
+                "ASOF column workspace arithmetic overflowed",
+            )
+        })
+    }
+
     pub(super) fn bytes(&self, row: usize, name: &str) -> Result<u64> {
         self.fixed
             .checked_add(variable_length(&self.column, row)?)
@@ -76,6 +91,43 @@ impl ColumnWorkspace {
                 )
             })
     }
+}
+
+fn variable_range_length(column: &ArrayRef, range: std::ops::Range<usize>) -> Result<u64> {
+    let length = match column.data_type() {
+        DataType::Utf8 => {
+            let values = column
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("validated Arrow type");
+            i64::from(values.value_offsets()[range.end] - values.value_offsets()[range.start])
+        }
+        DataType::LargeUtf8 => {
+            let values = column
+                .as_any()
+                .downcast_ref::<LargeStringArray>()
+                .expect("validated Arrow type");
+            values.value_offsets()[range.end] - values.value_offsets()[range.start]
+        }
+        DataType::Binary => {
+            let values = column
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .expect("validated Arrow type");
+            i64::from(values.value_offsets()[range.end] - values.value_offsets()[range.start])
+        }
+        DataType::LargeBinary => {
+            let values = column
+                .as_any()
+                .downcast_ref::<LargeBinaryArray>()
+                .expect("validated Arrow type");
+            values.value_offsets()[range.end] - values.value_offsets()[range.start]
+        }
+        _ => return Ok(0),
+    };
+    u64::try_from(length).map_err(|_| CalcFlowError::Format {
+        message: "negative ASOF variable-length value".into(),
+    })
 }
 
 fn variable_length(column: &ArrayRef, row: usize) -> Result<u64> {
@@ -150,13 +202,14 @@ impl StreamAsofJoinOperator {
                 .collect::<Result<Vec<_>>>()?;
             let mut accepted = 0_u64;
             let mut raw = 0_u64;
-            for row in 0..record.num_rows() {
-                if input.is_late(event_times.value(row)) {
-                    continue;
-                }
-                accepted = checked(&self.name, accepted, 1)?;
+            for range in accepted_ranges(event_times.values(), input.watermark) {
+                accepted = checked(&self.name, accepted, (range.end - range.start) as u64)?;
                 for column in &columns {
-                    raw = checked(&self.name, raw, column.bytes(row, &self.name)?)?;
+                    raw = checked(
+                        &self.name,
+                        raw,
+                        column.range_bytes(range.clone(), &self.name)?,
+                    )?;
                 }
             }
             if accepted == 0 {
@@ -203,7 +256,8 @@ impl StreamAsofJoinOperator {
         }
         let side = input.side(&self.spec);
         let event_times = super::admission::times(record, side);
-        if event_times.values().iter().all(|time| input.is_late(*time)) {
+        let mut ranges = accepted_ranges(event_times.values(), input.watermark).peekable();
+        if ranges.peek().is_none() {
             return Ok(0);
         }
         let identity_columns = side.keys().len() + side.sequence_by().len();
@@ -212,18 +266,41 @@ impl StreamAsofJoinOperator {
         // Converter configuration and Arrow buffer headers remain live while
         // the accepted identities are assembled, including a one-row batch.
         let mut bytes = identity_columns as u64 * 512;
-        for row in 0..record.num_rows() {
-            if input.is_late(event_times.value(row)) {
-                continue;
-            }
+        for range in ranges {
             bytes = checked(
                 &self.name,
                 bytes,
-                identity_row_workspace(&columns, row, &self.name)?,
+                identity_range_workspace(&columns, range, &self.name)?,
             )?;
         }
         Ok(bytes)
     }
+}
+
+/// Group accepted rows without allocating an index vector. With no ingress
+/// watermark, the complete batch is one range and no time values are scanned.
+fn accepted_ranges(
+    times: &[i64],
+    watermark: Option<i64>,
+) -> impl Iterator<Item = std::ops::Range<usize>> + '_ {
+    let mut next = 0;
+    std::iter::from_fn(move || {
+        let Some(watermark) = watermark else {
+            let range = next..times.len();
+            next = times.len();
+            return (!range.is_empty()).then_some(range);
+        };
+        next += times[next..]
+            .iter()
+            .take_while(|time| **time < watermark)
+            .count();
+        let start = next;
+        next += times[next..]
+            .iter()
+            .take_while(|time| **time >= watermark)
+            .count();
+        (start < next).then_some(start..next)
+    })
 }
 
 fn payload_charge(schema: &Schema, name: &str) -> Result<PayloadCharge> {
@@ -432,6 +509,7 @@ fn resolve_identity_columns(
 /// Covers batch row bytes and per-row sequence copies. Unique owned key copies
 /// grow a separate reservation before allocation. String encodings use 33/32
 /// scaling for block sentinels.
+#[cfg(test)]
 fn identity_row_workspace(
     columns: &ResolvedIdentityColumns,
     row: usize,
@@ -455,6 +533,69 @@ fn identity_row_workspace(
         }
     }
     Ok(bytes)
+}
+
+fn identity_encoding_workspace(
+    column: &ColumnWorkspace,
+    row: usize,
+    string: bool,
+    name: &str,
+) -> Result<u64> {
+    let slice = aligned(column.bytes(row, name)?);
+    if string {
+        checked(
+            name,
+            checked(name, slice, slice / 32)?,
+            STRING_IDENTITY_FRAMING_BYTES,
+        )
+    } else {
+        checked(name, slice, FIXED_IDENTITY_FRAMING_BYTES)
+    }
+}
+
+/// Fixed-width identity columns have identical per-row framing and slice
+/// bytes. Variable columns retain the exact per-value alignment charge.
+fn identity_range_workspace(
+    columns: &ResolvedIdentityColumns,
+    range: std::ops::Range<usize>,
+    name: &str,
+) -> Result<u64> {
+    let count = (range.end - range.start) as u64;
+    if count == 0 {
+        return Ok(0);
+    }
+    let mut bytes = ipc_multiply(IDENTITY_ROW_BYTES, count, name)?;
+    for (column, string, retained_copy) in columns {
+        let encoded = identity_column_range_workspace(column, range.clone(), *string, name)?;
+        bytes = checked(name, bytes, encoded)?;
+        if *retained_copy {
+            bytes = checked(name, bytes, encoded)?;
+        }
+    }
+    Ok(bytes)
+}
+
+fn identity_column_range_workspace(
+    column: &ColumnWorkspace,
+    mut range: std::ops::Range<usize>,
+    string: bool,
+    name: &str,
+) -> Result<u64> {
+    if string {
+        range.try_fold(0, |total, row| {
+            checked(
+                name,
+                total,
+                identity_encoding_workspace(column, row, true, name)?,
+            )
+        })
+    } else {
+        ipc_multiply(
+            identity_encoding_workspace(column, range.start, false, name)?,
+            (range.end - range.start) as u64,
+            name,
+        )
+    }
 }
 
 /// Aligns a buffer length to the IPC writer's alignment boundary.
@@ -632,6 +773,18 @@ mod tests {
                 Some(b"many bytes".as_slice()),
                 Some(b"".as_slice()),
             ])),
+            Arc::new(LargeStringArray::from(vec![
+                Some("short"),
+                None,
+                Some("many bytes"),
+                Some(""),
+            ])),
+            Arc::new(LargeBinaryArray::from(vec![
+                Some(b"a".as_slice()),
+                None,
+                Some(b"many bytes".as_slice()),
+                Some(b"".as_slice()),
+            ])),
         ];
         for column in columns {
             for sliced in [column.clone(), column.slice(1, 3)] {
@@ -641,6 +794,14 @@ mod tests {
                         cached.bytes(row, "asof").unwrap(),
                         column_workspace(&sliced, row).unwrap()
                     );
+                }
+                for start in 0..=sliced.len() {
+                    for end in start..=sliced.len() {
+                        let slices = (start..end)
+                            .map(|row| column_workspace(&sliced, row).unwrap())
+                            .sum::<u64>();
+                        assert_eq!(cached.range_bytes(start..end, "asof").unwrap(), slices);
+                    }
                 }
             }
         }
@@ -805,6 +966,32 @@ mod tests {
                 charge >= actual + 64,
                 "row {row}: charge {charge} < actual {actual} plus allocations"
             );
+        }
+    }
+
+    #[test]
+    fn admission_ranges_preserve_exact_row_workspace_and_skip_late_rows() {
+        assert_eq!(
+            accepted_ranges(&[-2, 3, -1, 4, 4], Some(0)).collect::<Vec<_>>(),
+            [1..2, 3..5]
+        );
+        assert_eq!(
+            accepted_ranges(&[-2, 3, -1, 4, 4], None).collect::<Vec<_>>(),
+            std::iter::once(0..5).collect::<Vec<_>>()
+        );
+        assert!(accepted_ranges(&[], None).next().is_none());
+        let record = repro_record(8);
+        let columns = resolve_identity_columns(&record, &repro_side()).unwrap();
+        for start in 0..=record.num_rows() {
+            for end in start..=record.num_rows() {
+                let expected = (start..end)
+                    .map(|row| identity_row_workspace(&columns, row, "asof").unwrap())
+                    .sum::<u64>();
+                assert_eq!(
+                    identity_range_workspace(&columns, start..end, "asof").unwrap(),
+                    expected
+                );
+            }
         }
     }
 

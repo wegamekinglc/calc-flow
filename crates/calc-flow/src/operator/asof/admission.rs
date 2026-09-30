@@ -118,6 +118,7 @@ impl InputKeys {
 /// Owns the batch converters and their optional, separately reserved hash
 /// vector. Mixed-late input encodes only each accepted immutable slice.
 struct InputEncodings<'a> {
+    operator: &'a StreamAsofJoinOperator,
     batch: &'a RecordBatch,
     side: &'a AsofJoinSide,
     columns: Option<(state::EncodedColumns, state::EncodedColumns)>,
@@ -145,12 +146,7 @@ impl<'a> InputEncodings<'a> {
             return Ok(None);
         }
         let columns = (accepted == batch.num_rows())
-            .then(|| -> Result<_> {
-                Ok((
-                    state::encode_columns(batch, side.keys())?,
-                    state::encode_columns(batch, side.sequence_by())?,
-                ))
-            })
+            .then(|| Self::encode_identity_columns(operator, batch, side))
             .transpose()?;
         let (hashes, hash_workspace) =
             Self::batch_key_hashes(operator, batch, input, columns.as_ref())?;
@@ -160,6 +156,7 @@ impl<'a> InputEncodings<'a> {
             0..0
         };
         Ok(Some(Self {
+            operator,
             batch,
             side,
             columns,
@@ -178,7 +175,11 @@ impl<'a> InputEncodings<'a> {
     ) -> Result<(Option<Vec<u64>>, Option<MemoryReservation>)> {
         let workspace = columns
             .filter(|(keys, _)| {
-                input.index == 1 && matches!(keys, state::EncodedColumns::Binary(_))
+                input.index == 1
+                    && matches!(
+                        keys,
+                        state::EncodedColumns::Binary(_) | state::EncodedColumns::StringKeys { .. }
+                    )
             })
             .and_then(|_| {
                 operator
@@ -207,10 +208,11 @@ impl<'a> InputEncodings<'a> {
                 .take_while(|time| !self.input.is_late(**time))
                 .count();
             let slice = self.batch.slice(row, count);
-            self.columns = Some((
-                state::encode_columns(&slice, self.side.keys())?,
-                state::encode_columns(&slice, self.side.sequence_by())?,
-            ));
+            self.columns = Some(Self::encode_identity_columns(
+                self.operator,
+                &slice,
+                self.side,
+            )?);
             self.range = row..row + count;
         }
         let (keys, sequences) = self.columns.as_ref().expect("accepted ASOF encodings");
@@ -222,6 +224,24 @@ impl<'a> InputEncodings<'a> {
                 sequences.row(index),
             )
         })
+    }
+
+    fn encode_identity_columns(
+        operator: &StreamAsofJoinOperator,
+        batch: &RecordBatch,
+        side: &AsofJoinSide,
+    ) -> Result<(state::EncodedColumns, state::EncodedColumns)> {
+        let keys = if state::SequenceKind::for_side(&batch.schema(), side)
+            .width()
+            .is_some()
+        {
+            state::encode_key_columns(batch, side.keys(), |bytes| {
+                operator.reserve_workspace(bytes)
+            })?
+        } else {
+            state::encode_columns(batch, side.keys())?
+        };
+        Ok((keys, state::encode_columns(batch, side.sequence_by())?))
     }
 }
 
@@ -635,8 +655,21 @@ impl Admission {
                     .bucket_mut_or_kind(key, state.sequence_kinds[1])
                     .reserve_payloads(count);
             }
+            // Each compact payload owns exactly its admitted rows. Attach its
+            // reference count once, then resolve row handles without two pool
+            // lookups for every row. Admission batches are ordered by key.
+            let payload_refs = self
+                .batches
+                .iter()
+                .map(|batch| state.batches.attach_batch(batch, batch.record.num_rows()))
+                .collect::<Vec<_>>();
             for (identity, payload) in self.rows.drain(..) {
-                let payload = state.attach(&payload);
+                let batch = self
+                    .batches
+                    .partition_point(|batch| batch.key < payload.batch.key);
+                let payload = payload_refs[batch].with_row(
+                    u32::try_from(payload.row).expect("preflighted ASOF payload row index"),
+                );
                 state.right_payload_min = Some(
                     state
                         .right_payload_min
@@ -1023,6 +1056,51 @@ mod identity_tests {
                 .iter()
                 .all(|row| row.0.1.as_slice().as_ptr() == first)
         );
+    }
+
+    #[test]
+    fn typed_string_dictionary_reserves_unique_value_copy_before_arrow_take() {
+        use datafusion::arrow::array::{Int64Array, StringArray};
+        let (operator, schema) = identity_fixture();
+        let keys = (0..3)
+            .map(|row| format!("{row}{}", "x".repeat(512_000)))
+            .collect::<Vec<_>>();
+        let record = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(keys)),
+                Arc::new(TimestampMicrosecondArray::from(vec![10; 3]).with_timezone("UTC")),
+                Arc::new(Int64Array::from(vec![1, 2, 3])),
+            ],
+        )
+        .unwrap();
+        let batch = Batch::table(vec![record], crate::BatchMetadata::default()).unwrap();
+        let input = ValidatedInput {
+            index: 1,
+            watermark: None,
+        };
+        let identity = operator.identity_workspace(&batch, input).unwrap();
+        assert!(
+            identity.size() < 2 << 20,
+            "the original identity workspace fits"
+        );
+        let error = InputEncodings::new(
+            &operator,
+            &batch.table_payload().unwrap().batches()[0],
+            input,
+        )
+        .err()
+        .expect("typed key value copies require their own workspace");
+        assert!(matches!(
+            error,
+            crate::CalcFlowError::OperatorReason {
+                reason_code: StreamingFailureReason::AsofWorkspaceLimitExceeded,
+                ..
+            }
+        ));
+        assert_eq!(operator.runtime.pool.reserved(), identity.size());
+        drop(identity);
+        assert_eq!(operator.runtime.pool.reserved(), 0);
     }
 
     #[test]

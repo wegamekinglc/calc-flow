@@ -62,10 +62,12 @@ impl SequenceColumn {
         self.kind
     }
 
+    #[inline]
     pub fn element_bytes(&self) -> usize {
         self.kind.width().unwrap_or(size_of::<Encoding>())
     }
 
+    #[inline]
     pub fn len(&self) -> usize {
         match &self.storage {
             Storage::Canonical(values) => values.len(),
@@ -109,6 +111,34 @@ impl SequenceColumn {
         }
     }
 
+    /// Own the exact live bytes of a contiguous integer input, including a
+    /// sliced Arrow array's offset. The v3 integer columns use little endian.
+    pub fn from_array_prefix(
+        array: &dyn datafusion::arrow::array::Array,
+        len: usize,
+        kind: SequenceKind,
+    ) -> Option<Self> {
+        let width = kind.width()?;
+        if len > array.len() {
+            return None;
+        }
+        let data = array.to_data();
+        let start = data.offset().checked_mul(width)?;
+        let end = start.checked_add(len.checked_mul(width)?)?;
+        let bytes = data.buffers().first()?.as_slice().get(start..end)?.to_vec();
+        #[cfg(target_endian = "big")]
+        let bytes = {
+            let mut bytes = bytes;
+            bytes.chunks_exact_mut(width).for_each(<[u8]>::reverse);
+            bytes
+        };
+        Some(Self {
+            kind,
+            storage: Storage::Integer(bytes),
+        })
+    }
+
+    #[inline]
     pub fn get(&self, index: usize) -> Option<SequenceRef<'_>> {
         match &self.storage {
             Storage::Canonical(values) => values.get(index).map(Cow::Borrowed),
@@ -211,6 +241,25 @@ impl SequenceColumn {
         }
     }
 
+    /// Integer columns have no encoding owner. Releasing a consumed prefix
+    /// does not need to reconstruct or clear its unobserved integer values.
+    pub fn owner_encoding(&self, index: usize) -> Option<&Encoding> {
+        match &self.storage {
+            Storage::Canonical(values) => values.get(index),
+            Storage::Integer(_) => None,
+        }
+    }
+
+    pub fn take_owner(&mut self, index: usize) -> Option<Encoding> {
+        match &mut self.storage {
+            Storage::Canonical(values) => Some(std::mem::replace(
+                &mut values[index],
+                Encoding::from_slice(&[]),
+            )),
+            Storage::Integer(_) => None,
+        }
+    }
+
     pub fn take(&mut self, index: usize) -> Encoding {
         let width = self.element_bytes();
         match &mut self.storage {
@@ -290,6 +339,7 @@ impl SequenceKind {
         }
     }
 
+    #[inline]
     pub fn width(self) -> Option<usize> {
         match self {
             Self::Canonical => None,
@@ -309,6 +359,7 @@ impl SequenceKind {
         }
     }
 
+    #[inline]
     pub fn integer_bytes(self, encoding: &Encoding) -> [u8; 8] {
         let width = self.width().expect("integer sequence column");
         let mut bytes = [0; 8];
@@ -320,6 +371,7 @@ impl SequenceKind {
         bytes
     }
 
+    #[inline]
     pub fn decode_integer(self, bytes: &[u8]) -> Encoding {
         let mut encoded = [0; 9];
         encoded[0] = 1;
@@ -351,6 +403,51 @@ mod tests {
         [1, 2, 4, 8]
             .into_iter()
             .flat_map(|width| [SequenceKind::Signed(width), SequenceKind::Unsigned(width)])
+    }
+
+    #[test]
+    fn copied_arrow_integer_prefix_preserves_sliced_extremes_and_width() {
+        use datafusion::arrow::{
+            array::*,
+            datatypes::{Field, Schema},
+            row::{RowConverter, SortField},
+        };
+        use std::sync::Arc;
+
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(Int8Array::from(vec![0, i8::MIN, 0, i8::MAX])),
+            Arc::new(Int16Array::from(vec![0, i16::MIN, 0, i16::MAX])),
+            Arc::new(Int32Array::from(vec![0, i32::MIN, 0, i32::MAX])),
+            Arc::new(Int64Array::from(vec![0, i64::MIN, 0, i64::MAX])),
+            Arc::new(UInt8Array::from(vec![0, 0, 1, u8::MAX])),
+            Arc::new(UInt16Array::from(vec![0, 0, 1, u16::MAX])),
+            Arc::new(UInt32Array::from(vec![0, 0, 1, u32::MAX])),
+            Arc::new(UInt64Array::from(vec![0, 0, 1, u64::MAX])),
+        ];
+        let side = AsofJoinSide::new(
+            vec!["seq".into()],
+            "time".into(),
+            vec!["seq".into()],
+            "left".into(),
+        )
+        .unwrap();
+        for column in columns {
+            let column = column.slice(1, 3);
+            let schema = Schema::new(vec![Field::new("seq", column.data_type().clone(), false)]);
+            let kind = SequenceKind::for_side(&schema, &side);
+            let copied = SequenceColumn::from_array_prefix(column.as_ref(), 3, kind).unwrap();
+            assert_eq!(copied.len(), 3);
+            assert_eq!(copied.allocation_bytes(), 3 * kind.width().unwrap());
+            let converter =
+                RowConverter::new(vec![SortField::new(column.data_type().clone())]).unwrap();
+            let expected = converter.convert_columns(&[column]).unwrap();
+            for row in 0..3 {
+                assert_eq!(
+                    copied.get(row).unwrap().as_slice(),
+                    expected.row(row).data()
+                );
+            }
+        }
     }
 
     #[test]

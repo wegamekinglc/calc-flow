@@ -273,6 +273,7 @@ impl PayloadPool {
     pub fn len(&self) -> usize {
         self.by_id.len()
     }
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.by_id.is_empty()
     }
@@ -496,6 +497,7 @@ impl PayloadPool {
     pub fn key(&self, row: RowRef) -> BatchKey {
         self.by_id_entry(row.batch).value.0.key
     }
+    #[cfg(test)]
     pub fn detach(&mut self, row: RowRef) {
         self.detach_id(row.batch, 1);
     }

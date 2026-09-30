@@ -624,6 +624,73 @@ async fn overlapping_left_chunks_restore_only_live_sparse_rows() {
 }
 
 #[tokio::test]
+async fn integer_left_chunk_checkpoint_omits_consumed_prefix_without_compaction() {
+    let (mut op, left, right) = prefix_fixture();
+    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+    let cx = StreamOperatorContext::new(&job, "asof", None);
+    let mut output = EdgeCollector::new(op.output_ports().to_vec());
+    op.process_data("right", right, &cx, &mut output)
+        .await
+        .unwrap();
+    op.process_data("left", left, &cx, &mut output)
+        .await
+        .unwrap();
+    op.on_watermark(EventTime::from_micros(101), &cx, &mut output)
+        .await
+        .unwrap();
+    assert_eq!(output.drain("output").len(), 1);
+    let (_, _, head) = op
+        .state
+        .left
+        .checkpoint_chunks(&op.state.batches)
+        .next()
+        .unwrap();
+    assert_eq!(head, 1, "the consumed integer prefix must remain uncompact");
+    let snapshot = op.capture(Epoch::INITIAL).unwrap();
+    let expected_charge = op.status.state_bytes;
+    let (mut restored, _, _) = prefix_fixture();
+    restored.restore(&snapshot).unwrap();
+    assert_eq!(restored.status.state_bytes, expected_charge);
+    assert_eq!(
+        restored
+            .state
+            .left
+            .iter()
+            .map(|(order, _)| *order.0)
+            .collect::<Vec<_>>(),
+        [101, 102]
+    );
+    let repeated = restored.capture(Epoch::INITIAL).unwrap();
+    assert_eq!(snapshot.segments, repeated.segments);
+    restored
+        .on_watermark(EventTime::from_micros(103), &cx, &mut output)
+        .await
+        .unwrap();
+    let remaining = output.drain("output");
+    assert_eq!(remaining.len(), 1);
+    let record = &remaining[0]
+        .as_data()
+        .unwrap()
+        .table_payload()
+        .unwrap()
+        .batches()[0];
+    let left = record
+        .column(2)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    let right = record
+        .column(5)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    assert_eq!(left.values().as_ref(), &[2, 3]);
+    assert_eq!(right.values().as_ref(), &[1, 1]);
+    assert_eq!(restored.status.pending_left_rows, 0);
+    assert_eq!(restored.status.matched_rows, 3);
+}
+
+#[tokio::test]
 async fn later_admission_reuses_the_resident_right_key_bytes() {
     let (mut op, initial) = fixture();
     let schema = initial.table_payload().unwrap().batches()[0].schema();
@@ -1260,6 +1327,158 @@ fn prefix_fixture() -> (StreamAsofJoinOperator, Batch, Batch) {
     )
     .unwrap();
     (op, left, right)
+}
+
+fn shared_string_identity_fixture() -> (StreamAsofJoinOperator, Batch) {
+    let (template, _) = fixture();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("key", DataType::Utf8, false),
+        Field::new(
+            "time",
+            DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+            false,
+        ),
+        Field::new("seq", DataType::Utf8, false),
+    ]));
+    let spec = StreamAsofJoinSpec::new(
+        template.spec.left().clone(),
+        template.spec.right().clone(),
+        Duration::from_micros(2),
+        template.spec.limits(),
+    )
+    .unwrap();
+    let op = StreamAsofJoinOperator::new("asof", schema.clone(), schema.clone(), spec).unwrap();
+    let record = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(vec!["key".repeat(32); 3])),
+            Arc::new(TimestampMicrosecondArray::from(vec![10, 20, 30]).with_timezone("UTC")),
+            Arc::new(StringArray::from(vec!["sequence".repeat(32); 3])),
+        ],
+    )
+    .unwrap();
+    (
+        op,
+        Batch::table(vec![record], BatchMetadata::default()).unwrap(),
+    )
+}
+
+fn asymmetric_progress(left: i64, right: i64) -> IngressProgressSnapshot {
+    IngressProgressSnapshot::new(BTreeMap::from([
+        (
+            "left".into(),
+            IngressProgress::new(IngressState::Active, Some(EventTime::from_micros(left))),
+        ),
+        (
+            "right".into(),
+            IngressProgress::new(IngressState::Active, Some(EventTime::from_micros(right))),
+        ),
+    ]))
+}
+
+#[tokio::test]
+async fn bulk_eviction_preserves_shared_string_owners_until_all_live_references_expire() {
+    let (mut op, right) = shared_string_identity_fixture();
+    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+    let cx = StreamOperatorContext::new(&job, "asof", None);
+    let mut output = EdgeCollector::new(op.output_ports().to_vec());
+    op.process_data("right", right, &cx, &mut output)
+        .await
+        .unwrap();
+    let allocation = op.state.encoding_owner_allocation();
+    assert!(allocation.0 > 0 && allocation.1 > 0);
+    let progress = StreamOperatorContext::with_ingress_progress(
+        &job,
+        "asof",
+        None,
+        asymmetric_progress(25, 15),
+    );
+    op.on_ingress_progress_with_output("left", &progress, &mut output)
+        .await
+        .unwrap();
+    assert_eq!(op.status.retained_right_rows, 1);
+    assert_eq!(op.status.identity_only_rows, 1);
+    assert_eq!(op.status.evicted_right_rows, 2);
+    assert_eq!(op.state.batches.values().next().unwrap().1, 1);
+    assert_eq!(op.state.encoding_owner_allocation(), allocation);
+    let snapshot = op.capture(Epoch::INITIAL).unwrap();
+    let expected_charge = op.status.state_bytes;
+    let (mut restored, _) = shared_string_identity_fixture();
+    restored.restore(&snapshot).unwrap();
+    assert_eq!(restored.status.state_bytes, expected_charge);
+    assert_eq!(restored.state.encoding_owner_allocation(), allocation);
+    assert_eq!(
+        restored.capture(Epoch::INITIAL).unwrap().segments,
+        snapshot.segments
+    );
+    let progress = StreamOperatorContext::with_ingress_progress(
+        &job,
+        "asof",
+        None,
+        asymmetric_progress(35, 31),
+    );
+    restored
+        .on_ingress_progress_with_output("left", &progress, &mut output)
+        .await
+        .unwrap();
+    assert_eq!(restored.status.retained_right_rows, 0);
+    assert_eq!(restored.status.identity_only_rows, 0);
+    assert_eq!(restored.status.evicted_right_rows, 3);
+    assert_eq!(restored.state.encoding_owner_allocation(), (0, 0));
+    assert!(restored.state.batches.values().next().is_none());
+    assert_eq!(
+        restored.status.state_bytes,
+        restored.current_inventory(None).unwrap().bytes
+    );
+}
+
+#[tokio::test]
+async fn eviction_preview_workspace_covers_many_owned_keys_in_one_payload_batch() {
+    let (mut op, _) = fixture();
+    let count = 64;
+    let input = Batch::table(
+        vec![
+            RecordBatch::try_new(
+                op.schemas[1].clone(),
+                vec![
+                    Arc::new(StringArray::from_iter_values(
+                        (0..count).map(|row| format!("key-{row:04}-{}", "x".repeat(32))),
+                    )),
+                    Arc::new(
+                        TimestampMicrosecondArray::from(vec![100; count]).with_timezone("UTC"),
+                    ),
+                    Arc::new(Int64Array::from(vec![1; count])),
+                ],
+            )
+            .unwrap(),
+        ],
+        BatchMetadata::default(),
+    )
+    .unwrap();
+    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+    let cx = StreamOperatorContext::new(&job, "asof", None);
+    let mut output = EdgeCollector::new(op.output_ports().to_vec());
+    op.process_data("right", input, &cx, &mut output)
+        .await
+        .unwrap();
+    assert_eq!(op.state.batches.values().count(), 1);
+    let mut ended = op.status();
+    ended.left.ended = true;
+    ended.right.ended = true;
+    let charge = op.state.eviction_workspace_bytes("asof").unwrap();
+    let workspace = op.reserve_workspace(charge).unwrap();
+    let mut preview = None;
+    let allocation = allocation_counter::measure(|| {
+        preview = Some(op.state.preview_eviction(&ended, 0, "asof").unwrap());
+    });
+    assert_eq!(preview.unwrap().evicted_payloads, count as u64);
+    assert!(
+        allocation.bytes_max <= charge,
+        "eviction preview allocated {}, reserved {charge}",
+        allocation.bytes_max
+    );
+    drop(workspace);
+    assert_eq!(op.runtime.pool.reserved(), 0);
 }
 
 #[tokio::test]

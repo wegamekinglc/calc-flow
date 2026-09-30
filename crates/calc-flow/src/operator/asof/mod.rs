@@ -135,6 +135,8 @@ impl StreamAsofJoinOperator {
     ) -> Result<datafusion::execution::memory_pool::MemoryReservation> {
         self.reserve_workspace(self.state.admission_staging_bytes(
             &admission.rows,
+            admission.left_chunks.as_deref(),
+            &admission.right_capacities,
             &admission.batches,
             &self.name,
         )?)

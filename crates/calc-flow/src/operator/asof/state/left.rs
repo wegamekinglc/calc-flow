@@ -21,6 +21,7 @@ use std::{
 };
 
 pub(in super::super) type LeftView<'a> = (&'a i64, &'a Encoding, SequenceRef<'a>);
+pub(in super::super) type OutputIdentity<'a> = (&'a i64, &'a Encoding, Option<&'a Encoding>);
 
 fn borrowed(order: &LeftOrder) -> LeftView<'_> {
     (&order.0, &order.1, Cow::Borrowed(&order.2))
@@ -35,12 +36,11 @@ pub(in super::super) struct ChunkData {
     pub key_counts: Vec<usize>,
     pub key_ids: Vec<u32>,
     pub sequences: SequenceColumn,
-    pub index_bytes: u64,
     pub owners: EncodingOwners,
 }
 
 fn chunk_sort_indices(
-    rows: &[(LeftOrder, u32)],
+    rows: &[(&LeftOrder, u32)],
     batch: &PayloadBatch,
     side: &AsofJoinSide,
     contiguous: bool,
@@ -76,7 +76,7 @@ fn chunk_sort_indices(
 }
 
 fn chunk_positions(
-    rows: &[(LeftOrder, u32)],
+    rows: &[(&LeftOrder, u32)],
     sorted: Option<&UInt32Array>,
     contiguous: bool,
 ) -> Option<Vec<u32>> {
@@ -118,9 +118,27 @@ fn intern_chunk_key(
     Ok(id)
 }
 
+fn copied_chunk_sequences(
+    batch: &PayloadBatch,
+    side: &AsofJoinSide,
+    rows: usize,
+    ordered: bool,
+    contiguous: bool,
+    kind: SequenceKind,
+) -> Option<SequenceColumn> {
+    if !ordered || !contiguous {
+        return None;
+    }
+    let [name] = side.sequence_by() else {
+        return None;
+    };
+    let column = batch.record.column_by_name(name)?;
+    SequenceColumn::from_array_prefix(column.as_ref(), rows, kind)
+}
+
 impl ChunkData {
     fn prepare(
-        rows: &[(LeftOrder, u32)],
+        rows: &[(&LeftOrder, u32)],
         batch: &PayloadBatch,
         side: &AsofJoinSide,
         name: &str,
@@ -139,13 +157,13 @@ impl ChunkData {
         let mut keys = Vec::with_capacity(1);
         let mut key_counts = Vec::with_capacity(1);
         let mut key_ids = Vec::with_capacity(rows.len());
-        let mut sequences = SequenceColumn::with_capacity(
-            rows.len(),
-            SequenceKind::for_side(&batch.record.schema(), side),
-        );
+        let kind = SequenceKind::for_side(&batch.record.schema(), side);
+        let copied = copied_chunk_sequences(batch, side, rows.len(), ordered, contiguous, kind);
+        let sequences_copied = copied.is_some();
+        let mut sequences =
+            copied.unwrap_or_else(|| SequenceColumn::with_capacity(rows.len(), kind));
         let mut time_values = Vec::with_capacity(rows.len());
         let mut interned = HashMap::<Encoding, u32, ahash::RandomState>::default();
-        let mut index_bytes = 0;
         let mut owners = EncodingOwners::default();
         for ordinal in 0..rows.len() {
             let row = sorted
@@ -163,13 +181,10 @@ impl ChunkData {
             )?;
             key_counts[id as usize] += 1;
             key_ids.push(id);
-            sequences.push(sequence.clone());
+            if !sequences_copied {
+                sequences.push(sequence.clone());
+            }
             owners.attach(sequence);
-            index_bytes = checked(
-                name,
-                index_bytes,
-                41 + key.len() as u64 + sequence.len() as u64,
-            )?;
         }
         Ok(Self {
             // External Arrow owners can hide a larger backing allocation than
@@ -182,7 +197,6 @@ impl ChunkData {
             key_counts,
             key_ids,
             sequences,
-            index_bytes,
             owners,
         })
     }
@@ -233,27 +247,38 @@ impl ChunkData {
     fn view(&self, ordinal: usize) -> LeftView<'_> {
         (
             &self.times[ordinal],
-            self.keys[self.key_ids[ordinal] as usize]
-                .as_ref()
-                .expect("live left key"),
+            self.key(ordinal),
             self.sequences.get(ordinal).expect("live left sequence"),
+        )
+    }
+
+    fn key(&self, ordinal: usize) -> &Encoding {
+        self.keys[self.key_ids[ordinal] as usize]
+            .as_ref()
+            .expect("live left key")
+    }
+
+    fn output_view(&self, ordinal: usize) -> OutputIdentity<'_> {
+        (
+            &self.times[ordinal],
+            self.key(ordinal),
+            self.sequences.owner_encoding(ordinal),
         )
     }
 
     fn consume(&mut self, range: std::ops::Range<usize>) {
         for ordinal in range {
             let key = self.key_ids[ordinal] as usize;
-            let sequence = self.sequences.take(ordinal);
-            self.index_bytes -= 41
-                + self.keys[key].as_ref().expect("consumed live key").len() as u64
-                + sequence.len() as u64;
+            let sequence = self.sequences.take_owner(ordinal);
             self.key_counts[key] -= 1;
             if self.key_counts[key] == 0 {
                 self.owners
                     .detach(self.keys[key].as_ref().expect("consumed live key"));
                 self.keys[key] = None;
             }
-            self.owners.detach(&sequence);
+            if let Some(sequence) = sequence {
+                self.owners.detach(&sequence);
+            }
         }
     }
 
@@ -279,7 +304,6 @@ impl ChunkData {
         let mut key_counts = vec![0; unique as usize];
         let mut key_ids = Vec::with_capacity(self.sequences.len() - head);
         let sequences = self.sequences.suffix(head);
-        let mut index_bytes = 0;
         let mut owners = EncodingOwners::default();
         for ordinal in head..self.sequences.len() {
             let old = self.key_ids[ordinal] as usize;
@@ -293,7 +317,6 @@ impl ChunkData {
             key_ids.push(id);
             let sequence = sequences.get(ordinal - head).expect("live suffix sequence");
             owners.attach(sequence.as_ref());
-            index_bytes += 41 + key.len() as u64 + sequence.len() as u64;
         }
         Self {
             times: self.times[head..].to_vec().into(),
@@ -303,7 +326,6 @@ impl ChunkData {
             key_counts,
             key_ids,
             sequences,
-            index_bytes,
             owners,
         }
     }
@@ -315,6 +337,14 @@ pub(in super::super) struct PreparedLeftChunk {
 }
 
 impl PreparedLeftChunk {
+    pub fn key_counts(&self) -> impl Iterator<Item = (&Encoding, usize)> {
+        self.data
+            .keys
+            .iter()
+            .zip(&self.data.key_counts)
+            .filter_map(|(key, count)| key.as_ref().map(|key| (key, *count)))
+    }
+
     pub fn capacity_bytes(&self, name: &str) -> Result<u64> {
         checked(
             name,
@@ -361,7 +391,7 @@ impl PreparedLeftChunk {
                             "ASOF payload row exceeds compact reference range",
                         )
                     })?;
-                    Ok((order.clone(), position))
+                    Ok((order, position))
                 })
                 .collect::<Result<Vec<_>>>()?;
             let data = ChunkData::prepare(&identities, owner, side, name)?;
@@ -526,6 +556,25 @@ impl LeftState {
             .chain(ChunkIter::new(&self.chunks))
     }
 
+    /// Matching uses time/key and encoding owners. Integer sequence bytes
+    /// remain in their owned column until a comparator actually needs them.
+    pub fn output_iter(&self) -> impl Iterator<Item = (OutputIdentity<'_>, RowRef)> {
+        let mut chunks = ChunkIter::new(&self.chunks);
+        self.legacy
+            .iter()
+            .map(|(order, row)| ((&order.0, &order.1, Some(&order.2)), *row))
+            .chain(std::iter::from_fn(move || {
+                let cursor = chunks.next_cursor()?;
+                Some((
+                    cursor.chunk.data.output_view(cursor.ordinal),
+                    cursor
+                        .chunk
+                        .reference
+                        .with_row(cursor.chunk.data.position(cursor.ordinal)),
+                ))
+            }))
+    }
+
     pub fn unordered_iter(&self) -> impl Iterator<Item = (LeftView<'_>, RowRef)> {
         self.legacy
             .ordered
@@ -567,7 +616,7 @@ impl LeftState {
             let mut upper = chunk.data.sequences.len();
             while lower < upper {
                 let middle = lower + (upper - lower) / 2;
-                if *chunk.data.view(middle).0 < frontier {
+                if chunk.data.times[middle] < frontier {
                     lower = middle + 1;
                 } else {
                     upper = middle;
@@ -891,10 +940,16 @@ impl PartialOrd for Cursor<'_> {
 }
 impl Ord for Cursor<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.chunk
-            .data
-            .view(self.ordinal)
-            .cmp(&other.chunk.data.view(other.ordinal))
+        let left = &self.chunk.data;
+        let right = &other.chunk.data;
+        left.times[self.ordinal]
+            .cmp(&right.times[other.ordinal])
+            .then_with(|| left.key(self.ordinal).cmp(right.key(other.ordinal)))
+            .then_with(|| {
+                left.sequences
+                    .get(self.ordinal)
+                    .cmp(&right.sequences.get(other.ordinal))
+            })
     }
 }
 
@@ -916,19 +971,24 @@ impl<'a> ChunkIter<'a> {
             heap: BinaryHeap::from(cursors),
         }
     }
-}
-impl<'a> Iterator for ChunkIter<'a> {
-    type Item = (LeftView<'a>, RowRef);
-    fn next(&mut self) -> Option<Self::Item> {
+
+    fn next_cursor(&mut self) -> Option<Cursor<'a>> {
         let Reverse(mut cursor) = self.heap.pop()?;
-        let result = cursor.chunk.row(cursor.ordinal);
+        let selected = cursor;
         cursor.ordinal += 1;
         if cursor.ordinal < cursor.chunk.data.sequences.len() {
             self.heap.push(Reverse(cursor));
         }
         #[cfg(test)]
         super::LEFT_VISITS.with(|visits| visits.set(visits.get() + 1));
-        Some(result)
+        Some(selected)
+    }
+}
+impl<'a> Iterator for ChunkIter<'a> {
+    type Item = (LeftView<'a>, RowRef);
+    fn next(&mut self) -> Option<Self::Item> {
+        let cursor = self.next_cursor()?;
+        Some(cursor.chunk.row(cursor.ordinal))
     }
 }
 
@@ -1041,12 +1101,12 @@ mod tests {
                 let (owner, side, rows) = fixture(key.clone(), sequence.clone(), 0);
                 let compact = rows
                     .iter()
-                    .map(|(order, row)| (order.clone(), u32::try_from(row.row).unwrap()))
+                    .map(|(order, row)| (order, u32::try_from(row.row).unwrap()))
                     .collect::<Vec<_>>();
                 let data = ChunkData::prepare(&compact, &owner, &side, "asof").unwrap();
                 let mut expected = compact
                     .iter()
-                    .map(|(identity, _)| identity.clone())
+                    .map(|(identity, _)| (*identity).clone())
                     .collect::<Vec<_>>();
                 expected.sort_unstable();
                 let actual = (0..rows.len())
@@ -1062,6 +1122,45 @@ mod tests {
                     key.data_type(),
                     sequence.data_type()
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn output_iterator_preserves_merged_order_and_only_returns_owned_sequences() {
+        let key = Arc::new(StringArray::from(vec!["A", "B", "A", "B", "A", "B"])) as ArrayRef;
+        let cases = [
+            Arc::new(Int64Array::from(vec![i64::MIN, -1, 0, 1, 2, i64::MAX])) as ArrayRef,
+            Arc::new(StringArray::from_iter_values(
+                (0..6).map(|row| format!("sequence-{row:03}-{}", "x".repeat(32))),
+            )) as ArrayRef,
+        ];
+        for sequence in cases {
+            let mut state = super::super::State::default();
+            for start in [0, 3] {
+                let (_, side, rows) =
+                    fixture(key.slice(start, 3), sequence.slice(start, 3), start as u64);
+                let chunks = PreparedLeftChunk::prepare(&rows, &side, "asof").unwrap();
+                state.left.install(chunks, &mut state.batches);
+            }
+            let expected = state
+                .left
+                .iter()
+                .map(|(order, row)| ((*order.0, order.1.clone(), order.2.into_owned()), row))
+                .collect::<Vec<_>>();
+            let actual = state.left.output_iter().collect::<Vec<_>>();
+            assert_eq!(actual.len(), expected.len());
+            for ((order, row), (reference, expected_row)) in actual.iter().zip(&expected) {
+                assert_eq!(
+                    (*order.0, order.1, *row),
+                    (reference.0, &reference.1, *expected_row)
+                );
+                assert_eq!(order.2.is_none(), sequence.data_type() == &DataType::Int64);
+                if let Some(owner) = order.2 {
+                    assert_eq!(owner, &reference.2);
+                } else {
+                    assert_eq!(sequence.data_type(), &DataType::Int64);
+                }
             }
         }
     }
@@ -1120,7 +1219,11 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let data = ChunkData::prepare(&rows, &owner, &side, "asof").unwrap();
+        let borrowed_rows = rows
+            .iter()
+            .map(|(order, row)| (order, *row))
+            .collect::<Vec<_>>();
+        let data = ChunkData::prepare(&borrowed_rows, &owner, &side, "asof").unwrap();
         assert_eq!(
             (0..6).map(|row| data.position(row)).collect::<Vec<_>>(),
             vec![5, 3, 2, 1, 4, 0]

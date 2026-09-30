@@ -35,14 +35,17 @@ fn metadata_bytes(count: usize) -> u64 {
 }
 
 impl EncodingOwners {
-    pub fn project_add<'a>(&self, values: impl Iterator<Item = &'a Encoding>) -> OwnerUpdates {
+    pub fn project_add_counts<'a>(
+        &self,
+        values: impl Iterator<Item = (&'a Encoding, usize)>,
+    ) -> OwnerUpdates {
         let mut updates = OwnerUpdates {
             allocations: BTreeMap::new(),
             bytes: self.bytes,
             encoded_length: self.encoded_length,
             new_owners: 0,
         };
-        for encoding in values {
+        for (encoding, count) in values {
             let Some((id, bytes)) = encoding.allocation() else {
                 continue;
             };
@@ -60,7 +63,7 @@ impl EncodingOwners {
                     encoded_length,
                 }
             });
-            allocation.references += 1;
+            allocation.references += count;
         }
         updates
     }
@@ -168,5 +171,30 @@ impl EncodingOwners {
     }
     pub fn allocation_bytes(&self) -> u64 {
         self.buffers_bytes() + self.metadata_bytes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn aggregated_owner_additions_keep_one_allocation_until_the_last_reference() {
+        let encoding = Encoding::from_slice(&[7; 64]);
+        let (id, _) = encoding.allocation().unwrap();
+        let mut owners = EncodingOwners::default();
+        let updates = owners.project_add_counts([(&encoding, 3), (&encoding, 4)].into_iter());
+        owners.commit_add(updates);
+        assert_eq!(owners.allocations.len(), 1);
+        assert_eq!(owners.allocations[&id].references, 7);
+        let bytes = owners.buffers_bytes();
+        let encoded = owners.encoded_length();
+        owners.detach_count(id, 6);
+        assert_eq!(owners.buffers_bytes(), bytes);
+        assert_eq!(owners.encoded_length(), encoded);
+        owners.detach_count(id, 1);
+        assert_eq!(owners.buffers_bytes(), 0);
+        assert_eq!(owners.encoded_length(), 0);
+        assert_eq!(owners.metadata_bytes(), 0);
     }
 }

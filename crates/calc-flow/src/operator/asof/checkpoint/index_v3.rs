@@ -799,17 +799,16 @@ fn validate_left_order(state: &State) -> Result<()> {
     Ok(())
 }
 
-fn left_index_inventory(
+fn left_encoding_owners(
     times: &[i64],
     keys: &[Option<Encoding>],
     key_ids: &[u32],
     sequences: &SequenceColumn,
-) -> Result<(u64, EncodingOwners)> {
+) -> Result<EncodingOwners> {
     let mut encodings = EncodingOwners::default();
     for key in keys.iter().flatten() {
         encodings.attach(key);
     }
-    let mut index_bytes = 0;
     for ordinal in 0..times.len() {
         let identity = (
             &times[ordinal],
@@ -831,9 +830,8 @@ fn left_index_inventory(
             }
         }
         encodings.attach(identity.2.as_ref());
-        index_bytes += 41 + identity.1.len() as u64 + identity.2.len() as u64;
     }
-    Ok((index_bytes, encodings))
+    Ok(encodings)
 }
 
 fn read_left_positions(
@@ -1050,7 +1048,7 @@ fn read_left(
         .ok_or_else(|| mismatch("ASOF v3 left payload batch is missing"))?;
     let (positions, start) =
         read_left_positions(cursor, rows, capacities[1], owner.record.num_rows())?;
-    let (index_bytes, encodings) = left_index_inventory(&times, &keys, &key_ids, &sequences)?;
+    let encodings = left_encoding_owners(&times, &keys, &key_ids, &sequences)?;
     Ok(PreparedLeftChunk::from_index(
         owner.clone(),
         ChunkData {
@@ -1061,7 +1059,6 @@ fn read_left(
             key_counts,
             key_ids,
             sequences,
-            index_bytes,
             owners: encodings,
         },
     ))
