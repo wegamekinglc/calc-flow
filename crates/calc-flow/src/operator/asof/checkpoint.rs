@@ -68,7 +68,12 @@ impl StreamAsofJoinOperator {
         let Some(length) = self.deferred_index_len else {
             return Ok(());
         };
-        let _workspace = self.reserve_workspace(length)?;
+        let _workspace = self.reserve_workspace(index_v2::workspace_bytes(
+            &self.state,
+            length,
+            false,
+            &self.name,
+        )?)?;
         let limit = usize::try_from(self.spec.limits().max_state_bytes()).expect("validated");
         let segment = index_v2::encode_sync(&self.state, length, limit)?;
         self.prepared = Some(PreparedSegment::new(segment));
@@ -160,7 +165,12 @@ impl StreamAsofJoinOperator {
         let Some(length) = self.deferred_index_len else {
             return Ok(());
         };
-        let workspace = self.reserve_workspace(length)?;
+        let workspace = self.reserve_workspace(index_v2::workspace_bytes(
+            &self.state,
+            length,
+            true,
+            &self.name,
+        )?)?;
         let limit = usize::try_from(self.spec.limits().max_state_bytes()).expect("validated");
         let (segment, _workspace) =
             index_v2::encode(&self.state, length, limit, context, workspace).await?;
@@ -177,7 +187,8 @@ impl StreamAsofJoinOperator {
     ) -> Result<PreparedCheckpoint> {
         let limit = usize::try_from(self.spec.limits().max_state_bytes()).expect("validated");
         let length = encoded_length(state, &self.name)?;
-        let workspace = self.reserve_workspace(length)?;
+        let workspace =
+            self.reserve_workspace(index_v2::workspace_bytes(state, length, true, &self.name)?)?;
         let (segment, workspace) = if state.left.is_empty() && state.right.is_empty() {
             (None, workspace)
         } else {

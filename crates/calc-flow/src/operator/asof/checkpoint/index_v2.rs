@@ -17,6 +17,25 @@ const MAGIC: &[u8; 8] = b"CFASOF02";
 pub(super) const INDEX_SEGMENT: &str = "asof-index-v2";
 const CHECK_EVERY: usize = 256;
 const YIELD_EVERY: usize = 8_192;
+type OwnedKeys = Vec<(Encoding, u32)>;
+
+pub(super) fn workspace_bytes(state: &State, length: u64, owned: bool, name: &str) -> Result<u64> {
+    let slot = if owned {
+        size_of::<(Encoding, u32)>()
+    } else {
+        size_of::<u32>()
+    };
+    let sorting = (state.right.len() as u64)
+        .checked_mul(slot as u64)
+        .ok_or_else(|| {
+            super::super::reason(
+                name,
+                crate::StreamingFailureReason::AsofCounterOverflow,
+                "ASOF checkpoint key workspace overflowed",
+            )
+        })?;
+    checked(name, length, sorting)
+}
 
 pub(super) fn batch_segment(key: BatchKey) -> String {
     format!("asof-batch-{}-{}", key.0, key.1)
@@ -84,7 +103,9 @@ pub(super) async fn encode(
     context: &StreamOperatorContext<'_>,
     workspace: MemoryReservation,
 ) -> Result<(StateSegment, MemoryReservation)> {
-    let bytes = encode_bytes(state, length, limit, context).await?;
+    let (keys, workspace) = sort_right_keys(state, context, workspace).await?;
+    let bytes = encode_bytes(state, length, limit, context, &keys).await?;
+    drop(keys);
     let result = tokio::task::spawn_blocking(move || (StateSegment::new(bytes), workspace))
         .await
         .map_err(|error| CalcFlowError::Internal {
@@ -94,11 +115,46 @@ pub(super) async fn encode(
     Ok(result)
 }
 
+async fn sort_right_keys(
+    state: &State,
+    context: &StreamOperatorContext<'_>,
+    workspace: MemoryReservation,
+) -> Result<(OwnedKeys, MemoryReservation)> {
+    let mut keys = Vec::with_capacity(state.right.len());
+    for (ordinal, (id, key)) in state.right.indexed_keys().enumerate() {
+        keys.push((key.clone(), id));
+        checkpoint_tick(ordinal + 1, context).await?;
+    }
+    context.check_cancelled()?;
+    let result = sort_owned_keys(keys, workspace, |keys| {
+        keys.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    })
+    .await?;
+    context.check_cancelled()?;
+    Ok(result)
+}
+
+async fn sort_owned_keys(
+    mut keys: OwnedKeys,
+    workspace: MemoryReservation,
+    sort: impl FnOnce(&mut OwnedKeys) + Send + 'static,
+) -> Result<(OwnedKeys, MemoryReservation)> {
+    tokio::task::spawn_blocking(move || {
+        sort(&mut keys);
+        (keys, workspace)
+    })
+    .await
+    .map_err(|error| CalcFlowError::Internal {
+        message: format!("ASOF checkpoint key sorting task failed: {error}"),
+    })
+}
+
 async fn encode_bytes(
     state: &State,
     length: u64,
     limit: usize,
     context: &StreamOperatorContext<'_>,
+    keys: &[(Encoding, u32)],
 ) -> Result<Vec<u8>> {
     let capacity = usize::try_from(length).expect("reserved address domain");
     let mut bytes = Vec::with_capacity(capacity);
@@ -108,7 +164,7 @@ async fn encode_bytes(
         context.check_cancelled()?;
         tokio::task::yield_now().await;
         write_left_async(&mut writer, state, context).await?;
-        write_right_async(&mut writer, state, context).await?;
+        write_right_async(&mut writer, state, context, keys).await?;
         context.check_cancelled()?;
     }
     if bytes.len() != capacity {
@@ -133,9 +189,11 @@ async fn write_right_async(
     writer: &mut BoundedWriter<'_>,
     state: &State,
     context: &StreamOperatorContext<'_>,
+    keys: &[(Encoding, u32)],
 ) -> Result<()> {
     let mut ordinal = 0;
-    for (key, bucket) in state.right.ordered_iter() {
+    for (key, id) in keys {
+        let bucket = state.right.bucket_by_id(*id);
         write_bucket_header(writer, key, bucket.len())?;
         for ((time, sequence), payload) in bucket {
             write_right(writer, *time, sequence, payload)?;
@@ -352,6 +410,9 @@ fn read_index_header(bytes: &[u8], max_rows: u64) -> Result<(Reader<'_>, u64, u6
     }
     let left = reader.count()?;
     let buckets = reader.count()?;
+    if buckets > u64::from(u32::MAX) {
+        return Err(mismatch("ASOF key count exceeds handle domain"));
+    }
     Ok((reader, left, buckets))
 }
 
@@ -515,4 +576,41 @@ fn read_right_entry(
         _ => return Err(mismatch("ASOF right payload marker differs")),
     };
     Ok((identity, payload))
+}
+
+#[cfg(test)]
+mod sorting_tests {
+    use super::*;
+    use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryConsumer, MemoryPool};
+    use std::{
+        sync::{Arc, Barrier},
+        time::Duration,
+    };
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropped_key_sort_keeps_workspace_reserved_until_worker_exit() {
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(4_096));
+        let workspace = MemoryConsumer::new("key-sort-test").register(&pool);
+        workspace.try_grow(1_024).unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let gate = Arc::new(Barrier::new(2));
+        let worker_gate = gate.clone();
+        let mut future = Box::pin(sort_owned_keys(vec![], workspace, move |_| {
+            started_tx.send(()).unwrap();
+            worker_gate.wait();
+        }));
+        assert!(futures::poll!(future.as_mut()).is_pending());
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        drop(future);
+        let while_running = pool.reserved();
+        gate.wait();
+        assert_eq!(while_running, 1_024);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while pool.reserved() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
 }

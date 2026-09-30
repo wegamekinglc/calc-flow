@@ -210,6 +210,12 @@ a **separate workspace ceiling equal to `max_state_bytes`**. Output is further
 bounded by runtime edge rows/bytes. A 64 MiB state limit therefore is not a
 64 MiB process RSS limit; sources, edges, checkpoint publication, runtime
 allocations, and caller-owned tables have their own ownership and budgets.
+Identity workspace includes the canonical batch encoding, retained sequence
+copies, and converter headers. New owned key copies reserve additional
+workspace once per unique key before allocation; shared resident keys reuse
+their buffers. Dropped late rows do not allocate
+identity buffers. Batch hash vectors reserve additional workspace and fall back
+to scalar probing when that scratch cannot fit.
 
 When required state or a single output row cannot fit, execution fails with a
 structured resource reason. It never discards a still-useful candidate or
@@ -226,8 +232,8 @@ consecutive left source rows are copied as spans, while right candidates are
 assembled with Arrow interleave on a blocking worker. This is
 the stream-only ASOF operator's output assembly; DataFusion remains the SQL and
 table-expression engine. Python only declares and lowers
-the graph. Admission retains each accepted payload batch and charges its exact
-canonical IPC size before encoding. A checkpoint encodes retained payloads once
+the graph. Admission retains each accepted payload batch and charges an upper
+bound for its canonical IPC size before encoding. A checkpoint encodes retained payloads once
 on a blocking worker in the managed async path; later checkpoints share those
 immutable segments. The produced segment is checked against the charged size,
 and the v2 state charge stays stable before and after encoding. Admission also
@@ -238,6 +244,9 @@ runtime capture shares the prepared bytes. The index stores identities
 and batch-row references; immutable batch segments are shared across captures.
 Direct calls to `checkpoint()` can synchronously prepare the index and payloads;
 the managed runtime first awaits asynchronous preparation before capture.
+Right key dictionaries use private integer handles for lookup. Checkpoint
+preparation reserves key sorting scratch and writes canonical key-byte order;
+the managed async path performs that sort on a blocking worker.
 
 Finalization takes ready rows up to the smaller of the output edge's row budget
 and 64,000 rows. Key and candidate vectors reserve workspace before allocation;

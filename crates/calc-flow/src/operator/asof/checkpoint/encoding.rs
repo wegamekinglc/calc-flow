@@ -20,7 +20,12 @@ impl<'a> Decoder<'a> {
         if self.take(8)? != MAGIC {
             return Err(mismatch("ASOF segment magic differs"));
         }
-        Ok((self.count()?, self.count()?))
+        let left = self.count()?;
+        let buckets = self.count()?;
+        if buckets > u64::from(u32::MAX) {
+            return Err(mismatch("ASOF key count exceeds handle domain"));
+        }
+        Ok((left, buckets))
     }
 
     fn take(&mut self, count: usize) -> Result<&'a [u8]> {
@@ -133,4 +138,24 @@ pub(super) fn restore_charge(bytes: &[u8], max_rows: u64) -> Result<u64> {
     }
     decoder.finish("ASOF segment contains trailing bytes")?;
     charge.workspace(bytes.len() as u64, decoder.rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn v1_header_rejects_unaddressable_key_count_before_reading_rows() {
+        let count = u64::from(u32::MAX) + 1;
+        let mut bytes = Vec::from(MAGIC.as_slice());
+        bytes.extend_from_slice(&0_u64.to_le_bytes());
+        bytes.extend_from_slice(&count.to_le_bytes());
+        let error = restore_charge(&bytes, count).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("key count exceeds handle domain"),
+            "{error}"
+        );
+    }
 }

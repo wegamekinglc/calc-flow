@@ -78,6 +78,18 @@ measurements. Use the current guides for supported behavior.
   Checkpoint bytes, counters, cancellation, and configured resource caps retain
   their existing contracts.
 
+- 2026-09-30: Intern retained ASOF right keys in a `u32` handle dictionary
+  using DataFusion's canonical-byte batch hashing and a per-instance seed.
+  Repeated admissions share resident key buffers. Checkpoints sort keys by
+  bytes with reserved scratch, using a blocking worker in the managed async
+  path; v1/v2 index bytes and state accounting remain compatible. Repeated small
+  admissions amortize right-column growth. Identity workspace covers the batch
+  encoding, sequence copies, and converter headers; new owned key copies grow
+  a separate reservation once per unique key before allocation. Dropped late
+  rows do not allocate identity buffers, and contiguous accepted runs reuse
+  their batch converter. Tight hash workspace
+  uses scalar probing with the same equality semantics.
+
 - 2026-09-29: Require immutable `Program(engine="sql")` or
   `Program(engine="streaming")` selection at construction and add
   `Program.execute(inputs)` dispatch. SQL returns named Arrow tables;

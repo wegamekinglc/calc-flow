@@ -23,8 +23,10 @@ left Arrow chunk 与 checkpoint v3 仍待实施；
 这一步保持现有行式身份和 v2 checkpoint，并非 P2.3 的 Arrow chunk 实现；
 admission 的已校验身份现在直接移入保留行，v2 index 长度与状态费用在同一
 遍历中预检；
-right 桶用哈希定位并保留排序 key 集合供 checkpoint 写出，驱逐后回收过大的
-桶和哈希表容量；仍未引入 P2.1 的 `u32` key 字典或 v3 checkpoint；
+right 桶已由 `HashTable<u32>` key 字典定位，批量哈希使用 DataFusion 工具且
+同一实例的标量哈希保持相同字节域；重复批次复用驻留 key 字节，
+驱逐后压缩 arena 并回收过大的桶和哈希表容量；checkpoint 单独预留排序
+空间并按 key 字节规范写出，托管异步排序放在线程池；仍未引入 v3 checkpoint；
 right 的载荷行和 identity-only 历史现有独立时间、sequence 列与 head，
 驱逐预检仅访问各自过期的前缀，提交后按桶重算最小时间；有序列路径为
 `O(keys + expired)`，较旧载荷转为身份时用乱序树索引，代价另加
@@ -35,6 +37,9 @@ right 接纳计数与 key 驻留同一遍计算，按接纳批次预留各列容
 重复探测 identity-only 历史；输出 worker 仅持有唯一 Arrow 批次及位置索引；
 前缀匹配同时累计 index、行费用和批次引用差，输出接受后按批次提交；
 有序 left 的就绪前缀用二分截取，不再克隆逐行 key 或重复遍历前缀记账；
+identity workspace 覆盖批次编码、sequence 副本与 converter 头；新的唯一
+key 副本在分配前追加预留，驻留 key 复用缓冲；被丢弃的 late 行不创建身份编码，
+连续接纳区间共用 converter，批量哈希 scratch 不足时保留标量路径；
 阶段结果及最终配对数据将在 PR 描述中记录。
 
 ## 1. 问题与测量
@@ -196,7 +201,7 @@ fail-closed 的有界内存和可 checkpoint 状态。在输入有序的常见�
   小型向量或哈希表。workspace 估算按连续段和变长列 offsets 差计算。
 - **P1.5 合并 admission 遍历。** late 过滤、身份、workspace、index 长度和
   inventory 增量在每批一次循环内完成；`check_cancelled()` 改为每 1,024–4,096 行
-  一次；哈希改用 DataFusion 已使用的 ahash，并按行数预分配容量。
+  一次；批量哈希使用 DataFusion 的 hash 工具，并按行数预分配容量。
 - **P1.6 无堆 sequence。** 单个整数 sequence 用定长内联编码（例如 `[u8; 9]`），
   其他情况用小缓冲内联；编码字节保持与现有 row format 一致，保证 checkpoint 兼容。
 

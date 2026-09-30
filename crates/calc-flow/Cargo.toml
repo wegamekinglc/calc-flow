@@ -17,6 +17,7 @@ datafusion.workspace = true
 futures.workspace = true
 fs2.workspace = true
 hex.workspace = true
+hashbrown.workspace = true
 parking_lot.workspace = true
 regex.workspace = true
 schemars.workspace = true

@@ -202,11 +202,16 @@ impl StreamAsofJoinOperator {
             return Ok(0);
         }
         let side = input.side(&self.spec);
+        let event_times = super::admission::times(record, side);
+        if event_times.values().iter().all(|time| input.is_late(*time)) {
+            return Ok(0);
+        }
         let identity_columns = side.keys().len() + side.sequence_by().len();
         let _column_scratch = self.reserve_workspace(identity_columns as u64 * 512)?;
         let columns = resolve_identity_columns(record, side)?;
-        let event_times = super::admission::times(record, side);
-        let mut bytes = 0;
+        // Converter configuration and Arrow buffer headers remain live while
+        // the accepted identities are assembled, including a one-row batch.
+        let mut bytes = identity_columns as u64 * 512;
         for row in 0..record.num_rows() {
             if input.is_late(event_times.value(row)) {
                 continue;
@@ -384,7 +389,7 @@ fn row_workspace(
 
 /// Identity columns resolved once per record batch: the array reference plus
 /// whether the column uses Arrow's blocked string row encoding.
-type ResolvedIdentityColumns = Vec<(ColumnWorkspace, bool)>;
+type ResolvedIdentityColumns = Vec<(ColumnWorkspace, bool, bool)>;
 
 fn resolve_identity_columns(
     record: &RecordBatch,
@@ -393,27 +398,31 @@ fn resolve_identity_columns(
     side.keys()
         .iter()
         .chain(side.sequence_by())
-        .map(|field| {
+        .enumerate()
+        .map(|(index, field)| {
             let column = record
                 .column(record.schema().index_of(field).expect("validated schema"))
                 .clone();
             let string = matches!(column.data_type(), DataType::Utf8 | DataType::LargeUtf8);
-            Ok((ColumnWorkspace::new(column)?, string))
+            Ok((
+                ColumnWorkspace::new(column)?,
+                string,
+                index >= side.keys().len(),
+            ))
         })
         .collect()
 }
 
-/// Allocation-free upper bound on one row's identity encodings: fixed
-/// headroom plus, per column, the aligned slice bytes scaled for the row
-/// format's marker framing. String columns are scaled by 33/32 because the
-/// blocked encoding adds a sentinel byte per block (~L/32 for length L).
+/// Covers batch row bytes and per-row sequence copies. Unique owned key copies
+/// grow a separate reservation before allocation. String encodings use 33/32
+/// scaling for block sentinels.
 fn identity_row_workspace(
     columns: &ResolvedIdentityColumns,
     row: usize,
     name: &str,
 ) -> Result<u64> {
     let mut bytes = IDENTITY_ROW_BYTES;
-    for (column, string) in columns {
+    for (column, string, retained_copy) in columns {
         let slice = aligned(column.bytes(row, name)?);
         let encoded = if *string {
             checked(
@@ -425,6 +434,9 @@ fn identity_row_workspace(
             checked(name, slice, FIXED_IDENTITY_FRAMING_BYTES)?
         };
         bytes = checked(name, bytes, encoded)?;
+        if *retained_copy {
+            bytes = checked(name, bytes, encoded)?;
+        }
     }
     Ok(bytes)
 }

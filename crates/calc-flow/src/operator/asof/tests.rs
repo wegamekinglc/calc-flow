@@ -24,6 +24,55 @@ struct RetainedPayloadCollector {
 }
 
 #[tokio::test]
+async fn later_admission_reuses_the_resident_right_key_bytes() {
+    let (mut op, initial) = fixture();
+    let schema = initial.table_payload().unwrap().batches()[0].schema();
+    let key = "a persistent symbol longer than the inline encoding";
+    let input = |sequence| {
+        Batch::table(
+            vec![
+                RecordBatch::try_new(
+                    schema.clone(),
+                    vec![
+                        Arc::new(StringArray::from(vec![key])),
+                        Arc::new(TimestampMicrosecondArray::from(vec![10]).with_timezone("UTC")),
+                        Arc::new(Int64Array::from(vec![sequence])),
+                    ],
+                )
+                .unwrap(),
+            ],
+            BatchMetadata::default(),
+        )
+        .unwrap()
+    };
+    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+    let cx = StreamOperatorContext::new(&job, "asof", None);
+    let mut output = EdgeCollector::new(op.output_ports().to_vec());
+    op.process_data("right", input(1), &cx, &mut output)
+        .await
+        .unwrap();
+    let resident = op
+        .state
+        .right
+        .ordered_iter()
+        .next()
+        .unwrap()
+        .0
+        .as_slice()
+        .as_ptr();
+    let batch = input(2);
+    let validated = op.validate_admission("right", &batch).unwrap();
+    let admission = op.prepare_admission(validated, &batch, &cx).await.unwrap();
+    assert_eq!(
+        admission.rows[0].0.1.as_slice().as_ptr(),
+        resident,
+        "each canonical key buffer must be owned once across batches"
+    );
+    drop(admission);
+    assert_eq!(op.runtime.pool.reserved(), 0);
+}
+
+#[tokio::test]
 async fn admission_prepares_index_only_when_checkpoint_is_captured() {
     let (mut op, input) = fixture();
     let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());

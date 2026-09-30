@@ -11,10 +11,8 @@ use datafusion::arrow::{
     record_batch::RecordBatch,
 };
 use datafusion::execution::memory_pool::MemoryReservation;
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use hashbrown::HashTable;
+use std::{collections::HashSet, hash::BuildHasher, sync::Arc};
 
 #[derive(Clone, Copy)]
 pub(super) struct ValidatedInput {
@@ -30,17 +28,178 @@ pub(super) struct Admission {
     right_capacities: Vec<(state::Encoding, usize)>,
     _identity_workspace: MemoryReservation,
     _payload_workspace: MemoryReservation,
+    _key_workspace: Option<MemoryReservation>,
 }
 
 struct AdmittedKey {
     encoding: state::Encoding,
+    hash: u64,
     rows: usize,
+}
+
+#[derive(Default)]
+struct InputKeys {
+    index: HashTable<u32>,
+    values: Vec<AdmittedKey>,
+    workspace: Option<MemoryReservation>,
+}
+
+impl InputKeys {
+    fn intern(
+        &mut self,
+        bytes: &[u8],
+        hash: Option<u64>,
+        operator: &StreamAsofJoinOperator,
+    ) -> Result<state::Encoding> {
+        let resident = &operator.state.right;
+        let name = &operator.name;
+        let hash = hash.unwrap_or_else(|| resident.hasher().hash_one(bytes));
+        if let Some(id) = self.index.find(hash, |id| {
+            self.values[*id as usize].encoding.as_slice() == bytes
+        }) {
+            let key = &mut self.values[*id as usize];
+            key.rows += 1;
+            return Ok(key.encoding.clone());
+        }
+        state::validate_key_count(self.values.len() as u64 + 1, name)?;
+        let id = u32::try_from(self.values.len()).expect("validated ASOF key count");
+        let encoding = if let Some(existing) = resident.encoding_hashed(hash, bytes) {
+            existing.clone()
+        } else {
+            if !state::Encoding::fits_inline(bytes) {
+                if self.workspace.is_none() {
+                    self.workspace = Some(operator.reserve_workspace(0)?);
+                }
+                self.workspace
+                    .as_ref()
+                    .expect("ASOF key copy workspace")
+                    .try_grow(bytes.len())
+                    .map_err(|_| {
+                        reason(
+                            name,
+                            StreamingFailureReason::AsofWorkspaceLimitExceeded,
+                            "ASOF owned key copies exceed max_state_bytes workspace",
+                        )
+                    })?;
+            }
+            state::Encoding::from_slice(bytes)
+        };
+        self.values.push(AdmittedKey {
+            encoding: encoding.clone(),
+            hash,
+            rows: 1,
+        });
+        self.index
+            .insert_unique(hash, id, |id| self.values[*id as usize].hash);
+        Ok(encoding)
+    }
+}
+
+/// Owns the batch converters and their optional, separately reserved hash
+/// vector. Mixed-late input encodes only each accepted immutable slice.
+struct InputEncodings<'a> {
+    batch: &'a RecordBatch,
+    side: &'a AsofJoinSide,
+    columns: Option<(state::EncodedColumns, state::EncodedColumns)>,
+    hashes: Option<Vec<u64>>,
+    _hash_workspace: Option<MemoryReservation>,
+    input: ValidatedInput,
+    range: std::ops::Range<usize>,
+}
+
+impl<'a> InputEncodings<'a> {
+    fn new(
+        operator: &'a StreamAsofJoinOperator,
+        batch: &'a RecordBatch,
+        input: ValidatedInput,
+    ) -> Result<Option<Self>> {
+        let side = input.side(&operator.spec);
+        let accepted = input.watermark.map_or(batch.num_rows(), |_| {
+            times(batch, side)
+                .values()
+                .iter()
+                .filter(|time| !input.is_late(**time))
+                .count()
+        });
+        if accepted == 0 {
+            return Ok(None);
+        }
+        let columns = (accepted == batch.num_rows())
+            .then(|| -> Result<_> {
+                Ok((
+                    state::encode_columns(batch, side.keys())?,
+                    state::encode_columns(batch, side.sequence_by())?,
+                ))
+            })
+            .transpose()?;
+        let hash_workspace = columns
+            .as_ref()
+            .filter(|(keys, _)| {
+                input.index == 1 && matches!(keys, state::EncodedColumns::Binary(_))
+            })
+            .and_then(|_| {
+                operator
+                    .reserve_workspace((batch.num_rows() as u64).saturating_mul(8))
+                    .ok()
+            });
+        let hashes = match (&columns, &hash_workspace) {
+            (Some((keys, _)), Some(_)) => {
+                Some(keys.hashes(operator.state.right.hasher(), batch.num_rows())?)
+            }
+            _ => None,
+        };
+        let range = if columns.is_some() {
+            0..batch.num_rows()
+        } else {
+            0..0
+        };
+        Ok(Some(Self {
+            batch,
+            side,
+            columns,
+            hashes,
+            _hash_workspace: hash_workspace,
+            input,
+            range,
+        }))
+    }
+
+    fn with_row<R>(
+        &mut self,
+        row: usize,
+        use_identity: impl FnOnce(&[u8], Option<u64>, state::Encoding) -> Result<R>,
+    ) -> Result<R> {
+        if !self.range.contains(&row) {
+            self.columns = None;
+            let event_times = times(self.batch, self.side);
+            let count = event_times.values()[row..]
+                .iter()
+                .take_while(|time| !self.input.is_late(**time))
+                .count();
+            let slice = self.batch.slice(row, count);
+            self.columns = Some((
+                state::encode_columns(&slice, self.side.keys())?,
+                state::encode_columns(&slice, self.side.sequence_by())?,
+            ));
+            self.range = row..row + count;
+        }
+        let (keys, sequences) = self.columns.as_ref().expect("accepted ASOF encodings");
+        let index = row - self.range.start;
+        keys.with_row(index, |bytes| {
+            use_identity(
+                bytes,
+                self.hashes.as_ref().map(|hashes| hashes[row]),
+                sequences.row(index),
+            )
+        })
+    }
 }
 
 struct InputIdentities<'a> {
     rows: Vec<InputRow<'a>>,
     duplicates: u64,
     right_capacities: Vec<(state::Encoding, usize)>,
+    key_workspace: Option<MemoryReservation>,
 }
 
 impl StreamAsofJoinOperator {
@@ -117,7 +276,24 @@ impl StreamAsofJoinOperator {
             rows,
             duplicates,
             right_capacities,
-        } = self.admission_identities(batch.table_payload()?.batches(), input, context)?;
+            key_workspace,
+        } = match self.admission_identities(batch.table_payload()?.batches(), input, context) {
+            Ok(identities) => identities,
+            Err(error)
+                if matches!(
+                    &error,
+                    crate::CalcFlowError::OperatorReason {
+                        reason_code: StreamingFailureReason::AsofWorkspaceLimitExceeded,
+                        ..
+                    }
+                ) =>
+            {
+                self.validate_duplicates_without_workspace(batch, input, context)
+                    .await?;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
         self.record_duplicates(input.index, duplicates)?;
         let accepted = self.check_admission_rows(input.index, rows.len() as u64)?;
         let payload_workspace = self.input_workspace(batch, input)?;
@@ -144,6 +320,7 @@ impl StreamAsofJoinOperator {
             right_capacities,
             _identity_workspace: identity_workspace,
             _payload_workspace: payload_workspace,
+            _key_workspace: key_workspace,
         })
     }
 
@@ -208,16 +385,13 @@ impl StreamAsofJoinOperator {
         } else {
             0
         };
-        let mut keys_by_hash =
-            HashMap::<u64, Vec<AdmittedKey>, RandomState>::with_hasher(RandomState::new());
-        let key_hasher = RandomState::new();
+        let mut keys = InputKeys::default();
         let mut rows = Vec::with_capacity(capacity);
         for batch in batches {
-            // Per-batch invariants are hoisted: one event-time array
-            // resolution and one row converter per identity column set.
+            let Some(mut encodings) = InputEncodings::new(self, batch, input)? else {
+                continue;
+            };
             let event_times = times(batch, side);
-            let keys = state::encode_columns(batch, side.keys())?;
-            let sequences = state::encode_columns(batch, side.sequence_by())?;
             for row in 0..batch.num_rows() {
                 if row % 1_024 == 0 {
                     context.check_cancelled()?;
@@ -226,29 +400,14 @@ impl StreamAsofJoinOperator {
                 if input.is_late(time) {
                     continue;
                 }
-                let key = keys.with_row(row, |key_bytes| {
-                    if input.index == 0 && state::Encoding::fits_inline(key_bytes) {
-                        return state::Encoding::from_slice(key_bytes);
-                    }
-                    let bucket = keys_by_hash
-                        .entry(key_hasher.hash_one(key_bytes))
-                        .or_default();
-                    if let Some(shared) = bucket
-                        .iter_mut()
-                        .find(|shared| shared.encoding.as_slice() == key_bytes)
-                    {
-                        shared.rows += 1;
-                        shared.encoding.clone()
+                let identity = encodings.with_row(row, |bytes, hash, sequence| {
+                    let key = if input.index == 0 && state::Encoding::fits_inline(bytes) {
+                        state::Encoding::from_slice(bytes)
                     } else {
-                        let shared = state::Encoding::from_slice(key_bytes);
-                        bucket.push(AdmittedKey {
-                            encoding: shared.clone(),
-                            rows: 1,
-                        });
-                        shared
-                    }
-                });
-                let identity: LeftOrder = (time, key, sequences.row(row));
+                        keys.intern(bytes, hash, self)?
+                    };
+                    Ok((time, key, sequence))
+                })?;
                 rows.push((identity, batch, row));
             }
         }
@@ -259,9 +418,8 @@ impl StreamAsofJoinOperator {
             context,
         )?;
         let right_capacities = if input.index == 1 {
-            keys_by_hash
-                .into_values()
-                .flatten()
+            keys.values
+                .into_iter()
                 .map(|key| (key.encoding, key.rows))
                 .collect()
         } else {
@@ -271,6 +429,7 @@ impl StreamAsofJoinOperator {
             rows,
             duplicates,
             right_capacities,
+            key_workspace: keys.workspace,
         })
     }
 }
@@ -557,9 +716,285 @@ fn can_share_batch(batch: &RecordBatch) -> Result<bool> {
 }
 
 #[cfg(test)]
-mod duplicate_tests {
+mod identity_tests {
     use super::*;
     use crate::{CancellationToken, JsonMap, StreamJobContext};
+
+    #[tokio::test]
+    async fn duplicate_identity_precedes_new_key_copy_workspace_failure() {
+        use datafusion::arrow::array::{Int64Array, StringArray};
+        let (mut operator, schema) = identity_fixture();
+        let key = "k".repeat(1_000_000);
+        let record = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![key.as_str(); 2])),
+                Arc::new(TimestampMicrosecondArray::from(vec![10; 2]).with_timezone("UTC")),
+                Arc::new(Int64Array::from(vec![1; 2])),
+            ],
+        )
+        .unwrap();
+        let batch = Batch::table(vec![record], crate::BatchMetadata::default()).unwrap();
+        let input = operator.validate_admission("right", &batch).unwrap();
+        let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+        let context = StreamOperatorContext::new(&job, "asof", None);
+        let error = operator
+            .prepare_admission(input, &batch, &context)
+            .await
+            .err()
+            .expect("duplicate");
+        assert!(matches!(
+            error,
+            crate::CalcFlowError::OperatorReason {
+                reason_code: StreamingFailureReason::AsofDuplicateIdentity,
+                ..
+            }
+        ));
+        assert_eq!(operator.status.right.duplicate_rows, 1);
+        assert_eq!(operator.status.right.accepted_rows, 0);
+        assert_eq!(operator.runtime.pool.reserved(), 0);
+    }
+
+    fn identity_fixture() -> (
+        StreamAsofJoinOperator,
+        datafusion::arrow::datatypes::SchemaRef,
+    ) {
+        use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("key", DataType::Utf8, false),
+            Field::new(
+                "time",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                false,
+            ),
+            Field::new("seq", DataType::Int64, false),
+        ]));
+        let side = |prefix: &str| {
+            AsofJoinSide::new(
+                vec!["key".into()],
+                "time".into(),
+                vec!["seq".into()],
+                prefix.into(),
+            )
+            .unwrap()
+        };
+        let spec = StreamAsofJoinSpec::new(
+            side("left"),
+            side("right"),
+            std::time::Duration::ZERO,
+            super::super::AsofStateLimits::new(10_000, 2 << 20).unwrap(),
+        )
+        .unwrap();
+        (
+            StreamAsofJoinOperator::new("asof", schema.clone(), schema.clone(), spec).unwrap(),
+            schema,
+        )
+    }
+
+    #[test]
+    fn repeated_long_keys_charge_one_retained_copy() {
+        use datafusion::arrow::array::{Int64Array, StringArray};
+        let (operator, schema) = identity_fixture();
+        let key = "k".repeat(48_000);
+        let record = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from_iter_values((0..32).map(|_| key.as_str()))),
+                Arc::new(
+                    TimestampMicrosecondArray::from_iter_values((0..32).map(|_| 10))
+                        .with_timezone("UTC"),
+                ),
+                Arc::new(Int64Array::from_iter_values(0..32)),
+            ],
+        )
+        .unwrap();
+        let batch = Batch::table(vec![record], crate::BatchMetadata::default()).unwrap();
+        let input = ValidatedInput {
+            index: 1,
+            watermark: None,
+        };
+        let _workspace = operator
+            .identity_workspace(&batch, input)
+            .expect("32 copies of the canonical batch buffer fit 2 MiB");
+        let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+        let context = StreamOperatorContext::new(&job, "asof", None);
+        let identities = operator
+            .admission_identities(batch.table_payload().unwrap().batches(), input, &context)
+            .unwrap();
+        assert_eq!(identities.rows.len(), 32);
+        let first = identities.rows[0].0.1.as_slice().as_ptr();
+        assert!(
+            identities
+                .rows
+                .iter()
+                .all(|row| row.0.1.as_slice().as_ptr() == first)
+        );
+    }
+
+    #[test]
+    fn admitted_key_handles_distinguish_full_hash_collisions() {
+        let (operator, _) = identity_fixture();
+        let mut keys = InputKeys::default();
+        for bytes in [b"one".as_slice(), b"two", b"one"] {
+            assert_eq!(
+                keys.intern(bytes, Some(0), &operator).unwrap().as_slice(),
+                bytes
+            );
+        }
+        assert_eq!(keys.values.len(), 2);
+        assert_eq!(keys.values[0].rows, 2);
+        assert_eq!(keys.values[1].rows, 1);
+    }
+
+    #[test]
+    fn one_late_row_keeps_batch_identity_conversion() {
+        use datafusion::arrow::array::{Int64Array, StringArray};
+
+        let (operator, schema) = identity_fixture();
+        let record = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from_iter_values((0..1_000).map(|_| "kept"))),
+                Arc::new(
+                    TimestampMicrosecondArray::from_iter_values(
+                        (0..1_000).map(|row| if row == 500 { 0 } else { 10 }),
+                    )
+                    .with_timezone("UTC"),
+                ),
+                Arc::new(Int64Array::from_iter_values(0..1_000)),
+            ],
+        )
+        .unwrap();
+        let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+        let context = StreamOperatorContext::new(&job, "asof", None);
+        let mut retained = None;
+        let allocation = allocation_counter::measure(|| {
+            retained = Some(
+                operator
+                    .admission_identities(
+                        std::slice::from_ref(&record),
+                        ValidatedInput {
+                            index: 1,
+                            watermark: Some(1),
+                        },
+                        &context,
+                    )
+                    .unwrap()
+                    .rows
+                    .len(),
+            );
+        });
+        assert_eq!(retained, Some(999));
+        assert!(
+            allocation.count_total <= 128,
+            "batch converters were rebuilt per row: {allocation:?}"
+        );
+    }
+
+    #[test]
+    fn discarded_large_keys_do_not_allocate_identity_buffers() {
+        use datafusion::arrow::array::{Int64Array, StringArray};
+
+        let (operator, schema) = identity_fixture();
+        let discarded = "x".repeat(4_096);
+        let record = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from_iter_values((0..1_000).map(|row| {
+                    if row == 999 {
+                        "kept"
+                    } else {
+                        discarded.as_str()
+                    }
+                }))),
+                Arc::new(
+                    TimestampMicrosecondArray::from_iter_values(
+                        (0..1_000).map(|row| if row == 999 { 10 } else { 0 }),
+                    )
+                    .with_timezone("UTC"),
+                ),
+                Arc::new(Int64Array::from_iter_values(0..1_000)),
+            ],
+        )
+        .unwrap();
+        let batch = Batch::table(vec![record], crate::BatchMetadata::default()).unwrap();
+        let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+        let context = StreamOperatorContext::new(&job, "asof", None);
+        for frontier in [1, 11] {
+            let input = ValidatedInput {
+                index: 1,
+                watermark: Some(frontier),
+            };
+            let reservation = operator.identity_workspace(&batch, input).unwrap();
+            let charge = reservation.size() as u64;
+            let mut retained = None;
+            let allocation = allocation_counter::measure(|| {
+                retained = Some(
+                    operator
+                        .admission_identities(
+                            batch.table_payload().unwrap().batches(),
+                            input,
+                            &context,
+                        )
+                        .unwrap(),
+                );
+            });
+            assert!(
+                allocation.bytes_max <= charge,
+                "frontier={frontier}, peak={}, reserved={charge}",
+                allocation.bytes_max
+            );
+            assert_eq!(retained.unwrap().rows.len(), usize::from(frontier == 1));
+        }
+    }
+
+    #[test]
+    fn long_unique_key_buffers_fit_identity_workspace() {
+        use datafusion::arrow::array::{Int64Array, StringArray};
+
+        let (operator, schema) = identity_fixture();
+        let key = "k".repeat(48_000);
+        let record = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![key.as_str()])),
+                Arc::new(TimestampMicrosecondArray::from(vec![10]).with_timezone("UTC")),
+                Arc::new(Int64Array::from(vec![1])),
+            ],
+        )
+        .unwrap();
+        let batch = Batch::table(vec![record], crate::BatchMetadata::default()).unwrap();
+        let input = ValidatedInput {
+            index: 1,
+            watermark: None,
+        };
+        let reservation = operator.identity_workspace(&batch, input).unwrap();
+        let charge = reservation.size() as u64;
+        let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+        let context = StreamOperatorContext::new(&job, "asof", None);
+        let mut retained = None;
+        let allocation = allocation_counter::measure(|| {
+            retained = Some(
+                operator
+                    .admission_identities(batch.table_payload().unwrap().batches(), input, &context)
+                    .unwrap(),
+            );
+        });
+        let key_copies = retained
+            .as_ref()
+            .unwrap()
+            .key_workspace
+            .as_ref()
+            .map_or(0, |reservation| reservation.size() as u64);
+        let hash_vector = size_of::<u64>() as u64;
+        let total_workspace = charge + key_copies + hash_vector;
+        assert!(
+            allocation.bytes_max <= total_workspace,
+            "peak={}, reserved={total_workspace}",
+            allocation.bytes_max
+        );
+        assert_eq!(retained.unwrap().rows.len(), 1);
+    }
 
     #[test]
     fn ordered_and_unordered_duplicates_count_each_rejected_row_once() {

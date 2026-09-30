@@ -1,14 +1,13 @@
 use crate::{Result, StateSegment};
-use ahash::RandomState;
 use datafusion::arrow::{
-    array::{Array, Int64Array, UInt64Array},
+    array::{Array, BinaryArray, Int64Array, UInt64Array},
     record_batch::RecordBatch,
     row::{RowConverter, Rows, SortField},
 };
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, BTreeSet, HashMap, hash_map},
-    hash::{Hash, Hasher},
+    collections::{BTreeMap, BTreeSet},
+    hash::{BuildHasher, Hash, Hasher},
     ops::Deref,
     sync::{Arc, OnceLock},
 };
@@ -338,105 +337,8 @@ impl<'a> IntoIterator for &'a LeftState {
     }
 }
 
-/// Hash lookup for right admission and candidate probing, with a separate
-/// canonical key order for checkpoint encoding and restore validation.
-#[derive(Clone, Default)]
-pub(super) struct RightState {
-    buckets: HashMap<Encoding, Box<RightBucket>, RandomState>,
-    ordered_keys: BTreeSet<Arc<Encoding>>,
-}
-
-impl RightState {
-    pub fn len(&self) -> usize {
-        self.buckets.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.buckets.is_empty()
-    }
-
-    pub fn values(&self) -> impl Iterator<Item = &RightBucket> {
-        self.buckets.values().map(Box::as_ref)
-    }
-
-    pub fn contains_key(&self, key: &Encoding) -> bool {
-        self.buckets.contains_key(key)
-    }
-
-    pub fn get(&self, key: &Encoding) -> Option<&RightBucket> {
-        self.buckets.get(key).map(Box::as_ref)
-    }
-
-    pub fn ordered_iter(&self) -> impl Iterator<Item = (&Encoding, &RightBucket)> {
-        self.ordered_keys.iter().map(|key| {
-            (
-                key.as_ref(),
-                self.buckets
-                    .get(key.as_ref())
-                    .expect("indexed ASOF right bucket")
-                    .as_ref(),
-            )
-        })
-    }
-
-    pub fn last_key_value(&self) -> Option<(&Encoding, &RightBucket)> {
-        let key = self.ordered_keys.last()?;
-        Some((
-            key.as_ref(),
-            self.buckets
-                .get(key.as_ref())
-                .expect("indexed ASOF right bucket")
-                .as_ref(),
-        ))
-    }
-
-    pub fn bucket_mut_or_default(&mut self, key: Encoding) -> &mut RightBucket {
-        match self.buckets.entry(key) {
-            hash_map::Entry::Occupied(entry) => entry.into_mut().as_mut(),
-            hash_map::Entry::Vacant(entry) => {
-                self.ordered_keys.insert(Arc::new(entry.key().clone()));
-                entry.insert(Box::default()).as_mut()
-            }
-        }
-    }
-
-    pub fn insert(&mut self, key: Encoding, bucket: RightBucket) {
-        self.ordered_keys.insert(Arc::new(key.clone()));
-        self.buckets.insert(key, Box::new(bucket));
-    }
-
-    pub fn retain(&mut self, mut keep: impl FnMut(&Encoding, &mut RightBucket) -> bool) {
-        self.buckets
-            .retain(|key, bucket| keep(key, bucket.as_mut()));
-        self.ordered_keys
-            .retain(|key| self.buckets.contains_key(key.as_ref()));
-        if self.buckets.is_empty() {
-            self.ordered_keys = BTreeSet::new();
-            self.buckets.shrink_to_fit();
-        } else if self.buckets.capacity() > self.buckets.len().saturating_mul(2).max(4) {
-            self.buckets.shrink_to_fit();
-        }
-    }
-}
-
-pub(super) struct RightStateIter<'a>(hash_map::Iter<'a, Encoding, Box<RightBucket>>);
-
-impl<'a> Iterator for RightStateIter<'a> {
-    type Item = (&'a Encoding, &'a RightBucket);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.0.next().map(|(key, bucket)| (key, bucket.as_ref()))
-    }
-}
-
-impl<'a> IntoIterator for &'a RightState {
-    type Item = (&'a Encoding, &'a RightBucket);
-    type IntoIter = RightStateIter<'a>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        RightStateIter(self.buckets.iter())
-    }
-}
+mod key_dictionary;
+pub(super) use key_dictionary::{RightState, validate_key_count};
 
 #[derive(Clone, Default)]
 pub(super) struct State {
@@ -516,6 +418,7 @@ impl State {
             )?;
         } else {
             if !self.right.contains_key(key) && seen.buckets.insert(key.clone()) {
+                validate_key_count(self.right.len() as u64 + seen.buckets.len() as u64, name)?;
                 inventory.charge_allocation(key, name)?;
                 *index_len = super::checked(name, *index_len, 16 + key.len() as u64)?;
             }
@@ -579,6 +482,7 @@ impl State {
 /// per batch. Both paths produce Arrow 58 row bytes independently per row.
 pub(super) enum EncodedColumns {
     Rows(Rows),
+    Binary(BinaryArray),
     Int64(Int64Array),
     UInt64(UInt64Array),
 }
@@ -587,6 +491,7 @@ impl EncodedColumns {
     pub(super) fn with_row<R>(&self, row: usize, use_bytes: impl FnOnce(&[u8]) -> R) -> R {
         match self {
             Self::Rows(rows) => use_bytes(rows.row(row).as_ref()),
+            Self::Binary(rows) => use_bytes(rows.value(row)),
             Self::Int64(column) => {
                 let mut encoded = [0_u8; 9];
                 encoded[0] = 1;
@@ -608,9 +513,28 @@ impl EncodedColumns {
         self.with_row(row, Encoding::from_slice)
     }
 
+    pub(super) fn hashes(
+        &self,
+        seed: &datafusion::common::hash_utils::RandomState,
+        count: usize,
+    ) -> Result<Vec<u64>> {
+        let mut hashes = vec![0; count];
+        if let Self::Binary(rows) = self {
+            datafusion::common::hash_utils::create_hashes([rows as &dyn Array], seed, &mut hashes)
+                .map_err(|error| crate::CalcFlowError::Format {
+                    message: format!("ASOF canonical key hashing failed: {error}"),
+                })?;
+        } else {
+            for (row, hash) in hashes.iter_mut().enumerate() {
+                *hash = self.with_row(row, |bytes| seed.hash_one(bytes));
+            }
+        }
+        Ok(hashes)
+    }
+
     #[cfg(test)]
     pub(super) fn is_typed(&self) -> bool {
-        !matches!(self, Self::Rows(_))
+        matches!(self, Self::Int64(_) | Self::UInt64(_))
     }
 }
 
@@ -653,7 +577,16 @@ pub(super) fn encode_columns(batch: &RecordBatch, names: &[String]) -> Result<En
     let rows = converter
         .convert_columns(&arrays)
         .map_err(|error| super::arrow_error(&error))?;
-    Ok(EncodedColumns::Rows(rows))
+    if i32::try_from(rows.size()).is_ok() {
+        let binary = rows
+            .try_into_binary()
+            .map_err(|error| super::arrow_error(&error))?;
+        Ok(EncodedColumns::Binary(binary))
+    } else {
+        // Keep the canonical row buffer when Binary's offset domain is too
+        // small. This path also hashes each row without a second large copy.
+        Ok(EncodedColumns::Rows(rows))
+    }
 }
 
 pub(super) fn encoded_columns(
@@ -1269,6 +1202,51 @@ mod encoding_tests {
             }
         }
     }
+
+    #[test]
+    fn batch_and_scalar_key_hashes_share_the_canonical_byte_domain() {
+        use datafusion::arrow::array::{ArrayRef, BinaryArray, LargeStringArray, StringArray};
+        use datafusion::common::hash_utils::{RandomState, create_hashes};
+        use std::hash::BuildHasher;
+
+        let hasher = RandomState::with_seed(123);
+        let cases: Vec<ArrayRef> = vec![
+            Arc::new(Int64Array::from(vec![i64::MIN, 0, i64::MAX])),
+            Arc::new(UInt64Array::from(vec![0, 1, u64::MAX])),
+            Arc::new(StringArray::from(vec![
+                Some(""),
+                None,
+                Some("a long generic key"),
+            ])),
+            Arc::new(LargeStringArray::from(vec!["", "z", "a longer key"])),
+        ];
+        for column in cases {
+            let count = column.len();
+            let record = RecordBatch::try_new(
+                Arc::new(Schema::new(vec![Field::new(
+                    "identity",
+                    column.data_type().clone(),
+                    true,
+                )])),
+                vec![column],
+            )
+            .unwrap();
+            let encoded = encode_columns(&record, &["identity".into()]).unwrap();
+            let batch_hashes = encoded.hashes(&hasher, count).unwrap();
+            let canonical = BinaryArray::from_iter_values((0..count).map(|row| encoded.row(row)));
+            let mut expected = vec![0; count];
+            create_hashes(
+                [&canonical as &dyn datafusion::arrow::array::Array],
+                &hasher,
+                &mut expected,
+            )
+            .unwrap();
+            assert_eq!(batch_hashes, expected);
+            for (row, hash) in batch_hashes.iter().enumerate() {
+                assert_eq!(*hash, encoded.with_row(row, |bytes| hasher.hash_one(bytes)));
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1558,7 +1536,7 @@ mod right_storage_tests {
 
     #[test]
     fn sparse_right_buckets_fit_the_committed_state_charge() {
-        for keys in [1_u32, 2, 4, 16, 128] {
+        for keys in [1_u32, 2, 4, 16, 128, 4_096] {
             let mut state = State::default();
             let mut prepared = None;
             let allocation = allocation_counter::measure(|| {
@@ -1576,9 +1554,9 @@ mod right_storage_tests {
             });
             let charged = state.inventory(prepared.as_ref(), "asof").unwrap().bytes;
             assert!(
-                u64::try_from(allocation.bytes_current).unwrap() <= charged,
-                "keys={keys}, retained={}, charged={charged}",
-                allocation.bytes_current
+                allocation.bytes_max <= charged,
+                "keys={keys}, peak={}, charged={charged}",
+                allocation.bytes_max
             );
         }
     }

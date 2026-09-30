@@ -565,6 +565,7 @@ dependencies = [
  "datafusion",
  "fs2",
  "futures",
+ "hashbrown 0.17.1",
  "hex",
  "parking_lot",
  "proptest",
