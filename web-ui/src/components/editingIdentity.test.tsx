@@ -8,8 +8,6 @@ import {
   type ArrowFieldConfig,
   type ConnectorCapability,
   type EditableProject,
-  type ProjectSinkBinding,
-  type ProjectSourceBinding,
 } from '../types';
 import { SchemaEditor } from './SchemaEditor';
 import { StreamConfigEditor } from './StreamConfigEditor';
@@ -142,15 +140,26 @@ describe('editable row identity', () => {
   });
 
   it.each([
-    { kind: 'source', field: 'sources' as const, label: 'Graph input', addIndex: 0 },
-    { kind: 'sink', field: 'sinks' as const, label: 'Graph output', addIndex: 1 },
-  ])('preserves the second $kind draft after adding and removing the first row', ({ kind, field, label, addIndex }) => {
+    {
+      kind: 'source', label: 'Graph input', addIndex: 0,
+      getBinding: (project: EditableProject) => at(project.sources),
+      withSecondBinding: (project: EditableProject) => ({
+        ...project,
+        sources: [...project.sources, { ...at(project.sources), binding: 'second' }],
+      }),
+    },
+    {
+      kind: 'sink', label: 'Graph output', addIndex: 1,
+      getBinding: (project: EditableProject) => at(project.sinks),
+      withSecondBinding: (project: EditableProject) => ({
+        ...project,
+        sinks: [...project.sinks, { ...at(project.sinks), binding: 'second' }],
+      }),
+    },
+  ])('preserves the second $kind draft after adding and removing the first row', ({ kind, label, addIndex, getBinding, withSecondBinding }) => {
     const initialProject = streamProject();
-    const original = at<ProjectSourceBinding | ProjectSinkBinding>(initialProject[field]);
-    const initial = {
-      ...initialProject,
-      [field]: [...initialProject[field], { ...original, binding: 'second' }],
-    };
+    const original = getBinding(initialProject);
+    const initial = withSecondBinding(initialProject);
     const { container } = render(<StreamHarness initialProject={initial} />);
     const input = at(screen.getAllByLabelText(label), 1);
     const card = input.closest<HTMLElement>('article');
@@ -172,7 +181,7 @@ describe('editable row identity', () => {
     if (!newCard) throw new Error('Expected the newly added binding card');
     expect(within(newCard).getByLabelText('Options')).not.toHaveValue('{second_draft');
     const project = JSON.parse(screen.getByTestId('project').textContent) as EditableProject;
-    expect(at<ProjectSourceBinding | ProjectSinkBinding>(project[field])).toEqual({
+    expect(getBinding(project)).toEqual({
       ...original,
       binding: 'second_renamed',
     });
