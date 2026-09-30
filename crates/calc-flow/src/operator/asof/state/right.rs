@@ -174,11 +174,7 @@ impl<V: RunValues> RightRun<V> {
             }
         }
         let required = self.times.len() + appended;
-        for capacity in &mut capacities[..2] {
-            while *capacity < required {
-                *capacity = (*capacity * 2).max(4);
-            }
-        }
+        grow_column_capacities(&mut capacities[..2], required);
         if size_of::<V>() != 0 {
             while capacities[2] < required {
                 capacities[2] = (capacities[2] * 2).max(4);
@@ -367,18 +363,13 @@ impl RightBucket {
             .identities
             .projected_capacities(removed_ordered, append);
         let width = self.identities.sequences.element_bytes();
-        let payload_bytes = if payload_rows == 0 {
-            0
-        } else {
-            size_of::<RightRun<Vec<Option<RowRef>>>>() as u64
-                + columns_bytes(payload_capacities, width)
-        };
-        let general_bytes = if general == 0 {
-            0
-        } else {
-            256 + general as u64 * 512
-        };
-        let metadata = payload_bytes + columns_bytes(identity_capacities, width) + general_bytes;
+        let metadata = projected_eviction_metadata(
+            payload_rows,
+            payload_capacities,
+            identity_capacities,
+            width,
+            general,
+        );
         let changed = removed_payloads + removed_ordered + removed_general > 0;
         (rows, metadata, if changed { metadata + 256 } else { 0 })
     }
@@ -786,6 +777,34 @@ impl RightBucket {
         }
         self.identities.compact();
     }
+}
+
+fn grow_column_capacities(capacities: &mut [usize], required: usize) {
+    for capacity in capacities {
+        while *capacity < required {
+            *capacity = (*capacity * 2).max(4);
+        }
+    }
+}
+
+fn projected_eviction_metadata(
+    payload_rows: usize,
+    payload_capacities: [usize; 3],
+    identity_capacities: [usize; 3],
+    width: usize,
+    general: usize,
+) -> u64 {
+    let payload_bytes = if payload_rows == 0 {
+        0
+    } else {
+        size_of::<RightRun<Vec<Option<RowRef>>>>() as u64 + columns_bytes(payload_capacities, width)
+    };
+    let general_bytes = if general == 0 {
+        0
+    } else {
+        256 + general as u64 * 512
+    };
+    payload_bytes + columns_bytes(identity_capacities, width) + general_bytes
 }
 
 fn columns_bytes(capacities: [usize; 3], sequence_bytes: usize) -> u64 {

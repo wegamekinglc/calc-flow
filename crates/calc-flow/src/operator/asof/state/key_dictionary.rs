@@ -412,7 +412,10 @@ mod tests {
         let mut bucket = RightBucket::with_sequence_kind(kind);
         bucket.reserve_payloads(7);
         for time in 0..7 {
-            bucket.insert_admitted((time, sequence.clone()), RowRef::fixture(time as u32));
+            bucket.insert_admitted(
+                (time, sequence.clone()),
+                RowRef::fixture(u32::try_from(time).unwrap()),
+            );
         }
         bucket.reserve_payloads(1);
         bucket.insert_admitted((7, sequence.clone()), RowRef::fixture(7));

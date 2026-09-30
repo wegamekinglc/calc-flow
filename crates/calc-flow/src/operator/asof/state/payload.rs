@@ -629,9 +629,10 @@ mod tests {
                     super::super::capacity_batch_allocation(batch, "asof").unwrap()
                 })
                 .sum::<u64>();
-        let memory: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(bytes as usize));
+        let memory: Arc<dyn MemoryPool> =
+            Arc::new(GreedyMemoryPool::new(usize::try_from(bytes).unwrap()));
         let lease = MemoryConsumer::new("pool-population").register(&memory);
-        lease.try_grow(bytes as usize).unwrap();
+        lease.try_grow(usize::try_from(bytes).unwrap()).unwrap();
         let weak = pool
             .compaction_entries(&removals)
             .map(|(_, batch, _)| Arc::downgrade(batch))
@@ -742,7 +743,7 @@ mod tests {
                     .map(|id| row(id).batch)
                     .collect::<Vec<_>>();
                 let projection = pool.project_admission(&batches, "asof").unwrap();
-                assert_eq!(projection.new_batches, additional as usize);
+                assert_eq!(projection.new_batches, usize::try_from(additional).unwrap());
                 let allocation = allocation_counter::measure(|| {
                     pool.reserve_admission(projection.new_batches);
                     for batch in &batches {

@@ -260,33 +260,88 @@ fn integer_sequences(data_type: &DataType, values: [u64; 3]) -> datafusion::arro
         Int8Array, Int16Array, Int32Array, UInt8Array, UInt16Array, UInt32Array,
     };
     match data_type {
-        DataType::Int8 => Arc::new(Int8Array::from_iter_values(values.map(|value| value as i8))),
-        DataType::Int16 => Arc::new(Int16Array::from_iter_values(
-            values.map(|value| value as i16),
+        DataType::Int8 => Arc::new(Int8Array::from_iter_values(
+            values.map(|value| i8::from_le_bytes([u8::try_from(value).unwrap()])),
         )),
-        DataType::Int32 => Arc::new(Int32Array::from_iter_values(
-            values.map(|value| value as i32),
-        )),
+        DataType::Int16 => {
+            Arc::new(Int16Array::from_iter_values(values.map(|value| {
+                i16::from_le_bytes(u16::try_from(value).unwrap().to_le_bytes())
+            })))
+        }
+        DataType::Int32 => {
+            Arc::new(Int32Array::from_iter_values(values.map(|value| {
+                i32::from_le_bytes(u32::try_from(value).unwrap().to_le_bytes())
+            })))
+        }
         DataType::Int64 => Arc::new(Int64Array::from_iter_values(
-            values.map(|value| value as i64),
+            values.map(|value| i64::from_le_bytes(value.to_le_bytes())),
         )),
         DataType::UInt8 => Arc::new(UInt8Array::from_iter_values(
-            values.map(|value| value as u8),
+            values.map(|value| u8::try_from(value).unwrap()),
         )),
         DataType::UInt16 => Arc::new(UInt16Array::from_iter_values(
-            values.map(|value| value as u16),
+            values.map(|value| u16::try_from(value).unwrap()),
         )),
         DataType::UInt32 => Arc::new(UInt32Array::from_iter_values(
-            values.map(|value| value as u32),
+            values.map(|value| u32::try_from(value).unwrap()),
         )),
         DataType::UInt64 => Arc::new(UInt64Array::from_iter_values(values)),
         _ => unreachable!("integer sequence fixture"),
     }
 }
 
-#[tokio::test]
-async fn integer_v3_checkpoints_preserve_extremes_capacities_and_answers() {
-    let types = [
+fn integer_checkpoint_inputs(
+    data_type: &DataType,
+    sequences: datafusion::arrow::array::ArrayRef,
+) -> (StreamAsofJoinOperator, impl Fn(Vec<i64>) -> Batch) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("key", DataType::Utf8, false),
+        Field::new(
+            "time",
+            DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+            false,
+        ),
+        Field::new("seq", data_type.clone(), false),
+    ]));
+    let side = |prefix: &str| {
+        AsofJoinSide::new(
+            vec!["key".into()],
+            "time".into(),
+            vec!["seq".into()],
+            prefix.into(),
+        )
+        .unwrap()
+    };
+    let spec = StreamAsofJoinSpec::new(
+        side("left_"),
+        side("right_"),
+        Duration::from_micros(10),
+        AsofStateLimits::new(100, 128 * 1024).unwrap(),
+    )
+    .unwrap();
+    let op = StreamAsofJoinOperator::new("asof", schema.clone(), schema.clone(), spec).unwrap();
+    let input = move |times: Vec<i64>| {
+        Batch::table(
+            vec![
+                RecordBatch::try_new(
+                    schema.clone(),
+                    vec![
+                        Arc::new(StringArray::from(vec!["a long shared key 中文"; 3])),
+                        Arc::new(TimestampMicrosecondArray::from(times).with_timezone("UTC")),
+                        sequences.clone(),
+                    ],
+                )
+                .unwrap(),
+            ],
+            BatchMetadata::default(),
+        )
+        .unwrap()
+    };
+    (op, input)
+}
+
+fn integer_sequence_types() -> [DataType; 8] {
+    [
         DataType::Int8,
         DataType::Int16,
         DataType::Int32,
@@ -295,8 +350,12 @@ async fn integer_v3_checkpoints_preserve_extremes_capacities_and_answers() {
         DataType::UInt16,
         DataType::UInt32,
         DataType::UInt64,
-    ];
-    for (flag, data_type) in (1..=8).zip(types) {
+    ]
+}
+
+#[tokio::test]
+async fn integer_v3_checkpoints_preserve_extremes_capacities_and_answers() {
+    for (flag, data_type) in (1..=8).zip(integer_sequence_types()) {
         let kind = state::SequenceKind::from_flag(flag).unwrap();
         let width = kind.width().unwrap();
         let maximum = u64::MAX >> (64 - width * 8);
@@ -309,53 +368,7 @@ async fn integer_v3_checkpoints_preserve_extremes_capacities_and_answers() {
         let sequences = integer_sequences(&data_type, values);
         let expected = datafusion::common::ScalarValue::try_from_array(&sequences, 2).unwrap();
         for identity_only in [false, true] {
-            let schema = Arc::new(Schema::new(vec![
-                Field::new("key", DataType::Utf8, false),
-                Field::new(
-                    "time",
-                    DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
-                    false,
-                ),
-                Field::new("seq", data_type.clone(), false),
-            ]));
-            let side = |prefix: &str| {
-                AsofJoinSide::new(
-                    vec!["key".into()],
-                    "time".into(),
-                    vec!["seq".into()],
-                    prefix.into(),
-                )
-                .unwrap()
-            };
-            let spec = StreamAsofJoinSpec::new(
-                side("left_"),
-                side("right_"),
-                Duration::from_micros(10),
-                AsofStateLimits::new(100, 128 * 1024).unwrap(),
-            )
-            .unwrap();
-            let mut op =
-                StreamAsofJoinOperator::new("asof", schema.clone(), schema.clone(), spec.clone())
-                    .unwrap();
-            let input = |times: Vec<i64>| {
-                Batch::table(
-                    vec![
-                        RecordBatch::try_new(
-                            schema.clone(),
-                            vec![
-                                Arc::new(StringArray::from(vec!["a long shared key 中文"; 3])),
-                                Arc::new(
-                                    TimestampMicrosecondArray::from(times).with_timezone("UTC"),
-                                ),
-                                sequences.clone(),
-                            ],
-                        )
-                        .unwrap(),
-                    ],
-                    BatchMetadata::default(),
-                )
-                .unwrap()
-            };
+            let (mut op, input) = integer_checkpoint_inputs(&data_type, sequences.clone());
             let job =
                 StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
             let cx = StreamOperatorContext::new(&job, "asof", None);
@@ -391,8 +404,13 @@ async fn integer_v3_checkpoints_preserve_extremes_capacities_and_answers() {
             }
             let before = op.status();
             let snapshot = op.capture(Epoch::INITIAL).unwrap();
-            let mut restored =
-                StreamAsofJoinOperator::new("asof", schema.clone(), schema, spec).unwrap();
+            let mut restored = StreamAsofJoinOperator::new(
+                "asof",
+                op.schemas[0].clone(),
+                op.schemas[1].clone(),
+                op.spec.clone(),
+            )
+            .unwrap();
             restored.restore(&snapshot).unwrap();
             assert_eq!(
                 restored.status.state_bytes, before.state_bytes,

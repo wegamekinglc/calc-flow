@@ -88,15 +88,7 @@ impl StreamAsofJoinOperator {
         count: usize,
         context: &StreamOperatorContext<'_>,
     ) -> Result<u64> {
-        let descriptors = count
-            .checked_mul(size_of::<(u32, Arc<super::state::PayloadBatch>, usize)>())
-            .ok_or_else(|| {
-                super::reason(
-                    &self.name,
-                    crate::StreamingFailureReason::AsofCounterOverflow,
-                    "ASOF pool copy workspace overflowed",
-                )
-            })? as u64;
+        let descriptors = pool_descriptor_bytes(count, &self.name)?;
         let mut bytes = checked(
             &self.name,
             self.state.batches.metadata_bytes(),
@@ -205,15 +197,38 @@ impl StreamAsofJoinOperator {
             for ((_, sequence), _) in bucket.as_ref() {
                 cooperate(ordinal, context).await?;
                 ordinal += 1;
-                if let Some((address, retained)) = sequence.as_ref().allocation() {
-                    if owners.insert(address) {
-                        bytes = checked(&self.name, bytes, retained)?;
-                    }
-                }
+                bytes = retain_encoding_buffer(&mut owners, sequence.as_ref(), bytes, &self.name)?;
             }
         }
         Ok(bytes)
     }
+}
+
+fn pool_descriptor_bytes(count: usize, name: &str) -> Result<u64> {
+    count
+        .checked_mul(size_of::<(u32, Arc<super::state::PayloadBatch>, usize)>())
+        .map(|bytes| bytes as u64)
+        .ok_or_else(|| {
+            super::reason(
+                name,
+                crate::StreamingFailureReason::AsofCounterOverflow,
+                "ASOF pool copy workspace overflowed",
+            )
+        })
+}
+
+fn retain_encoding_buffer(
+    owners: &mut std::collections::BTreeSet<usize>,
+    encoding: &Encoding,
+    bytes: u64,
+    name: &str,
+) -> Result<u64> {
+    if let Some((address, retained)) = encoding.allocation() {
+        if owners.insert(address) {
+            return checked(name, bytes, retained);
+        }
+    }
+    Ok(bytes)
 }
 
 async fn populate_pool(
@@ -414,7 +429,9 @@ mod tests {
         operator.state.right.insert(unrelated, untouched);
         operator.state.rebuild_encoding_owners();
         let (_, columns) = copy_extent([(0, &source)].into_iter(), "asof").unwrap();
-        operator.runtime.pool = Arc::new(GreedyMemoryPool::new(columns as usize + 4_096));
+        operator.runtime.pool = Arc::new(GreedyMemoryPool::new(
+            usize::try_from(columns).unwrap() + 4_096,
+        ));
         let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
         let context = StreamOperatorContext::new(&job, "asof", None);
         let prepared = operator
@@ -444,9 +461,10 @@ mod tests {
         ] {
             let source = bucket(kind);
             let (_, bytes) = copy_extent([(0, &source)].into_iter(), "asof").unwrap();
-            let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(bytes as usize));
+            let pool: Arc<dyn MemoryPool> =
+                Arc::new(GreedyMemoryPool::new(usize::try_from(bytes).unwrap()));
             let workspace = MemoryConsumer::new("right-copy").register(&pool);
-            workspace.try_grow(bytes as usize).unwrap();
+            workspace.try_grow(usize::try_from(bytes).unwrap()).unwrap();
             let mut prepared = PreparedRightCopies {
                 originals: vec![(0, source)],
                 replacements: Vec::with_capacity(1),
@@ -472,9 +490,10 @@ mod tests {
         let source = bucket(SequenceKind::Signed(8));
         let weak = Arc::downgrade(&source);
         let (_, bytes) = copy_extent([(0, &source)].into_iter(), "asof").unwrap();
-        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(bytes as usize));
+        let pool: Arc<dyn MemoryPool> =
+            Arc::new(GreedyMemoryPool::new(usize::try_from(bytes).unwrap()));
         let workspace = MemoryConsumer::new("right-copy").register(&pool);
-        workspace.try_grow(bytes as usize).unwrap();
+        workspace.try_grow(usize::try_from(bytes).unwrap()).unwrap();
         let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
         let worker_gate = gate.clone();
         let (started_tx, started_rx) = std::sync::mpsc::channel();
@@ -498,7 +517,7 @@ mod tests {
         drop(operation);
         drop(source);
         assert!(weak.upgrade().is_some());
-        assert_eq!(pool.reserved(), bytes as usize);
+        assert_eq!(pool.reserved(), usize::try_from(bytes).unwrap());
         let (flag, changed) = gate.as_ref();
         *flag.lock().unwrap() = true;
         changed.notify_all();

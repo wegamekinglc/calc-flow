@@ -26,6 +26,10 @@ impl CapacitySnapshot {
     }
 }
 
+fn indexed_inventory_bytes(bytes: u64, length: u64, name: &str) -> Result<u64> {
+    checked(name, bytes, checked(name, length, 256)?)
+}
+
 impl State {
     pub fn admission_staging_bytes(
         &self,
@@ -77,16 +81,33 @@ impl State {
         )?;
         inventory.bytes = inventory.bytes - self.batches.metadata_bytes() + pool.metadata_bytes;
         inventory.bytes = checked(name, inventory.bytes, pool.payload_bytes)?;
-        let mut length = snapshot.index_length.max(80);
-        length = checked(
+        let length = self.project_admission_length(
+            snapshot.index_length,
+            &updates,
+            chunks,
+            right_counts,
             name,
-            length,
-            EncodingOwners::projected_encoded_length(&updates) - owners.encoded_length(),
         )?;
-        length = self.admission_index_length(length, chunks, right_counts, name)?;
         super::validate_key_count((self.batches.len() + pool.new_batches) as u64, name)?;
-        inventory.bytes = checked(name, inventory.bytes, checked(name, length, 256)?)?;
+        inventory.bytes = indexed_inventory_bytes(inventory.bytes, length, name)?;
         Ok((length, inventory, updates))
+    }
+
+    fn project_admission_length(
+        &self,
+        length: u64,
+        updates: &OwnerUpdates,
+        chunks: Option<&[PreparedLeftChunk]>,
+        right_counts: &[(Encoding, usize)],
+        name: &str,
+    ) -> Result<u64> {
+        let owners = self.encoding_owners.as_ref().expect("tracked native state");
+        let length = checked(
+            name,
+            length.max(80),
+            EncodingOwners::projected_encoded_length(updates) - owners.encoded_length(),
+        )?;
+        self.admission_index_length(length, chunks, right_counts, name)
     }
 
     fn admission_column_inventory(
@@ -121,20 +142,30 @@ impl State {
                 length = checked(name, length, chunk.v3_length(self.sequence_kinds[0]))?;
             }
         } else {
-            let mut new_keys = 0;
-            for (key, count) in right_counts {
-                if !self.right.contains_key(key) {
-                    new_keys += 1;
-                    length = checked(name, length, 65)?;
-                }
-                length = checked(
-                    name,
-                    length,
-                    *count as u64 * (21 + self.sequence_kinds[1].reference_bytes()),
-                )?;
-            }
-            super::validate_key_count((self.right.len() + new_keys) as u64, name)?;
+            length = self.right_admission_index_length(length, right_counts, name)?;
         }
+        Ok(length)
+    }
+
+    fn right_admission_index_length(
+        &self,
+        mut length: u64,
+        counts: &[(Encoding, usize)],
+        name: &str,
+    ) -> Result<u64> {
+        let mut new_keys = 0;
+        for (key, count) in counts {
+            if !self.right.contains_key(key) {
+                new_keys += 1;
+                length = checked(name, length, 65)?;
+            }
+            length = checked(
+                name,
+                length,
+                *count as u64 * (21 + self.sequence_kinds[1].reference_bytes()),
+            )?;
+        }
+        super::validate_key_count((self.right.len() + new_keys) as u64, name)?;
         Ok(length)
     }
 

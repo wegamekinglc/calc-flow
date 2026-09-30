@@ -159,17 +159,11 @@ impl OwnerReader {
         }
         let id = u32::from_le_bytes(bytes[4..8].try_into().expect("four bytes")) as usize;
         let row = u32::from_le_bytes(bytes[8..12].try_into().expect("four bytes"));
-        let owner = self
-            .owners
+        self.owners
             .get(id)
             .ok_or_else(|| mismatch("ASOF v3 encoding owner is missing"))?;
-        if !self.used[id] {
-            if id != self.next {
-                return Err(mismatch("ASOF v3 owner references are noncanonical"));
-            }
-            self.next += 1;
-            self.used[id] = true;
-        }
+        self.mark_used(id)?;
+        let owner = &self.owners[id];
         match owner {
             Owner::Shared(values) if row == 0 => Ok(Encoding::Shared(values.clone())),
             Owner::Batch(rows) if (row as usize) < rows.len() => Ok(Encoding::Batch {
@@ -178,6 +172,17 @@ impl OwnerReader {
             }),
             _ => Err(mismatch("ASOF v3 encoding row reference differs")),
         }
+    }
+
+    fn mark_used(&mut self, id: usize) -> Result<()> {
+        if !self.used[id] {
+            if id != self.next {
+                return Err(mismatch("ASOF v3 owner references are noncanonical"));
+            }
+            self.next += 1;
+            self.used[id] = true;
+        }
+        Ok(())
     }
 
     pub fn finish(&self) -> Result<()> {
@@ -237,11 +242,23 @@ fn scan_owner(cursor: &mut Cursor<'_>) -> Result<(u64, u64)> {
     let offsets = cursor.capacity(width)?;
     cursor.take(shape.length)?;
     scan_owner_offsets(cursor, &shape, width, offsets)?;
+    Ok((
+        shape.length as u64,
+        owner_restore_allocation(&shape, offsets, width, cursor.limit)?,
+    ))
+}
+
+fn owner_restore_allocation(
+    shape: &OwnerShape,
+    offsets: usize,
+    width: usize,
+    limit: u64,
+) -> Result<u64> {
     let charge = super::restore_add(
         shape.capacity as u64,
-        super::allocation(offsets, width, cursor.limit)?,
+        super::allocation(offsets, width, limit)?,
     )?;
-    Ok((shape.length as u64, super::restore_add(charge, 512)?))
+    super::restore_add(charge, 512)
 }
 
 fn scan_owner_offsets(

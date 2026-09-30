@@ -440,24 +440,8 @@ impl LeftState {
                     73 + 16 * chunk.data.keys.iter().filter(|key| key.is_some()).count() as u64;
                 continue;
             }
-            let mut owners = prefix
-                .sequence_owners
-                .get(&batch)
-                .cloned()
-                .unwrap_or_default();
-            for (id, key) in chunk
-                .data
-                .keys
-                .iter()
-                .enumerate()
-                .filter_map(|(id, key)| key.as_ref().map(|key| (id, key)))
-            {
-                let removed = prefix.keys.get(&(batch, key.clone())).copied().unwrap_or(0);
-                if removed == chunk.data.key_counts[id] {
-                    removed_index += 16;
-                    EncodingOwners::record_remove(&mut owners, key, 1);
-                }
-            }
+            let (owners, removed_keys) = projected_chunk_owner_removals(prefix, batch, &chunk.data);
+            removed_index += removed_keys;
             let replacement = prepared
                 .compacted
                 .iter()
@@ -815,6 +799,32 @@ impl LeftState {
     pub fn is_ordered(&self) -> bool {
         self.legacy.is_ordered()
     }
+}
+
+fn projected_chunk_owner_removals(
+    prefix: &super::LeftPrefix,
+    batch: BatchKey,
+    data: &ChunkData,
+) -> (super::OwnerRemovals, u64) {
+    let mut owners = prefix
+        .sequence_owners
+        .get(&batch)
+        .cloned()
+        .unwrap_or_default();
+    let mut removed_index = 0;
+    for (id, key) in data
+        .keys
+        .iter()
+        .enumerate()
+        .filter_map(|(id, key)| key.as_ref().map(|key| (id, key)))
+    {
+        let removed = prefix.keys.get(&(batch, key.clone())).copied().unwrap_or(0);
+        if removed == data.key_counts[id] {
+            removed_index += 16;
+            EncodingOwners::record_remove(&mut owners, key, 1);
+        }
+    }
+    (owners, removed_index)
 }
 
 fn projected_chunk_bytes(
@@ -1326,7 +1336,8 @@ mod tests {
             let (original, side, mut rows) = fixture(key, sequence, 0);
             let mut columns = original.record.columns().to_vec();
             columns[1] = Arc::new(
-                TimestampMicrosecondArray::from_iter_values(0..count as i64).with_timezone("UTC"),
+                TimestampMicrosecondArray::from_iter_values(0..i64::try_from(count).unwrap())
+                    .with_timezone("UTC"),
             );
             let owner = Arc::new(PayloadBatch {
                 record: Arc::new(RecordBatch::try_new(original.record.schema(), columns).unwrap()),
@@ -1336,7 +1347,7 @@ mod tests {
                 body_bytes: 0,
             });
             for (ordinal, (identity, row)) in rows.iter_mut().enumerate() {
-                identity.0 = ordinal as i64;
+                identity.0 = i64::try_from(ordinal).unwrap();
                 row.batch = owner.clone();
             }
             let mut retained = None;
@@ -1351,10 +1362,10 @@ mod tests {
                     .data
                     .sequences
                     .allocation_bytes(),
-                width as usize * count
+                usize::try_from(width).unwrap() * count
             );
             assert!(
-                allocation.bytes_current >= 0 && allocation.bytes_current as u64 <= bound,
+                u64::try_from(allocation.bytes_current).unwrap() <= bound,
                 "{data_type:?}: sequence storage exceeds its declared width: {allocation:?}, bound={bound}"
             );
         }

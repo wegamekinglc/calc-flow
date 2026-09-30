@@ -85,26 +85,8 @@ impl StreamAsofJoinOperator {
         validated: admission::ValidatedInput,
         context: &StreamOperatorContext<'_>,
     ) -> Result<()> {
-        let staging_workspace = self
-            .reserve_workspace(self.state.admission_staging_bytes(
-                &admission.rows,
-                &admission.batches,
-                &self.name,
-            )?)
-            .map_err(|error| self.attempt_error(error))?;
-        let (index_len, projected, owners) = self
-            .state
-            .project_capacity_admission(
-                self.capacity_snapshot(),
-                &admission.rows,
-                admission.left_chunks.as_deref(),
-                &admission.right_capacities,
-                &admission.batches,
-                &self.name,
-            )
-            .map_err(|error| self.attempt_error(error))?;
-        self.check_inventory_limits(&projected)
-            .map_err(|error| self.attempt_error(error))?;
+        let staging_workspace = self.reserve_admission_staging(&admission)?;
+        let (index_len, projected, owners) = self.checked_capacity_admission(&admission)?;
         let mut status = self
             .admitted_status(validated.index, admission.rows.len(), &projected)
             .map_err(|error| self.attempt_error(error))?;
@@ -145,6 +127,38 @@ impl StreamAsofJoinOperator {
         );
         drop((admission, index_workspace, staging_workspace));
         Ok(())
+    }
+
+    fn reserve_admission_staging(
+        &mut self,
+        admission: &admission::Admission,
+    ) -> Result<datafusion::execution::memory_pool::MemoryReservation> {
+        self.reserve_workspace(self.state.admission_staging_bytes(
+            &admission.rows,
+            &admission.batches,
+            &self.name,
+        )?)
+        .map_err(|error| self.attempt_error(error))
+    }
+
+    fn checked_capacity_admission(
+        &mut self,
+        admission: &admission::Admission,
+    ) -> Result<(u64, Inventory, state::OwnerUpdates)> {
+        let projected = self
+            .state
+            .project_capacity_admission(
+                self.capacity_snapshot(),
+                &admission.rows,
+                admission.left_chunks.as_deref(),
+                &admission.right_capacities,
+                &admission.batches,
+                &self.name,
+            )
+            .map_err(|error| self.attempt_error(error))?;
+        self.check_inventory_limits(&projected.1)
+            .map_err(|error| self.attempt_error(error))?;
+        Ok(projected)
     }
 
     fn admitted_status(

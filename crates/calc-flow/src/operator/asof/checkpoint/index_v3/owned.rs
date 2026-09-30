@@ -52,6 +52,18 @@ fn captured_input_bytes(state: &State, buffers: u64, name: &str) -> Result<u64> 
     let mut bytes = 0;
     bytes = checked(name, bytes, buffers)?;
     bytes = checked(name, bytes, state.left.capacity_bytes(name)?)?;
+    bytes = captured_descriptor_bytes(state, bytes, name)?;
+    for bucket in state.right.values() {
+        bytes = checked(
+            name,
+            bytes,
+            bucket.metadata_bytes() + (size_of::<RightBucket>() + 2 * size_of::<usize>()) as u64,
+        )?;
+    }
+    Ok(bytes)
+}
+
+fn captured_descriptor_bytes(state: &State, mut bytes: u64, name: &str) -> Result<u64> {
     bytes = checked(
         name,
         bytes,
@@ -62,19 +74,11 @@ fn captured_input_bytes(state: &State, buffers: u64, name: &str) -> Result<u64> 
         bytes,
         (state.right.len() * size_of::<Bucket>()) as u64,
     )?;
-    bytes = checked(
+    checked(
         name,
         bytes,
         (state.batches.len() * size_of::<(u32, u64)>()) as u64,
-    )?;
-    for bucket in state.right.values() {
-        bytes = checked(
-            name,
-            bytes,
-            bucket.metadata_bytes() + (size_of::<RightBucket>() + 2 * size_of::<usize>()) as u64,
-        )?;
-    }
-    Ok(bytes)
+    )
 }
 
 async fn cooperate(count: usize, context: &StreamOperatorContext<'_>) -> Result<()> {
@@ -95,18 +99,9 @@ impl Index {
         }
         let pool = state.batches.backing_buckets();
         let right_capacity = state.right.checkpoint_capacities();
-        let mut left = Vec::with_capacity(state.left.checkpoint_chunks(&state.batches).len());
-        for chunk in state.left.checkpoint_owned_chunks(&state.batches) {
-            left.push(chunk);
-            cooperate(left.len(), context).await?;
-        }
-        let mut right = Vec::with_capacity(state.right.len());
-        let mut count = left.len();
-        for (key, rows) in state.right.owned_buckets() {
-            right.push(Bucket { key, rows });
-            count += 1;
-            cooperate(count, context).await?;
-        }
+        let left = capture_left_chunks(state, context).await?;
+        let right = capture_right_buckets(state, left.len(), context).await?;
+        let mut count = left.len() + right.len();
         let mut batches = Vec::with_capacity(state.batches.len());
         for batch in state.batches.checkpoint_right_handles() {
             batches.push(batch);
@@ -204,6 +199,32 @@ impl Index {
     }
 }
 
+async fn capture_right_buckets(
+    state: &State,
+    mut count: usize,
+    context: &StreamOperatorContext<'_>,
+) -> Result<Vec<Bucket>> {
+    let mut right = Vec::with_capacity(state.right.len());
+    for (key, rows) in state.right.owned_buckets() {
+        right.push(Bucket { key, rows });
+        count += 1;
+        cooperate(count, context).await?;
+    }
+    Ok(right)
+}
+
+async fn capture_left_chunks(
+    state: &State,
+    context: &StreamOperatorContext<'_>,
+) -> Result<Vec<LeftChunk>> {
+    let mut left = Vec::with_capacity(state.left.checkpoint_chunks(&state.batches).len());
+    for chunk in state.left.checkpoint_owned_chunks(&state.batches) {
+        left.push(chunk);
+        cooperate(left.len(), context).await?;
+    }
+    Ok(left)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,7 +283,11 @@ mod tests {
             let rows = (0..3)
                 .map(|row| {
                     (
-                        (row as i64, keys.row(row), sequences.row(row)),
+                        (
+                            i64::try_from(row).unwrap(),
+                            keys.row(row),
+                            sequences.row(row),
+                        ),
                         RowPayload {
                             batch: batch.clone(),
                             row,

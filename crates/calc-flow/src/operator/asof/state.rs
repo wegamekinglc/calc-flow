@@ -1557,7 +1557,7 @@ mod encoding_tests {
             let encoded = encode_columns(&record, &["identity".into()]).unwrap();
             let mut bucket = RightBucket::new();
             for time in 0..2 {
-                bucket.insert((time, encoded.row(time as usize)), None);
+                bucket.insert((time, encoded.row(usize::try_from(time).unwrap())), None);
             }
             state.right.insert(Encoding::from_slice(&[1]), bucket);
             drop(encoded);
@@ -1948,7 +1948,7 @@ mod right_storage_tests {
             state
                 .right
                 .bucket_mut_or_default(key.clone())
-                .insert((time as i64, sequence.clone()), Some(row));
+                .insert((i64::try_from(time).unwrap(), sequence.clone()), Some(row));
         }
         let rows = vec![((4_096, key.clone(), sequence), payload(4_096))];
         let counts = vec![(key, 1)];

@@ -94,23 +94,11 @@ impl StreamAsofJoinOperator {
         let segment = snapshot_segment(snapshot)?;
         let workspace = self.snapshot_restore_workspace(snapshot, segment)?;
         let batches = self.decode_validated_payloads(snapshot, &metadata.metrics)?;
-        let mut state = if let Some(segment) = segment {
-            index_v3::decode(
-                segment,
-                &batches,
-                self.spec.limits().max_state_rows(),
-                self.spec.limits().max_state_bytes(),
-                self.sequence_kinds(),
-            )?
-        } else {
-            State::empty_tracked()
-        };
+        let mut state = self.decode_snapshot_index(segment, &batches)?;
         state.sequence_kinds = self.sequence_kinds();
         self.validate_indexed_rows(&state)?;
         let prepared = segment.cloned().map(PreparedSegment::new);
-        let inventory = state.capacity_inventory(prepared.as_ref(), &self.name)?;
-        validate_gauges(&inventory, state.left.len() as u64, &metadata.metrics)?;
-        self.validate_restored_limits(&inventory, &metadata)?;
+        self.validate_snapshot_inventory(&state, prepared.as_ref(), &metadata)?;
         Ok(DecodedSnapshot {
             state,
             metrics: metadata.metrics,
@@ -120,6 +108,35 @@ impl StreamAsofJoinOperator {
             deferred_len: None,
             _workspace: workspace,
         })
+    }
+
+    fn validate_snapshot_inventory(
+        &self,
+        state: &State,
+        prepared: Option<&PreparedSegment>,
+        metadata: &Metadata<'_>,
+    ) -> Result<()> {
+        let inventory = state.capacity_inventory(prepared, &self.name)?;
+        validate_gauges(&inventory, state.left.len() as u64, &metadata.metrics)?;
+        self.validate_restored_limits(&inventory, metadata)
+    }
+
+    fn decode_snapshot_index(
+        &self,
+        segment: Option<&StateSegment>,
+        batches: &BTreeMap<BatchKey, Arc<PayloadBatch>>,
+    ) -> Result<State> {
+        if let Some(segment) = segment {
+            index_v3::decode(
+                segment,
+                batches,
+                self.spec.limits().max_state_rows(),
+                self.spec.limits().max_state_bytes(),
+                self.sequence_kinds(),
+            )
+        } else {
+            Ok(State::empty_tracked())
+        }
     }
     fn decode_validated_payloads(
         &self,
@@ -923,9 +940,10 @@ mod tests {
             + 256;
         let expected = index_v3::encode_sync(&operator.state, length, usize::MAX).unwrap();
         operator.deferred_index_len = Some(length);
-        operator.runtime.pool = Arc::new(
-            datafusion::execution::memory_pool::GreedyMemoryPool::new(committed as usize),
-        );
+        operator.runtime.pool =
+            Arc::new(datafusion::execution::memory_pool::GreedyMemoryPool::new(
+                usize::try_from(committed).unwrap(),
+            ));
         let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
         let context = StreamOperatorContext::new(&job, "asof", None);
         operator
@@ -1106,7 +1124,7 @@ mod tests {
             StreamAsofJoinOperator::new("asof", schema.clone(), schema, spec).unwrap();
         restored.runtime.pool =
             Arc::new(datafusion::execution::memory_pool::GreedyMemoryPool::new(
-                operator.status.state_bytes as usize + 4_096,
+                usize::try_from(operator.status.state_bytes).unwrap() + 4_096,
             ));
         restored.restore(&actual).unwrap();
         assert_eq!(restored.status.state_bytes, operator.status.state_bytes);
@@ -1267,7 +1285,7 @@ mod tests {
             let batch = retained.unwrap();
             let fee = super::super::state::capacity_batch_allocation(&batch, "asof").unwrap();
             assert!(
-                allocations.bytes_current >= 0 && allocations.bytes_current as u64 <= fee,
+                u64::try_from(allocations.bytes_current).unwrap() <= fee,
                 "{data_type:?} width={width} allocation={allocations:?} fee={fee}"
             );
         }

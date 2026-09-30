@@ -150,9 +150,13 @@ pub(in super::super) fn encoded_length(state: &State, name: &str) -> Result<u64>
         .owners_encoded_length()
         .unwrap_or_else(|| source_owners(state).encoded_length());
     let mut bytes = checked(name, BASE_BYTES, owners)?;
-    bytes = checked(name, bytes, left_lengths(state, name)?)?;
-    bytes = checked(name, bytes, right_lengths(state, name)?)?;
+    bytes = column_lengths(state, bytes, name)?;
     Ok(bytes)
+}
+
+fn column_lengths(state: &State, bytes: u64, name: &str) -> Result<u64> {
+    let bytes = checked(name, bytes, left_lengths(state, name)?)?;
+    checked(name, bytes, right_lengths(state, name)?)
 }
 
 fn left_lengths(state: &State, name: &str) -> Result<u64> {
@@ -505,14 +509,23 @@ pub(super) fn restore_charge(bytes: &[u8], max_rows: u64, max_bytes: u64) -> Res
     let header = read_header(&mut cursor, max_rows)?;
     let mut charge = header_restore_charge(&header, max_bytes)?;
     charge = restore_add(charge, owners::restore_charge(&mut cursor)?)?;
-    let (rows, left_charge) = scan_left_chunks(&mut cursor, &header, max_rows)?;
-    charge = restore_add(charge, left_charge)?;
-    charge = restore_add(
-        charge,
-        scan_right_buckets(&mut cursor, header.buckets, rows, max_rows)?,
-    )?;
+    charge = scan_column_charge(&mut cursor, &header, max_rows, charge)?;
     cursor.finish()?;
     Ok(charge)
+}
+
+fn scan_column_charge(
+    cursor: &mut Cursor<'_>,
+    header: &Header,
+    max_rows: u64,
+    charge: u64,
+) -> Result<u64> {
+    let (rows, left_charge) = scan_left_chunks(cursor, header, max_rows)?;
+    let charge = restore_add(charge, left_charge)?;
+    restore_add(
+        charge,
+        scan_right_buckets(cursor, header.buckets, rows, max_rows)?,
+    )
 }
 
 fn header_restore_charge(header: &Header, max_bytes: u64) -> Result<u64> {
@@ -688,16 +701,24 @@ pub(super) fn decode(
         &header,
         max_rows,
     )?;
-    cursor.finish()?;
-    owners.finish()?;
-    if state.batches.len() != batches.len() {
+    finish_decoded_columns(&cursor, &owners)?;
+    finalize_restored_state(&mut state, &header, batches.len())?;
+    Ok(state)
+}
+
+fn finalize_restored_state(state: &mut State, header: &Header, batch_count: usize) -> Result<()> {
+    if state.batches.len() != batch_count {
         return Err(mismatch("ASOF v3 contains unreferenced payload batches"));
     }
-    validate_left_order(&state)?;
+    validate_left_order(state)?;
     state.rebuild_encoding_owners();
     state.rebuild_right_minima();
-    validate_reconstructed_capacities(&state, &header)?;
-    Ok(state)
+    validate_reconstructed_capacities(state, header)
+}
+
+fn finish_decoded_columns(cursor: &Cursor<'_>, owners: &OwnerReader) -> Result<()> {
+    cursor.finish()?;
+    owners.finish()
 }
 
 fn decode_left_chunks(
@@ -1235,7 +1256,11 @@ mod tests {
             let rows = (0..3)
                 .map(|row| {
                     (
-                        (row as i64, keys.row(row), sequences.row(row)),
+                        (
+                            i64::try_from(row).unwrap(),
+                            keys.row(row),
+                            sequences.row(row),
+                        ),
                         RowPayload {
                             batch: batch.clone(),
                             row,
@@ -1263,19 +1288,7 @@ mod tests {
     #[test]
     fn columnar_prescan_rejects_overflowing_row_counts_without_panicking() {
         for right in [false, true] {
-            let mut bytes = MAGIC.to_vec();
-            for count in [u64::from(!right), u64::from(right), u64::from(!right)] {
-                put(&mut bytes, count);
-            }
-            for capacity in [
-                0,
-                0,
-                u64::from(right),
-                if right { 4 } else { 0 },
-                u64::from(!right),
-            ] {
-                put(&mut bytes, capacity);
-            }
+            let mut bytes = overflow_header_fixture(right);
             put(&mut bytes, 0);
             if right {
                 bytes.extend_from_slice(&[0; 16]);
@@ -1292,6 +1305,23 @@ mod tests {
             }
             assert!(restore_charge(&bytes, u64::MAX, u64::MAX).is_err());
         }
+    }
+
+    fn overflow_header_fixture(right: bool) -> Vec<u8> {
+        let mut bytes = MAGIC.to_vec();
+        for count in [u64::from(!right), u64::from(right), u64::from(!right)] {
+            put(&mut bytes, count);
+        }
+        for capacity in [
+            0,
+            0,
+            u64::from(right),
+            if right { 4 } else { 0 },
+            u64::from(!right),
+        ] {
+            put(&mut bytes, capacity);
+        }
+        bytes
     }
 
     #[test]

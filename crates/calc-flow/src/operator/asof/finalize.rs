@@ -158,28 +158,14 @@ impl StreamAsofJoinOperator {
         ended: bool,
         context: &StreamOperatorContext<'_>,
     ) -> Result<()> {
-        let staging = self.reserve_workspace(self.state.eviction_workspace_bytes(&self.name)?)?;
+        let staging = self.reserve_capacity_eviction_staging()?;
         let (preview, length, inventory, bytes) = self.capacity_eviction_projection()?;
         let columns = self.reserve_workspace(bytes)?;
-        let mut status = self.status.clone();
-        status.evicted_right_rows = checked(
-            &self.name,
-            status.evicted_right_rows,
-            preview.evicted_payloads,
-        )?;
-        status.retained_right_rows = inventory.right_payloads;
-        status.identity_only_rows = inventory.identity_only;
-        status.state_rows = inventory.identities;
-        status.state_bytes = inventory.bytes;
-        status.output_watermark_micros = frontier
-            .and_then(|time| time.checked_sub(1))
-            .map(EventTime::from_micros)
-            .or(status.output_watermark_micros);
+        let status = self.capacity_progress_status(&preview, &inventory, frontier)?;
         let pool = self
             .prepare_pool_compaction(&preview.batches, context)
             .await?;
-        let copies = self.prepare_right_eviction_copies(context).await?;
-        context.check_cancelled()?;
+        let copies = self.checked_right_eviction_copies(context).await?;
         copies.install(&mut self.state.right);
         let evicted = self
             .state
@@ -199,6 +185,42 @@ impl StreamAsofJoinOperator {
         );
         drop((columns, staging));
         Ok(())
+    }
+
+    fn reserve_capacity_eviction_staging(&self) -> Result<MemoryReservation> {
+        self.reserve_workspace(self.state.eviction_workspace_bytes(&self.name)?)
+    }
+
+    async fn checked_right_eviction_copies(
+        &self,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<super::copy::PreparedRightCopies> {
+        let copies = self.prepare_right_eviction_copies(context).await?;
+        context.check_cancelled()?;
+        Ok(copies)
+    }
+
+    fn capacity_progress_status(
+        &self,
+        preview: &state::EvictionPreview,
+        inventory: &state::Inventory,
+        frontier: Option<i64>,
+    ) -> Result<StreamAsofJoinStatus> {
+        let mut status = self.status.clone();
+        status.evicted_right_rows = checked(
+            &self.name,
+            status.evicted_right_rows,
+            preview.evicted_payloads,
+        )?;
+        status.retained_right_rows = inventory.right_payloads;
+        status.identity_only_rows = inventory.identity_only;
+        status.state_rows = inventory.identities;
+        status.state_bytes = inventory.bytes;
+        status.output_watermark_micros = frontier
+            .and_then(|time| time.checked_sub(1))
+            .map(EventTime::from_micros)
+            .or(status.output_watermark_micros);
+        Ok(status)
     }
 
     async fn prepare_output(

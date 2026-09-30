@@ -404,13 +404,13 @@ mod tests {
                     bucket.insert((time, sequence.clone()), None);
                 }
             });
-            let columns = count as u64 * (8 + width as u64);
+            let columns = u64::try_from(count).unwrap() * (8 + width as u64);
             assert!(
-                allocations.bytes_current >= 0 && allocations.bytes_current as u64 <= columns + 128,
+                u64::try_from(allocations.bytes_current).unwrap() <= columns + 128,
                 "{kind:?}: {allocations:?}, expected={columns}"
             );
-            assert!(bucket.metadata_bytes() >= allocations.bytes_current as u64);
-            assert_eq!(bucket.len(), count as usize);
+            assert!(bucket.metadata_bytes() >= u64::try_from(allocations.bytes_current).unwrap());
+            assert_eq!(bucket.len(), usize::try_from(count).unwrap());
             assert!(
                 bucket
                     .iter()
