@@ -145,7 +145,7 @@ async fn write_right_async(
     context: &StreamOperatorContext<'_>,
 ) -> Result<()> {
     let mut ordinal = 0;
-    for (key, bucket) in &state.right {
+    for (key, bucket) in state.right.ordered_iter() {
         write_bucket_header(writer, key, bucket.len())?;
         for ((time, sequence), payload) in bucket {
             write_right(writer, *time, sequence, payload.as_ref())?;
@@ -184,7 +184,7 @@ fn write_state_sync(writer: &mut BoundedWriter<'_>, state: &State) -> Result<()>
     for ((time, key, sequence), payload) in &state.left {
         write_left(writer, *time, key, sequence, payload)?;
     }
-    for (key, bucket) in &state.right {
+    for (key, bucket) in state.right.ordered_iter() {
         write_bucket_header(writer, key, bucket.len())?;
         for ((time, sequence), payload) in bucket {
             write_right(writer, *time, sequence, payload.as_ref())?;

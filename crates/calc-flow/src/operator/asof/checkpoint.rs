@@ -973,6 +973,24 @@ mod tests {
     };
     use std::time::Duration;
 
+    #[test]
+    fn v2_index_orders_right_buckets_independently_of_hash_insertion() {
+        let mut forward = State::default();
+        let mut reverse = State::default();
+        for (state, keys) in [(&mut forward, [1_u8, 2]), (&mut reverse, [2, 1])] {
+            for key in keys {
+                let mut bucket = RightBucket::default();
+                bucket.insert((1, Encoding::from_slice(&[1])), None);
+                state.right.insert(Encoding::from_slice(&[key]), bucket);
+            }
+        }
+        let length = encoded_length(&forward, "asof").unwrap();
+        assert_eq!(length, encoded_length(&reverse, "asof").unwrap());
+        let forward = index_v2::encode_sync(&forward, length, 1_024).unwrap();
+        let reverse = index_v2::encode_sync(&reverse, length, 1_024).unwrap();
+        assert_eq!(forward.bytes(), reverse.bytes());
+    }
+
     fn progress(left: Option<i64>, right: Option<i64>) -> IngressProgressSnapshot {
         IngressProgressSnapshot::new(BTreeMap::from([
             (

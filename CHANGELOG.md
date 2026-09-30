@@ -41,6 +41,12 @@ measurements. Use the current guides for supported behavior.
   length and state charges in one scan;
   checkpoint index bytes and v1/v2 recovery remain unchanged.
 
+- 2026-09-30: Locate stream ASOF right buckets with a hash table while
+  retaining sorted keys for canonical checkpoint writes. Eviction releases
+  oversized bucket and hash-table capacity as right history contracts. The
+  existing v2 index bytes, state charge, and v1/v2 restore rules remain
+  compatible.
+
 - 2026-09-29: Require immutable `Program(engine="sql")` or
   `Program(engine="streaming")` selection at construction and add
   `Program.execute(inputs)` dispatch. SQL returns named Arrow tables;

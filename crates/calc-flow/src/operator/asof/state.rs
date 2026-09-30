@@ -1,4 +1,5 @@
 use crate::{Result, StateSegment};
+use ahash::RandomState;
 use datafusion::arrow::{
     array::{Array, Int64Array, UInt64Array},
     record_batch::RecordBatch,
@@ -6,7 +7,7 @@ use datafusion::arrow::{
 };
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap, hash_map},
     hash::{Hash, Hasher},
     ops::Deref,
     sync::{Arc, OnceLock},
@@ -171,6 +172,9 @@ impl RightBucket {
     pub fn retain(&mut self, mut keep: impl FnMut(&RightOrder, &mut Option<RowPayload>) -> bool) {
         self.rows
             .retain_mut(|(order, payload)| keep(order, payload));
+        if self.rows.capacity() > self.rows.len().saturating_mul(2) {
+            self.rows = std::mem::take(&mut self.rows).into_boxed_slice().into_vec();
+        }
     }
 
     pub fn candidate(&self, time: i64, tolerance: u64) -> Option<&RowPayload> {
@@ -420,10 +424,90 @@ impl<'a> IntoIterator for &'a LeftState {
     }
 }
 
+/// Hash lookup for right admission and candidate probing, with a separate
+/// canonical key order for checkpoint encoding and restore validation.
+#[derive(Clone, Default)]
+pub(super) struct RightState {
+    buckets: HashMap<Encoding, RightBucket, RandomState>,
+    ordered_keys: BTreeSet<Encoding>,
+}
+
+impl RightState {
+    pub fn len(&self) -> usize {
+        self.buckets.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.buckets.is_empty()
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &RightBucket> {
+        self.buckets.values()
+    }
+
+    pub fn contains_key(&self, key: &Encoding) -> bool {
+        self.buckets.contains_key(key)
+    }
+
+    pub fn get(&self, key: &Encoding) -> Option<&RightBucket> {
+        self.buckets.get(key)
+    }
+
+    pub fn ordered_iter(&self) -> impl Iterator<Item = (&Encoding, &RightBucket)> {
+        self.ordered_keys.iter().map(|key| {
+            (
+                key,
+                self.buckets.get(key).expect("indexed ASOF right bucket"),
+            )
+        })
+    }
+
+    pub fn last_key_value(&self) -> Option<(&Encoding, &RightBucket)> {
+        let key = self.ordered_keys.last()?;
+        Some((
+            key,
+            self.buckets.get(key).expect("indexed ASOF right bucket"),
+        ))
+    }
+
+    pub fn bucket_mut_or_default(&mut self, key: Encoding) -> &mut RightBucket {
+        match self.buckets.entry(key) {
+            hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            hash_map::Entry::Vacant(entry) => {
+                self.ordered_keys.insert(entry.key().clone());
+                entry.insert(RightBucket::default())
+            }
+        }
+    }
+
+    pub fn insert(&mut self, key: Encoding, bucket: RightBucket) {
+        self.ordered_keys.insert(key.clone());
+        self.buckets.insert(key, bucket);
+    }
+
+    pub fn retain(&mut self, mut keep: impl FnMut(&Encoding, &mut RightBucket) -> bool) {
+        self.buckets.retain(|key, bucket| keep(key, bucket));
+        self.ordered_keys
+            .retain(|key| self.buckets.contains_key(key));
+        if self.buckets.capacity() > self.buckets.len().saturating_mul(2).max(4) {
+            self.buckets.shrink_to_fit();
+        }
+    }
+}
+
+impl<'a> IntoIterator for &'a RightState {
+    type Item = (&'a Encoding, &'a RightBucket);
+    type IntoIter = hash_map::Iter<'a, Encoding, RightBucket>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.buckets.iter()
+    }
+}
+
 #[derive(Clone, Default)]
 pub(super) struct State {
     pub left: LeftState,
-    pub right: BTreeMap<Encoding, RightBucket>,
+    pub right: RightState,
     pub batches: BTreeMap<BatchKey, (Arc<PayloadBatch>, usize)>,
     pub right_payload_min: Option<i64>,
     pub right_identity_min: Option<i64>,
@@ -1275,5 +1359,58 @@ mod left_storage_tests {
             vec![3, 4]
         );
         assert_eq!(general_state.batches[&(0, 0)].1, 2);
+    }
+}
+
+#[cfg(test)]
+mod right_storage_tests {
+    use super::{Encoding, RightBucket, RightState};
+
+    #[test]
+    fn hashed_right_buckets_keep_canonical_order_after_retain_and_reinsert() {
+        let mut right = RightState::default();
+        for key in [2_u8, 1] {
+            right
+                .bucket_mut_or_default(Encoding::from_slice(&[key]))
+                .insert((key.into(), Encoding::from_slice(&[1])), None);
+        }
+        assert_eq!(
+            right
+                .ordered_iter()
+                .map(|(key, _)| key.as_slice()[0])
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        right.retain(|key, _| key.as_slice() != [1]);
+        assert_eq!(right.len(), 1);
+        right.insert(Encoding::from_slice(&[1]), RightBucket::default());
+        assert_eq!(
+            right
+                .ordered_iter()
+                .map(|(key, _)| key.as_slice()[0])
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+
+    #[test]
+    fn right_eviction_releases_empty_hash_and_bucket_capacity() {
+        let mut right = RightState::default();
+        for key in 0_u8..64 {
+            let mut bucket = RightBucket::default();
+            bucket.insert((i64::from(key), Encoding::from_slice(&[1])), None);
+            right.insert(Encoding::from_slice(&[key]), bucket);
+        }
+        right.retain(|key, _| key.as_slice() == [63]);
+        assert_eq!(right.len(), 1);
+        assert!(right.buckets.capacity() <= 4 * right.len());
+
+        let mut bucket = RightBucket::default();
+        for time in 0..64 {
+            bucket.insert((time, Encoding::from_slice(&[1])), None);
+        }
+        bucket.retain(|(time, _), _| *time == 63);
+        assert_eq!(bucket.len(), 1);
+        assert!(bucket.rows.capacity() <= 2 * bucket.len());
     }
 }

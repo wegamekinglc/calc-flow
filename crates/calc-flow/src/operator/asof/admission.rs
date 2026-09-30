@@ -334,8 +334,7 @@ impl Admission {
                 );
                 state
                     .right
-                    .entry(identity.1)
-                    .or_default()
+                    .bucket_mut_or_default(identity.1)
                     .insert((identity.0, identity.2), Some(payload));
             }
             status.right.accepted_rows = self.accepted;
@@ -529,8 +528,7 @@ mod duplicate_tests {
         let mut state = state::State::default();
         state
             .right
-            .entry(key.clone())
-            .or_default()
+            .bucket_mut_or_default(key.clone())
             .insert((1, sequence.clone()), None);
         let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
         let context = StreamOperatorContext::new(&job, "asof", None);

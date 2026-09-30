@@ -23,6 +23,8 @@
 这一步保持现有行式身份和 v2 checkpoint，并非 P2.3 的 Arrow chunk 实现；
 admission 的已校验身份现在直接移入保留行，v2 index 长度与状态费用在同一
 遍历中预检；
+right 桶用哈希定位并保留排序 key 集合供 checkpoint 写出，驱逐后回收过大的
+桶和哈希表容量；仍未引入 P2.1 的 `u32` key 字典或 v3 checkpoint；
 阶段结果及最终配对数据将在 PR 描述中记录。
 
 ## 1. 问题与测量
