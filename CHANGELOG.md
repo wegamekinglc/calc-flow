@@ -37,7 +37,8 @@ measurements. Use the current guides for supported behavior.
   Overlapping batches retain the tree fallback. Finalized prefixes release
   their batch references and compact vector capacity when it exceeds the
   remaining identities' charged headroom. Admission moves validated identities
-  into payload references without cloning each row;
+  into payload references without cloning each row and projects checkpoint index
+  length and state charges in one scan;
   checkpoint index bytes and v1/v2 recovery remain unchanged.
 
 - 2026-09-29: Require immutable `Program(engine="sql")` or

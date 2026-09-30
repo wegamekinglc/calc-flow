@@ -15,7 +15,7 @@ use datafusion::execution::memory_pool::MemoryReservation;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     mem::size_of,
     sync::{Arc, OnceLock},
 };
@@ -62,32 +62,6 @@ struct Metadata<'a> {
 }
 
 impl StreamAsofJoinOperator {
-    /// Project the canonical index length from the admitted delta. Right-side
-    /// bucket headers are charged only when the key is new to committed state.
-    pub(super) fn index_length_after_admission(
-        &self,
-        side: usize,
-        rows: &[(super::state::LeftOrder, RowPayload)],
-    ) -> Result<u64> {
-        let previous = self
-            .deferred_index_len
-            .or_else(|| self.prepared.as_ref().map(|segment| segment.len() as u64));
-        let mut length = previous.unwrap_or(24);
-        let mut new_buckets = BTreeSet::new();
-        for ((_, key, sequence), _) in rows {
-            let row_length = if side == 0 {
-                41 + key.len() as u64 + sequence.len() as u64
-            } else {
-                if !self.state.right.contains_key(key) && new_buckets.insert(key) {
-                    length = super::checked(&self.name, length, 16 + key.len() as u64)?;
-                }
-                34 + sequence.len() as u64
-            };
-            length = super::checked(&self.name, length, row_length)?;
-        }
-        Ok(length)
-    }
-
     /// Admission and uncaptured output prefixes reserve and charge the
     /// canonical index length without serializing it. Materialize on capture.
     pub(super) fn ensure_prepared_sync(&mut self) -> Result<()> {

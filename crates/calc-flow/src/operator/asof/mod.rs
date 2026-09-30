@@ -262,9 +262,9 @@ impl StreamOperator for StreamAsofJoinOperator {
             // an identical state.
             return Ok(());
         }
-        let index_len = self
-            .index_length_after_admission(validated.index, &admission.rows)
-            .map_err(|error| self.attempt_error(error))?;
+        let previous_index_len = self
+            .deferred_index_len
+            .or_else(|| self.prepared.as_ref().map(|segment| segment.len() as u64));
         let previous_index_bytes = self
             .deferred_index_len
             .or_else(|| {
@@ -273,9 +273,9 @@ impl StreamOperator for StreamAsofJoinOperator {
                     .map(|segment| segment.capacity() as u64)
             })
             .map_or(0, |capacity| capacity + 64);
-        let projected = self
+        let (index_len, projected) = self
             .state
-            .inventory_after_admission(
+            .project_admission(
                 Inventory {
                     identities: self.status.state_rows,
                     right_payloads: self.status.retained_right_rows,
@@ -283,7 +283,7 @@ impl StreamOperator for StreamAsofJoinOperator {
                     bytes: self.status.state_bytes,
                 },
                 previous_index_bytes,
-                index_len,
+                previous_index_len.unwrap_or(24),
                 validated.index,
                 &admission.rows,
                 &self.name,

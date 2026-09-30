@@ -452,36 +452,33 @@ impl State {
         }
     }
 
-    /// Account for an admission before mutating committed state. All inserted
-    /// identities and payload batches are unique after admission validation.
-    pub fn inventory_after_admission(
+    /// Project the v2 index length and committed state charge in one scan.
+    /// Identities and payload batch keys are unique after validation.
+    pub fn project_admission(
         &self,
         mut current: Inventory,
         previous_index_bytes: u64,
-        next_index_len: u64,
+        mut index_len: u64,
         side: usize,
         rows: &[(LeftOrder, RowPayload)],
         name: &str,
-    ) -> Result<Inventory> {
+    ) -> Result<(u64, Inventory)> {
         current.bytes = current
             .bytes
             .checked_sub(previous_index_bytes)
             .expect("committed index charge is included in state bytes");
-        current.bytes = super::checked(
-            name,
-            current.bytes,
-            super::checked(name, next_index_len, 64)?,
-        )?;
         let mut seen = AdmissionSeen::default();
         for row in rows {
-            self.charge_admission_row(&mut current, side, row, &mut seen, name)?;
+            self.project_admission_row(&mut current, &mut index_len, side, row, &mut seen, name)?;
         }
-        Ok(current)
+        current.bytes = super::checked(name, current.bytes, super::checked(name, index_len, 64)?)?;
+        Ok((index_len, current))
     }
 
-    fn charge_admission_row(
+    fn project_admission_row(
         &self,
         inventory: &mut Inventory,
+        index_len: &mut u64,
         side: usize,
         row: &(LeftOrder, RowPayload),
         seen: &mut AdmissionSeen,
@@ -490,29 +487,24 @@ impl State {
         let ((_, key, sequence), payload) = row;
         if side == 0 {
             inventory.charge_left(key, sequence, payload, name)?;
+            *index_len = super::checked(
+                name,
+                *index_len,
+                41 + key.len() as u64 + sequence.len() as u64,
+            )?;
         } else {
-            self.charge_right_admission(inventory, key, sequence, payload, seen, name)?;
+            if !self.right.contains_key(key) && seen.buckets.insert(key.clone()) {
+                inventory.charge_allocation(key, name)?;
+                *index_len = super::checked(name, *index_len, 16 + key.len() as u64)?;
+            }
+            inventory.charge_right(sequence, Some(payload), name)?;
+            *index_len = super::checked(name, *index_len, 34 + sequence.len() as u64)?;
         }
         if seen.batches.insert(payload.batch.key) {
             inventory.bytes =
                 super::checked(name, inventory.bytes, batch_allocation(&payload.batch))?;
         }
         Ok(())
-    }
-
-    fn charge_right_admission(
-        &self,
-        inventory: &mut Inventory,
-        key: &Encoding,
-        sequence: &Encoding,
-        payload: &RowPayload,
-        seen: &mut AdmissionSeen,
-        name: &str,
-    ) -> Result<()> {
-        if !self.right.contains_key(key) && seen.buckets.insert(key.clone()) {
-            inventory.charge_allocation(key, name)?;
-        }
-        inventory.charge_right(sequence, Some(payload), name)
     }
 
     pub fn attach(&mut self, row: &RowPayload) {
