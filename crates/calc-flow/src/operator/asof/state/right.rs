@@ -268,9 +268,11 @@ impl RightBucket {
         }
         match self.payloads.as_mut() {
             Some(run) => {
-                run.times.reserve_exact(additional);
-                run.sequences.reserve_exact(additional);
-                run.values.reserve_exact(additional);
+                // Keep Vec's amortized growth for repeated small admissions.
+                // A fresh bucket still allocates only the accepted batch size.
+                run.times.reserve(additional);
+                run.sequences.reserve(additional);
+                run.values.reserve(additional);
             }
             None => self.payloads = Some(Box::new(RightRun::with_capacity(additional))),
         }

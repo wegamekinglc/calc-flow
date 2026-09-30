@@ -1282,6 +1282,36 @@ mod right_bucket_tests {
     use std::sync::{Arc, OnceLock};
 
     #[test]
+    fn small_right_admissions_amortize_column_growth() {
+        let batch = Arc::new(PayloadBatch {
+            key: (1, 0),
+            record: Arc::new(RecordBatch::new_empty(Arc::new(Schema::empty()))),
+            encoded: OnceLock::new(),
+            encoded_charge_bytes: 0,
+            body_bytes: 0,
+        });
+        let mut bucket = RightBucket::new();
+        let allocations = allocation_counter::measure(|| {
+            for time in 0..1_000 {
+                bucket.reserve_payloads(1);
+                bucket.insert_admitted(
+                    (time, Encoding::from_slice(&[1])),
+                    RowPayload {
+                        batch: Arc::clone(&batch),
+                        row: 0,
+                    },
+                );
+            }
+        });
+        assert!(
+            allocations.count_total <= 40,
+            "growth was not amortized: {allocations:?}"
+        );
+        assert!(bucket.capacity() <= 2 * bucket.len());
+        assert_eq!(bucket.candidate(999, 0).unwrap().row, 0);
+    }
+
+    #[test]
     fn admitted_right_run_reserves_each_column_once() {
         let batch = Arc::new(PayloadBatch {
             key: (1, 0),
