@@ -1,4 +1,5 @@
 import type { ArrowFieldConfig } from '../types';
+import { useEditableRows } from './useEditableRows';
 
 interface SchemaEditorProps {
   fields: ArrowFieldConfig[];
@@ -7,14 +8,12 @@ interface SchemaEditorProps {
 }
 
 export function SchemaEditor({ fields, arrowTypes, onChange }: SchemaEditorProps) {
-  const update = (index: number, change: Partial<ArrowFieldConfig>) => {
-    onChange(fields.map((field, item) => (item === index ? { ...field, ...change } : field)));
-  };
+  const { rows, update, append, remove } = useEditableRows(fields, onChange);
 
   return (
     <div className="schema-editor">
-      {fields.map((field, index) => (
-        <div className="schema-row" key={`${field.name}-${index}`}>
+      {rows.map(({ key, value: field }, index) => (
+        <div className="schema-row" key={key}>
           <input
             aria-label="Field name"
             value={field.name}
@@ -41,7 +40,7 @@ export function SchemaEditor({ fields, arrowTypes, onChange }: SchemaEditorProps
             className="icon-button"
             type="button"
             aria-label={`Remove ${field.name}`}
-            onClick={() => onChange(fields.filter((_, item) => item !== index))}
+            onClick={() => remove(index)}
           >
             ×
           </button>
@@ -51,10 +50,7 @@ export function SchemaEditor({ fields, arrowTypes, onChange }: SchemaEditorProps
         className="text-button"
         type="button"
         onClick={() =>
-          onChange([
-            ...fields,
-            { name: `field_${fields.length + 1}`, data_type: 'float64', nullable: true },
-          ])
+          append({ name: `field_${fields.length + 1}`, data_type: 'float64', nullable: true })
         }
       >
         + field
