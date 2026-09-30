@@ -319,10 +319,10 @@ impl Admission {
         status: &mut StreamAsofJoinStatus,
     ) {
         if ingress == "left" {
-            for (identity, payload) in self.rows.drain(..) {
-                state.attach(&payload);
-                state.left.insert(identity, payload);
+            for (_, payload) in &self.rows {
+                state.attach(payload);
             }
+            state.left.append_admission(std::mem::take(&mut self.rows));
             status.left.accepted_rows = self.accepted;
         } else {
             for (identity, payload) in self.rows.drain(..) {

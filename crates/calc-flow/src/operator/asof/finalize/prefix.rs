@@ -80,27 +80,7 @@ impl StreamAsofJoinOperator {
         status.state_bytes = inventory.bytes;
         emit_output(output.batch, context, collector).await?;
         // Nothing after sink acceptance can fail or yield before installation.
-        if keys.len() == 1 {
-            let payload = self
-                .state
-                .left
-                .remove(&keys[0])
-                .expect("pending ASOF identity");
-            self.state.detach(&payload);
-        } else {
-            let split_key = keys.last().expect("nonempty finalized ASOF prefix");
-            let remaining = self.state.left.split_off(split_key);
-            let removed = std::mem::replace(&mut self.state.left, remaining);
-            let last = self
-                .state
-                .left
-                .remove(split_key)
-                .expect("last ASOF prefix row");
-            self.state.detach(&last);
-            for (_, payload) in removed {
-                self.state.detach(&payload);
-            }
-        }
+        self.state.commit_left_prefix(keys.len());
         // Right payloads remain until finish_progress sweeps them once.
         self.swept = None;
         self.status = status;

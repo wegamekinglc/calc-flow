@@ -32,6 +32,12 @@ measurements. Use the current guides for supported behavior.
   the existing binary search. Matching, identity-only rows, tolerance bounds,
   output order, and checkpoint state are unchanged.
 
+- 2026-09-30: Store globally ordered pending ASOF left rows contiguously and
+  append later non-overlapping batches without per-row tree insertion.
+  Overlapping batches retain the tree fallback. Finalized prefixes release
+  their batch references and vector capacity before the next state charge;
+  checkpoint index bytes and v1/v2 recovery remain unchanged.
+
 - 2026-09-29: Require immutable `Program(engine="sql")` or
   `Program(engine="streaming")` selection at construction and add
   `Program.execute(inputs)` dispatch. SQL returns named Arrow tables;

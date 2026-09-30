@@ -275,9 +275,151 @@ pub(super) struct RowPayload {
     pub row: usize,
 }
 
+/// Keep the common ordered left stream contiguous. An overlapping batch
+/// promotes to the tree so late and out-of-order identities retain their
+/// existing ordering and duplicate semantics.
+#[derive(Clone, Default)]
+pub(super) struct LeftState {
+    ordered: Vec<(LeftOrder, RowPayload)>,
+    general: BTreeMap<LeftOrder, RowPayload>,
+}
+
+impl LeftState {
+    pub fn len(&self) -> usize {
+        self.ordered.len() + self.general.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ordered.is_empty() && self.general.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&LeftOrder, &RowPayload)> {
+        self.ordered
+            .iter()
+            .map(|(key, payload)| (key, payload))
+            .chain(self.general.iter())
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &LeftOrder> {
+        self.iter().map(|(key, _)| key)
+    }
+
+    pub fn first_key_value(&self) -> Option<(&LeftOrder, &RowPayload)> {
+        self.ordered
+            .first()
+            .map(|(key, payload)| (key, payload))
+            .or_else(|| self.general.first_key_value())
+    }
+
+    pub fn last_key_value(&self) -> Option<(&LeftOrder, &RowPayload)> {
+        self.general
+            .last_key_value()
+            .or_else(|| self.ordered.last().map(|(key, payload)| (key, payload)))
+    }
+
+    pub fn contains_key(&self, key: &LeftOrder) -> bool {
+        if self.general.is_empty() {
+            self.ordered
+                .binary_search_by(|(current, _)| current.cmp(key))
+                .is_ok()
+        } else {
+            self.general.contains_key(key)
+        }
+    }
+
+    pub fn insert(&mut self, key: LeftOrder, payload: RowPayload) {
+        if self.general.is_empty() && self.ordered.last().is_none_or(|(last, _)| last < &key) {
+            self.ordered.push((key, payload));
+        } else {
+            self.promote();
+            self.general.insert(key, payload);
+        }
+    }
+
+    pub fn append_admission(&mut self, mut rows: Vec<(LeftOrder, RowPayload)>) {
+        if rows.is_empty() {
+            return;
+        }
+        if !rows.windows(2).all(|pair| pair[0].0 < pair[1].0) {
+            rows.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        }
+        if self.general.is_empty()
+            && self
+                .ordered
+                .last()
+                .is_none_or(|(last, _)| last < &rows[0].0)
+        {
+            self.ordered.append(&mut rows);
+        } else {
+            self.promote();
+            self.general.extend(rows);
+        }
+    }
+
+    pub fn drain_prefix(
+        &mut self,
+        count: usize,
+        batches: &mut BTreeMap<BatchKey, (Arc<PayloadBatch>, usize)>,
+    ) {
+        if self.general.is_empty() {
+            for (_, payload) in self.ordered.drain(..count) {
+                detach_batch(batches, &payload);
+            }
+            // Release capacity along with finalized rows: the committed
+            // state charge only covers identities that remain reachable.
+            self.ordered = std::mem::take(&mut self.ordered)
+                .into_boxed_slice()
+                .into_vec();
+        } else {
+            let split_key = self.general.keys().nth(count).cloned();
+            let removed = if let Some(split_key) = split_key {
+                let remaining = self.general.split_off(&split_key);
+                std::mem::replace(&mut self.general, remaining)
+            } else {
+                std::mem::take(&mut self.general)
+            };
+            for payload in removed.into_values() {
+                detach_batch(batches, &payload);
+            }
+        }
+    }
+
+    fn promote(&mut self) {
+        if !self.ordered.is_empty() {
+            self.general.extend(std::mem::take(&mut self.ordered));
+        }
+    }
+
+    #[cfg(test)]
+    fn is_ordered(&self) -> bool {
+        self.general.is_empty()
+    }
+}
+
+impl<'a> IntoIterator for &'a LeftState {
+    type Item = (&'a LeftOrder, &'a RowPayload);
+    type IntoIter = std::iter::Chain<
+        std::iter::Map<
+            std::slice::Iter<'a, (LeftOrder, RowPayload)>,
+            fn(&(LeftOrder, RowPayload)) -> (&LeftOrder, &RowPayload),
+        >,
+        std::collections::btree_map::Iter<'a, LeftOrder, RowPayload>,
+    >;
+
+    fn into_iter(self) -> Self::IntoIter {
+        fn as_refs(row: &(LeftOrder, RowPayload)) -> (&LeftOrder, &RowPayload) {
+            (&row.0, &row.1)
+        }
+        self.ordered
+            .iter()
+            .map(as_refs as fn(&(LeftOrder, RowPayload)) -> (&LeftOrder, &RowPayload))
+            .chain(self.general.iter())
+    }
+}
+
 #[derive(Clone, Default)]
 pub(super) struct State {
-    pub left: BTreeMap<LeftOrder, RowPayload>,
+    pub left: LeftState,
     pub right: BTreeMap<Encoding, RightBucket>,
     pub batches: BTreeMap<BatchKey, (Arc<PayloadBatch>, usize)>,
     pub right_payload_min: Option<i64>,
@@ -377,8 +519,8 @@ impl State {
             .1 += 1;
     }
 
-    pub fn detach(&mut self, row: &RowPayload) {
-        detach_batch(&mut self.batches, row);
+    pub fn commit_left_prefix(&mut self, count: usize) {
+        self.left.drain_prefix(count, &mut self.batches);
     }
 
     pub fn contains_identity(&self, index: usize, identity: &LeftOrder) -> bool {
@@ -1059,5 +1201,82 @@ mod right_bucket_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod left_storage_tests {
+    use super::{Encoding, LeftOrder, LeftState, PayloadBatch, RowPayload, State};
+    use crate::StateSegment;
+    use datafusion::arrow::{datatypes::Schema, record_batch::RecordBatch};
+    use std::sync::{Arc, OnceLock};
+
+    #[test]
+    fn ordered_left_batches_append_and_overlapping_rows_promote_without_reordering() {
+        let batch = Arc::new(PayloadBatch {
+            key: (0, 0),
+            record: Arc::new(RecordBatch::new_empty(Arc::new(Schema::empty()))),
+            encoded: OnceLock::from(StateSegment::new(Vec::new())),
+            encoded_charge_bytes: 0,
+            body_bytes: 0,
+        });
+        let row = |time: i64| -> (LeftOrder, RowPayload) {
+            (
+                (time, Encoding::from_slice(&[1]), Encoding::from_slice(&[1])),
+                RowPayload {
+                    batch: Arc::clone(&batch),
+                    row: usize::try_from(time).expect("nonnegative test row"),
+                },
+            )
+        };
+        let mut left = LeftState::default();
+        left.append_admission(vec![row(2), row(1)]);
+        left.append_admission(vec![row(4)]);
+        assert!(left.is_ordered());
+        assert_eq!(
+            left.keys().map(|key| key.0).collect::<Vec<_>>(),
+            vec![1, 2, 4]
+        );
+        let mut ordered_state = State {
+            left: left.clone(),
+            ..State::default()
+        };
+        for (_, payload) in ordered_state.left.clone().iter() {
+            ordered_state.attach(payload);
+        }
+        ordered_state.commit_left_prefix(2);
+        assert_eq!(
+            ordered_state
+                .left
+                .keys()
+                .map(|key| key.0)
+                .collect::<Vec<_>>(),
+            vec![4]
+        );
+        assert_eq!(ordered_state.left.ordered.capacity(), 1);
+        assert_eq!(ordered_state.batches[&(0, 0)].1, 1);
+        left.append_admission(vec![row(3)]);
+        assert!(!left.is_ordered());
+        assert_eq!(
+            left.keys().map(|key| key.0).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+        let mut general_state = State {
+            left,
+            ..State::default()
+        };
+        for (_, payload) in general_state.left.clone().iter() {
+            general_state.attach(payload);
+        }
+        general_state.commit_left_prefix(2);
+        assert_eq!(
+            general_state
+                .left
+                .keys()
+                .map(|key| key.0)
+                .collect::<Vec<_>>(),
+            vec![3, 4]
+        );
+        assert_eq!(general_state.batches[&(0, 0)].1, 2);
     }
 }
