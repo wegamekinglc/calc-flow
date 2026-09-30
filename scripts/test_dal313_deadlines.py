@@ -78,7 +78,222 @@ def process_is_running(pid: int) -> bool:
     return path.read_text().split(")", 1)[1].split()[0] != "Z"
 
 
+def child_io_failure_prefix(fault: str) -> str:
+    return f"""
+import dal313_child_observer as observer
+from pathlib import Path
+fault = {fault!r}
+real_open = Path.open
+class FailingEvidence:
+    def __init__(self, stream, kind):
+        self.stream, self.kind = stream, kind
+    def __enter__(self):
+        return self
+    def __exit__(self, *args):
+        self.stream.close()
+    def write(self, data):
+        if self.kind == 'stage':
+            raise OSError('synthetic stage write failure')
+        return self.stream.write(data)
+    def flush(self):
+        self.stream.flush()
+        raise OSError('synthetic stack flush failure')
+    def close(self):
+        self.stream.close()
+        raise OSError('synthetic stack close failure')
+def open_evidence(path, *args, **kwargs):
+    stream = real_open(path, *args, **kwargs)
+    if path.name == 'example-child-stages.log' and fault in ('stage', 'both'):
+        return FailingEvidence(stream, 'stage')
+    return stream
+Path.open = open_evidence
+if fault in ('cleanup', 'both'):
+    observer._STREAM = FailingEvidence(observer._STREAM, 'stack')
+"""
+
+
 class DeadlineDiagnosticTests(unittest.TestCase):
+    def test_child_unavailable_evidence_preserves_original_entry_and_exit(self) -> None:
+        for code in (0, 7):
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                blocked = root / "blocked"
+                blocked.write_text("not a directory", encoding="utf-8")
+                output = blocked / "evidence"
+                observer = dal313_pytest_observer.Observer(
+                    "synthetic-child-guard", output
+                )
+                command = [
+                    sys.executable,
+                    "-O",
+                    "-c",
+                    f"print('original-entry', flush=True); raise SystemExit({code})",
+                    "examples/01_datafusion_pipeline.py",
+                    "quantity",
+                ]
+                with (
+                    mock.patch.dict(
+                        os.environ,
+                        PYTHONPATH=str(dal313_deadlines.TOOLS),
+                        DAL313_CHILD_OUTPUT=str(output),
+                    ),
+                    dal313_pytest_observer.pytest.MonkeyPatch.context() as patch,
+                ):
+                    observer.install_child(patch)
+                    result = subprocess.run(
+                        command, timeout=60, capture_output=True, text=True, check=False
+                    )
+                self.assertEqual(result.returncode, code, result.stderr)
+                self.assertEqual(result.stdout, "original-entry\n")
+                self.assertIn("DAL313 child observation unhealthy:", result.stderr)
+                self.assertIn('"healthy": false', result.stderr)
+                self.assertIn('"operation": "child-stack.open"', result.stderr)
+                self.assertNotIn("Traceback (most recent call last)", result.stderr)
+                self.assertTrue(observer.health_errors)
+
+    def test_child_stage_and_cleanup_io_failures_preserve_original_entry_and_exit(
+        self,
+    ) -> None:
+        for fault in ("stage", "cleanup"):
+            for code in (0, 7):
+                with (
+                    self.subTest(fault=fault, code=code),
+                    tempfile.TemporaryDirectory() as directory,
+                ):
+                    root = Path(directory)
+                    example = root / "synthetic.py"
+                    example.write_text(
+                        "print('original-entry', flush=True)\n"
+                        + ("answer = 17\n" if code == 0 else "raise SystemExit(7)\n"),
+                        encoding="utf-8",
+                    )
+                    observer = dal313_pytest_observer.Observer(
+                        "synthetic-child-guard", root
+                    )
+                    command = [
+                        sys.executable,
+                        "-O",
+                        "-c",
+                        child_io_failure_prefix(fault)
+                        + "\nimport runpy; result = runpy.run_path("
+                        + repr(str(example))
+                        + ")\nif result['answer'] != 17: "
+                        "raise AssertionError('original result changed')\n",
+                        "examples/01_datafusion_pipeline.py",
+                        "quantity",
+                    ]
+                    with (
+                        mock.patch.dict(
+                            os.environ,
+                            PYTHONPATH=str(dal313_deadlines.TOOLS),
+                            DAL313_CHILD_OUTPUT=str(root),
+                        ),
+                        dal313_pytest_observer.pytest.MonkeyPatch.context() as patch,
+                    ):
+                        observer.install_child(patch)
+                        result = subprocess.run(
+                            command,
+                            timeout=60,
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                        )
+                    self.assertEqual(result.returncode, code, result.stderr)
+                    self.assertEqual(result.stdout, "original-entry\n")
+                    self.assertNotIn(
+                        "Exception ignored in atexit callback", result.stderr
+                    )
+                    self.assertNotIn("Traceback (most recent call last)", result.stderr)
+                    health = json.loads(
+                        (root / "example-child-health.json").read_text()
+                    )
+                    self.assertFalse(health["healthy"])
+                    operations = {item["operation"] for item in health["errors"]}
+                    if fault == "stage":
+                        self.assertIn("child-stage.example_run_path_enter", operations)
+                        self.assertIn(
+                            "child-stage.example_run_path_return"
+                            if code == 0
+                            else "child-stage.example_run_path_error=SystemExit",
+                            operations,
+                        )
+                    else:
+                        self.assertIn("child-stack.flush", operations)
+                        self.assertIn("child-stack.close", operations)
+
+    def test_child_io_failures_preserve_original_exception_and_timeout_objects(
+        self,
+    ) -> None:
+        for kind in ("error", "timeout"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                example = root / "synthetic.py"
+                example.write_text(
+                    "from __main__ import failure\n"
+                    "print('original-entry', flush=True)\nraise failure\n",
+                    encoding="utf-8",
+                )
+                original = """
+import runpy, subprocess
+failure = (RuntimeError('original-cause') if KIND == 'error' else
+    subprocess.TimeoutExpired('original-command', 60,
+        output=b'partial', stderr=b'cause'))
+try:
+    runpy.run_path(EXAMPLE)
+except (RuntimeError, subprocess.TimeoutExpired) as error:
+    if error is not failure: raise AssertionError('original object replaced')
+    if isinstance(error, subprocess.TimeoutExpired):
+        if (error.cmd, error.timeout, error.output, error.stderr) != (
+                'original-command', 60, b'partial', b'cause'):
+            raise AssertionError('original timeout fields changed')
+    print('retained-' + type(error).__name__, flush=True)
+    raise SystemExit(7)
+"""
+                original = original.replace("KIND", repr(kind)).replace(
+                    "EXAMPLE", repr(str(example))
+                )
+                observer = dal313_pytest_observer.Observer(
+                    "synthetic-child-guard", root
+                )
+                command = [
+                    sys.executable,
+                    "-O",
+                    "-c",
+                    child_io_failure_prefix("both") + original,
+                    "examples/01_datafusion_pipeline.py",
+                    "quantity",
+                ]
+                with (
+                    mock.patch.dict(
+                        os.environ,
+                        PYTHONPATH=str(dal313_deadlines.TOOLS),
+                        DAL313_CHILD_OUTPUT=str(root),
+                    ),
+                    dal313_pytest_observer.pytest.MonkeyPatch.context() as patch,
+                ):
+                    observer.install_child(patch)
+                    result = subprocess.run(
+                        command, timeout=60, capture_output=True, text=True, check=False
+                    )
+                self.assertEqual(result.returncode, 7, result.stderr)
+                self.assertEqual(
+                    result.stdout,
+                    "original-entry\nretained-"
+                    + ("RuntimeError" if kind == "error" else "TimeoutExpired")
+                    + "\n",
+                )
+                health = json.loads((root / "example-child-health.json").read_text())
+                self.assertFalse(health["healthy"])
+                operations = {item["operation"] for item in health["errors"]}
+                self.assertIn("child-stack.flush", operations)
+                self.assertIn("child-stack.close", operations)
+                self.assertIn(
+                    "child-stage.example_run_path_error="
+                    + ("RuntimeError" if kind == "error" else "TimeoutExpired"),
+                    operations,
+                )
+                self.assertNotIn("Exception ignored in atexit callback", result.stderr)
+
     def test_drains_large_output_after_log_and_console_write_failures(self) -> None:
         for failure_at in ("open", "write"):
             with (
