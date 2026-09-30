@@ -40,7 +40,9 @@ export function SchemaEditor({ fields, arrowTypes, onChange }: SchemaEditorProps
             className="icon-button"
             type="button"
             aria-label={`Remove ${field.name}`}
-            onClick={() => remove(index)}
+            onClick={() => {
+              remove(index);
+            }}
           >
             ×
           </button>
@@ -49,9 +51,9 @@ export function SchemaEditor({ fields, arrowTypes, onChange }: SchemaEditorProps
       <button
         className="text-button"
         type="button"
-        onClick={() =>
-          append({ name: `field_${fields.length + 1}`, data_type: 'float64', nullable: true })
-        }
+        onClick={() => {
+          append({ name: `field_${fields.length + 1}`, data_type: 'float64', nullable: true });
+        }}
       >
         + field
       </button>

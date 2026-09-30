@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type Dispatch } from 'react';
 
 interface EditableRow<T> {
   readonly key: string;
@@ -23,7 +23,7 @@ const reconcileRows = <T,>(
 // Keep editable row identity in UI state, separate from project values.
 export function useEditableRows<T extends object>(
   items: readonly T[],
-  onChange: (items: T[]) => void,
+  onChange: Dispatch<T[]>,
   scope?: string,
 ) {
   const [previous, setPrevious] = useState(() => ({ items, scope, rows: items.map(rowFor) }));
@@ -41,9 +41,15 @@ export function useEditableRows<T extends object>(
 
   return {
     rows,
-    update: (index: number, change: Partial<T>) => commit(rows.map((row, current) =>
-      current === index ? { ...row, value: { ...row.value, ...change } } : row)),
-    append: (value: T) => commit([...rows, rowFor(value)]),
-    remove: (index: number) => commit(rows.filter((_, current) => current !== index)),
+    update: (index: number, change: Partial<T>) => {
+      commit(rows.map((row, current) =>
+        current === index ? { ...row, value: { ...row.value, ...change } } : row));
+    },
+    append: (value: T) => {
+      commit([...rows, rowFor(value)]);
+    },
+    remove: (index: number) => {
+      commit(rows.filter((_, current) => current !== index));
+    },
   };
 }

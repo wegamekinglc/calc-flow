@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import { useState } from 'react';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   at,
@@ -8,6 +8,8 @@ import {
   type ArrowFieldConfig,
   type ConnectorCapability,
   type EditableProject,
+  type ProjectSinkBinding,
+  type ProjectSourceBinding,
 } from '../types';
 import { SchemaEditor } from './SchemaEditor';
 import { StreamConfigEditor } from './StreamConfigEditor';
@@ -139,17 +141,15 @@ describe('editable row identity', () => {
     expect(input).toHaveValue('second_renamed');
   });
 
-  it.each(['source', 'sink'] as const)('preserves the second %s draft after adding and removing the first row', (kind) => {
+  it.each([
+    { kind: 'source', field: 'sources' as const, label: 'Graph input', addIndex: 0 },
+    { kind: 'sink', field: 'sinks' as const, label: 'Graph output', addIndex: 1 },
+  ])('preserves the second $kind draft after adding and removing the first row', ({ kind, field, label, addIndex }) => {
     const initialProject = streamProject();
-    const label = kind === 'source' ? 'Graph input' : 'Graph output';
+    const original = at<ProjectSourceBinding | ProjectSinkBinding>(initialProject[field]);
     const initial = {
       ...initialProject,
-      sources: kind === 'source'
-        ? [...initialProject.sources, { ...at(initialProject.sources), binding: 'second' }]
-        : initialProject.sources,
-      sinks: kind === 'sink'
-        ? [...initialProject.sinks, { ...at(initialProject.sinks), binding: 'second' }]
-        : initialProject.sinks,
+      [field]: [...initialProject[field], { ...original, binding: 'second' }],
     };
     const { container } = render(<StreamHarness initialProject={initial} />);
     const input = at(screen.getAllByLabelText(label), 1);
@@ -162,7 +162,7 @@ describe('editable row identity', () => {
     if (!section) throw new Error('Expected stream settings');
     fireEvent.click(at(screen.getAllByRole('button', { name: `Remove ${kind}` })));
     expect(at(screen.getAllByLabelText(label))).toBe(input);
-    fireEvent.click(at(within(section).getAllByRole('button', { name: 'Add' }), kind === 'source' ? 0 : 1));
+    fireEvent.click(at(within(section).getAllByRole('button', { name: 'Add' }), addIndex));
     input.focus();
     fireEvent.change(input, { target: { value: 'second_renamed' } });
     expect(input).toHaveFocus();
@@ -172,15 +172,15 @@ describe('editable row identity', () => {
     if (!newCard) throw new Error('Expected the newly added binding card');
     expect(within(newCard).getByLabelText('Options')).not.toHaveValue('{second_draft');
     const project = JSON.parse(screen.getByTestId('project').textContent) as EditableProject;
-    expect(kind === 'source' ? at(project.sources) : at(project.sinks)).toEqual({
-      ...(kind === 'source' ? at(initialProject.sources) : at(initialProject.sinks)),
+    expect(at<ProjectSourceBinding | ProjectSinkBinding>(project[field])).toEqual({
+      ...original,
       binding: 'second_renamed',
     });
   });
 
   it('discards local source drafts when switching projects with the same binding', () => {
     const project = streamProject();
-    const onChange = () => {};
+    const onChange = vi.fn();
     const { rerender } = render(<StreamConfigEditor project={project} connectors={connectors} onChange={onChange} />);
     fireEvent.change(sourceOptions(), {
       target: { value: '{other_project_draft' },
@@ -191,7 +191,7 @@ describe('editable row identity', () => {
 
   it('uses replacement source data from external props', () => {
     const project = streamProject();
-    const onChange = () => {};
+    const onChange = vi.fn();
     const { rerender } = render(<StreamConfigEditor project={project} connectors={connectors} onChange={onChange} />);
     fireEvent.change(sourceOptions(), {
       target: { value: '{local_draft' },
