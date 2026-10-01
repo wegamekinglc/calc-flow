@@ -461,7 +461,6 @@ struct BatchScratch<'a> {
     group_ids: HashMap<Arc<[u8]>, usize>,
     string_group_ids: HashMap<Option<&'a str>, usize>,
     group_keys: Vec<Arc<[u8]>>,
-    group_values: Vec<Vec<Option<ScalarValue>>>,
     // Keyed by (window start, group); the fixed geometry determines the end.
     slots: HashMap<(i64, usize), usize>,
     entries: Vec<(WindowKey, AccumulatorRow)>,
@@ -480,14 +479,13 @@ impl<'a> BatchScratch<'a> {
             slots: HashMap::new(),
             entries: Vec::new(),
             encoded_group: Vec::new(),
-            group_values: Vec::new(),
             usage,
             metrics: PreparedInputMetrics::default(),
         }
     }
 
-    /// Borrow single string keys directly from Arrow. Canonical keys and
-    /// owned output values are created only for a distinct batch group.
+    /// Borrow single string keys directly from Arrow. Canonical keys are
+    /// created only for a distinct batch group.
     fn intern_group(
         &mut self,
         columns: &RecordColumns<'a>,
@@ -513,13 +511,6 @@ impl<'a> BatchScratch<'a> {
         let key = Arc::<[u8]>::from(self.encoded_group.as_slice());
         let group = self.group_keys.len();
         self.group_keys.push(Arc::clone(&key));
-        self.group_values.push(
-            columns
-                .groups
-                .iter()
-                .map(|(column, _)| column.scalar_at(row))
-                .collect(),
-        );
         if let BorrowedString::Value(value) = string_key {
             self.string_group_ids.insert(value, group);
         } else {
@@ -853,7 +844,7 @@ impl WindowAggregateOperator {
         scratch: &mut BatchScratch<'_>,
         operator_id: &str,
     ) -> Result<()> {
-        let (index, previous_dynamic_bytes) = self.accumulator_slot(scratch, slot);
+        let (index, previous_dynamic_bytes) = self.accumulator_slot(scratch, slot, columns, row);
         let (key, accumulator) = &mut scratch.entries[index];
         update_accumulators(accumulator, columns, row, &self.spec, operator_id)?;
         let next = charge_accumulator(
@@ -876,6 +867,8 @@ impl WindowAggregateOperator {
         &self,
         scratch: &mut BatchScratch<'_>,
         slot: WindowSlot,
+        columns: &RecordColumns<'_>,
+        row: usize,
     ) -> (usize, Option<u64>) {
         let slot_key = (slot.start.as_micros(), slot.group);
         if let Some(&index) = scratch.slots.get(&slot_key) {
@@ -892,11 +885,12 @@ impl WindowAggregateOperator {
         let existing = self.state.accumulators.get(&key);
         let previous_dynamic_bytes = existing.map(aggregate_dynamic_bytes);
         let entry = existing.cloned().unwrap_or_else(|| {
-            new_accumulator_row(
-                &self.spec,
-                &self.compiled,
-                &scratch.group_values[slot.group],
-            )
+            let values = columns
+                .groups
+                .iter()
+                .map(|(column, _)| column.scalar_at(row))
+                .collect();
+            new_accumulator_row(&self.spec, &self.compiled, values)
         });
         let index = scratch.entries.len();
         scratch.entries.push((key, entry));
@@ -1976,7 +1970,7 @@ fn extend_group_encoding(encoded: &mut Vec<u8>, bytes: &[u8]) -> std::result::Re
 fn new_accumulator_row(
     spec: &WindowSpec,
     compiled: &CompiledWindowSpec,
-    group_values: &[Option<ScalarValue>],
+    group_values: Vec<Option<ScalarValue>>,
 ) -> AccumulatorRow {
     let aggregates = spec
         .aggregates
@@ -2008,7 +2002,7 @@ fn new_accumulator_row(
         })
         .collect();
     AccumulatorRow {
-        group_values: group_values.to_vec(),
+        group_values,
         aggregates,
     }
 }

@@ -16,7 +16,8 @@ measurements. Use the current guides for supported behavior.
   fits the visible slice charge. Full input validation, retained payloads,
   logical graph fingerprints, and v3 checkpoint schemas remain in force.
   Window aggregation borrows single UTF-8 group keys from Arrow and creates
-  canonical keys and owned group values once per distinct batch group.
+  canonical keys once per distinct batch group. Owned group values are read
+  only when creating a new window accumulator.
   Composite string keys encode borrowed values before interning. Aggregate
   update order and checkpoint encoding retain their existing contracts.
 
