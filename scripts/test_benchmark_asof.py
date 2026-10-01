@@ -59,6 +59,44 @@ def report() -> dict:
 
 
 class AsofEvidenceTests(unittest.IsolatedAsyncioTestCase):
+    def test_current_and_adaptive_output_chunks_cover_all_pending_rows(self):
+        evidence = copy.deepcopy(report())
+        for case in evidence["cases"]:
+            pending = case["config"]["pending"]
+            chunks = (
+                [[pending, 0.1]]
+                if pending < 2048
+                else [[pending // 2, 0.05], [pending - pending // 2, 0.1]]
+            )
+            for sample in (case["oracle"], *case["samples"]):
+                sample["chunks"] = chunks
+        with TemporaryDirectory() as raw:
+            path = Path(raw) / "result.json"
+            path.write_text(json.dumps(evidence))
+            rows = asof_rows(path)
+        self.assertEqual(len(rows), 8)
+
+    def test_invalid_output_chunk_coverage_is_rejected(self):
+        invalid = (
+            [[0, 0.1], [512, 0.1]],
+            [[True, 0.1], [511, 0.1]],
+            [[511, 0.1]],
+            [[513, 0.1]],
+            [[-1, 0.1], [513, 0.1]],
+            [[512, float("nan")]],
+            [[512, -0.1]],
+            [[10_001, 0.1]],
+        )
+        with TemporaryDirectory() as raw:
+            path = Path(raw) / "result.json"
+            for chunks in invalid:
+                with self.subTest(chunks=chunks):
+                    evidence = copy.deepcopy(report())
+                    evidence["cases"][0]["oracle"]["chunks"] = chunks
+                    path.write_text(json.dumps(evidence))
+                    with self.assertRaises(ValueError):
+                        asof_rows(path)
+
     async def test_maintained_native_target_keeps_eight_cases_and_raw_diagnostics(self):
         self.assertIn("stream_asof_perf", bench_targets(Path.cwd()))
         evidence = report()

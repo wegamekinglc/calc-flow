@@ -127,9 +127,10 @@ eight-case sampling inventory and preserves every raw diagnostic.
 
 Timing covers watermark settlement, excluding admission, operator restoration,
 checkpoint capture and full row validation. Keep cumulative allocation,
-active allocation peak and sampled process RSS separate. Stable right history
-avoids repeated retained-state cloning and row encoding, but each output chunk
-still copies and hashes the remaining checkpoint bytes; see
+active allocation peak and sampled process RSS separate. Output chunks adapt
+to the default context's row/byte budget and available workspace. Stable right
+history avoids repeated retained-state cloning; checkpoint encoding is deferred
+until capture; see
 [state preparation and recovery](../docs/asof-join-guide.md#bounded-state-and-workspace).
 
 Candidate-only collection establishes coverage; Rust whole-suite ABBA deltas

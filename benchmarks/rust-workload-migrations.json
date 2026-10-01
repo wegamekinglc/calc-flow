@@ -28,6 +28,13 @@
       "candidate_sha256": "11db484eeb64abfdc33e0896b2ed88616ba64ee09ed2e5c9dd1f60ce936305f8",
       "reason": "workload extension and harness fix: add dense tumbling/hopping cases; window iterations drain the collector so each measures one fresh batch instead of an accumulating outbox; state workloads unchanged",
       "reference": "#339 / PR #348"
+    },
+    {
+      "target": "stream_asof_perf",
+      "baseline_sha256": "d7f58b227636b231f274ca3e6a754ff9b5f25b9f54ffa5cfa42358a10953277a",
+      "candidate_sha256": "c7de5c4cbeaa71b6ef58ad78277210f0caca3f2255e953cab30c02d0d6545d84",
+      "reason": "harness oracle fix: accept bounded adaptive output chunks and cancel after a prefix larger than the default edge budget; the eight measured workloads and settlement timing boundary are unchanged",
+      "reference": "2026-10-01 morning benchmark repair"
     }
   ]
 }

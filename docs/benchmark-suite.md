@@ -205,18 +205,20 @@ The target and `scripts/benchmark_suite/asof.py` share this exact inventory.
 not total charged state. Total state also includes pending left and any
 identity-only entries. Every workload retains its right rows after settlement.
 
-| Case                 | Pending left | Retained right | Keys               | Restored | Output chunks |
-|----------------------|--------------|----------------|--------------------|----------|---------------|
-| `balanced_512`       | 512          | 512            | 32, balanced       | No       | 4             |
-| `balanced_2048`      | 2,048        | 2,048          | 32, balanced       | No       | 16            |
-| `balanced_8192`      | 8,192        | 8,192          | 32, balanced       | No       | 64            |
-| `fixed128_right512`  | 128          | 512            | 32, balanced       | No       | 1             |
-| `fixed128_right2048` | 128          | 2,048          | 32, balanced       | No       | 1             |
-| `fixed128_right8192` | 128          | 8,192          | 32, balanced       | No       | 1             |
-| `skew_8192`          | 8,192        | 8,192          | About 90% on key 0 | No       | 64            |
-| `restored_skew_8192` | 8,192        | 8,192          | About 90% on key 0 | Yes      | 64            |
+| Case                 | Pending left | Retained right | Keys               | Restored |
+|----------------------|--------------|----------------|--------------------|----------|
+| `balanced_512`       | 512          | 512            | 32, balanced       | No       |
+| `balanced_2048`      | 2,048        | 2,048          | 32, balanced       | No       |
+| `balanced_8192`      | 8,192        | 8,192          | 32, balanced       | No       |
+| `fixed128_right512`  | 128          | 512            | 32, balanced       | No       |
+| `fixed128_right2048` | 128          | 2,048          | 32, balanced       | No       |
+| `fixed128_right8192` | 128          | 8,192          | 32, balanced       | No       |
+| `skew_8192`          | 8,192        | 8,192          | About 90% on key 0 | No       |
+| `restored_skew_8192` | 8,192        | 8,192          | About 90% on key 0 | Yes      |
 
-These fixtures produce 128-row chunks of 8 KiB logical output bytes. Left time
+Output chunks adapt to the context's default 10,000-row, 64 MiB edge budget
+and available workspace. The oracle requires positive, bounded chunk sizes
+covering every pending row; historical 128-row chunks remain valid. Left time
 starts at 1,000,000 microseconds, right time is 999,999, both watermarks advance
 to 2,000,000, and tolerance is 10,000,000 microseconds. The state limits are
 100,000 rows and 512 MiB. These choices exercise stable right history; they do
@@ -235,6 +237,9 @@ row oracle and 20 samples for each of the eight cases. `--check` and `--test`
 run the same correctness checks with empty `samples` arrays; their oracle
 diagnostics are not timing evidence. `--output` writes JSON and creates parent
 directories; without it the report is printed to stdout.
+The untimed cancellation check seeds 300 more left rows than the default
+output row budget, accepts one prefix, cancels the next emission, and restores
+the remaining rows without gaps or duplicates.
 
 The report schema is `calc-flow.asof-finalization.v1`. Raw observations retain
 elapsed seconds, output rows, chunk row counts and cumulative emission times,
@@ -247,7 +252,7 @@ means RSS is unavailable, not zero memory use.
 
 The Rust adapter saves each block's `stream_asof_perf/asof.json`. Its loader
 requires all eight unique cases, exact configurations, successful full-row
-oracles, at least 20 samples per case, valid times/counts, 128-row chunk
+oracles, at least 20 samples per case, valid times/counts, bounded chunk
 coverage, and the expected final status. It retains all diagnostic observations
 in normalized metadata. Oracle-only reports intentionally fail this sampling
 contract.
