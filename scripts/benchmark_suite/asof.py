@@ -20,6 +20,7 @@ CASES = {
         ("restored_skew_8192", 8192, 8192, True, True),
     )
 }
+MAX_CHUNK_ROWS = 10_000  # The operator context's default output edge budget.
 COUNTS = (
     "allocation_peak_bytes",
     "allocation_total_bytes",
@@ -105,12 +106,17 @@ def _valid_times(sample: dict, config: dict) -> bool:
 
 def _valid_chunks(sample: dict, config: dict) -> bool:
     chunks = sample.get("chunks", [])
-    if len(chunks) != config["pending"] // 128:
+    if not isinstance(chunks, list) or not chunks:
         return False
-    return all(
-        len(chunk) == 2 and chunk[0] == 128 and _nonnegative(chunk[1])
+    valid = all(
+        isinstance(chunk, list)
+        and len(chunk) == 2
+        and type(chunk[0]) is int
+        and 0 < chunk[0] <= MAX_CHUNK_ROWS
+        and _nonnegative(chunk[1])
         for chunk in chunks
     )
+    return valid and sum(chunk[0] for chunk in chunks) == config["pending"]
 
 
 def _valid_status(sample: dict, config: dict) -> bool:

@@ -23,6 +23,19 @@ valid input; **Cancel**, Escape, or closing the dialog discards the draft.
 Confirming a card does not save the entire project. See the
 [Studio application guide](../web-ui/README.md#edit-data-sources) for controls.
 
+Schema field names and Source/Sink binding names keep keyboard focus during
+continuous edits. For stream Source/Sink cards, **Options** accepts a JSON
+object as you type. A valid object updates the editable project immediately;
+incomplete or invalid JSON stays in the local editor and is excluded from
+saved or exported project values.
+
+Each unfinished Options draft stays with its binding during renames and when
+other bindings are added or removed. Removing the binding discards its draft.
+Switching projects or externally replacing a binding, including a reload that
+replaces it, displays the current project Options instead. External changes to
+that Options value also replace the draft. These drafts are temporary editor
+state.
+
 [Example 14](../examples/14_project_persistence.py) demonstrates the project
 serialization used by application code. Executable UDFs and provider callbacks
 are registered in a trusted runtime and are not embedded in the saved graph.
