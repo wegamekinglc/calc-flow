@@ -8,6 +8,7 @@ import type {
   ProjectSinkBinding,
   ProjectSourceBinding,
 } from '../types';
+import { useEditableRows } from './useEditableRows';
 
 interface StreamConfigEditorProps {
   project: EditableProject;
@@ -99,6 +100,12 @@ export function StreamConfigEditor({
 }: StreamConfigEditorProps) {
   const sources = connectors.filter(({ kind }) => kind === 'source' || kind === 'both');
   const sinks = connectors.filter(({ kind }) => kind === 'sink' || kind === 'both');
+  const sourceRows = useEditableRows(project.sources, (next) => {
+    onChange({ ...project, sources: next });
+  }, project.id);
+  const sinkRows = useEditableRows(project.sinks, (next) => {
+    onChange({ ...project, sinks: next });
+  }, project.id);
   const streamOptions = project.runtime.mode === 'stream'
     ? project.runtime.options
     : null;
@@ -152,21 +159,8 @@ export function StreamConfigEditor({
     });
   };
 
-  const updateSource = (index: number, update: Partial<ProjectSourceBinding>) => {
-    onChange({
-      ...project,
-      sources: project.sources.map((source, current) =>
-        current === index ? { ...source, ...update } : source),
-    });
-  };
-
-  const updateSink = (index: number, update: Partial<ProjectSinkBinding>) => {
-    onChange({
-      ...project,
-      sinks: project.sinks.map((sink, current) =>
-        current === index ? { ...sink, ...update } : sink),
-    });
-  };
+  const updateSource = sourceRows.update;
+  const updateSink = sinkRows.update;
 
   return (
     <section className="stream-config">
@@ -241,14 +235,14 @@ export function StreamConfigEditor({
               disabled={!sources.length}
               onClick={() => {
                 const source = defaultSource(sources[0]);
-                if (source) onChange({ ...project, sources: [...project.sources, source] });
+                if (source) sourceRows.append(source);
               }}
             >
               Add
             </button>
           </div>
-          {project.sources.map((source, index) => (
-            <article className="binding-card" key={source.binding}>
+          {sourceRows.rows.map(({ key, value: source }, index) => (
+            <article className="binding-card" key={key}>
               <label>
                 Graph input
                 <input
@@ -296,10 +290,7 @@ export function StreamConfigEditor({
                 type="button"
                 className="text-button danger"
                 onClick={() => {
-                  onChange({
-                    ...project,
-                    sources: project.sources.filter((_, current) => current !== index),
-                  });
+                  sourceRows.remove(index);
                 }}
               >
                 Remove source
@@ -315,9 +306,9 @@ export function StreamConfigEditor({
               disabled={!sinks.length}
               onClick={() => {
                 const sink = defaultSink(sinks[0]);
-                if (sink) onChange({ ...project, sinks: [...project.sinks, {
+                if (sink) sinkRows.append({
                   ...sink, binding: unbound[0]?.binding ?? sink.binding,
-                }] });
+                });
               }}
             >
               Add
@@ -334,8 +325,8 @@ export function StreamConfigEditor({
               {output.nodeId}.{output.port} → {output.binding}
             </option>)}
           </datalist>
-          {project.sinks.map((sink, index) => (
-            <article className="binding-card" key={sink.binding}>
+          {sinkRows.rows.map(({ key, value: sink }, index) => (
+            <article className="binding-card" key={key}>
               <label>
                 Graph output
                 <input
@@ -399,10 +390,7 @@ export function StreamConfigEditor({
                 type="button"
                 className="text-button danger"
                 onClick={() => {
-                  onChange({
-                    ...project,
-                    sinks: project.sinks.filter((_, current) => current !== index),
-                  });
+                  sinkRows.remove(index);
                 }}
               >
                 Remove sink
