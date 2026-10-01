@@ -27,13 +27,14 @@ use super::{
 
 use super::expression::required_input;
 
+mod incremental;
+
 /// A multi-input `DataFusion` SQL operator.
 ///
 /// Batch graphs may use several input aliases. Stream graphs accept exactly
 /// one alias (spec NG6: incremental multi-input joins are undefined); the
 /// single-alias form retains input for cumulative aggregate snapshots
-/// and processes row-level SQL independently for each batch. Each emitted
-/// aggregate snapshot reruns the query over all retained input. Call
+/// and processes row-level SQL independently for each batch. Call
 /// [`Self::set_state_budget`] to enforce an application-chosen state limit.
 pub struct SqlOperator {
     name: String,
@@ -47,14 +48,153 @@ pub struct SqlOperator {
     stream_aggregate: bool,
     retained: Option<RetainedSqlInput>,
     state_budget: Option<StateBudget>,
+    incremental: Option<Box<incremental::IncrementalSql>>,
+    incremental_checked: bool,
+    #[cfg(test)]
+    incremental_work: (usize, usize),
+    #[cfg(test)]
+    retained_handles_copied: std::sync::atomic::AtomicUsize,
 }
 
-#[derive(Clone)]
 struct RetainedSqlInput {
-    batch: Batch,
-    segment: StateSegment,
+    records: Vec<RecordBatch>,
+    metadata: BatchMetadata,
+    reservation: Option<datafusion::execution::memory_pool::MemoryReservation>,
+    segment: Option<StateSegment>,
     rows: u64,
     bytes: u64,
+}
+
+struct MaterializedSqlInput {
+    batch: Batch,
+    _reservation: datafusion::execution::memory_pool::MemoryReservation,
+}
+
+impl MaterializedSqlInput {
+    fn batch(&self) -> &Batch {
+        &self.batch
+    }
+}
+
+fn record_copy_reservation(
+    runtime: &DataFusionRuntime,
+    name: &str,
+    records: usize,
+    columns: usize,
+    copies: usize,
+) -> Result<datafusion::execution::memory_pool::MemoryReservation> {
+    let width = incremental::checked_bytes(
+        0,
+        [
+            (copies, size_of::<RecordBatch>()),
+            (columns, size_of::<datafusion::arrow::array::ArrayRef>()),
+        ],
+        name,
+    )?;
+    let bytes = incremental::checked_bytes(256, [(records, width)], name)?;
+    let reservation = runtime.incremental_reservation(name);
+    reservation
+        .try_grow(bytes)
+        .map_err(|error| CalcFlowError::DataFusion {
+            node_id: Some(name.into()),
+            message: error.to_string(),
+        })?;
+    Ok(reservation)
+}
+
+impl RetainedSqlInput {
+    fn materialize(&self, runtime: &DataFusionRuntime, name: &str) -> Result<MaterializedSqlInput> {
+        let reservation = record_copy_reservation(
+            runtime,
+            name,
+            self.records.len(),
+            self.records[0].num_columns(),
+            2,
+        )?;
+        let records = self.records.clone();
+        #[cfg(test)]
+        incremental_tests::after_record_copies(&self.metadata, records.len());
+        let batch = Batch::table(records, self.metadata.clone())?;
+        Ok(MaterializedSqlInput {
+            batch,
+            _reservation: reservation,
+        })
+    }
+
+    async fn checkpoint_records(
+        &self,
+        runtime: &DataFusionRuntime,
+        name: &str,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<(
+        Vec<RecordBatch>,
+        BatchMetadata,
+        datafusion::execution::memory_pool::MemoryReservation,
+    )> {
+        let reservation = record_copy_reservation(
+            runtime,
+            name,
+            self.records.len(),
+            self.records[0].num_columns(),
+            2,
+        )?;
+        let mut records = Vec::with_capacity(self.records.len());
+        for chunk in self.records.chunks(8192) {
+            context.check_cancelled()?;
+            records.extend_from_slice(chunk);
+            #[cfg(test)]
+            incremental_tests::after_record_copies(&self.metadata, chunk.len());
+            tokio::task::yield_now().await;
+        }
+        context.check_cancelled()?;
+        Ok((records, self.metadata.clone(), reservation))
+    }
+
+    fn reserve_append(
+        &mut self,
+        additional: usize,
+        runtime: &DataFusionRuntime,
+        name: &str,
+        columns: usize,
+    ) -> Result<()> {
+        let count = self
+            .records
+            .len()
+            .checked_add(additional)
+            .ok_or_else(|| sql_state_error("retained record count overflowed"))?;
+        let capacity = count
+            .max(1)
+            .checked_next_power_of_two()
+            .ok_or_else(|| sql_state_error("retained record capacity overflowed"))?
+            .max(self.records.capacity());
+        let width = size_of::<RecordBatch>()
+            .checked_add(
+                columns
+                    .checked_mul(size_of::<datafusion::arrow::array::ArrayRef>())
+                    .ok_or_else(|| sql_state_error("retained column charge overflowed"))?,
+            )
+            .ok_or_else(|| sql_state_error("retained record charge overflowed"))?;
+        let bytes = capacity
+            .checked_mul(width)
+            .ok_or_else(|| sql_state_error("retained capacity charge overflowed"))?;
+        let reservation = self
+            .reservation
+            .get_or_insert_with(|| runtime.incremental_reservation(name));
+        if bytes > reservation.size() {
+            reservation
+                .try_grow(bytes - reservation.size())
+                .map_err(|error| CalcFlowError::DataFusion {
+                    node_id: Some(name.into()),
+                    message: error.to_string(),
+                })?;
+        }
+        self.records
+            .try_reserve_exact(capacity - self.records.len())
+            .map_err(|error| CalcFlowError::Internal {
+                message: format!("SQL retained record allocation failed: {error}"),
+            })?;
+        Ok(())
+    }
 }
 
 impl Clone for SqlOperator {
@@ -73,6 +213,12 @@ impl Clone for SqlOperator {
             stream_aggregate: self.stream_aggregate,
             retained: None,
             state_budget: self.state_budget,
+            incremental: None,
+            incremental_checked: false,
+            #[cfg(test)]
+            incremental_work: (0, 0),
+            #[cfg(test)]
+            retained_handles_copied: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 }
@@ -137,6 +283,12 @@ impl SqlOperator {
             stream_aggregate,
             retained: None,
             state_budget: None,
+            incremental: None,
+            incremental_checked: false,
+            #[cfg(test)]
+            incremental_work: (0, 0),
+            #[cfg(test)]
+            retained_handles_copied: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -304,12 +456,10 @@ impl SqlOperator {
             .retained
             .as_ref()
             .map(|state| {
-                state
-                    .batch
-                    .table_payload()
-                    .expect("retained table")
-                    .batches()
-                    .to_vec()
+                #[cfg(test)]
+                self.retained_handles_copied
+                    .fetch_add(state.records.len(), std::sync::atomic::Ordering::SeqCst);
+                state.records.clone()
             })
             .unwrap_or_default();
         if batch.num_rows() > 0 || records.is_empty() {
@@ -318,19 +468,25 @@ impl SqlOperator {
         records
     }
 
-    async fn accumulate(&self, batch: &Batch) -> Result<RetainedSqlInput> {
+    fn accumulate(&self, batch: &Batch) -> Result<RetainedSqlInput> {
         let (rows, bytes) = self.accumulated_charge(batch)?;
-        let combined = Batch::table(self.merged_records(batch), batch.metadata().clone())?;
-        let (combined, segment) = tokio::task::spawn_blocking(move || {
-            let segment = StateSegment::new(encode_sql_state(&combined)?);
-            Ok::<_, CalcFlowError>((combined, segment))
-        })
-        .await
-        .map_err(|error| CalcFlowError::Internal {
-            message: format!("SQL state encoder task failed: {error}"),
-        })??;
+        let records = self.merged_records(batch);
+        let schema = records[0].schema();
+        if records.iter().any(|record| record.schema() != schema) {
+            return Err(CalcFlowError::InvalidArgument {
+                field: "batches".into(),
+                message: "schemas must match".into(),
+            });
+        }
+        let segment = self
+            .retained
+            .as_ref()
+            .filter(|_| batch.num_rows() == 0)
+            .and_then(|state| state.segment.clone());
         Ok(RetainedSqlInput {
-            batch: combined,
+            records,
+            metadata: batch.metadata().clone(),
+            reservation: None,
             segment,
             rows,
             bytes,
@@ -385,6 +541,147 @@ impl SqlOperator {
             .and_then(Value::as_u64)
             .ok_or_else(|| sql_state_error("SQL aggregate checkpoint has no byte count"))?;
         Ok((segment, rows, bytes))
+    }
+
+    async fn initialize_incremental(
+        &mut self,
+        alias: &str,
+        batch: &Batch,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<Option<Box<incremental::IncrementalSql>>> {
+        let mut initialized = None;
+        if !self.incremental_checked {
+            let schema = self.retained.as_ref().map_or_else(
+                || batch.table_payload().map(|table| table.schema().clone()),
+                |state| Ok(state.records[0].schema()),
+            )?;
+            let runtime = self.stream_state.runtime()?;
+            initialized = incremental::IncrementalSql::plan(
+                runtime,
+                &self.validated,
+                alias,
+                schema,
+                &self.name,
+            )
+            .await?
+            .map(Box::new);
+            context.check_cancelled()?;
+            if let Some(incremental) = initialized.as_mut() {
+                #[cfg(test)]
+                {
+                    self.incremental_work.1 += 1;
+                }
+                if let Some(retained) = &self.retained {
+                    let materialized = retained.materialize(runtime, &self.name)?;
+                    let transaction = incremental
+                        .update(&materialized.batch, context, &self.name)
+                        .await?;
+                    #[cfg(test)]
+                    {
+                        self.incremental_work.0 += transaction.rows;
+                    }
+                    incremental.commit(transaction);
+                }
+            } else {
+                self.incremental_checked = true;
+            }
+        }
+        Ok(initialized)
+    }
+
+    async fn process_incremental(
+        &mut self,
+        batch: Batch,
+        mut initialized: Option<Box<incremental::IncrementalSql>>,
+        context: &StreamOperatorContext<'_>,
+        output: &mut dyn StreamCollector,
+    ) -> Result<()> {
+        let (rows, bytes) = self.accumulated_charge(&batch)?;
+        let append = batch.num_rows() > 0 || self.retained.is_none();
+        if append {
+            if let Some(state) = &self.retained {
+                if state.records[0].schema() != batch.table_payload()?.schema().clone() {
+                    return Err(CalcFlowError::InvalidArgument {
+                        field: "batches".into(),
+                        message: "schemas must match".into(),
+                    });
+                }
+            }
+        }
+        let additional = if append {
+            batch.table_payload()?.batches().len()
+        } else {
+            0
+        };
+        let metadata = batch.metadata().clone();
+        let mut first = self.retained.is_none().then(|| RetainedSqlInput {
+            records: Vec::new(),
+            metadata: metadata.clone(),
+            reservation: None,
+            segment: None,
+            rows: 0,
+            bytes: 0,
+        });
+        let runtime = self.stream_state.runtime()?;
+        let _record_copies = if additional == 0 {
+            None
+        } else {
+            Some(record_copy_reservation(
+                runtime,
+                &self.name,
+                additional,
+                batch.table_payload()?.schema().fields().len(),
+                1,
+            )?)
+        };
+        if additional != 0 {
+            first
+                .as_mut()
+                .or(self.retained.as_mut())
+                .expect("retained preflight")
+                .reserve_append(
+                    additional,
+                    runtime,
+                    &self.name,
+                    batch.table_payload()?.schema().fields().len(),
+                )?;
+        }
+        let records = if append {
+            batch.table_payload()?.batches().to_vec()
+        } else {
+            Vec::new()
+        };
+        let incremental = initialized
+            .as_mut()
+            .or(self.incremental.as_mut())
+            .expect("checked incremental plan");
+        let runtime = self.stream_state.runtime()?;
+        let transaction = incremental.update(&batch, context, &self.name).await?;
+        #[cfg(test)]
+        {
+            self.incremental_work.0 += transaction.rows;
+        }
+        let produced =
+            runtime.incremental_output(transaction.records.clone(), batch.metadata().clone())?;
+        context.check_cancelled()?;
+        output.emit("output", produced).await?;
+        incremental.commit(transaction);
+        if initialized.is_some() {
+            self.incremental = initialized;
+        }
+        self.incremental_checked = true;
+        if let Some(first) = first {
+            self.retained = Some(first);
+        }
+        let state = self.retained.as_mut().expect("retained after emission");
+        state.records.extend(records);
+        state.metadata = metadata;
+        state.rows = rows;
+        state.bytes = bytes;
+        if batch.num_rows() != 0 {
+            state.segment = None;
+        }
+        Ok(())
     }
 
     #[doc(hidden)]
@@ -494,15 +791,36 @@ impl StreamOperator for SqlOperator {
         }
         context.check_cancelled()?;
         self.input_ports[0].validate(&batch, &format!("{}.{alias}", self.name))?;
+        let alias = alias.clone();
+        if self.stream_aggregate && self.udfs.is_empty() {
+            let initialized = self.initialize_incremental(&alias, &batch, context).await?;
+            if self.incremental.is_some() || initialized.is_some() {
+                return self
+                    .process_incremental(batch, initialized, context, output)
+                    .await;
+            }
+        }
         let next = if self.stream_aggregate {
-            Some(self.accumulate(&batch).await?)
+            Some(self.accumulate(&batch)?)
         } else {
             None
         };
+        let runtime = self.stream_state.runtime()?;
+        let materialized = next
+            .as_ref()
+            .map(|state| state.materialize(runtime, &self.name))
+            .transpose()?;
         let tables = BTreeMap::from([(
             alias.clone(),
-            next.as_ref().map_or(batch, |state| state.batch.clone()),
+            materialized
+                .as_ref()
+                .map_or(batch, |state| state.batch.clone()),
         )]);
+        #[cfg(test)]
+        {
+            self.incremental_work.0 += tables.values().map(Batch::num_rows).sum::<usize>();
+            self.incremental_work.1 += 1;
+        }
         let runtime = self.stream_state.runtime()?;
         let produced = runtime
             .sql_validated(&self.validated, &tables, Some(&self.name))
@@ -530,7 +848,68 @@ impl StreamOperator for SqlOperator {
         Ok(())
     }
 
+    async fn prepare_checkpoint_async(
+        &mut self,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<()> {
+        context.check_cancelled()?;
+        let Some(state) = self
+            .retained
+            .as_ref()
+            .filter(|state| state.segment.is_none())
+        else {
+            return Ok(());
+        };
+        let runtime = self.stream_state.runtime()?;
+        let prepared = state
+            .checkpoint_records(runtime, &self.name, context)
+            .await?;
+        let job = context.job().clone();
+        let attempt = tokio_util::sync::CancellationToken::new();
+        let _cancel_on_drop = attempt.clone().drop_guard();
+        let segment = tokio::task::spawn_blocking(move || {
+            let (records, metadata, reservation) = prepared;
+            let materialized = MaterializedSqlInput {
+                batch: Batch::table(records, metadata)?,
+                _reservation: reservation,
+            };
+            let batch = materialized.batch();
+            let result = encode_sql_state_checked(batch, || {
+                job.check_cancelled()?;
+                if attempt.is_cancelled() {
+                    return Err(CalcFlowError::Cancelled {
+                        run_id: job.job_id().to_string(),
+                    });
+                }
+                Ok(())
+            })
+            .map(StateSegment::new);
+            #[cfg(test)]
+            tests::after_encode(batch);
+            result
+        })
+        .await
+        .map_err(|error| CalcFlowError::Internal {
+            message: format!("SQL state encoder task failed: {error}"),
+        })??;
+        context.check_cancelled()?;
+        self.retained
+            .as_mut()
+            .expect("retained during preparation")
+            .segment = Some(segment);
+        Ok(())
+    }
+
     fn checkpoint(&mut self, _epoch: Epoch) -> Result<OperatorStateSnapshot> {
+        if let Some(state) = self
+            .retained
+            .as_mut()
+            .filter(|state| state.segment.is_none())
+        {
+            let runtime = self.stream_state.runtime()?;
+            let materialized = state.materialize(runtime, &self.name)?;
+            state.segment = Some(StateSegment::new(encode_sql_state(&materialized.batch)?));
+        }
         let Some(state) = &self.retained else {
             return Ok(OperatorStateSnapshot::default());
         };
@@ -540,13 +919,18 @@ impl StreamOperator for SqlOperator {
                 ("rows".into(), json!(state.rows)),
                 ("bytes".into(), json!(state.bytes)),
             ]),
-            segments: BTreeMap::from([("input".into(), state.segment.clone())]),
+            segments: BTreeMap::from([(
+                "input".into(),
+                state.segment.clone().expect("prepared segment"),
+            )]),
         })
     }
 
     fn restore(&mut self, snapshot: &OperatorStateSnapshot) -> Result<()> {
         if snapshot.inline_metadata.is_empty() && snapshot.segments.is_empty() {
             self.retained = None;
+            self.incremental = None;
+            self.incremental_checked = false;
             return Ok(());
         }
         if !self.checkpoint_matches(snapshot) {
@@ -557,17 +941,41 @@ impl StreamOperator for SqlOperator {
         let (segment, rows, bytes) = Self::read_checkpoint_charge(snapshot)?;
         let batch = decode_sql_state(segment.bytes())?;
         self.validate_checkpoint_charge(&batch, rows, bytes)?;
-        self.retained = Some(RetainedSqlInput {
-            batch,
-            segment,
+        let table = batch.table_payload()?;
+        let runtime = self.stream_state.runtime()?;
+        let copies = record_copy_reservation(
+            runtime,
+            &self.name,
+            table.batches().len(),
+            table.schema().fields().len(),
+            1,
+        )?;
+        let mut retained = RetainedSqlInput {
+            records: Vec::new(),
+            metadata: batch.metadata().clone(),
+            reservation: None,
+            segment: Some(segment),
             rows,
             bytes,
-        });
+        };
+        retained.reserve_append(
+            table.batches().len(),
+            runtime,
+            &self.name,
+            table.schema().fields().len(),
+        )?;
+        retained.records.extend(table.batches().iter().cloned());
+        drop(copies);
+        self.incremental = None;
+        self.incremental_checked = false;
+        self.retained = Some(retained);
         Ok(())
     }
 
     fn reset(&mut self) -> Result<()> {
         self.retained = None;
+        self.incremental = None;
+        self.incremental_checked = false;
         Ok(())
     }
 }
@@ -579,20 +987,45 @@ fn sql_state_error(message: &str) -> CalcFlowError {
 }
 
 fn encode_sql_state(batch: &Batch) -> Result<Vec<u8>> {
+    encode_sql_state_checked(batch, || Ok(()))
+}
+
+fn encode_sql_state_checked(
+    batch: &Batch,
+    mut check_cancelled: impl FnMut() -> Result<()>,
+) -> Result<Vec<u8>> {
+    #[cfg(test)]
+    if batch.metadata().source() == tests::ENCODE_SOURCE {
+        tests::ENCODE_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    #[cfg(test)]
+    tests::before_encode(batch)?;
+    check_cancelled()?;
     let table = batch.table_payload().expect("SQL state is a table");
     let mut bytes = Vec::new();
     {
         let mut writer = FileWriter::try_new(&mut bytes, table.schema())
             .map_err(|error| sql_state_error(&format!("SQL state IPC header failed: {error}")))?;
         for record in table.batches() {
+            check_cancelled()?;
+            #[cfg(test)]
+            if batch.metadata().source() == tests::CANCEL_SOURCE {
+                tests::CANCEL_WRITES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            #[cfg(test)]
+            if batch.metadata().source() == tests::DROP_SOURCE {
+                tests::DROP_WRITES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
             writer.write(record).map_err(|error| {
                 sql_state_error(&format!("SQL state IPC write failed: {error}"))
             })?;
         }
+        check_cancelled()?;
         writer
             .finish()
             .map_err(|error| sql_state_error(&format!("SQL state IPC finish failed: {error}")))?;
     }
+    check_cancelled()?;
     Ok(bytes)
 }
 
@@ -609,3 +1042,676 @@ fn decode_sql_state(bytes: &[u8]) -> Result<Batch> {
         .map_err(|error| sql_state_error(&format!("SQL state records are invalid: {error}")))?;
     Batch::table(records, BatchMetadata::default())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        Arc, LazyLock, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use datafusion::arrow::array::{Array, Int64Array};
+
+    use super::*;
+    use crate::{CancellationToken, EdgeCollector, StreamJobContext};
+
+    pub(super) const ENCODE_SOURCE: &str = "sql-lazy-ipc-test";
+    pub(super) static ENCODE_CALLS: AtomicUsize = AtomicUsize::new(0);
+    pub(super) const CANCEL_SOURCE: &str = "sql-cancel-encoding";
+    pub(super) static CANCEL_WRITES: AtomicUsize = AtomicUsize::new(0);
+    pub(super) const DROP_SOURCE: &str = "dropped-prepare";
+    pub(super) static DROP_WRITES: AtomicUsize = AtomicUsize::new(0);
+    static ENCODER_FINISHED: LazyLock<Mutex<BTreeMap<String, tokio::sync::oneshot::Sender<()>>>> =
+        LazyLock::new(|| Mutex::new(BTreeMap::new()));
+
+    pub(super) fn after_encode(batch: &Batch) {
+        if let Some(finished) = ENCODER_FINISHED
+            .lock()
+            .unwrap()
+            .remove(batch.metadata().source())
+        {
+            let _ = finished.send(());
+        }
+    }
+    type EncoderHook = Box<dyn FnOnce() -> Result<()> + Send>;
+    static ENCODER_HOOKS: LazyLock<Mutex<BTreeMap<String, EncoderHook>>> =
+        LazyLock::new(|| Mutex::new(BTreeMap::new()));
+
+    pub(super) fn before_encode(batch: &Batch) -> Result<()> {
+        let hook = ENCODER_HOOKS
+            .lock()
+            .unwrap()
+            .remove(batch.metadata().source());
+        hook.map_or(Ok(()), |hook| hook())
+    }
+
+    fn on_encode(source: &str, hook: impl FnOnce() -> Result<()> + Send + 'static) {
+        assert!(
+            ENCODER_HOOKS
+                .lock()
+                .unwrap()
+                .insert(source.into(), Box::new(hook))
+                .is_none()
+        );
+    }
+
+    fn operator() -> SqlOperator {
+        SqlOperator::new(
+            "totals",
+            "SELECT SUM(value) AS total FROM events",
+            vec!["events".into()],
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
+    fn batch(source: &str, values: &[i64]) -> Batch {
+        Batch::table(
+            vec![
+                RecordBatch::try_from_iter(vec![(
+                    "value",
+                    Arc::new(Int64Array::from(values.to_vec())) as Arc<dyn Array>,
+                )])
+                .unwrap(),
+            ],
+            BatchMetadata::new(source, 0, JsonMap::new()).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn job() -> StreamJobContext {
+        StreamJobContext::new(
+            1,
+            "sql-test",
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        )
+    }
+
+    fn total(collector: &mut EdgeCollector) -> i64 {
+        let output = collector.drain("output");
+        assert_eq!(output.len(), 1);
+        let table = output[0].as_data().unwrap().table_payload().unwrap();
+        table.batches()[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0)
+    }
+
+    #[tokio::test]
+    async fn test_sql_ipc_encoding_is_deferred_until_checkpoint() {
+        ENCODE_CALLS.store(0, Ordering::SeqCst);
+        let mut operator = operator();
+        let job = job();
+        let context = StreamOperatorContext::new(&job, "totals", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        for (values, expected) in [(&[1][..], 1), (&[2, 3][..], 6)] {
+            operator
+                .process_data(
+                    "events",
+                    batch(ENCODE_SOURCE, values),
+                    &context,
+                    &mut collector,
+                )
+                .await
+                .unwrap();
+            assert_eq!(total(&mut collector), expected);
+        }
+        assert_eq!(ENCODE_CALLS.load(Ordering::SeqCst), 0);
+        operator.prepare_checkpoint_async(&context).await.unwrap();
+        assert_eq!(ENCODE_CALLS.load(Ordering::SeqCst), 1);
+        let first = operator.checkpoint(Epoch::INITIAL).unwrap();
+        operator.prepare_checkpoint_async(&context).await.unwrap();
+        let second = operator.checkpoint(Epoch::INITIAL).unwrap();
+        assert!(Arc::ptr_eq(
+            &first.segments["input"].bytes_arc(),
+            &second.segments["input"].bytes_arc()
+        ));
+        assert_eq!(ENCODE_CALLS.load(Ordering::SeqCst), 1);
+        operator
+            .process_data(
+                "events",
+                batch(ENCODE_SOURCE, &[4]),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        assert_eq!(total(&mut collector), 10);
+        assert_eq!(ENCODE_CALLS.load(Ordering::SeqCst), 1);
+        operator.prepare_checkpoint_async(&context).await.unwrap();
+        let third = operator.checkpoint(Epoch::INITIAL).unwrap();
+        assert_eq!(ENCODE_CALLS.load(Ordering::SeqCst), 2);
+        assert!(!Arc::ptr_eq(
+            &first.segments["input"].bytes_arc(),
+            &third.segments["input"].bytes_arc()
+        ));
+        let mut restored = self::operator();
+        StreamOperator::restore(&mut restored, &third).unwrap();
+        restored
+            .process_data("events", batch("restored", &[5]), &context, &mut collector)
+            .await
+            .unwrap();
+        assert_eq!(total(&mut collector), 15);
+    }
+
+    #[tokio::test]
+    async fn test_sql_checkpoint_encoder_stops_when_cancelled() {
+        CANCEL_WRITES.store(0, Ordering::SeqCst);
+        let mut operator = operator();
+        let job = job();
+        let context = StreamOperatorContext::new(&job, "totals", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        for value in [1, 2] {
+            operator
+                .process_data(
+                    "events",
+                    batch(CANCEL_SOURCE, &[value]),
+                    &context,
+                    &mut collector,
+                )
+                .await
+                .unwrap();
+            collector.drain("output");
+        }
+        let cancellation = job.cancellation().clone();
+        on_encode(CANCEL_SOURCE, move || {
+            cancellation.cancel();
+            Ok(())
+        });
+        assert!(matches!(
+            operator.prepare_checkpoint_async(&context).await,
+            Err(CalcFlowError::Cancelled { .. })
+        ));
+        assert_eq!(CANCEL_WRITES.load(Ordering::SeqCst), 0);
+        assert!(operator.retained.as_ref().unwrap().segment.is_none());
+        assert_eq!(operator.retained.as_ref().unwrap().rows, 2);
+        let active = self::job();
+        operator
+            .prepare_checkpoint_async(&StreamOperatorContext::new(&active, "totals", None))
+            .await
+            .unwrap();
+        let snapshot = operator.checkpoint(Epoch::INITIAL).unwrap();
+        let mut restored = self::operator();
+        StreamOperator::restore(&mut restored, &snapshot).unwrap();
+        restored
+            .process_data(
+                "events",
+                batch("restored-cancel", &[3]),
+                &StreamOperatorContext::new(&active, "totals", None),
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        assert_eq!(total(&mut collector), 6);
+    }
+
+    fn same_segment(left: &OperatorStateSnapshot, right: &OperatorStateSnapshot) -> bool {
+        Arc::ptr_eq(
+            &left.segments["input"].bytes_arc(),
+            &right.segments["input"].bytes_arc(),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_sql_empty_batch_reuses_prepared_checkpoint() {
+        let mut operator = operator();
+        let job = job();
+        let context = StreamOperatorContext::new(&job, "totals", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data(
+                "events",
+                batch("empty-initial", &[]),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        let empty = collector.drain("output");
+        assert!(
+            empty[0]
+                .as_data()
+                .unwrap()
+                .table_payload()
+                .unwrap()
+                .batches()[0]
+                .column(0)
+                .is_null(0)
+        );
+        let empty_snapshot = operator.checkpoint(Epoch::INITIAL).unwrap();
+        assert_eq!(empty_snapshot.inline_metadata["rows"], json!(0));
+        let mut restored = self::operator();
+        StreamOperator::restore(&mut restored, &empty_snapshot).unwrap();
+        restored
+            .process_data(
+                "events",
+                batch("after-empty", &[1, 2]),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        assert_eq!(total(&mut collector), 3);
+        restored.prepare_checkpoint_async(&context).await.unwrap();
+        let first = restored.checkpoint(Epoch::INITIAL).unwrap();
+        restored
+            .process_data(
+                "events",
+                batch("different-empty-metadata", &[]),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        assert_eq!(total(&mut collector), 3);
+        restored.prepare_checkpoint_async(&context).await.unwrap();
+        let second = restored.checkpoint(Epoch::INITIAL).unwrap();
+        assert!(same_segment(&first, &second));
+        assert_eq!(first.inline_metadata, second.inline_metadata);
+    }
+
+    #[tokio::test]
+    async fn test_sql_legacy_checkpoint_restore_and_clone() {
+        let input = batch("legacy", &[1, 2]);
+        let mut bytes = Vec::new();
+        let table = input.table_payload().unwrap();
+        let mut writer = FileWriter::try_new(&mut bytes, table.schema()).unwrap();
+        for record in table.batches() {
+            writer.write(record).unwrap();
+        }
+        writer.finish().unwrap();
+        drop(writer);
+        let mut operator = operator();
+        let legacy = OperatorStateSnapshot {
+            inline_metadata: BTreeMap::from([
+                ("query_sha256".into(), json!(operator.query_digest())),
+                ("rows".into(), json!(2)),
+                ("bytes".into(), json!(input.estimated_bytes().unwrap())),
+            ]),
+            segments: BTreeMap::from([("input".into(), StateSegment::new(bytes))]),
+        };
+        StreamOperator::restore(&mut operator, &legacy).unwrap();
+        let job = job();
+        let context = StreamOperatorContext::new(&job, "totals", None);
+        operator.prepare_checkpoint_async(&context).await.unwrap();
+        let captured = operator.checkpoint(Epoch::INITIAL).unwrap();
+        assert!(same_segment(&legacy, &captured));
+        assert_eq!(legacy.inline_metadata, captured.inline_metadata);
+        let mut invalid = legacy.clone();
+        invalid.inline_metadata.insert("rows".into(), json!(3));
+        assert!(StreamOperator::restore(&mut operator, &invalid).is_err());
+        assert!(same_segment(
+            &captured,
+            &operator.checkpoint(Epoch::INITIAL).unwrap()
+        ));
+        let mut cloned = operator.clone();
+        assert!(
+            cloned
+                .checkpoint(Epoch::INITIAL)
+                .unwrap()
+                .segments
+                .is_empty()
+        );
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("events", batch("continued", &[3]), &context, &mut collector)
+            .await
+            .unwrap();
+        assert_eq!(total(&mut collector), 6);
+        cloned
+            .process_data("events", batch("cloned", &[4]), &context, &mut collector)
+            .await
+            .unwrap();
+        assert_eq!(total(&mut collector), 4);
+        StreamOperator::reset(&mut operator).unwrap();
+        assert!(
+            operator
+                .checkpoint(Epoch::INITIAL)
+                .unwrap()
+                .segments
+                .is_empty()
+        );
+        StreamOperator::restore(&mut cloned, &OperatorStateSnapshot::default()).unwrap();
+        assert!(
+            cloned
+                .checkpoint(Epoch::INITIAL)
+                .unwrap()
+                .segments
+                .is_empty()
+        );
+    }
+
+    struct RejectOutput;
+
+    #[async_trait]
+    impl StreamCollector for RejectOutput {
+        async fn emit(&mut self, _port: &str, _batch: Batch) -> Result<()> {
+            Err(CalcFlowError::Operator {
+                node_id: "sink".into(),
+                message: "injected emit failure".into(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sql_rejected_output_preserves_clean_and_dirty_state() {
+        let job = job();
+        let context = StreamOperatorContext::new(&job, "totals", None);
+        for prepared in [false, true] {
+            let mut operator = operator();
+            let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+            operator
+                .process_data(
+                    "events",
+                    batch("emit-initial", &[1]),
+                    &context,
+                    &mut collector,
+                )
+                .await
+                .unwrap();
+            collector.drain("output");
+            let before = if prepared {
+                Some(operator.checkpoint(Epoch::INITIAL).unwrap())
+            } else {
+                None
+            };
+            let charge = operator
+                .retained
+                .as_ref()
+                .map(|state| (state.rows, state.bytes));
+            let error = operator
+                .process_data(
+                    "events",
+                    batch("emit-rejected", &[2]),
+                    &context,
+                    &mut RejectOutput,
+                )
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("injected emit failure"));
+            assert_eq!(
+                operator
+                    .retained
+                    .as_ref()
+                    .map(|state| (state.rows, state.bytes)),
+                charge
+            );
+            assert_eq!(
+                operator.retained.as_ref().unwrap().segment.is_some(),
+                prepared
+            );
+            if let Some(before) = before {
+                assert!(same_segment(
+                    &before,
+                    &operator.checkpoint(Epoch::INITIAL).unwrap()
+                ));
+            }
+            operator
+                .process_data("events", batch("emit-next", &[3]), &context, &mut collector)
+                .await
+                .unwrap();
+            assert_eq!(total(&mut collector), 4);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sql_query_and_byte_budget_errors_preserve_checkpoint() {
+        let mut operator = SqlOperator::new(
+            "totals",
+            "SELECT SUM(CAST(value AS INT)) AS total FROM events",
+            vec!["events".into()],
+            Vec::new(),
+        )
+        .unwrap();
+        let job = job();
+        let context = StreamOperatorContext::new(&job, "totals", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        let input = batch("budget-initial", &[1]);
+        let bytes = u64::try_from(input.estimated_bytes().unwrap()).unwrap();
+        operator
+            .process_data("events", input, &context, &mut collector)
+            .await
+            .unwrap();
+        assert_eq!(total(&mut collector), 1);
+        let first = operator.checkpoint(Epoch::INITIAL).unwrap();
+        assert!(
+            operator
+                .process_data(
+                    "events",
+                    batch("query-failure", &[i64::MAX]),
+                    &context,
+                    &mut collector
+                )
+                .await
+                .is_err()
+        );
+        assert!(collector.drain("output").is_empty());
+        assert!(same_segment(
+            &first,
+            &operator.checkpoint(Epoch::INITIAL).unwrap()
+        ));
+        operator
+            .set_state_budget(StateBudget::new(100, bytes).unwrap())
+            .unwrap();
+        let error = operator
+            .process_data(
+                "events",
+                batch("budget-failure", &[2]),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("configured state budget"));
+        assert!(collector.drain("output").is_empty());
+        assert!(same_segment(
+            &first,
+            &operator.checkpoint(Epoch::INITIAL).unwrap()
+        ));
+        operator
+            .set_state_budget(StateBudget::new(100, bytes * 2).unwrap())
+            .unwrap();
+        operator
+            .process_data(
+                "events",
+                batch("budget-next", &[2]),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        assert_eq!(total(&mut collector), 3);
+    }
+
+    #[tokio::test]
+    async fn test_sql_checkpoint_encoder_failure_can_be_retried() {
+        let mut operator = operator();
+        let job = job();
+        let context = StreamOperatorContext::new(&job, "totals", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data(
+                "events",
+                batch("encode-failure", &[1, 2]),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        assert_eq!(total(&mut collector), 3);
+        on_encode("encode-failure", || {
+            Err(sql_state_error("injected encoder failure"))
+        });
+        let error = operator
+            .prepare_checkpoint_async(&context)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("injected encoder failure"));
+        assert!(operator.retained.as_ref().unwrap().segment.is_none());
+        on_encode("encode-failure", || {
+            Err(sql_state_error("injected sync failure"))
+        });
+        assert!(operator.checkpoint(Epoch::INITIAL).is_err());
+        assert!(operator.retained.as_ref().unwrap().segment.is_none());
+        operator.prepare_checkpoint_async(&context).await.unwrap();
+        let snapshot = operator.checkpoint(Epoch::INITIAL).unwrap();
+        assert_eq!(snapshot.inline_metadata["rows"], json!(2));
+        let mut restored = self::operator();
+        StreamOperator::restore(&mut restored, &snapshot).unwrap();
+        restored
+            .process_data(
+                "events",
+                batch("retry-next", &[3]),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        assert_eq!(total(&mut collector), 6);
+    }
+
+    #[tokio::test]
+    async fn test_sql_dropped_worker_retains_materialized_record_credits() {
+        let source = "sql-worker-materialized-credit";
+        let record = batch(source, &[]).table_payload().unwrap().batches()[0].clone();
+        let input = Batch::table(
+            vec![record; 12_000],
+            BatchMetadata::new(source, 0, JsonMap::new()).unwrap(),
+        )
+        .unwrap();
+        let mut operator = operator();
+        let job = job();
+        let context = StreamOperatorContext::new(&job, "totals", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("events", input, &context, &mut collector)
+            .await
+            .unwrap();
+        collector.drain("output");
+        let pressure = operator
+            .stream_state
+            .runtime()
+            .unwrap()
+            .incremental_reservation("pressure");
+        pressure.try_grow((1 << 30) - (3 << 20)).unwrap();
+        let probe = operator
+            .stream_state
+            .runtime()
+            .unwrap()
+            .incremental_reservation("probe");
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (finished, completion) = tokio::sync::oneshot::channel();
+        ENCODER_FINISHED
+            .lock()
+            .unwrap()
+            .insert(source.into(), finished);
+        let (resume, paused) = std::sync::mpsc::channel();
+        on_encode(source, move || {
+            entered.send(()).unwrap();
+            paused
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            Ok(())
+        });
+        {
+            let prepare = operator.prepare_checkpoint_async(&context);
+            tokio::pin!(prepare);
+            tokio::select! {
+                result = &mut prepare => panic!("encoder finished before release: {result:?}"),
+                result = started => result.unwrap(),
+            }
+        }
+        let result = probe.try_grow(3 << 19);
+        resume.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), completion)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            result.is_err(),
+            "record clone credits must remain with the paused worker after dropping preparation"
+        );
+        assert!(operator.retained.as_ref().unwrap().segment.is_none());
+        assert!(!job.cancellation().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn test_sql_dropped_preparation_cannot_install_stale_state() {
+        DROP_WRITES.store(0, Ordering::SeqCst);
+        let mut operator = operator();
+        let job = job();
+        let context = StreamOperatorContext::new(&job, "totals", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("events", batch(DROP_SOURCE, &[1]), &context, &mut collector)
+            .await
+            .unwrap();
+        collector.drain("output");
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (finished, completion) = tokio::sync::oneshot::channel();
+        ENCODER_FINISHED
+            .lock()
+            .unwrap()
+            .insert(DROP_SOURCE.into(), finished);
+        let (resume, paused) = std::sync::mpsc::channel();
+        on_encode(DROP_SOURCE, move || {
+            entered.send(()).unwrap();
+            paused
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            Ok(())
+        });
+        {
+            let prepare = operator.prepare_checkpoint_async(&context);
+            tokio::pin!(prepare);
+            tokio::select! {
+                result = &mut prepare => panic!("encoder finished before release: {result:?}"),
+                result = started => result.unwrap(),
+            }
+        }
+        assert!(operator.retained.as_ref().unwrap().segment.is_none());
+        resume.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), completion)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!job.cancellation().is_cancelled());
+        assert_eq!(DROP_WRITES.load(Ordering::SeqCst), 0);
+        operator
+            .process_data(
+                "events",
+                batch("after-dropped-prepare", &[2]),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        assert_eq!(total(&mut collector), 3);
+        let snapshot = operator.checkpoint(Epoch::INITIAL).unwrap();
+        assert!(same_segment(
+            &snapshot,
+            &operator.checkpoint(Epoch::INITIAL).unwrap()
+        ));
+        let mut restored = self::operator();
+        StreamOperator::restore(&mut restored, &snapshot).unwrap();
+        let active = self::job();
+        restored
+            .process_data(
+                "events",
+                batch("drop-restored", &[3]),
+                &StreamOperatorContext::new(&active, "totals", None),
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        assert_eq!(total(&mut collector), 6);
+    }
+}
+
+#[cfg(test)]
+#[path = "sql/incremental_tests.rs"]
+mod incremental_tests;

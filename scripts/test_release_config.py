@@ -775,6 +775,7 @@ class ReleaseConfigTests(unittest.TestCase):
                 "stream_join_perf",
                 "stream_asof_perf",
                 "stream_asof_e2e",
+                "stream_sql_aggregate",
                 "stream_join_materialization",
                 "allocation_regression",
                 "sql_datafusion_performance",

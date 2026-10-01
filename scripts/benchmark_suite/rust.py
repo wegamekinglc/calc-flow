@@ -21,6 +21,7 @@ from scripts.benchmark_suite.rust_provenance import (
     target_dependency_fingerprint,
     with_compiled_dependencies,
 )
+from scripts.benchmark_suite.sql_stream import sql_stream_rows
 from scripts.verify_sql_datafusion_performance import verify_report
 from scripts.write_criterion_provenance import build_provenance
 
@@ -211,6 +212,15 @@ async def run_binary(
             env=environment,
         )
         return asof_rows(path)
+    if target == "stream_sql_aggregate":
+        path = output / "sql-stream.json"
+        await command(
+            [str(binary), "--samples", "20", "--output", str(path)],
+            cwd=source,
+            log=output / "run.log",
+            env=environment,
+        )
+        return sql_stream_rows(path)
     if target == "stream_asof_e2e":
         path = output / "asof-e2e.json"
         await command(

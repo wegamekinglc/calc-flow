@@ -347,6 +347,69 @@ impl DataFusionRuntime {
         physical_query_schema(context, &query, node_id).await
     }
 
+    pub(crate) async fn incremental_sql_plan(
+        &self,
+        query: &ValidatedQuery,
+        alias: &str,
+        schema: SchemaRef,
+        node_id: &str,
+    ) -> Result<(
+        datafusion::logical_expr::LogicalPlan,
+        datafusion::logical_expr::LogicalPlan,
+    )> {
+        self.ensure_open()?;
+        let _guard = self.query_lock.lock().await;
+        let context = self.context_for_rows(0, None, "not_evaluated");
+        let input = Batch::table(
+            vec![RecordBatch::new_empty(schema)],
+            BatchMetadata::default(),
+        )?;
+        let mut registrations = TableRegistrations::new(context);
+        registrations.register(alias, &input, Some(node_id))?;
+        let state = context.state();
+        let raw = state
+            .statement_to_plan(query.statement())
+            .await
+            .map_err(|error| datafusion_error(Some(node_id), error))?;
+        let analyzed = state
+            .analyzer()
+            .execute_and_check(raw.clone(), state.config_options(), |_, _| {})
+            .map_err(|error| datafusion_error(Some(node_id), error))?;
+        Ok((raw, analyzed))
+    }
+
+    pub(crate) fn incremental_reservation(
+        &self,
+        node_id: &str,
+    ) -> datafusion::execution::memory_pool::MemoryReservation {
+        datafusion::execution::memory_pool::MemoryConsumer::new(format!(
+            "sql-incremental:{node_id}"
+        ))
+        .register(&self.runtime_env.memory_pool)
+    }
+
+    pub(crate) fn incremental_output(
+        &self,
+        records: Vec<RecordBatch>,
+        metadata: BatchMetadata,
+    ) -> Result<Batch> {
+        self.ensure_open()?;
+        let mut batches = Vec::new();
+        let mut rows = 0;
+        let mut bytes = 0;
+        for record in records {
+            push_bounded_sql_batch(
+                &mut batches,
+                &mut rows,
+                &mut bytes,
+                record,
+                MAX_SQL_RESULT_ROWS,
+                MAX_SQL_RESULT_BYTES,
+            )?;
+        }
+        Batch::table(batches, metadata)
+    }
+
     /// Executes one read-only SQL query over run-scoped table aliases.
     ///
     /// # Errors
