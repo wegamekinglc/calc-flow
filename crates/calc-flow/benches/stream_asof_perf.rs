@@ -2,9 +2,9 @@
 use async_trait::async_trait;
 use calc_flow::{
     AsofJoinSide, AsofStateLimits, Batch, BatchMetadata, CalcFlowError, CancellationToken,
-    EdgeCollector, Epoch, EventTime, IngressProgress, IngressProgressSnapshot, IngressState,
-    JsonMap, OperatorMetadata, StreamAsofJoinOperator, StreamAsofJoinSpec, StreamCollector,
-    StreamJobContext, StreamOperator, StreamOperatorContext,
+    EdgeBudget, EdgeCollector, Epoch, EventTime, IngressProgress, IngressProgressSnapshot,
+    IngressState, JsonMap, OperatorMetadata, StreamAsofJoinOperator, StreamAsofJoinSpec,
+    StreamCollector, StreamJobContext, StreamOperator, StreamOperatorContext,
 };
 use datafusion::arrow::{
     array::{Array, Int64Array, TimestampMicrosecondArray},
@@ -294,8 +294,13 @@ fn sample(rt: &tokio::runtime::Runtime, config: &Config, check: bool) -> Value {
     sampler.join().unwrap();
     let after_status = op.status();
     assert_eq!(collector.rows, pending);
-    assert_eq!(collector.chunks.len(), pending.div_ceil(128));
-    assert!(collector.chunks.iter().all(|(rows, _)| *rows <= 128));
+    assert!(!collector.chunks.is_empty());
+    assert!(
+        collector
+            .chunks
+            .iter()
+            .all(|(rows, _)| *rows > 0 && *rows <= EdgeBudget::default().max_rows)
+    );
     assert_eq!(after_status.pending_left_rows, 0);
     assert_eq!(after_status.matched_rows, pending as u64);
     assert_eq!(after_status.retained_right_rows, retained as u64);
@@ -340,7 +345,10 @@ fn strict_frontiers_cancel_restore_check() {
         let cancel = CancellationToken::new();
         let job = job(cancel.clone());
         let mut op = operator();
-        seed(&mut op, &job, 300, 512, true).await;
+        // Exceed the public context's output budget so cancellation always
+        // occurs after a committed prefix, even when output batching grows.
+        let pending = EdgeBudget::default().max_rows + 300;
+        seed(&mut op, &job, pending, 512, true).await;
         let mut zero = EdgeCollector::new(op.output_ports().to_vec());
         for (l, r) in [(LEFT_TIME, LEFT_TIME), (FRONTIER, LEFT_TIME)] {
             let cx = progress(&job, l, r);
@@ -348,7 +356,7 @@ fn strict_frontiers_cancel_restore_check() {
                 .await
                 .unwrap();
             assert!(zero.drain("output").is_empty());
-            assert_eq!(op.status().pending_left_rows, 300);
+            assert_eq!(op.status().pending_left_rows, pending as u64);
         }
         let cx = progress(&job, FRONTIER, FRONTIER);
         let mut out = CancelCollector {
@@ -360,8 +368,11 @@ fn strict_frontiers_cancel_restore_check() {
             .await
             .unwrap_err();
         assert!(matches!(error, CalcFlowError::Cancelled { .. }));
-        assert_eq!(op.status().emitted_left_rows, 128);
-        assert_eq!(op.status().pending_left_rows, 172);
+        assert_eq!(out.accepted.len(), 1);
+        let accepted = out.accepted[0].num_rows();
+        assert!(accepted > 0 && accepted < pending);
+        assert_eq!(op.status().emitted_left_rows, accepted as u64);
+        assert_eq!(op.status().pending_left_rows, (pending - accepted) as u64);
         let snapshot = op.checkpoint(Epoch::INITIAL).unwrap();
         let mut restored = operator();
         restored.restore(&snapshot).unwrap();
@@ -377,8 +388,9 @@ fn strict_frontiers_cancel_restore_check() {
         for m in resumed.drain("output") {
             pos = validate(m.as_data().unwrap(), pos, &rights, true);
         }
-        assert_eq!(pos, 300);
-        assert_eq!(restored.status().emitted_left_rows, 300);
+        assert_eq!(pos, pending);
+        assert_eq!(restored.status().emitted_left_rows, pending as u64);
+        assert_eq!(restored.status().pending_left_rows, 0);
     });
 }
 
