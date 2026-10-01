@@ -135,6 +135,14 @@ prefixed left fields. Final rows are ordered by
 `(left_time, left_key_tuple, left_sequence_tuple)`; physical batch boundaries
 are not part of the result contract.
 
+A downstream column-only `select` can reduce the fields ASOF materializes.
+The stream compiler combines the column requirements of all direct projection
+consumers, including aliases and reordered selections. A consumer requiring
+the complete row or another expression keeps the full intermediate output.
+This physical optimization preserves the declared graph, source validation,
+output order, and checkpoint identity. It reduces gathering, output workspace,
+and edge traffic; retained input payloads still contain their declared columns.
+
 ## Watermarks, idle, and late input
 
 A left event at `t` is final only when **both** sides have a watermark strictly
@@ -283,6 +291,12 @@ in that progress tick have been accepted, then performed once. A cancelled
 tick can therefore retain right payloads that the completed tick would evict;
 its checkpoint still contains the accepted output prefix and every remaining
 pending row.
+
+When a left output range covers one complete Arrow array, materialization can
+share it if its backing buffers fit the visible slice memory charge. Partial
+ranges and arrays backed by larger allocations use the bounded copy path.
+Projected output reserves workspace for the selected columns; the existing
+conservative buffer-growth allowance also applies to shared arrays.
 
 Admission preflights exact incremental identity, batch and index charges before
 synchronously installing new rows. An eviction sweep preflights its row, shared

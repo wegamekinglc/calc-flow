@@ -25,6 +25,8 @@ use crate::{
 
 use super::{NodeDefinition, TablePlanResources, compile_graph};
 
+mod projection;
+
 /// Per graph-output delivery requests recorded into the compiled stream plan
 /// (API note A1.2).
 #[derive(Clone, Debug, Default)]
@@ -688,7 +690,7 @@ impl PipelineBuilder {
     /// fails conversion; validation runs before conversion, so this is
     /// unreachable and guards the internal invariant only.
     pub fn compile_stream(
-        self,
+        mut self,
         udfs: &UdfRegistrySnapshot,
         requirements: &StreamRequirements,
     ) -> Result<StreamExecutionPlan> {
@@ -710,6 +712,7 @@ impl PipelineBuilder {
         }
         validate_deterministic_udfs(&self.nodes, requirements, udfs)?;
         validate_external_provider_lifecycles(&self.nodes, requirements)?;
+        projection::push_asof_output_projections(&mut self)?;
         let edges = self
             .edges
             .iter()

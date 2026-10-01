@@ -9,6 +9,17 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-01: Push exact downstream column projections into streaming ASOF
+  output materialization. All direct projection consumers contribute their
+  column requirements; output workspace and Arrow gathering use only those
+  fields. Complete left arrays can share buffers when their backing memory
+  fits the visible slice charge. Full input validation, retained payloads,
+  logical graph fingerprints, and v3 checkpoint schemas remain in force.
+  Window aggregation borrows single UTF-8 group keys from Arrow and creates
+  canonical keys and owned group values once per distinct batch group.
+  Composite string keys encode borrowed values before interning. Aggregate
+  update order and checkpoint encoding retain their existing contracts.
+
 - 2026-10-01: Move stream ASOF state, layout, and accounting to version 3.
   Checkpoints use a canonical columnar index with key dictionaries, typed
   integer sequence columns, shared generic identity buffers, batch references,

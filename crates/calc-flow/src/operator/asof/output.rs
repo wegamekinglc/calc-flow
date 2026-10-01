@@ -19,6 +19,7 @@ use std::{borrow::Cow, collections::HashMap, sync::Arc};
 pub(super) struct OutputRuntime {
     pub pool: Arc<dyn MemoryPool>,
     config: DataFusionConfig,
+    output_columns: Option<Vec<usize>>,
     #[cfg(test)]
     worker_gate: Option<(std::sync::mpsc::Sender<()>, Arc<std::sync::Barrier>)>,
 }
@@ -28,6 +29,7 @@ impl OutputRuntime {
         Self {
             pool: Arc::new(GreedyMemoryPool::new(limit)),
             config: DataFusionConfig::default(),
+            output_columns: None,
             #[cfg(test)]
             worker_gate: None,
         }
@@ -35,6 +37,10 @@ impl OutputRuntime {
 
     pub fn configure(&mut self, config: DataFusionConfig) {
         self.config = config;
+    }
+
+    pub fn set_output_projection(&mut self, columns: Vec<usize>) {
+        self.output_columns = Some(columns);
     }
 
     pub async fn materialize(
@@ -48,6 +54,7 @@ impl OutputRuntime {
         tokio::task::yield_now().await;
         let owned = OutputRows::capture(rows, &check_cancelled).await?;
         let schema = schema.clone();
+        let output_columns = self.output_columns.clone();
         #[cfg(test)]
         let worker_gate = self.worker_gate.clone();
         // Plan construction and Arrow copies stay off the executor. The
@@ -60,7 +67,8 @@ impl OutputRuntime {
             }
             let left = GatherPlan::new(&owned.left, false);
             let right = GatherPlan::new(&owned.right, true);
-            let result = materialize_plans(&left, &right, owned.len, &schema)?;
+            let result =
+                materialize_plans(&left, &right, owned.len, &schema, output_columns.as_deref())?;
             Ok::<_, crate::CalcFlowError>((result, workspace))
         })
         .await
@@ -219,6 +227,9 @@ impl<'a> GatherPlan<'a> {
             }
             return interleave(&columns, positions).map_err(|error| super::arrow_error(&error));
         }
+        if let Some(column) = self.shared_column(index)? {
+            return Ok(column);
+        }
         let data = self
             .batches
             .iter()
@@ -230,6 +241,23 @@ impl<'a> GatherPlan<'a> {
             mutable.extend(span.source, span.start, span.end);
         }
         Ok(make_array(mutable.freeze()))
+    }
+
+    fn shared_column(&self, index: usize) -> Result<Option<ArrayRef>> {
+        let [span] = self.spans.as_slice() else {
+            return Ok(None);
+        };
+        let column = self.batches[span.source].column(index);
+        if span.start != 0 || span.end != column.len() {
+            return Ok(None);
+        }
+        let data = column.to_data();
+        // Queue budgets charge visible slices. Reuse a complete array only
+        // when it retains no additional, uncharged backing bytes.
+        let visible = data
+            .get_slice_memory_size()
+            .map_err(|error| super::arrow_error(&error))?;
+        Ok((data.get_buffer_memory_size() <= visible).then(|| Arc::clone(column)))
     }
 }
 
@@ -267,7 +295,7 @@ fn materialize_rows(
     let owned = OutputRows::new(rows);
     let left = GatherPlan::new(&owned.left, false);
     let right = GatherPlan::new(&owned.right, true);
-    materialize_plans(&left, &right, rows.len(), schema)
+    materialize_plans(&left, &right, rows.len(), schema, None)
 }
 
 fn materialize_plans(
@@ -275,14 +303,16 @@ fn materialize_plans(
     right: &GatherPlan<'_>,
     len: usize,
     schema: &SchemaRef,
+    output_columns: Option<&[usize]>,
 ) -> Result<Batch> {
     let left_fields = left.batches.first().map_or(0, |batch| batch.num_columns());
     let mut columns = Vec::with_capacity(schema.fields().len());
     for (index, field) in schema.fields().iter().enumerate() {
-        let column = if index < left_fields {
-            left.column(index, field.data_type(), len)?
+        let source = output_columns.map_or(index, |columns| columns[index]);
+        let column = if source < left_fields {
+            left.column(source, field.data_type(), len)?
         } else {
-            right.column(index - left_fields, field.data_type(), len)?
+            right.column(source - left_fields, field.data_type(), len)?
         };
         columns.push(column);
     }

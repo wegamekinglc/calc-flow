@@ -49,6 +49,10 @@ const WINDOW_SEGMENT_LAYOUT_VERSION: u32 = 2;
 const MAX_GROUP_KEY_BYTES: usize = 65_536;
 const MAX_WINDOW_DELTA_SEGMENTS: usize = 32;
 
+#[cfg(test)]
+#[path = "window/group_tests.rs"]
+mod group_tests;
+
 /// Aggregate function supported by the first built-in window operator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -453,23 +457,25 @@ struct WindowSlot {
 
 /// Per-batch accumulator scratch: hashed while rows stream in, then sorted
 /// once into the deterministic window-key order installs and encodes observe.
-struct BatchScratch {
+struct BatchScratch<'a> {
     group_ids: HashMap<Arc<[u8]>, usize>,
+    string_group_ids: HashMap<Option<&'a str>, usize>,
     group_keys: Vec<Arc<[u8]>>,
+    group_values: Vec<Vec<Option<ScalarValue>>>,
     // Keyed by (window start, group); the fixed geometry determines the end.
     slots: HashMap<(i64, usize), usize>,
     entries: Vec<(WindowKey, AccumulatorRow)>,
-    // Reused per row: the current row's encoded group key and group values.
+    // Reused by the general composite-key path, without owned row scalars.
     encoded_group: Vec<u8>,
-    group_values: Vec<Option<ScalarValue>>,
     usage: WindowStateUsage,
     metrics: PreparedInputMetrics,
 }
 
-impl BatchScratch {
+impl<'a> BatchScratch<'a> {
     fn new(usage: WindowStateUsage) -> Self {
         Self {
             group_ids: HashMap::new(),
+            string_group_ids: HashMap::new(),
             group_keys: Vec::new(),
             slots: HashMap::new(),
             entries: Vec::new(),
@@ -480,30 +486,45 @@ impl BatchScratch {
         }
     }
 
-    /// Encodes the row's group into the reusable buffers and returns its
-    /// batch-local group index, sharing one key allocation per distinct group.
+    /// Borrow single string keys directly from Arrow. Canonical keys and
+    /// owned output values are created only for a distinct batch group.
     fn intern_group(
         &mut self,
-        columns: &RecordColumns<'_>,
+        columns: &RecordColumns<'a>,
         row: usize,
         operator_id: &str,
         names: &[String],
     ) -> Result<usize> {
-        encode_group_key(
-            columns,
-            row,
-            operator_id,
-            names,
-            &mut self.encoded_group,
-            &mut self.group_values,
-        )?;
-        if let Some(&group) = self.group_ids.get(self.encoded_group.as_slice()) {
+        let string_key = match columns.groups.as_slice() {
+            [(column, _)] => column.borrowed_string(row),
+            _ => BorrowedString::Other,
+        };
+        if let BorrowedString::Value(key) = string_key
+            && let Some(&group) = self.string_group_ids.get(&key)
+        {
+            return Ok(group);
+        }
+        encode_group_key(columns, row, operator_id, names, &mut self.encoded_group)?;
+        if matches!(string_key, BorrowedString::Other)
+            && let Some(&group) = self.group_ids.get(self.encoded_group.as_slice())
+        {
             return Ok(group);
         }
         let key = Arc::<[u8]>::from(self.encoded_group.as_slice());
         let group = self.group_keys.len();
         self.group_keys.push(Arc::clone(&key));
-        self.group_ids.insert(key, group);
+        self.group_values.push(
+            columns
+                .groups
+                .iter()
+                .map(|(column, _)| column.scalar_at(row))
+                .collect(),
+        );
+        if let BorrowedString::Value(value) = string_key {
+            self.string_group_ids.insert(value, group);
+        } else {
+            self.group_ids.insert(key, group);
+        }
         Ok(group)
     }
 
@@ -789,12 +810,12 @@ impl WindowAggregateOperator {
         Ok(scratch.into_update())
     }
 
-    fn prepare_row(
+    fn prepare_row<'a>(
         &self,
-        columns: &RecordColumns<'_>,
+        columns: &RecordColumns<'a>,
         row: usize,
         context: &StreamOperatorContext<'_>,
-        scratch: &mut BatchScratch,
+        scratch: &mut BatchScratch<'a>,
     ) -> Result<()> {
         let operator_id = context.operator_id();
         let Some(event_time) =
@@ -829,7 +850,7 @@ impl WindowAggregateOperator {
         columns: &RecordColumns<'_>,
         row: usize,
         slot: WindowSlot,
-        scratch: &mut BatchScratch,
+        scratch: &mut BatchScratch<'_>,
         operator_id: &str,
     ) -> Result<()> {
         let (index, previous_dynamic_bytes) = self.accumulator_slot(scratch, slot);
@@ -853,7 +874,7 @@ impl WindowAggregateOperator {
     /// bytes already charged for it, or `None` when the key is new to state.
     fn accumulator_slot(
         &self,
-        scratch: &mut BatchScratch,
+        scratch: &mut BatchScratch<'_>,
         slot: WindowSlot,
     ) -> (usize, Option<u64>) {
         let slot_key = (slot.start.as_micros(), slot.group);
@@ -871,7 +892,11 @@ impl WindowAggregateOperator {
         let existing = self.state.accumulators.get(&key);
         let previous_dynamic_bytes = existing.map(aggregate_dynamic_bytes);
         let entry = existing.cloned().unwrap_or_else(|| {
-            new_accumulator_row(&self.spec, &self.compiled, &scratch.group_values)
+            new_accumulator_row(
+                &self.spec,
+                &self.compiled,
+                &scratch.group_values[slot.group],
+            )
         });
         let index = scratch.entries.len();
         scratch.entries.push((key, entry));
@@ -1711,21 +1736,26 @@ fn window_assignment(
     Ok((EventTime::from_micros(start), EventTime::from_micros(end)))
 }
 
-/// Encodes the row's stable group key and values into caller-owned reusable
-/// buffers, replacing their previous contents.
+/// Encodes the row's stable group key without allocating string scalars.
 fn encode_group_key(
     columns: &RecordColumns<'_>,
     row: usize,
     operator_id: &str,
     names: &[String],
     encoded: &mut Vec<u8>,
-    values: &mut Vec<Option<ScalarValue>>,
 ) -> Result<()> {
     encoded.clear();
-    values.clear();
     for (ordinal, (column, data_type)) in columns.groups.iter().enumerate() {
-        let value = column.scalar_at(row);
-        encode_group_scalar(encoded, data_type, value.as_ref()).map_err(|message| {
+        let result = if let BorrowedString::Value(value) = column.borrowed_string(row) {
+            match value {
+                None => extend_group_encoding(encoded, &[0x00]),
+                Some(value) => extend_group_encoding(encoded, &[0x01])
+                    .and_then(|()| encode_group_string_bytes(encoded, value)),
+            }
+        } else {
+            encode_group_scalar(encoded, data_type, column.scalar_at(row).as_ref())
+        };
+        result.map_err(|message| {
             operator_error(
                 operator_id,
                 &format!(
@@ -1734,7 +1764,6 @@ fn encode_group_key(
                 ),
             )
         })?;
-        values.push(value);
     }
     Ok(())
 }
@@ -1893,6 +1922,13 @@ fn encode_string_group(
     let ScalarValue::String(value) = value else {
         return Err("compiled group scalar type mismatch".into());
     };
+    encode_group_string_bytes(encoded, value)
+}
+
+fn encode_group_string_bytes(
+    encoded: &mut Vec<u8>,
+    value: &str,
+) -> std::result::Result<(), String> {
     for byte in value.as_bytes() {
         let escaped = if *byte == 0 {
             &[0x00, 0xff][..]
@@ -2337,6 +2373,12 @@ struct ScalarColumn<'a> {
 }
 
 #[derive(Clone, Copy)]
+enum BorrowedString<'a> {
+    Other,
+    Value(Option<&'a str>),
+}
+
+#[derive(Clone, Copy)]
 enum TypedValues<'a> {
     Opaque,
     Boolean(&'a BooleanArray),
@@ -2358,6 +2400,16 @@ enum TypedValues<'a> {
 }
 
 impl<'a> ScalarColumn<'a> {
+    /// Distinguish string columns, including their null group, from other types.
+    fn borrowed_string(&self, row: usize) -> BorrowedString<'a> {
+        let value = match self.values {
+            TypedValues::Utf8(array) => (!self.is_null(row)).then(|| array.value(row)),
+            TypedValues::LargeUtf8(array) => (!self.is_null(row)).then(|| array.value(row)),
+            _ => return BorrowedString::Other,
+        };
+        BorrowedString::Value(value)
+    }
+
     fn opaque(array: &'a dyn Array) -> Self {
         Self {
             nulls: array.nulls(),

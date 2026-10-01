@@ -59,6 +59,7 @@ pub struct StreamAsofJoinOperator {
     inputs: Vec<Port>,
     outputs: Vec<Port>,
     schemas: [SchemaRef; 3],
+    output_columns: Option<[Vec<usize>; 2]>,
     state: State,
     prepared: Option<checkpoint::PreparedSegment>,
     /// Exact index length reserved in the state gauge, encoded on the first
@@ -230,6 +231,7 @@ impl StreamAsofJoinOperator {
             inputs,
             outputs,
             schemas,
+            output_columns: None,
             state,
             prepared: None,
             deferred_index_len: None,
@@ -243,6 +245,36 @@ impl StreamAsofJoinOperator {
     /// Returns the immutable declaration.
     pub const fn spec(&self) -> &StreamAsofJoinSpec {
         &self.spec
+    }
+
+    /// A physical output projection keeps the logical state schema and
+    /// fingerprint intact. Input validation and duplicate proofs still use
+    /// every declared identity column.
+    pub(crate) fn set_output_projection(&mut self, columns: Vec<usize>) -> Result<()> {
+        let schema = self.schemas[2]
+            .project(&columns)
+            .map_err(|error| arrow_error(&error))?;
+        self.outputs[0] = Port::with_schema_ref(
+            "output",
+            BatchKind::Table,
+            true,
+            Some(std::sync::Arc::new(schema)),
+        )?;
+        self.runtime.set_output_projection(columns.clone());
+        let left_fields = self.schemas[0].fields().len();
+        self.output_columns = Some([
+            columns
+                .iter()
+                .copied()
+                .filter(|&index| index < left_fields)
+                .collect(),
+            columns
+                .into_iter()
+                .filter(|&index| index >= left_fields)
+                .map(|index| index - left_fields)
+                .collect(),
+        ]);
+        Ok(())
     }
     /// Returns payload-free committed state and attempt counters.
     pub fn status(&self) -> StreamAsofJoinStatus {

@@ -115,6 +115,45 @@ fn direct_materialization_preserves_order_and_missing_right_rows() {
     );
 }
 
+#[test]
+fn complete_left_span_shares_its_arrow_values_buffer() {
+    let (_, schemas, row) = fixture();
+    let result = materialize_rows(&[(row.view(), None)], &schemas[2]).unwrap();
+    let source = row.batch.record.column(2).to_data();
+    let output = result.table_payload().unwrap().batches()[0]
+        .column(2)
+        .to_data();
+    assert_eq!(source.buffers()[0].as_ptr(), output.buffers()[0].as_ptr());
+}
+
+#[test]
+fn complete_left_span_with_larger_backing_still_copies() {
+    let (_, schemas, mut row) = fixture();
+    let record = RecordBatch::try_new(
+        schemas[0].clone(),
+        vec![
+            row.batch.record.column(0).clone(),
+            row.batch.record.column(1).clone(),
+            Arc::new(Int64Array::from(vec![7; 1_024]).slice(3, 1)),
+        ],
+    )
+    .unwrap();
+    row.batch = Arc::new(PayloadBatch {
+        key: (0, 1),
+        record: Arc::new(record),
+        body_bytes: 0,
+        encoded_charge_bytes: 0,
+        encoded: std::sync::OnceLock::new(),
+    });
+    let result = materialize_rows(&[(row.view(), None)], &schemas[2]).unwrap();
+    let source = row.batch.record.column(2).to_data();
+    let output = result.table_payload().unwrap().batches()[0]
+        .column(2)
+        .to_data();
+    assert_ne!(source.buffers()[0].as_ptr(), output.buffers()[0].as_ptr());
+    assert!(output.get_buffer_memory_size() < source.get_buffer_memory_size());
+}
+
 #[tokio::test]
 async fn cancelled_materialization_keeps_runtime_reusable() {
     let (_, schemas, bytes) = fixture();
