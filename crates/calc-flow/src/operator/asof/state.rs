@@ -17,11 +17,17 @@ const INLINE_ENCODING_BYTES: usize = 10;
 #[cfg(test)]
 thread_local! {
     static LEFT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static IDENTITY_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
 pub(super) fn take_left_visits() -> usize {
     LEFT_VISITS.with(|visits| visits.replace(0))
+}
+
+#[cfg(test)]
+pub(super) fn take_identity_probes() -> usize {
+    IDENTITY_PROBES.with(|probes| probes.replace(0))
 }
 
 fn left_row_refs(row: &(LeftOrder, RowRef)) -> (&LeftOrder, &RowRef) {
@@ -596,6 +602,8 @@ impl State {
     }
 
     pub fn contains_identity(&self, index: usize, identity: &LeftOrder) -> bool {
+        #[cfg(test)]
+        IDENTITY_PROBES.with(|probes| probes.set(probes.get() + 1));
         if index == 0 {
             self.left.contains_key(identity)
         } else {

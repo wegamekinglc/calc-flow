@@ -576,10 +576,62 @@ fn prepare_duplicate_probes<'a>(
     context: &StreamOperatorContext<'_>,
 ) -> Result<(bool, Option<HashSet<LeftOrder, RandomState>>)> {
     let sorted = identities_are_sorted((*identities).clone(), context)?;
-    let skip_resident = sorted && identities_are_after_state(state, side, (*identities).clone());
+    let skip_resident = if sorted {
+        identities_are_after_state(state, side, (*identities).clone())
+    } else {
+        unordered_identities_are_after_state(state, side, (*identities).clone(), context)?
+    };
     let seen =
         (!sorted).then(|| HashSet::with_capacity_and_hasher(identities.len(), RandomState::new()));
     Ok((skip_resident, seen))
+}
+
+fn unordered_identities_are_after_state<'a>(
+    state: &state::State,
+    side: usize,
+    identities: impl ExactSizeIterator<Item = &'a LeftOrder>,
+    context: &StreamOperatorContext<'_>,
+) -> Result<bool> {
+    let empty = if side == 0 {
+        state.left.is_empty()
+    } else {
+        state.right.is_empty()
+    };
+    if empty {
+        return Ok(true);
+    }
+    // Limit the history scan to this batch's size.
+    if side != 0 && state.right.len() > identities.len() {
+        return Ok(false);
+    }
+    let earliest = earliest_identity(identities, side, context)?;
+    Ok(identities_are_after_state(
+        state,
+        side,
+        earliest.into_iter(),
+    ))
+}
+
+fn earliest_identity<'a>(
+    identities: impl Iterator<Item = &'a LeftOrder>,
+    side: usize,
+    context: &StreamOperatorContext<'_>,
+) -> Result<Option<&'a LeftOrder>> {
+    let mut earliest = None;
+    for (position, identity) in identities.enumerate() {
+        check_input_cancellation(position, context)?;
+        if earliest.is_none_or(|previous: &LeftOrder| {
+            if side == 0 {
+                identity < previous
+            } else {
+                identity.0 < previous.0
+            }
+        }) {
+            earliest = Some(identity);
+        }
+    }
+    context.check_cancelled()?;
+    Ok(earliest)
 }
 
 fn repeated_identity(
@@ -1451,6 +1503,220 @@ mod identity_tests {
             allocation.bytes_max
         );
         assert_eq!(retained.unwrap().rows.len(), 1);
+    }
+
+    #[test]
+    fn unordered_append_runs_skip_resident_identity_probes() {
+        let key = state::Encoding::from_slice(&[1]);
+        let sequence = state::Encoding::from_slice(&[2]);
+        let identity = |time| (time, key.clone(), sequence.clone());
+        let mut resident = state::State::default();
+        resident
+            .left
+            .insert(identity(10), state::RowRef::fixture(0));
+        resident
+            .right
+            .bucket_mut_or_default(key.clone())
+            .insert((10, sequence.clone()), None);
+        let empty = state::State::default();
+        let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+        let context = StreamOperatorContext::new(&job, "asof", None);
+        let rows = [identity(12), identity(11), identity(12)];
+        for state in [&empty, &resident] {
+            for side in [0, 1] {
+                state::take_identity_probes();
+                assert_eq!(
+                    count_duplicate_identities(state, side, rows.iter(), &context).unwrap(),
+                    1
+                );
+                assert_eq!(state::take_identity_probes(), 0, "side={side}");
+            }
+        }
+    }
+
+    #[test]
+    fn unordered_probe_bounds_preserve_equal_and_lower_collisions() {
+        let key = state::Encoding::from_slice(&[1]);
+        let sequence = state::Encoding::from_slice(&[2]);
+        let identity = |time| (time, key.clone(), sequence.clone());
+        let mut state = state::State::default();
+        state.left.insert(identity(10), state::RowRef::fixture(0));
+        state
+            .right
+            .bucket_mut_or_default(key.clone())
+            .insert((10, sequence.clone()), None);
+        state
+            .right
+            .bucket_mut_or_default(state::Encoding::from_slice(&[3]))
+            .insert((20, sequence.clone()), None);
+        let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+        let context = StreamOperatorContext::new(&job, "asof", None);
+        for rows in [
+            vec![identity(11), identity(10), identity(10)],
+            vec![identity(10), identity(9), identity(10)],
+        ] {
+            for side in [0, 1] {
+                state::take_identity_probes();
+                assert_eq!(
+                    count_duplicate_identities(&state, side, rows.iter(), &context).unwrap(),
+                    2
+                );
+                assert_eq!(state::take_identity_probes(), 2, "side={side}");
+            }
+        }
+        let other_key = state::Encoding::from_slice(&[3]);
+        let rows = [
+            (21, other_key.clone(), sequence.clone()),
+            (20, other_key, sequence),
+        ];
+        state::take_identity_probes();
+        assert_eq!(
+            count_duplicate_identities(&state, 1, rows.iter(), &context).unwrap(),
+            1
+        );
+        assert_eq!(state::take_identity_probes(), 2);
+    }
+
+    #[test]
+    fn unordered_same_time_left_append_uses_full_identity_order() {
+        let key = state::Encoding::from_slice(&[1]);
+        let sequence = state::Encoding::from_slice(&[2]);
+        let mut state = state::State::default();
+        state.left.insert(
+            (10, key.clone(), sequence.clone()),
+            state::RowRef::fixture(0),
+        );
+        state
+            .right
+            .bucket_mut_or_default(key.clone())
+            .insert((10, sequence.clone()), None);
+        let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+        let context = StreamOperatorContext::new(&job, "asof", None);
+        for rows in [
+            vec![
+                (10, key.clone(), state::Encoding::from_slice(&[4])),
+                (10, key, state::Encoding::from_slice(&[3])),
+            ],
+            vec![
+                (10, state::Encoding::from_slice(&[4]), sequence.clone()),
+                (10, state::Encoding::from_slice(&[3]), sequence),
+            ],
+        ] {
+            for (side, expected_probes) in [(0, 0), (1, 2)] {
+                state::take_identity_probes();
+                assert_eq!(
+                    count_duplicate_identities(&state, side, rows.iter(), &context).unwrap(),
+                    0
+                );
+                assert_eq!(
+                    state::take_identity_probes(),
+                    expected_probes,
+                    "side={side}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unordered_small_runs_preserve_collisions_in_large_right_dictionary() {
+        let sequence = state::Encoding::from_slice(&[2]);
+        let mut state = state::State::default();
+        for key in 1..=4 {
+            state
+                .right
+                .bucket_mut_or_default(state::Encoding::from_slice(&[key]))
+                .insert((10, sequence.clone()), None);
+        }
+        let key = state::Encoding::from_slice(&[4]);
+        let rows = [(21, key.clone(), sequence.clone()), (10, key, sequence)];
+        let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+        let context = StreamOperatorContext::new(&job, "asof", None);
+        state::take_identity_probes();
+        assert_eq!(
+            count_duplicate_identities(&state, 1, rows.iter(), &context).unwrap(),
+            1
+        );
+        assert_eq!(state::take_identity_probes(), 2);
+    }
+
+    #[test]
+    fn unordered_probe_bound_scan_observes_cancellation() {
+        let key = state::Encoding::from_slice(&[1]);
+        let sequence = state::Encoding::from_slice(&[2]);
+        let mut state = state::State::default();
+        state
+            .right
+            .bucket_mut_or_default(key.clone())
+            .insert((10, sequence.clone()), None);
+        let rows = (11..2_059)
+            .rev()
+            .map(|time| (time, key.clone(), sequence.clone()))
+            .collect::<Vec<_>>();
+        let cancellation = CancellationToken::new();
+        let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, cancellation.clone());
+        let context = StreamOperatorContext::new(&job, "asof", None);
+        let identities = rows.iter().enumerate().map(|(position, identity)| {
+            if position == 1_024 {
+                cancellation.cancel();
+            }
+            identity
+        });
+        state::take_identity_probes();
+        assert!(matches!(
+            unordered_identities_are_after_state(&state, 1, identities, &context),
+            Err(crate::CalcFlowError::Cancelled { .. })
+        ));
+        assert_eq!(state::take_identity_probes(), 0);
+        assert_eq!(state.right.get(&key).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn unordered_probe_bound_uses_only_accepted_rows() {
+        use datafusion::arrow::array::{Int64Array, StringArray};
+        let (mut operator, schema) = identity_fixture();
+        let record = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["key"; 4])),
+                Arc::new(TimestampMicrosecondArray::from(vec![0, 12, 11, 12]).with_timezone("UTC")),
+                Arc::new(Int64Array::from(vec![999, 1, 2, 3])),
+            ],
+        )
+        .unwrap();
+        let key = state::encode_columns(&record, &["key".into()])
+            .unwrap()
+            .row(0);
+        let sequence = state::encode_columns(&record, &["seq".into()])
+            .unwrap()
+            .row(1);
+        operator.state.left.insert(
+            (10, key.clone(), sequence.clone()),
+            state::RowRef::fixture(0),
+        );
+        operator
+            .state
+            .right
+            .bucket_mut_or_default(key)
+            .insert((10, sequence), None);
+        let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+        let context = StreamOperatorContext::new(&job, "asof", None);
+        for index in [0, 1] {
+            state::take_identity_probes();
+            let identities = operator
+                .admission_identities(
+                    std::slice::from_ref(&record),
+                    ValidatedInput {
+                        index,
+                        watermark: Some(10),
+                    },
+                    3,
+                    &context,
+                )
+                .unwrap();
+            assert_eq!(identities.rows.len(), 3);
+            assert_eq!(identities.duplicates, 0);
+            assert_eq!(state::take_identity_probes(), 0, "side={index}");
+        }
     }
 
     #[test]
