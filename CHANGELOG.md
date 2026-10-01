@@ -7,7 +7,119 @@ the [documentation index](docs/README.md).
 Entries describe the state at their date, including superseded decisions and
 measurements. Use the current guides for supported behavior.
 
+## 2026-10
+
+- 2026-10-01: Move stream ASOF state, layout, and accounting to version 3.
+  Checkpoints use a canonical columnar index with key dictionaries, typed
+  integer sequence columns, shared generic identity buffers, batch references,
+  and capacity hints. Resource charges cover retained capacities and unique
+  buffer owners. Shared right columns and sparse payload pool replacements are
+  prepared on blocking workers with reservations retained through cancellation.
+  Rust and Python capabilities advertise state/layout 3; the operator identity
+  remains `stream_asof_join@1`. Versions 1 and 2 are rejected.
+  Admission uses typed string-key dictionaries with integer sequences, copies
+  ordered integer sequence ranges, and aggregates shared owner counts. Output
+  workspace uses Arrow offset ranges; finalization and eviction avoid encoding
+  integer sequences that need no owned buffer. Eviction previews reserve their
+  encoding-owner removal scratch before changing state.
+
 ## 2026-09
+
+- 2026-09-30: Verify coverage comparison baselines from successful Linux CI
+  reruns. The resolver checks the latest attempt's three coverage jobs and
+  required steps, and binds each checksum-bearing artifact to its successful
+  job's execution interval, including jobs carried forward from earlier
+  attempts. Source-tree, repository, and coverage threshold checks still apply.
+
+- 2026-09-30: Continue stream ASOF Join acceleration. Admission retains flat
+  Arrow payload batches without eagerly writing their checkpoint IPC segments;
+  checkpoint preparation encodes each retained batch once and later captures
+  share its immutable bytes. The existing v2 checkpoint format, accounting
+  version, state charge, and v1/v2 restore behavior remain compatible. See the
+  second-round performance comparison in the associated PR for measured effects.
+
+- 2026-09-30: Speed up ordered stream ASOF Join admission. It checks adjacent
+  identities in already ordered batches, skips resident identity probes when
+  the new range follows retained state, and avoids interning short inline keys.
+  Watermark-local disorder still uses full duplicate detection; duplicate
+  counters and checkpoint identity bytes remain unchanged.
+
+- 2026-09-30: Encode single non-null `Int64` and `UInt64` ASOF identity columns
+  directly into Arrow's canonical row bytes. Other types and nullable columns
+  keep the generic Arrow converter. This reduces admission allocation and
+  preserves checkpoint identity compatibility.
+
+- 2026-09-30: Reuse a per-key candidate cursor while finalizing large ordered
+  ASOF output prefixes. Small prefixes and cases without cursor workspace use
+  the existing binary search. Matching, identity-only rows, tolerance bounds,
+  output order, and checkpoint state are unchanged.
+
+- 2026-09-30: Store globally ordered pending ASOF left rows contiguously and
+  append later non-overlapping batches without per-row tree insertion.
+  Overlapping batches retain the tree fallback. Finalized prefixes release
+  their batch references and compact vector capacity when it exceeds the
+  remaining identities' charged headroom. Admission moves validated identities
+  into payload references without cloning each row and projects checkpoint index
+  length and state charges in one scan;
+  checkpoint index bytes and v1/v2 recovery remain unchanged.
+
+- 2026-09-30: Locate stream ASOF right buckets with a hash table while
+  retaining sorted keys for canonical checkpoint writes. Eviction releases
+  oversized bucket and hash-table capacity as right history contracts. The
+  existing v2 index bytes, state charge, and v1/v2 restore rules remain
+  compatible.
+
+- 2026-09-30: Keep ASOF right payload and identity-only histories in separate
+  ordered time and sequence columns. Eviction previews inspect their expired
+  prefixes, and committed sweeps advance head cursors and release dead payload
+  references before periodically compacting capacity. Stalled identity history
+  no longer makes each payload sweep revisit all retained rows. Canonical key
+  ordering uses a tree, including reverse arrivals of many distinct keys; sparse
+  identity-only buckets allocate no payload column. Existing v2 checkpoint bytes
+  and v1/v2 recovery remain compatible. Older payloads enter a separate identity
+  tree when their order overlaps retained history, without moving retained
+  identity columns. Empty key and batch-reference indexes release their owned
+  allocations when the committed state charge reaches zero. Eviction workspace
+  reserves the batch-reference tree's minimum leaf allocation as well as its
+  per-batch slots, retaining the configured workspace cap.
+
+- 2026-09-30: Accumulate ASOF right row counts while admitting identities,
+  reserve each right column for the accepted batch, and skip the identity-only
+  history probes already covered by duplicate validation. Output workers own
+  one Arrow reference per distinct source and primitive row positions instead
+  of cloning a payload handle for each output row. Prefix matching accumulates
+  checkpoint-length, row-charge, and batch-reference changes in the same walk;
+  ordered prefix selection uses binary search, and sink acceptance commits
+  aggregated batch-reference changes without constructing an owned key vector.
+  Checkpoint bytes, counters, cancellation, and configured resource caps retain
+  their existing contracts.
+
+- 2026-09-30: Intern retained ASOF right keys in a `u32` handle dictionary
+  using DataFusion's canonical-byte batch hashing and a per-instance seed.
+  Repeated admissions share resident key buffers. Checkpoints sort keys by
+  bytes with reserved scratch, using a blocking worker in the managed async
+  path; v1/v2 index bytes and state accounting remain compatible. Repeated small
+  admissions amortize right-column growth. Identity workspace covers the batch
+  encoding, sequence copies, and converter headers; new owned key copies grow
+  a separate reservation once per unique key before allocation. Dropped late
+  rows do not allocate identity buffers, and contiguous accepted runs reuse
+  their batch converter. Tight hash workspace
+  uses scalar probing with the same equality semantics.
+
+- 2026-09-30: Retain ASOF payload rows as eight-byte batch and row handles.
+  One private pool owns each Arrow payload batch, releases it after its final
+  row reference, and trims its indexes as history contracts. Output and
+  checkpoint preparation borrow pool entries. Canonical v2 checkpoint bytes,
+  state charges, and strict v1/v2 recovery checks remain compatible.
+
+- 2026-09-30: Retain pending ASOF left rows in sorted Arrow chunks with one
+  canonical key owner per chunk and compact row positions. Borrowed cursors
+  merge overlapping chunks in canonical time, key, and sequence order.
+  Preparation and prefix compaction run on blocking workers with owned
+  workspace, including retained input buffers after cancellation and reset;
+  accepted output commits prebuilt buffers without allocation.
+  Recovery migrates only validated live index rows. Checkpoint bytes and
+  accounting remain v2 compatible.
 
 - 2026-09-29: Require immutable `Program(engine="sql")` or
   `Program(engine="streaming")` selection at construction and add

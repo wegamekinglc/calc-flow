@@ -72,11 +72,16 @@ impl StreamAsofJoinOperator {
         side: &AsofJoinSide,
         context: &StreamOperatorContext<'_>,
     ) -> Result<bool> {
-        for (time, key, sequence) in self.state.left.keys() {
+        for (time, key, sequence) in self.state.left.unordered_keys() {
             context.check_cancelled()?;
             if times(row.0, side).value(row.1) == *time
                 && identity_compare::encoded_equal(row.0, row.1, side.keys(), key)
-                && identity_compare::encoded_equal(row.0, row.1, side.sequence_by(), sequence)
+                && identity_compare::encoded_equal(
+                    row.0,
+                    row.1,
+                    side.sequence_by(),
+                    sequence.as_slice(),
+                )
             {
                 return Ok(true);
             }
@@ -98,7 +103,12 @@ impl StreamAsofJoinOperator {
             for (time, sequence) in bucket.keys() {
                 context.check_cancelled()?;
                 if times(row.0, side).value(row.1) == *time
-                    && identity_compare::encoded_equal(row.0, row.1, side.sequence_by(), sequence)
+                    && identity_compare::encoded_equal(
+                        row.0,
+                        row.1,
+                        side.sequence_by(),
+                        sequence.as_slice(),
+                    )
                 {
                     return Ok(true);
                 }

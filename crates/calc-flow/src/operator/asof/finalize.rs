@@ -1,24 +1,39 @@
 use super::{
     StreamAsofJoinOperator, StreamAsofJoinStatus, SweepStamp, checked, reason,
-    state::{self, BatchKey, LeftOrder, RowPayload},
+    state::{self, BatchKey, LeftPrefix, PayloadView},
     workspace::ColumnWorkspace,
 };
 use crate::{
     Batch, BatchMetadata, CalcFlowError, EventTime, JsonMap, Result, StreamCollector,
     StreamOperatorContext, StreamingFailureReason,
 };
+use ahash::RandomState;
 use datafusion::execution::memory_pool::MemoryReservation;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 mod prefix;
+
+type EvictionProjection = (state::EvictionPreview, u64, state::Inventory, u64);
 
 struct PreparedOutput {
     batch: Batch,
     matched: u64,
     workspace: MemoryReservation,
+    prefix: LeftPrefix,
+}
+
+struct MatchedPrefix<'a> {
+    rows: Vec<(PayloadView<'a>, Option<PayloadView<'a>>)>,
+    prefix: LeftPrefix,
 }
 
 impl StreamAsofJoinOperator {
+    #[tracing::instrument(
+        name = "asof.finalize",
+        level = "debug",
+        skip_all,
+        fields(operator = %self.name, frontier, ended)
+    )]
     pub(super) async fn finalize(
         &mut self,
         frontier: Option<i64>,
@@ -34,13 +49,13 @@ impl StreamAsofJoinOperator {
             // Defer right-side eviction until all ready left rows are emitted.
             // Each accepted prefix can then share the committed right segment.
             let headroom = self.checkpoint_workspace()?;
-            let (mut keys, key_workspace) = self.finalizable_keys(frontier, ended, context)?;
+            let (mut count, prefix_workspace) = self.finalizable_rows(frontier, ended, context)?;
             let prepared_output = self
-                .prepare_output(&mut keys, &key_workspace, context)
+                .prepare_output(&mut count, &prefix_workspace, context)
                 .await?;
-            self.commit_prefix_output(&keys, prepared_output, headroom, context, output)
+            self.commit_prefix_output(prepared_output, headroom, context, output)
                 .await?;
-            drop(key_workspace);
+            drop(prefix_workspace);
         }
         self.finish_progress(frontier, ended, context).await
     }
@@ -62,45 +77,20 @@ impl StreamAsofJoinOperator {
             .is_some_and(|((time, _, _), _)| ended || frontier.is_some_and(|bound| *time < bound))
     }
 
-    fn finalizable_keys(
+    fn finalizable_rows(
         &self,
         frontier: Option<i64>,
         ended: bool,
         context: &StreamOperatorContext<'_>,
-    ) -> Result<(Vec<LeftOrder>, MemoryReservation)> {
-        const MAX_KEYS: usize = 64_000;
-        let limit = context.output_budget().max_rows.min(MAX_KEYS);
-        let count = self.count_finalizable_keys(limit, frontier, ended, context)?;
-        let (count, reservation) = self.reserve_finalizable_keys(count)?;
-        let mut keys = Vec::with_capacity(count);
-        for key in self.state.left.keys().take(count) {
-            context.check_cancelled()?;
-            keys.push(key.clone());
-        }
-        Ok((keys, reservation))
-    }
-
-    fn count_finalizable_keys(
-        &self,
-        limit: usize,
-        frontier: Option<i64>,
-        ended: bool,
-        context: &StreamOperatorContext<'_>,
-    ) -> Result<usize> {
-        let mut count = 0;
-        for (time, _, _) in self.state.left.keys().take(limit) {
-            context.check_cancelled()?;
-            if !ended && frontier.is_none_or(|bound| *time >= bound) {
-                break;
-            }
-            count += 1;
-        }
-        Ok(count)
-    }
-
-    fn reserve_finalizable_keys(&self, mut count: usize) -> Result<(usize, MemoryReservation)> {
+    ) -> Result<(usize, MemoryReservation)> {
+        const MAX_ROWS: usize = 64_000;
+        context.check_cancelled()?;
+        let limit = context.output_budget().max_rows.min(MAX_ROWS);
+        let mut count = self.state.left.ready_prefix_len(limit, frontier, ended);
         loop {
-            match self.reserve_workspace(key_workspace_bytes(count, count)) {
+            match self.reserve_workspace(
+                prefix_workspace_bytes(count) + self.state.left.iter_workspace_bytes(),
+            ) {
                 Ok(reservation) => return Ok((count, reservation)),
                 Err(_) if count > 1 => count /= 2,
                 Err(error) => return Err(error),
@@ -116,6 +106,12 @@ impl StreamAsofJoinOperator {
         Ok(status)
     }
 
+    #[tracing::instrument(
+        name = "asof.sweep",
+        level = "debug",
+        skip_all,
+        fields(operator = %self.name, frontier, ended)
+    )]
     async fn finish_progress(
         &mut self,
         frontier: Option<i64>,
@@ -137,56 +133,140 @@ impl StreamAsofJoinOperator {
             self.swept = Some(stamp);
             return Ok(());
         }
-        let workspace = self.state_workspace()?;
-        let mut next = self.state.clone();
+        self.finish_capacity_progress(frontier, ended, context)
+            .await
+    }
+
+    fn capacity_eviction_projection(&self) -> Result<EvictionProjection> {
+        let preview =
+            self.state
+                .preview_eviction(&self.status, self.spec.tolerance_micros(), &self.name)?;
+        let (length, inventory, bytes) = self.state.project_capacity_eviction(
+            self.capacity_snapshot(),
+            &preview,
+            &self.status,
+            self.spec.tolerance_micros(),
+            &self.name,
+        )?;
+        self.check_inventory_limits(&inventory)?;
+        Ok((preview, length, inventory, bytes))
+    }
+
+    async fn finish_capacity_progress(
+        &mut self,
+        frontier: Option<i64>,
+        ended: bool,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<()> {
+        let staging = self.reserve_capacity_eviction_staging()?;
+        let (preview, length, inventory, bytes) = self.capacity_eviction_projection()?;
+        let columns = self.reserve_workspace(bytes)?;
+        let status = self.capacity_progress_status(&preview, &inventory, frontier)?;
+        let pool = self
+            .prepare_pool_compaction(&preview.batches, context)
+            .await?;
+        let copies = self.checked_right_eviction_copies(context).await?;
+        copies.install(&mut self.state.right);
+        let evicted =
+            self.state
+                .evict_prepared(&status, self.spec.tolerance_micros(), pool, &preview);
+        debug_assert_eq!(evicted, preview.evicted_payloads);
+        self.status = status;
+        self.prepared = None;
+        self.deferred_index_len = (length != 0).then_some(length);
+        self.swept = Some(SweepStamp::current(&self.status));
+        self.terminal = ended;
+        debug_assert_eq!(
+            self.current_inventory(None)
+                .expect("committed eviction inventory")
+                .bytes
+                + if length == 0 { 0 } else { length + 256 },
+            self.status.state_bytes
+        );
+        drop((columns, staging));
+        Ok(())
+    }
+
+    fn reserve_capacity_eviction_staging(&self) -> Result<MemoryReservation> {
+        self.reserve_workspace(self.state.eviction_workspace_bytes(&self.name)?)
+    }
+
+    async fn checked_right_eviction_copies(
+        &self,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<super::copy::PreparedRightCopies> {
+        let copies = self.prepare_right_eviction_copies(context).await?;
+        context.check_cancelled()?;
+        Ok(copies)
+    }
+
+    fn capacity_progress_status(
+        &self,
+        preview: &state::EvictionPreview,
+        inventory: &state::Inventory,
+        frontier: Option<i64>,
+    ) -> Result<StreamAsofJoinStatus> {
         let mut status = self.status.clone();
-        let evicted = next.evict(&status, self.spec.tolerance_micros());
-        status.evicted_right_rows = checked(&self.name, status.evicted_right_rows, evicted)?;
-        let prepared = self.prepare_checkpoint(&next, context).await?;
-        self.checked_inventory(&next, prepared.segment.as_ref(), &mut status)?;
+        status.evicted_right_rows = checked(
+            &self.name,
+            status.evicted_right_rows,
+            preview.evicted_payloads,
+        )?;
+        status.retained_right_rows = inventory.right_payloads;
+        status.identity_only_rows = inventory.identity_only;
+        status.state_rows = inventory.identities;
+        status.state_bytes = inventory.bytes;
         status.output_watermark_micros = frontier
             .and_then(|time| time.checked_sub(1))
             .map(EventTime::from_micros)
             .or(status.output_watermark_micros);
-        self.install(next, status, prepared, true);
-        self.terminal = ended;
-        drop(workspace);
-        Ok(())
+        Ok(status)
     }
 
     async fn prepare_output(
         &mut self,
-        keys: &mut Vec<LeftOrder>,
-        key_workspace: &MemoryReservation,
+        count: &mut usize,
+        prefix_workspace: &MemoryReservation,
         context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedOutput> {
         loop {
             context.check_cancelled()?;
-            match self.output_attempt(keys, context).await {
+            match self.output_attempt(*count, context).await {
                 Ok(output) => return Ok(output),
-                Err(error) if keys.len() > 1 && retryable(&error) => {
-                    keys.truncate(keys.len() / 2);
-                    shrink_key_workspace(keys, key_workspace);
+                Err(error) if *count > 1 && retryable(&error) => {
+                    *count /= 2;
+                    shrink_prefix_workspace(
+                        *count,
+                        self.state.left.iter_workspace_bytes(),
+                        prefix_workspace,
+                    );
                 }
                 Err(error) => return Err(error),
             }
         }
     }
 
+    #[tracing::instrument(
+        name = "asof.output",
+        level = "debug",
+        skip_all,
+        fields(operator = %self.name, rows = count)
+    )]
     async fn output_attempt(
         &mut self,
-        keys: &[LeftOrder],
+        count: usize,
         context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedOutput> {
-        let mut rows = Vec::with_capacity(keys.len());
-        for key in keys {
-            context.check_cancelled()?;
-            rows.push((
-                &self.state.left[key],
-                self.state
-                    .candidate(&key.1, key.0, self.spec.tolerance_micros()),
-            ));
-        }
+        let cursor_workspace = self.cursor_workspace(count)?;
+        let MatchedPrefix { rows, prefix } = match_output_prefix(
+            &self.state,
+            count,
+            self.spec.tolerance_micros(),
+            context,
+            &self.name,
+            cursor_workspace,
+        )?;
+        context.check_cancelled()?;
         let matched = rows.iter().filter(|(_, right)| right.is_some()).count() as u64;
         let mut workspace = self.reserve_workspace(16 * 1024)?;
         let bytes = output_workspace(&rows, &self.schemas[1], &mut workspace, &self.name)?;
@@ -194,14 +274,31 @@ impl StreamAsofJoinOperator {
         grow_output_workspace(&mut workspace, remaining, &self.name)?;
         let (result, workspace) = self
             .runtime
-            .materialize(&rows, &self.schemas[2], workspace)
+            .materialize(&rows, &self.schemas[2], workspace, || {
+                context.check_cancelled()
+            })
             .await?;
         let batch = self.output_batch(&result, context)?;
         Ok(PreparedOutput {
             batch,
             matched,
             workspace,
+            prefix,
         })
+    }
+
+    fn cursor_workspace(&self, count: usize) -> Result<Option<MemoryReservation>> {
+        let right_keys = self.state.right.len();
+        if count < 1_024 || right_keys == 0 || right_keys > 4_096 || count < right_keys * 4 {
+            return Ok(None);
+        }
+        // One hash slot, key, cursor, and allocator slack per right bucket.
+        let charge = right_keys as u64 * 128 + 256;
+        match self.reserve_workspace(charge) {
+            Ok(reservation) => Ok(Some(reservation)),
+            Err(error) if retryable(&error) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
     fn output_batch(&self, result: &Batch, context: &StreamOperatorContext<'_>) -> Result<Batch> {
         let batch = Batch::table(
@@ -219,6 +316,82 @@ impl StreamAsofJoinOperator {
     }
 }
 
+fn match_output_prefix<'a>(
+    state: &'a state::State,
+    count: usize,
+    tolerance: u64,
+    context: &StreamOperatorContext<'_>,
+    name: &str,
+    cursor_workspace: Option<MemoryReservation>,
+) -> Result<MatchedPrefix<'a>> {
+    let matched = if cursor_workspace.is_some() {
+        monotonic_candidate_rows(state, count, tolerance, context, name)?
+    } else {
+        binary_search_candidate_rows(state, count, tolerance, context, name)?
+    };
+    drop(cursor_workspace);
+    Ok(matched)
+}
+
+fn binary_search_candidate_rows<'a>(
+    state: &'a state::State,
+    count: usize,
+    tolerance: u64,
+    context: &StreamOperatorContext<'_>,
+    name: &str,
+) -> Result<MatchedPrefix<'a>> {
+    let mut rows = Vec::with_capacity(count);
+    let mut prefix = LeftPrefix::default();
+    for (index, (key, left)) in state.left.output_iter().take(count).enumerate() {
+        if index % 1_024 == 0 {
+            context.check_cancelled()?;
+        }
+        let left = state.batches.view(left);
+        rows.push((
+            left,
+            state
+                .candidate(key.1, *key.0, tolerance)
+                .map(|row| state.batches.view(*row)),
+        ));
+        prefix.visit_owners(key.1, key.2, left.batch.key, name)?;
+    }
+    Ok(MatchedPrefix { rows, prefix })
+}
+
+fn monotonic_candidate_rows<'a>(
+    state: &'a state::State,
+    count: usize,
+    tolerance: u64,
+    context: &StreamOperatorContext<'_>,
+    name: &str,
+) -> Result<MatchedPrefix<'a>> {
+    let first_time = state
+        .left
+        .first_key_value()
+        .expect("nonempty ASOF prefix")
+        .0
+        .0;
+    let first_time = *first_time;
+    let mut cursors = HashMap::with_capacity_and_hasher(state.right.len(), RandomState::new());
+    for (key, bucket) in &state.right {
+        cursors.insert(key.clone(), (bucket, bucket.cursor_at(first_time)));
+    }
+    let mut rows = Vec::with_capacity(count);
+    let mut prefix = LeftPrefix::default();
+    for (index, (key, left)) in state.left.output_iter().take(count).enumerate() {
+        if index % 1_024 == 0 {
+            context.check_cancelled()?;
+        }
+        let right = cursors
+            .get_mut(key.1)
+            .and_then(|(bucket, next)| bucket.candidate_monotonic(*key.0, tolerance, next));
+        let left = state.batches.view(left);
+        rows.push((left, right.map(|row| state.batches.view(*row))));
+        prefix.visit_owners(key.1, key.2, left.batch.key, name)?;
+    }
+    Ok(MatchedPrefix { rows, prefix })
+}
+
 fn retryable(error: &CalcFlowError) -> bool {
     matches!(
         error,
@@ -230,17 +403,15 @@ fn retryable(error: &CalcFlowError) -> bool {
     )
 }
 
-fn key_workspace_bytes(key_capacity: usize, candidate_rows: usize) -> u64 {
-    (key_capacity * size_of::<LeftOrder>()
-        + candidate_rows * size_of::<(&RowPayload, Option<&RowPayload>)>()
-        + key_capacity * 80 // bounded batch-reference counts during commit
-        + 128) as u64
+fn prefix_workspace_bytes(count: usize) -> u64 {
+    // Candidate references, batch-reference count tree (including a minimum
+    // leaf), and allocator slack. No owned identity vector is constructed.
+    (count * (size_of::<(PayloadView<'_>, Option<PayloadView<'_>>)>() + 640) + 2_048) as u64
 }
 
-fn shrink_key_workspace(keys: &mut Vec<LeftOrder>, reservation: &MemoryReservation) {
-    keys.shrink_to_fit();
-    let needed = usize::try_from(key_workspace_bytes(keys.capacity(), keys.len()))
-        .expect("bounded ASOF key scratch");
+fn shrink_prefix_workspace(count: usize, heap_bytes: u64, reservation: &MemoryReservation) {
+    let needed = usize::try_from(prefix_workspace_bytes(count) + heap_bytes)
+        .expect("bounded ASOF prefix scratch");
     reservation.shrink(reservation.size() - needed);
 }
 
@@ -249,7 +420,7 @@ fn shrink_key_workspace(keys: &mut Vec<LeftOrder>, reservation: &MemoryReservati
 /// actual Arrow slice widths, including repeated right candidates; the fourfold
 /// multiplier covers a growing output buffer and a simultaneous old buffer.
 fn output_workspace(
-    rows: &[(&RowPayload, Option<&RowPayload>)],
+    rows: &[(PayloadView<'_>, Option<PayloadView<'_>>)],
     right_schema: &datafusion::arrow::datatypes::Schema,
     workspace: &mut MemoryReservation,
     name: &str,
@@ -265,23 +436,49 @@ fn output_workspace(
 }
 
 fn raw_output_bytes(
-    rows: &[(&RowPayload, Option<&RowPayload>)],
+    rows: &[(PayloadView<'_>, Option<PayloadView<'_>>)],
     columns: &mut BTreeMap<BatchKey, Vec<ColumnWorkspace>>,
     workspace: &mut MemoryReservation,
     name: &str,
 ) -> Result<u64> {
+    let left = raw_side_bytes(rows.iter().map(|(left, _)| *left), columns, workspace, name)?;
+    let right = raw_side_bytes(
+        rows.iter().filter_map(|(_, right)| *right),
+        columns,
+        workspace,
+        name,
+    )?;
+    checked(name, left, right)
+}
+
+fn raw_side_bytes<'a>(
+    rows: impl Iterator<Item = PayloadView<'a>>,
+    columns: &mut BTreeMap<BatchKey, Vec<ColumnWorkspace>>,
+    workspace: &mut MemoryReservation,
+    name: &str,
+) -> Result<u64> {
+    let mut rows = rows.peekable();
     let mut raw = 0;
-    for (left, right) in rows {
-        raw = checked(name, raw, row_slice_bytes(left, columns, workspace, name)?)?;
-        if let Some(right) = right {
-            raw = checked(name, raw, row_slice_bytes(right, columns, workspace, name)?)?;
+    while let Some(row) = rows.next() {
+        let mut end = row.row + 1;
+        while rows
+            .peek()
+            .is_some_and(|next| next.batch.key == row.batch.key && next.row == end)
+        {
+            rows.next();
+            end += 1;
         }
+        raw = checked(
+            name,
+            raw,
+            range_slice_bytes(&row, row.row..end, columns, workspace, name)?,
+        )?;
     }
     Ok(raw)
 }
 
 fn output_buffer_bytes(
-    rows: &[(&RowPayload, Option<&RowPayload>)],
+    rows: &[(PayloadView<'_>, Option<PayloadView<'_>>)],
     right_schema: &datafusion::arrow::datatypes::Schema,
     raw: u64,
     name: &str,
@@ -341,8 +538,9 @@ fn workspace_overflow(name: &str) -> CalcFlowError {
     )
 }
 
-fn row_slice_bytes(
-    row: &RowPayload,
+fn range_slice_bytes(
+    row: &PayloadView<'_>,
+    range: std::ops::Range<usize>,
     cache: &mut BTreeMap<BatchKey, Vec<ColumnWorkspace>>,
     workspace: &mut MemoryReservation,
     name: &str,
@@ -367,7 +565,7 @@ fn row_slice_bytes(
         }
     };
     columns.iter().try_fold(0, |total, column| {
-        checked(name, total, column.bytes(row.row, name)?)
+        checked(name, total, column.range_bytes(range.clone(), name)?)
     })
 }
 
@@ -419,20 +617,18 @@ mod workspace_tests {
     #[test]
     fn output_retry_releases_key_and_candidate_scratch() {
         let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
-        let mut keys = (0..4_096)
-            .map(|time| (time, Arc::new(vec![1]), Arc::new(vec![1])))
-            .collect::<Vec<_>>();
+        let mut count = 1_024;
         let reservation = MemoryConsumer::new("asof-test-keys").register(&pool);
         reservation
-            .try_grow(usize::try_from(key_workspace_bytes(keys.capacity(), keys.len())).unwrap())
+            .try_grow(usize::try_from(prefix_workspace_bytes(count)).unwrap())
             .unwrap();
         let initial = reservation.size();
-        keys.truncate(1);
-        shrink_key_workspace(&mut keys, &reservation);
+        count = 1;
+        shrink_prefix_workspace(count, 0, &reservation);
         assert!(reservation.size() < initial / 100);
         assert_eq!(
             reservation.size(),
-            usize::try_from(key_workspace_bytes(keys.capacity(), keys.len())).unwrap()
+            usize::try_from(prefix_workspace_bytes(count)).unwrap()
         );
         assert_eq!(pool.reserved(), reservation.size());
     }
@@ -455,17 +651,21 @@ mod workspace_tests {
             .unwrap(),
         );
         let payloads = (0..4)
-            .map(|id| RowPayload {
+            .map(|id| state::RowPayload {
                 batch: Arc::new(state::PayloadBatch {
                     key: (0, id),
                     record: record.clone(),
-                    encoded: StateSegment::new(Vec::new()),
+                    encoded: std::sync::OnceLock::from(StateSegment::new(Vec::new())),
+                    encoded_charge_bytes: 0,
                     body_bytes: 0,
                 }),
                 row: 0,
             })
             .collect::<Vec<_>>();
-        let rows = payloads.iter().map(|row| (row, None)).collect::<Vec<_>>();
+        let rows = payloads
+            .iter()
+            .map(|row| (row.view(), None))
+            .collect::<Vec<_>>();
         let mut reservation = MemoryConsumer::new("asof-test-output").register(&pool);
         reservation.try_grow(16 * 1024).unwrap();
         assert!(matches!(

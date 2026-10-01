@@ -100,7 +100,7 @@ impl TaskFixture {
             &["left", "right"],
             1,
             CompiledStreamOperator::StreamAsofJoin(Box::new(operator)),
-            OperatorCheckpointCapability::CheckpointedStateful { state_version: 1 },
+            OperatorCheckpointCapability::CheckpointedStateful { state_version: 3 },
             port,
             Some(OperatorCheckpointPort {
                 acks: sender,
@@ -563,7 +563,7 @@ async fn test_asof_restore_rejects_pending_left_at_or_behind_output_frontier_bef
         &["left", "right"],
         1,
         CompiledStreamOperator::StreamAsofJoin(Box::new(restored)),
-        OperatorCheckpointCapability::CheckpointedStateful { state_version: 1 },
+        OperatorCheckpointCapability::CheckpointedStateful { state_version: 3 },
         port,
         None,
         Some(super::OperatorRestoreState {

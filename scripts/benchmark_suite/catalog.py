@@ -8,6 +8,15 @@ from pathlib import Path
 ROW_SCALES = tuple(10**power for power in range(1, 8))
 LEGACY_SCALES = ("overhead", "small", "standard")
 SQL_CASES = ("projection", "filter", "group_by", "join", "sma20", "dual_sma")
+POLARS_CASES = (
+    "projection",
+    "filter",
+    "group_by",
+    "join",
+    "sma20",
+    "dual_sma",
+    "asof_join",
+)
 ROLLING_CASES = SQL_CASES[-2:]
 # Keep this a literal tuple: the suite resolves baseline case ids by parsing
 # the baseline catalog's declarative forms, and derived assignments fail
@@ -42,7 +51,7 @@ REPORT_CASES = SQL_CASES + tuple(
 CAPABILITIES = {
     "calc-flow-sql": SQL_CASES,
     "datafusion": SQL_CASES,
-    "polars": SQL_CASES,
+    "polars": POLARS_CASES,
     "calc-flow-stream": STREAM_CASES,
     "ta-lib": ROLLING_CASES,
     "finance-python": FINANCE_CASES,
@@ -357,7 +366,7 @@ def _baseline_engine_ids(constants: dict[str, tuple[str, ...] | int]) -> frozens
     columns = (
         ("calc-flow-sql", sql),
         ("datafusion", sql),
-        ("polars", sql),
+        ("polars", constants.get("POLARS_CASES", sql)),
         ("calc-flow-stream", stream),
         ("ta-lib", rolling),
         ("finance-python", constants.get("FINANCE_CASES", ())),

@@ -41,6 +41,21 @@ def test_polars_samples_collect_through_the_streaming_engine(monkeypatch):
     assert result == pa.table({"value": [1.0]})
 
 
+def test_polars_asof_case_matches_the_shared_oracle(tmp_path):
+    case = next(
+        case
+        for case in engine_cases(101)
+        if case["backend"] == "polars" and case["scenario"] == "asof_join"
+    )
+    runner = EngineCase(case, tmp_path)
+    try:
+        sample = runner.sample()
+        assert sample["correctness"]["passed"]
+        assert sample["correctness"]["rows"] == 101
+    finally:
+        runner.close()
+
+
 @pytest.mark.parametrize("scenario", STREAM_CASES)
 def test_ready_stream_repeated_samples_use_fresh_execution_plans(scenario, tmp_path):
     case = next(

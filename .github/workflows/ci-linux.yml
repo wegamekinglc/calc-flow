@@ -853,6 +853,12 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     env:
+      # Four connector services share this 16 GiB runner with instrumented
+      # linking. Without DWARF, one job peaked near 6.5 GiB; three jobs keep
+      # codegen and link parallelism while added swap absorbs rare spikes.
+      CARGO_BUILD_JOBS: "3"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
       CALC_FLOW_CONNECTOR_CONTAINERS: "1"
       CALC_FLOW_KAFKA_BOOTSTRAP: localhost:9092
       CALC_FLOW_PG_TEST_URL: postgresql://postgres:postgres@localhost:5432/postgres
@@ -926,8 +932,38 @@ jobs:
         uses: taiki-e/install-action@537c30d2b45cc3aa3fb35e2bbcfb61ef93fd6f02 # v2.62.52
         with:
           tool: cargo-llvm-cov@0.8.7
+      - name: Add swap headroom for instrumented linking
+        # A transient rustc/ld peak must slow the build, not stop the runner.
+        run: |
+          sudo fallocate -l 8G /coverage.swap
+          sudo chmod 600 /coverage.swap
+          sudo mkswap /coverage.swap
+          sudo swapon /coverage.swap
+          swapon --show
+          free -m
+      - name: Compile instrumented Rust targets
+        timeout-minutes: 45
+        run: |
+          monitor_resources() {
+            while true; do
+              free -m
+              df -h .
+              ps -eo pid,ppid,rss,comm --sort=-rss | sed -n '1,12p'
+              sleep 30
+            done
+          }
+          monitor_resources &
+          monitor_pid=$!
+          stop_monitor() {
+            pkill -P "$monitor_pid" 2>/dev/null || true
+            kill "$monitor_pid" 2>/dev/null || true
+            wait "$monitor_pid" 2>/dev/null || true
+          }
+          trap stop_monitor EXIT
+          python3.13 scripts/run_rust_coverage.py --no-run
       - name: Enforce combined Rust and connector line coverage
-        run: python3.13 scripts/run_rust_coverage.py
+        timeout-minutes: 30
+        run: python3.13 scripts/run_rust_coverage.py --no-clean
       - name: Upload Rust coverage report
         if: ${{ always() && hashFiles('rust-lcov.info') != '' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
