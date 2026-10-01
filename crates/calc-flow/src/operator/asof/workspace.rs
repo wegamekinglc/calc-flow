@@ -98,7 +98,70 @@ impl ColumnWorkspace {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static RANGE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn take_range_calls() -> usize {
+    RANGE_CALLS.with(|calls| calls.replace(0))
+}
+
+pub(super) struct OutputColumns {
+    pub fields: usize,
+    fixed: u64,
+    variable: Vec<ColumnWorkspace>,
+}
+
+impl OutputColumns {
+    pub(super) fn new(mut columns: Vec<ColumnWorkspace>, name: &str) -> Result<Self> {
+        let fields = columns.len();
+        let fixed = columns
+            .iter()
+            .try_fold(0, |total, column| checked(name, total, column.fixed))?;
+        columns.retain(|column| {
+            matches!(
+                column.column.data_type(),
+                DataType::Utf8 | DataType::LargeUtf8 | DataType::Binary | DataType::LargeBinary
+            )
+        });
+        Ok(Self {
+            fields,
+            fixed,
+            variable: columns,
+        })
+    }
+
+    pub(super) fn is_fixed_width(&self) -> bool {
+        self.variable.is_empty()
+    }
+
+    pub(super) fn fixed_bytes(&self, count: usize, name: &str) -> Result<u64> {
+        self.fixed.checked_mul(count as u64).ok_or_else(|| {
+            reason(
+                name,
+                StreamingFailureReason::AsofCounterOverflow,
+                "ASOF column workspace arithmetic overflowed",
+            )
+        })
+    }
+
+    pub(super) fn range_bytes(&self, range: std::ops::Range<usize>, name: &str) -> Result<u64> {
+        let fixed = self.fixed_bytes(range.end - range.start, name)?;
+        self.variable.iter().try_fold(fixed, |total, column| {
+            checked(
+                name,
+                total,
+                variable_range_length(&column.column, range.clone())?,
+            )
+        })
+    }
+}
+
 fn variable_range_length(column: &ArrayRef, range: std::ops::Range<usize>) -> Result<u64> {
+    #[cfg(test)]
+    RANGE_CALLS.with(|calls| calls.set(calls.get() + 1));
     let length = match column.data_type() {
         DataType::Utf8 => {
             let values = column
@@ -839,6 +902,43 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn output_columns_checked_sum_and_range_preserve_overflow_reason() {
+        let fixed = |bytes| ColumnWorkspace {
+            column: Arc::new(UInt64Array::from(vec![1, 2])),
+            fixed: bytes,
+        };
+        let sum = OutputColumns::new(vec![fixed(u64::MAX), fixed(1)], "asof");
+        let multiply = OutputColumns::new(vec![fixed(u64::MAX)], "asof").unwrap();
+        let variable = OutputColumns::new(
+            vec![ColumnWorkspace {
+                column: Arc::new(StringArray::from(vec!["a", "b"])),
+                fixed: u64::MAX,
+            }],
+            "asof",
+        )
+        .unwrap();
+        for result in [
+            sum.map(|_| 0),
+            multiply.fixed_bytes(2, "asof"),
+            variable.range_bytes(0..1, "asof"),
+        ] {
+            assert!(matches!(
+                result,
+                Err(CalcFlowError::OperatorReason {
+                    node_id,
+                    reason_code: StreamingFailureReason::AsofCounterOverflow,
+                    ..
+                }) if node_id == "asof"
+            ));
+        }
+        assert_eq!(multiply.fields, 1);
+        assert_eq!(multiply.fixed_bytes(0, "asof").unwrap(), 0);
+        let empty = OutputColumns::new(Vec::new(), "asof").unwrap();
+        assert_eq!(empty.fields, 0);
+        assert_eq!(empty.range_bytes(0..2, "asof").unwrap(), 0);
     }
 
     #[test]

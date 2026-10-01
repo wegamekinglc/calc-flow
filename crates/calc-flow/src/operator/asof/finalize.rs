@@ -1,7 +1,7 @@
 use super::{
     StreamAsofJoinOperator, StreamAsofJoinStatus, SweepStamp, checked, reason,
     state::{self, BatchKey, LeftPrefix, PayloadView},
-    workspace::ColumnWorkspace,
+    workspace::{ColumnWorkspace, OutputColumns},
 };
 use crate::{
     Batch, BatchMetadata, CalcFlowError, EventTime, JsonMap, Result, StreamCollector,
@@ -435,7 +435,7 @@ fn output_workspace(
     workspace: &mut MemoryReservation,
     name: &str,
 ) -> Result<u64> {
-    let mut columns = BTreeMap::<BatchKey, Vec<ColumnWorkspace>>::new();
+    let mut columns = BTreeMap::<BatchKey, OutputColumns>::new();
     let raw = raw_output_bytes(rows, selected, &mut columns, workspace, name)?;
     let buffers = output_buffer_bytes(
         rows,
@@ -454,7 +454,7 @@ fn output_workspace(
 fn raw_output_bytes(
     rows: &[(PayloadView<'_>, Option<PayloadView<'_>>)],
     selected: Option<&[Vec<usize>; 2]>,
-    columns: &mut BTreeMap<BatchKey, Vec<ColumnWorkspace>>,
+    columns: &mut BTreeMap<BatchKey, OutputColumns>,
     workspace: &mut MemoryReservation,
     name: &str,
 ) -> Result<u64> {
@@ -478,26 +478,36 @@ fn raw_output_bytes(
 fn raw_side_bytes<'a>(
     rows: impl Iterator<Item = PayloadView<'a>>,
     selected: Option<&[usize]>,
-    columns: &mut BTreeMap<BatchKey, Vec<ColumnWorkspace>>,
+    columns: &mut BTreeMap<BatchKey, OutputColumns>,
     workspace: &mut MemoryReservation,
     name: &str,
 ) -> Result<u64> {
     let mut rows = rows.peekable();
     let mut raw = 0;
     while let Some(row) = rows.next() {
-        let mut end = row.row + 1;
-        while rows
-            .peek()
-            .is_some_and(|next| next.batch.key == row.batch.key && next.row == end)
-        {
-            rows.next();
-            end += 1;
-        }
-        raw = checked(
-            name,
-            raw,
-            range_slice_bytes(&row, row.row..end, selected, columns, workspace, name)?,
-        )?;
+        let source = source_columns(&row, selected, columns, workspace, name)?;
+        let bytes = if source.is_fixed_width() {
+            let mut count = 1;
+            while rows
+                .peek()
+                .is_some_and(|next| next.batch.key == row.batch.key)
+            {
+                rows.next();
+                count += 1;
+            }
+            source.fixed_bytes(count, name)?
+        } else {
+            let mut end = row.row + 1;
+            while rows
+                .peek()
+                .is_some_and(|next| next.batch.key == row.batch.key && next.row == end)
+            {
+                rows.next();
+                end += 1;
+            }
+            source.range_bytes(row.row..end, name)?
+        };
+        raw = checked(name, raw, bytes)?;
     }
     Ok(raw)
 }
@@ -520,12 +530,12 @@ fn output_buffer_bytes(
 
 fn output_bookkeeping_bytes(
     rows: usize,
-    columns: &BTreeMap<BatchKey, Vec<ColumnWorkspace>>,
+    columns: &BTreeMap<BatchKey, OutputColumns>,
     name: &str,
 ) -> Result<u64> {
-    let source_columns = columns
-        .values()
-        .try_fold(0, |count, fields| checked(name, count, fields.len() as u64))?;
+    let source_columns = columns.values().try_fold(0, |count, fields| {
+        checked(name, count, fields.fields as u64)
+    })?;
     let row_scratch = (rows as u64)
         .checked_mul(256)
         .ok_or_else(|| workspace_overflow(name))?;
@@ -573,15 +583,26 @@ fn workspace_overflow(name: &str) -> CalcFlowError {
     )
 }
 
-fn range_slice_bytes(
+#[cfg(test)]
+thread_local! {
+    static SOURCE_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn take_source_probes() -> usize {
+    SOURCE_PROBES.with(|probes| probes.replace(0))
+}
+
+fn source_columns<'a>(
     row: &PayloadView<'_>,
-    range: std::ops::Range<usize>,
     selected: Option<&[usize]>,
-    cache: &mut BTreeMap<BatchKey, Vec<ColumnWorkspace>>,
+    cache: &'a mut BTreeMap<BatchKey, OutputColumns>,
     workspace: &mut MemoryReservation,
     name: &str,
-) -> Result<u64> {
-    let columns = match cache.entry(row.batch.key) {
+) -> Result<&'a OutputColumns> {
+    #[cfg(test)]
+    SOURCE_PROBES.with(|probes| probes.set(probes.get() + 1));
+    Ok(match cache.entry(row.batch.key) {
         std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
         std::collections::btree_map::Entry::Vacant(entry) => {
             grow_output_workspace(
@@ -600,11 +621,8 @@ fn range_slice_bytes(
                 .cloned()
                 .map(ColumnWorkspace::new)
                 .collect::<Result<Vec<_>>>()?;
-            entry.insert(columns)
+            entry.insert(OutputColumns::new(columns, name)?)
         }
-    };
-    columns.iter().try_fold(0, |total, column| {
-        checked(name, total, column.range_bytes(range.clone(), name)?)
     })
 }
 
@@ -652,6 +670,274 @@ mod workspace_tests {
     };
     use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryConsumer, MemoryPool};
     use std::sync::Arc;
+
+    fn payload(record: RecordBatch, key: BatchKey) -> state::RowPayload {
+        state::RowPayload {
+            batch: Arc::new(state::PayloadBatch {
+                key,
+                record: Arc::new(record),
+                encoded: std::sync::OnceLock::from(StateSegment::new(Vec::new())),
+                encoded_charge_bytes: 0,
+                body_bytes: 0,
+            }),
+            row: 0,
+        }
+    }
+
+    #[test]
+    fn fixed_output_ranges_skip_per_column_length_probes() {
+        use datafusion::arrow::array::{
+            ArrayRef, BooleanArray, FixedSizeBinaryArray, Float64Array, NullArray,
+        };
+        let arrays: Vec<ArrayRef> = vec![
+            Arc::new(Int64Array::from(vec![Some(1), None])),
+            Arc::new(Float64Array::from(vec![Some(1.5), None])),
+            Arc::new(BooleanArray::from(vec![Some(true), None])),
+            Arc::new(NullArray::new(2)),
+            Arc::new(
+                FixedSizeBinaryArray::try_from_iter(
+                    [b"abcd".as_slice(), b"efgh".as_slice()].into_iter(),
+                )
+                .unwrap(),
+            ),
+        ];
+        let schema = Arc::new(Schema::new(
+            arrays
+                .iter()
+                .enumerate()
+                .map(|(i, a)| Field::new(format!("field_{i}"), a.data_type().clone(), true))
+                .collect::<Vec<_>>(),
+        ));
+        let record = RecordBatch::try_new(schema, arrays).unwrap();
+        let per_row = record
+            .columns()
+            .iter()
+            .map(|column| {
+                column
+                    .to_data()
+                    .slice(0, 1)
+                    .get_slice_memory_size()
+                    .unwrap() as u64
+            })
+            .sum::<u64>();
+        let source = payload(record, (1, 0));
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+        let mut reservation = MemoryConsumer::new("output-test").register(&pool);
+        super::super::workspace::take_range_calls();
+        take_source_probes();
+        let raw = raw_side_bytes(
+            std::iter::repeat_n(source.view(), 100_000),
+            None,
+            &mut BTreeMap::new(),
+            &mut reservation,
+            "asof",
+        )
+        .unwrap();
+        assert_eq!(raw, per_row * 100_000);
+        assert_eq!(super::super::workspace::take_range_calls(), 0);
+        assert_eq!(take_source_probes(), 1);
+    }
+
+    fn legacy_workspace_bytes(
+        rows: &[(PayloadView<'_>, Option<PayloadView<'_>>)],
+        schema: &Schema,
+        selected: Option<&[Vec<usize>; 2]>,
+    ) -> u64 {
+        let mut sources = BTreeMap::new();
+        let mut slice_bytes = 0;
+        for (left, right) in rows {
+            for (side, row) in [(0, Some(*left)), (1, *right)] {
+                let Some(row) = row else { continue };
+                let mut fields = 0;
+                for (index, column) in row.batch.record.columns().iter().enumerate() {
+                    if selected.is_some_and(|selected| !selected[side].contains(&index)) {
+                        continue;
+                    }
+                    fields += 1;
+                    slice_bytes += column
+                        .to_data()
+                        .slice(row.row, 1)
+                        .get_slice_memory_size()
+                        .unwrap() as u64;
+                }
+                sources.insert(row.batch.key, fields);
+            }
+        }
+        let unmatched = rows.iter().filter(|(_, right)| right.is_none()).count() as u64;
+        let null =
+            null_output_row_bytes(schema, selected.map(|s| s[1].as_slice()), "asof").unwrap();
+        (slice_bytes + unmatched * null) * 4
+            + rows.len() as u64 * 256
+            + sources.values().sum::<u64>() * 512
+            + sources.len() as u64 * 128
+            + 16 * 1024
+    }
+
+    #[test]
+    fn output_source_charge_matches_arrow_slices_with_projection_and_repeats() {
+        fn view(source: &state::RowPayload, row: usize) -> PayloadView<'_> {
+            PayloadView {
+                batch: source.batch.as_ref(),
+                row,
+            }
+        }
+        use datafusion::arrow::array::{
+            ArrayRef, BinaryArray, BooleanArray, FixedSizeBinaryArray, Float64Array,
+            LargeBinaryArray, LargeStringArray, NullArray, StringArray,
+        };
+        let arrays: Vec<ArrayRef> = vec![
+            Arc::new(Float64Array::from(vec![
+                Some(1.5),
+                None,
+                Some(2.5),
+                Some(3.5),
+            ])),
+            Arc::new(BooleanArray::from(vec![
+                Some(true),
+                None,
+                Some(false),
+                Some(true),
+            ])),
+            Arc::new(NullArray::new(4)),
+            Arc::new(
+                FixedSizeBinaryArray::try_from_iter(
+                    [b"abcd".as_slice(), b"efgh", b"ijkl", b"mnop"].into_iter(),
+                )
+                .unwrap(),
+            ),
+            Arc::new(StringArray::from(vec![
+                Some("outside"),
+                None,
+                Some(""),
+                Some("text"),
+            ])),
+            Arc::new(LargeStringArray::from(vec![
+                Some("outside"),
+                Some("large"),
+                None,
+                Some(""),
+            ])),
+            Arc::new(BinaryArray::from(vec![
+                Some(b"outside".as_slice()),
+                None,
+                Some(b"binary"),
+                Some(b""),
+            ])),
+            Arc::new(LargeBinaryArray::from(vec![
+                Some(b"outside".as_slice()),
+                Some(b"large"),
+                None,
+                Some(b""),
+            ])),
+        ];
+        let schema = Arc::new(Schema::new(
+            arrays
+                .iter()
+                .enumerate()
+                .map(|(i, a)| Field::new(format!("field_{i}"), a.data_type().clone(), true))
+                .collect::<Vec<_>>(),
+        ));
+        let record = RecordBatch::try_new(schema.clone(), arrays).unwrap();
+        let left_a = payload(record.slice(1, 3), (0, 0));
+        let left_b = payload(record.clone(), (0, 1));
+        let right_a = payload(record.slice(1, 3), (1, 0));
+        let right_b = payload(record, (1, 1));
+        let rows = vec![
+            (view(&left_a, 0), Some(view(&right_a, 0))),
+            (view(&left_a, 1), Some(view(&right_b, 2))),
+            (view(&left_b, 3), Some(view(&right_a, 0))),
+            (view(&left_a, 1), Some(view(&right_a, 1))),
+            (view(&left_a, 2), Some(view(&right_a, 2))),
+            (view(&left_b, 1), None),
+            (view(&left_a, 0), Some(view(&right_b, 1))),
+        ];
+        let projections = [
+            None,
+            Some([vec![0, 1, 2, 3], vec![4, 5, 6, 7]]),
+            Some([vec![0, 1, 2, 3], vec![0, 1, 2, 3]]),
+            Some([vec![], vec![]]),
+            Some([vec![4], vec![]]),
+            Some([vec![], vec![0]]),
+        ];
+        for selected in &projections {
+            let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+            let mut reservation = MemoryConsumer::new("output-test").register(&pool);
+            let actual =
+                output_workspace(&rows, &schema, selected.as_ref(), &mut reservation, "asof")
+                    .unwrap();
+            assert_eq!(
+                actual,
+                legacy_workspace_bytes(&rows, &schema, selected.as_ref())
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_output_runs_charge_reversed_rows_and_source_switches_exactly() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            true,
+        )]));
+        let first = payload(
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![Arc::new(Int64Array::from(vec![Some(1), None, Some(3)]))],
+            )
+            .unwrap()
+            .slice(1, 2),
+            (1, 0),
+        );
+        let second = payload(
+            RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![4, 5, 6]))]).unwrap(),
+            (1, 1),
+        );
+        let rows = [
+            (&first, 1),
+            (&first, 0),
+            (&first, 1),
+            (&first, 1),
+            (&second, 2),
+            (&second, 0),
+            (&first, 0),
+            (&first, 1),
+        ]
+        .map(|(source, row)| PayloadView {
+            batch: source.batch.as_ref(),
+            row,
+        });
+        let expected = rows
+            .iter()
+            .map(|row| {
+                row.batch
+                    .record
+                    .column(0)
+                    .to_data()
+                    .slice(row.row, 1)
+                    .get_slice_memory_size()
+                    .unwrap() as u64
+            })
+            .sum::<u64>();
+        for selected in [None, Some([].as_slice())] {
+            let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+            let mut reservation = MemoryConsumer::new("output-test").register(&pool);
+            take_source_probes();
+            let raw = raw_side_bytes(
+                rows.iter().copied(),
+                selected,
+                &mut BTreeMap::new(),
+                &mut reservation,
+                "asof",
+            )
+            .unwrap();
+            assert_eq!(raw, if selected.is_none() { expected } else { 0 });
+            assert_eq!(take_source_probes(), 3);
+            assert_eq!(
+                reservation.size(),
+                if selected.is_none() { 1280 } else { 256 }
+            );
+        }
+    }
 
     #[test]
     fn output_retry_releases_key_and_candidate_scratch() {
