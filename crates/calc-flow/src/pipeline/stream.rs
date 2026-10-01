@@ -710,9 +710,7 @@ impl PipelineBuilder {
                 });
             }
         }
-        validate_deterministic_udfs(&self.nodes, requirements, udfs)?;
-        validate_external_provider_lifecycles(&self.nodes, requirements)?;
-        projection::push_asof_output_projections(&mut self)?;
+        prepare_stream_operators(&mut self, requirements, udfs)?;
         let edges = self
             .edges
             .iter()
@@ -735,6 +733,16 @@ impl PipelineBuilder {
             static_inputs: BTreeMap::new(),
         })
     }
+}
+
+fn prepare_stream_operators(
+    builder: &mut PipelineBuilder,
+    requirements: &StreamRequirements,
+    udfs: &UdfRegistrySnapshot,
+) -> Result<()> {
+    validate_deterministic_udfs(&builder.nodes, requirements, udfs)?;
+    validate_external_provider_lifecycles(&builder.nodes, requirements)?;
+    projection::push_asof_output_projections(builder)
 }
 
 fn build_runtime_nodes(
