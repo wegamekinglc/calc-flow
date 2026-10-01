@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import unittest
 from copy import deepcopy
@@ -35,6 +36,53 @@ def measured_case(**changes):
 
 
 class BenchmarkSuiteTests(unittest.TestCase):
+    def test_asof_e2e_report_requires_complete_validated_inventory(self):
+        from scripts.benchmark_suite.asof_e2e import asof_e2e_rows
+
+        sample = {
+            "seconds": 0.1,
+            "output_rows": 100_000,
+            "allocation_total_bytes": 1024,
+            "allocation_peak_bytes": 512,
+            "allocation_count": 10,
+            "evicted_right_rows": 100_000,
+            "retained_right_rows": 0,
+            "validated_all_rows": True,
+        }
+        report = {
+            "schema": "calc-flow.asof-e2e.v1",
+            "scope": "operator-admission-settlement",
+            "cases": [
+                {
+                    "name": name,
+                    "rows": 100_000,
+                    "oracle": sample,
+                    "samples": [sample] * 20,
+                }
+                for name in (
+                    "admit_settle_100k",
+                    "eviction_ticks",
+                    "out_of_order_within_watermark",
+                    "composite_key",
+                )
+            ],
+        }
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "asof-e2e.json"
+            path.write_text(json.dumps(report), encoding="utf-8")
+            rows = asof_e2e_rows(path)
+            self.assertEqual(len(rows), 4)
+            self.assertEqual(rows["stream_asof_e2e/admit_settle_100k"]["rows"], 100_000)
+            report["cases"][1]["oracle"] = {**sample, "evicted_right_rows": 0}
+            path.write_text(json.dumps(report), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "invalid ASOF e2e observation"):
+                asof_e2e_rows(path)
+            report["cases"][1]["oracle"] = sample
+            report["cases"].pop()
+            path.write_text(json.dumps(report), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "incomplete ASOF e2e inventory"):
+                asof_e2e_rows(path)
+
     def test_documented_tables_align_full_cell_separator_widths(self):
         root = Path(__file__).resolve().parents[1]
         documents = {

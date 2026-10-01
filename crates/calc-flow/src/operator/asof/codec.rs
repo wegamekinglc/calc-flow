@@ -1,13 +1,9 @@
 mod framing;
 
 use crate::{CalcFlowError, Result};
-use datafusion::arrow::{
-    datatypes::Schema,
-    ipc::{reader::StreamReader, writer::StreamWriter},
-    record_batch::RecordBatch,
-};
+use datafusion::arrow::{datatypes::Schema, ipc::writer::StreamWriter, record_batch::RecordBatch};
 use sha2::{Digest as _, Sha256};
-use std::io::{self, Cursor, Write};
+use std::io::{self, Write};
 
 /// Bounded IPC sink over a caller-owned buffer. `with_capacity` fail-closes
 /// at `min(limit, capacity)` for exactly pre-sized encodes; `growable` lets
@@ -25,24 +21,6 @@ impl<'a> BoundedWriter<'a> {
     }
     pub fn growable(bytes: &'a mut Vec<u8>, limit: usize) -> Self {
         Self { bytes, limit }
-    }
-
-    pub fn write_parts(&mut self, parts: &[&[u8]]) -> io::Result<()> {
-        let added = parts
-            .iter()
-            .try_fold(0_usize, |size, part| size.checked_add(part.len()));
-        if added
-            .and_then(|added| self.bytes.len().checked_add(added))
-            .is_none_or(|size| size > self.limit)
-        {
-            return Err(io::Error::other(
-                "ASOF bounded encoding workspace exhausted",
-            ));
-        }
-        for part in parts {
-            self.bytes.extend_from_slice(part);
-        }
-        Ok(())
     }
 }
 impl Write for BoundedWriter<'_> {
@@ -86,56 +64,48 @@ pub(super) fn encode_batch(
     Ok(scratch.clone())
 }
 
-pub(super) fn decode_batch(bytes: &[u8], schema_digest: &[u8; 32]) -> Result<RecordBatch> {
-    validate_schema_digest(bytes, schema_digest)?;
-    framing::validate_ipc_framing(bytes)?;
-    let mut reader = StreamReader::try_new(Cursor::new(bytes), None)
-        .map_err(|error| super::arrow_error(&error))?;
-    decoded_row(&mut reader)
+/// Materialize a deferred payload into its already charged exact IPC size.
+/// Preallocating avoids the growable scratch buffer and its final copy.
+pub(super) fn encode_batch_preallocated(
+    batch: &RecordBatch,
+    capacity: usize,
+    limit: usize,
+) -> Result<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(capacity);
+    write_batch(
+        batch,
+        &mut BoundedWriter::with_capacity(&mut bytes, capacity, limit),
+    )?;
+    Ok(bytes)
 }
 
 pub(super) fn decode_table_batch(
     bytes: &[u8],
     schema_digest: &[u8; 32],
+    schema: &datafusion::arrow::datatypes::SchemaRef,
     max_rows: u64,
 ) -> Result<RecordBatch> {
     validate_schema_digest(bytes, schema_digest)?;
-    framing::validate_ipc_framing_rows(bytes, None, Some(max_rows))?;
-    let mut reader = StreamReader::try_new(Cursor::new(bytes), None)
-        .map_err(|error| super::arrow_error(&error))?;
-    let batch = reader
-        .next()
-        .transpose()
-        .map_err(|error| super::arrow_error(&error))?
-        .ok_or_else(|| CalcFlowError::Format {
-            message: "ASOF batch payload is empty".into(),
-        })?;
-    if reader.next().is_some() {
-        return Err(CalcFlowError::Format {
-            message: "ASOF batch payload contains extra data".into(),
-        });
-    }
-    Ok(batch)
+    let (message, body) = framing::record_parts(bytes, max_rows)?;
+    let batch = message
+        .header_as_record_batch()
+        .expect("validated record message");
+    // The exact schema message was authenticated above. Reuse its trusted
+    // owner instead of parsing and copying schema metadata on every restore.
+    let body = datafusion::arrow::buffer::Buffer::from_slice_ref(body);
+    datafusion::arrow::ipc::reader::read_record_batch(
+        &body,
+        batch,
+        schema.clone(),
+        &std::collections::HashMap::new(),
+        None,
+        &message.version(),
+    )
+    .map_err(|error| super::arrow_error(&error))
 }
 
 pub(super) fn payload_body_bytes(bytes: &[u8]) -> Result<u64> {
     framing::payload_body_bytes(bytes)
-}
-
-fn decoded_row(reader: &mut StreamReader<Cursor<&[u8]>>) -> Result<RecordBatch> {
-    let batch = reader
-        .next()
-        .transpose()
-        .map_err(|error| super::arrow_error(&error))?
-        .ok_or_else(|| CalcFlowError::Format {
-            message: "ASOF row payload is empty".into(),
-        })?;
-    if batch.num_rows() != 1 || reader.next().is_some() {
-        return Err(CalcFlowError::Format {
-            message: "ASOF payload must contain exactly one row".into(),
-        });
-    }
-    Ok(batch)
 }
 
 fn framing_error(message: &str) -> CalcFlowError {
@@ -209,9 +179,11 @@ mod tests {
                 .unwrap();
         let bytes = encode_batch(&batch, 1 << 20, &mut Vec::new()).unwrap();
         let digest = schema_digest(&schema).unwrap();
-        assert!(decode_table_batch(&bytes, &digest, 1).is_err());
+        assert!(decode_table_batch(&bytes, &digest, &schema, 1).is_err());
         assert_eq!(
-            decode_table_batch(&bytes, &digest, 2).unwrap().num_rows(),
+            decode_table_batch(&bytes, &digest, &schema, 2)
+                .unwrap()
+                .num_rows(),
             2
         );
     }

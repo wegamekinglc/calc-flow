@@ -195,12 +195,14 @@ The equality case remains eligible. Right EOF alone does not discard useful
 history. An expired payload can leave a charged identity-only entry until its
 own side's watermark passes the identity time or that side ends.
 
-Accounting version 2 charges each retained identity and key/sequence buffer,
-each Arrow payload batch once, and the prepared index segment. The batch charge
-includes its IPC bytes, the decoded record body length, and per-column metadata.
+Accounting version 3 charges retained column and index capacities, unique
+key/sequence buffer owners, each Arrow payload batch once, and the reserved
+canonical checkpoint index. The batch charge
+reserves its canonical IPC bytes even before encoding, plus the decoded record
+body length and per-column metadata.
 Admission reuses immutable Arrow buffers when it accepts a whole input batch
-whose backing allocation contains no bytes beyond the accepted slice. Otherwise it compacts
-the accepted rows before retention, including small slices of much larger
+whose backing allocation contains no bytes beyond the accepted slice. Otherwise
+it compacts the accepted rows before retention, including small slices of much larger
 source buffers. Snapshot batch segments share immutable IPC buffers; a row
 index points into one batch.
 
@@ -209,6 +211,17 @@ a **separate workspace ceiling equal to `max_state_bytes`**. Output is further
 bounded by runtime edge rows/bytes. A 64 MiB state limit therefore is not a
 64 MiB process RSS limit; sources, edges, checkpoint publication, runtime
 allocations, and caller-owned tables have their own ownership and budgets.
+Identity workspace includes the canonical batch encoding, retained sequence
+copies, and converter headers. A single non-null Utf8 or LargeUtf8 key with an
+integer sequence is hashed from its Arrow values and encoded once per distinct
+value. The temporary distinct-value copy reserves workspace before Arrow take;
+row dictionary IDs retain the same canonical key bytes and checkpoint order.
+Other key shapes use the existing typed scalar or batch row converter paths;
+generic sequences use the batch row converter. New owned key copies reserve
+additional workspace once per unique key before allocation; shared resident
+keys reuse their buffers. Dropped late rows do not allocate
+identity buffers. Batch hash vectors reserve additional workspace and fall back
+to scalar probing when that scratch cannot fit.
 
 When required state or a single output row cannot fit, execution fails with a
 structured resource reason. It never discards a still-useful candidate or
@@ -216,25 +229,55 @@ chooses a worse match to fit a limit. Failed batch admission leaves no partial
 accepted state or corresponding output. Results previously accepted by a sink
 are not withdrawn.
 
-Native Rust/Arrow indexes choose at most one candidate per left row. Candidate
+Native Rust/Arrow indexes keep each right key's identities in time and sequence
+order and choose at most one candidate per left row. Large ordered left prefixes
+reuse a per-key right cursor; smaller outputs and constrained workspace use
+binary search. Candidate
 rows are gathered directly from retained Arrow batches in final left-row order;
-consecutive source rows are copied as spans on a blocking worker. This is
+consecutive left source rows are copied as spans, while right candidates are
+assembled with Arrow interleave on a blocking worker. This is
 the stream-only ASOF operator's output assembly; DataFusion remains the SQL and
 table-expression engine. Python only declares and lowers
-the graph. Admission encodes each accepted payload batch once, then updates the
-projected index length from the new identities. The index allocation is
-preflighted and charged immediately; canonical index bytes are written during
-asynchronous checkpoint preparation or an eviction sweep. The synchronous
+the graph. Admission retains each accepted payload batch and charges an upper
+bound for its canonical IPC size before encoding. A checkpoint encodes retained payloads once
+on a blocking worker in the managed async path; later checkpoints share those
+immutable segments. The produced segment is checked against the charged size,
+and the v3 state charge stays stable before and after encoding. Admission also
+updates the projected index length from the new identities. The index allocation
+is preflighted and charged immediately; canonical index bytes are written during
+checkpoint preparation. The synchronous
 runtime capture shares the prepared bytes. The index stores identities
 and batch-row references; immutable batch segments are shared across captures.
-Direct calls to `checkpoint()` can synchronously prepare the index; the managed
-runtime first awaits asynchronous preparation before capture.
+Direct calls to `checkpoint()` can synchronously prepare the index and payloads;
+the managed runtime first awaits asynchronous preparation before capture.
+Right key dictionaries use private integer handles for lookup. Checkpoint
+preparation reserves key sorting scratch and writes canonical key-byte order;
+the managed async path performs that sort on a blocking worker.
+Retained payload rows use eight-byte batch/row references to one owning batch
+pool. Finalized and evicted references release their batch when its final row
+is removed, and sparse pool indexes shrink using preflighted replacement storage.
+Pending left rows retain owned compact Arrow time buffers, a per-chunk key dictionary,
+sequence columns, and optional compact positions. All eight signed and unsigned
+integer sequence types use their native 1/2/4/8-byte width. Ordered contiguous
+integer sequences copy the accepted Arrow value range directly. Generic sequences
+share one continuous Arrow binary buffer per admitted batch. Unordered input is sorted
+on a blocking worker; borrowed cursor heads merge overlapping chunks in
+canonical `(time, key, sequence)` order. Cached row counts and extrema avoid
+rescanning all chunks on admission and progress queries. Prefix compaction
+reserves scratch and builds replacement buffers before output acceptance, so
+committing accepted output does not allocate. Its worker also reserves the
+retained input capacities, keeping Arrow and identity buffers funded when a
+cancelled or dropped call is followed by reset. Restore constructs chunks only
+from validated live index offsets. State accounting charges retained column
+capacities, unique identity buffers, payload batches, owning indexes, and the
+reserved canonical checkpoint index. A partly referenced identity buffer remains
+charged at its full retained capacity.
 
 Finalization takes ready rows up to the smaller of the output edge's row budget
 and 64,000 rows. Key and candidate vectors reserve workspace before allocation;
 the operator halves a chunk and releases unused scratch if workspace or output
-bytes exceed a limit. Each accepted chunk updates the deferred index length or
-removes a left prefix from an already captured index segment. Right-side
+bytes exceed a limit. Each accepted chunk updates the deferred index length and
+releases obsolete prepared index bytes. Right-side
 eviction is deferred until all ready chunks
 in that progress tick have been accepted, then performed once. A cancelled
 tick can therefore retain right payloads that the completed tick would evict;
@@ -242,10 +285,18 @@ its checkpoint still contains the accepted output prefix and every remaining
 pending row.
 
 Admission preflights exact incremental identity, batch and index charges before
-synchronously installing new rows; it does not clone the retained maps. A
-right-side eviction sweep still clones state and rebuilds the index in
-`O(retained identities)`; both paths reuse unchanged Arrow batch segments. This does
-not turn state limits into a process RSS bound. The output edge and workspace
+synchronously installing new rows. An eviction sweep preflights its row, shared
+batch, and index deltas before changing state in place; it defers index encoding
+until checkpoint preparation. A tick with nothing to evict uses cached minimum
+right-side times, while a sweep that changes state still traverses retained
+right buckets and their expired prefixes. The preview reserves scratch for batch
+reference counts and unique encoding-owner removals, including identity-only
+history. Commit releases each batch and encoding allocation by its aggregated
+reference count. Shared right columns are copied on a
+blocking worker before admission or eviction commits; unchanged buckets keep
+their allocation. The worker's reservation retains its inputs and replacement
+columns through cancellation and reset. Both paths reuse unchanged Arrow batch segments. This does not
+turn state limits into a process RSS bound. The output edge and workspace
 budgets continue to bound each emitted chunk. No
 throughput or latency guarantee follows from the configured resource bounds.
 See the [ASOF benchmark boundary and workloads](benchmark-suite.md#asof-settlement-measurements)
@@ -274,26 +325,25 @@ facts; resource occupancy and delivery guarantees come from the running job.
 ## Recovery, status, and delivery
 
 ASOF uses its own `stream_asof_join@1` identity with state/layout/accounting
-version 2. Checkpoints include pending left rows, right history, live identities,
+version 3. Checkpoints include pending left rows, right history, live identities,
 logical counters, output sequence, and terminal state. The runtime wrapper owns
 ingress watermarks/idle/EOF and the forwarded output frontier. Restore validates
 these together with configuration, schema, segment integrity, and recomputed
-resource charges before installing state. Version 1 row-IPC snapshots are read
-and migrated into version 2 state; new captures write the index plus one segment
-per retained Arrow batch. `reset` only clears operator-owned memory; it does not
+resource charges before installing state. Only version 3 snapshots are supported;
+versions 1 and 2 are rejected. Captures write a canonical columnar index plus one
+segment per retained Arrow batch, preserving typed sequence widths and capacity
+hints. `reset` only clears operator-owned memory; it does not
 delete shared checkpoints, reset sources, or operate sink transactions.
 
-The prefix preparation path derives the next index length for deferred state or
-removes a left prefix from an already prepared index. It validates the next
+The prefix preparation path derives the next canonical index length. It validates the next
 charge before emitting a chunk, then installs state, counters, index view, and
 output sequence synchronously after the sink accepts it. At a checkpoint
-barrier, asynchronous preparation writes the canonical version 2 index before
+barrier, asynchronous preparation writes the canonical version 3 index before
 the synchronous capture shares it. Cancellation during preparation or a
 blocked emit leaves that chunk pending and preserves any earlier committed
 prefix. A captured checkpoint resumes the remaining rows and sequence without
-losing or repeating the committed operator prefix. This preparation change
-requires no state-format migration and preserves the strict dual-watermark
-boundary.
+losing or repeating the committed operator prefix. The strict dual-watermark
+boundary is preserved.
 
 A managed checkpoint aligns source cursors, operator state, and sink decisions.
 A published terminal checkpoint resumes without repeating final output.

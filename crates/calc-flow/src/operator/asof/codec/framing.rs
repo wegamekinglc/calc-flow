@@ -2,10 +2,6 @@ use super::framing_error;
 use crate::Result;
 use datafusion::arrow::ipc::{self, Message, MessageHeader};
 
-pub(super) fn validate_ipc_framing(bytes: &[u8]) -> Result<()> {
-    validate_ipc_framing_rows(bytes, Some(1), None).map(|_| ())
-}
-
 pub(super) fn validate_ipc_framing_rows(
     mut bytes: &[u8],
     rows: Option<usize>,
@@ -31,6 +27,16 @@ pub(super) fn validate_ipc_framing_rows(
         bytes = &bytes[body..];
         stage += 1;
     }
+}
+
+pub(super) fn record_parts(mut bytes: &[u8], max_rows: u64) -> Result<(Message<'_>, &[u8])> {
+    validate_ipc_framing_rows(bytes, None, Some(max_rows))?;
+    let schema_length = message_prefix(&mut bytes)?;
+    let (_, schema_body) = read_message(&mut bytes, schema_length)?;
+    bytes = &bytes[schema_body..];
+    let record_length = message_prefix(&mut bytes)?;
+    let (message, body) = read_message(&mut bytes, record_length)?;
+    Ok((message, &bytes[..body]))
 }
 
 pub(super) fn payload_body_bytes(bytes: &[u8]) -> Result<u64> {

@@ -1,37 +1,49 @@
-mod encoding;
-mod index_v2;
+mod index_v3;
+mod payload_segments;
 mod prepared;
 mod validation;
 
+#[cfg(test)]
+use super::state::{RightBucket, RowPayload};
 use super::{
     StreamAsofJoinOperator, StreamAsofJoinStatus,
-    state::{BatchKey, Encoding, Inventory, PayloadBatch, RightOrder, RowPayload, State},
+    state::{BatchKey, Encoding, Inventory, PayloadBatch, PayloadView, State},
 };
 use crate::{
     CalcFlowError, Epoch, IngressProgressSnapshot, OperatorStateSnapshot, Result, StateSegment,
     StreamOperatorContext,
 };
+use datafusion::execution::memory_pool::MemoryReservation;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
+    collections::BTreeMap,
+    mem::size_of,
+    sync::{Arc, OnceLock},
 };
 
-use encoding::{Decoder, restore_charge};
-pub(super) use index_v2::{encoded_length, left_prefix_length};
+pub(super) use index_v3::encoded_length as v3_encoded_length;
 pub(super) use prepared::PreparedSegment;
 use validation::{validate_counters, validate_progress};
 
-const MAGIC: &[u8; 8] = b"CFASOF01";
-const SEGMENT: &str = "asof-state-v1";
-const INDEX_SEGMENT: &str = index_v2::INDEX_SEGMENT;
-type IdentityCache =
-    BTreeMap<BatchKey, (super::state::EncodedColumns, super::state::EncodedColumns)>;
+const INDEX_SEGMENT: &str = index_v3::INDEX_SEGMENT;
 
+fn encode_payloads(
+    pending: Vec<Arc<PayloadBatch>>,
+    _workspace: MemoryReservation,
+    limit: usize,
+    name: &str,
+) -> Result<()> {
+    for batch in pending {
+        batch.ensure_encoded(limit, name)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 pub(super) struct PreparedCheckpoint {
     pub segment: Option<PreparedSegment>,
-    pub _workspace: datafusion::execution::memory_pool::MemoryReservation,
+    pub _workspace: MemoryReservation,
 }
 
 pub(super) struct DecodedSnapshot {
@@ -40,7 +52,8 @@ pub(super) struct DecodedSnapshot {
     terminal: bool,
     sequence: u64,
     prepared: Option<PreparedSegment>,
-    _workspace: datafusion::execution::memory_pool::MemoryReservation,
+    deferred_len: Option<u64>,
+    _workspace: MemoryReservation,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -59,30 +72,139 @@ struct Metadata<'a> {
 }
 
 impl StreamAsofJoinOperator {
-    /// Project the canonical index length from the admitted delta. Right-side
-    /// bucket headers are charged only when the key is new to committed state.
-    pub(super) fn index_length_after_admission(
+    pub(super) fn sequence_kinds(&self) -> [super::state::SequenceKind; 2] {
+        [
+            super::state::SequenceKind::for_side(&self.schemas[0], self.spec.left()),
+            super::state::SequenceKind::for_side(&self.schemas[1], self.spec.right()),
+        ]
+    }
+
+    pub(super) fn current_inventory(
         &self,
-        side: usize,
-        rows: &[(super::state::LeftOrder, RowPayload)],
-    ) -> Result<u64> {
-        let previous = self
-            .deferred_index_len
-            .or_else(|| self.prepared.as_ref().map(|segment| segment.len() as u64));
-        let mut length = previous.unwrap_or(24);
-        let mut new_buckets = BTreeSet::new();
-        for ((_, key, sequence), _) in rows {
-            let row_length = if side == 0 {
-                41 + key.len() as u64 + sequence.len() as u64
-            } else {
-                if !self.state.right.contains_key(key) && new_buckets.insert(key) {
-                    length = super::checked(&self.name, length, 16 + key.len() as u64)?;
-                }
-                34 + sequence.len() as u64
-            };
-            length = super::checked(&self.name, length, row_length)?;
+        prepared: Option<&PreparedSegment>,
+    ) -> Result<Inventory> {
+        self.state.capacity_inventory(prepared, &self.name)
+    }
+
+    fn decode_snapshot_v3(
+        &self,
+        snapshot: &OperatorStateSnapshot,
+        metadata: Metadata<'_>,
+    ) -> Result<DecodedSnapshot> {
+        let segment = snapshot_segment(snapshot)?;
+        let workspace = self.snapshot_restore_workspace(snapshot, segment)?;
+        let batches = self.decode_validated_payloads(snapshot, &metadata.metrics)?;
+        let mut state = self.decode_snapshot_index(segment, &batches)?;
+        state.sequence_kinds = self.sequence_kinds();
+        self.validate_indexed_rows(&state)?;
+        let prepared = segment.cloned().map(PreparedSegment::new);
+        self.validate_snapshot_inventory(&state, prepared.as_ref(), &metadata)?;
+        Ok(DecodedSnapshot {
+            state,
+            metrics: metadata.metrics,
+            terminal: metadata.terminal,
+            sequence: metadata.next_output_sequence,
+            prepared,
+            deferred_len: None,
+            _workspace: workspace,
+        })
+    }
+
+    fn validate_snapshot_inventory(
+        &self,
+        state: &State,
+        prepared: Option<&PreparedSegment>,
+        metadata: &Metadata<'_>,
+    ) -> Result<()> {
+        let inventory = state.capacity_inventory(prepared, &self.name)?;
+        validate_gauges(&inventory, state.left.len() as u64, &metadata.metrics)?;
+        self.validate_restored_limits(&inventory, metadata)
+    }
+
+    fn decode_snapshot_index(
+        &self,
+        segment: Option<&StateSegment>,
+        batches: &BTreeMap<BatchKey, Arc<PayloadBatch>>,
+    ) -> Result<State> {
+        if let Some(segment) = segment {
+            index_v3::decode(
+                segment,
+                batches,
+                self.spec.limits().max_state_rows(),
+                self.spec.limits().max_state_bytes(),
+                self.sequence_kinds(),
+            )
+        } else {
+            Ok(State::empty_tracked())
         }
-        Ok(length)
+    }
+    fn decode_validated_payloads(
+        &self,
+        snapshot: &OperatorStateSnapshot,
+        metrics: &StreamAsofJoinStatus,
+    ) -> Result<BTreeMap<BatchKey, Arc<PayloadBatch>>> {
+        let batches = self.decode_payload_batches(snapshot)?;
+        validate_batch_ranges(&batches, metrics)?;
+        Ok(batches)
+    }
+
+    fn validate_restored_limits(
+        &self,
+        inventory: &Inventory,
+        metadata: &Metadata<'_>,
+    ) -> Result<()> {
+        if inventory.identities > self.spec.limits().max_state_rows()
+            || inventory.bytes > self.spec.limits().max_state_bytes()
+        {
+            return Err(mismatch("ASOF restored v3 state exceeds current limits"));
+        }
+        validate_counters(
+            &metadata.metrics,
+            metadata.terminal,
+            metadata.next_output_sequence,
+        )?;
+        Ok(())
+    }
+
+    fn snapshot_restore_workspace(
+        &self,
+        snapshot: &OperatorStateSnapshot,
+        segment: Option<&StateSegment>,
+    ) -> Result<MemoryReservation> {
+        let index_workspace = segment.map_or(Ok(0), |segment| {
+            verify_checksum(segment)?;
+            index_v3::restore_charge(
+                segment.bytes(),
+                self.spec.limits().max_state_rows(),
+                self.spec.limits().max_state_bytes(),
+            )
+        })?;
+        let payload_workspace = self.payload_restore_workspace(snapshot)?;
+        self.reserve_workspace(super::checked(
+            &self.name,
+            index_workspace,
+            payload_workspace,
+        )?)
+    }
+
+    fn payload_restore_workspace(&self, snapshot: &OperatorStateSnapshot) -> Result<u64> {
+        let mut retained = 0;
+        let mut scratch = 0;
+        for (name, segment) in &snapshot.segments {
+            if name == index_v3::INDEX_SEGMENT {
+                continue;
+            }
+            let key = payload_segments::parse_batch_segment(name)?;
+            let columns = self.schemas[usize::from(key.0)].fields().len() as u64;
+            let body = super::codec::payload_body_bytes(segment.bytes())
+                .map_err(|_| mismatch("ASOF invalid Arrow batch framing"))?;
+            retained = super::checked(&self.name, retained, body)?;
+            // Array/record owners and the temporary payload dictionary. The
+            // IPC bodies themselves are copied once; input segments are borrowed.
+            retained = super::checked(&self.name, retained, 640 + columns * 256)?;
+            scratch = scratch.max(512 + columns * 64);
+        }
+        super::checked(&self.name, retained, scratch)
     }
 
     /// Admission and uncaptured output prefixes reserve and charge the
@@ -91,17 +213,16 @@ impl StreamAsofJoinOperator {
         let Some(length) = self.deferred_index_len else {
             return Ok(());
         };
-        let _workspace = self.reserve_workspace(length)?;
+        let workspace_bytes = index_v3::workspace_bytes;
+        let _workspace =
+            self.reserve_workspace(workspace_bytes(&self.state, length, false, &self.name)?)?;
         let limit = usize::try_from(self.spec.limits().max_state_bytes()).expect("validated");
-        let segment = index_v2::encode_sync(&self.state, length, limit)?;
+        let segment = index_v3::encode_sync(&self.state, length, limit)?;
         self.prepared = Some(PreparedSegment::new(segment));
         self.deferred_index_len = None;
         debug_assert_eq!(
-            self.state
-                .inventory(self.prepared.as_ref(), &self.name)
-                .expect("materialized index inventory")
-                .bytes,
-            self.status.state_bytes,
+            self.current_inventory(self.prepared.as_ref())?.bytes,
+            self.status.state_bytes
         );
         Ok(())
     }
@@ -112,7 +233,71 @@ impl StreamAsofJoinOperator {
     ) -> Result<()> {
         context.check_cancelled()?;
         self.prepare_deferred_index_async(context).await?;
-        self.compact_prepared_async(context).await?;
+        self.prepare_payloads_async(context).await?;
+        context.check_cancelled()
+    }
+
+    fn pending_payloads(&self) -> Result<(Vec<Arc<PayloadBatch>>, MemoryReservation)> {
+        let (count, largest) = self.pending_payload_extent()?;
+        let pointers = count
+            .checked_mul(size_of::<Arc<PayloadBatch>>() as u64)
+            .ok_or_else(|| {
+                super::reason(
+                    &self.name,
+                    crate::StreamingFailureReason::AsofCounterOverflow,
+                    "ASOF payload checkpoint workspace overflowed",
+                )
+            })?;
+        let workspace = self.reserve_workspace(super::checked(&self.name, pointers, largest)?)?;
+        let mut pending = Vec::with_capacity(usize::try_from(count).expect("bounded ASOF rows"));
+        for (batch, _) in self.state.batches.values() {
+            if !batch.has_encoded() {
+                pending.push(Arc::clone(batch));
+            }
+        }
+        Ok((pending, workspace))
+    }
+
+    fn pending_payload_extent(&self) -> Result<(u64, u64)> {
+        let mut count = 0_u64;
+        let mut largest = 0_u64;
+        let mut retained = 0_u64;
+        for (batch, _) in self.state.batches.values() {
+            if !batch.has_encoded() {
+                count = super::checked(&self.name, count, 1)?;
+                retained = super::checked(
+                    &self.name,
+                    retained,
+                    super::state::capacity_batch_allocation(batch, &self.name)?,
+                )?;
+                largest = largest.max(batch.encoded_charge_bytes);
+            }
+        }
+        // A detached worker can own every Arrow record and every newly cached
+        // IPC segment. The largest batch also funds the encoder's temporary
+        // body while its final segment is being assembled.
+        Ok((count, super::checked(&self.name, retained, largest)?))
+    }
+
+    fn ensure_payloads_sync(&self) -> Result<()> {
+        let (pending, workspace) = self.pending_payloads()?;
+        let limit = usize::try_from(self.spec.limits().max_state_bytes()).expect("validated");
+        encode_payloads(pending, workspace, limit, &self.name)
+    }
+
+    async fn prepare_payloads_async(&self, context: &StreamOperatorContext<'_>) -> Result<()> {
+        let (pending, workspace) = self.pending_payloads()?;
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let limit = usize::try_from(self.spec.limits().max_state_bytes()).expect("validated");
+        let name = self.name.clone();
+        context.check_cancelled()?;
+        tokio::task::spawn_blocking(move || encode_payloads(pending, workspace, limit, &name))
+            .await
+            .map_err(|error| CalcFlowError::Internal {
+                message: format!("ASOF payload checkpoint task failed: {error}"),
+            })??;
         context.check_cancelled()
     }
 
@@ -123,48 +308,32 @@ impl StreamAsofJoinOperator {
         let Some(length) = self.deferred_index_len else {
             return Ok(());
         };
-        let workspace = self.reserve_workspace(length)?;
+        let workspace_bytes = index_v3::workspace_bytes;
+        let workspace =
+            self.reserve_workspace(workspace_bytes(&self.state, length, true, &self.name)?)?;
         let limit = usize::try_from(self.spec.limits().max_state_bytes()).expect("validated");
         let (segment, _workspace) =
-            index_v2::encode(&self.state, length, limit, context, workspace).await?;
+            index_v3::encode(&self.state, length, limit, context, workspace).await?;
         self.prepared = Some(PreparedSegment::new(segment));
         self.deferred_index_len = None;
         Ok(())
     }
 
-    async fn compact_prepared_async(&mut self, context: &StreamOperatorContext<'_>) -> Result<()> {
-        if let Some(prepared) = self.prepared.as_ref().filter(|view| view.is_drained()) {
-            let workspace = self.reserve_workspace(prepared.len() as u64)?;
-            let retained_capacity = prepared.capacity();
-            let prepared = prepared.clone();
-            context.check_cancelled()?;
-            let canonical = tokio::task::spawn_blocking(move || {
-                let _workspace = workspace;
-                prepared.canonical()
-            })
-            .await
-            .map_err(|error| CalcFlowError::Internal {
-                message: format!("ASOF checkpoint compaction task failed: {error}"),
-            })?;
-            context.check_cancelled()?;
-            self.install_compacted_prepared(canonical, retained_capacity);
-        }
-        Ok(())
-    }
-
+    #[cfg(test)]
     pub(super) async fn prepare_checkpoint(
         &self,
         state: &State,
         context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedCheckpoint> {
+        let length = v3_encoded_length(state, &self.name)?;
         let limit = usize::try_from(self.spec.limits().max_state_bytes()).expect("validated");
-        let length = encoded_length(state, &self.name)?;
-        let workspace = self.reserve_workspace(length)?;
-        let (segment, workspace) = if state.left.is_empty() && state.right.is_empty() {
+        let workspace =
+            self.reserve_workspace(index_v3::workspace_bytes(state, length, true, &self.name)?)?;
+        let (segment, workspace) = if length == 0 {
             (None, workspace)
         } else {
             let (segment, workspace) =
-                index_v2::encode(state, length, limit, context, workspace).await?;
+                index_v3::encode(state, length, limit, context, workspace).await?;
             (Some(PreparedSegment::new(segment)), workspace)
         };
         Ok(PreparedCheckpoint {
@@ -173,33 +342,10 @@ impl StreamAsofJoinOperator {
         })
     }
 
-    /// Replaces a drained view with its canonical bytes so the snapshot and
-    /// later captures share one exact-capacity buffer and the drained base is
-    /// released. The reservation bounds the copy while the base is alive.
-    fn compact_prepared(&mut self) -> Result<()> {
-        if let Some(prepared) = self.prepared.as_ref().filter(|view| view.is_drained()) {
-            let _workspace = self.reserve_workspace(prepared.len() as u64)?;
-            let retained_capacity = prepared.capacity();
-            let canonical = prepared.canonical();
-            self.install_compacted_prepared(canonical, retained_capacity);
-        }
-        Ok(())
-    }
-
-    fn install_compacted_prepared(&mut self, canonical: StateSegment, old_capacity: usize) {
-        let new_capacity = canonical.bytes_arc().capacity();
-        self.status.state_bytes = self
-            .status
-            .state_bytes
-            .checked_sub(old_capacity as u64)
-            .and_then(|bytes| bytes.checked_add(new_capacity as u64))
-            .expect("compaction preserves a charged index allocation");
-        self.prepared = Some(PreparedSegment::new(canonical));
-    }
-
+    /// Capture canonical v3 index and immutable payload segments.
     pub(super) fn capture(&mut self, epoch: Epoch) -> Result<OperatorStateSnapshot> {
         self.ensure_prepared_sync()?;
-        self.compact_prepared()?;
+        self.ensure_payloads_sync()?;
         let mut metrics = self.status.clone();
         for side in [&mut metrics.left, &mut metrics.right] {
             side.watermark_micros = None;
@@ -207,11 +353,12 @@ impl StreamAsofJoinOperator {
             side.ended = false;
         }
         metrics.output_watermark_micros = None;
+        let version = 3;
         let metadata = Metadata {
             kind: "stream_asof_join",
-            state_version: 2,
-            layout_version: 2,
-            accounting_version: 2,
+            state_version: version,
+            layout_version: version,
+            accounting_version: version,
             row_encoding: "arrow-batch-58.3.0",
             fingerprint: &self.fingerprint,
             epoch: epoch.as_u64(),
@@ -227,8 +374,9 @@ impl StreamAsofJoinOperator {
             .as_ref()
             .map(|segment| BTreeMap::from([(INDEX_SEGMENT.into(), segment.canonical())]))
             .unwrap_or_default();
-        for (key, (batch, _)) in &self.state.batches {
-            segments.insert(index_v2::batch_segment(*key), batch.encoded.clone());
+        for (key, (batch, _)) in self.state.batches.iter() {
+            let encoded = batch.encoded.get().expect("prepared ASOF payload");
+            segments.insert(payload_segments::batch_segment(*key), encoded.clone());
         }
         Ok(OperatorStateSnapshot {
             inline_metadata,
@@ -240,69 +388,7 @@ impl StreamAsofJoinOperator {
         &self,
         snapshot: &OperatorStateSnapshot,
     ) -> Result<DecodedSnapshot> {
-        let metadata = self.restore_metadata(snapshot)?;
-        let version = metadata.state_version;
-        let segment = snapshot_segment(snapshot, version)?;
-        let workspace_bytes = if version == 1 {
-            segment
-                .map(|segment| restore_charge(segment.bytes(), self.spec.limits().max_state_rows()))
-                .transpose()?
-                .unwrap_or(0)
-        } else {
-            let payloads = snapshot
-                .segments
-                .iter()
-                .filter(|(name, _)| name.as_str() != INDEX_SEGMENT)
-                .try_fold(0_u64, |total, (_, value)| {
-                    super::checked(&self.name, total, value.bytes().len() as u64)
-                })?;
-            super::checked(
-                &self.name,
-                segment.map_or(Ok(0), |segment| {
-                    index_v2::restore_charge(segment.bytes(), self.spec.limits().max_state_rows())
-                })?,
-                payloads,
-            )?
-        };
-        let workspace = self.reserve_workspace(workspace_bytes)?;
-        let state = if version == 1 {
-            segment
-                .map(|segment| self.decode_state(segment))
-                .transpose()?
-                .unwrap_or_default()
-        } else {
-            self.decode_state_v2(snapshot, segment, &metadata.metrics)?
-        };
-        if version == 1 {
-            let legacy = legacy_inventory(segment, self.spec.limits().max_state_rows())?;
-            validate_gauges(&legacy, state.left.len() as u64, &metadata.metrics)?;
-        }
-        let prepared = if version == 1 && (!state.left.is_empty() || !state.right.is_empty()) {
-            let length = encoded_length(&state, &self.name)?;
-            // The v1 restore reservation already includes the original encoded
-            // segment plus 384 bytes per identity. The v2 index is smaller than
-            // those two allowances together, so migration needs no extra cap.
-            Some(PreparedSegment::new(index_v2::encode_sync(
-                &state,
-                length,
-                usize::try_from(self.spec.limits().max_state_bytes()).expect("validated"),
-            )?))
-        } else {
-            segment.cloned().map(PreparedSegment::new)
-        };
-        let inventory =
-            self.validate_restored_state(&state, prepared.as_ref(), version, &metadata.metrics)?;
-        let mut metrics = metadata.metrics;
-        metrics.state_bytes = inventory.bytes;
-        validate_counters(&metrics, metadata.terminal, metadata.next_output_sequence)?;
-        Ok(DecodedSnapshot {
-            state,
-            metrics,
-            terminal: metadata.terminal,
-            sequence: metadata.next_output_sequence,
-            prepared,
-            _workspace: workspace,
-        })
+        self.decode_snapshot_v3(snapshot, self.restore_metadata(snapshot)?)
     }
 
     fn restore_metadata<'a>(&self, snapshot: &'a OperatorStateSnapshot) -> Result<Metadata<'a>> {
@@ -319,21 +405,11 @@ impl StreamAsofJoinOperator {
     }
 
     fn validate_metadata(&self, metadata: &Metadata<'_>) -> Result<()> {
-        let version_ok = match metadata.state_version {
-            1 => {
-                metadata.layout_version == 1
-                    && metadata.accounting_version == 1
-                    && metadata.row_encoding == "arrow-row-58.3.0"
-            }
-            2 => {
-                metadata.layout_version == 2
-                    && metadata.accounting_version == 2
-                    && metadata.row_encoding == "arrow-batch-58.3.0"
-            }
-            _ => false,
-        };
         if metadata.kind != "stream_asof_join"
-            || !version_ok
+            || metadata.state_version != 3
+            || metadata.layout_version != 3
+            || metadata.accounting_version != 3
+            || metadata.row_encoding != "arrow-batch-58.3.0"
             || metadata.fingerprint != self.fingerprint
         {
             return Err(mismatch(
@@ -343,209 +419,18 @@ impl StreamAsofJoinOperator {
         Ok(())
     }
 
-    fn validate_restored_state(
-        &self,
-        state: &State,
-        prepared: Option<&PreparedSegment>,
-        version: u32,
-        metrics: &StreamAsofJoinStatus,
-    ) -> Result<Inventory> {
-        let inventory = state.inventory(prepared, &self.name)?;
-        if version == 2 {
-            validate_gauges(&inventory, state.left.len() as u64, metrics)?;
-        } else if inventory.identities != metrics.state_rows
-            || inventory.right_payloads != metrics.retained_right_rows
-            || inventory.identity_only != metrics.identity_only_rows
-        {
-            return Err(mismatch("ASOF migrated state gauges differ"));
-        }
-        if inventory.identities > self.spec.limits().max_state_rows()
-            || inventory.bytes > self.spec.limits().max_state_bytes()
-        {
-            return Err(mismatch("ASOF restored state exceeds current limits"));
-        }
-        Ok(inventory)
-    }
-
-    fn decode_state(&self, segment: &StateSegment) -> Result<State> {
-        if hex::encode(Sha256::digest(segment.bytes())) != segment.sha256() {
-            return Err(mismatch("ASOF segment checksum mismatch"));
-        }
-        let mut decoder = Decoder::new(segment.bytes(), self.spec.limits().max_state_rows());
-        let (left_count, bucket_count) = decoder.header()?;
-        let mut state = State::default();
-        for _ in 0..left_count {
-            self.decode_left_row(&mut decoder, &mut state)?;
-        }
-        let mut next_right_id = 0;
-        for _ in 0..bucket_count {
-            self.decode_bucket(&mut decoder, &mut state, &mut next_right_id)?;
-        }
-        decoder.finish("ASOF segment contains trailing data")?;
-        Ok(state)
-    }
-
-    fn decode_left_row(&self, decoder: &mut Decoder<'_>, state: &mut State) -> Result<()> {
-        decoder.row()?;
-        let time = decoder.time()?;
-        let key = Arc::new(decoder.blob()?.to_vec());
-        let sequence = Arc::new(decoder.blob()?.to_vec());
-        let bytes = decoder.blob()?;
-        let record = self.validate_payload(bytes, false, &(time, key.clone(), sequence.clone()))?;
-        let identity = (time, key, sequence);
-        if state
-            .left
-            .last_key_value()
-            .is_some_and(|(last, _)| last >= &identity)
-        {
-            return Err(mismatch("ASOF left identity order is not strict"));
-        }
-        let payload = legacy_payload((0, state.left.len() as u64), bytes, record);
-        state.attach(&payload);
-        state.left.insert(identity, payload);
-        Ok(())
-    }
-
-    fn decode_bucket(
-        &self,
-        decoder: &mut Decoder<'_>,
-        state: &mut State,
-        next_id: &mut u64,
-    ) -> Result<()> {
-        let key = Arc::new(decoder.blob()?.to_vec());
-        super::identity::validate(&key, &self.schemas[1], self.spec.right().keys())?;
-        if state
-            .right
-            .last_key_value()
-            .is_some_and(|(last, _)| last >= &key)
-        {
-            return Err(mismatch("ASOF right key order is not strict"));
-        }
-        let count = decoder.count()?;
-        if count == 0 {
-            return Err(mismatch("ASOF empty right bucket is noncanonical"));
-        }
-        let mut bucket = BTreeMap::new();
-        for _ in 0..count {
-            self.decode_right_row(decoder, &key, &mut bucket, state, next_id)?;
-        }
-        state.right.insert(key, bucket);
-        Ok(())
-    }
-
-    fn decode_right_row(
-        &self,
-        decoder: &mut Decoder<'_>,
-        key: &Encoding,
-        bucket: &mut BTreeMap<RightOrder, Option<RowPayload>>,
-        state: &mut State,
-        next_id: &mut u64,
-    ) -> Result<()> {
-        decoder.row()?;
-        let time = decoder.time()?;
-        let sequence = self.decode_right_sequence(decoder)?;
-        let bytes = decoder.blob()?;
-        let record = self.validate_right_payload(bytes, time, key, &sequence)?;
-        let identity = (time, sequence);
-        if bucket
-            .last_key_value()
-            .is_some_and(|(last, _)| last >= &identity)
-        {
-            return Err(mismatch("ASOF right identity order is not strict"));
-        }
-        let payload = record.map(|record| {
-            let payload = legacy_payload((1, *next_id), bytes, record);
-            *next_id += 1;
-            state.attach(&payload);
-            payload
-        });
-        bucket.insert(identity, payload);
-        Ok(())
-    }
-
-    fn validate_right_payload(
-        &self,
-        bytes: &[u8],
-        time: i64,
-        key: &Encoding,
-        sequence: &Encoding,
-    ) -> Result<Option<datafusion::arrow::record_batch::RecordBatch>> {
-        if !bytes.is_empty() {
-            return self
-                .validate_payload(bytes, true, &(time, key.clone(), sequence.clone()))
-                .map(Some);
-        }
-        Ok(None)
-    }
-
-    fn decode_right_sequence(&self, decoder: &mut Decoder<'_>) -> Result<Encoding> {
-        let sequence = Arc::new(decoder.blob()?.to_vec());
-        super::identity::validate(&sequence, &self.schemas[1], self.spec.right().sequence_by())?;
-        Ok(sequence)
-    }
-
-    fn validate_payload(
-        &self,
-        bytes: &[u8],
-        right: bool,
-        identity: &super::state::LeftOrder,
-    ) -> Result<datafusion::arrow::record_batch::RecordBatch> {
-        let row = super::codec::decode_batch(bytes, &self.schema_digests[usize::from(right)])
-            .map_err(|_| mismatch("ASOF invalid Arrow row encoding"))?;
-        let side = if right {
-            self.spec.right()
-        } else {
-            self.spec.left()
-        };
-        if row.schema() != self.schemas[usize::from(right)] {
-            return Err(mismatch("ASOF row schema differs"));
-        }
-        validate_nonnull_identity(&row, side)?;
-        let time = row
-            .column(row.schema().index_of(side.event_time()).expect("validated"))
-            .as_any()
-            .downcast_ref::<datafusion::arrow::array::TimestampMicrosecondArray>()
-            .expect("validated")
-            .value(0);
-        let key = super::state::encoded_columns(&row, 0, side.keys())?;
-        let sequence = super::state::encoded_columns(&row, 0, side.sequence_by())?;
-        if &(time, key, sequence) != identity {
-            return Err(mismatch("ASOF row payload identity differs from index"));
-        }
-        Ok(row)
-    }
-
-    fn decode_state_v2(
-        &self,
-        snapshot: &OperatorStateSnapshot,
-        segment: Option<&StateSegment>,
-        metrics: &StreamAsofJoinStatus,
-    ) -> Result<State> {
-        let Some(segment) = segment else {
-            return Ok(State::default());
-        };
-        verify_checksum(segment)?;
-        let batches = self.decode_payload_batches(snapshot)?;
-        validate_batch_ranges(&batches, metrics)?;
-        let state = index_v2::decode(
-            segment.bytes(),
-            &batches,
-            self.spec.limits().max_state_rows(),
-        )?;
-        self.validate_indexed_rows(&state)?;
-        Ok(state)
-    }
-
     fn decode_payload_batches(
         &self,
         snapshot: &OperatorStateSnapshot,
     ) -> Result<BTreeMap<BatchKey, Arc<PayloadBatch>>> {
+        u32::try_from(snapshot.segments.len().saturating_sub(1))
+            .map_err(|_| mismatch("ASOF payload batches exceed compact reference range"))?;
         let mut batches = BTreeMap::new();
         for (name, encoded) in &snapshot.segments {
             if name == INDEX_SEGMENT {
                 continue;
             }
-            let key = index_v2::parse_batch_segment(name)?;
+            let key = payload_segments::parse_batch_segment(name)?;
             let payload = self.decode_payload_batch(key, encoded)?;
             if batches.insert(key, payload).is_some() {
                 return Err(mismatch("ASOF duplicate batch segment"));
@@ -564,7 +449,8 @@ impl StreamAsofJoinOperator {
         let record = super::codec::decode_table_batch(
             encoded.bytes(),
             &self.schema_digests[side],
-            self.spec.limits().max_state_rows(),
+            &self.schemas[side],
+            self.spec.limits().max_state_rows().min(u64::from(u32::MAX)),
         )
         .map_err(|_| mismatch("ASOF invalid Arrow batch encoding"))?;
         if record.schema() != self.schemas[side]
@@ -572,73 +458,82 @@ impl StreamAsofJoinOperator {
         {
             return Err(mismatch("ASOF batch schema or row count differs"));
         }
+        let record = record
+            .with_schema(self.schemas[side].clone())
+            .map_err(|_| mismatch("ASOF batch schema differs"))?;
+        let (encoded_charge_bytes, body_bytes) = super::workspace::payload_bound_with_header(
+            &record,
+            self.payload_header_bytes[side],
+            &self.name,
+        )
+        .map_err(|_| mismatch("ASOF payload bound cannot be computed"))?;
+        let actual_body = super::codec::payload_body_bytes(encoded.bytes())
+            .map_err(|_| mismatch("ASOF invalid Arrow batch framing"))?;
+        if encoded.bytes().len() as u64 > encoded_charge_bytes || actual_body > body_bytes {
+            return Err(mismatch("ASOF payload exceeds its memory-accounting bound"));
+        }
         Ok(Arc::new(PayloadBatch {
             key,
             record: Arc::new(record),
-            body_bytes: super::codec::payload_body_bytes(encoded.bytes())
-                .map_err(|_| mismatch("ASOF invalid Arrow batch framing"))?,
-            encoded: encoded.clone(),
+            body_bytes,
+            encoded_charge_bytes,
+            encoded: OnceLock::from(encoded.clone()),
         }))
     }
 
     fn validate_indexed_rows(&self, state: &State) -> Result<()> {
-        let identities = self.indexed_batch_identities(state)?;
-        self.validate_left_indexed_rows(state, &identities)?;
-        self.validate_right_indexed_rows(state, &identities)
-    }
-
-    fn indexed_batch_identities(&self, state: &State) -> Result<IdentityCache> {
-        let mut identities = BTreeMap::new();
-        for (key, (batch, _)) in &state.batches {
+        let mut seen = std::collections::BTreeSet::new();
+        for (key, (batch, _)) in state.batches.iter() {
             let side = if key.0 == 0 {
                 self.spec.left()
             } else {
                 self.spec.right()
             };
             validate_nonnull_identity(&batch.record, side)?;
-            identities.insert(
-                *key,
-                (
-                    super::state::encode_columns(&batch.record, side.keys())?,
-                    super::state::encode_columns(&batch.record, side.sequence_by())?,
-                ),
-            );
         }
-        Ok(identities)
-    }
-
-    fn validate_left_indexed_rows(&self, state: &State, identities: &IdentityCache) -> Result<()> {
-        for (identity, payload) in &state.left {
-            super::identity::validate(&identity.1, &self.schemas[0], self.spec.left().keys())?;
-            super::identity::validate(
-                &identity.2,
+        for (identity, payload) in state.left.unordered_iter() {
+            validate_encoding(
+                identity.1,
+                &self.schemas[0],
+                self.spec.left().keys(),
+                0,
+                &mut seen,
+            )?;
+            validate_encoding(
+                identity.2.as_ref(),
                 &self.schemas[0],
                 self.spec.left().sequence_by(),
+                1,
+                &mut seen,
             )?;
-            validate_index_identity(identity, payload, identities, self.spec.left())?;
+            validate_index_identity(&identity, state.batches.view(payload), self.spec.left())?;
         }
+        self.validate_right_indexed_rows(state, &mut seen)?;
         Ok(())
     }
 
-    fn validate_right_indexed_rows(&self, state: &State, identities: &IdentityCache) -> Result<()> {
-        for (key, bucket) in &state.right {
-            super::identity::validate(key, &self.schemas[1], self.spec.right().keys())?;
-            self.validate_right_indexed_bucket(key, bucket, identities)?;
-        }
-        Ok(())
-    }
-
-    fn validate_right_indexed_bucket(
+    fn validate_right_indexed_rows(
         &self,
-        key: &Encoding,
-        bucket: &BTreeMap<RightOrder, Option<RowPayload>>,
-        identities: &IdentityCache,
+        state: &State,
+        seen: &mut std::collections::BTreeSet<(usize, u8)>,
     ) -> Result<()> {
-        for ((time, sequence), payload) in bucket {
-            super::identity::validate(sequence, &self.schemas[1], self.spec.right().sequence_by())?;
-            if let Some(payload) = payload {
-                let identity = (*time, key.clone(), sequence.clone());
-                validate_index_identity(&identity, payload, identities, self.spec.right())?;
+        for (key, bucket) in &state.right {
+            validate_encoding(key, &self.schemas[1], self.spec.right().keys(), 2, seen)?;
+            for ((time, sequence), payload) in bucket {
+                validate_encoding(
+                    sequence.as_ref(),
+                    &self.schemas[1],
+                    self.spec.right().sequence_by(),
+                    3,
+                    seen,
+                )?;
+                if let Some(payload) = payload {
+                    validate_index_identity(
+                        &(time, key, sequence),
+                        state.batches.view(*payload),
+                        self.spec.right(),
+                    )?;
+                }
             }
         }
         Ok(())
@@ -690,11 +585,12 @@ impl StreamAsofJoinOperator {
         decoded: DecodedSnapshot,
     ) {
         self.state = decoded.state;
+        self.state.rebuild_right_minima();
         self.status = decoded.metrics;
         self.terminal = decoded.terminal;
         self.next_output_sequence = decoded.sequence;
         self.prepared = decoded.prepared;
-        self.deferred_index_len = None;
+        self.deferred_index_len = decoded.deferred_len;
         self.swept = None;
     }
 }
@@ -720,130 +616,17 @@ fn validate_batch_ranges(
     Ok(())
 }
 
-fn snapshot_segment(
-    snapshot: &OperatorStateSnapshot,
-    version: u32,
-) -> Result<Option<&StateSegment>> {
-    if version == 1 {
-        if snapshot.segments.len() > 1 || snapshot.segments.keys().any(|key| key != SEGMENT) {
-            return Err(mismatch("unexpected ASOF legacy segment inventory"));
-        }
-        Ok(snapshot.segments.get(SEGMENT))
-    } else {
-        let index = snapshot.segments.get(INDEX_SEGMENT);
-        if snapshot
-            .segments
-            .keys()
-            .any(|name| name != INDEX_SEGMENT && index_v2::parse_batch_segment(name).is_err())
-            || (index.is_none() && !snapshot.segments.is_empty())
-        {
-            return Err(mismatch("unexpected ASOF columnar segment inventory"));
-        }
-        Ok(index)
+fn snapshot_segment(snapshot: &OperatorStateSnapshot) -> Result<Option<&StateSegment>> {
+    let index = snapshot.segments.get(INDEX_SEGMENT);
+    if snapshot
+        .segments
+        .keys()
+        .any(|key| key != INDEX_SEGMENT && payload_segments::parse_batch_segment(key).is_err())
+        || (index.is_none() && !snapshot.segments.is_empty())
+    {
+        return Err(mismatch("unexpected ASOF columnar segment inventory"));
     }
-}
-
-fn legacy_inventory(segment: Option<&StateSegment>, max_rows: u64) -> Result<Inventory> {
-    let Some(segment) = segment else {
-        return Ok(Inventory::default());
-    };
-    let mut decoder = Decoder::new(segment.bytes(), max_rows);
-    let (left_count, bucket_count) = decoder.header()?;
-    let mut inventory = Inventory {
-        bytes: legacy_add(64, segment.bytes_arc().capacity() as u64)?,
-        ..Inventory::default()
-    };
-    for _ in 0..left_count {
-        legacy_left_inventory_row(&mut decoder, &mut inventory)?;
-    }
-    for _ in 0..bucket_count {
-        legacy_right_inventory_bucket(&mut decoder, &mut inventory)?;
-    }
-    decoder.finish("ASOF legacy segment has trailing data")?;
-    Ok(inventory)
-}
-
-fn legacy_left_inventory_row(decoder: &mut Decoder<'_>, inventory: &mut Inventory) -> Result<()> {
-    let (key, sequence, payload) = read_legacy_left_row(decoder)?;
-    inventory.identities = legacy_add(inventory.identities, 1)?;
-    inventory.bytes = legacy_add(inventory.bytes, 384)?;
-    for value in [key, sequence, payload] {
-        charge_legacy_blob(inventory, value)?;
-    }
-    Ok(())
-}
-
-fn read_legacy_left_row<'a>(decoder: &mut Decoder<'a>) -> Result<(&'a [u8], &'a [u8], &'a [u8])> {
-    decoder.row()?;
-    decoder.time()?;
-    Ok((decoder.blob()?, decoder.blob()?, decoder.blob()?))
-}
-
-fn legacy_right_inventory_bucket(
-    decoder: &mut Decoder<'_>,
-    inventory: &mut Inventory,
-) -> Result<()> {
-    let key = decoder.blob()?;
-    charge_legacy_blob(inventory, key)?;
-    let rows = decoder.count()?;
-    for _ in 0..rows {
-        legacy_right_inventory_row(decoder, inventory)?;
-    }
-    Ok(())
-}
-
-fn legacy_right_inventory_row(decoder: &mut Decoder<'_>, inventory: &mut Inventory) -> Result<()> {
-    let (sequence, payload) = read_legacy_right_row(decoder)?;
-    inventory.identities = legacy_add(inventory.identities, 1)?;
-    inventory.bytes = legacy_add(inventory.bytes, 320)?;
-    charge_legacy_blob(inventory, sequence)?;
-    charge_legacy_right_payload(inventory, payload)
-}
-
-fn read_legacy_right_row<'a>(decoder: &mut Decoder<'a>) -> Result<(&'a [u8], &'a [u8])> {
-    decoder.row()?;
-    decoder.time()?;
-    Ok((decoder.blob()?, decoder.blob()?))
-}
-
-fn charge_legacy_right_payload(inventory: &mut Inventory, payload: &[u8]) -> Result<()> {
-    if payload.is_empty() {
-        inventory.identity_only = legacy_add(inventory.identity_only, 1)?;
-    } else {
-        inventory.right_payloads = legacy_add(inventory.right_payloads, 1)?;
-        charge_legacy_blob(inventory, payload)?;
-    }
-    Ok(())
-}
-
-fn charge_legacy_blob(inventory: &mut Inventory, value: &[u8]) -> Result<()> {
-    inventory.bytes = legacy_add(inventory.bytes, legacy_add(64, value.len() as u64)?)?;
-    Ok(())
-}
-
-fn legacy_add(base: u64, value: u64) -> Result<u64> {
-    base.checked_add(value)
-        .ok_or_else(|| mismatch("ASOF legacy inventory charge overflowed"))
-}
-
-fn legacy_payload(
-    key: BatchKey,
-    bytes: &[u8],
-    record: datafusion::arrow::record_batch::RecordBatch,
-) -> RowPayload {
-    RowPayload {
-        batch: Arc::new(PayloadBatch {
-            key,
-            record: Arc::new(record),
-            body_bytes: if bytes.is_empty() {
-                0
-            } else {
-                super::codec::payload_body_bytes(bytes).expect("validated legacy IPC")
-            },
-            encoded: StateSegment::new(bytes.to_vec()),
-        }),
-        row: 0,
-    }
+    Ok(index)
 }
 
 fn verify_checksum(segment: &StateSegment) -> Result<()> {
@@ -853,19 +636,45 @@ fn verify_checksum(segment: &StateSegment) -> Result<()> {
     Ok(())
 }
 
+fn validate_encoding(
+    encoding: &Encoding,
+    schema: &datafusion::arrow::datatypes::Schema,
+    columns: &[String],
+    role: u8,
+    seen: &mut std::collections::BTreeSet<(usize, u8)>,
+) -> Result<()> {
+    if let Some((address, _)) = encoding.allocation() {
+        if !seen.insert((address, role)) {
+            return Ok(());
+        }
+    }
+    // A live handle can keep expired rows in its shared batch buffer. Validate
+    // the entire allocation against every schema role that references it.
+    for value in encoding.owner_values() {
+        super::identity::validate(value, schema, columns)?;
+    }
+    Ok(())
+}
+
 fn validate_index_identity(
-    identity: &super::state::LeftOrder,
-    payload: &RowPayload,
-    cache: &IdentityCache,
+    identity: &super::state::LeftView<'_>,
+    payload: PayloadView<'_>,
     side: &super::AsofJoinSide,
 ) -> Result<()> {
     let record = &payload.batch.record;
-    let (keys, sequences) = cache
-        .get(&payload.batch.key)
-        .ok_or_else(|| mismatch("ASOF indexed batch is missing"))?;
-    if super::admission::times(record, side).value(payload.row) != identity.0
-        || keys.row(payload.row) != identity.1
-        || sequences.row(payload.row) != identity.2
+    if super::admission::times(record, side).value(payload.row) != *identity.0
+        || !super::identity_compare::encoded_equal(
+            record,
+            payload.row,
+            side.keys(),
+            identity.1.as_slice(),
+        )
+        || !super::identity_compare::encoded_equal(
+            record,
+            payload.row,
+            side.sequence_by(),
+            identity.2.as_slice(),
+        )
     {
         return Err(mismatch("ASOF batch row identity differs from index"));
     }
@@ -912,7 +721,7 @@ mod tests {
     use crate::{
         AsofJoinSide, AsofStateLimits, Batch, BatchMetadata, CancellationToken, EdgeCollector,
         EventTime, IngressProgress, IngressState, JsonMap, OperatorMetadata, StreamJobContext,
-        StreamOperator, StreamOperatorContext, StreamingFailureReason,
+        StreamOperator, StreamOperatorContext,
     };
     use datafusion::arrow::{
         array::{Int8Array, Int64Array, StringArray, TimestampMicrosecondArray},
@@ -920,6 +729,24 @@ mod tests {
         record_batch::RecordBatch,
     };
     use std::time::Duration;
+
+    #[test]
+    fn v3_index_orders_right_buckets_independently_of_hash_insertion() {
+        let mut forward = State::default();
+        let mut reverse = State::default();
+        for (state, keys) in [(&mut forward, [1_u8, 2]), (&mut reverse, [2, 1])] {
+            for key in keys {
+                let mut bucket = RightBucket::default();
+                bucket.insert((1, Encoding::from_slice(&[1])), None);
+                state.right.insert(Encoding::from_slice(&[key]), bucket);
+            }
+        }
+        let length = v3_encoded_length(&forward, "asof").unwrap();
+        assert_eq!(length, v3_encoded_length(&reverse, "asof").unwrap());
+        let forward = index_v3::encode_sync(&forward, length, 1_024).unwrap();
+        let reverse = index_v3::encode_sync(&reverse, length, 1_024).unwrap();
+        assert_eq!(forward.bytes(), reverse.bytes());
+    }
 
     fn progress(left: Option<i64>, right: Option<i64>) -> IngressProgressSnapshot {
         IngressProgressSnapshot::new(BTreeMap::from([
@@ -935,338 +762,20 @@ mod tests {
     }
 
     fn dummy_payload() -> RowPayload {
-        legacy_payload(
-            (0, 0),
-            &[],
-            RecordBatch::new_empty(Arc::new(Schema::empty())),
-        )
-    }
-
-    fn legacy_snapshot(
-        operator: &mut StreamAsofJoinOperator,
-        segment: StateSegment,
-        left_rows: u64,
-        right_rows: u64,
-    ) -> OperatorStateSnapshot {
-        let mut snapshot = operator.capture(Epoch::INITIAL).unwrap();
-        for (field, value) in [
-            ("state_version", serde_json::json!(1)),
-            ("layout_version", serde_json::json!(1)),
-            ("accounting_version", serde_json::json!(1)),
-            ("row_encoding", serde_json::json!("arrow-row-58.3.0")),
-        ] {
-            snapshot.inline_metadata.insert(field.into(), value);
+        RowPayload {
+            batch: Arc::new(PayloadBatch {
+                key: (0, 0),
+                record: Arc::new(RecordBatch::new_empty(Arc::new(Schema::empty()))),
+                encoded: OnceLock::new(),
+                encoded_charge_bytes: 0,
+                body_bytes: 0,
+            }),
+            row: 0,
         }
-        let metrics = snapshot
-            .inline_metadata
-            .get_mut("metrics")
-            .unwrap()
-            .as_object_mut()
-            .unwrap();
-        metrics.insert("pending_left_rows".into(), serde_json::json!(left_rows));
-        metrics.insert(
-            "state_rows".into(),
-            serde_json::json!(left_rows + right_rows),
-        );
-        metrics.insert("retained_right_rows".into(), serde_json::json!(right_rows));
-        metrics.insert(
-            "state_bytes".into(),
-            serde_json::json!(
-                legacy_inventory(Some(&segment), left_rows + right_rows)
-                    .unwrap()
-                    .bytes
-            ),
-        );
-        metrics["left"]["accepted_rows"] = serde_json::json!(left_rows);
-        metrics["right"]["accepted_rows"] = serde_json::json!(right_rows);
-        snapshot.segments.insert(SEGMENT.into(), segment);
-        snapshot
-    }
-
-    #[test]
-    fn legacy_row_snapshot_restores_into_columnar_state() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("key", DataType::Utf8, false),
-            Field::new(
-                "time",
-                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
-                false,
-            ),
-            Field::new("seq", DataType::Int64, false),
-        ]));
-        let side = |prefix: &str| {
-            AsofJoinSide::new(
-                vec!["key".into()],
-                "time".into(),
-                vec!["seq".into()],
-                prefix.into(),
-            )
-            .unwrap()
-        };
-        let spec = super::super::StreamAsofJoinSpec::new(
-            side("left"),
-            side("right"),
-            Duration::ZERO,
-            AsofStateLimits::new(100, 1 << 20).unwrap(),
-        )
-        .unwrap();
-        let mut operator =
-            StreamAsofJoinOperator::new("asof", schema.clone(), schema.clone(), spec.clone())
-                .unwrap();
-        let row = RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(StringArray::from(vec!["A"])),
-                Arc::new(TimestampMicrosecondArray::from(vec![100]).with_timezone("UTC")),
-                Arc::new(Int64Array::from(vec![1])),
-            ],
-        )
-        .unwrap();
-        let key = super::super::state::encoded_columns(&row, 0, spec.left().keys()).unwrap();
-        let sequence =
-            super::super::state::encoded_columns(&row, 0, spec.left().sequence_by()).unwrap();
-        let payload = super::super::codec::encode_batch(&row, 1 << 20, &mut Vec::new()).unwrap();
-        let mut bytes = MAGIC.to_vec();
-        bytes.extend_from_slice(&1_u64.to_le_bytes());
-        bytes.extend_from_slice(&1_u64.to_le_bytes());
-        bytes.extend_from_slice(&100_i64.to_le_bytes());
-        for blob in [key.as_slice(), sequence.as_slice(), payload.as_slice()] {
-            bytes.extend_from_slice(&(blob.len() as u64).to_le_bytes());
-            bytes.extend_from_slice(blob);
-        }
-        bytes.extend_from_slice(&(key.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(&key);
-        bytes.extend_from_slice(&1_u64.to_le_bytes());
-        bytes.extend_from_slice(&100_i64.to_le_bytes());
-        for blob in [sequence.as_slice(), payload.as_slice()] {
-            bytes.extend_from_slice(&(blob.len() as u64).to_le_bytes());
-            bytes.extend_from_slice(blob);
-        }
-        let segment = StateSegment::new(bytes);
-        let snapshot = legacy_snapshot(&mut operator, segment, 1, 1);
-        operator.restore(&snapshot).unwrap();
-        assert_eq!(operator.state.left.len(), 1);
-        let upgraded = operator.capture(Epoch::INITIAL).unwrap();
-        assert_eq!(upgraded.inline_metadata["state_version"], 2);
-        assert!(upgraded.segments.contains_key(INDEX_SEGMENT));
-        assert_eq!(upgraded.segments.len(), 3);
-    }
-
-    #[test]
-    fn near_limit_multirow_legacy_snapshot_restores_and_restarts_as_v2() {
-        const ROWS: u64 = 64;
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("key", DataType::Utf8, false),
-            Field::new(
-                "time",
-                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
-                false,
-            ),
-            Field::new("seq", DataType::Int64, false),
-            Field::new("value", DataType::Utf8, false),
-        ]));
-        let side = |prefix: &str| {
-            AsofJoinSide::new(
-                vec!["key".into()],
-                "time".into(),
-                vec!["seq".into()],
-                prefix.into(),
-            )
-            .unwrap()
-        };
-        let mut bytes = MAGIC.to_vec();
-        bytes.extend_from_slice(&ROWS.to_le_bytes());
-        bytes.extend_from_slice(&0_u64.to_le_bytes());
-        for ordinal in 0..ROWS {
-            let ordinal = i64::try_from(ordinal).unwrap();
-            let row = RecordBatch::try_new(
-                schema.clone(),
-                vec![
-                    Arc::new(StringArray::from(vec!["A"])),
-                    Arc::new(
-                        TimestampMicrosecondArray::from(vec![100 + ordinal]).with_timezone("UTC"),
-                    ),
-                    Arc::new(Int64Array::from(vec![ordinal])),
-                    Arc::new(StringArray::from(vec!["v".repeat(2_048)])),
-                ],
-            )
-            .unwrap();
-            let key = super::super::state::encoded_columns(&row, 0, &["key".into()]).unwrap();
-            let sequence = super::super::state::encoded_columns(&row, 0, &["seq".into()]).unwrap();
-            let payload =
-                super::super::codec::encode_batch(&row, 1 << 20, &mut Vec::new()).unwrap();
-            bytes.extend_from_slice(&(100 + ordinal).to_le_bytes());
-            for blob in [key.as_slice(), sequence.as_slice(), payload.as_slice()] {
-                bytes.extend_from_slice(&(blob.len() as u64).to_le_bytes());
-                bytes.extend_from_slice(blob);
-            }
-        }
-        let segment = StateSegment::new(bytes);
-        let old_bytes = legacy_inventory(Some(&segment), ROWS).unwrap().bytes;
-        let limit = old_bytes + 4_096;
-        assert!(restore_charge(segment.bytes(), ROWS).unwrap() < limit);
-        let spec = super::super::StreamAsofJoinSpec::new(
-            side("left"),
-            side("right"),
-            Duration::ZERO,
-            AsofStateLimits::new(ROWS, limit).unwrap(),
-        )
-        .unwrap();
-        let mut operator =
-            StreamAsofJoinOperator::new("asof", schema.clone(), schema.clone(), spec.clone())
-                .unwrap();
-        let decoded = operator.decode_state(&segment).unwrap();
-        let index_length = encoded_length(&decoded, "asof").unwrap();
-        let estimated = decoded
-            .inventory(
-                Some(&PreparedSegment::new(StateSegment::new(vec![
-                    0;
-                    usize::try_from(index_length).unwrap()
-                ]))),
-                "asof",
-            )
-            .unwrap()
-            .bytes;
-        assert!(
-            estimated <= limit,
-            "v1={old_bytes} v2={estimated} limit={limit}"
-        );
-        let snapshot = legacy_snapshot(&mut operator, segment, ROWS, 0);
-        operator.restore(&snapshot).unwrap();
-        assert_eq!(operator.state.left.len() as u64, ROWS);
-        assert!(operator.status.state_bytes <= limit);
-        let upgraded = operator.capture(Epoch::INITIAL).unwrap();
-        assert_eq!(upgraded.inline_metadata["state_version"], 2);
-        let mut restarted =
-            StreamAsofJoinOperator::new("asof", schema.clone(), schema, spec).unwrap();
-        restarted.restore(&upgraded).unwrap();
-        assert_eq!(restarted.state.left.len() as u64, ROWS);
-    }
-
-    #[test]
-    fn one_wide_legacy_row_restores_at_original_workspace_limit() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("key", DataType::Utf8, false),
-            Field::new(
-                "time",
-                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
-                false,
-            ),
-            Field::new("seq", DataType::Int64, false),
-            Field::new("value", DataType::Utf8, false),
-        ]));
-        let row = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(StringArray::from(vec!["A"])),
-                Arc::new(TimestampMicrosecondArray::from(vec![100]).with_timezone("UTC")),
-                Arc::new(Int64Array::from(vec![1])),
-                Arc::new(StringArray::from(vec!["v".repeat(48 * 1024)])),
-            ],
-        )
-        .unwrap();
-        let key = super::super::state::encoded_columns(&row, 0, &["key".into()]).unwrap();
-        let sequence = super::super::state::encoded_columns(&row, 0, &["seq".into()]).unwrap();
-        let payload = super::super::codec::encode_batch(&row, 1 << 20, &mut Vec::new()).unwrap();
-        let mut bytes = MAGIC.to_vec();
-        bytes.extend_from_slice(&1_u64.to_le_bytes());
-        bytes.extend_from_slice(&0_u64.to_le_bytes());
-        bytes.extend_from_slice(&100_i64.to_le_bytes());
-        for blob in [key.as_slice(), sequence.as_slice(), payload.as_slice()] {
-            bytes.extend_from_slice(&(blob.len() as u64).to_le_bytes());
-            bytes.extend_from_slice(blob);
-        }
-        let segment = StateSegment::new(bytes);
-        let limit = restore_charge(segment.bytes(), 1).unwrap();
-        assert!(legacy_inventory(Some(&segment), 1).unwrap().bytes <= limit);
-        let side = |prefix: &str| {
-            AsofJoinSide::new(
-                vec!["key".into()],
-                "time".into(),
-                vec!["seq".into()],
-                prefix.into(),
-            )
-            .unwrap()
-        };
-        let spec = super::super::StreamAsofJoinSpec::new(
-            side("left"),
-            side("right"),
-            Duration::ZERO,
-            AsofStateLimits::new(1, limit).unwrap(),
-        )
-        .unwrap();
-        let mut operator =
-            StreamAsofJoinOperator::new("asof", schema.clone(), schema.clone(), spec.clone())
-                .unwrap();
-        let snapshot = legacy_snapshot(&mut operator, segment, 1, 0);
-        operator.restore(&snapshot).unwrap();
-        let upgraded = operator.capture(Epoch::INITIAL).unwrap();
-        let mut restarted =
-            StreamAsofJoinOperator::new("asof", schema.clone(), schema, spec).unwrap();
-        restarted.restore(&upgraded).unwrap();
-        assert_eq!(restarted.state.left.len(), 1);
-    }
-
-    #[test]
-    fn v2_preflight_uses_encoded_rows_when_metadata_understates_state() {
-        use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
-
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("key", DataType::Utf8, false),
-            Field::new(
-                "time",
-                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
-                false,
-            ),
-            Field::new("seq", DataType::Int64, false),
-        ]));
-        let side = |prefix: &str| {
-            AsofJoinSide::new(
-                vec!["key".into()],
-                "time".into(),
-                vec!["seq".into()],
-                prefix.into(),
-            )
-            .unwrap()
-        };
-        let spec = super::super::StreamAsofJoinSpec::new(
-            side("left"),
-            side("right"),
-            Duration::ZERO,
-            AsofStateLimits::new(32, 1 << 20).unwrap(),
-        )
-        .unwrap();
-        let mut operator =
-            StreamAsofJoinOperator::new("asof", schema.clone(), schema, spec).unwrap();
-        operator.state.right.insert(
-            Arc::new(vec![1]),
-            (0..32)
-                .map(|ordinal| ((ordinal, Arc::new(vec![1])), None))
-                .collect(),
-        );
-        let length = encoded_length(&operator.state, "asof").unwrap();
-        let index = index_v2::encode_sync(&operator.state, length, 1 << 20).unwrap();
-        operator.prepared = Some(PreparedSegment::new(index));
-        let mut snapshot = operator.capture(Epoch::INITIAL).unwrap();
-        snapshot.inline_metadata.get_mut("metrics").unwrap()["state_rows"] = serde_json::json!(0);
-        let encoded = snapshot.segments[INDEX_SEGMENT].bytes().len();
-        assert!(
-            index_v2::restore_charge(snapshot.segments[INDEX_SEGMENT].bytes(), 32,).unwrap()
-                > encoded as u64 + 1
-        );
-        operator.runtime.pool = Arc::new(GreedyMemoryPool::new(encoded + 1)) as Arc<dyn MemoryPool>;
-        let error = operator.decoded_snapshot(&snapshot).err().unwrap();
-        assert!(matches!(
-            error,
-            CalcFlowError::OperatorReason {
-                reason_code: StreamingFailureReason::AsofWorkspaceLimitExceeded,
-                ..
-            }
-        ));
     }
 
     #[tokio::test]
-    async fn v2_restore_rejects_batch_id_at_next_admission_boundary() {
+    async fn v3_restore_rejects_batch_id_at_next_admission_boundary() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("key", DataType::Utf8, false),
             Field::new(
@@ -1329,7 +838,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn narrow_column_v2_checkpoint_restores_with_same_state_limit() {
+    async fn narrow_column_v3_checkpoint_restores_with_same_state_limit() {
         let mut fields = vec![
             Field::new("key", DataType::Utf8, false),
             Field::new(
@@ -1382,32 +891,417 @@ mod tests {
         assert_eq!(restored.status().state_rows, 1);
     }
 
+    #[tokio::test]
+    async fn v3_identity_only_capture_fits_the_committed_state_budget() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("key", DataType::Utf8, false),
+            Field::new(
+                "time",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                false,
+            ),
+            Field::new("seq", DataType::Int64, false),
+        ]));
+        let side = |prefix: &str| {
+            AsofJoinSide::new(
+                vec!["key".into()],
+                "time".into(),
+                vec!["seq".into()],
+                prefix.into(),
+            )
+            .unwrap()
+        };
+        let spec = super::super::StreamAsofJoinSpec::new(
+            side("left"),
+            side("right"),
+            Duration::ZERO,
+            AsofStateLimits::new(4_096, 2 * 1024 * 1024).unwrap(),
+        )
+        .unwrap();
+        let mut operator =
+            StreamAsofJoinOperator::new("asof", schema.clone(), schema, spec).unwrap();
+        let kind = operator.state.sequence_kinds[1];
+        let mut bucket = RightBucket::with_sequence_kind(kind);
+        for time in 0..4_096 {
+            bucket.insert((time, kind.decode_integer(&time.to_le_bytes())), None);
+        }
+        operator
+            .state
+            .right
+            .insert(Encoding::from_slice(&[1]), bucket);
+        operator.state.rebuild_encoding_owners();
+        let length = v3_encoded_length(&operator.state, "asof").unwrap();
+        let committed = operator
+            .state
+            .capacity_inventory(None, "asof")
+            .unwrap()
+            .bytes
+            + length
+            + 256;
+        let expected = index_v3::encode_sync(&operator.state, length, usize::MAX).unwrap();
+        operator.deferred_index_len = Some(length);
+        operator.runtime.pool =
+            Arc::new(datafusion::execution::memory_pool::GreedyMemoryPool::new(
+                usize::try_from(committed).unwrap(),
+            ));
+        let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+        let context = StreamOperatorContext::new(&job, "asof", None);
+        operator
+            .prepare_deferred_index_async(&context)
+            .await
+            .unwrap();
+        assert_eq!(operator.prepared.as_ref().unwrap().canonical(), expected);
+        assert_eq!(operator.runtime.pool.reserved(), 0);
+    }
+
+    #[tokio::test]
+    async fn pending_payload_lease_funds_all_detached_batches() {
+        let mut operator = operator_with_pending_payloads().await;
+        let (pending, workspace) = operator.pending_payloads().unwrap();
+        let retained = pending
+            .iter()
+            .map(|batch| super::super::state::capacity_batch_allocation(batch, "asof").unwrap())
+            .sum::<u64>();
+        assert!(
+            workspace.size() as u64 >= retained,
+            "detached payloads need their complete owner fee: reserved={}, retained={retained}",
+            workspace.size()
+        );
+        let weak = pending.iter().map(Arc::downgrade).collect::<Vec<_>>();
+        let pool = operator.runtime.pool.clone();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let worker = tokio::task::spawn_blocking(move || {
+            started.send(()).unwrap();
+            blocked.recv().unwrap();
+            encode_payloads(pending, workspace, 8 << 20, "asof").unwrap();
+        });
+        ready.await.unwrap();
+        drop(worker);
+        operator.reset().unwrap();
+        assert!(weak.iter().all(|batch| batch.upgrade().is_some()));
+        assert!(pool.reserved() as u64 >= retained);
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            tokio::time::sleep(Duration::from_millis(1)),
+        )
+        .await
+        .unwrap();
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while pool.reserved() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(weak.iter().all(|batch| batch.upgrade().is_none()));
+    }
+
+    async fn operator_with_pending_payloads() -> StreamAsofJoinOperator {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("key", DataType::Utf8, false),
+            Field::new(
+                "time",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                false,
+            ),
+            Field::new("seq", DataType::Int64, false),
+            Field::new("value", DataType::Utf8, false),
+        ]));
+        let side = |prefix: &str| {
+            AsofJoinSide::new(
+                vec!["key".into()],
+                "time".into(),
+                vec!["seq".into()],
+                prefix.into(),
+            )
+            .unwrap()
+        };
+        let spec = super::super::StreamAsofJoinSpec::new(
+            side("left"),
+            side("right"),
+            Duration::ZERO,
+            AsofStateLimits::new(100, 8 << 20).unwrap(),
+        )
+        .unwrap();
+        let mut operator =
+            StreamAsofJoinOperator::new("asof", schema.clone(), schema.clone(), spec).unwrap();
+        let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+        let context = StreamOperatorContext::new(&job, "asof", None);
+        let mut output = EdgeCollector::new(operator.output_ports().to_vec());
+        for index in 0..4 {
+            let record = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(vec!["A"])),
+                    Arc::new(TimestampMicrosecondArray::from(vec![index]).with_timezone("UTC")),
+                    Arc::new(Int64Array::from(vec![index])),
+                    Arc::new(StringArray::from(vec!["v".repeat(256 << 10)])),
+                ],
+            )
+            .unwrap();
+            operator
+                .process_data(
+                    "right",
+                    Batch::table(vec![record], BatchMetadata::default()).unwrap(),
+                    &context,
+                    &mut output,
+                )
+                .await
+                .unwrap();
+        }
+        operator
+    }
+
+    #[tokio::test]
+    async fn v3_capture_and_restore_do_not_reserve_duplicate_payload_bodies() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("key", DataType::Utf8, false),
+            Field::new(
+                "time",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                false,
+            ),
+            Field::new("seq", DataType::Int64, false),
+            Field::new("value", DataType::Utf8, false),
+        ]));
+        let side = |prefix: &str| {
+            AsofJoinSide::new(
+                vec!["key".into()],
+                "time".into(),
+                vec!["seq".into()],
+                prefix.into(),
+            )
+            .unwrap()
+        };
+        let spec = super::super::StreamAsofJoinSpec::new(
+            side("left"),
+            side("right"),
+            Duration::ZERO,
+            AsofStateLimits::new(64, 2 * 1024 * 1024).unwrap(),
+        )
+        .unwrap();
+        let mut operator =
+            StreamAsofJoinOperator::new("asof", schema.clone(), schema.clone(), spec.clone())
+                .unwrap();
+        let record = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["A"; 64])),
+                Arc::new(
+                    TimestampMicrosecondArray::from(
+                        (0..64).map(|row| 100 + row).collect::<Vec<_>>(),
+                    )
+                    .with_timezone("UTC"),
+                ),
+                Arc::new(Int64Array::from((0..64).collect::<Vec<_>>())),
+                Arc::new(StringArray::from(vec!["v".repeat(2_048); 64])),
+            ],
+        )
+        .unwrap();
+        let batch = Batch::table(vec![record], BatchMetadata::default()).unwrap();
+        let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+        let context = StreamOperatorContext::new(&job, "asof", None);
+        let mut output = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("left", batch, &context, &mut output)
+            .await
+            .unwrap();
+        let expected = operator.capture(Epoch::INITIAL).unwrap();
+        let length = operator.prepared.take().unwrap().len() as u64;
+        operator.deferred_index_len = Some(length);
+        // Simulate another operation using the pool. Encoding an index need
+        // not reserve the cached Arrow payload again.
+        operator.runtime.pool = Arc::new(
+            datafusion::execution::memory_pool::GreedyMemoryPool::new(64 * 1024),
+        );
+        operator.prepare_checkpoint_async(&context).await.unwrap();
+        let actual = operator.capture(Epoch::INITIAL).unwrap();
+        assert_eq!(actual.segments, expected.segments);
+        assert_eq!(operator.runtime.pool.reserved(), 0);
+        let mut restored =
+            StreamAsofJoinOperator::new("asof", schema.clone(), schema, spec).unwrap();
+        restored.runtime.pool =
+            Arc::new(datafusion::execution::memory_pool::GreedyMemoryPool::new(
+                usize::try_from(operator.status.state_bytes).unwrap() + 4_096,
+            ));
+        restored.restore(&actual).unwrap();
+        assert_eq!(restored.status.state_bytes, operator.status.state_bytes);
+        assert_eq!(restored.runtime.pool.reserved(), 0);
+    }
+
+    #[tokio::test]
+    async fn v3_restore_rejects_noncanonical_expired_sequence_in_a_shared_buffer() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("key", DataType::Utf8, false),
+            Field::new(
+                "time",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                false,
+            ),
+            Field::new("seq", DataType::Utf8, false),
+        ]));
+        let side = |prefix: &str| {
+            AsofJoinSide::new(
+                vec!["key".into()],
+                "time".into(),
+                vec!["seq".into()],
+                prefix.into(),
+            )
+            .unwrap()
+        };
+        let spec = super::super::StreamAsofJoinSpec::new(
+            side("left"),
+            side("right"),
+            Duration::ZERO,
+            AsofStateLimits::new(8, 1 << 20).unwrap(),
+        )
+        .unwrap();
+        let record = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["A", "A"])),
+                Arc::new(TimestampMicrosecondArray::from(vec![100, 101]).with_timezone("UTC")),
+                Arc::new(StringArray::from(vec![
+                    "first string sequence",
+                    "second string sequence",
+                ])),
+            ],
+        )
+        .unwrap();
+        let mut operator =
+            StreamAsofJoinOperator::new("asof", schema.clone(), schema, spec).unwrap();
+        let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+        let context = StreamOperatorContext::new(&job, "asof", None);
+        let mut output = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data(
+                "right",
+                Batch::table(vec![record], BatchMetadata::default()).unwrap(),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap();
+        let progressed = StreamOperatorContext::with_ingress_progress(
+            &job,
+            "asof",
+            None,
+            progress(Some(101), Some(101)),
+        );
+        operator
+            .on_watermark(EventTime::from_micros(101), &progressed, &mut output)
+            .await
+            .unwrap();
+        assert_eq!(operator.status.state_rows, 1);
+        let mut snapshot = operator.capture(Epoch::INITIAL).unwrap();
+        let mut bytes = snapshot.segments[index_v3::INDEX_SEGMENT].bytes().to_vec();
+        assert_eq!(u64::from_le_bytes(bytes[72..80].try_into().unwrap()), 1);
+        assert_eq!(bytes[80], 1, "one Binary owner retains both sequence rows");
+        assert_eq!(u64::from_le_bytes(bytes[82..90].try_into().unwrap()), 2);
+        bytes[114] = 0; // Invalid string marker in the expired, unreferenced row.
+        snapshot
+            .segments
+            .insert(index_v3::INDEX_SEGMENT.into(), StateSegment::new(bytes));
+        let before = operator.status();
+        assert!(matches!(
+            operator.restore(&snapshot),
+            Err(CalcFlowError::CheckpointMismatch { .. })
+        ));
+        assert_eq!(operator.status(), before);
+        assert_eq!(operator.runtime.pool.reserved(), 0);
+    }
+
     #[test]
-    fn asof_restore_reserves_identity_only_validation_scratch() {
-        let key = vec![1_u8; 1_048_576];
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(MAGIC);
-        bytes.extend_from_slice(&0_u64.to_le_bytes());
-        bytes.extend_from_slice(&1_u64.to_le_bytes());
-        bytes.extend_from_slice(&(key.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(&key);
-        bytes.extend_from_slice(&1_u64.to_le_bytes());
-        bytes.extend_from_slice(&100_i64.to_le_bytes());
-        bytes.extend_from_slice(&1_u64.to_le_bytes());
-        bytes.push(1);
-        bytes.extend_from_slice(&0_u64.to_le_bytes());
-        assert!(restore_charge(&bytes, 1).unwrap() >= (bytes.len() + key.len()) as u64 + 384);
+    fn capacity_payload_charge_bounds_allocations_for_wide_flat_columns() {
+        use datafusion::common::ScalarValue;
+        let value_types = [
+            DataType::Int8,
+            DataType::Int64,
+            DataType::Boolean,
+            DataType::Float64,
+            DataType::Utf8,
+            DataType::LargeUtf8,
+            DataType::Binary,
+            DataType::LargeBinary,
+            DataType::Decimal128(30, 2),
+        ];
+        for (width, data_type) in [1, 4, 32]
+            .into_iter()
+            .flat_map(|width| value_types.iter().map(move |data_type| (width, data_type)))
+        {
+            let mut fields = vec![
+                Field::new("key", DataType::Utf8, false),
+                Field::new(
+                    "time",
+                    DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                    false,
+                ),
+                Field::new("seq", DataType::Int64, false),
+            ];
+            fields.extend(
+                (0..width)
+                    .map(|index| Field::new(format!("value{index}"), data_type.clone(), true)),
+            );
+            let schema = Arc::new(Schema::new(fields));
+            let side = |prefix: &str| {
+                AsofJoinSide::new(
+                    vec!["key".into()],
+                    "time".into(),
+                    vec!["seq".into()],
+                    prefix.into(),
+                )
+                .unwrap()
+            };
+            let spec = super::super::StreamAsofJoinSpec::new(
+                side("left"),
+                side("right"),
+                Duration::ZERO,
+                AsofStateLimits::new(64, 8 * 1024 * 1024).unwrap(),
+            )
+            .unwrap();
+            let operator =
+                StreamAsofJoinOperator::new("asof", schema.clone(), schema.clone(), spec).unwrap();
+            let mut columns: Vec<datafusion::arrow::array::ArrayRef> = vec![
+                Arc::new(StringArray::from(vec!["A"; 64])),
+                Arc::new(TimestampMicrosecondArray::from(vec![100; 64]).with_timezone("UTC")),
+                Arc::new(Int64Array::from(vec![1; 64])),
+            ];
+            columns.extend((0..width).map(|_| {
+                ScalarValue::new_default(data_type)
+                    .unwrap()
+                    .to_array_of_size(64)
+                    .unwrap()
+            }));
+            let record = RecordBatch::try_new(schema, columns).unwrap();
+            let source =
+                super::super::codec::encode_batch(&record, usize::MAX, &mut Vec::new()).unwrap();
+            let mut retained = None;
+            let allocations = allocation_counter::measure(|| {
+                let encoded = StateSegment::new(source.clone());
+                retained = Some(operator.decode_payload_batch((0, 0), &encoded).unwrap());
+            });
+            let batch = retained.unwrap();
+            let fee = super::super::state::capacity_batch_allocation(&batch, "asof").unwrap();
+            assert!(
+                u64::try_from(allocations.bytes_current).unwrap() <= fee,
+                "{data_type:?} width={width} allocation={allocations:?} fee={fee}"
+            );
+        }
     }
 
     #[test]
     fn asof_restore_rejects_identity_only_that_can_still_match_pending() {
         let mut state = State::default();
-        state
-            .left
-            .insert((105, Arc::new(vec![1]), Arc::new(vec![1])), dummy_payload());
+        let payload = state.attach(&dummy_payload());
+        state.left.insert(
+            (105, Encoding::from_slice(&[1]), Encoding::from_slice(&[1])),
+            payload,
+        );
         state.right.insert(
-            Arc::new(vec![1]),
-            BTreeMap::from([((100, Arc::new(vec![1])), None)]),
+            Encoding::from_slice(&[1]),
+            RightBucket::from_iter([((100, Encoding::from_slice(&[1])), None)]),
         );
         assert!(
             validate_progress(
@@ -1424,9 +1318,11 @@ mod tests {
     #[test]
     fn asof_restore_rejects_ready_pending_before_stale_frontier() {
         let mut state = State::default();
-        state
-            .left
-            .insert((105, Arc::new(vec![1]), Arc::new(vec![1])), dummy_payload());
+        let payload = state.attach(&dummy_payload());
+        state.left.insert(
+            (105, Encoding::from_slice(&[1]), Encoding::from_slice(&[1])),
+            payload,
+        );
         assert!(
             validate_progress(
                 &state,
@@ -1443,8 +1339,8 @@ mod tests {
     fn asof_restore_rejects_expired_identity_only_and_unproven_output_frontier() {
         let mut state = State::default();
         state.right.insert(
-            Arc::new(vec![1]),
-            BTreeMap::from([((100, Arc::new(vec![1])), None)]),
+            Encoding::from_slice(&[1]),
+            RightBucket::from_iter([((100, Encoding::from_slice(&[1])), None)]),
         );
         assert!(
             validate_progress(&state, 10, false, &progress(Some(1000), Some(101)), None).is_err()

@@ -73,6 +73,8 @@ The [project schema](../schemas/project-v3.schema.json) and
    the initial SQL and native-streaming optimization scope and validation rules.
 7. [Bounded backward ASOF join plan, dated 2026-09-09](plans/2026-09-09-bounded-backward-asof-join.md):
    the frozen join semantics, implementation split, and exit gates.
+8. [Streaming ASOF acceleration plan, dated 2026-09-30](plans/2026-09-30-streaming-asof-acceleration.md):
+   the measured Polars gap, root causes, phased optimizations, and gates.
 
 ## History and maintenance
 

@@ -9,6 +9,7 @@ description = "Rust core for stateful DataFusion calculation pipelines"
 exclude = ["tests/**"]
 
 [dependencies]
+ahash.workspace = true
 arrow-data = "=58.3.0"
 async-trait.workspace = true
 chrono.workspace = true
@@ -16,6 +17,7 @@ datafusion.workspace = true
 futures.workspace = true
 fs2.workspace = true
 hex.workspace = true
+hashbrown.workspace = true
 parking_lot.workspace = true
 regex.workspace = true
 schemars.workspace = true
@@ -70,4 +72,8 @@ workspace = true
 
 [[bench]]
 name = "stream_asof_perf"
+harness = false
+
+[[bench]]
+name = "stream_asof_e2e"
 harness = false

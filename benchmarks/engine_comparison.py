@@ -257,6 +257,15 @@ def _polars_plan(data: Workload, scenario: str):
         return frame.join(pl.from_arrow(data.dimension).lazy(), on="symbol").select(
             "sequence", (value * pl.col("factor")).alias("value")
         )
+    if scenario == "asof_join":
+        reference = frame.select("symbol", "event_time", pl.col("price").alias("value"))
+        return frame.join_asof(
+            reference,
+            on="event_time",
+            by="symbol",
+            strategy="backward",
+            check_sortedness=False,
+        ).select("sequence", "value")
     slow = value.rolling_mean(20, min_samples=20).over(
         "symbol", order_by=["event_time", "sequence"]
     )

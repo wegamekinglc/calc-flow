@@ -6,6 +6,7 @@ use datafusion::{
         datatypes::{DataType, Schema},
         record_batch::RecordBatch,
     },
+    common::ScalarValue,
     execution::memory_pool::{MemoryConsumer, MemoryReservation},
 };
 
@@ -64,6 +65,21 @@ impl ColumnWorkspace {
         Ok(Self { column, fixed })
     }
 
+    pub(super) fn range_bytes(&self, range: std::ops::Range<usize>, name: &str) -> Result<u64> {
+        let variable = variable_range_length(&self.column, range.clone())?;
+        let bytes = self
+            .fixed
+            .checked_mul((range.end - range.start) as u64)
+            .and_then(|fixed| fixed.checked_add(variable));
+        bytes.ok_or_else(|| {
+            reason(
+                name,
+                StreamingFailureReason::AsofCounterOverflow,
+                "ASOF column workspace arithmetic overflowed",
+            )
+        })
+    }
+
     pub(super) fn bytes(&self, row: usize, name: &str) -> Result<u64> {
         self.fixed
             .checked_add(variable_length(&self.column, row)?)
@@ -75,6 +91,43 @@ impl ColumnWorkspace {
                 )
             })
     }
+}
+
+fn variable_range_length(column: &ArrayRef, range: std::ops::Range<usize>) -> Result<u64> {
+    let length = match column.data_type() {
+        DataType::Utf8 => {
+            let values = column
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("validated Arrow type");
+            i64::from(values.value_offsets()[range.end] - values.value_offsets()[range.start])
+        }
+        DataType::LargeUtf8 => {
+            let values = column
+                .as_any()
+                .downcast_ref::<LargeStringArray>()
+                .expect("validated Arrow type");
+            values.value_offsets()[range.end] - values.value_offsets()[range.start]
+        }
+        DataType::Binary => {
+            let values = column
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .expect("validated Arrow type");
+            i64::from(values.value_offsets()[range.end] - values.value_offsets()[range.start])
+        }
+        DataType::LargeBinary => {
+            let values = column
+                .as_any()
+                .downcast_ref::<LargeBinaryArray>()
+                .expect("validated Arrow type");
+            values.value_offsets()[range.end] - values.value_offsets()[range.start]
+        }
+        _ => return Ok(0),
+    };
+    u64::try_from(length).map_err(|_| CalcFlowError::Format {
+        message: "negative ASOF variable-length value".into(),
+    })
 }
 
 fn variable_length(column: &ArrayRef, row: usize) -> Result<u64> {
@@ -149,13 +202,14 @@ impl StreamAsofJoinOperator {
                 .collect::<Result<Vec<_>>>()?;
             let mut accepted = 0_u64;
             let mut raw = 0_u64;
-            for row in 0..record.num_rows() {
-                if input.is_late(event_times.value(row)) {
-                    continue;
-                }
-                accepted = checked(&self.name, accepted, 1)?;
+            for range in accepted_ranges(event_times.values(), input.watermark) {
+                accepted = checked(&self.name, accepted, (range.end - range.start) as u64)?;
                 for column in &columns {
-                    raw = checked(&self.name, raw, column.bytes(row, &self.name)?)?;
+                    raw = checked(
+                        &self.name,
+                        raw,
+                        column.range_bytes(range.clone(), &self.name)?,
+                    )?;
                 }
             }
             if accepted == 0 {
@@ -201,42 +255,52 @@ impl StreamAsofJoinOperator {
             return Ok(0);
         }
         let side = input.side(&self.spec);
+        let event_times = super::admission::times(record, side);
+        let mut ranges = accepted_ranges(event_times.values(), input.watermark).peekable();
+        if ranges.peek().is_none() {
+            return Ok(0);
+        }
         let identity_columns = side.keys().len() + side.sequence_by().len();
         let _column_scratch = self.reserve_workspace(identity_columns as u64 * 512)?;
         let columns = resolve_identity_columns(record, side)?;
-        let event_times = super::admission::times(record, side);
-        let mut bytes = 0;
-        for row in 0..record.num_rows() {
-            if input.is_late(event_times.value(row)) {
-                continue;
-            }
+        // Converter configuration and Arrow buffer headers remain live while
+        // the accepted identities are assembled, including a one-row batch.
+        let mut bytes = identity_columns as u64 * 512;
+        for range in ranges {
             bytes = checked(
                 &self.name,
                 bytes,
-                identity_row_workspace(&columns, row, &self.name)?,
+                identity_range_workspace(&columns, range, &self.name)?,
             )?;
         }
         Ok(bytes)
     }
+}
 
-    /// Clone headroom for the next transactional candidate, from the
-    /// maintained committed gauges: per-identity headroom plus one
-    /// ordered-map allocation per right bucket.
-    pub(super) fn state_workspace(&self) -> Result<MemoryReservation> {
-        let bytes = self
-            .status
-            .state_rows
-            .checked_mul(IDENTITY_ROW_BYTES)
-            .and_then(|value| value.checked_add(self.state.right.len() as u64 * 64))
-            .ok_or_else(|| {
-                reason(
-                    &self.name,
-                    StreamingFailureReason::AsofCounterOverflow,
-                    "ASOF state clone workspace arithmetic overflowed",
-                )
-            })?;
-        self.reserve_workspace(bytes)
-    }
+/// Group accepted rows without allocating an index vector. With no ingress
+/// watermark, the complete batch is one range and no time values are scanned.
+fn accepted_ranges(
+    times: &[i64],
+    watermark: Option<i64>,
+) -> impl Iterator<Item = std::ops::Range<usize>> + '_ {
+    let mut next = 0;
+    std::iter::from_fn(move || {
+        let Some(watermark) = watermark else {
+            let range = next..times.len();
+            next = times.len();
+            return (!range.is_empty()).then_some(range);
+        };
+        next += times[next..]
+            .iter()
+            .take_while(|time| **time < watermark)
+            .count();
+        let start = next;
+        next += times[next..]
+            .iter()
+            .take_while(|time| **time >= watermark)
+            .count();
+        (start < next).then_some(start..next)
+    })
 }
 
 fn payload_charge(schema: &Schema, name: &str) -> Result<PayloadCharge> {
@@ -252,6 +316,151 @@ fn payload_charge(schema: &Schema, name: &str) -> Result<PayloadCharge> {
     Ok(PayloadCharge {
         schema_bytes: bytes,
     })
+}
+
+/// A deterministic bound for the canonical IPC batch. A one-row schema
+/// skeleton supplies fixed framing; the full payload body is measured from
+/// logical Arrow lengths without serializing its rows. Restore recomputes the
+/// same charge whether or not the encoded segment is materialized.
+#[cfg(test)]
+pub(super) fn payload_encoded_bound(record: &RecordBatch, name: &str) -> Result<(u64, u64)> {
+    let body = payload_ipc_body_bytes(record, name)?;
+    let header = ipc_header_bytes(record)?;
+    let encoded = checked(name, header, body)?;
+    Ok((encoded, body))
+}
+
+pub(super) fn payload_header_bytes(
+    schema: &datafusion::arrow::datatypes::SchemaRef,
+) -> Result<u64> {
+    ipc_header_bytes(&RecordBatch::new_empty(schema.clone()))
+}
+
+pub(super) fn payload_bound_with_header(
+    record: &RecordBatch,
+    header: u64,
+    name: &str,
+) -> Result<(u64, u64)> {
+    let body = payload_ipc_body_bytes(record, name)?;
+    Ok((checked(name, header, body)?, body))
+}
+
+fn ipc_header_bytes(record: &RecordBatch) -> Result<u64> {
+    let columns = record
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| {
+            ScalarValue::new_default(field.data_type())
+                .and_then(|value| value.to_array())
+                .map_err(|error| CalcFlowError::Format {
+                    message: format!("ASOF IPC header skeleton failed: {error}"),
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let skeleton = RecordBatch::try_new(record.schema(), columns)
+        .map_err(|error| super::arrow_error(&error))?;
+    let encoded = super::codec::encode_batch(&skeleton, usize::MAX, &mut Vec::new())?;
+    let body = super::codec::payload_body_bytes(&encoded)?;
+    Ok(encoded.len() as u64 - body)
+}
+
+fn payload_ipc_body_bytes(record: &RecordBatch, name: &str) -> Result<u64> {
+    record.columns().iter().try_fold(0, |total, column| {
+        checked(name, total, column_ipc_body_bytes(column, name)?)
+    })
+}
+
+fn column_ipc_body_bytes(column: &ArrayRef, name: &str) -> Result<u64> {
+    let rows = column.len() as u64;
+    if matches!(column.data_type(), DataType::Null) {
+        return Ok(0);
+    }
+    let bitmap = ipc_aligned(rows.div_ceil(8), name)?;
+    let data = match column.data_type() {
+        DataType::Boolean => ipc_aligned(rows.div_ceil(8), name)?,
+        DataType::Utf8 | DataType::Binary => variable_ipc_bytes(column, rows, 4, name)?,
+        DataType::LargeUtf8 | DataType::LargeBinary => variable_ipc_bytes(column, rows, 8, name)?,
+        data_type => fixed_ipc_bytes(data_type, rows, name)?,
+    };
+    checked(name, bitmap, data)
+}
+
+fn variable_ipc_bytes(column: &ArrayRef, rows: u64, offset_width: u64, name: &str) -> Result<u64> {
+    let offsets = ipc_multiply(checked(name, rows, 1)?, offset_width, name)?;
+    checked(
+        name,
+        ipc_aligned(offsets, name)?,
+        ipc_aligned(value_span(column)?, name)?,
+    )
+}
+
+fn fixed_ipc_bytes(data_type: &DataType, rows: u64, name: &str) -> Result<u64> {
+    let width = match data_type {
+        DataType::FixedSizeBinary(width) => {
+            u64::try_from(*width).expect("validated flat ASOF type")
+        }
+        _ => data_type
+            .primitive_width()
+            .expect("validated flat ASOF type") as u64,
+    };
+    ipc_aligned(ipc_multiply(rows, width, name)?, name)
+}
+
+fn ipc_multiply(left: u64, right: u64, name: &str) -> Result<u64> {
+    left.checked_mul(right).ok_or_else(|| {
+        reason(
+            name,
+            StreamingFailureReason::AsofCounterOverflow,
+            "ASOF IPC buffer length overflowed",
+        )
+    })
+}
+
+fn value_span(column: &ArrayRef) -> Result<u64> {
+    let span = match column.data_type() {
+        DataType::Utf8 => span_offsets(
+            column
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("string")
+                .value_offsets(),
+        ),
+        DataType::Binary => span_offsets(
+            column
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .expect("binary")
+                .value_offsets(),
+        ),
+        DataType::LargeUtf8 => span_offsets(
+            column
+                .as_any()
+                .downcast_ref::<LargeStringArray>()
+                .expect("large string")
+                .value_offsets(),
+        ),
+        DataType::LargeBinary => span_offsets(
+            column
+                .as_any()
+                .downcast_ref::<LargeBinaryArray>()
+                .expect("large binary")
+                .value_offsets(),
+        ),
+        _ => unreachable!("validated variable ASOF type"),
+    };
+    u64::try_from(span).map_err(|_| CalcFlowError::Format {
+        message: "ASOF variable IPC offsets are invalid".into(),
+    })
+}
+
+fn span_offsets<T: Copy + Into<i128>>(offsets: &[T]) -> i128 {
+    offsets.last().copied().expect("Arrow offsets").into()
+        - offsets.first().copied().expect("Arrow offsets").into()
+}
+
+fn ipc_aligned(bytes: u64, name: &str) -> Result<u64> {
+    checked(name, bytes, 63).map(|value| value & !63)
 }
 
 /// Historical upper bound for a legacy single-row IPC encoding. Kept in the
@@ -273,7 +482,7 @@ fn row_workspace(
 
 /// Identity columns resolved once per record batch: the array reference plus
 /// whether the column uses Arrow's blocked string row encoding.
-type ResolvedIdentityColumns = Vec<(ColumnWorkspace, bool)>;
+type ResolvedIdentityColumns = Vec<(ColumnWorkspace, bool, bool)>;
 
 fn resolve_identity_columns(
     record: &RecordBatch,
@@ -282,27 +491,32 @@ fn resolve_identity_columns(
     side.keys()
         .iter()
         .chain(side.sequence_by())
-        .map(|field| {
+        .enumerate()
+        .map(|(index, field)| {
             let column = record
                 .column(record.schema().index_of(field).expect("validated schema"))
                 .clone();
             let string = matches!(column.data_type(), DataType::Utf8 | DataType::LargeUtf8);
-            Ok((ColumnWorkspace::new(column)?, string))
+            Ok((
+                ColumnWorkspace::new(column)?,
+                string,
+                index >= side.keys().len(),
+            ))
         })
         .collect()
 }
 
-/// Allocation-free upper bound on one row's identity encodings: fixed
-/// headroom plus, per column, the aligned slice bytes scaled for the row
-/// format's marker framing. String columns are scaled by 33/32 because the
-/// blocked encoding adds a sentinel byte per block (~L/32 for length L).
+/// Covers batch row bytes and per-row sequence copies. Unique owned key copies
+/// grow a separate reservation before allocation. String encodings use 33/32
+/// scaling for block sentinels.
+#[cfg(test)]
 fn identity_row_workspace(
     columns: &ResolvedIdentityColumns,
     row: usize,
     name: &str,
 ) -> Result<u64> {
     let mut bytes = IDENTITY_ROW_BYTES;
-    for (column, string) in columns {
+    for (column, string, retained_copy) in columns {
         let slice = aligned(column.bytes(row, name)?);
         let encoded = if *string {
             checked(
@@ -314,8 +528,74 @@ fn identity_row_workspace(
             checked(name, slice, FIXED_IDENTITY_FRAMING_BYTES)?
         };
         bytes = checked(name, bytes, encoded)?;
+        if *retained_copy {
+            bytes = checked(name, bytes, encoded)?;
+        }
     }
     Ok(bytes)
+}
+
+fn identity_encoding_workspace(
+    column: &ColumnWorkspace,
+    row: usize,
+    string: bool,
+    name: &str,
+) -> Result<u64> {
+    let slice = aligned(column.bytes(row, name)?);
+    if string {
+        checked(
+            name,
+            checked(name, slice, slice / 32)?,
+            STRING_IDENTITY_FRAMING_BYTES,
+        )
+    } else {
+        checked(name, slice, FIXED_IDENTITY_FRAMING_BYTES)
+    }
+}
+
+/// Fixed-width identity columns have identical per-row framing and slice
+/// bytes. Variable columns retain the exact per-value alignment charge.
+fn identity_range_workspace(
+    columns: &ResolvedIdentityColumns,
+    range: std::ops::Range<usize>,
+    name: &str,
+) -> Result<u64> {
+    let count = (range.end - range.start) as u64;
+    if count == 0 {
+        return Ok(0);
+    }
+    let mut bytes = ipc_multiply(IDENTITY_ROW_BYTES, count, name)?;
+    for (column, string, retained_copy) in columns {
+        let encoded = identity_column_range_workspace(column, range.clone(), *string, name)?;
+        bytes = checked(name, bytes, encoded)?;
+        if *retained_copy {
+            bytes = checked(name, bytes, encoded)?;
+        }
+    }
+    Ok(bytes)
+}
+
+fn identity_column_range_workspace(
+    column: &ColumnWorkspace,
+    mut range: std::ops::Range<usize>,
+    string: bool,
+    name: &str,
+) -> Result<u64> {
+    if string {
+        range.try_fold(0, |total, row| {
+            checked(
+                name,
+                total,
+                identity_encoding_workspace(column, row, true, name)?,
+            )
+        })
+    } else {
+        ipc_multiply(
+            identity_encoding_workspace(column, range.start, false, name)?,
+            (range.end - range.start) as u64,
+            name,
+        )
+    }
 }
 
 /// Aligns a buffer length to the IPC writer's alignment boundary.
@@ -493,6 +773,18 @@ mod tests {
                 Some(b"many bytes".as_slice()),
                 Some(b"".as_slice()),
             ])),
+            Arc::new(LargeStringArray::from(vec![
+                Some("short"),
+                None,
+                Some("many bytes"),
+                Some(""),
+            ])),
+            Arc::new(LargeBinaryArray::from(vec![
+                Some(b"a".as_slice()),
+                None,
+                Some(b"many bytes".as_slice()),
+                Some(b"".as_slice()),
+            ])),
         ];
         for column in columns {
             for sliced in [column.clone(), column.slice(1, 3)] {
@@ -502,6 +794,14 @@ mod tests {
                         cached.bytes(row, "asof").unwrap(),
                         column_workspace(&sliced, row).unwrap()
                     );
+                }
+                for start in 0..=sliced.len() {
+                    for end in start..=sliced.len() {
+                        let slices = (start..end)
+                            .map(|row| column_workspace(&sliced, row).unwrap())
+                            .sum::<u64>();
+                        assert_eq!(cached.range_bytes(start..end, "asof").unwrap(), slices);
+                    }
                 }
             }
         }
@@ -522,6 +822,118 @@ mod tests {
                     "row {row}: charge {charge} < actual {actual}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn batch_payload_charge_bounds_ipc_encoding_and_body() {
+        use datafusion::arrow::array::{BinaryArray, BooleanArray, NullArray};
+        let nullable = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("flag", DataType::Boolean, true),
+                Field::new("text", DataType::Utf8, true),
+                Field::new("bytes", DataType::Binary, true),
+                Field::new("nothing", DataType::Null, true),
+            ])),
+            vec![
+                Arc::new(BooleanArray::from(vec![
+                    Some(true),
+                    None,
+                    Some(false),
+                    Some(true),
+                ])),
+                Arc::new(StringArray::from(vec![
+                    Some("a"),
+                    None,
+                    Some("many"),
+                    Some(""),
+                ])),
+                Arc::new(BinaryArray::from(vec![
+                    Some(b"z".as_slice()),
+                    None,
+                    Some(b"abc".as_slice()),
+                    Some(b"".as_slice()),
+                ])),
+                Arc::new(NullArray::new(4)),
+            ],
+        )
+        .unwrap();
+        for record in [
+            repro_record(8),
+            wide_string_record(),
+            metadata_record(),
+            repro_record(8).slice(2, 4),
+            nullable.clone(),
+            nullable.slice(1, 2),
+        ] {
+            let (encoded_bound, body_bound) = payload_encoded_bound(&record, "asof").unwrap();
+            let encoded = codec::encode_batch(&record, usize::MAX, &mut Vec::new()).unwrap();
+            let body = codec::payload_body_bytes(&encoded).unwrap();
+            assert_eq!(body_bound, body);
+            assert_eq!(encoded_bound, encoded.len() as u64);
+        }
+    }
+
+    #[test]
+    fn batch_payload_charge_covers_supported_flat_scalar_types() {
+        use datafusion::arrow::datatypes::IntervalUnit;
+
+        let types = [
+            DataType::Null,
+            DataType::Boolean,
+            DataType::Int8,
+            DataType::Int32,
+            DataType::Int64,
+            DataType::UInt8,
+            DataType::UInt16,
+            DataType::Int16,
+            DataType::UInt32,
+            DataType::UInt64,
+            DataType::Float16,
+            DataType::Float32,
+            DataType::Float64,
+            DataType::Date32,
+            DataType::Date64,
+            DataType::Time32(TimeUnit::Second),
+            DataType::Time32(TimeUnit::Millisecond),
+            DataType::Time64(TimeUnit::Microsecond),
+            DataType::Time64(TimeUnit::Nanosecond),
+            DataType::Timestamp(TimeUnit::Second, None),
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
+            DataType::Duration(TimeUnit::Second),
+            DataType::Duration(TimeUnit::Millisecond),
+            DataType::Duration(TimeUnit::Microsecond),
+            DataType::Duration(TimeUnit::Nanosecond),
+            DataType::Interval(IntervalUnit::YearMonth),
+            DataType::Interval(IntervalUnit::DayTime),
+            DataType::Interval(IntervalUnit::MonthDayNano),
+            DataType::Decimal32(8, 2),
+            DataType::Decimal64(16, 2),
+            DataType::Decimal128(30, 2),
+            DataType::Decimal256(70, 2),
+            DataType::FixedSizeBinary(8),
+            DataType::FixedSizeBinary(0),
+            DataType::LargeUtf8,
+            DataType::LargeBinary,
+        ];
+        for data_type in types {
+            let value = ScalarValue::new_default(&data_type).unwrap();
+            let record = RecordBatch::try_new(
+                Arc::new(Schema::new(vec![Field::new(
+                    "value",
+                    data_type.clone(),
+                    true,
+                )])),
+                vec![value.to_array().unwrap()],
+            )
+            .unwrap();
+            let (encoded_bound, body_bound) = payload_encoded_bound(&record, "asof").unwrap();
+            let encoded = codec::encode_batch(&record, usize::MAX, &mut Vec::new()).unwrap();
+            let body = codec::payload_body_bytes(&encoded).unwrap();
+            assert_eq!(body_bound, body, "{data_type:?}");
+            assert_eq!(encoded_bound, encoded.len() as u64, "{data_type:?}");
         }
     }
 
@@ -554,6 +966,32 @@ mod tests {
                 charge >= actual + 64,
                 "row {row}: charge {charge} < actual {actual} plus allocations"
             );
+        }
+    }
+
+    #[test]
+    fn admission_ranges_preserve_exact_row_workspace_and_skip_late_rows() {
+        assert_eq!(
+            accepted_ranges(&[-2, 3, -1, 4, 4], Some(0)).collect::<Vec<_>>(),
+            [1..2, 3..5]
+        );
+        assert_eq!(
+            accepted_ranges(&[-2, 3, -1, 4, 4], None).collect::<Vec<_>>(),
+            std::iter::once(0..5).collect::<Vec<_>>()
+        );
+        assert!(accepted_ranges(&[], None).next().is_none());
+        let record = repro_record(8);
+        let columns = resolve_identity_columns(&record, &repro_side()).unwrap();
+        for start in 0..=record.num_rows() {
+            for end in start..=record.num_rows() {
+                let expected = (start..end)
+                    .map(|row| identity_row_workspace(&columns, row, "asof").unwrap())
+                    .sum::<u64>();
+                assert_eq!(
+                    identity_range_workspace(&columns, start..end, "asof").unwrap(),
+                    expected
+                );
+            }
         }
     }
 

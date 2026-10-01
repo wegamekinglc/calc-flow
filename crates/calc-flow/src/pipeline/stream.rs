@@ -1441,6 +1441,48 @@ mod runtime_projection_tests {
     }
 
     #[test]
+    fn asof_checkpoint_capability_matches_its_v3_snapshot_contract() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("key", DataType::Utf8, false),
+            Field::new(
+                "time",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                false,
+            ),
+            Field::new("sequence", DataType::Int64, false),
+        ]));
+        let spec = crate::StreamAsofJoinSpec::new(
+            crate::AsofJoinSide::new(
+                vec!["key".into()],
+                "time".into(),
+                vec!["sequence".into()],
+                "left__".into(),
+            )
+            .unwrap(),
+            crate::AsofJoinSide::new(
+                vec!["key".into()],
+                "time".into(),
+                vec!["sequence".into()],
+                "right__".into(),
+            )
+            .unwrap(),
+            Duration::ZERO,
+            crate::AsofStateLimits::new(100, 1_000_000).unwrap(),
+        )
+        .unwrap();
+        let operator =
+            crate::StreamAsofJoinOperator::new("asof", schema.clone(), schema, spec).unwrap();
+        let builder = PipelineBuilder::new("asof")
+            .unwrap()
+            .add_node("asof", operator)
+            .unwrap();
+        assert_eq!(
+            only_capability(builder),
+            OperatorCheckpointCapability::CheckpointedStateful { state_version: 3 }
+        );
+    }
+
+    #[test]
     fn built_in_and_external_operators_have_explicit_checkpoint_capabilities() {
         let expression = PipelineBuilder::new("expression")
             .unwrap()

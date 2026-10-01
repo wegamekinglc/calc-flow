@@ -90,6 +90,7 @@ struct Probe {
     late_sink_mode: LateSinkMode,
     ordinary_rows: Mutex<Vec<(i64, u64)>>,
     ordinary_received: Notify,
+    write_completed: Notify,
     fault: Mutex<Option<(&'static str, &'static str, usize)>>,
     paused: Notify,
     opens: Mutex<Vec<usize>>,
@@ -221,7 +222,10 @@ impl TransactionalStreamSink for ObservedSink {
         }
         self.check_fault("write", self.writes)?;
         self.writes += 1;
-        self.sink.write(batch).await
+        self.sink.write(batch).await?;
+        self.record("write_completed", batch.metadata().sequence());
+        self.probe.write_completed.notify_one();
+        Ok(())
     }
     async fn pre_commit(&mut self, epoch: Epoch) -> Result<JsonMap> {
         self.record("prepare", epoch.as_u64());
@@ -966,6 +970,26 @@ async fn wait_for_ordinary_rows(probe: &Probe, count: usize) {
     }
 }
 
+fn normal_write_count(probe: &Probe) -> usize {
+    probe
+        .sink_events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(name, event, _)| *name == "normal" && *event == "write_completed")
+        .count()
+}
+
+async fn wait_for_normal_write(probe: &Probe, previous: usize) {
+    loop {
+        let changed = probe.write_completed.notified();
+        if normal_write_count(probe) > previous {
+            return;
+        }
+        changed.await;
+    }
+}
+
 #[tokio::test]
 async fn test_late_files_ordinary_delivery_remains_per_output_and_replays_after_durable_cut() {
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -993,11 +1017,17 @@ async fn test_late_files_ordinary_delivery_remains_per_output_and_replays_after_
         first.trigger_checkpoint().await.unwrap();
         assert_eq!(first.cancel().await.state, JobState::Cancelled);
         assert_settled(&first);
+        let previous_normal_writes = normal_write_count(&probe);
         let second = runner(root.path(), &[5, 20], Some(4), probe.clone())
             .start()
             .await
             .unwrap();
         wait_for_ordinary_rows(&probe, 2).await;
+        probe.paused.notified().await;
+        // Ordinary delivery does not prove that the other output's blocking
+        // file write has released its handle. Cancel after both outputs settle
+        // so this replay test does not race Windows staging-directory removal.
+        wait_for_normal_write(&probe, previous_normal_writes).await;
         assert_eq!(second.cancel().await.state, JobState::Cancelled);
         assert_settled(&second);
         let third = runner(root.path(), &[5, 20], None, probe.clone())

@@ -84,9 +84,12 @@ def _fixture() -> tuple[dict, dict]:
                 "id": number + 100,
                 "name": job_name,
                 "run_id": 60,
+                "run_attempt": 1,
                 "head_sha": HEAD,
                 "status": "completed",
                 "conclusion": "success",
+                "started_at": "2026-01-01T00:00:00Z",
+                "completed_at": "2026-01-01T00:10:00Z",
                 "steps": [
                     {"name": step_name, "status": "completed", "conclusion": "success"}
                 ],
@@ -99,6 +102,7 @@ def _fixture() -> tuple[dict, dict]:
                 "digest": "sha256:" + "f" * 64,
                 "size_in_bytes": 100,
                 "expired": False,
+                "created_at": "2026-01-01T00:05:00Z",
                 "workflow_run": {
                     "id": 60,
                     "head_sha": HEAD,
@@ -264,6 +268,26 @@ class DefaultBaselineTests(unittest.TestCase):
 
 
 class EquivalentMeasurementTests(unittest.TestCase):
+    def test_successful_rerun_accepts_carried_successful_coverage_jobs(self) -> None:
+        github, reports = _fixture()
+        run = github[f"{PREFIX}/actions/runs/60"][0]
+        run["run_attempt"] = 2
+        jobs = github[f"{PREFIX}/actions/runs/60/attempts/1/jobs?per_page=100"]
+        github[f"{PREFIX}/actions/runs/60/attempts/2/jobs?per_page=100"] = (
+            copy.deepcopy(jobs)
+        )
+        carried = github[f"{PREFIX}/actions/runs/60/attempts/2/jobs?per_page=100"]
+        for page in carried:
+            for job in page["jobs"]:
+                job["run_attempt"] = 2
+        carried[0]["jobs"][0]["started_at"] = "2026-01-01T00:20:00Z"
+        carried[0]["jobs"][0]["completed_at"] = "2026-01-01T00:30:00Z"
+        artifact = github[f"{PREFIX}/actions/runs/60/artifacts?per_page=100"]
+        artifact[0]["artifacts"][0]["created_at"] = "2026-01-01T00:25:00Z"
+        result = _resolve_fixture(github, reports)
+        self.assertEqual(result["candidate"]["run"]["run_attempt"], 2)
+        self.assertEqual(result["compare_sha"], MEASUREMENT)
+
     def test_partial_base_uses_original_same_tree_measurement_with_full_evidence(
         self,
     ) -> None:
@@ -332,16 +356,62 @@ class EquivalentMeasurementTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "build|run URL"):
                     _resolve_fixture(github, reports)
 
-    def test_wrong_head_failed_workflow_or_rerun_cannot_supply_reports(self) -> None:
+    def test_wrong_head_or_failed_workflow_cannot_supply_reports(self) -> None:
         for field, value in (
             ("head_sha", BASE),
             ("conclusion", "failure"),
-            ("run_attempt", 2),
         ):
             with self.subTest(field=field):
                 github, reports = _fixture()
                 github[f"{PREFIX}/actions/runs/60"][0][field] = value
-                with self.assertRaisesRegex(ValueError, "original Linux"):
+                with self.assertRaisesRegex(ValueError, "successful Linux"):
+                    _resolve_fixture(github, reports)
+
+    def test_latest_attempt_cannot_fall_back_to_an_earlier_successful_job(self) -> None:
+        github, reports = _fixture()
+        github[f"{PREFIX}/actions/runs/60"][0]["run_attempt"] = 2
+        earlier = github[f"{PREFIX}/actions/runs/60/attempts/1/jobs?per_page=100"]
+        latest = copy.deepcopy(earlier)
+        for page in latest:
+            for job in page["jobs"]:
+                job["run_attempt"] = 2
+        latest[0]["jobs"][0]["conclusion"] = "failure"
+        endpoint = f"{PREFIX}/actions/runs/60/attempts/2/jobs?per_page=100"
+        github[endpoint] = latest
+        with self.assertRaisesRegex(ValueError, "coverage job did not succeed"):
+            _resolve_fixture(github, reports)
+
+    def test_invalid_attempt_or_mismatched_job_attempt_cannot_supply_reports(
+        self,
+    ) -> None:
+        for value in (0, -1, True, "2"):
+            with self.subTest(value=value):
+                github, reports = _fixture()
+                github[f"{PREFIX}/actions/runs/60"][0]["run_attempt"] = value
+                with self.assertRaisesRegex(ValueError, "invalid attempt"):
+                    _resolve_fixture(github, reports)
+        github, reports = _fixture()
+        job = github[f"{PREFIX}/actions/runs/60/attempts/1/jobs?per_page=100"][0][
+            "jobs"
+        ][0]
+        job["run_attempt"] = 2
+        with self.assertRaisesRegex(ValueError, "run/attempt/head"):
+            _resolve_fixture(github, reports)
+
+    def test_artifact_must_be_created_during_its_successful_coverage_job(self) -> None:
+        for created in (
+            "2025-12-31T23:59:59Z",
+            "2026-01-01T00:10:01Z",
+            "invalid",
+            None,
+        ):
+            with self.subTest(created=created):
+                github, reports = _fixture()
+                artifact = github[f"{PREFIX}/actions/runs/60/artifacts?per_page=100"][
+                    0
+                ]["artifacts"][0]
+                artifact["created_at"] = created
+                with self.assertRaisesRegex(ValueError, "artifact"):
                     _resolve_fixture(github, reports)
 
     def test_combined_rust_gate_must_have_succeeded_even_if_job_succeeded(self) -> None:

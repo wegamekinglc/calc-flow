@@ -59,8 +59,8 @@ def _capability(analyzer: _Analyzer, path: str) -> None:
         "microbatch_invariant": True,
         "requires_watermark": True,
         "checkpoint_support": "checkpointed_stateful",
-        "state_version": 1,
-        "state_layouts": (1,),
+        "state_version": 3,
+        "state_layouts": (3,),
         "deterministic": True,
         "replay_safe": True,
         "input_ports": (

@@ -76,7 +76,7 @@ def explain_asof(nodes: list[dict[str, object]]) -> tuple[str, ...]:
                 "closes_at=both_watermarks>left_time_or_side_eof "
                 "idle_does_not_close=true "
                 "output_time=left.time frontier_lag_micros=1",
-                f"    state {node['id']} state_version=1 state_layout=1 "
+                f"    state {node['id']} state_version=3 state_layout=3 "
                 f"max_state_rows={limits['max_state_rows']} "
                 f"max_state_bytes={limits['max_state_bytes']} "
                 f"workspace_bytes={limits['max_state_bytes']} "

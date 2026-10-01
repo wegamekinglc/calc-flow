@@ -115,14 +115,41 @@ async fn test_asof_restore_rejects_state_layout_accounting_and_encoding_versions
     let mut target = operator(10);
     seed_live_state(&mut target, &schema()).await;
     for (field, value) in [
-        ("state_version", json!(3)),
-        ("layout_version", json!(3)),
-        ("accounting_version", json!(3)),
+        ("state_version", json!(4)),
+        ("layout_version", json!(4)),
+        ("accounting_version", json!(4)),
         ("row_encoding", json!("arrow-row-unknown")),
     ] {
         let mut damaged = original.clone();
         damaged.inline_metadata.insert(field.into(), value);
         reject_without_replacing_state(&mut target, &damaged, "state version differs", field);
+    }
+    assert_original_answer(&mut target).await;
+}
+
+#[tokio::test]
+async fn test_asof_restore_rejects_historical_versions_without_replacing_state() {
+    let empty = operator(10).checkpoint(Epoch::INITIAL).unwrap();
+    let mut target = operator(10);
+    seed_live_state(&mut target, &schema()).await;
+    for version in [1, 2] {
+        let mut historical = empty.clone();
+        for field in ["state_version", "layout_version", "accounting_version"] {
+            historical
+                .inline_metadata
+                .insert(field.into(), json!(version));
+        }
+        if version == 1 {
+            historical
+                .inline_metadata
+                .insert("row_encoding".into(), json!("arrow-row-58.3.0"));
+        }
+        reject_without_replacing_state(
+            &mut target,
+            &historical,
+            "state version differs",
+            "historical version",
+        );
     }
     assert_original_answer(&mut target).await;
 }
@@ -264,61 +291,78 @@ fn read_count(bytes: &[u8], cursor: &mut usize) -> usize {
     usize::try_from(value).unwrap()
 }
 
-fn skip_blob(bytes: &[u8], cursor: &mut usize) {
-    let length = read_count(bytes, cursor);
-    *cursor += length;
+fn sequence_width(flag: u8) -> usize {
+    match flag {
+        0 => 16,
+        1..=4 => 1 << (flag - 1),
+        5..=8 => 1 << (flag - 5),
+        _ => panic!("sequence codec"),
+    }
 }
 
-fn ordered_entry_ranges(bytes: &[u8]) -> [Vec<Range<usize>>; 3] {
-    assert_eq!(&bytes[..8], b"CFASOF02");
+fn columnar_entry_ranges(bytes: &[u8]) -> [Vec<Range<usize>>; 3] {
+    assert_eq!(&bytes[..8], b"CFASOF03");
     let mut cursor = 8;
-    let left_count = read_count(bytes, &mut cursor);
-    let key_count = read_count(bytes, &mut cursor);
-    let mut left = Vec::new();
-    for _ in 0..left_count {
-        let start = cursor;
-        cursor += 8;
-        for _ in 0..2 {
-            skip_blob(bytes, &mut cursor);
+    let chunks = read_count(bytes, &mut cursor);
+    let buckets = read_count(bytes, &mut cursor);
+    read_count(bytes, &mut cursor);
+    cursor += 40;
+    let owners = read_count(bytes, &mut cursor);
+    for _ in 0..owners {
+        let kind = bytes[cursor];
+        cursor += 2;
+        let rows = read_count(bytes, &mut cursor);
+        read_count(bytes, &mut cursor);
+        let length = read_count(bytes, &mut cursor);
+        read_count(bytes, &mut cursor);
+        cursor += length;
+        if kind != 0 {
+            cursor += (rows + 1) * if kind == 1 { 4 } else { 8 };
         }
-        cursor += 17;
-        left.push(start..cursor);
+    }
+    let mut left = Vec::new();
+    for _ in 0..chunks {
+        read_count(bytes, &mut cursor);
+        let rows = read_count(bytes, &mut cursor);
+        let keys = read_count(bytes, &mut cursor);
+        let width = sequence_width(bytes[cursor]);
+        cursor += 1 + 48 + keys * 16 + rows * 12;
+        left.extend((0..rows).map(|row| cursor + row * width..cursor + (row + 1) * width));
+        cursor += rows * (width + 4);
     }
     let mut keys = Vec::new();
-    let mut first_right_rows = Vec::new();
-    for key_index in 0..key_count {
+    let mut first_right = Vec::new();
+    for key in 0..buckets {
         let start = cursor;
-        skip_blob(bytes, &mut cursor);
-        let count = read_count(bytes, &mut cursor);
-        for _ in 0..count {
-            let row_start = cursor;
-            cursor += 8;
-            skip_blob(bytes, &mut cursor);
-            let marker = bytes[cursor];
-            cursor += 1;
-            if marker == 1 {
-                cursor += 17;
-            }
-            if key_index == 0 {
-                first_right_rows.push(row_start..cursor);
-            }
+        cursor += 16;
+        let rows = read_count(bytes, &mut cursor);
+        let width = sequence_width(bytes[cursor]);
+        cursor += 1 + 40 + rows * 8;
+        if key == 0 {
+            first_right
+                .extend((0..rows).map(|row| cursor + row * width..cursor + (row + 1) * width));
         }
+        cursor += rows * width;
+        let payloads = bytes[cursor..cursor + rows]
+            .iter()
+            .fold(0, |count, &tag| count + usize::from(tag == 1));
+        cursor += rows + payloads * 12;
         keys.push(start..cursor);
     }
     assert_eq!(cursor, bytes.len());
-    [left, keys, first_right_rows]
+    [left, keys, first_right]
 }
 
 #[tokio::test]
-async fn test_asof_restore_rejects_serialized_duplicates_and_noncanonical_order_atomically() {
+async fn test_asof_v3_restore_rejects_serialized_duplicates_and_noncanonical_order_atomically() {
     let original = populated_snapshot().await;
-    let bytes = original.segments["asof-index-v2"].bytes();
+    let bytes = original.segments["asof-index-v3"].bytes();
     let mut target = operator(10);
     seed_live_state(&mut target, &schema()).await;
-    for (entries, message) in ordered_entry_ranges(bytes).into_iter().zip([
-        "left index order is not strict",
-        "right bucket order is not strict",
-        "right index order is not strict",
+    for (entries, message) in columnar_entry_ranges(bytes).into_iter().zip([
+        "chunk identity order is not strict",
+        "right key order is not strict",
+        "right identity order is not strict",
     ]) {
         assert_eq!(entries.len(), 2);
         for duplicate in [false, true] {
@@ -341,15 +385,15 @@ async fn test_asof_restore_rejects_serialized_duplicates_and_noncanonical_order_
             let mut damaged = original.clone();
             damaged
                 .segments
-                .insert("asof-index-v2".into(), StateSegment::new(replacement));
+                .insert("asof-index-v3".into(), StateSegment::new(replacement));
             reject_without_replacing_state(
                 &mut target,
                 &damaged,
                 message,
                 if duplicate {
-                    "serialized duplicate"
+                    "v3 serialized duplicate"
                 } else {
-                    "serialized descending order"
+                    "v3 descending order"
                 },
             );
         }

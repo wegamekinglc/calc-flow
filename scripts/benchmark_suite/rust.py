@@ -9,6 +9,7 @@ import tomllib
 from pathlib import Path
 
 from scripts.benchmark_suite.asof import asof_rows
+from scripts.benchmark_suite.asof_e2e import asof_e2e_rows
 from scripts.benchmark_suite.catalog import CONTRACT
 from scripts.benchmark_suite.join_materialization import materialization_rows
 from scripts.benchmark_suite.legacy import combine_blocks
@@ -210,6 +211,15 @@ async def run_binary(
             env=environment,
         )
         return asof_rows(path)
+    if target == "stream_asof_e2e":
+        path = output / "asof-e2e.json"
+        await command(
+            [str(binary), "--output", str(path)],
+            cwd=source,
+            log=output / "run.log",
+            env=environment,
+        )
+        return asof_e2e_rows(path)
     if target == "stream_join_materialization":
         path = output / "materialization.json"
         await command(
