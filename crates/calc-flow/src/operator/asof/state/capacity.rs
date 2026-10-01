@@ -3,7 +3,7 @@
 
 use super::{
     Encoding, EncodingOwners, Inventory, LeftOrder, LeftPrefix, OwnerUpdates, PreparedLeftChunk,
-    PreparedLeftDrain, RowPayload, State,
+    PreparedLeftDrain, State,
 };
 use crate::{
     Result,
@@ -31,9 +31,9 @@ fn indexed_inventory_bytes(bytes: u64, length: u64, name: &str) -> Result<u64> {
 }
 
 impl State {
-    pub fn admission_staging_bytes(
+    pub fn admission_staging_bytes<R>(
         &self,
-        rows: &[(LeftOrder, RowPayload)],
+        rows: &[(LeftOrder, R)],
         chunks: Option<&[PreparedLeftChunk]>,
         right_counts: &[(Encoding, usize)],
         batches: &[std::sync::Arc<super::PayloadBatch>],
@@ -64,10 +64,10 @@ impl State {
         )
     }
 
-    pub fn project_capacity_admission(
+    pub fn project_capacity_admission<R>(
         &self,
         snapshot: CapacitySnapshot,
-        rows: &[(LeftOrder, RowPayload)],
+        rows: &[(LeftOrder, R)],
         chunks: Option<&[PreparedLeftChunk]>,
         right_counts: &[(Encoding, usize)],
         batches: &[std::sync::Arc<super::PayloadBatch>],
@@ -101,9 +101,9 @@ impl State {
 
     /// Integer sequence columns own no canonical encoding allocations. Reuse
     /// admission's per-key row counts instead of visiting every row again.
-    fn admission_owned_encodings<'a>(
+    fn admission_owned_encodings<'a, R: 'a>(
         &self,
-        rows: &'a [(LeftOrder, RowPayload)],
+        rows: &'a [(LeftOrder, R)],
         chunks: Option<&'a [PreparedLeftChunk]>,
         right_counts: &'a [(Encoding, usize)],
     ) -> impl Iterator<Item = (&'a Encoding, usize)> {

@@ -214,6 +214,16 @@ it compacts the accepted rows before retention, including small slices of much l
 source buffers. Snapshot batch segments share immutable IPC buffers; a row
 index points into one batch.
 
+During admission, temporary rows also use batch-table indices. The admission
+owns each compact payload once, and left chunk preparation transfers a copy
+of that owner table to its blocking worker together with its workspace lease.
+Dropping the preparation future cannot release the worker's input charge early.
+Identity preflight counts accepted rows while estimating their workspace, so
+the identity vector reserves its complete capacity once, including inputs
+with an accepted watermark. Nonempty admission reserves one additional
+identity-row slot for the overlap with converter startup. These temporary
+indices do not change retained row references or the version 3 checkpoint layout.
+
 Admission, sorting, Arrow materialization, encoding, and restore also share
 a **separate workspace ceiling equal to `max_state_bytes`**. Output is further
 bounded by runtime edge rows/bytes. A 64 MiB state limit therefore is not a

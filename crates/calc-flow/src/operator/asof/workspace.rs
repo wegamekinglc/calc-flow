@@ -10,6 +10,11 @@ use datafusion::{
     execution::memory_pool::{MemoryConsumer, MemoryReservation},
 };
 
+pub(super) struct ReservedIdentities {
+    pub reservation: MemoryReservation,
+    pub rows: usize,
+}
+
 /// Headroom for one identity row: the two owned encodings, the ordered-map
 /// node that will hold them, and row-converter scratch.
 const IDENTITY_ROW_BYTES: u64 = 384;
@@ -234,31 +239,58 @@ impl StreamAsofJoinOperator {
         &self,
         batch: &Batch,
         input: super::admission::ValidatedInput,
-    ) -> Result<MemoryReservation> {
-        let mut bytes = 0;
-        for record in batch.table_payload()?.batches() {
+    ) -> Result<ReservedIdentities> {
+        let (mut bytes, rows) = self.identity_batch_workspace(batch, input)?;
+        if rows != 0 {
+            // Exact preallocation keeps the one identity vector alive during
+            // converter startup, before any rows have been encoded. Cover that
+            // overlap even for a single accepted row with one startup slot.
             bytes = checked(
                 &self.name,
                 bytes,
-                self.identity_record_workspace(record, input)?,
+                size_of::<super::admission::InputRow<'_>>() as u64,
             )?;
         }
-        self.reserve_workspace(bytes)
+        Ok(ReservedIdentities {
+            reservation: self.reserve_workspace(bytes)?,
+            rows,
+        })
+    }
+
+    fn identity_batch_workspace(
+        &self,
+        batch: &Batch,
+        input: super::admission::ValidatedInput,
+    ) -> Result<(u64, usize)> {
+        let mut bytes = 0;
+        let mut rows = 0_usize;
+        for record in batch.table_payload()?.batches() {
+            let (record_bytes, accepted) = self.identity_record_workspace(record, input)?;
+            bytes = checked(&self.name, bytes, record_bytes)?;
+            rows = rows.checked_add(accepted).ok_or_else(|| {
+                reason(
+                    &self.name,
+                    StreamingFailureReason::AsofCounterOverflow,
+                    "ASOF accepted identity count exceeds the address domain",
+                )
+            })?;
+        }
+        Ok((bytes, rows))
     }
 
     fn identity_record_workspace(
         &self,
         record: &RecordBatch,
         input: super::admission::ValidatedInput,
-    ) -> Result<u64> {
+    ) -> Result<(u64, usize)> {
         if record.num_rows() == 0 {
-            return Ok(0);
+            return Ok((0, 0));
         }
         let side = input.side(&self.spec);
         let event_times = super::admission::times(record, side);
         let mut ranges = accepted_ranges(event_times.values(), input.watermark).peekable();
         if ranges.peek().is_none() {
-            return Ok(0);
+            return Ok((0, 0));
         }
         let identity_columns = side.keys().len() + side.sequence_by().len();
         let _column_scratch = self.reserve_workspace(identity_columns as u64 * 512)?;
@@ -266,14 +298,16 @@ impl StreamAsofJoinOperator {
         // Converter configuration and Arrow buffer headers remain live while
         // the accepted identities are assembled, including a one-row batch.
         let mut bytes = identity_columns as u64 * 512;
+        let mut rows = 0;
         for range in ranges {
+            rows += range.len();
             bytes = checked(
                 &self.name,
                 bytes,
                 identity_range_workspace(&columns, range, &self.name)?,
             )?;
         }
-        Ok(bytes)
+        Ok((bytes, rows))
     }
 }
 

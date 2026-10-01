@@ -9,6 +9,15 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-10
 
+- 2026-10-01: Use batch-table indices for temporary streaming ASOF admission
+  rows, retaining each payload once per batch and resolving right payload
+  references directly at install. Detached left preparation keeps its owner
+  table and workspace lease together. Identity preflight also counts accepted
+  rows, allowing one complete identity-vector reservation under watermarks,
+  with one extra row slot charged for converter startup overlap.
+  Retained state, version 3 checkpoint layout, and aggregate resource limits
+  keep their existing contracts.
+
 - 2026-10-01: Push exact downstream column projections into streaming ASOF
   output materialization. All direct projection consumers contribute their
   column requirements; output workspace and Arrow gathering use only those

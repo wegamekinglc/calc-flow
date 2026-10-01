@@ -12,6 +12,109 @@ use datafusion::arrow::{
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 struct LateMetrics;
+
+fn indexed_input(schema: &SchemaRef, rows: &[(&str, i64, i64)]) -> RecordBatch {
+    RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from_iter_values(rows.iter().map(|row| row.0))),
+            Arc::new(
+                TimestampMicrosecondArray::from_iter_values(rows.iter().map(|row| row.1))
+                    .with_timezone("UTC"),
+            ),
+            Arc::new(Int64Array::from_iter_values(rows.iter().map(|row| row.2))),
+        ],
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn indexed_admission_preserves_compacted_multibatch_payloads_after_sort_and_restore() {
+    let (template, _) = fixture();
+    let schema = template.schemas[0].clone();
+    let spec = template.spec.with_late_policy(AsofLatePolicy::Drop);
+    let mut op =
+        StreamAsofJoinOperator::new("asof", schema.clone(), schema.clone(), spec.clone()).unwrap();
+    op.status.left.watermark_micros = Some(EventTime::from_micros(100));
+    op.status.right.watermark_micros = Some(EventTime::from_micros(100));
+    let right = Batch::table(
+        vec![
+            indexed_input(&schema, &[]),
+            indexed_input(&schema, &[("B", 103, 33), ("A", 100, 10), ("A", 102, 22)]),
+            indexed_input(&schema, &[("A", 99, 9), ("A", 101, 11)]),
+        ],
+        BatchMetadata::default(),
+    )
+    .unwrap();
+    let left = Batch::table(
+        vec![
+            indexed_input(&schema, &[]),
+            indexed_input(&schema, &[("A", 102, 202), ("B", 103, 303), ("A", 99, 199)]),
+            indexed_input(
+                &schema,
+                &[("A", 100, 100), ("A", 101, 101), ("A", 104, 104)],
+            ),
+        ],
+        BatchMetadata::default(),
+    )
+    .unwrap();
+    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+    let cx = StreamOperatorContext::new(&job, "asof", None);
+    let mut preload = EdgeCollector::new(op.output_ports().to_vec());
+    op.process_data("right", right, &cx, &mut preload)
+        .await
+        .unwrap();
+    op.process_data("left", left, &cx, &mut preload)
+        .await
+        .unwrap();
+    assert_eq!(op.status.right.accepted_rows, 4);
+    assert_eq!(op.status.left.accepted_rows, 5);
+    assert_eq!(op.status.right.late_rows, 1);
+    assert_eq!(op.status.left.late_rows, 1);
+    let snapshot = op.capture(Epoch::INITIAL).unwrap();
+    let mut restored = StreamAsofJoinOperator::new("asof", schema.clone(), schema, spec).unwrap();
+    restored.restore(&snapshot).unwrap();
+    let mut expected_status = op.status.clone();
+    expected_status.left.watermark_micros = None;
+    expected_status.right.watermark_micros = None;
+    assert_eq!(restored.status, expected_status);
+    let repeated = restored.capture(Epoch::INITIAL).unwrap();
+    assert_eq!(repeated.inline_metadata, snapshot.inline_metadata);
+    assert_eq!(repeated.segments, snapshot.segments);
+    for candidate in [&mut op, &mut restored] {
+        let mut output = EdgeCollector::new(candidate.output_ports().to_vec());
+        candidate.on_end(&cx, &mut output).await.unwrap();
+        let rows = output.drain("output");
+        let right_sequences = rows
+            .iter()
+            .flat_map(|message| {
+                message
+                    .as_data()
+                    .unwrap()
+                    .table_payload()
+                    .unwrap()
+                    .batches()
+                    .iter()
+                    .flat_map(|record| {
+                        record
+                            .column_by_name("right__seq")
+                            .unwrap()
+                            .as_any()
+                            .downcast_ref::<Int64Array>()
+                            .unwrap()
+                            .iter()
+                    })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            right_sequences,
+            vec![Some(10), Some(11), Some(22), Some(33), None]
+        );
+        assert_eq!(candidate.status.matched_rows, 4);
+        assert_eq!(candidate.status.unmatched_rows, 1);
+        assert_eq!(candidate.status.state_bytes, 0);
+    }
+}
 impl crate::operator::stream::LateMetricSink for LateMetrics {
     fn record(&self, _delta: crate::operator::stream::LateMetricDelta) -> Result<()> {
         Ok(())

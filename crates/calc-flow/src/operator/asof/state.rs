@@ -293,6 +293,14 @@ pub(super) struct RowPayload {
     pub row: usize,
 }
 
+/// A row in the admission-owned batch table. The table retains each payload
+/// once; these temporary indices never enter retained state or checkpoints.
+#[derive(Clone, Copy)]
+pub(super) struct AdmissionRef {
+    pub batch_index: usize,
+    pub row: usize,
+}
+
 mod payload;
 pub(super) use payload::{
     PayloadPool, PayloadRemoval, PayloadView, PreparedPayloadRemoval, RowRef,

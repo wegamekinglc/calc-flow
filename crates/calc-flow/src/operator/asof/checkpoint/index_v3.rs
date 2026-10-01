@@ -1211,6 +1211,33 @@ mod tests {
     };
     use std::sync::OnceLock;
 
+    use crate::operator::asof::state::{AdmissionRef, LeftOrder, RowPayload};
+
+    fn prepare_owned(
+        rows: &[(LeftOrder, RowPayload)],
+        side: &AsofJoinSide,
+        name: &str,
+    ) -> Result<Vec<PreparedLeftChunk>> {
+        let mut batches = Vec::<Arc<PayloadBatch>>::new();
+        let mut indexed = Vec::with_capacity(rows.len());
+        for (order, payload) in rows {
+            if batches
+                .last()
+                .is_none_or(|owner| owner.key != payload.batch.key)
+            {
+                batches.push(payload.batch.clone());
+            }
+            indexed.push((
+                order.clone(),
+                AdmissionRef {
+                    batch_index: batches.len() - 1,
+                    row: payload.row,
+                },
+            ));
+        }
+        PreparedLeftChunk::prepare(&indexed, &batches, side, name)
+    }
+
     fn fixture() -> (State, BTreeMap<BatchKey, Arc<PayloadBatch>>) {
         let schema = Arc::new(Schema::new(vec![
             Field::new("time", DataType::Int64, false),
@@ -1266,7 +1293,7 @@ mod tests {
                 })
                 .collect::<Vec<_>>();
             if index == 0 {
-                let chunks = PreparedLeftChunk::prepare(&rows, &side, "test").unwrap();
+                let chunks = prepare_owned(&rows, &side, "test").unwrap();
                 state.left.install(chunks, &mut state.batches);
             } else {
                 for ((time, key, sequence), payload) in rows {
@@ -1429,7 +1456,7 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let chunks = PreparedLeftChunk::prepare(&rows, &side, "test").unwrap();
+        let chunks = prepare_owned(&rows, &side, "test").unwrap();
         let (length, projected, owners) = state
             .project_capacity_admission(
                 state.capacity_snapshot("test"),
