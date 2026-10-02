@@ -127,14 +127,7 @@ impl RightState {
     ) -> Result<PreparedStorage> {
         let (capacity, backing) = self.admission_capacities(additions);
         u32::try_from(capacity).map_err(|_| failure(name))?;
-        let auxiliary = total(
-            &[
-                allocation(capacity, 8, name)?,
-                allocation(capacity.max(self.payloads.capacity()), 16, name)?,
-                allocation(capacity.max(self.identities.capacity()), 16, name)?,
-            ],
-            name,
-        )?;
+        let auxiliary = self.auxiliary_capacity_bytes(capacity, name)?;
         let growth = Growth::new(self.lease.as_ref(), auxiliary, pool, name)?;
         let bytes = self.storage_workspace(capacity, backing, name)?;
         let workspace = MemoryConsumer::new("asof-dictionary-preparation").register(pool);
@@ -147,6 +140,17 @@ impl RightState {
             growth,
             _workspace: workspace,
         })
+    }
+
+    fn auxiliary_capacity_bytes(&self, capacity: usize, name: &str) -> Result<usize> {
+        total(
+            &[
+                allocation(capacity, 8, name)?,
+                allocation(capacity.max(self.payloads.capacity()), 16, name)?,
+                allocation(capacity.max(self.identities.capacity()), 16, name)?,
+            ],
+            name,
+        )
     }
 
     fn storage_workspace(

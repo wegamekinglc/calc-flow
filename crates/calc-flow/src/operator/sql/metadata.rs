@@ -20,13 +20,7 @@ pub(super) fn reserve(
         .attributes()
         .iter()
         .try_fold(0usize, |bytes, (key, value)| {
-            add(
-                bytes,
-                add(
-                    key.len().checked_mul(6).ok_or_else(overflow)?,
-                    value_bytes(value, 2)?,
-                )?,
-            )
+            add(bytes, entry_bytes(key, value, 2)?)
         })?;
     let source = metadata
         .source()
@@ -112,18 +106,16 @@ fn value_bytes(value: &Value, depth: usize) -> Result<usize> {
             add(bytes, value_bytes(value, depth + 1)?)
         }),
         Value::Object(values) => values.iter().try_fold(64usize, |bytes, (key, value)| {
-            add(
-                bytes,
-                add(
-                    128,
-                    add(
-                        key.len().checked_mul(6).ok_or_else(overflow)?,
-                        value_bytes(value, depth + 1)?,
-                    )?,
-                )?,
-            )
+            add(bytes, add(128, entry_bytes(key, value, depth + 1)?)?)
         }),
     }
+}
+
+fn entry_bytes(key: &str, value: &Value, depth: usize) -> Result<usize> {
+    add(
+        key.len().checked_mul(6).ok_or_else(overflow)?,
+        value_bytes(value, depth)?,
+    )
 }
 
 fn add(left: usize, right: usize) -> Result<usize> {

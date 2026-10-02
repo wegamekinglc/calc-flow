@@ -11,8 +11,8 @@ use datafusion::{
     sql::{
         parser::Statement as DFStatement,
         sqlparser::ast::{
-            Expr, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr, Ident, Query,
-            Select, SelectItem, SetExpr, Statement, TableFactor, Visit, Visitor,
+            Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr, Ident,
+            Query, Select, SelectItem, SetExpr, Statement, TableFactor, Visit, Visitor,
         },
     },
 };
@@ -210,6 +210,19 @@ impl Dependencies<'_> {
             ControlFlow::Break(())
         }
     }
+
+    fn collect_output_aliases(&mut self, projection: &[SelectItem]) -> ControlFlow<()> {
+        for item in projection {
+            match item {
+                SelectItem::ExprWithAlias { alias, .. } => {
+                    self.outputs.insert(normalized(alias));
+                }
+                SelectItem::UnnamedExpr(_) => {}
+                _ => return ControlFlow::Break(()),
+            }
+        }
+        ControlFlow::Continue(())
+    }
 }
 
 impl Visitor for Dependencies<'_> {
@@ -255,16 +268,7 @@ impl Visitor for Dependencies<'_> {
             return ControlFlow::Break(());
         }
         self.table_alias = alias.as_ref().map(|alias| normalized(&alias.name));
-        for item in &select.projection {
-            match item {
-                SelectItem::ExprWithAlias { alias, .. } => {
-                    self.outputs.insert(normalized(alias));
-                }
-                SelectItem::UnnamedExpr(_) => {}
-                _ => return ControlFlow::Break(()),
-            }
-        }
-        ControlFlow::Continue(())
+        self.collect_output_aliases(&select.projection)
     }
 
     fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
@@ -278,39 +282,7 @@ impl Visitor for Dependencies<'_> {
                     self.column(&parts[1])
                 }
             }
-            Expr::Function(function) => {
-                if function.over.is_some() {
-                    return ControlFlow::Break(());
-                }
-                if let FunctionArguments::List(arguments) = &function.args {
-                    let wildcard = arguments.args.iter().any(|arg| {
-                        !matches!(
-                            arg,
-                            FunctionArg::Unnamed(FunctionArgExpr::Expr(_))
-                                | FunctionArg::Named {
-                                    arg: FunctionArgExpr::Expr(_),
-                                    ..
-                                }
-                                | FunctionArg::ExprNamed {
-                                    arg: FunctionArgExpr::Expr(_),
-                                    ..
-                                }
-                        )
-                    });
-                    if wildcard
-                        && !(function.name.to_string().eq_ignore_ascii_case("count")
-                            && matches!(
-                                arguments.args.as_slice(),
-                                [FunctionArg::Unnamed(FunctionArgExpr::Wildcard)]
-                            ))
-                    {
-                        return ControlFlow::Break(());
-                    }
-                } else if matches!(function.args, FunctionArguments::Subquery(_)) {
-                    return ControlFlow::Break(());
-                }
-                ControlFlow::Continue(())
-            }
+            Expr::Function(function) => function_dependencies(function),
             Expr::Value(_)
             | Expr::BinaryOp { .. }
             | Expr::UnaryOp { .. }
@@ -340,6 +312,40 @@ impl Visitor for Dependencies<'_> {
             _ => ControlFlow::Break(()),
         }
     }
+}
+
+fn function_dependencies(function: &Function) -> ControlFlow<()> {
+    if function.over.is_some() {
+        return ControlFlow::Break(());
+    }
+    if let FunctionArguments::List(arguments) = &function.args {
+        let wildcard = arguments.args.iter().any(|arg| {
+            !matches!(
+                arg,
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(_))
+                    | FunctionArg::Named {
+                        arg: FunctionArgExpr::Expr(_),
+                        ..
+                    }
+                    | FunctionArg::ExprNamed {
+                        arg: FunctionArgExpr::Expr(_),
+                        ..
+                    }
+            )
+        });
+        if wildcard
+            && !(function.name.to_string().eq_ignore_ascii_case("count")
+                && matches!(
+                    arguments.args.as_slice(),
+                    [FunctionArg::Unnamed(FunctionArgExpr::Wildcard)]
+                ))
+        {
+            return ControlFlow::Break(());
+        }
+    } else if matches!(function.args, FunctionArguments::Subquery(_)) {
+        return ControlFlow::Break(());
+    }
+    ControlFlow::Continue(())
 }
 
 fn normalized(identifier: &Ident) -> String {

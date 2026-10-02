@@ -94,14 +94,7 @@ impl OutputRuntime {
         self.config.validate()?;
         tokio::task::yield_now().await;
         check_cancelled()?;
-        let types = schema.fields().iter().try_fold(256, |total, field| {
-            super::checked(
-                name,
-                total,
-                super::checked(name, field.data_type().size() as u64, 512)?,
-            )
-        })?;
-        super::output_plan::grow_workspace(&mut workspace, types, name)?;
+        reserve_column_types(schema, &mut workspace, name)?;
         let requests = column_requests(schema, self.output_columns.as_deref());
         let rows = owned.len;
         #[cfg(test)]
@@ -126,6 +119,21 @@ impl OutputRuntime {
         })??;
         result.into_batch(schema, rows)
     }
+}
+
+fn reserve_column_types(
+    schema: &SchemaRef,
+    workspace: &mut MemoryReservation,
+    name: &str,
+) -> Result<()> {
+    let types = schema.fields().iter().try_fold(256, |total, field| {
+        super::checked(
+            name,
+            total,
+            super::checked(name, field.data_type().size() as u64, 512)?,
+        )
+    })?;
+    super::output_plan::grow_workspace(workspace, types, name)
 }
 
 #[cfg(test)]

@@ -85,12 +85,21 @@ struct PendingSqlInput {
     _reservation: Option<datafusion::execution::memory_pool::MemoryReservation>,
 }
 
+type RetentionPlans = (
+    datafusion::logical_expr::LogicalPlan,
+    datafusion::logical_expr::LogicalPlan,
+);
+
+type SqlCheckpointInput = (
+    Vec<RecordBatch>,
+    BatchMetadata,
+    datafusion::execution::memory_pool::MemoryReservation,
+    datafusion::execution::memory_pool::MemoryReservation,
+);
+
 struct PreparedRetention {
     batch: Batch,
-    plans: Option<(
-        datafusion::logical_expr::LogicalPlan,
-        datafusion::logical_expr::LogicalPlan,
-    )>,
+    plans: Option<RetentionPlans>,
     backing_reservation:
         Option<std::sync::Arc<datafusion::execution::memory_pool::MemoryReservation>>,
     migrated: Option<RetainedSqlInput>,
@@ -185,6 +194,43 @@ impl RetainedSqlInput {
         }
         context.check_cancelled()?;
         Ok((records, self.metadata.clone(), reservation))
+    }
+
+    fn needs_checkpoint(&self) -> bool {
+        self.segment.is_none() || (self.projection.is_some() && self.metadata_segment.is_none())
+    }
+
+    async fn prepare_checkpoint_parts(
+        &self,
+        runtime: &DataFusionRuntime,
+        name: &str,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<(
+        Option<SqlCheckpointInput>,
+        Option<(
+            BatchMetadata,
+            datafusion::execution::memory_pool::MemoryReservation,
+        )>,
+    )> {
+        let prepared = if self.segment.is_none() {
+            let (records, metadata, reservation) =
+                self.checkpoint_records(runtime, name, context).await?;
+            Some((
+                records,
+                metadata,
+                reservation,
+                runtime.incremental_reservation(name),
+            ))
+        } else {
+            None
+        };
+        let metadata = if self.projection.is_some() && self.metadata_segment.is_none() {
+            let reservation = metadata::reserve(runtime, &self.metadata, name)?;
+            Some((self.metadata.clone(), reservation))
+        } else {
+            None
+        };
+        Ok((prepared, metadata))
     }
 
     fn reserve_append(
@@ -462,13 +508,7 @@ impl SqlOperator {
         alias: &str,
         context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedRetention> {
-        if !self.stream_aggregate
-            || !self.udfs.is_empty()
-            || self
-                .retained
-                .as_ref()
-                .is_some_and(|state| state.projection_checked && state.projection.is_none())
-        {
+        if !self.can_project_retention() {
             return Ok(PreparedRetention {
                 batch,
                 plans: None,
@@ -479,6 +519,61 @@ impl SqlOperator {
             });
         }
         let runtime = self.retention_runtime()?;
+        let (plans, projection) = self
+            .prepare_retention_projection(&batch, alias, runtime, context)
+            .await?;
+        let Some(projection) = projection else {
+            return Ok(PreparedRetention {
+                batch,
+                plans: None,
+                backing_reservation: None,
+                migrated: None,
+                projection: None,
+                _reservation: None,
+            });
+        };
+        let (reservation, projected) = self.project_retained_records(
+            runtime,
+            batch.table_payload()?.batches(),
+            batch.metadata(),
+            &projection,
+        )?;
+        let (projected, backing_reservation) = self.detach_backing(projected)?;
+        let migrated = self
+            .retained
+            .as_ref()
+            .filter(|state| state.projection.is_none())
+            .map(|state| self.project_legacy(state, &projection))
+            .transpose()?;
+        Ok(PreparedRetention {
+            batch: projected,
+            plans,
+            backing_reservation,
+            migrated,
+            projection: Some(projection),
+            _reservation: Some(reservation),
+        })
+    }
+
+    fn can_project_retention(&self) -> bool {
+        self.stream_aggregate
+            && self.udfs.is_empty()
+            && !self
+                .retained
+                .as_ref()
+                .is_some_and(|state| state.projection_checked && state.projection.is_none())
+    }
+
+    async fn prepare_retention_projection(
+        &self,
+        batch: &Batch,
+        alias: &str,
+        runtime: &DataFusionRuntime,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<(
+        Option<RetentionPlans>,
+        Option<std::sync::Arc<retention::SqlProjection>>,
+    )> {
         let existing = self
             .retained
             .as_ref()
@@ -508,45 +603,29 @@ impl SqlOperator {
             }
         };
         context.check_cancelled()?;
-        let Some(projection) = projection else {
-            return Ok(PreparedRetention {
-                batch,
-                plans: None,
-                backing_reservation: None,
-                migrated: None,
-                projection: None,
-                _reservation: None,
-            });
-        };
-        let table = batch.table_payload()?;
+        Ok((plans, projection))
+    }
+
+    fn project_retained_records(
+        &self,
+        runtime: &DataFusionRuntime,
+        records: &[RecordBatch],
+        metadata: &BatchMetadata,
+        projection: &retention::SqlProjection,
+    ) -> Result<(datafusion::execution::memory_pool::MemoryReservation, Batch)> {
         let reservation = record_copy_reservation(
             runtime,
             &self.name,
-            table.batches().len(),
+            records.len(),
             projection.columns.ordinals().len(),
             2,
         )?;
-        let records = table
-            .batches()
+        let records = records
             .iter()
             .map(|record| projection.columns.project(record))
             .collect::<Result<Vec<_>>>()?;
-        let projected = Batch::table(records, batch.metadata().clone())?;
-        let (projected, backing_reservation) = self.detach_backing(projected)?;
-        let migrated = self
-            .retained
-            .as_ref()
-            .filter(|state| state.projection.is_none())
-            .map(|state| self.project_legacy(state, &projection))
-            .transpose()?;
-        Ok(PreparedRetention {
-            batch: projected,
-            plans,
-            backing_reservation,
-            migrated,
-            projection: Some(projection),
-            _reservation: Some(reservation),
-        })
+        let projected = Batch::table(records, metadata.clone())?;
+        Ok((reservation, projected))
     }
 
     fn detach_backing(
@@ -558,26 +637,29 @@ impl SqlOperator {
     )> {
         let table = batch.table_payload()?;
         let visible = batch.estimated_bytes()?;
-        let backing = table
-            .batches()
-            .iter()
-            .flat_map(RecordBatch::columns)
-            .try_fold(0usize, |bytes, array| {
-                bytes.checked_add(array.get_buffer_memory_size())
-            })
-            .ok_or_else(|| sql_state_error("SQL backing charge overflowed"))?;
+        let backing = sql_array_bytes(
+            table.batches(),
+            |array| Ok(array.get_buffer_memory_size()),
+            "SQL backing charge overflowed",
+        )?;
         if backing <= visible.saturating_mul(4).max(64 << 10) {
             return Ok((batch, None));
         }
-        let wire_bytes = table
-            .batches()
-            .iter()
-            .flat_map(RecordBatch::columns)
-            .try_fold(0usize, |bytes, array| {
-                bytes
-                    .checked_add(sql_ipc_buffer_bytes(&array.to_data())?)
-                    .ok_or_else(|| sql_state_error("SQL IPC buffer bound overflowed"))
-            })?;
+        let (reservation, bound) = self.detachment_workspace(table, visible)?;
+        let (_encoded, _decoded, detached) = detach_sql_batch(&batch, bound)?;
+        Ok((detached, Some(std::sync::Arc::new(reservation))))
+    }
+
+    fn detachment_workspace(
+        &self,
+        table: &crate::batch::TableBatch,
+        visible: usize,
+    ) -> Result<(datafusion::execution::memory_pool::MemoryReservation, usize)> {
+        let wire_bytes = sql_array_bytes(
+            table.batches(),
+            |array| sql_ipc_buffer_bytes(&array.to_data()),
+            "SQL IPC buffer bound overflowed",
+        )?;
         let schema = ipc::schema_bytes(table.schema())?;
         let reservation = self
             .retention_runtime()?
@@ -592,32 +674,7 @@ impl SqlOperator {
             &self.name,
         )?;
         incremental::ensure_reservation(&reservation, bound, &self.name)?;
-        let encoded = encode_sql_state(&batch)?;
-        if encoded.capacity() > bound / 4 {
-            return Err(sql_state_error(
-                "SQL detachment IPC exceeded its prepaid bound",
-            ));
-        }
-        let decoded = decode_sql_state(&encoded)?;
-        let detached = Batch::table(
-            decoded.table_payload()?.batches().to_vec(),
-            batch.metadata().clone(),
-        )?;
-        let actual = detached
-            .table_payload()?
-            .batches()
-            .iter()
-            .flat_map(RecordBatch::columns)
-            .try_fold(0usize, |bytes, array| {
-                bytes.checked_add(array.get_array_memory_size())
-            })
-            .ok_or_else(|| sql_state_error("SQL detached allocation charge overflowed"))?;
-        if actual > bound / 2 {
-            return Err(sql_state_error(
-                "SQL detached arrays exceeded their prepaid bound",
-            ));
-        }
-        Ok((detached, Some(std::sync::Arc::new(reservation))))
+        Ok((reservation, bound))
     }
 
     fn project_legacy(
@@ -626,30 +683,10 @@ impl SqlOperator {
         projection: &std::sync::Arc<retention::SqlProjection>,
     ) -> Result<RetainedSqlInput> {
         let runtime = self.retention_runtime()?;
-        let copies = record_copy_reservation(
-            runtime,
-            &self.name,
-            state.records.len(),
-            projection.columns.ordinals().len(),
-            2,
-        )?;
-        let records = state
-            .records
-            .iter()
-            .map(|record| projection.columns.project(record))
-            .collect::<Result<Vec<_>>>()?;
-        let projected = Batch::table(records, state.metadata.clone())?;
+        let (copies, projected) =
+            self.project_retained_records(runtime, &state.records, &state.metadata, projection)?;
         let (projected, backing) = self.detach_backing(projected)?;
-        let bytes = u64::try_from(projected.estimated_bytes()?)
-            .map_err(|_| sql_state_error("projected byte charge exceeds u64"))?;
-        if self
-            .state_budget
-            .is_some_and(|budget| !budget.allows(state.rows, bytes))
-        {
-            return Err(sql_state_error(
-                "projected legacy input exceeds the state budget",
-            ));
-        }
+        let bytes = self.projected_legacy_charge(&projected, state.rows)?;
         let mut migrated = RetainedSqlInput {
             records: Vec::new(),
             metadata: state.metadata.clone(),
@@ -665,17 +702,30 @@ impl SqlOperator {
             rows: state.rows,
             bytes,
         };
+        let records = projected.table_payload()?.batches();
         migrated.reserve_append(
-            projected.table_payload()?.batches().len(),
+            records.len(),
             runtime,
             &self.name,
             projection.columns.ordinals().len(),
         )?;
-        migrated
-            .records
-            .extend_from_slice(projected.table_payload()?.batches());
+        migrated.records.extend_from_slice(records);
         drop(copies);
         Ok(migrated)
+    }
+
+    fn projected_legacy_charge(&self, projected: &Batch, rows: u64) -> Result<u64> {
+        let bytes = u64::try_from(projected.estimated_bytes()?)
+            .map_err(|_| sql_state_error("projected byte charge exceeds u64"))?;
+        if self
+            .state_budget
+            .is_some_and(|budget| !budget.allows(rows, bytes))
+        {
+            return Err(sql_state_error(
+                "projected legacy input exceeds the state budget",
+            ));
+        }
+        Ok(bytes)
     }
 
     fn query_digest(&self) -> String {
@@ -786,6 +836,27 @@ impl SqlOperator {
         &self,
         snapshot: &OperatorStateSnapshot,
     ) -> Result<std::sync::Arc<retention::SqlProjection>> {
+        if !self.projection_checkpoint_matches(snapshot) {
+            return Err(sql_state_error(
+                "SQL pruned checkpoint identity or inventory is invalid",
+            ));
+        }
+        let runtime = self.retention_runtime()?;
+        let (_schema_workspace, schema) = self.read_projection_schema(snapshot, runtime)?;
+        let [alias] = self.aliases.as_slice() else {
+            return Err(sql_state_error("SQL pruned restore requires one alias"));
+        };
+        let projection = retention::SqlProjection::resolve(
+            self.retention_runtime()?,
+            &self.validated,
+            alias,
+            schema,
+            &self.name,
+        )?;
+        validate_projection_descriptor(snapshot, projection)
+    }
+
+    fn projection_checkpoint_matches(&self, snapshot: &OperatorStateSnapshot) -> bool {
         let fields = [
             "query_sha256",
             "rows",
@@ -797,27 +868,26 @@ impl SqlOperator {
             "physical_schema_sha256",
             "batch_metadata_sha256",
         ];
-        if !self.stream_aggregate
-            || !self.udfs.is_empty()
-            || snapshot.inline_metadata.len() != fields.len()
-            || fields
+        self.stream_aggregate
+            && self.udfs.is_empty()
+            && snapshot.inline_metadata.len() == fields.len()
+            && fields
                 .iter()
-                .any(|field| !snapshot.inline_metadata.contains_key(*field))
-            || snapshot.inline_metadata["state_layout"] != json!(2)
-            || snapshot.inline_metadata["state_accounting"] != json!(2)
-            || snapshot.inline_metadata["query_sha256"] != json!(self.query_digest())
-            || snapshot.segments.len() != 3
-            || !snapshot.segments.contains_key("input-projected")
-            || !snapshot.segments.contains_key("logical-schema")
-            || !snapshot.segments.contains_key("batch-metadata")
-            || snapshot.inline_metadata["batch_metadata_sha256"]
-                != json!(snapshot.segments["batch-metadata"].sha256())
-        {
-            return Err(sql_state_error(
-                "SQL pruned checkpoint identity or inventory is invalid",
-            ));
-        }
-        let runtime = self.retention_runtime()?;
+                .all(|field| snapshot.inline_metadata.contains_key(*field))
+            && snapshot.inline_metadata["state_layout"] == json!(2)
+            && snapshot.inline_metadata["state_accounting"] == json!(2)
+            && snapshot.inline_metadata["query_sha256"] == json!(self.query_digest())
+            && projection_checkpoint_segments_match(snapshot)
+    }
+
+    fn read_projection_schema(
+        &self,
+        snapshot: &OperatorStateSnapshot,
+        runtime: &DataFusionRuntime,
+    ) -> Result<(
+        datafusion::execution::memory_pool::MemoryReservation,
+        SchemaRef,
+    )> {
         let schema_workspace = runtime.incremental_reservation(&self.name);
         incremental::ensure_reservation(
             &schema_workspace,
@@ -837,33 +907,7 @@ impl SqlOperator {
                 "SQL checkpoint logical schema differs from the declared input",
             ));
         }
-        let [alias] = self.aliases.as_slice() else {
-            return Err(sql_state_error("SQL pruned restore requires one alias"));
-        };
-        let projection = retention::SqlProjection::resolve(
-            self.retention_runtime()?,
-            &self.validated,
-            alias,
-            schema,
-            &self.name,
-        )?
-        .ok_or_else(|| {
-            sql_state_error("SQL pruned checkpoint cannot prove complete dependencies")
-        })?;
-        if snapshot.inline_metadata["retained_ordinals"] != json!(projection.columns.ordinals())
-            || snapshot.inline_metadata["dependency_sha256"]
-                != json!(hex::encode(projection.columns.dependency_digest()))
-            || snapshot.inline_metadata["physical_schema_sha256"]
-                != json!(retention::schema_digest(
-                    projection.columns.physical_schema()
-                )?)
-            || projection.logical_segment.bytes() != snapshot.segments["logical-schema"].bytes()
-        {
-            return Err(sql_state_error(
-                "SQL pruned checkpoint descriptor differs from trusted dependencies",
-            ));
-        }
-        Ok(projection)
+        Ok((schema_workspace, schema))
     }
 
     fn checkpoint_matches(&self, snapshot: &OperatorStateSnapshot) -> bool {
@@ -1016,54 +1060,24 @@ impl SqlOperator {
         let batch = &prepared.batch;
         let previous = prepared.migrated.as_ref().or(self.retained.as_ref());
         let (rows, bytes) = self.accumulated_charge(batch, previous)?;
-        let append = batch.num_rows() > 0 || previous.is_none();
-        if append
-            && previous.is_some_and(|state| {
-                state.records[0].schema()
-                    != batch
-                        .table_payload()
-                        .expect("validated table")
-                        .schema()
-                        .clone()
-            })
-        {
-            return Err(CalcFlowError::InvalidArgument {
-                field: "batches".into(),
-                message: "schemas must match".into(),
-            });
-        }
-        let additional = append_batches(batch, append)?.len();
+        let (append, additional) = validate_incremental_append(batch, previous)?;
         let metadata = batch.metadata().clone();
-        let mut first = prepared.migrated.take().or_else(|| {
-            self.retained.is_none().then(|| RetainedSqlInput {
-                records: Vec::new(),
-                metadata: metadata.clone(),
-                projection: prepared.projection.clone(),
-                projection_checked: true,
-                backing_reservations: Vec::new(),
-                reservation: None,
-                segment: None,
-                metadata_segment: None,
-                rows: 0,
-                bytes: 0,
-            })
-        });
+        let mut first = initial_incremental_input(
+            prepared.migrated.take(),
+            self.retained.as_ref(),
+            &metadata,
+            prepared.projection.as_ref(),
+        );
         let runtime = self.stream_state.runtime()?;
         let columns = batch.table_payload()?.schema().fields().len();
-        let reservation = if additional == 0 {
-            None
-        } else {
-            Some(record_copy_reservation(
-                runtime, &self.name, additional, columns, 1,
-            )?)
-        };
-        if additional != 0 {
-            first
-                .as_mut()
-                .or(self.retained.as_mut())
-                .expect("retained preflight")
-                .reserve_append(additional, runtime, &self.name, columns)?;
-        }
+        let reservation = reserve_incremental_records(
+            &mut first,
+            &mut self.retained,
+            additional,
+            columns,
+            runtime,
+            &self.name,
+        )?;
         let records = append_batches(batch, append)?.to_vec();
         Ok(PendingSqlInput {
             first,
@@ -1287,34 +1301,17 @@ impl StreamOperator for SqlOperator {
         context: &StreamOperatorContext<'_>,
     ) -> Result<()> {
         context.check_cancelled()?;
-        let Some(state) = self.retained.as_ref().filter(|state| {
-            state.segment.is_none()
-                || (state.projection.is_some() && state.metadata_segment.is_none())
-        }) else {
+        let Some(state) = self
+            .retained
+            .as_ref()
+            .filter(|state| state.needs_checkpoint())
+        else {
             return Ok(());
         };
         let runtime = self.stream_state.runtime()?;
-        let prepared = if state.segment.is_none() {
-            Some({
-                let (records, metadata, reservation) = state
-                    .checkpoint_records(runtime, &self.name, context)
-                    .await?;
-                (
-                    records,
-                    metadata,
-                    reservation,
-                    runtime.incremental_reservation(&self.name),
-                )
-            })
-        } else {
-            None
-        };
-        let metadata = if state.projection.is_some() && state.metadata_segment.is_none() {
-            let reservation = metadata::reserve(runtime, &state.metadata, &self.name)?;
-            Some((state.metadata.clone(), reservation))
-        } else {
-            None
-        };
+        let (prepared, metadata) = state
+            .prepare_checkpoint_parts(runtime, &self.name, context)
+            .await?;
         let job = context.job().clone();
         let attempt = tokio_util::sync::CancellationToken::new();
         let _cancel_on_drop = attempt.clone().drop_guard();
@@ -1577,12 +1574,7 @@ fn sql_state_error(message: &str) -> CalcFlowError {
 }
 
 async fn encode_sql_state_async(
-    prepared: Option<(
-        Vec<RecordBatch>,
-        BatchMetadata,
-        datafusion::execution::memory_pool::MemoryReservation,
-        datafusion::execution::memory_pool::MemoryReservation,
-    )>,
+    prepared: Option<SqlCheckpointInput>,
     metadata: Option<(
         BatchMetadata,
         datafusion::execution::memory_pool::MemoryReservation,
@@ -1637,6 +1629,154 @@ fn check_encoding_cancelled(
     Ok(())
 }
 
+fn projection_checkpoint_segments_match(snapshot: &OperatorStateSnapshot) -> bool {
+    snapshot.segments.len() == 3
+        && snapshot.segments.contains_key("input-projected")
+        && snapshot.segments.contains_key("logical-schema")
+        && snapshot.segments.contains_key("batch-metadata")
+        && snapshot.inline_metadata["batch_metadata_sha256"]
+            == json!(snapshot.segments["batch-metadata"].sha256())
+}
+
+fn validate_projection_descriptor(
+    snapshot: &OperatorStateSnapshot,
+    projection: Option<std::sync::Arc<retention::SqlProjection>>,
+) -> Result<std::sync::Arc<retention::SqlProjection>> {
+    let projection = projection.ok_or_else(|| {
+        sql_state_error("SQL pruned checkpoint cannot prove complete dependencies")
+    })?;
+    if snapshot.inline_metadata["retained_ordinals"] != json!(projection.columns.ordinals())
+        || snapshot.inline_metadata["dependency_sha256"]
+            != json!(hex::encode(projection.columns.dependency_digest()))
+        || snapshot.inline_metadata["physical_schema_sha256"]
+            != json!(retention::schema_digest(
+                projection.columns.physical_schema()
+            )?)
+        || projection.logical_segment.bytes() != snapshot.segments["logical-schema"].bytes()
+    {
+        return Err(sql_state_error(
+            "SQL pruned checkpoint descriptor differs from trusted dependencies",
+        ));
+    }
+    Ok(projection)
+}
+
+fn validate_incremental_append(
+    batch: &Batch,
+    previous: Option<&RetainedSqlInput>,
+) -> Result<(bool, usize)> {
+    let append = batch.num_rows() > 0 || previous.is_none();
+    if append
+        && previous.is_some_and(|state| {
+            state.records[0].schema()
+                != batch
+                    .table_payload()
+                    .expect("validated table")
+                    .schema()
+                    .clone()
+        })
+    {
+        return Err(CalcFlowError::InvalidArgument {
+            field: "batches".into(),
+            message: "schemas must match".into(),
+        });
+    }
+    let additional = append_batches(batch, append)?.len();
+    Ok((append, additional))
+}
+
+fn initial_incremental_input(
+    migrated: Option<RetainedSqlInput>,
+    retained: Option<&RetainedSqlInput>,
+    metadata: &BatchMetadata,
+    projection: Option<&std::sync::Arc<retention::SqlProjection>>,
+) -> Option<RetainedSqlInput> {
+    migrated.or_else(|| {
+        retained.is_none().then(|| RetainedSqlInput {
+            records: Vec::new(),
+            metadata: metadata.clone(),
+            projection: projection.cloned(),
+            projection_checked: true,
+            backing_reservations: Vec::new(),
+            reservation: None,
+            segment: None,
+            metadata_segment: None,
+            rows: 0,
+            bytes: 0,
+        })
+    })
+}
+
+fn reserve_incremental_records(
+    first: &mut Option<RetainedSqlInput>,
+    retained: &mut Option<RetainedSqlInput>,
+    additional: usize,
+    columns: usize,
+    runtime: &DataFusionRuntime,
+    name: &str,
+) -> Result<Option<datafusion::execution::memory_pool::MemoryReservation>> {
+    let reservation = if additional == 0 {
+        None
+    } else {
+        Some(record_copy_reservation(
+            runtime, name, additional, columns, 1,
+        )?)
+    };
+    if additional != 0 {
+        first
+            .as_mut()
+            .or(retained.as_mut())
+            .expect("retained preflight")
+            .reserve_append(additional, runtime, name, columns)?;
+    }
+    Ok(reservation)
+}
+
+fn sql_array_bytes(
+    records: &[RecordBatch],
+    charge: impl Fn(&datafusion::arrow::array::ArrayRef) -> Result<usize>,
+    overflow: &str,
+) -> Result<usize> {
+    records
+        .iter()
+        .flat_map(RecordBatch::columns)
+        .try_fold(0usize, |bytes, array| {
+            bytes
+                .checked_add(charge(array)?)
+                .ok_or_else(|| sql_state_error(overflow))
+        })
+}
+
+fn detach_sql_batch(batch: &Batch, bound: usize) -> Result<(Vec<u8>, Batch, Batch)> {
+    let encoded = encode_sql_state(batch)?;
+    if encoded.capacity() > bound / 4 {
+        return Err(sql_state_error(
+            "SQL detachment IPC exceeded its prepaid bound",
+        ));
+    }
+    let decoded = decode_sql_state(&encoded)?;
+    let detached = Batch::table(
+        decoded.table_payload()?.batches().to_vec(),
+        batch.metadata().clone(),
+    )?;
+    validate_detached_bytes(&detached, bound)?;
+    Ok((encoded, decoded, detached))
+}
+
+fn validate_detached_bytes(detached: &Batch, bound: usize) -> Result<()> {
+    let actual = sql_array_bytes(
+        detached.table_payload()?.batches(),
+        |array| Ok(array.get_array_memory_size()),
+        "SQL detached allocation charge overflowed",
+    )?;
+    if actual > bound / 2 {
+        return Err(sql_state_error(
+            "SQL detached arrays exceeded their prepaid bound",
+        ));
+    }
+    Ok(())
+}
+
 fn encode_sql_state(batch: &Batch) -> Result<Vec<u8>> {
     encode_sql_state_checked(batch, || Ok(()))
 }
@@ -1658,19 +1798,26 @@ fn encode_sql_state_into<W: std::io::Write>(
     #[cfg(test)]
     tests::before_checked_encode(batch)?;
     check_cancelled()?;
-    let table = batch.table_payload().expect("SQL state is a table");
-    {
-        #[cfg(test)]
-        tests::before_schema_allocation(batch)?;
-        let mut writer = FileWriter::try_new(output, table.schema())
-            .map_err(|error| sql_state_error(&format!("SQL state IPC header failed: {error}")))?;
-        write_sql_records(&mut writer, batch, &mut check_cancelled)?;
-        check_cancelled()?;
-        writer
-            .finish()
-            .map_err(|error| sql_state_error(&format!("SQL state IPC finish failed: {error}")))?;
-    }
+    write_sql_state_file(batch, output, &mut check_cancelled)?;
     check_cancelled()?;
+    Ok(())
+}
+
+fn write_sql_state_file<W: std::io::Write>(
+    batch: &Batch,
+    output: &mut W,
+    check_cancelled: &mut impl FnMut() -> Result<()>,
+) -> Result<()> {
+    let table = batch.table_payload().expect("SQL state is a table");
+    #[cfg(test)]
+    tests::before_schema_allocation(batch)?;
+    let mut writer = FileWriter::try_new(output, table.schema())
+        .map_err(|error| sql_state_error(&format!("SQL state IPC header failed: {error}")))?;
+    write_sql_records(&mut writer, batch, check_cancelled)?;
+    check_cancelled()?;
+    writer
+        .finish()
+        .map_err(|error| sql_state_error(&format!("SQL state IPC finish failed: {error}")))?;
     Ok(())
 }
 

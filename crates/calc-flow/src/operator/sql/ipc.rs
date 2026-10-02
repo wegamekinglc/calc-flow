@@ -1,6 +1,9 @@
 use std::{io::Write, sync::Arc};
 
-use datafusion::{arrow::datatypes::Schema, execution::memory_pool::MemoryReservation};
+use datafusion::{
+    arrow::{datatypes::Schema, record_batch::RecordBatch},
+    execution::memory_pool::MemoryReservation,
+};
 
 use super::{StateSegment, incremental, sql_ipc_buffer_bytes, sql_state_error};
 use crate::{Batch, Result};
@@ -43,18 +46,22 @@ pub(super) fn encode(
         Ok(())
     })?;
     let bytes = buffer.bytes;
-    let retained = bytes
-        .capacity()
-        .checked_add(256)
-        .ok_or_else(|| sql_state_error("SQL IPC retained charge overflowed"))?;
-    if reservation.size() > retained {
-        reservation.shrink(reservation.size() - retained);
-    }
+    settle_reservation(bytes.capacity(), &reservation)?;
     let reservation = Arc::new(reservation);
     Ok(Arc::new(SqlInputSegment {
         segment: StateSegment::new(bytes).with_owner(reservation.clone()),
         _reservation: reservation,
     }))
+}
+
+fn settle_reservation(capacity: usize, reservation: &MemoryReservation) -> Result<()> {
+    let retained = capacity
+        .checked_add(256)
+        .ok_or_else(|| sql_state_error("SQL IPC retained charge overflowed"))?;
+    if reservation.size() > retained {
+        reservation.shrink(reservation.size() - retained);
+    }
+    Ok(())
 }
 
 fn scratch_bytes(batch: &Batch) -> Result<usize> {
@@ -66,14 +73,7 @@ fn scratch_bytes(batch: &Batch) -> Result<usize> {
         .iter()
         .try_fold(0usize, |bytes, field| bytes.checked_add(field.size()))
         .ok_or_else(|| sql_state_error("SQL IPC schema scratch overflowed"))?;
-    let largest = table.batches().iter().try_fold(0usize, |largest, record| {
-        let bytes = record.columns().iter().try_fold(0usize, |bytes, array| {
-            bytes
-                .checked_add(sql_ipc_buffer_bytes(&array.to_data())?)
-                .ok_or_else(|| sql_state_error("SQL IPC scratch overflowed"))
-        })?;
-        Ok::<_, crate::CalcFlowError>(largest.max(bytes))
-    })?;
+    let largest = largest_batch_bytes(table.batches())?;
     let width = fields
         .div_ceil(size_of::<datafusion::arrow::datatypes::DataType>())
         .max(1);
@@ -87,6 +87,17 @@ fn scratch_bytes(batch: &Batch) -> Result<usize> {
         [(largest, 4), (schema, 16), (footer, 512)],
         "SQL checkpoint IPC",
     )
+}
+
+fn largest_batch_bytes(records: &[RecordBatch]) -> Result<usize> {
+    records.iter().try_fold(0usize, |largest, record| {
+        let bytes = record.columns().iter().try_fold(0usize, |bytes, array| {
+            bytes
+                .checked_add(sql_ipc_buffer_bytes(&array.to_data())?)
+                .ok_or_else(|| sql_state_error("SQL IPC scratch overflowed"))
+        })?;
+        Ok::<_, crate::CalcFlowError>(largest.max(bytes))
+    })
 }
 
 pub(super) fn schema_bytes(schema: &Schema) -> Result<usize> {
@@ -120,6 +131,41 @@ struct PaidBuffer<'a> {
     scratch: usize,
 }
 
+impl PaidBuffer<'_> {
+    fn reserve_growth(&self, length: usize) -> std::io::Result<usize> {
+        let capacity = length
+            .max(256)
+            .checked_next_power_of_two()
+            .ok_or_else(|| std::io::Error::other("SQL IPC capacity overflowed"))?;
+        let charge = self
+            .scratch
+            .checked_add(capacity)
+            .and_then(|bytes| bytes.checked_add(self.bytes.capacity()))
+            .and_then(|bytes| bytes.checked_add(256))
+            .ok_or_else(|| std::io::Error::other("SQL IPC buffer charge overflowed"))?;
+        incremental::ensure_reservation(self.reservation, charge, "SQL checkpoint IPC")
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        Ok(capacity)
+    }
+
+    fn grow(&mut self, length: usize) -> std::io::Result<()> {
+        let capacity = self.reserve_growth(length)?;
+        self.bytes
+            .try_reserve_exact(capacity - self.bytes.len())
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        if self.bytes.capacity() > capacity {
+            return Err(std::io::Error::other(
+                "SQL IPC allocation exceeded prepaid capacity",
+            ));
+        }
+        let settled = self.scratch + capacity + 256;
+        if self.reservation.size() > settled {
+            self.reservation.shrink(self.reservation.size() - settled);
+        }
+        Ok(())
+    }
+}
+
 impl Write for PaidBuffer<'_> {
     fn write(&mut self, input: &[u8]) -> std::io::Result<usize> {
         let length = self
@@ -128,30 +174,7 @@ impl Write for PaidBuffer<'_> {
             .checked_add(input.len())
             .ok_or_else(|| std::io::Error::other("SQL IPC byte count overflowed"))?;
         if length > self.bytes.capacity() {
-            let capacity = length
-                .max(256)
-                .checked_next_power_of_two()
-                .ok_or_else(|| std::io::Error::other("SQL IPC capacity overflowed"))?;
-            let charge = self
-                .scratch
-                .checked_add(capacity)
-                .and_then(|bytes| bytes.checked_add(self.bytes.capacity()))
-                .and_then(|bytes| bytes.checked_add(256))
-                .ok_or_else(|| std::io::Error::other("SQL IPC buffer charge overflowed"))?;
-            incremental::ensure_reservation(self.reservation, charge, "SQL checkpoint IPC")
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
-            self.bytes
-                .try_reserve_exact(capacity - self.bytes.len())
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
-            if self.bytes.capacity() > capacity {
-                return Err(std::io::Error::other(
-                    "SQL IPC allocation exceeded prepaid capacity",
-                ));
-            }
-            let settled = self.scratch + capacity + 256;
-            if self.reservation.size() > settled {
-                self.reservation.shrink(self.reservation.size() - settled);
-            }
+            self.grow(length)?;
         }
         self.bytes.extend_from_slice(input);
         Ok(input.len())
