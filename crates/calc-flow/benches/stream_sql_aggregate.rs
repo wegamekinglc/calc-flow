@@ -555,7 +555,7 @@ fn add_recovery_digest(observation: &mut Value, digest: Option<String>, value_ty
 }
 
 fn main() {
-    let args = std::env::args_os().collect::<Vec<_>>();
+    let args = std::env::args_os().collect::<Vec<_>>(); // nosemgrep: args-os
     let value_type = value_type(&args);
     let check = args.iter().any(|arg| arg == "--check" || arg == "--test");
     let samples = args

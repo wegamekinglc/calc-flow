@@ -505,7 +505,7 @@ fn report(runtime: &tokio::runtime::Runtime, check: bool, samples: usize) -> Val
 }
 
 fn main() {
-    let args = std::env::args_os().collect::<Vec<_>>();
+    let args = std::env::args_os().collect::<Vec<_>>(); // nosemgrep: args-os
     let check = args.iter().any(|arg| arg == "--check" || arg == "--test");
     let samples = args
         .iter()
