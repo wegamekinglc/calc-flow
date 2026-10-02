@@ -24,15 +24,66 @@ CASES = {
     "fixed_groups_1000_batches": (1000, 0, ROWS, False),
     "growing_groups_10k_100_batches": (100, 0, 10_000, True),
 }
+Workload = tuple[int, int, int, bool]
+DecimalType = tuple[int, int, int]
+DECIMAL_PRECISION = {32: (4, 9), 64: (12, 18), 128: (28, 38), 256: (60, 76)}
 
 
 def _nullable(value: int | None) -> bytes:
     return struct.pack("<Bq", value is not None, value or 0)
 
 
-@lru_cache(maxsize=5)
+def _input_row(index: int, unique_keys: bool) -> tuple[int | None, int | None]:
+    key = (index if unique_keys else index % 64) if index % 101 else None
+    value = index % 257 - 128 if index % 13 and key != 63 else None
+    return key, value
+
+
+def _accumulate(
+    aggregate: tuple[int, int, int | None, int | None], value: int | None
+) -> tuple[int, int, int | None, int | None]:
+    count, total, minimum, maximum = aggregate
+    if value is not None:
+        count += 1
+        total += value
+        minimum = value if minimum is None else min(minimum, value)
+        maximum = value if maximum is None else max(maximum, value)
+    return count, total, minimum, maximum
+
+
+def _typed_nullable(
+    value: int | None, decimal: DecimalType | None, *, total: bool
+) -> bytes:
+    if decimal is None:
+        return _nullable(value)
+    bits, precision, scale = decimal
+    if total:
+        precision = min(precision + 10, DECIMAL_PRECISION[bits][1])
+    return struct.pack("<HBbB", bits, precision, scale, value is not None) + (
+        value or 0
+    ).to_bytes(bits // 8, "little", signed=True)
+
+
+def _snapshot_digest(
+    groups: dict[int | None, tuple[int, int, int | None, int | None]],
+    decimal: DecimalType | None = None,
+) -> bytes:
+    snapshot = hashlib.sha256()
+    for group in sorted(groups, key=lambda item: (item is not None, item or 0)):
+        count, total, minimum, maximum = groups[group]
+        snapshot.update(_nullable(group))
+        snapshot.update(struct.pack("<q", count))
+        for index, scalar in enumerate((total if count else None, minimum, maximum)):
+            snapshot.update(_typed_nullable(scalar, decimal, total=index == 0))
+    return snapshot.digest()
+
+
+@lru_cache(maxsize=45)
 def expected_snapshot_digest(
-    batches: int, rows: int = ROWS, unique_keys: bool = False
+    batches: int,
+    rows: int = ROWS,
+    unique_keys: bool = False,
+    decimal: DecimalType | None = None,
 ) -> str:
     """Hash each independently accumulated, sorted snapshot of the fixed input."""
 
@@ -44,25 +95,23 @@ def expected_snapshot_digest(
     combined = hashlib.sha256()
     chunk = rows // batches
     for index in range(rows):
-        key = (index if unique_keys else index % 64) if index % 101 else None
-        value = index % 257 - 128 if index % 13 and key != 63 else None
-        count, total, minimum, maximum = groups.get(key, (0, 0, None, None))
-        if value is not None:
-            count += 1
-            total += value
-            minimum = value if minimum is None else min(minimum, value)
-            maximum = value if maximum is None else max(maximum, value)
-        groups[key] = (count, total, minimum, maximum)
+        key, value = _input_row(index, unique_keys)
+        groups[key] = _accumulate(groups.get(key, (0, 0, None, None)), value)
         if (index + 1) % chunk == 0:
-            snapshot = hashlib.sha256()
-            for group in sorted(groups, key=lambda item: (item is not None, item or 0)):
-                count, total, minimum, maximum = groups[group]
-                snapshot.update(_nullable(group))
-                snapshot.update(struct.pack("<q", count))
-                for scalar in (total if count else None, minimum, maximum):
-                    snapshot.update(_nullable(scalar))
-            combined.update(snapshot.digest())
+            combined.update(_snapshot_digest(groups, decimal))
     return combined.hexdigest()
+
+
+@lru_cache(maxsize=16)
+def expected_recovery_digest(rows: int, unique_keys: bool, decimal: DecimalType) -> str:
+    groups: dict[int | None, tuple[int, int, int | None, int | None]] = {}
+    recovery = hashlib.sha256()
+    for index in range(rows + 1):
+        key, value = _input_row(index, unique_keys)
+        groups[key] = _accumulate(groups.get(key, (0, 0, None, None)), value)
+        if index + 1 in (rows, rows + 1):
+            recovery.update(_snapshot_digest(groups, decimal))
+    return recovery.hexdigest()
 
 
 def expected_output_rows(
@@ -86,30 +135,29 @@ def _integer(value: object, expected: int | None = None) -> bool:
     return type(value) is int and value >= 0 and (expected is None or value == expected)
 
 
-def _validate_sample(
-    sample: object,
-    batches: int,
-    checkpoint: int,
-    rows: int,
-    unique_keys: bool,
-    oracle: bool,
-) -> None:
-    if not isinstance(sample, dict):
-        raise ValueError("invalid SQL stream observation")
+def _valid_timing(value: object) -> bool:
+    return type(value) in (int, float) and math.isfinite(value) and value >= 0
+
+
+def _validate_timing(sample: dict) -> None:
     for field in ("seconds", "process_seconds", "prepare_seconds", "capture_seconds"):
         value = sample.get(field)
-        if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+        if not _valid_timing(value):
             raise ValueError("invalid SQL stream timing")
+    durations = sum(
+        sample[field]
+        for field in ("process_seconds", "prepare_seconds", "capture_seconds")
+    )
     if (
         sample["seconds"] <= 0
         or sample["process_seconds"] <= 0
-        or sum(
-            sample[field]
-            for field in ("process_seconds", "prepare_seconds", "capture_seconds")
-        )
-        > sample["seconds"] * 1.01
+        or durations > sample["seconds"] * 1.01
     ):
         raise ValueError("invalid SQL stream phase durations")
+
+
+def _validate_counts(sample: dict, workload: Workload) -> None:
+    batches, checkpoint, rows, unique_keys = workload
     expected = {
         "input_rows": rows,
         "output_rows": expected_output_rows(batches, rows, unique_keys),
@@ -118,13 +166,31 @@ def _validate_sample(
     }
     if any(not _integer(sample.get(field), value) for field, value in expected.items()):
         raise ValueError("invalid SQL stream row or checkpoint count")
+
+
+def _validate_oracle(
+    sample: dict, workload: Workload, decimal: DecimalType | None, *, oracle: bool
+) -> None:
+    batches, _, rows, unique_keys = workload
     if (
         sample.get("validated_all_snapshots") is not True
         or sample.get("validated_recovery") is not oracle
         or sample.get("all_snapshots_sha256")
-        != expected_snapshot_digest(batches, rows, unique_keys)
+        != expected_snapshot_digest(batches, rows, unique_keys, decimal)
     ):
         raise ValueError("invalid SQL stream snapshot oracle")
+    if decimal is not None:
+        expected = (
+            expected_recovery_digest(rows, unique_keys, decimal) if oracle else None
+        )
+        if (
+            "recovery_snapshots_sha256" not in sample
+            or sample["recovery_snapshots_sha256"] != expected
+        ):
+            raise ValueError("invalid SQL stream recovery oracle")
+
+
+def _validate_checkpoint_fields(sample: dict) -> None:
     if (
         not _digest(sample.get("final_checkpoint_sha256"))
         or not _integer(sample.get("final_checkpoint_bytes"))
@@ -132,6 +198,10 @@ def _validate_sample(
         or not _integer(sample.get("checkpoint_bytes"))
     ):
         raise ValueError("invalid SQL stream checkpoint evidence")
+
+
+def _validate_checkpoint(sample: dict, checkpoint: int) -> None:
+    _validate_checkpoint_fields(sample)
     if checkpoint:
         if sample["checkpoint_bytes"] < sample["final_checkpoint_bytes"]:
             raise ValueError("incomplete SQL stream checkpoint bytes")
@@ -142,61 +212,148 @@ def _validate_sample(
         raise ValueError("unexpected SQL stream checkpoint work")
 
 
+def _validate_sample(
+    sample: object, workload: Workload, decimal: DecimalType | None, *, oracle: bool
+) -> None:
+    if not isinstance(sample, dict):
+        raise ValueError("invalid SQL stream observation")
+    _validate_timing(sample)
+    _validate_counts(sample, workload)
+    _validate_oracle(sample, workload, decimal, oracle=oracle)
+    _validate_checkpoint(sample, workload[1])
+
+
+def _validate_inventory(cases: object) -> list[dict]:
+    if not isinstance(cases, list) or len(cases) != len(CASES):
+        raise ValueError("incomplete SQL stream benchmark inventory")
+    if any(
+        not isinstance(case, dict) or not isinstance(case.get("name"), str)
+        for case in cases
+    ):
+        raise ValueError("incomplete SQL stream benchmark inventory")
+    if {case["name"] for case in cases} != set(CASES):
+        raise ValueError("incomplete SQL stream benchmark inventory")
+    return cases
+
+
+def _validate_workload(case: dict, workload: Workload) -> None:
+    batches, checkpoint, count, unique = workload
+    maximum_groups = count - (count + 100) // 101 + 1 if unique else 65
+    expected = {
+        "rows": count,
+        "batches": batches,
+        "checkpoint_every": checkpoint,
+        "maximum_groups": maximum_groups,
+    }
+    if any(not _integer(case.get(field), value) for field, value in expected.items()):
+        raise ValueError("invalid SQL stream workload")
+    if case.get("unique_keys") is not unique or case.get("query") != QUERY:
+        raise ValueError("invalid SQL stream workload")
+
+
+def _case_row(
+    case: dict, scope: str, minimum_samples: int, decimal: DecimalType | None
+) -> dict:
+    workload = CASES[case["name"]]
+    batches, checkpoint, count, unique = workload
+    _validate_workload(case, workload)
+    samples = case.get("samples")
+    if not isinstance(samples, list) or len(samples) < minimum_samples:
+        raise ValueError("incomplete SQL stream observations")
+    _validate_sample(case.get("oracle"), workload, decimal, oracle=True)
+    for sample in samples:
+        _validate_sample(sample, workload, decimal, oracle=False)
+    if any(
+        sample["final_checkpoint_sha256"] != case["oracle"]["final_checkpoint_sha256"]
+        for sample in samples
+    ):
+        raise ValueError("unstable SQL stream checkpoint bytes")
+    return {
+        "samples": [sample["seconds"] for sample in samples],
+        "rows": count,
+        "scope": scope,
+        "metadata": {
+            "oracle": case["oracle"],
+            "observations": samples,
+            "batches": batches,
+            "checkpoint_every": checkpoint,
+            "unique_keys": unique,
+        },
+    }
+
+
+def _decimal_descriptor(decimal: DecimalType) -> dict:
+    bits, precision, scale = decimal
+    return {
+        "name": f"decimal{bits}",
+        "input": {"bits": bits, "precision": precision, "scale": scale},
+        "total": {
+            "bits": bits,
+            "precision": min(precision + 10, DECIMAL_PRECISION[bits][1]),
+            "scale": scale,
+        },
+    }
+
+
+def _report_decimal(report: dict) -> DecimalType | None:
+    if report.get("schema") == "calc-flow.sql-stream-aggregate.v1":
+        if "value_type" in report:
+            raise ValueError("undeclared SQL stream datatype")
+        return None
+    if report.get("schema") != "calc-flow.sql-stream-aggregate.v2":
+        raise ValueError("invalid SQL stream benchmark contract")
+    return _validate_decimal_descriptor(report.get("value_type"))
+
+
+def _validate_decimal_descriptor(value: object) -> DecimalType:
+    if not isinstance(value, dict) or not isinstance(value.get("input"), dict):
+        raise ValueError("invalid SQL stream decimal datatype")
+    source = value["input"]
+    bits, precision, scale = (
+        source.get(field) for field in ("bits", "precision", "scale")
+    )
+    _validate_decimal_numbers(source)
+    if bits not in DECIMAL_PRECISION or scale not in (-2, 2):
+        raise ValueError("unsupported SQL stream decimal datatype")
+    decimal = (bits, DECIMAL_PRECISION[bits][0], scale)
+    if value != _decimal_descriptor(decimal):
+        raise ValueError("invalid SQL stream decimal promotion")
+    _validate_decimal_numbers(value["total"])
+    return decimal
+
+
+def _validate_decimal_numbers(value: dict) -> None:
+    if any(
+        type(value.get(field)) is not int for field in ("bits", "precision", "scale")
+    ):
+        raise ValueError("invalid SQL stream decimal promotion")
+
+
+def _typed_case_row(
+    case: dict, report: dict, minimum_samples: int, decimal: DecimalType | None
+) -> dict:
+    row = _case_row(case, report["scope"], minimum_samples, decimal)
+    if decimal is not None:
+        row["metadata"]["value_type"] = report["value_type"]
+    return row
+
+
 def sql_stream_rows(path: Path, *, minimum_samples: int = 20) -> dict:
     """Retain complete observations after validating every cumulative snapshot."""
 
     report = read_json(path)
-    if (
-        report.get("schema") != "calc-flow.sql-stream-aggregate.v1"
-        or report.get("scope") != "warm-native-operator-cumulative-snapshots"
-    ):
+    decimal = _report_decimal(report)
+    if report.get("scope") != "warm-native-operator-cumulative-snapshots":
         raise ValueError("invalid SQL stream benchmark contract")
-    cases = report.get("cases")
-    if (
-        not isinstance(cases, list)
-        or len(cases) != len(CASES)
-        or any(
-            not isinstance(case, dict) or not isinstance(case.get("name"), str)
-            for case in cases
+    cases = _validate_inventory(report.get("cases"))
+    prefix = (
+        "stream_sql_aggregate"
+        if decimal is None
+        else f"stream_sql_aggregate/decimal{decimal[0]}_scale{decimal[2]}"
+    )
+    return {
+        f"{prefix}/{case['name']}": _typed_case_row(
+            case, report, minimum_samples, decimal
         )
-        or {case.get("name") for case in cases} != set(CASES)
-    ):
-        raise ValueError("incomplete SQL stream benchmark inventory")
-    rows = {}
-    for case in cases:
-        batches, checkpoint, count, unique = CASES[case["name"]]
-        maximum_groups = count - (count + 100) // 101 + 1 if unique else 65
-        if (
-            not _integer(case.get("rows"), count)
-            or not _integer(case.get("batches"), batches)
-            or not _integer(case.get("checkpoint_every"), checkpoint)
-            or not _integer(case.get("maximum_groups"), maximum_groups)
-            or case.get("unique_keys") is not unique
-            or case.get("query") != QUERY
-        ):
-            raise ValueError("invalid SQL stream workload")
-        samples = case.get("samples")
-        if not isinstance(samples, list) or len(samples) < minimum_samples:
-            raise ValueError("incomplete SQL stream observations")
-        _validate_sample(case.get("oracle"), batches, checkpoint, count, unique, True)
-        for sample in samples:
-            _validate_sample(sample, batches, checkpoint, count, unique, False)
-        if any(
-            sample["final_checkpoint_sha256"]
-            != case["oracle"]["final_checkpoint_sha256"]
-            for sample in samples
-        ):
-            raise ValueError("unstable SQL stream checkpoint bytes")
-        rows[f"stream_sql_aggregate/{case['name']}"] = {
-            "samples": [sample["seconds"] for sample in samples],
-            "rows": count,
-            "scope": report["scope"],
-            "metadata": {
-                "oracle": case["oracle"],
-                "observations": samples,
-                "batches": batches,
-                "checkpoint_every": checkpoint,
-                "unique_keys": unique,
-            },
-        }
-    return rows
+        for case in cases
+    }

@@ -203,6 +203,8 @@ pub struct DataFusionRuntime {
     query_lock: AsyncMutex<()>,
     metrics: Mutex<Vec<DataFusionQueryMetric>>,
     next_query: AtomicU64,
+    #[cfg(test)]
+    pub(crate) incremental_sql_plan_calls: AtomicUsize,
     effective_target_partitions: AtomicUsize,
     parallelism_decision: OnceLock<DataFusionParallelismDecision>,
     rolling_rewrite_audit: Arc<RollingRewriteAudit>,
@@ -234,6 +236,8 @@ impl DataFusionRuntime {
             query_lock: AsyncMutex::new(()),
             metrics: Mutex::new(Vec::new()),
             next_query: AtomicU64::new(1),
+            #[cfg(test)]
+            incremental_sql_plan_calls: AtomicUsize::new(0),
             effective_target_partitions: AtomicUsize::new(0),
             parallelism_decision: OnceLock::new(),
             rolling_rewrite_audit: Arc::new(RollingRewriteAudit::default()),
@@ -364,6 +368,9 @@ impl DataFusionRuntime {
             vec![RecordBatch::new_empty(schema)],
             BatchMetadata::default(),
         )?;
+        #[cfg(test)]
+        self.incremental_sql_plan_calls
+            .fetch_add(1, Ordering::Relaxed);
         let mut registrations = TableRegistrations::new(context);
         registrations.register(alias, &input, Some(node_id))?;
         let state = context.state();

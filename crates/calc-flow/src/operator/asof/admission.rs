@@ -704,11 +704,12 @@ impl Admission {
             self.rows.clear();
             status.left.accepted_rows = self.accepted;
         } else {
-            for (key, count) in self.right_capacities.drain(..) {
+            for (key, count) in &self.right_capacities {
                 state
                     .right
-                    .bucket_mut_or_kind(key, state.sequence_kinds[1])
-                    .reserve_payloads(count);
+                    .update_unindexed(key.clone(), state.sequence_kinds[1], |bucket| {
+                        bucket.reserve_payloads(*count);
+                    });
             }
             // Each compact payload owns exactly its admitted rows. Attach its
             // reference count once, then resolve row handles without two pool
@@ -729,9 +730,14 @@ impl Admission {
                 );
                 state
                     .right
-                    .bucket_mut_or_default(identity.1)
-                    .insert_admitted((identity.0, identity.2), payload);
+                    .update_unindexed(identity.1, state.sequence_kinds[1], |bucket| {
+                        bucket.insert_admitted((identity.0, identity.2), payload);
+                    });
             }
+            for (key, _) in self.right_capacities.drain(..) {
+                state.right.refresh_key(&key);
+            }
+            [state.right_payload_min, state.right_identity_min] = state.right.minima();
             status.right.accepted_rows = self.accepted;
         }
     }

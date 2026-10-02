@@ -22,6 +22,7 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
+pub(super) use index_v3::BASE_BYTES as INDEX_HEADER_BYTES;
 pub(super) use index_v3::encoded_length as v3_encoded_length;
 pub(super) use prepared::PreparedSegment;
 use validation::{validate_counters, validate_progress};
@@ -89,23 +90,38 @@ impl StreamAsofJoinOperator {
     fn decode_snapshot_v3(
         &self,
         snapshot: &OperatorStateSnapshot,
-        metadata: Metadata<'_>,
+        metadata: &Metadata<'_>,
     ) -> Result<DecodedSnapshot> {
-        let segment = snapshot_segment(snapshot)?;
+        let segment = snapshot_segment(snapshot, metadata.layout_version)?;
         let workspace = self.snapshot_restore_workspace(snapshot, segment)?;
         let batches = self.decode_validated_payloads(snapshot, &metadata.metrics)?;
         let mut state = self.decode_snapshot_index(segment, &batches)?;
         state.sequence_kinds = self.sequence_kinds();
         self.validate_indexed_rows(&state)?;
-        let prepared = segment.cloned().map(PreparedSegment::new);
-        self.validate_snapshot_inventory(&state, prepared.as_ref(), &metadata)?;
+        let mut prepared = segment.cloned().map(PreparedSegment::new);
+        self.validate_snapshot_inventory(&state, prepared.as_ref(), metadata)?;
+        if metadata.layout_version == 3 {
+            state.right.build_recovery_index(&workspace, &self.name)?;
+            [state.right_payload_min, state.right_identity_min] = state.right.minima();
+        }
+        let (metrics, deferred_len) = self.migrate_snapshot_inventory(&state, metadata)?;
+        if metadata.layout_version == 3 {
+            prepared = None;
+        }
+        let auxiliary = state.right.auxiliary_bytes();
+        if auxiliary > workspace.size() {
+            return Err(mismatch("ASOF recovery index exceeds prepaid workspace"));
+        }
+        state
+            .right
+            .install_recovery_lease(workspace.split(auxiliary));
         Ok(DecodedSnapshot {
             state,
-            metrics: metadata.metrics,
+            metrics,
             terminal: metadata.terminal,
             sequence: metadata.next_output_sequence,
             prepared,
-            deferred_len: None,
+            deferred_len,
             _workspace: workspace,
         })
     }
@@ -116,9 +132,37 @@ impl StreamAsofJoinOperator {
         prepared: Option<&PreparedSegment>,
         metadata: &Metadata<'_>,
     ) -> Result<()> {
-        let inventory = state.capacity_inventory(prepared, &self.name)?;
+        let right_bytes = if metadata.layout_version == 3 {
+            state.right.legacy_metadata_bytes()
+        } else {
+            state.right.metadata_bytes()
+        };
+        let inventory = state.capacity_inventory_with_right(right_bytes, prepared, &self.name)?;
         validate_gauges(&inventory, state.left.len() as u64, &metadata.metrics)?;
         self.validate_restored_limits(&inventory, metadata)
+    }
+
+    fn migrate_snapshot_inventory(
+        &self,
+        state: &State,
+        metadata: &Metadata<'_>,
+    ) -> Result<(StreamAsofJoinStatus, Option<u64>)> {
+        let mut metrics = metadata.metrics.clone();
+        if metadata.layout_version != 3 {
+            return Ok((metrics, None));
+        }
+        let length = v3_encoded_length(state, &self.name)?;
+        let mut inventory = state.capacity_inventory(None, &self.name)?;
+        if length != 0 {
+            inventory.bytes = super::checked(&self.name, inventory.bytes, length + 256)?;
+        }
+        if inventory.bytes > self.spec.limits().max_state_bytes() {
+            return Err(mismatch(
+                "ASOF restored state with expiration index exceeds limits.max_state_bytes",
+            ));
+        }
+        metrics.state_bytes = inventory.bytes;
+        Ok((metrics, (length != 0).then_some(length)))
     }
 
     fn decode_snapshot_index(
@@ -191,7 +235,7 @@ impl StreamAsofJoinOperator {
         let mut retained = 0;
         let mut scratch = 0;
         for (name, segment) in &snapshot.segments {
-            if name == index_v3::INDEX_SEGMENT {
+            if name == index_v3::INDEX_SEGMENT || name == index_v3::LEGACY_SEGMENT {
                 continue;
             }
             let key = payload_segments::parse_batch_segment(name)?;
@@ -342,7 +386,7 @@ impl StreamAsofJoinOperator {
         })
     }
 
-    /// Capture canonical v3 index and immutable payload segments.
+    /// Capture canonical state and immutable payload segments.
     pub(super) fn capture(&mut self, epoch: Epoch) -> Result<OperatorStateSnapshot> {
         self.ensure_prepared_sync()?;
         self.ensure_payloads_sync()?;
@@ -353,12 +397,11 @@ impl StreamAsofJoinOperator {
             side.ended = false;
         }
         metrics.output_watermark_micros = None;
-        let version = 3;
         let metadata = Metadata {
             kind: "stream_asof_join",
-            state_version: version,
-            layout_version: version,
-            accounting_version: version,
+            state_version: 3,
+            layout_version: 4,
+            accounting_version: 4,
             row_encoding: "arrow-batch-58.3.0",
             fingerprint: &self.fingerprint,
             epoch: epoch.as_u64(),
@@ -388,7 +431,7 @@ impl StreamAsofJoinOperator {
         &self,
         snapshot: &OperatorStateSnapshot,
     ) -> Result<DecodedSnapshot> {
-        self.decode_snapshot_v3(snapshot, self.restore_metadata(snapshot)?)
+        self.decode_snapshot_v3(snapshot, &self.restore_metadata(snapshot)?)
     }
 
     fn restore_metadata<'a>(&self, snapshot: &'a OperatorStateSnapshot) -> Result<Metadata<'a>> {
@@ -407,8 +450,10 @@ impl StreamAsofJoinOperator {
     fn validate_metadata(&self, metadata: &Metadata<'_>) -> Result<()> {
         if metadata.kind != "stream_asof_join"
             || metadata.state_version != 3
-            || metadata.layout_version != 3
-            || metadata.accounting_version != 3
+            || !matches!(
+                (metadata.layout_version, metadata.accounting_version),
+                (3, 3) | (4, 4)
+            )
             || metadata.row_encoding != "arrow-batch-58.3.0"
             || metadata.fingerprint != self.fingerprint
         {
@@ -427,7 +472,7 @@ impl StreamAsofJoinOperator {
             .map_err(|_| mismatch("ASOF payload batches exceed compact reference range"))?;
         let mut batches = BTreeMap::new();
         for (name, encoded) in &snapshot.segments {
-            if name == INDEX_SEGMENT {
+            if name == INDEX_SEGMENT || name == index_v3::LEGACY_SEGMENT {
                 continue;
             }
             let key = payload_segments::parse_batch_segment(name)?;
@@ -585,7 +630,6 @@ impl StreamAsofJoinOperator {
         decoded: DecodedSnapshot,
     ) {
         self.state = decoded.state;
-        self.state.rebuild_right_minima();
         self.status = decoded.metrics;
         self.terminal = decoded.terminal;
         self.next_output_sequence = decoded.sequence;
@@ -616,15 +660,31 @@ fn validate_batch_ranges(
     Ok(())
 }
 
-fn snapshot_segment(snapshot: &OperatorStateSnapshot) -> Result<Option<&StateSegment>> {
-    let index = snapshot.segments.get(INDEX_SEGMENT);
+fn snapshot_segment(
+    snapshot: &OperatorStateSnapshot,
+    layout: u32,
+) -> Result<Option<&StateSegment>> {
+    let name = if layout == 3 {
+        index_v3::LEGACY_SEGMENT
+    } else {
+        INDEX_SEGMENT
+    };
+    let index = snapshot.segments.get(name);
     if snapshot
         .segments
         .keys()
-        .any(|key| key != INDEX_SEGMENT && payload_segments::parse_batch_segment(key).is_err())
+        .any(|key| key != name && payload_segments::parse_batch_segment(key).is_err())
         || (index.is_none() && !snapshot.segments.is_empty())
     {
         return Err(mismatch("unexpected ASOF columnar segment inventory"));
+    }
+    let magic: &[u8] = if layout == 3 {
+        b"CFASOF03"
+    } else {
+        b"CFASOF04"
+    };
+    if index.is_some_and(|segment| !segment.bytes().starts_with(magic)) {
+        return Err(mismatch("ASOF index layout differs from metadata"));
     }
     Ok(index)
 }
@@ -1197,10 +1257,10 @@ mod tests {
         assert_eq!(operator.status.state_rows, 1);
         let mut snapshot = operator.capture(Epoch::INITIAL).unwrap();
         let mut bytes = snapshot.segments[index_v3::INDEX_SEGMENT].bytes().to_vec();
-        assert_eq!(u64::from_le_bytes(bytes[72..80].try_into().unwrap()), 1);
-        assert_eq!(bytes[80], 1, "one Binary owner retains both sequence rows");
-        assert_eq!(u64::from_le_bytes(bytes[82..90].try_into().unwrap()), 2);
-        bytes[114] = 0; // Invalid string marker in the expired, unreferenced row.
+        assert_eq!(u64::from_le_bytes(bytes[88..96].try_into().unwrap()), 1);
+        assert_eq!(bytes[96], 1, "one Binary owner retains both sequence rows");
+        assert_eq!(u64::from_le_bytes(bytes[98..106].try_into().unwrap()), 2);
+        bytes[130] = 0; // Invalid string marker in the expired, unreferenced row.
         snapshot
             .segments
             .insert(index_v3::INDEX_SEGMENT.into(), StateSegment::new(bytes));
@@ -1210,7 +1270,10 @@ mod tests {
             Err(CalcFlowError::CheckpointMismatch { .. })
         ));
         assert_eq!(operator.status(), before);
-        assert_eq!(operator.runtime.pool.reserved(), 0);
+        assert_eq!(
+            operator.runtime.pool.reserved(),
+            operator.state.right.auxiliary_bytes()
+        );
     }
 
     #[test]

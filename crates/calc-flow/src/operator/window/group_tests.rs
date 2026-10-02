@@ -1,5 +1,212 @@
 use super::*;
 
+thread_local! {
+    pub(super) static SLOT_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static CACHE_KEY_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn prepare_group_update(record: RecordBatch, spec: WindowSpec) -> InputBatchUpdate {
+    let operator = WindowAggregateOperator::new("window", record.schema(), spec).unwrap();
+    let job = crate::StreamJobContext::new(
+        1,
+        "window-slot-cache",
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "window", None);
+    let batch = Batch::table(vec![record], crate::BatchMetadata::default()).unwrap();
+    operator.prepare_input_batch(&batch, &context).unwrap()
+}
+
+#[test]
+fn repeated_tumbling_groups_reuse_accumulator_slots() {
+    let keys = [None, Some(""), Some("same"), Some("a\0b")];
+    for large in [false, true] {
+        for composite in [false, true] {
+            let record = string_record(
+                large,
+                vec![0; 8192],
+                (0..8192).map(|row| keys[row % keys.len()]).collect(),
+            );
+            SLOT_LOOKUPS.with(|calls| calls.set(0));
+            let update = prepare_group_update(record, spec(composite));
+            assert_eq!(update.accumulators.len(), keys.len());
+            assert_eq!(update.usage.rows, 4);
+            for entry in update.accumulators.values() {
+                assert!(matches!(
+                    entry.aggregates.as_slice(),
+                    [AccumulatorValue::SignedSum(Some(2048))]
+                ));
+            }
+            assert_eq!(SLOT_LOOKUPS.with(std::cell::Cell::get), 4);
+        }
+    }
+}
+
+#[test]
+fn repeated_two_window_groups_reuse_all_accumulator_slots() {
+    assert_hopping_slot_reuse(2);
+}
+
+#[test]
+fn repeated_three_window_groups_reuse_all_accumulator_slots() {
+    assert_hopping_slot_reuse(3);
+}
+
+fn assert_hopping_slot_reuse(overlap: usize) {
+    let keys = [None, Some(""), Some("same"), Some("a\0b")];
+    for large in [false, true] {
+        for composite in [false, true] {
+            let record = string_record(
+                large,
+                vec![0; 8192],
+                (0..8192).map(|row| keys[row % keys.len()]).collect(),
+            );
+            SLOT_LOOKUPS.with(|calls| calls.set(0));
+            let update = prepare_group_update(record, hopping_spec(overlap, composite));
+            assert_eq!(update.accumulators.len(), overlap * keys.len());
+            assert_eq!(update.usage.rows, (overlap * keys.len()) as u64);
+            for entry in update.accumulators.values() {
+                assert!(matches!(
+                    entry.aggregates.as_slice(),
+                    [AccumulatorValue::SignedSum(Some(2048))]
+                ));
+            }
+            assert_eq!(
+                SLOT_LOOKUPS.with(std::cell::Cell::get),
+                overlap * keys.len()
+            );
+        }
+    }
+}
+
+#[test]
+fn high_overlap_preserves_all_windows_and_map_lookups() {
+    let record = string_record(false, vec![0; 128], vec![Some("same"); 128]);
+    CACHE_KEY_COMPARISONS.with(|calls| calls.set(0));
+    prepare_group_update(record.clone(), hopping_spec(2, false));
+    assert!(CACHE_KEY_COMPARISONS.with(std::cell::Cell::get) > 0);
+    SLOT_LOOKUPS.with(|calls| calls.set(0));
+    CACHE_KEY_COMPARISONS.with(|calls| calls.set(0));
+    let update = prepare_group_update(record, hopping_spec(8, false));
+    assert_eq!(update.accumulators.len(), 8);
+    assert_eq!(update.usage.rows, 8);
+    let starts = update
+        .accumulators
+        .keys()
+        .map(|key| key.start.as_micros())
+        .collect::<Vec<_>>();
+    assert_eq!(starts, [-70, -60, -50, -40, -30, -20, -10, 0]);
+    for entry in update.accumulators.values() {
+        assert!(matches!(
+            entry.aggregates.as_slice(),
+            [AccumulatorValue::SignedSum(Some(128))]
+        ));
+    }
+    assert_eq!(SLOT_LOOKUPS.with(std::cell::Cell::get), 1024);
+    assert_eq!(CACHE_KEY_COMPARISONS.with(std::cell::Cell::get), 0);
+}
+
+#[test]
+fn hopping_slot_cache_keeps_colliding_groups_separate() {
+    let groups = (0..65)
+        .map(|index| format!("group{index}"))
+        .collect::<Vec<_>>();
+    for overlap in [2, 3, 4] {
+        let record = string_record(
+            false,
+            vec![0; 130],
+            groups
+                .iter()
+                .cycle()
+                .take(130)
+                .map(|key| Some(key.as_str()))
+                .collect(),
+        );
+        let update = prepare_group_update(record, hopping_spec(overlap, false));
+        assert_eq!(update.accumulators.len(), overlap * groups.len());
+        assert_eq!(update.usage.rows, (overlap * groups.len()) as u64);
+        for entry in update.accumulators.values() {
+            assert!(matches!(
+                entry.aggregates.as_slice(),
+                [AccumulatorValue::SignedSum(Some(2))]
+            ));
+        }
+    }
+}
+
+fn hopping_spec(overlap: usize, composite: bool) -> WindowSpec {
+    let mut spec = spec(composite);
+    spec.geometry = WindowGeometry::Hopping {
+        size_micros: (overlap * 10) as u64,
+        slide_micros: 10,
+    };
+    spec
+}
+
+#[test]
+fn slot_cache_keeps_colliding_groups_separate() {
+    let groups = (0..65)
+        .map(|index| format!("group{index}"))
+        .collect::<Vec<_>>();
+    let record = string_record(
+        false,
+        vec![0; 130],
+        groups
+            .iter()
+            .cycle()
+            .take(130)
+            .map(|key| Some(key.as_str()))
+            .collect(),
+    );
+    let update = prepare_group_update(record, spec(false));
+    assert_eq!(update.accumulators.len(), 65);
+    assert_eq!(update.usage.rows, 65);
+    for entry in update.accumulators.values() {
+        assert!(matches!(
+            entry.aggregates.as_slice(),
+            [AccumulatorValue::SignedSum(Some(2))]
+        ));
+    }
+}
+
+#[test]
+fn slot_cache_keeps_out_of_order_and_hopping_windows_separate() {
+    let hopping = WindowSpec::hopping("time", Duration::from_micros(20), Duration::from_micros(10))
+        .unwrap()
+        .group_by(["group"])
+        .unwrap()
+        .aggregate(AggregateFunction::Sum, "value", "total")
+        .unwrap();
+    for (spec, expected) in [
+        (spec(false), BTreeMap::from([(0, 3), (10, 2)])),
+        (hopping, BTreeMap::from([(-10, 3), (0, 5), (10, 2)])),
+        (
+            hopping_spec(3, false),
+            BTreeMap::from([(-20, 3), (-10, 5), (0, 5), (10, 2)]),
+        ),
+        (
+            hopping_spec(4, false),
+            BTreeMap::from([(-30, 3), (-20, 5), (-10, 5), (0, 5), (10, 2)]),
+        ),
+    ] {
+        let record = string_record(false, vec![0, 10, 0, 10, 0], vec![Some("same"); 5]);
+        let update = prepare_group_update(record, spec);
+        let totals = update
+            .accumulators
+            .iter()
+            .map(|(key, entry)| {
+                let [AccumulatorValue::SignedSum(Some(total))] = entry.aggregates.as_slice() else {
+                    panic!("expected a signed sum");
+                };
+                (key.start.as_micros(), *total)
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(totals, expected);
+    }
+}
+
 fn string_record(large: bool, times: Vec<i64>, groups: Vec<Option<&str>>) -> RecordBatch {
     let len = times.len();
     let schema = Arc::new(Schema::new(vec![
@@ -59,7 +266,7 @@ fn repeated_string_groups_do_not_allocate_owned_scalars() {
             let operator =
                 WindowAggregateOperator::new("window", record.schema(), spec.clone()).unwrap();
             let columns = RecordColumns::new(&record, &spec, &operator.compiled, "window").unwrap();
-            let mut scratch = BatchScratch::new(WindowStateUsage { rows: 0, bytes: 0 });
+            let mut scratch = BatchScratch::new(WindowStateUsage { rows: 0, bytes: 0 }, 1);
             scratch
                 .intern_group(&columns, 0, "window", &spec.group_by)
                 .unwrap();

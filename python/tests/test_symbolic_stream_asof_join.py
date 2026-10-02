@@ -211,7 +211,6 @@ def test_asof_analysis_rejects_batch_and_wrong_temporal_type(runtime) -> None:
         {"checkpoint_support": "unproven", "state_version": None, "state_layouts": ()},
         {"state_version": 2, "state_layouts": (1, 2)},
         {"state_version": 1, "state_layouts": (1,)},
-        {"state_layouts": (1, 3)},
         {"deterministic": False},
         {"replay_safe": False},
         {"input_ports": (ProviderPort("input", "table", True),)},
@@ -731,7 +730,7 @@ def test_asof_builtin_capability_is_an_independent_complete_contract() -> None:
         "requires_watermark": True,
         "checkpoint_support": "checkpointed_stateful",
         "state_version": 3,
-        "state_layouts": (3,),
+        "state_layouts": (3, 4),
         "deterministic": True,
         "replay_safe": True,
     }
@@ -808,3 +807,58 @@ def test_stateful_consumers_require_all_left_asof_ordering_metadata(
     assert any(issue.code == "ordering_required" for issue in analysis.issues)
     with pytest.raises(cf.CompileError, match="ordering_required"):
         program.compile_stream(runtime)
+
+
+@pytest.mark.parametrize("layouts,selected", [((3,), 3), ((3, 4), 4), ((1, 3), 3)])
+def test_asof_default_layout_membership_and_explanation(
+    runtime, monkeypatch, layouts, selected
+):
+    snapshot = runtime.capabilities()
+    offered = replace(
+        snapshot,
+        operators=tuple(
+            replace(operator, state_layouts=layouts)
+            if operator.kind == "stream_asof_join"
+            else operator
+            for operator in snapshot.operators
+        ),
+    )
+    monkeypatch.setattr(cf.Runtime, "capabilities", lambda _self: offered)
+    program = cf.Program("layout", engine="streaming", outputs={"matched": _join()})
+    assert program.analyze(runtime, mode="stream").issues == ()
+    assert f"state_version=3 state_layout={selected}" in program.explain(
+        runtime, mode="stream"
+    )
+
+
+@pytest.mark.parametrize("layouts", [(), (1, 2), (5,)])
+def test_asof_default_capability_rejects_missing_recovery_layout(
+    runtime, monkeypatch, layouts
+):
+    from dataclasses import fields
+    from types import SimpleNamespace
+
+    snapshot = runtime.capabilities()
+    operators = tuple(
+        SimpleNamespace(
+            **{
+                **{
+                    field.name: getattr(operator, field.name)
+                    for field in fields(operator)
+                },
+                "state_layouts": layouts,
+            }
+        )
+        if operator.kind == "stream_asof_join"
+        else operator
+        for operator in snapshot.operators
+    )
+    offered = replace(snapshot, operators=operators)
+    monkeypatch.setattr(cf.Runtime, "capabilities", lambda _self: offered)
+    program = cf.Program(
+        "missing-layout", engine="streaming", outputs={"matched": _join()}
+    )
+    assert any(
+        issue.code == "capability_mismatch"
+        for issue in program.analyze(runtime, mode="stream").issues
+    )

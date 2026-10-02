@@ -126,6 +126,29 @@ fn complete_left_span_shares_its_arrow_values_buffer() {
     assert_eq!(source.buffers()[0].as_ptr(), output.buffers()[0].as_ptr());
 }
 
+#[tokio::test]
+async fn output_plan_empty_projection_preserves_row_count() {
+    let (_, _, row) = fixture();
+    let schema = Arc::new(Schema::empty());
+    let rows = [
+        (row.view(), Some(row.view())),
+        (row.view(), None),
+        (row.view(), Some(row.view())),
+    ];
+    let mut runtime = OutputRuntime::new(1_048_576);
+    runtime.set_output_projection(Vec::new());
+    let reservation = MemoryConsumer::new("test-output").register(&runtime.pool);
+    let (result, reservation) = runtime
+        .materialize(&rows, &schema, reservation, || Ok(()))
+        .await
+        .unwrap();
+    let record = &result.table_payload().unwrap().batches()[0];
+    assert_eq!(record.num_columns(), 0);
+    assert_eq!(record.num_rows(), 3);
+    drop((result, reservation));
+    assert_eq!(runtime.pool.reserved(), 0);
+}
+
 #[test]
 fn complete_left_span_with_larger_backing_still_copies() {
     let (_, schemas, mut row) = fixture();
@@ -166,11 +189,13 @@ async fn cancelled_materialization_keeps_runtime_reusable() {
     drop(future);
     assert_eq!(pool.reserved(), 0);
     let reservation = MemoryConsumer::new("test-output").register(&runtime.pool);
-    let (result, _reservation) = runtime
+    let (result, reservation) = runtime
         .materialize(&rows, &schemas[2], reservation, || Ok(()))
         .await
         .unwrap();
     assert_eq!(result.table_payload().unwrap().batches()[0].num_rows(), 1);
+    assert!(pool.reserved() > 0);
+    drop((result, reservation));
     assert_eq!(pool.reserved(), 0);
 }
 
@@ -266,8 +291,9 @@ async fn dropped_materialization_keeps_worker_memory_reserved_until_exit() {
     assert!(futures::poll!(future.as_mut()).is_pending());
     assert!(futures::poll!(future.as_mut()).is_pending());
     started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    let paid = pool.reserved();
     drop(future);
-    assert_eq!(pool.reserved(), 4_096);
+    let retained = pool.reserved();
     gate.wait();
     tokio::time::timeout(Duration::from_secs(1), async {
         while pool.reserved() != 0 {
@@ -276,4 +302,163 @@ async fn dropped_materialization_keeps_worker_memory_reserved_until_exit() {
     })
     .await
     .unwrap();
+    assert!(paid >= 4_096);
+    assert_eq!(retained, paid);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn output_plan_worker_retains_source_backing_and_credit_after_observer_drop() {
+    use super::super::output_plan::OutputPlanBuilder;
+    let (_, schemas, mut row) = fixture();
+    let record = RecordBatch::try_new(
+        schemas[0].clone(),
+        vec![
+            row.batch.record.column(0).clone(),
+            row.batch.record.column(1).clone(),
+            Arc::new(Int64Array::from(vec![7; 1_024]).slice(3, 1)),
+        ],
+    )
+    .unwrap();
+    row.batch = Arc::new(PayloadBatch {
+        key: (0, 1),
+        record: Arc::new(record),
+        body_bytes: 0,
+        encoded_charge_bytes: 0,
+        encoded: std::sync::OnceLock::new(),
+    });
+    let weak = Arc::downgrade(row.batch.record.column(2));
+    let backing = row.batch.record.get_array_memory_size();
+    let mut runtime = OutputRuntime::new(1_048_576);
+    let pool = runtime.pool.clone();
+    let mut workspace = MemoryConsumer::new("test-output").register(&pool);
+    let mut builder = OutputPlanBuilder::new(1, None, &mut workspace, "asof").unwrap();
+    builder
+        .push(row.view(), None, &mut workspace, "asof")
+        .unwrap();
+    let plan = builder.finish(&schemas[1], &mut workspace, "asof").unwrap();
+    let charge = workspace.size();
+    assert!(charge >= backing);
+    drop(row);
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let gate = Arc::new(std::sync::Barrier::new(2));
+    runtime.worker_gate = Some((started_tx, gate.clone()));
+    let mut future =
+        Box::pin(runtime.materialize_plan(plan, &schemas[2], workspace, "asof", || Ok(())));
+    assert!(futures::poll!(future.as_mut()).is_pending());
+    assert!(futures::poll!(future.as_mut()).is_pending());
+    started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    let paid = pool.reserved();
+    drop(future);
+    let retained = pool.reserved();
+    let array_retained = weak.upgrade().is_some();
+    gate.wait();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while pool.reserved() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(paid >= charge);
+    assert_eq!(retained, paid);
+    assert!(array_retained);
+    assert!(weak.upgrade().is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn output_plan_worker_holds_arrays_without_source_or_output_schema_metadata() {
+    use super::super::output_plan::OutputPlanBuilder;
+    let (_, schemas, mut row) = fixture();
+    let schema = Arc::new(
+        Schema::new(row.batch.record.schema().fields().clone())
+            .with_metadata(HashMap::with_capacity(65_536)),
+    );
+    let source_schema = Arc::downgrade(&schema);
+    row.batch = Arc::new(PayloadBatch {
+        key: (0, 1),
+        record: Arc::new(
+            RecordBatch::try_new(schema, row.batch.record.columns().to_vec()).unwrap(),
+        ),
+        body_bytes: 0,
+        encoded_charge_bytes: 0,
+        encoded: std::sync::OnceLock::new(),
+    });
+    let schema = Arc::new(
+        schemas[2]
+            .as_ref()
+            .clone()
+            .with_metadata(HashMap::with_capacity(65_536)),
+    );
+    let output_schema = Arc::downgrade(&schema);
+    let array = Arc::downgrade(row.batch.record.column(2));
+    let mut runtime = OutputRuntime::new(128 << 10);
+    let pool = runtime.pool.clone();
+    let mut workspace = MemoryConsumer::new("test-output").register(&pool);
+    let mut builder = OutputPlanBuilder::new(1, None, &mut workspace, "asof").unwrap();
+    builder
+        .push(row.view(), None, &mut workspace, "asof")
+        .unwrap();
+    let plan = builder.finish(&schemas[1], &mut workspace, "asof").unwrap();
+    drop((row, schemas));
+    assert!(source_schema.upgrade().is_none());
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let gate = Arc::new(std::sync::Barrier::new(2));
+    runtime.worker_gate = Some((started_tx, gate.clone()));
+    let mut future =
+        Box::pin(runtime.materialize_plan(plan, &schema, workspace, "asof", || Ok(())));
+    assert!(futures::poll!(future.as_mut()).is_pending());
+    assert!(futures::poll!(future.as_mut()).is_pending());
+    started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    let paid = pool.reserved();
+    drop(future);
+    drop(schema);
+    let schema_released = output_schema.upgrade().is_none();
+    let array_retained = array.upgrade().is_some();
+    gate.wait();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while pool.reserved() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(schema_released);
+    assert!(array_retained);
+    assert!(paid > 0);
+    assert!(array.upgrade().is_none());
+}
+
+#[tokio::test]
+async fn output_plan_unmatched_type_heap_is_prepaid_before_worker_launch() {
+    use super::super::output_plan::OutputPlanBuilder;
+    let (_, schemas, row) = fixture();
+    let data_type = DataType::Timestamp(TimeUnit::Second, Some("x".repeat(1 << 20).into()));
+    let right = Schema::new(vec![Field::new("time", data_type.clone(), true)]);
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "right__time",
+        data_type,
+        true,
+    )]));
+    let mut runtime = OutputRuntime::new(128 << 10);
+    runtime.set_output_projection(vec![3]);
+    let pool = runtime.pool.clone();
+    let mut workspace = MemoryConsumer::new("type-test").register(&pool);
+    let selected = [Vec::new(), vec![0]];
+    let mut builder = OutputPlanBuilder::new(1, Some(&selected), &mut workspace, "asof").unwrap();
+    builder
+        .push(row.view(), None, &mut workspace, "asof")
+        .unwrap();
+    let plan = builder.finish(&right, &mut workspace, "asof").unwrap();
+    let result = runtime
+        .materialize_plan(plan, &schema, workspace, "asof", || Ok(()))
+        .await;
+    assert!(matches!(
+        result,
+        Err(crate::CalcFlowError::OperatorReason {
+            reason_code: crate::StreamingFailureReason::AsofWorkspaceLimitExceeded,
+            ..
+        })
+    ));
+    assert_eq!(pool.reserved(), 0);
+    drop(schemas);
 }

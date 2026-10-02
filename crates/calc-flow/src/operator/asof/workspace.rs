@@ -101,6 +101,17 @@ impl ColumnWorkspace {
 #[cfg(test)]
 thread_local! {
     static RANGE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static OUTPUT_SOURCE_REGISTRATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn record_output_source_registration() {
+    OUTPUT_SOURCE_REGISTRATIONS.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(test)]
+pub(super) fn take_output_source_registrations() -> usize {
+    OUTPUT_SOURCE_REGISTRATIONS.with(|count| count.replace(0))
 }
 
 #[cfg(test)]
@@ -109,6 +120,7 @@ pub(super) fn take_range_calls() -> usize {
 }
 
 pub(super) struct OutputColumns {
+    #[cfg(test)]
     pub fields: usize,
     fixed: u64,
     variable: Vec<ColumnWorkspace>,
@@ -116,6 +128,7 @@ pub(super) struct OutputColumns {
 
 impl OutputColumns {
     pub(super) fn new(mut columns: Vec<ColumnWorkspace>, name: &str) -> Result<Self> {
+        #[cfg(test)]
         let fields = columns.len();
         let fixed = columns
             .iter()
@@ -127,6 +140,7 @@ impl OutputColumns {
             )
         });
         Ok(Self {
+            #[cfg(test)]
             fields,
             fixed,
             variable: columns,

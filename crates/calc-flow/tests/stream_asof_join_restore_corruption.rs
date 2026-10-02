@@ -116,8 +116,10 @@ async fn test_asof_restore_rejects_state_layout_accounting_and_encoding_versions
     seed_live_state(&mut target, &schema()).await;
     for (field, value) in [
         ("state_version", json!(4)),
-        ("layout_version", json!(4)),
-        ("accounting_version", json!(4)),
+        ("layout_version", json!(3)),
+        ("layout_version", json!(5)),
+        ("accounting_version", json!(3)),
+        ("accounting_version", json!(5)),
         ("row_encoding", json!("arrow-row-unknown")),
     ] {
         let mut damaged = original.clone();
@@ -301,12 +303,12 @@ fn sequence_width(flag: u8) -> usize {
 }
 
 fn columnar_entry_ranges(bytes: &[u8]) -> [Vec<Range<usize>>; 3] {
-    assert_eq!(&bytes[..8], b"CFASOF03");
+    assert_eq!(&bytes[..8], b"CFASOF04");
     let mut cursor = 8;
     let chunks = read_count(bytes, &mut cursor);
     let buckets = read_count(bytes, &mut cursor);
     read_count(bytes, &mut cursor);
-    cursor += 40;
+    cursor += 56;
     let owners = read_count(bytes, &mut cursor);
     for _ in 0..owners {
         let kind = bytes[cursor];
@@ -356,7 +358,7 @@ fn columnar_entry_ranges(bytes: &[u8]) -> [Vec<Range<usize>>; 3] {
 #[tokio::test]
 async fn test_asof_v3_restore_rejects_serialized_duplicates_and_noncanonical_order_atomically() {
     let original = populated_snapshot().await;
-    let bytes = original.segments["asof-index-v3"].bytes();
+    let bytes = original.segments["asof-index-v4"].bytes();
     let mut target = operator(10);
     seed_live_state(&mut target, &schema()).await;
     for (entries, message) in columnar_entry_ranges(bytes).into_iter().zip([
@@ -385,7 +387,7 @@ async fn test_asof_v3_restore_rejects_serialized_duplicates_and_noncanonical_ord
             let mut damaged = original.clone();
             damaged
                 .segments
-                .insert("asof-index-v3".into(), StateSegment::new(replacement));
+                .insert("asof-index-v4".into(), StateSegment::new(replacement));
             reject_without_replacing_state(
                 &mut target,
                 &damaged,

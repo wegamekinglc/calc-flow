@@ -49,9 +49,21 @@ const WINDOW_SEGMENT_LAYOUT_VERSION: u32 = 2;
 const MAX_GROUP_KEY_BYTES: usize = 65_536;
 const MAX_WINDOW_DELTA_SEGMENTS: usize = 32;
 
+#[path = "window/kernels.rs"]
+mod kernels;
+mod keys;
+
 #[cfg(test)]
 #[path = "window/group_tests.rs"]
 mod group_tests;
+
+#[cfg(test)]
+#[path = "window/kernel_tests.rs"]
+mod kernel_tests;
+
+#[cfg(test)]
+#[path = "window/key_tests.rs"]
+mod key_tests;
 
 /// Aggregate function supported by the first built-in window operator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -455,14 +467,23 @@ struct WindowSlot {
     group: usize,
 }
 
+#[derive(Clone, Copy)]
+struct CachedWindowSlot {
+    key: (i64, usize),
+    index: usize,
+}
+
 /// Per-batch accumulator scratch: hashed while rows stream in, then sorted
 /// once into the deterministic window-key order installs and encodes observe.
 struct BatchScratch<'a> {
     group_ids: HashMap<Arc<[u8]>, usize>,
     string_group_ids: HashMap<Option<&'a str>, usize>,
+    integer_group_ids: HashMap<keys::IntegerKey, usize>,
     group_keys: Vec<Arc<[u8]>>,
     // Keyed by (window start, group); the fixed geometry determines the end.
     slots: HashMap<(i64, usize), usize>,
+    slot_cache: [Option<CachedWindowSlot>; 64],
+    slot_cache_ways: usize,
     entries: Vec<(WindowKey, AccumulatorRow)>,
     // Reused by the general composite-key path, without owned row scalars.
     encoded_group: Vec<u8>,
@@ -471,12 +492,21 @@ struct BatchScratch<'a> {
 }
 
 impl<'a> BatchScratch<'a> {
-    fn new(usage: WindowStateUsage) -> Self {
+    fn new(usage: WindowStateUsage, overlap: u64) -> Self {
+        let slot_cache_ways = match overlap {
+            1 => 1,
+            2 => 2,
+            3 | 4 => 4,
+            _ => 0,
+        };
         Self {
             group_ids: HashMap::new(),
             string_group_ids: HashMap::new(),
+            integer_group_ids: HashMap::new(),
             group_keys: Vec::new(),
             slots: HashMap::new(),
+            slot_cache: [None; 64],
+            slot_cache_ways,
             entries: Vec::new(),
             encoded_group: Vec::new(),
             usage,
@@ -493,6 +523,12 @@ impl<'a> BatchScratch<'a> {
         operator_id: &str,
         names: &[String],
     ) -> Result<usize> {
+        let integer_key = keys::IntegerKey::read(columns, row);
+        if let Some(key) = integer_key
+            && let Some(&group) = self.integer_group_ids.get(&key)
+        {
+            return Ok(group);
+        }
         let string_key = match columns.groups.as_slice() {
             [(column, _)] => column.borrowed_string(row),
             _ => BorrowedString::Other,
@@ -503,7 +539,8 @@ impl<'a> BatchScratch<'a> {
             return Ok(group);
         }
         encode_group_key(columns, row, operator_id, names, &mut self.encoded_group)?;
-        if matches!(string_key, BorrowedString::Other)
+        if integer_key.is_none()
+            && matches!(string_key, BorrowedString::Other)
             && let Some(&group) = self.group_ids.get(self.encoded_group.as_slice())
         {
             return Ok(group);
@@ -511,7 +548,9 @@ impl<'a> BatchScratch<'a> {
         let key = Arc::<[u8]>::from(self.encoded_group.as_slice());
         let group = self.group_keys.len();
         self.group_keys.push(Arc::clone(&key));
-        if let BorrowedString::Value(value) = string_key {
+        if let Some(value) = integer_key {
+            self.integer_group_ids.insert(value, group);
+        } else if let BorrowedString::Value(value) = string_key {
             self.string_group_ids.insert(value, group);
         } else {
             self.group_ids.insert(key, group);
@@ -526,6 +565,50 @@ impl<'a> BatchScratch<'a> {
             metrics: self.metrics.into_delta(),
         }
     }
+
+    fn cached_slot(&self, key: (i64, usize)) -> Option<usize> {
+        if self.slot_cache_ways == 0 {
+            return None;
+        }
+        let position = key.1.wrapping_mul(self.slot_cache_ways) & (self.slot_cache.len() - 1);
+        let cached = self.slot_cache[position]
+            .filter(|entry| {
+                #[cfg(test)]
+                group_tests::CACHE_KEY_COMPARISONS.with(|calls| calls.set(calls.get() + 1));
+                entry.key == key
+            })
+            .map(|entry| entry.index);
+        if cached.is_some() || self.slot_cache_ways == 1 {
+            return cached;
+        }
+        self.slot_cache[position + 1..position + self.slot_cache_ways]
+            .iter()
+            .flatten()
+            .find(|entry| {
+                #[cfg(test)]
+                group_tests::CACHE_KEY_COMPARISONS.with(|calls| calls.set(calls.get() + 1));
+                entry.key == key
+            })
+            .map(|entry| entry.index)
+    }
+
+    fn cache_slot(&mut self, key: (i64, usize), index: usize) {
+        if self.slot_cache_ways == 0 {
+            return;
+        }
+        let position = key.1.wrapping_mul(self.slot_cache_ways) & (self.slot_cache.len() - 1);
+        let offset = if self.slot_cache_ways == 1 {
+            0
+        } else {
+            self.slot_cache[position..position + self.slot_cache_ways]
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, entry)| entry.map(|entry| entry.index))
+                .map(|(offset, _)| offset)
+                .unwrap_or_default()
+        };
+        self.slot_cache[position + offset] = Some(CachedWindowSlot { key, index });
+    }
 }
 
 /// Input columns of one record, downcast once so per-row reads skip dynamic
@@ -533,7 +616,7 @@ impl<'a> BatchScratch<'a> {
 struct RecordColumns<'a> {
     event_time: EventTimeColumn<'a>,
     groups: Vec<(ScalarColumn<'a>, &'a DataType)>,
-    aggregates: Vec<ScalarColumn<'a>>,
+    aggregates: Vec<(ScalarColumn<'a>, kernels::UpdateKernel)>,
 }
 
 impl<'a> RecordColumns<'a> {
@@ -560,7 +643,12 @@ impl<'a> RecordColumns<'a> {
             .iter()
             .zip(&compiled.aggregates)
             .map(|(aggregate, compiled)| {
-                aggregate_column(record, aggregate.function, compiled, operator_id)
+                aggregate_column(record, aggregate.function, compiled, operator_id).map(|column| {
+                    (
+                        column,
+                        kernels::select(aggregate.function, &compiled.input_type),
+                    )
+                })
             })
             .collect::<Result<_>>()?;
         Ok(Self {
@@ -785,10 +873,13 @@ impl WindowAggregateOperator {
             ));
         }
         let table = batch.table_payload()?;
-        let mut scratch = BatchScratch::new(WindowStateUsage {
-            rows: logical_length(self.state.accumulators.len()),
-            bytes: self.state.accumulator_bytes,
-        });
+        let mut scratch = BatchScratch::new(
+            WindowStateUsage {
+                rows: logical_length(self.state.accumulators.len()),
+                bytes: self.state.accumulator_bytes,
+            },
+            self.compiled.geometry.overlap,
+        );
 
         for record in table.batches() {
             let columns =
@@ -871,7 +962,16 @@ impl WindowAggregateOperator {
         row: usize,
     ) -> (usize, Option<u64>) {
         let slot_key = (slot.start.as_micros(), slot.group);
+        if let Some(index) = scratch.cached_slot(slot_key) {
+            return (
+                index,
+                Some(aggregate_dynamic_bytes(&scratch.entries[index].1)),
+            );
+        }
+        #[cfg(test)]
+        group_tests::SLOT_LOOKUPS.with(|calls| calls.set(calls.get() + 1));
         if let Some(&index) = scratch.slots.get(&slot_key) {
+            scratch.cache_slot(slot_key, index);
             return (
                 index,
                 Some(aggregate_dynamic_bytes(&scratch.entries[index].1)),
@@ -895,6 +995,7 @@ impl WindowAggregateOperator {
         let index = scratch.entries.len();
         scratch.entries.push((key, entry));
         scratch.slots.insert(slot_key, index);
+        scratch.cache_slot(slot_key, index);
         (index, previous_dynamic_bytes)
     }
 
@@ -1738,6 +1839,8 @@ fn encode_group_key(
     names: &[String],
     encoded: &mut Vec<u8>,
 ) -> Result<()> {
+    #[cfg(test)]
+    key_tests::GROUP_ENCODINGS.with(|calls| calls.set(calls.get() + 1));
     encoded.clear();
     for (ordinal, (column, data_type)) in columns.groups.iter().enumerate() {
         let result = if let BorrowedString::Value(value) = column.borrowed_string(row) {
@@ -2014,17 +2117,17 @@ fn update_accumulators(
     spec: &WindowSpec,
     operator_id: &str,
 ) -> Result<()> {
-    for (ordinal, ((aggregate, column), accumulator)) in spec
+    for (ordinal, ((_, (column, update)), accumulator)) in spec
         .aggregates
         .iter()
         .zip(&columns.aggregates)
         .zip(&mut row.aggregates)
         .enumerate()
     {
-        let Some(value) = aggregate_input(aggregate.function, column, row_index) else {
+        if column.is_null(row_index) {
             continue;
-        };
-        update_accumulator(accumulator, aggregate.function, value).map_err(|message| {
+        }
+        update(column, row_index, accumulator).map_err(|message| {
             operator_error(
                 operator_id,
                 &format!("window.aggregates[{ordinal}] update failed: {message}"),
@@ -2034,8 +2137,7 @@ fn update_accumulators(
     Ok(())
 }
 
-/// Returns the aggregate's input for one row, or `None` for a null input;
-/// `count` only observes validity.
+#[cfg(test)]
 fn aggregate_input(
     function: AggregateFunction,
     column: &ScalarColumn<'_>,

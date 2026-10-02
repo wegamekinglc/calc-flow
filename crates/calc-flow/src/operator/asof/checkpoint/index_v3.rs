@@ -18,9 +18,11 @@ use crate::{Result, StateSegment};
 use owners::{OwnerReader, OwnerWriter};
 use std::{collections::BTreeMap, sync::Arc};
 
-pub(super) const INDEX_SEGMENT: &str = "asof-index-v3";
-const MAGIC: &[u8; 8] = b"CFASOF03";
-const BASE_BYTES: u64 = 80;
+pub(super) const INDEX_SEGMENT: &str = "asof-index-v4";
+pub(super) const LEGACY_SEGMENT: &str = "asof-index-v3";
+const MAGIC: &[u8; 8] = b"CFASOF04";
+const LEGACY_MAGIC: &[u8; 8] = b"CFASOF03";
+pub(in super::super) const BASE_BYTES: u64 = 96;
 const LEFT_HEADER: u64 = 73;
 const RIGHT_HEADER: u64 = 65;
 
@@ -256,6 +258,8 @@ pub(super) fn encode_sync(state: &State, length: u64, limit: usize) -> Result<St
         right[0],
         right[1],
         state.left.chunk_capacity(),
+        state.right.heap_capacities()[0],
+        state.right.heap_capacities()[1],
     ] {
         put(&mut bytes, value as u64);
     }
@@ -448,25 +452,40 @@ fn require_capacity(capacity: usize, count: usize) -> Result<()> {
 }
 
 struct Header {
+    legacy: bool,
     chunks: usize,
     buckets: usize,
     left_rows: usize,
     capacities: [usize; 5],
+    heaps: [usize; 2],
 }
 
 fn read_header(cursor: &mut Cursor<'_>, max_rows: u64) -> Result<Header> {
-    if cursor.take(8)? != MAGIC {
-        return Err(mismatch("ASOF v3 index magic differs"));
+    let magic = cursor.take(8)?;
+    if magic != MAGIC && magic != LEGACY_MAGIC {
+        return Err(mismatch("ASOF index magic differs"));
     }
     let [chunks, buckets, left_rows] = cursor.addresses()?;
     validate_header_counts(chunks, buckets, left_rows, max_rows)?;
     let capacities = cursor.capacities([25, 25, 40, 5, 32])?;
     validate_header_capacities(capacities, chunks, buckets)?;
+    let heaps = if magic == MAGIC {
+        cursor.capacities([16, 16])?
+    } else {
+        [capacities[2]; 2]
+    };
+    for capacity in heaps {
+        require_capacity(capacity, buckets)?;
+        u32::try_from(capacity)
+            .map_err(|_| mismatch("ASOF heap capacity exceeds handle domain"))?;
+    }
     Ok(Header {
+        legacy: magic == LEGACY_MAGIC,
         chunks,
         buckets,
         left_rows,
         capacities,
+        heaps,
     })
 }
 
@@ -487,8 +506,10 @@ fn validate_header_capacities(capacities: [usize; 5], chunks: usize, buckets: us
         validate_hash_capacity(capacities[index])?;
     }
     require_capacity(capacities[2], buckets)?;
+    u32::try_from(capacities[2])
+        .map_err(|_| mismatch("ASOF dictionary capacity exceeds handle domain"))?;
     require_capacity(capacities[4], chunks)?;
-    if capacities[3] < buckets {
+    if super::super::state::bucket_capacity(capacities[3]) < buckets {
         return Err(mismatch("ASOF v3 hash capacity is too small"));
     }
     Ok(())
@@ -532,6 +553,9 @@ fn header_restore_charge(header: &Header, max_bytes: u64) -> Result<u64> {
     let mut charge = 0;
     for (capacity, width) in header.capacities.into_iter().zip([25, 25, 40, 5, 32]) {
         charge = restore_add(charge, allocation(capacity, width, max_bytes)?)?;
+    }
+    for capacity in header.heaps {
+        charge = restore_add(charge, allocation(capacity, 16, max_bytes)?)?;
     }
     restore_add(
         charge,
@@ -683,7 +707,11 @@ pub(super) fn decode(
     let mut state = State::empty_tracked();
     state.sequence_kinds = kinds;
     state.batches = PayloadPool::with_backing_buckets(header.capacities[0], header.capacities[1]);
-    state.right = RightState::with_capacities(header.capacities[2], header.capacities[3]);
+    state.right = RightState::with_index_capacities(
+        header.capacities[2],
+        header.capacities[3],
+        if header.legacy { [0; 2] } else { header.heaps },
+    );
     state.left.reserve_chunks_exact(header.capacities[4]);
     decode_left_chunks(
         &mut cursor,
@@ -712,7 +740,7 @@ fn finalize_restored_state(state: &mut State, header: &Header, batch_count: usiz
     }
     validate_left_order(state)?;
     state.rebuild_encoding_owners();
-    state.rebuild_right_minima();
+    [state.right_payload_min, state.right_identity_min] = state.right.minima();
     validate_reconstructed_capacities(state, header)
 }
 
@@ -766,14 +794,18 @@ fn decode_right_buckets(
             max_rows - rows,
         )?;
         rows += bucket.len() as u64;
-        if state
-            .right
-            .last_key_value()
-            .is_some_and(|(last, _)| last >= &key)
+        if !state.right.is_empty()
+            && state
+                .right
+                .indexed_bucket(
+                    u32::try_from(state.right.len() - 1).expect("validated right key domain"),
+                )
+                .0
+                >= &key
         {
             return Err(mismatch("ASOF v3 right key order is not strict"));
         }
-        state.right.insert(key, bucket);
+        state.right.insert_restored(key, bucket, !header.legacy);
     }
     Ok(())
 }
@@ -781,6 +813,7 @@ fn decode_right_buckets(
 fn validate_reconstructed_capacities(state: &State, header: &Header) -> Result<()> {
     if state.batches.backing_buckets() != (header.capacities[0], header.capacities[1])
         || state.right.checkpoint_capacities() != [header.capacities[2], header.capacities[3]]
+        || (!header.legacy && state.right.heap_capacities() != header.heaps)
         || state.left.chunk_capacity() != header.capacities[4]
     {
         return Err(mismatch("ASOF v3 capacity reconstruction differs"));
@@ -1310,6 +1343,12 @@ mod tests {
     }
 
     #[test]
+    fn test_a03_restore_rejects_hash_backing_with_insufficient_item_capacity() {
+        assert!(validate_header_capacities([0, 0, 29, 32, 0], 0, 29).is_err());
+        assert!(validate_header_capacities([0, 0, 28, 32, 0], 0, 28).is_ok());
+    }
+
+    #[test]
     fn columnar_prescan_rejects_overflowing_row_counts_without_panicking() {
         for right in [false, true] {
             let mut bytes = overflow_header_fixture(right);
@@ -1342,6 +1381,8 @@ mod tests {
             u64::from(right),
             if right { 4 } else { 0 },
             u64::from(!right),
+            u64::from(right),
+            u64::from(right),
         ] {
             put(&mut bytes, capacity);
         }
@@ -1553,13 +1594,7 @@ mod tests {
             status.right.watermark_micros = Some(EventTime::from_micros(right));
             let preview = state.preview_eviction(&status, 0, "test").unwrap();
             let (length, projected, _) = state
-                .project_capacity_eviction(
-                    state.capacity_snapshot("test"),
-                    &preview,
-                    &status,
-                    0,
-                    "test",
-                )
+                .project_capacity_eviction(state.capacity_snapshot("test"), &preview, "test")
                 .unwrap();
             state.evict(&status, 0);
             assert_eq!(
@@ -1608,7 +1643,7 @@ mod tests {
         let segment =
             encode_sync(&state, encoded_length(&state, "test").unwrap(), 1_000_000).unwrap();
         let mut padding = segment.bytes().to_vec();
-        padding[81] = 1;
+        padding[97] = 1;
         assert!(
             decode(
                 &StateSegment::new(padding),

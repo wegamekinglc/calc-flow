@@ -990,10 +990,10 @@ def test_capability_catalog_reports_every_durable_state_layout() -> None:
     assert operators["cross_section"].state_layouts == (1,)
     assert operators["stream_join"].state_layouts == (1,)
     assert operators["stream_asof_join"].state_version == 3
-    assert operators["stream_asof_join"].state_layouts == (3,)
+    assert operators["stream_asof_join"].state_layouts == (3, 4)
     assert operators["window"].state_layouts == (1,)
     assert operators["expression"].state_layouts == ()
-    assert operators["sql"].state_layouts == (1,)
+    assert operators["sql"].state_layouts == (1, 2)
 
 
 def test_provider_capability_rejects_unprovable_lifecycle_combinations() -> None:

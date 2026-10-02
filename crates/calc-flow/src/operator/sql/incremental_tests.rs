@@ -8,6 +8,15 @@ use datafusion::arrow::{
 use super::*;
 use crate::{CancellationToken, EdgeCollector, StreamJobContext};
 
+#[path = "decimal_tests.rs"]
+mod decimal_tests;
+
+#[path = "retained_tests.rs"]
+mod retained_tests;
+
+#[path = "retained_planning_tests.rs"]
+mod retained_planning_tests;
+
 fn batch(values: &[i64]) -> Batch {
     Batch::table(
         vec![
@@ -469,13 +478,19 @@ async fn test_sql_incremental_unsupported_queries_use_whole_query_fallback() {
 #[tokio::test]
 async fn test_sql_incremental_float_decimal_queries_preserve_cumulative_engine() {
     use datafusion::arrow::array::{Decimal128Array, Float64Array};
-    for array in [
-        Arc::new(Float64Array::from(vec![1e16, 1.0, -1e16, 3.0])) as Arc<dyn Array>,
-        Arc::new(
-            Decimal128Array::from(vec![Some(123), None, Some(456), Some(-100)])
-                .with_precision_and_scale(12, 2)
-                .unwrap(),
-        ) as Arc<dyn Array>,
+    for (array, eligible) in [
+        (
+            Arc::new(Float64Array::from(vec![1e16, 1.0, -1e16, 3.0])) as Arc<dyn Array>,
+            false,
+        ),
+        (
+            Arc::new(
+                Decimal128Array::from(vec![Some(123), None, Some(456), Some(-100)])
+                    .with_precision_and_scale(12, 2)
+                    .unwrap(),
+            ) as Arc<dyn Array>,
+            true,
+        ),
     ] {
         let schema = Arc::new(datafusion::arrow::datatypes::Schema::new(vec![
             datafusion::arrow::datatypes::Field::new("value", array.data_type().clone(), true),
@@ -495,7 +510,7 @@ async fn test_sql_incremental_float_decimal_queries_preserve_cumulative_engine()
         assert_prefix_oracle(
             "SELECT SUM(value) AS total, AVG(value) AS mean FROM events",
             &incoming,
-            false,
+            eligible,
         )
         .await;
     }
@@ -1466,7 +1481,10 @@ async fn assert_restored_primitive_prefix(
     let after = restored.checkpoint(Epoch::INITIAL).unwrap();
     assert_eq!(before.inline_metadata, after.inline_metadata);
     assert_eq!(
-        before.segments["input"].bytes(),
-        after.segments["input"].bytes()
+        before.segments.keys().collect::<Vec<_>>(),
+        after.segments.keys().collect::<Vec<_>>()
     );
+    for (name, segment) in &before.segments {
+        assert_eq!(segment.bytes(), after.segments[name].bytes());
+    }
 }

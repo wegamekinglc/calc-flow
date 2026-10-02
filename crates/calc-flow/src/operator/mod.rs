@@ -8,6 +8,7 @@ mod expression;
 mod join;
 pub(crate) mod late_output;
 mod output_chunk;
+mod retained_columns;
 pub(crate) mod rolling;
 pub(crate) mod rolling_metrics;
 pub(crate) mod row_cost;

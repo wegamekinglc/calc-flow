@@ -15,6 +15,10 @@ use std::{
 const INLINE_ENCODING_BYTES: usize = 10;
 
 #[cfg(test)]
+#[path = "state/expiration_cost_tests.rs"]
+mod expiration_cost_tests;
+
+#[cfg(test)]
 thread_local! {
     static LEFT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static IDENTITY_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -309,7 +313,7 @@ pub(super) struct AdmissionRef {
 
 mod payload;
 pub(super) use payload::{
-    PayloadPool, PayloadRemoval, PayloadView, PreparedPayloadRemoval, RowRef,
+    PayloadPool, PayloadRemoval, PayloadView, PreparedPayloadRemoval, RowRef, bucket_capacity,
 };
 
 /// Keep the common ordered left stream contiguous. An overlapping batch
@@ -486,7 +490,7 @@ pub(super) use sequences::{SequenceColumn, SequenceKind, SequenceRef};
 mod key_dictionary;
 pub(super) use key_dictionary::{RightState, validate_key_count};
 
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub(super) struct State {
     pub left: LeftState,
     pub right: RightState,
@@ -538,6 +542,7 @@ impl State {
         self.encoding_owners = Some(owners);
     }
 
+    #[cfg(test)]
     pub fn rebuild_right_minima(&mut self) {
         self.right_payload_min = None;
         self.right_identity_min = None;
@@ -958,6 +963,9 @@ impl LeftPrefix {
 
 #[derive(Default)]
 pub(super) struct EvictionPreview {
+    pub selected: Vec<u32>,
+    pub previous_right_bytes: u64,
+    pub projected_right: (usize, u64, u64),
     pub evicted_payloads: u64,
     pub removed_identities: u64,
     pub added_identity_only: u64,
@@ -1102,13 +1110,13 @@ impl State {
         Ok(bytes)
     }
 
-    fn index_capacity_inventory(&self, name: &str) -> Result<Inventory> {
+    fn index_capacity_inventory(&self, right_bytes: u64, name: &str) -> Result<Inventory> {
         let mut total = Inventory {
             identities: self.left.len() as u64,
             bytes: self.left.capacity_bytes(name)?,
             ..Inventory::default()
         };
-        total.bytes = super::checked(name, total.bytes, self.right.metadata_bytes())?;
+        total.bytes = super::checked(name, total.bytes, right_bytes)?;
         let fallback;
         let owners = if let Some(owners) = &self.encoding_owners {
             owners
@@ -1129,7 +1137,16 @@ impl State {
         prepared: Option<&super::checkpoint::PreparedSegment>,
         name: &str,
     ) -> Result<Inventory> {
-        let mut total = self.index_capacity_inventory(name)?;
+        self.capacity_inventory_with_right(self.right.metadata_bytes(), prepared, name)
+    }
+
+    pub fn capacity_inventory_with_right(
+        &self,
+        right_bytes: u64,
+        prepared: Option<&super::checkpoint::PreparedSegment>,
+        name: &str,
+    ) -> Result<Inventory> {
+        let mut total = self.index_capacity_inventory(right_bytes, name)?;
         total.bytes = super::checked(name, total.bytes, self.batches.metadata_bytes())?;
         total.bytes = super::checked(name, total.bytes, self.payload_capacity_bytes(name)?)?;
         if let Some(prepared) = prepared {
@@ -1141,7 +1158,12 @@ impl State {
     /// Bound both batch-reference counts and removal entries for every owned
     /// encoding allocation. Identity-only history can still own encodings
     /// when no payload batch remains.
-    pub fn eviction_workspace_bytes(&self, name: &str) -> Result<u64> {
+    pub fn eviction_workspace_bytes(
+        &self,
+        status: &super::StreamAsofJoinStatus,
+        tolerance: u64,
+        name: &str,
+    ) -> Result<u64> {
         let batches = (self.batches.len() as u64).checked_mul(96).ok_or_else(|| {
             super::reason(
                 name,
@@ -1154,19 +1176,33 @@ impl State {
         } else {
             super::checked(name, batches, 256)?
         };
-        let owners = if let Some(owners) = &self.encoding_owners {
-            owners.metadata_bytes()
+        let owners = self.eviction_owner_workspace_bytes();
+        let selection = (self.right.due_count(eviction_cutoffs(
+            status,
+            tolerance,
+            retention_threshold(self, status),
+        )) as u64)
+            .checked_mul(size_of::<u32>() as u64)
+            .ok_or_else(|| {
+                super::reason(
+                    name,
+                    crate::StreamingFailureReason::AsofCounterOverflow,
+                    "ASOF eviction selection overflowed",
+                )
+            })?;
+        super::checked(name, super::checked(name, batches, owners)?, selection)
+    }
+
+    fn eviction_owner_workspace_bytes(&self) -> u64 {
+        if let Some(owners) = &self.encoding_owners {
+            return owners.metadata_bytes();
+        }
+        let rows = self.right.values().map(RightBucket::len).sum::<usize>() as u64;
+        if rows == 0 {
+            0
         } else {
-            // Only private untracked fixtures use this conservative fallback;
-            // native admission and restore always install the owner ledger.
-            let rows = self.right.values().map(RightBucket::len).sum::<usize>() as u64;
-            if rows == 0 {
-                0
-            } else {
-                rows.saturating_mul(256).saturating_add(384)
-            }
-        };
-        super::checked(name, batches, owners)
+            rows.saturating_mul(256).saturating_add(384)
+        }
     }
 
     /// Compute all status and index deltas before the infallible sweep commits.
@@ -1182,9 +1218,31 @@ impl State {
             tolerance,
             threshold: retention_threshold(self, status),
         };
-        let mut preview = EvictionPreview::default();
+        let mut preview = EvictionPreview {
+            selected: self.right.due_keys(eviction_cutoffs(
+                status,
+                tolerance,
+                conditions.threshold,
+            )),
+            previous_right_bytes: self.right.metadata_bytes(),
+            ..EvictionPreview::default()
+        };
+        let (mut keys, mut rows_bytes, mut workspace) =
+            (self.right.len(), self.right.bucket_bytes(), 0);
         let mut removed_batch_refs = BTreeMap::<BatchKey, usize>::new();
-        for (key, bucket) in &self.right {
+        for ordinal in 0..preview.selected.len() {
+            let (key, bucket) = self.right.indexed_bucket(preview.selected[ordinal]);
+            #[cfg(test)]
+            expiration_cost_tests::record_preview();
+            let (rows, bytes, scratch) =
+                bucket.projected_eviction(status, tolerance, conditions.threshold);
+            rows_bytes -= bucket.metadata_bytes();
+            if rows == 0 {
+                keys -= 1;
+            } else {
+                rows_bytes += bytes;
+            }
+            workspace += scratch;
             preview_bucket(
                 &mut preview,
                 &mut removed_batch_refs,
@@ -1195,6 +1253,9 @@ impl State {
             )?;
         }
         preview.batches = removed_batch_refs;
+        preview.projected_right = self
+            .right
+            .projected_eviction_bytes(keys, rows_bytes, workspace, name)?;
         Ok(preview)
     }
 
@@ -1237,7 +1298,10 @@ impl State {
     pub fn evict(&mut self, status: &super::StreamAsofJoinStatus, tolerance: u64) -> u64 {
         let preview = self.preview_eviction(status, tolerance, "asof").unwrap();
         let compaction = self.batches.prepare_removal(&preview.batches);
-        self.evict_prepared(status, tolerance, compaction, &preview)
+        let dictionary = self
+            .right
+            .prepare_fixture_compaction(self.right.len() - preview.projected_right.0);
+        self.evict_prepared(status, tolerance, compaction, dictionary, &preview)
     }
 
     /// Release expired columns and commit the preflighted batch and encoding
@@ -1248,27 +1312,20 @@ impl State {
         status: &super::StreamAsofJoinStatus,
         tolerance: u64,
         compaction: PreparedPayloadRemoval,
+        dictionary: Option<key_dictionary::PreparedCompaction>,
         preview: &EvictionPreview,
     ) -> u64 {
         let threshold = retention_threshold(self, status);
         let mut evicted = 0;
-        let mut payload_min = None;
-        let mut identity_min = None;
         self.batches.defer_compaction();
-        self.right.retain(|_, bucket| {
-            if bucket.eviction_pending(status, tolerance, threshold) {
-                evicted += Arc::make_mut(bucket).evict(status, tolerance, threshold);
-            }
-            if let Some(time) = bucket.payload_min() {
-                payload_min = Some(payload_min.map_or(time, |previous: i64| previous.min(time)));
-            }
-            if let Some(time) = bucket.identity_min() {
-                identity_min = Some(identity_min.map_or(time, |previous: i64| previous.min(time)));
-            }
-            !bucket.is_empty()
-        });
-        self.right_payload_min = payload_min;
-        self.right_identity_min = identity_min;
+        for &id in &preview.selected {
+            evicted += self.right.evict_bucket(id, status, tolerance, threshold);
+        }
+        self.right.remove_empty(&preview.selected);
+        if let Some(dictionary) = dictionary {
+            dictionary.install(&mut self.right);
+        }
+        [self.right_payload_min, self.right_identity_min] = self.right.minima();
         for (&batch, &removed) in &preview.batches {
             self.batches.detach_count(batch, removed);
         }
@@ -1312,6 +1369,23 @@ fn identity_expired(time: i64, status: &super::StreamAsofJoinStatus) -> bool {
             .right
             .watermark_micros
             .is_some_and(|wm| time < wm.as_micros())
+}
+
+fn eviction_cutoffs(
+    status: &super::StreamAsofJoinStatus,
+    tolerance: u64,
+    threshold: i128,
+) -> [i128; 2] {
+    let payload = threshold.saturating_sub(i128::from(tolerance));
+    let identity = if status.right.ended {
+        i128::MAX
+    } else {
+        status
+            .right
+            .watermark_micros
+            .map_or(i128::MIN, |time| i128::from(time.as_micros()))
+    };
+    [payload, identity]
 }
 
 /// Reports whether `evict` would drop any payload or identity, without
@@ -1436,6 +1510,37 @@ mod eviction_minima_tests {
     use super::*;
     use crate::EventTime;
     use datafusion::arrow::datatypes::Schema;
+
+    #[test]
+    fn test_eviction_selection_reuses_shared_selected_keys() {
+        let mut state = State::default();
+        for key in 0_u8..32 {
+            let time = if key == 0 { 0 } else { 100 };
+            state.right.insert(
+                Encoding::from_slice(&[key]),
+                RightBucket::from_iter([((time, Encoding::from_slice(&[1])), None)]),
+            );
+        }
+        let original = state.right.owned_buckets().collect::<Vec<_>>();
+        let mut status = super::super::StreamAsofJoinStatus::default();
+        status.left.watermark_micros = Some(EventTime::from_micros(1));
+        status.right.watermark_micros = Some(EventTime::from_micros(1));
+        let preview = state.preview_eviction(&status, 0, "asof").unwrap();
+        let selected = state.right.shared_eviction_buckets(&preview.selected);
+        for _ in 0..3 {
+            assert_eq!(selected.clone().count(), 1);
+        }
+        drop(selected);
+        let compaction = state.batches.prepare_removal(&preview.batches);
+        let dictionary = state
+            .right
+            .prepare_fixture_compaction(state.right.len() - preview.projected_right.0);
+        state.evict_prepared(&status, 0, compaction, dictionary, &preview);
+        assert_eq!(state.right.len(), 31);
+        assert_eq!(original.len(), 32);
+        assert_eq!(preview.removed_identities, 1);
+        assert_eq!(state.right_identity_min, Some(100));
+    }
 
     #[test]
     fn eviction_preview_visits_only_expired_rows() {
@@ -2234,7 +2339,7 @@ mod right_storage_tests {
             let mut status = super::super::StreamAsofJoinStatus::default();
             status.left.ended = true;
             status.right.ended = true;
-            let charge = state.eviction_workspace_bytes("asof").unwrap();
+            let charge = state.eviction_workspace_bytes(&status, 0, "asof").unwrap();
             let allocation = allocation_counter::measure(|| {
                 let preview = state.preview_eviction(&status, 0, "asof").unwrap();
                 assert_eq!(preview.evicted_payloads, count);

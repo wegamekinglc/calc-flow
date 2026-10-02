@@ -306,19 +306,6 @@ pub(in super::super) struct RightCursor {
 }
 
 impl RightBucket {
-    pub fn eviction_pending(
-        &self,
-        status: &super::super::StreamAsofJoinStatus,
-        tolerance: u64,
-        threshold: i128,
-    ) -> bool {
-        self.payload_min()
-            .is_some_and(|time| super::payload_expired(time, tolerance, threshold))
-            || self
-                .identity_min()
-                .is_some_and(|time| super::identity_expired(time, status))
-    }
-
     pub fn projected_eviction(
         &self,
         status: &super::super::StreamAsofJoinStatus,

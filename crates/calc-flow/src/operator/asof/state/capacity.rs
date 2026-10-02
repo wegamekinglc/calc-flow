@@ -5,10 +5,7 @@ use super::{
     Encoding, EncodingOwners, Inventory, LeftOrder, LeftPrefix, OwnerUpdates, PreparedLeftChunk,
     PreparedLeftDrain, State,
 };
-use crate::{
-    Result,
-    operator::asof::{StreamAsofJoinStatus, checked},
-};
+use crate::{Result, operator::asof::checked};
 
 #[derive(Clone, Copy)]
 pub(in super::super) struct CapacitySnapshot {
@@ -139,7 +136,7 @@ impl State {
         let owners = self.encoding_owners.as_ref().expect("tracked native state");
         let length = checked(
             name,
-            length.max(80),
+            length.max(super::super::checkpoint::INDEX_HEADER_BYTES),
             EncodingOwners::projected_encoded_length(updates) - owners.encoded_length(),
         )?;
         self.admission_index_length(length, chunks, right_counts, name)
@@ -242,18 +239,12 @@ impl State {
         &self,
         snapshot: CapacitySnapshot,
         preview: &super::EvictionPreview,
-        status: &StreamAsofJoinStatus,
-        tolerance: u64,
         name: &str,
     ) -> Result<(u64, Inventory, u64)> {
         let pool = self.batches.project_remove(&preview.batches, name)?;
         let owners = self.encoding_owners.as_ref().expect("tracked native state");
         let (owner_bytes, owner_length) = owners.projected_remove(&preview.owners);
-        let (removed_keys, right_bytes, workspace) = self.right.projected_eviction_bytes(
-            status,
-            tolerance,
-            super::retention_threshold(self, status),
-        );
+        let (removed_keys, right_bytes, workspace) = preview.projected_right;
         let mut inventory = snapshot.inventory_without_index();
         inventory.identities -= preview.removed_identities;
         inventory.right_payloads -= preview.evicted_payloads;
@@ -268,7 +259,7 @@ impl State {
         if inventory.identities == 0 {
             length = 0;
         }
-        inventory.bytes = inventory.bytes - self.right.metadata_bytes() + right_bytes;
+        inventory.bytes = inventory.bytes - preview.previous_right_bytes + right_bytes;
         inventory.bytes = inventory.bytes - owners.allocation_bytes() + owner_bytes;
         inventory.bytes = inventory.bytes - self.batches.metadata_bytes() + pool.metadata_bytes
             - pool.released_bytes;

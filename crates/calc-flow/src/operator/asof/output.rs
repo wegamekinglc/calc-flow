@@ -1,7 +1,10 @@
 //! Materialize an already matched ASOF prefix directly from Arrow batches.
 
+use super::output_plan::{OutputPlan, OutputSide, Span};
+#[cfg(test)]
 use super::state::{BatchKey, PayloadView};
 use crate::{Batch, BatchMetadata, DataFusionConfig, Result};
+#[cfg(test)]
 use ahash::RandomState;
 use arrow_data::transform::MutableArrayData;
 use datafusion::execution::memory_pool::MemoryReservation;
@@ -9,12 +12,14 @@ use datafusion::{
     arrow::{
         array::{Array, ArrayRef, make_array, new_null_array},
         compute::interleave,
-        datatypes::SchemaRef,
-        record_batch::RecordBatch,
+        datatypes::{DataType, SchemaRef},
+        record_batch::{RecordBatch, RecordBatchOptions},
     },
     execution::memory_pool::{GreedyMemoryPool, MemoryPool},
 };
-use std::{borrow::Cow, collections::HashMap, sync::Arc};
+#[cfg(test)]
+use std::collections::HashMap;
+use std::sync::Arc;
 
 pub(super) struct OutputRuntime {
     pub pool: Arc<dyn MemoryPool>,
@@ -22,6 +27,41 @@ pub(super) struct OutputRuntime {
     output_columns: Option<Vec<usize>>,
     #[cfg(test)]
     worker_gate: Option<(std::sync::mpsc::Sender<()>, Arc<std::sync::Barrier>)>,
+}
+
+struct ColumnRequest {
+    index: usize,
+    data_type: DataType,
+}
+
+struct MaterializationInput {
+    rows: OutputPlan,
+    requests: Vec<ColumnRequest>,
+    workspace: MemoryReservation,
+}
+
+struct GatheredColumns {
+    columns: Vec<ArrayRef>,
+    workspace: MemoryReservation,
+}
+
+impl MaterializationInput {
+    fn materialize(self) -> Result<GatheredColumns> {
+        let left = GatherPlan::new(&self.rows.left, false);
+        let right = GatherPlan::new(&self.rows.right, true);
+        let columns = materialize_columns(&left, &right, self.rows.len, &self.requests)?;
+        Ok(GatheredColumns {
+            columns,
+            workspace: self.workspace,
+        })
+    }
+}
+
+impl GatheredColumns {
+    fn into_batch(self, schema: &SchemaRef, rows: usize) -> Result<(Batch, MemoryReservation)> {
+        let batch = materialize_batch(self.columns, schema, rows)?;
+        Ok((batch, self.workspace))
+    }
 }
 
 impl OutputRuntime {
@@ -43,64 +83,84 @@ impl OutputRuntime {
         self.output_columns = Some(columns);
     }
 
-    pub async fn materialize(
+    pub async fn materialize_plan(
+        &mut self,
+        owned: OutputPlan,
+        schema: &SchemaRef,
+        mut workspace: MemoryReservation,
+        name: &str,
+        check_cancelled: impl Fn() -> Result<()> + Send + Sync,
+    ) -> Result<(Batch, MemoryReservation)> {
+        self.config.validate()?;
+        tokio::task::yield_now().await;
+        check_cancelled()?;
+        let types = schema.fields().iter().try_fold(256, |total, field| {
+            super::checked(
+                name,
+                total,
+                super::checked(name, field.data_type().size() as u64, 512)?,
+            )
+        })?;
+        super::output_plan::grow_workspace(&mut workspace, types, name)?;
+        let requests = column_requests(schema, self.output_columns.as_deref());
+        let rows = owned.len;
+        #[cfg(test)]
+        let worker_gate = self.worker_gate.clone();
+        let input = MaterializationInput {
+            rows: owned,
+            requests,
+            workspace,
+        };
+        // Copies retain their reservation until the worker exits.
+        let result = tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            if let Some((started, gate)) = worker_gate {
+                let _ = started.send(());
+                gate.wait();
+            }
+            input.materialize()
+        })
+        .await
+        .map_err(|error| crate::CalcFlowError::Internal {
+            message: format!("ASOF output materialization task failed: {error}"),
+        })??;
+        result.into_batch(schema, rows)
+    }
+}
+
+#[cfg(test)]
+impl OutputRuntime {
+    async fn materialize(
         &mut self,
         rows: &[(PayloadView<'_>, Option<PayloadView<'_>>)],
         schema: &SchemaRef,
         workspace: MemoryReservation,
         check_cancelled: impl Fn() -> Result<()> + Send + Sync,
     ) -> Result<(Batch, MemoryReservation)> {
-        self.config.validate()?;
-        tokio::task::yield_now().await;
         let owned = OutputRows::capture(rows, &check_cancelled).await?;
-        let schema = schema.clone();
-        let output_columns = self.output_columns.clone();
-        #[cfg(test)]
-        let worker_gate = self.worker_gate.clone();
-        // Plan construction and Arrow copies stay off the executor. The
-        // reservation moves with the work, even if this future is dropped.
-        let (result, workspace) = tokio::task::spawn_blocking(move || {
-            #[cfg(test)]
-            if let Some((started, gate)) = worker_gate {
-                let _ = started.send(());
-                gate.wait();
-            }
-            let left = GatherPlan::new(&owned.left, false);
-            let right = GatherPlan::new(&owned.right, true);
-            let result =
-                materialize_plans(&left, &right, owned.len, &schema, output_columns.as_deref())?;
-            Ok::<_, crate::CalcFlowError>((result, workspace))
-        })
-        .await
-        .map_err(|error| crate::CalcFlowError::Internal {
-            message: format!("ASOF output materialization task failed: {error}"),
-        })??;
-        Ok((result, workspace))
+        let plan = OutputPlan {
+            left: owned.left,
+            right: owned.right,
+            len: owned.len,
+            matched: rows.iter().filter(|(_, right)| right.is_some()).count() as u64,
+            raw_bytes: 0,
+        };
+        self.materialize_plan(plan, schema, workspace, "asof", check_cancelled)
+            .await
     }
 }
 
-#[derive(Clone, Copy)]
-struct Span {
-    source: usize,
-    start: usize,
-    end: usize,
-}
-
-/// One Arrow owner per distinct source, plus primitive row positions. A
-/// blocking worker never owns the operator's per-row payload handles.
-struct OutputSide {
-    batches: Vec<Arc<RecordBatch>>,
-    positions: Vec<(usize, usize)>,
-}
-
+#[cfg(test)]
 struct OutputRows {
     left: OutputSide,
     right: OutputSide,
     len: usize,
 }
 
+#[cfg(test)]
 type SourceMap = HashMap<BatchKey, usize, RandomState>;
 
+#[cfg(test)]
 impl OutputRows {
     async fn capture(
         rows: &[(PayloadView<'_>, Option<PayloadView<'_>>)],
@@ -115,8 +175,8 @@ impl OutputRows {
             }
             check_cancelled()?;
             for &(left, right) in chunk {
-                output.left.push(Some(left), &mut left_sources);
-                output.right.push(right, &mut right_sources);
+                output.left.push(Some(left), &mut left_sources, false);
+                output.right.push(right, &mut right_sources, true);
             }
         }
         check_cancelled()?;
@@ -137,94 +197,84 @@ impl OutputRows {
         let mut left_sources = SourceMap::with_hasher(RandomState::new());
         let mut right_sources = SourceMap::with_hasher(RandomState::new());
         for &(left, right) in rows {
-            output.left.push(Some(left), &mut left_sources);
-            output.right.push(right, &mut right_sources);
+            output.left.push(Some(left), &mut left_sources, false);
+            output.right.push(right, &mut right_sources, true);
         }
         output
     }
 }
 
+#[cfg(test)]
 impl OutputSide {
     fn empty(len: usize) -> Self {
         Self {
             batches: Vec::new(),
             positions: Vec::with_capacity(len),
+            spans: Vec::new(),
+            has_nulls: false,
         }
     }
 
-    fn push(&mut self, selected: Option<PayloadView<'_>>, by_key: &mut SourceMap) {
+    fn push(&mut self, selected: Option<PayloadView<'_>>, by_key: &mut SourceMap, right: bool) {
         let Some(row) = selected else {
-            self.positions.push((usize::MAX, 0));
+            self.positions.push((0, 0));
+            self.has_nulls = true;
             return;
         };
         let source = *by_key.entry(row.batch.key).or_insert_with(|| {
+            #[cfg(test)]
+            super::workspace::record_output_source_registration();
             let source = self.batches.len();
-            self.batches.push(Arc::clone(&row.batch.record));
+            self.batches.push(row.batch.record.columns().to_vec());
             source
         });
-        self.positions.push((source, row.row));
+        self.positions.push((source + usize::from(right), row.row));
+        if !right {
+            if let Some(span) = self.spans.last_mut()
+                && span.source == source
+                && span.end == row.row
+            {
+                span.end += 1;
+            } else {
+                self.spans.push(Span {
+                    source,
+                    start: row.row,
+                    end: row.row + 1,
+                });
+            }
+        }
     }
 }
 
 struct GatherPlan<'a> {
-    batches: &'a [Arc<RecordBatch>],
-    spans: Vec<Span>,
-    positions: Option<Cow<'a, [(usize, usize)]>>,
+    batches: &'a [Vec<ArrayRef>],
+    spans: &'a [Span],
+    positions: Option<&'a [(usize, usize)]>,
+    has_nulls: bool,
 }
 
 impl<'a> GatherPlan<'a> {
     fn new(rows: &'a OutputSide, right: bool) -> Self {
-        let mut spans = Vec::new();
-        if !right {
-            for &(source, row) in &rows.positions {
-                if let Some(Span {
-                    source: previous,
-                    end,
-                    ..
-                }) = spans.last_mut()
-                    && *previous == source
-                    && *end == row
-                {
-                    *end += 1;
-                } else {
-                    spans.push(Span {
-                        source,
-                        start: row,
-                        end: row + 1,
-                    });
-                }
-            }
-        }
         Self {
             batches: &rows.batches,
-            spans,
-            positions: right.then(|| right_positions(rows)),
+            spans: &rows.spans,
+            positions: right.then_some(rows.positions.as_slice()),
+            has_nulls: rows.has_nulls,
         }
     }
 
-    fn column(
-        &self,
-        index: usize,
-        data_type: &datafusion::arrow::datatypes::DataType,
-        len: usize,
-    ) -> Result<ArrayRef> {
+    fn column(&self, index: usize, data_type: &DataType, len: usize) -> Result<ArrayRef> {
         if self.batches.is_empty() {
             return Ok(new_null_array(data_type, len));
         }
         if let Some(positions) = &self.positions {
-            let columns = self
-                .batches
-                .iter()
-                .map(|batch| batch.column(index).as_ref())
+            let null_column = self.has_nulls.then(|| new_null_array(data_type, 1));
+            let first = null_column
+                .as_ref()
+                .map_or_else(|| self.batches[0][index].as_ref(), |column| column.as_ref());
+            let columns = std::iter::once(first)
+                .chain(self.batches.iter().map(|batch| batch[index].as_ref()))
                 .collect::<Vec<&dyn Array>>();
-            let null_column = positions
-                .iter()
-                .any(|(source, _)| *source == self.batches.len())
-                .then(|| new_null_array(data_type, 1));
-            let mut columns = columns;
-            if let Some(null_column) = null_column.as_ref() {
-                columns.push(null_column.as_ref());
-            }
             return interleave(&columns, positions).map_err(|error| super::arrow_error(&error));
         }
         if let Some(column) = self.shared_column(index)? {
@@ -233,21 +283,21 @@ impl<'a> GatherPlan<'a> {
         let data = self
             .batches
             .iter()
-            .map(|batch| batch.column(index).to_data())
+            .map(|batch| batch[index].to_data())
             .collect::<Vec<_>>();
         let nullable = data.iter().any(|data| data.nulls().is_some());
         let mut mutable = MutableArrayData::new(data.iter().collect(), nullable, len);
-        for span in &self.spans {
+        for span in self.spans {
             mutable.extend(span.source, span.start, span.end);
         }
         Ok(make_array(mutable.freeze()))
     }
 
     fn shared_column(&self, index: usize) -> Result<Option<ArrayRef>> {
-        let [span] = self.spans.as_slice() else {
+        let [span] = self.spans else {
             return Ok(None);
         };
-        let column = self.batches[span.source].column(index);
+        let column = &self.batches[span.source][index];
         if span.start != 0 || span.end != column.len() {
             return Ok(None);
         }
@@ -258,32 +308,6 @@ impl<'a> GatherPlan<'a> {
             .get_slice_memory_size()
             .map_err(|error| super::arrow_error(&error))?;
         Ok((data.get_buffer_memory_size() <= visible).then(|| Arc::clone(column)))
-    }
-}
-
-fn right_positions(rows: &OutputSide) -> Cow<'_, [(usize, usize)]> {
-    if rows
-        .positions
-        .iter()
-        .any(|(source, _)| *source == usize::MAX)
-    {
-        Cow::Owned(
-            rows.positions
-                .iter()
-                .map(|&(source, row)| {
-                    (
-                        if source == usize::MAX {
-                            rows.batches.len()
-                        } else {
-                            source
-                        },
-                        row,
-                    )
-                })
-                .collect(),
-        )
-    } else {
-        Cow::Borrowed(rows.positions.as_slice())
     }
 }
 
@@ -298,6 +322,45 @@ fn materialize_rows(
     materialize_plans(&left, &right, rows.len(), schema, None)
 }
 
+fn column_requests(schema: &SchemaRef, output_columns: Option<&[usize]>) -> Vec<ColumnRequest> {
+    schema
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(index, field)| ColumnRequest {
+            index: output_columns.map_or(index, |columns| columns[index]),
+            data_type: field.data_type().clone(),
+        })
+        .collect()
+}
+
+fn materialize_columns(
+    left: &GatherPlan<'_>,
+    right: &GatherPlan<'_>,
+    len: usize,
+    requests: &[ColumnRequest],
+) -> Result<Vec<ArrayRef>> {
+    let left_fields = left.batches.first().map_or(0, Vec::len);
+    requests
+        .iter()
+        .map(|request| {
+            if request.index < left_fields {
+                left.column(request.index, &request.data_type, len)
+            } else {
+                right.column(request.index - left_fields, &request.data_type, len)
+            }
+        })
+        .collect()
+}
+
+fn materialize_batch(columns: Vec<ArrayRef>, schema: &SchemaRef, len: usize) -> Result<Batch> {
+    let options = RecordBatchOptions::new().with_row_count(Some(len));
+    let record = RecordBatch::try_new_with_options(schema.clone(), columns, &options)
+        .map_err(|error| super::arrow_error(&error))?;
+    Batch::table(vec![record], BatchMetadata::default())
+}
+
+#[cfg(test)]
 fn materialize_plans(
     left: &GatherPlan<'_>,
     right: &GatherPlan<'_>,
@@ -305,20 +368,9 @@ fn materialize_plans(
     schema: &SchemaRef,
     output_columns: Option<&[usize]>,
 ) -> Result<Batch> {
-    let left_fields = left.batches.first().map_or(0, |batch| batch.num_columns());
-    let mut columns = Vec::with_capacity(schema.fields().len());
-    for (index, field) in schema.fields().iter().enumerate() {
-        let source = output_columns.map_or(index, |columns| columns[index]);
-        let column = if source < left_fields {
-            left.column(source, field.data_type(), len)?
-        } else {
-            right.column(source - left_fields, field.data_type(), len)?
-        };
-        columns.push(column);
-    }
-    let record = RecordBatch::try_new(schema.clone(), columns)
-        .map_err(|error| super::arrow_error(&error))?;
-    Batch::table(vec![record], BatchMetadata::default())
+    let requests = column_requests(schema, output_columns);
+    let columns = materialize_columns(left, right, len, &requests)?;
+    materialize_batch(columns, schema, len)
 }
 
 #[cfg(test)]

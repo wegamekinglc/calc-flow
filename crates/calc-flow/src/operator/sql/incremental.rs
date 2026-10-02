@@ -8,7 +8,7 @@ use datafusion::{
         record_batch::RecordBatch,
         row::{RowConverter, SortField},
     },
-    common::ScalarValue,
+    common::{DFSchema, ScalarValue},
     execution::memory_pool::MemoryReservation,
     logical_expr::{
         Accumulator, EmitTo, Expr, GroupsAccumulator, LogicalPlan, execution_props::ExecutionProps,
@@ -38,6 +38,7 @@ pub(super) struct IncrementalSql {
     output_schema: SchemaRef,
     aggregates: Vec<Arc<AggregateFunctionExpr>>,
     aggregate_bytes: usize,
+    finalizer_bytes: usize,
     plan_bytes: usize,
     projection: Vec<Arc<dyn PhysicalExpr>>,
     keys: Vec<usize>,
@@ -122,14 +123,14 @@ impl NativeKeys {
             .checked_add(array.len())
             .ok_or_else(|| df_error(name, "native group count overflowed"))?;
         let bytes = native_key_bytes(count, self.indices.capacity(), self.width, name)?;
-        if bytes > self.reservation.size() {
-            self.reservation
-                .try_grow(bytes - self.reservation.size())
-                .map_err(|error| df_error(name, error))?;
-        }
+        ensure_reservation(&self.reservation, bytes, name)?;
         self.groups
             .intern(&[array], &mut self.indices)
             .map_err(|error| df_error(name, error))?;
+        self.validate_capacity(name)
+    }
+
+    fn validate_capacity(&self, name: &str) -> Result<()> {
         let actual = checked_bytes(
             self.groups.size(),
             [(self.indices.capacity(), size_of::<usize>())],
@@ -183,6 +184,8 @@ struct PartialGroups {
     accumulators: Vec<Box<dyn GroupsAccumulator>>,
     slots: Vec<usize>,
     base_bytes: usize,
+    group_bytes: usize,
+    state_fields: usize,
     reservation: MemoryReservation,
 }
 
@@ -196,6 +199,7 @@ impl PartialGroups {
         reservation
             .try_grow(base_bytes)
             .map_err(|error| df_error(name, error))?;
+        let (group_bytes, state_fields) = native_state_charge(aggregates, name)?;
         let accumulators = aggregates
             .iter()
             .map(|expr| {
@@ -207,6 +211,8 @@ impl PartialGroups {
             accumulators,
             slots: Vec::new(),
             base_bytes,
+            group_bytes,
+            state_fields,
             reservation,
         })
     }
@@ -228,13 +234,14 @@ impl PartialGroups {
             .max(4)
             .checked_next_power_of_two()
             .ok_or_else(|| df_error(name, "partial group capacity overflowed"))?;
-        let width = checked_bytes(size_of::<usize>(), [(self.accumulators.len(), 40)], name)?;
-        let bytes = checked_bytes(self.base_bytes, [(capacity, width)], name)?;
-        if bytes > self.reservation.size() {
-            self.reservation
-                .try_grow(bytes - self.reservation.size())
-                .map_err(|error| df_error(name, error))?;
-        }
+        let bitmap_bytes = checked_bytes(0, [(capacity.div_ceil(512), 64)], name)?;
+        let bitmap_copies = checked_bytes(0, [(self.state_fields, 3)], name)?;
+        let bytes = checked_bytes(
+            self.base_bytes,
+            [(capacity, self.group_bytes), (bitmap_bytes, bitmap_copies)],
+            name,
+        )?;
+        ensure_reservation(&self.reservation, bytes, name)?;
         self.slots
             .try_reserve_exact(capacity - self.slots.len())
             .map_err(|error| df_error(name, error))?;
@@ -264,7 +271,10 @@ impl PartialGroups {
         if actual > self.reservation.size() {
             return Err(df_error(
                 name,
-                "partial accumulator exceeded reserved capacity",
+                format!(
+                    "partial accumulator needs {actual} bytes; reserved {}",
+                    self.reservation.size()
+                ),
             ));
         }
         Ok(())
@@ -308,9 +318,86 @@ impl PartialGroups {
     }
 }
 
+fn grouped_finalizer_charge(
+    keys: &[usize],
+    aggregates: &[Arc<AggregateFunctionExpr>],
+    name: &str,
+) -> Result<usize> {
+    if keys.is_empty() {
+        return Ok(0);
+    }
+    aggregates
+        .iter()
+        .filter(|expr| expr.fun().name() == "avg")
+        .try_fold(0_usize, |maximum, expr| {
+            let fields = expr.state_fields().map_err(|error| df_error(name, error))?;
+            let buffers = fields.iter().try_fold(4096, |bytes, field| {
+                let width = primitive_buffer_charge(field.data_type(), name)?;
+                checked_bytes(bytes, [(3, width), (3, 64)], name)
+            })?;
+            let result = primitive_buffer_charge(expr.field().data_type(), name)?;
+            Ok(maximum.max(checked_bytes(buffers, [(3, result), (3, 64)], name)?))
+        })
+}
+
+fn primitive_buffer_charge(data_type: &DataType, name: &str) -> Result<usize> {
+    let width = data_type
+        .primitive_width()
+        .ok_or_else(|| df_error(name, "native SQL result has variable-width state"))?;
+    Ok(checked_bytes(0, [(4, width)], name)?.max(64))
+}
+
+fn native_grouped_result(
+    expression: &AggregateFunctionExpr,
+    state: &[ScalarValue],
+    name: &str,
+) -> Result<ScalarValue> {
+    let count = if state[0] == ScalarValue::UInt64(Some(0)) && state[1].is_null() {
+        ScalarValue::UInt64(None)
+    } else {
+        state[0].clone()
+    };
+    let arrays = vec![
+        count.to_array().map_err(|error| df_error(name, error))?,
+        state[1].to_array().map_err(|error| df_error(name, error))?,
+    ];
+    let mut native = expression
+        .create_groups_accumulator()
+        .map_err(|error| df_error(name, error))?;
+    native
+        .merge_batch(&arrays, &[0], None, 1)
+        .map_err(|error| df_error(name, error))?;
+    let result = native
+        .evaluate(EmitTo::All)
+        .map_err(|error| df_error(name, error))?;
+    ScalarValue::try_from_array(&result, 0).map_err(|error| df_error(name, error))
+}
+
+fn native_state_charge(
+    aggregates: &[Arc<AggregateFunctionExpr>],
+    name: &str,
+) -> Result<(usize, usize)> {
+    aggregates
+        .iter()
+        .try_fold((2 * size_of::<usize>(), 0), |(bytes, count), aggregate| {
+            let fields = aggregate
+                .state_fields()
+                .map_err(|error| df_error(name, error))?;
+            let count = checked_bytes(count, [(fields.len(), 1)], name)?;
+            let bytes = fields.iter().try_fold(bytes, |bytes, field| {
+                let width = field.data_type().primitive_width().ok_or_else(|| {
+                    df_error(name, "native SQL aggregate has variable-width state")
+                })?;
+                checked_bytes(bytes, [(3, width)], name)
+            })?;
+            Ok((bytes, count))
+        })
+}
+
 type CandidateMap = HashMap<usize, Candidate, RandomState>;
 type KeyIndex = HashMap<Arc<[u8]>, usize, RandomState>;
 type PreparedGroups = (Vec<(usize, Group)>, Vec<Option<Group>>);
+type PreparedTransaction = (Vec<RecordBatch>, Vec<(usize, Group)>, Vec<Option<Group>>);
 
 pub(super) struct Transaction {
     pub records: Vec<RecordBatch>,
@@ -332,34 +419,29 @@ impl IncrementalSql {
         let (raw, analyzed) = runtime
             .incremental_sql_plan(query, alias, schema.clone(), name)
             .await?;
-        let Some((_, raw_aggregate)) = shape(&raw) else {
+        Self::from_plan(runtime, query, schema, &raw, &analyzed, name)
+    }
+
+    pub(super) fn from_plan(
+        runtime: &DataFusionRuntime,
+        query: &ValidatedQuery,
+        schema: SchemaRef,
+        raw: &LogicalPlan,
+        analyzed: &LogicalPlan,
+        name: &str,
+    ) -> Result<Option<Self>> {
+        let Some((keys, variable_columns)) = plan_inputs(raw, &schema, name)? else {
             return Ok(None);
         };
-        if raw_aggregate.aggr_expr.is_empty()
-            || !raw_aggregate
-                .aggr_expr
-                .iter()
-                .all(|expr| eligible(expr, &schema))
-        {
-            return Ok(None);
-        }
-        let keys = raw_aggregate
-            .group_expr
-            .iter()
-            .map(|expr| {
-                let Expr::Column(column) = expr else {
-                    return None;
-                };
-                let index = schema.index_of(&column.name).ok()?;
-                key_type(schema.field(index).data_type()).then_some(index)
-            })
-            .collect::<Option<Vec<_>>>();
-        let Some(keys) = keys else { return Ok(None) };
-        let variable_columns = variable_columns(&keys, &raw_aggregate.aggr_expr, &schema, name)?;
-        let Some((projection, aggregate)) = shape(&analyzed) else {
+        let Some((projection, aggregate)) = shape(analyzed) else {
             return Ok(None);
         };
         let reservation = runtime.incremental_reservation(name);
+        let rebound_fields = if aggregate.input.schema().as_arrow() == schema.as_ref() {
+            0
+        } else {
+            schema.fields().len()
+        };
         let plan_bytes = checked_bytes(
             4096,
             [
@@ -367,46 +449,30 @@ impl IncrementalSql {
                 (aggregate.aggr_expr.len(), 1024),
                 (projection.expr.len(), 512),
                 (query.text().len(), 8),
+                (rebound_fields, 512),
             ],
             name,
         )?;
         reservation
             .try_grow(plan_bytes)
             .map_err(|error| df_error(name, error))?;
-        let props = ExecutionProps::new();
-        let Ok(aggregates) = aggregate
-            .aggr_expr
-            .iter()
-            .map(|expr| {
-                LoweredAggregateBuilder::new(expr, aggregate.input.schema(), &schema, &props)
-                    .build()
-                    .map(|lowered| lowered.aggregate)
-            })
-            .collect::<datafusion::error::Result<Vec<_>>>()
-        else {
-            return Ok(None);
-        };
-        let Ok(projection) = projection
-            .expr
-            .iter()
-            .map(|expr| create_physical_expr(expr, &aggregate.schema, &props))
-            .collect::<datafusion::error::Result<Vec<_>>>()
-        else {
+        let Some((aggregates, projection)) = physical_plan(projection, aggregate, &schema) else {
             return Ok(None);
         };
         let Some(aggregate_bytes) = aggregate_bytes(&aggregates, name)? else {
             return Ok(None);
         };
-        if !keys.is_empty() && !native_groups_supported(&aggregates) {
+        if !grouped_aggregates_supported(&keys, &aggregates) {
             return Ok(None);
         }
-        let converter = row_converter(&keys, &schema, name)?;
+        let (converter, finalizer_bytes) = grouped_layout(&keys, &aggregates, &schema, name)?;
         Ok(Some(Self {
             schema,
             aggregate_schema: Arc::new(aggregate.schema.as_arrow().clone()),
             output_schema: Arc::new(analyzed.schema().as_arrow().clone()),
             aggregates,
             aggregate_bytes,
+            finalizer_bytes,
             plan_bytes,
             projection,
             keys,
@@ -466,6 +532,24 @@ impl IncrementalSql {
                 .collect::<Result<Vec<_>>>()?;
             (Arc::from(key), Arc::from(values))
         };
+        let accumulators = self.candidate_accumulators(previous, name)?;
+        Ok(Candidate {
+            group: Group {
+                key,
+                values,
+                states: Vec::new(),
+                results: Vec::new(),
+                _reservation: reservation,
+            },
+            accumulators,
+        })
+    }
+
+    fn candidate_accumulators(
+        &self,
+        previous: Option<&Group>,
+        name: &str,
+    ) -> Result<Vec<Box<dyn Accumulator>>> {
         let accumulators = self
             .aggregates
             .iter()
@@ -487,16 +571,7 @@ impl IncrementalSql {
                 Ok(accumulator)
             })
             .collect::<Result<Vec<_>>>()?;
-        Ok(Candidate {
-            group: Group {
-                key,
-                values,
-                states: Vec::new(),
-                results: Vec::new(),
-                _reservation: reservation,
-            },
-            accumulators,
-        })
+        Ok(accumulators)
     }
 
     pub async fn update(
@@ -506,22 +581,70 @@ impl IncrementalSql {
         name: &str,
     ) -> Result<Transaction> {
         let table = batch.table_payload()?;
-        if batch.num_rows() != 0 && table.schema() != &self.schema {
+        self.validate_input_schema(batch.num_rows(), table.schema())?;
+        let (reservation, workspace, mut candidates) =
+            self.input_candidates(batch.num_rows(), name)?;
+        let rows_processed = self
+            .update_records(
+                table.batches(),
+                &mut candidates,
+                (&reservation, workspace),
+                context,
+                name,
+            )
+            .await?;
+        #[cfg(not(test))]
+        let _ = rows_processed;
+        self.finish_candidates(&mut candidates, context, name)
+            .await?;
+        let (records, groups, new_groups) = self
+            .prepare_transaction(candidates, &reservation, context, name)
+            .await?;
+        Ok(Transaction {
+            records,
+            #[cfg(test)]
+            rows: rows_processed,
+            groups,
+            new_groups,
+            _reservation: reservation,
+        })
+    }
+
+    async fn prepare_transaction(
+        &mut self,
+        candidates: InputCandidates,
+        reservation: &MemoryReservation,
+        context: &StreamOperatorContext<'_>,
+        name: &str,
+    ) -> Result<PreparedTransaction> {
+        let count = self.output_count(&candidates, name)?;
+        let records = self
+            .output_records(count, &candidates.groups, reservation, context, name)
+            .await?;
+        let new_count = count - self.groups.len();
+        self.reserve_groups(new_count, count, name)?;
+        let (groups, new_groups) = self
+            .prepare_groups(candidates.groups, new_count, context)
+            .await?;
+        Ok((records, groups, new_groups))
+    }
+
+    fn validate_input_schema(&self, rows: usize, schema: &SchemaRef) -> Result<()> {
+        if rows != 0 && schema != &self.schema {
             return Err(CalcFlowError::InvalidArgument {
                 field: "batches".into(),
                 message: "schemas must match".into(),
             });
         }
-        let reservation = self.reservation.new_empty();
-        let width = checked_bytes(
-            if self.keys.is_empty() { 0 } else { 128 },
-            [(self.aggregates.len(), 32), (self.keys.len(), 24)],
-            name,
-        )?;
-        let workspace = checked_bytes(4096, [(batch.num_rows().min(CHUNK_ROWS), width)], name)?;
-        reservation
-            .try_grow(workspace)
-            .map_err(|error| df_error(name, error))?;
+        Ok(())
+    }
+
+    fn input_candidates(
+        &self,
+        rows: usize,
+        name: &str,
+    ) -> Result<(MemoryReservation, usize, InputCandidates)> {
+        let (reservation, workspace) = self.input_workspace(rows, name)?;
         let partial = if self.keys.is_empty() {
             None
         } else {
@@ -531,7 +654,7 @@ impl IncrementalSql {
                 name,
             )?)
         };
-        let native = self.native_keys(batch.num_rows(), name)?;
+        let native = self.native_keys(rows, name)?;
         let mut candidates = InputCandidates {
             groups: HashMap::with_hasher(RandomState::new()),
             touched: HashMap::with_hasher(RandomState::new()),
@@ -544,13 +667,44 @@ impl IncrementalSql {
                 .groups
                 .insert(0, self.candidate(self.groups.first(), &[], None, name)?);
         }
+        Ok((reservation, workspace, candidates))
+    }
+
+    fn input_workspace(&self, rows: usize, name: &str) -> Result<(MemoryReservation, usize)> {
+        let reservation = self.reservation.new_empty();
+        let width = checked_bytes(
+            if self.keys.is_empty() { 0 } else { 128 },
+            [(self.aggregates.len(), 32), (self.keys.len(), 24)],
+            name,
+        )?;
+        let workspace = checked_bytes(
+            4096,
+            [(self.finalizer_bytes, 1), (rows.min(CHUNK_ROWS), width)],
+            name,
+        )?;
+        reservation
+            .try_grow(workspace)
+            .map_err(|error| df_error(name, error))?;
+        Ok((reservation, workspace))
+    }
+
+    async fn update_records(
+        &self,
+        records: &[RecordBatch],
+        candidates: &mut InputCandidates,
+        workspace: (&MemoryReservation, usize),
+        context: &StreamOperatorContext<'_>,
+        name: &str,
+    ) -> Result<usize> {
         #[cfg(test)]
         let mut rows = 0;
-        for record in table.batches() {
+        #[cfg(not(test))]
+        let rows = 0;
+        for record in records {
             for offset in (0..record.num_rows()).step_by(CHUNK_ROWS) {
                 context.check_cancelled()?;
                 let chunk = record.slice(offset, CHUNK_ROWS.min(record.num_rows() - offset));
-                self.update_chunk(&chunk, &mut candidates, &reservation, workspace, name)?;
+                self.update_chunk(&chunk, candidates, workspace.0, workspace.1, name)?;
                 #[cfg(test)]
                 {
                     rows += chunk.num_rows();
@@ -558,9 +712,18 @@ impl IncrementalSql {
                 tokio::task::yield_now().await;
             }
         }
+        Ok(rows)
+    }
+
+    async fn finish_candidates(
+        &self,
+        candidates: &mut InputCandidates,
+        context: &StreamOperatorContext<'_>,
+        name: &str,
+    ) -> Result<()> {
         let mut native = candidates.native.take();
         if let Some(native) = native.as_mut() {
-            self.native_candidates(native, &mut candidates, context, name)
+            self.native_candidates(native, candidates, context, name)
                 .await?;
         }
         if let Some(mut partial) = candidates.partial.take() {
@@ -569,6 +732,10 @@ impl IncrementalSql {
         drop(native);
         self.finalize_candidates(&mut candidates.groups, context, name)
             .await?;
+        Ok(())
+    }
+
+    fn output_count(&self, candidates: &InputCandidates, name: &str) -> Result<usize> {
         let new_count = candidates
             .new_count
             .max(usize::from(self.keys.is_empty() && self.groups.is_empty()));
@@ -577,22 +744,7 @@ impl IncrementalSql {
             .len()
             .checked_add(new_count)
             .ok_or_else(|| df_error(name, "incremental group count overflowed"))?;
-        let records = self
-            .output_records(count, &candidates.groups, &reservation, context, name)
-            .await?;
-        let new_count = count - self.groups.len();
-        self.reserve_groups(new_count, count, name)?;
-        let (groups, new_groups) = self
-            .prepare_groups(candidates.groups, new_count, context)
-            .await?;
-        Ok(Transaction {
-            records,
-            #[cfg(test)]
-            rows,
-            groups,
-            new_groups,
-            _reservation: reservation,
-        })
+        Ok(count)
     }
 
     fn native_keys(&self, rows: usize, name: &str) -> Result<Option<NativeKeys>> {
@@ -622,29 +774,10 @@ impl IncrementalSql {
         workspace: usize,
         name: &str,
     ) -> Result<()> {
-        let variable_bytes = self.variable_columns.iter().try_fold(0, |total, &index| {
-            let bytes = chunk
-                .column(index)
-                .to_data()
-                .get_slice_memory_size()
-                .map_err(|error| df_error(name, error))?;
-            checked_bytes(total, [(bytes, 4)], name)
-        })?;
-        let needed = checked_bytes(workspace, [(variable_bytes, 1)], name)?;
-        if needed > reservation.size() {
-            reservation
-                .try_grow(needed - reservation.size())
-                .map_err(|error| df_error(name, error))?;
-        }
+        self.reserve_chunk(chunk, reservation, workspace, name)?;
         let arguments = self.arguments(chunk, name)?;
         if self.keys.is_empty() {
-            let candidate = candidates.groups.get_mut(&0).expect("global candidate");
-            for (arguments, accumulator) in arguments.iter().zip(&mut candidate.accumulators) {
-                accumulator
-                    .update_batch(arguments)
-                    .map_err(|error| df_error(name, error))?;
-            }
-            return Ok(());
+            return update_global(&arguments, &mut candidates.groups, name);
         }
         if let Some(native) = candidates.native.as_mut() {
             native.intern(chunk.column(self.keys[0]).clone(), name)?;
@@ -661,6 +794,26 @@ impl IncrementalSql {
             return Ok(());
         }
         self.update_grouped_chunk(chunk, &arguments, candidates, name)
+    }
+
+    fn reserve_chunk(
+        &self,
+        chunk: &RecordBatch,
+        reservation: &MemoryReservation,
+        workspace: usize,
+        name: &str,
+    ) -> Result<()> {
+        let variable_bytes = self.variable_columns.iter().try_fold(0, |total, &index| {
+            let bytes = chunk
+                .column(index)
+                .to_data()
+                .get_slice_memory_size()
+                .map_err(|error| df_error(name, error))?;
+            checked_bytes(total, [(bytes, 4)], name)
+        })?;
+        let needed = checked_bytes(workspace, [(variable_bytes, 1)], name)?;
+        ensure_reservation(reservation, needed, name)?;
+        Ok(())
     }
 
     fn update_grouped_chunk(
@@ -699,20 +852,8 @@ impl IncrementalSql {
             #[cfg(test)]
             self.historical_key_lookups
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let (slot, previous, new_count) = if let Some(&slot) = self.index.get(key) {
-                (slot, self.groups.get(slot), candidates.new_count)
-            } else {
-                let slot = self
-                    .groups
-                    .len()
-                    .checked_add(candidates.new_count)
-                    .ok_or_else(|| df_error(name, "incremental group count overflowed"))?;
-                let count = candidates
-                    .new_count
-                    .checked_add(1)
-                    .ok_or_else(|| df_error(name, "new group count overflowed"))?;
-                (slot, None, count)
-            };
+            let (slot, previous, new_count) =
+                self.candidate_slot(key, candidates.new_count, name)?;
             let candidate = self.candidate(previous, key, Some((&key_arrays, row)), name)?;
             let rank = partial.add_slot(slot, name)?;
             candidates.touched.insert(candidate.group.key.clone(), rank);
@@ -725,6 +866,28 @@ impl IncrementalSql {
         self.partial_groups
             .fetch_max(partial.slots.len(), std::sync::atomic::Ordering::SeqCst);
         Ok(())
+    }
+
+    fn candidate_slot(
+        &self,
+        key: &[u8],
+        new_count: usize,
+        name: &str,
+    ) -> Result<(usize, Option<&Group>, usize)> {
+        let (slot, previous, new_count) = if let Some(&slot) = self.index.get(key) {
+            (slot, self.groups.get(slot), new_count)
+        } else {
+            let slot = self
+                .groups
+                .len()
+                .checked_add(new_count)
+                .ok_or_else(|| df_error(name, "incremental group count overflowed"))?;
+            let count = new_count
+                .checked_add(1)
+                .ok_or_else(|| df_error(name, "new group count overflowed"))?;
+            (slot, None, count)
+        };
+        Ok((slot, previous, new_count))
     }
 
     async fn native_candidates(
@@ -755,37 +918,38 @@ impl IncrementalSql {
                 .expect("grouped key converter")
                 .convert_columns(&arrays)
                 .map_err(|error| df_error(name, error))?;
-            for row in 0..rows {
-                let encoded_row = encoded.row(row);
-                let key = encoded_row.as_ref();
-                #[cfg(test)]
-                self.historical_key_lookups
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let (slot, previous, new_count) = if let Some(&slot) = self.index.get(key) {
-                    (slot, self.groups.get(slot), candidates.new_count)
-                } else {
-                    let slot = self
-                        .groups
-                        .len()
-                        .checked_add(candidates.new_count)
-                        .ok_or_else(|| df_error(name, "incremental group count overflowed"))?;
-                    let count = candidates
-                        .new_count
-                        .checked_add(1)
-                        .ok_or_else(|| df_error(name, "new group count overflowed"))?;
-                    (slot, None, count)
-                };
-                let candidate = self.candidate(previous, key, Some((&arrays, row)), name)?;
-                let rank = candidates
-                    .partial
-                    .as_mut()
-                    .expect("grouped partial accumulators")
-                    .add_slot(slot, name)?;
-                debug_assert_eq!(rank, start + row);
-                candidates.groups.insert(slot, candidate);
-                candidates.new_count = new_count;
-            }
+            self.native_candidate_rows(&arrays, &encoded, start, rows, candidates, name)?;
             tokio::task::yield_now().await;
+        }
+        Ok(())
+    }
+
+    fn native_candidate_rows(
+        &self,
+        arrays: &[ArrayRef],
+        encoded: &datafusion::arrow::row::Rows,
+        start: usize,
+        rows: usize,
+        candidates: &mut InputCandidates,
+        name: &str,
+    ) -> Result<()> {
+        for row in 0..rows {
+            let encoded_row = encoded.row(row);
+            let key = encoded_row.as_ref();
+            #[cfg(test)]
+            self.historical_key_lookups
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let (slot, previous, new_count) =
+                self.candidate_slot(key, candidates.new_count, name)?;
+            let candidate = self.candidate(previous, key, Some((arrays, row)), name)?;
+            let rank = candidates
+                .partial
+                .as_mut()
+                .expect("grouped partial accumulators")
+                .add_slot(slot, name)?;
+            debug_assert_eq!(rank, start + row);
+            candidates.groups.insert(slot, candidate);
+            candidates.new_count = new_count;
         }
         Ok(())
     }
@@ -804,6 +968,22 @@ impl IncrementalSql {
                     .map_err(|error| df_error(name, error))
             })
             .collect::<Result<Vec<_>>>()
+    }
+
+    fn candidate_result(
+        &self,
+        expression: &AggregateFunctionExpr,
+        state: &[ScalarValue],
+        accumulator: &mut dyn Accumulator,
+        name: &str,
+    ) -> Result<ScalarValue> {
+        if !self.keys.is_empty() && expression.fun().name() == "avg" {
+            native_grouped_result(expression, state, name)
+        } else {
+            accumulator
+                .evaluate()
+                .map_err(|error| df_error(name, error))
+        }
     }
 
     async fn finalize_candidates(
@@ -827,10 +1007,14 @@ impl IncrementalSql {
             candidate.group.results = candidate
                 .accumulators
                 .iter_mut()
-                .map(|accumulator| {
-                    accumulator
-                        .evaluate()
-                        .map_err(|error| df_error(name, error))
+                .enumerate()
+                .map(|(index, accumulator)| {
+                    self.candidate_result(
+                        &self.aggregates[index],
+                        &candidate.group.states[index],
+                        accumulator.as_mut(),
+                        name,
+                    )
                 })
                 .collect::<Result<Vec<_>>>()?;
             #[cfg(test)]
@@ -848,6 +1032,30 @@ impl IncrementalSql {
         context: &StreamOperatorContext<'_>,
         name: &str,
     ) -> Result<Vec<RecordBatch>> {
+        let output_charge = self.output_charge(count, candidates, context, name).await?;
+        reservation
+            .try_grow(output_charge)
+            .map_err(|error| df_error(name, error))?;
+        let mut records = Vec::new();
+        for start in (0..count).step_by(CHUNK_ROWS) {
+            context.check_cancelled()?;
+            let end = count.min(start.saturating_add(CHUNK_ROWS));
+            records.push(self.output_chunk(start, end, candidates, name)?);
+            tokio::task::yield_now().await;
+        }
+        if records.is_empty() {
+            records.push(RecordBatch::new_empty(self.output_schema.clone()));
+        }
+        Ok(records)
+    }
+
+    async fn output_charge(
+        &self,
+        count: usize,
+        candidates: &CandidateMap,
+        context: &StreamOperatorContext<'_>,
+        name: &str,
+    ) -> Result<usize> {
         let width = checked_bytes(
             0,
             [
@@ -858,64 +1066,52 @@ impl IncrementalSql {
             name,
         )?;
         let output_charge = checked_bytes(0, [(count, width)], name)?;
-        let mut output_charge = output_charge;
-        for (index, group) in self.groups.iter().enumerate() {
-            if index % CHUNK_ROWS == 0 {
-                context.check_cancelled()?;
-                tokio::task::yield_now().await;
-            }
-            output_charge = checked_bytes(output_charge, [(group.key.len(), 4)], name)?;
-        }
-        for (index, candidate) in candidates.values().enumerate() {
-            if index % CHUNK_ROWS == 0 {
-                context.check_cancelled()?;
-                tokio::task::yield_now().await;
-            }
-            output_charge = checked_bytes(output_charge, [(candidate.group.key.len(), 4)], name)?;
-        }
-        reservation
-            .try_grow(output_charge)
+        let output_charge =
+            key_output_charge(output_charge, self.groups.iter(), context, name).await?;
+        key_output_charge(
+            output_charge,
+            candidates.values().map(|candidate| &candidate.group),
+            context,
+            name,
+        )
+        .await
+    }
+
+    fn output_chunk(
+        &self,
+        start: usize,
+        end: usize,
+        candidates: &CandidateMap,
+        name: &str,
+    ) -> Result<RecordBatch> {
+        let columns = (0..self.keys.len() + self.aggregates.len())
+            .map(|column| {
+                ScalarValue::iter_to_array((start..end).map(|slot| {
+                    let group = candidates
+                        .get(&slot)
+                        .map_or_else(|| &self.groups[slot], |candidate| &candidate.group);
+                    if column < self.keys.len() {
+                        group.values[column].clone()
+                    } else {
+                        group.results[column - self.keys.len()].clone()
+                    }
+                }))
+                .map_err(|error| df_error(name, error))
+            })
+            .collect::<Result<Vec<ArrayRef>>>()?;
+        let aggregate = RecordBatch::try_new(self.aggregate_schema.clone(), columns)
             .map_err(|error| df_error(name, error))?;
-        let mut records = Vec::new();
-        for start in (0..count).step_by(CHUNK_ROWS) {
-            context.check_cancelled()?;
-            let end = count.min(start.saturating_add(CHUNK_ROWS));
-            let columns = (0..self.keys.len() + self.aggregates.len())
-                .map(|column| {
-                    ScalarValue::iter_to_array((start..end).map(|slot| {
-                        let group = candidates
-                            .get(&slot)
-                            .map_or_else(|| &self.groups[slot], |candidate| &candidate.group);
-                        if column < self.keys.len() {
-                            group.values[column].clone()
-                        } else {
-                            group.results[column - self.keys.len()].clone()
-                        }
-                    }))
+        let output = self
+            .projection
+            .iter()
+            .map(|expr| {
+                expr.evaluate(&aggregate)
+                    .and_then(|value| value.into_array(end - start))
                     .map_err(|error| df_error(name, error))
-                })
-                .collect::<Result<Vec<ArrayRef>>>()?;
-            let aggregate = RecordBatch::try_new(self.aggregate_schema.clone(), columns)
-                .map_err(|error| df_error(name, error))?;
-            let output = self
-                .projection
-                .iter()
-                .map(|expr| {
-                    expr.evaluate(&aggregate)
-                        .and_then(|value| value.into_array(end - start))
-                        .map_err(|error| df_error(name, error))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            records.push(
-                RecordBatch::try_new(self.output_schema.clone(), output)
-                    .map_err(|error| df_error(name, error))?,
-            );
-            tokio::task::yield_now().await;
-        }
-        if records.is_empty() {
-            records.push(RecordBatch::new_empty(self.output_schema.clone()));
-        }
-        Ok(records)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        RecordBatch::try_new(self.output_schema.clone(), output)
+            .map_err(|error| df_error(name, error))
     }
 
     fn reserve_groups(&mut self, new_count: usize, count: usize, name: &str) -> Result<()> {
@@ -934,11 +1130,7 @@ impl IncrementalSql {
                 ],
                 name,
             )?;
-            if charge > self.reservation.size() {
-                self.reservation
-                    .try_grow(charge - self.reservation.size())
-                    .map_err(|error| df_error(name, error))?;
-            }
+            ensure_reservation(&self.reservation, charge, name)?;
             self.groups
                 .try_reserve_exact(new_count)
                 .map_err(|error| df_error(name, error))?;
@@ -990,6 +1182,18 @@ impl IncrementalSql {
             self.groups.push(group);
         }
     }
+}
+
+fn grouped_layout(
+    keys: &[usize],
+    aggregates: &[Arc<AggregateFunctionExpr>],
+    schema: &SchemaRef,
+    name: &str,
+) -> Result<(Option<RowConverter>, usize)> {
+    Ok((
+        row_converter(keys, schema, name)?,
+        grouped_finalizer_charge(keys, aggregates, name)?,
+    ))
 }
 
 fn row_converter(keys: &[usize], schema: &SchemaRef, name: &str) -> Result<Option<RowConverter>> {
@@ -1120,12 +1324,7 @@ fn eligible(expr: &Expr, schema: &SchemaRef) -> bool {
         return false;
     };
     let params = &function.params;
-    if params.distinct
-        || params.filter.is_some()
-        || !params.order_by.is_empty()
-        || params.null_treatment.is_some()
-        || params.args.len() != 1
-    {
+    if !aggregate_parameters_supported(params) {
         return false;
     }
     let builtin = datafusion::functions_aggregate::all_default_aggregate_functions()
@@ -1150,20 +1349,183 @@ fn eligible(expr: &Expr, schema: &SchemaRef) -> bool {
         return false;
     };
     if count {
-        key_type(field.data_type())
+        count_argument_supported(field.data_type())
     } else {
-        matches!(
-            field.data_type(),
-            DataType::Int8
-                | DataType::Int16
-                | DataType::Int32
-                | DataType::Int64
-                | DataType::UInt8
-                | DataType::UInt16
-                | DataType::UInt32
-                | DataType::UInt64
-        ) && matches!(function.func.name(), "sum" | "min" | "max")
+        aggregate_argument_supported(field.data_type(), function.func.name())
     }
+}
+
+fn aggregate_argument_supported(data_type: &DataType, function: &str) -> bool {
+    match function {
+        "sum" | "min" | "max" => exact_numeric(data_type),
+        "avg" => matches!(
+            data_type,
+            DataType::Decimal32(_, 0..)
+                | DataType::Decimal64(_, 0..)
+                | DataType::Decimal128(_, 0..)
+                | DataType::Decimal256(_, 0..)
+        ),
+        _ => false,
+    }
+}
+
+fn count_argument_supported(data_type: &DataType) -> bool {
+    key_type(data_type) || exact_numeric(data_type)
+}
+
+fn exact_numeric(data_type: &DataType) -> bool {
+    matches!(
+        data_type,
+        DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64
+            | DataType::Decimal32(..)
+            | DataType::Decimal64(..)
+            | DataType::Decimal128(..)
+            | DataType::Decimal256(..)
+    )
+}
+
+fn grouped_aggregates_supported(keys: &[usize], aggregates: &[Arc<AggregateFunctionExpr>]) -> bool {
+    keys.is_empty() || native_groups_supported(aggregates)
+}
+
+async fn key_output_charge<'a>(
+    mut charge: usize,
+    groups: impl Iterator<Item = &'a Group>,
+    context: &StreamOperatorContext<'_>,
+    name: &str,
+) -> Result<usize> {
+    for (index, group) in groups.enumerate() {
+        if index % CHUNK_ROWS == 0 {
+            context.check_cancelled()?;
+            tokio::task::yield_now().await;
+        }
+        charge = checked_bytes(charge, [(group.key.len(), 4)], name)?;
+    }
+    Ok(charge)
+}
+
+fn aggregate_parameters_supported(
+    params: &datafusion::logical_expr::expr::AggregateFunctionParams,
+) -> bool {
+    !params.distinct
+        && params.filter.is_none()
+        && params.order_by.is_empty()
+        && params.null_treatment.is_none()
+        && params.args.len() == 1
+}
+
+pub(super) fn ensure_reservation(
+    reservation: &MemoryReservation,
+    bytes: usize,
+    name: &str,
+) -> Result<()> {
+    if bytes > reservation.size() {
+        reservation
+            .try_grow(bytes - reservation.size())
+            .map_err(|error| df_error(name, error))?;
+    }
+    Ok(())
+}
+
+fn update_global(
+    arguments: &[Vec<ArrayRef>],
+    candidates: &mut CandidateMap,
+    name: &str,
+) -> Result<()> {
+    let candidate = candidates.get_mut(&0).expect("global candidate");
+    for (arguments, accumulator) in arguments.iter().zip(&mut candidate.accumulators) {
+        accumulator
+            .update_batch(arguments)
+            .map_err(|error| df_error(name, error))?;
+    }
+    Ok(())
+}
+
+fn plan_inputs(
+    raw: &LogicalPlan,
+    schema: &SchemaRef,
+    name: &str,
+) -> Result<Option<(Vec<usize>, Vec<usize>)>> {
+    let Some((_, raw_aggregate)) = shape(raw) else {
+        return Ok(None);
+    };
+    if raw_aggregate.aggr_expr.is_empty()
+        || !raw_aggregate
+            .aggr_expr
+            .iter()
+            .all(|expr| eligible(expr, schema))
+    {
+        return Ok(None);
+    }
+    let keys = raw_aggregate
+        .group_expr
+        .iter()
+        .map(|expr| {
+            let Expr::Column(column) = expr else {
+                return None;
+            };
+            let index = schema.index_of(&column.name).ok()?;
+            key_type(schema.field(index).data_type()).then_some(index)
+        })
+        .collect::<Option<Vec<_>>>();
+    let Some(keys) = keys else { return Ok(None) };
+    let variable_columns = variable_columns(&keys, &raw_aggregate.aggr_expr, schema, name)?;
+    Ok(Some((keys, variable_columns)))
+}
+
+type PhysicalSqlPlan = (Vec<Arc<AggregateFunctionExpr>>, Vec<Arc<dyn PhysicalExpr>>);
+
+fn physical_plan(
+    projection: &datafusion::logical_expr::Projection,
+    aggregate: &datafusion::logical_expr::Aggregate,
+    schema: &SchemaRef,
+) -> Option<PhysicalSqlPlan> {
+    let props = ExecutionProps::new();
+    let logical = aggregate.input.schema();
+    let rebound;
+    let input = if logical.as_arrow() == schema.as_ref() {
+        logical.as_ref()
+    } else {
+        let qualifiers = schema
+            .fields()
+            .iter()
+            .map(|field| {
+                let index = logical.as_arrow().index_of(field.name()).ok()?;
+                let (qualifier, original) = logical.qualified_field(index);
+                (original == field).then(|| qualifier.cloned())
+            })
+            .collect::<Option<Vec<_>>>()?;
+        rebound = DFSchema::from_field_specific_qualified_schema(qualifiers, schema).ok()?;
+        &rebound
+    };
+    let Ok(aggregates) = aggregate
+        .aggr_expr
+        .iter()
+        .map(|expr| {
+            LoweredAggregateBuilder::new(expr, input, schema, &props)
+                .build()
+                .map(|lowered| lowered.aggregate)
+        })
+        .collect::<datafusion::error::Result<Vec<_>>>()
+    else {
+        return None;
+    };
+    let Ok(projection) = projection
+        .expr
+        .iter()
+        .map(|expr| create_physical_expr(expr, &aggregate.schema, &props))
+        .collect::<datafusion::error::Result<Vec<_>>>()
+    else {
+        return None;
+    };
+    Some((aggregates, projection))
 }
 
 fn df_error(name: &str, error: impl std::fmt::Display) -> CalcFlowError {
@@ -1189,6 +1551,557 @@ pub(super) fn checked_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn decimal_sum_expression() -> Arc<AggregateFunctionExpr> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("key", DataType::Int64, false),
+            Field::new("value", DataType::Decimal256(60, 0), true),
+        ]));
+        let query = crate::expression::parse_select_query(
+            "SELECT key, SUM(value) AS total FROM events GROUP BY key",
+        )
+        .unwrap();
+        let runtime = DataFusionRuntime::new(crate::DataFusionConfig::default()).unwrap();
+        let (_, analyzed) = runtime
+            .incremental_sql_plan(&query, "events", schema.clone(), "totals")
+            .await
+            .unwrap();
+        let (projection, aggregate) = shape(&analyzed).unwrap();
+        physical_plan(projection, aggregate, &schema)
+            .unwrap()
+            .0
+            .remove(0)
+    }
+
+    #[tokio::test]
+    async fn test_sql_decimal_partial_growth_is_prepaid() {
+        use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryConsumer, MemoryPool};
+        let expression = decimal_sum_expression().await;
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+        let reservation = MemoryConsumer::new("decimal-partial").register(&pool);
+        let mut partial = PartialGroups::new(&[expression], reservation, "totals").unwrap();
+        for slot in 0..1024 {
+            partial.add_slot(slot, "totals").unwrap();
+        }
+        let values = ScalarValue::Decimal256(
+            Some(datafusion::arrow::datatypes::i256::from_i128(1)),
+            60,
+            0,
+        );
+        partial
+            .update(
+                &[vec![values.to_array_of_size(1024).unwrap()]],
+                &(0..1024).collect::<Vec<_>>(),
+                1024,
+                "totals",
+            )
+            .unwrap();
+        let previous = partial.accumulators[0].size();
+        partial.add_slot(1024, "totals").unwrap();
+        let prepaid = partial.reservation.size();
+        partial
+            .update(&[vec![values.to_array().unwrap()]], &[1024], 1025, "totals")
+            .unwrap();
+        let peak = previous
+            + partial.accumulators[0].size()
+            + partial.slots.capacity() * size_of::<usize>();
+        assert!(
+            peak <= prepaid,
+            "native capacity growth needs {peak} bytes; prepaid only {prepaid}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sql_decimal_partial_pool_failure_precedes_capacity_growth() {
+        use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryConsumer, MemoryPool};
+        let expression = decimal_sum_expression().await;
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+        let reservation = MemoryConsumer::new("decimal-partial").register(&pool);
+        let mut partial = PartialGroups::new(&[expression], reservation, "totals").unwrap();
+        for slot in 0..4 {
+            partial.add_slot(slot, "totals").unwrap();
+        }
+        let before = (
+            partial.slots.clone(),
+            partial.slots.capacity(),
+            partial.reservation.size(),
+        );
+        let pressure = MemoryConsumer::new("pressure").register(&pool);
+        pressure.try_grow((1 << 20) - pool.reserved()).unwrap();
+        assert!(partial.add_slot(4, "totals").is_err());
+        assert_eq!(
+            (
+                partial.slots.clone(),
+                partial.slots.capacity(),
+                partial.reservation.size()
+            ),
+            before
+        );
+        drop(pressure);
+        assert_eq!(partial.add_slot(4, "totals").unwrap(), 4);
+        drop(partial);
+        assert_eq!(pool.reserved(), 0);
+    }
+
+    async fn decimal_avg_expression() -> Arc<AggregateFunctionExpr> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("key", DataType::Int64, false),
+            Field::new("value", DataType::Decimal256(60, 2), true),
+        ]));
+        let query = crate::expression::parse_select_query(
+            "SELECT key, AVG(value) AS mean FROM events GROUP BY key",
+        )
+        .unwrap();
+        let runtime = DataFusionRuntime::new(crate::DataFusionConfig::default()).unwrap();
+        let (_, analyzed) = runtime
+            .incremental_sql_plan(&query, "events", schema.clone(), "totals")
+            .await
+            .unwrap();
+        let (projection, aggregate) = shape(&analyzed).unwrap();
+        physical_plan(projection, aggregate, &schema)
+            .unwrap()
+            .0
+            .remove(0)
+    }
+
+    fn native_avg_buffer_bytes(expression: &AggregateFunctionExpr, values: ArrayRef) -> usize {
+        let count = values.len();
+        let mut native = expression.create_groups_accumulator().unwrap();
+        native
+            .update_batch(&[values], &(0..count).collect::<Vec<_>>(), None, count)
+            .unwrap();
+        native
+            .state(EmitTo::All)
+            .unwrap()
+            .iter()
+            .map(|array| array.get_buffer_memory_size())
+            .sum()
+    }
+
+    #[tokio::test]
+    async fn test_sql_decimal_avg_partial_growth_and_extraction_are_prepaid() {
+        use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryConsumer, MemoryPool};
+        let expression = decimal_avg_expression().await;
+        let fields = expression.state_fields().unwrap();
+        assert_eq!(fields[0].data_type(), &DataType::UInt64);
+        assert_eq!(fields[1].data_type(), &DataType::Decimal256(60, 2));
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+        let reservation = MemoryConsumer::new("decimal-avg-partial").register(&pool);
+        let mut partial = PartialGroups::new(&[expression.clone()], reservation, "totals").unwrap();
+        for slot in 0..1024 {
+            partial.add_slot(slot, "totals").unwrap();
+        }
+        let value = ScalarValue::Decimal256(
+            Some(datafusion::arrow::datatypes::i256::from_i128(1)),
+            60,
+            2,
+        );
+        partial
+            .update(
+                &[vec![value.to_array_of_size(1024).unwrap()]],
+                &(0..1024).collect::<Vec<_>>(),
+                1024,
+                "totals",
+            )
+            .unwrap();
+        let before = partial.accumulators[0].size();
+        let previous_buffers =
+            native_avg_buffer_bytes(&expression, value.to_array_of_size(1024).unwrap());
+        let capacity = partial.slots.capacity();
+        let prepaid = partial.reservation.size();
+        let pressure = MemoryConsumer::new("pressure").register(&pool);
+        pressure.try_grow((1 << 20) - pool.reserved()).unwrap();
+        assert!(partial.add_slot(1024, "totals").is_err());
+        assert_eq!(partial.slots.capacity(), capacity);
+        assert_eq!(partial.accumulators[0].size(), before);
+        assert_eq!(partial.reservation.size(), prepaid);
+        drop(pressure);
+        partial.add_slot(1024, "totals").unwrap();
+        partial
+            .update(
+                &[vec![
+                    ScalarValue::Decimal256(None, 60, 2).to_array().unwrap(),
+                ]],
+                &[1024],
+                1025,
+                "totals",
+            )
+            .unwrap();
+        let states = partial.accumulators[0].state(EmitTo::All).unwrap();
+        assert_eq!(states[0].len(), 1025);
+        assert_eq!(states[1].len(), 1025);
+        assert!(states[0].is_null(1024));
+        assert!(states[1].is_null(1024));
+        assert!(!states[0].is_null(0));
+        assert!(!states[1].is_null(0));
+        let extracted = states
+            .iter()
+            .map(|array| array.get_buffer_memory_size())
+            .sum::<usize>();
+        let peak = previous_buffers + 2 * extracted + partial.slots.capacity() * size_of::<usize>();
+        assert!(peak <= partial.reservation.size());
+        assert_eq!(pool.reserved(), partial.reservation.size());
+        drop(states);
+        drop(partial);
+        assert_eq!(pool.reserved(), 0);
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum BoundaryResult {
+        Value(ScalarValue),
+        Error,
+        Panic,
+    }
+
+    fn boundary_outcome(result: std::thread::Result<Result<ScalarValue>>) -> BoundaryResult {
+        match result {
+            Ok(Ok(value)) => BoundaryResult::Value(value),
+            Ok(Err(_)) => BoundaryResult::Error,
+            Err(_) => BoundaryResult::Panic,
+        }
+    }
+
+    async fn boundary_plan(value: &ScalarValue, grouped: bool) -> (IncrementalSql, RecordBatch) {
+        let record = RecordBatch::try_from_iter_with_nullable([
+            (
+                "key",
+                ScalarValue::Int64(Some(0)).to_array().unwrap(),
+                false,
+            ),
+            ("value", value.to_array().unwrap(), true),
+        ])
+        .unwrap();
+        let text = if grouped {
+            "SELECT key, AVG(value) AS mean FROM events GROUP BY key"
+        } else {
+            "SELECT AVG(value) AS mean FROM events"
+        };
+        let query = crate::expression::parse_select_query(text).unwrap();
+        let runtime = DataFusionRuntime::new(crate::DataFusionConfig::default()).unwrap();
+        let plan = IncrementalSql::plan(&runtime, &query, "events", record.schema(), "totals")
+            .await
+            .unwrap()
+            .unwrap();
+        (plan, record)
+    }
+
+    fn reference_boundary(
+        plan: &IncrementalSql,
+        count: Option<u64>,
+        sum: &ScalarValue,
+    ) -> BoundaryResult {
+        let expression = &plan.aggregates[0];
+        let arrays = vec![
+            ScalarValue::UInt64(count).to_array().unwrap(),
+            sum.to_array().unwrap(),
+        ];
+        boundary_outcome(std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            || {
+                if plan.keys.is_empty() {
+                    let mut scalar = expression.create_accumulator().unwrap();
+                    scalar.merge_batch(&arrays).unwrap();
+                    scalar.evaluate().map_err(|error| df_error("totals", error))
+                } else {
+                    let mut native = expression.create_groups_accumulator().unwrap();
+                    native.merge_batch(&arrays, &[0], None, 1).unwrap();
+                    let result = native
+                        .evaluate(EmitTo::All)
+                        .map_err(|error| df_error("totals", error))?;
+                    ScalarValue::try_from_array(&result, 0)
+                        .map_err(|error| df_error("totals", error))
+                }
+            },
+        )))
+    }
+
+    async fn candidate_boundary(
+        plan: &IncrementalSql,
+        record: &RecordBatch,
+        count: Option<u64>,
+        sum: &ScalarValue,
+    ) -> BoundaryResult {
+        use futures::FutureExt;
+        let arrays = vec![record.column(0).clone()];
+        let keys = if plan.keys.is_empty() {
+            None
+        } else {
+            Some((arrays.as_slice(), 0))
+        };
+        let mut candidate = plan.candidate(None, &[0], keys, "totals").unwrap();
+        candidate.accumulators[0]
+            .merge_batch(&[
+                ScalarValue::UInt64(Some(count.unwrap_or(0)))
+                    .to_array()
+                    .unwrap(),
+                sum.to_array().unwrap(),
+            ])
+            .unwrap();
+        let mut candidates = CandidateMap::with_hasher(RandomState::new());
+        candidates.insert(0, candidate);
+        let job = crate::StreamJobContext::new(
+            1,
+            "boundary",
+            crate::JsonMap::new(),
+            None,
+            crate::CancellationToken::new(),
+        );
+        let context = StreamOperatorContext::new(&job, "totals", None);
+        let (_reservation, _) = plan.input_workspace(0, "totals").unwrap();
+        let result = std::panic::AssertUnwindSafe(async {
+            plan.finalize_candidates(&mut candidates, &context, "totals")
+                .await?;
+            Ok(candidates[&0].group.results[0].clone())
+        })
+        .catch_unwind()
+        .await;
+        boundary_outcome(result)
+    }
+
+    async fn assert_boundary_counts(value: ScalarValue, counts: &[u64], grouped: bool) {
+        let (plan, record) = boundary_plan(&value, grouped).await;
+        for count in counts {
+            let reference = reference_boundary(&plan, Some(*count), &value);
+            let candidate = candidate_boundary(&plan, &record, Some(*count), &value).await;
+            assert_eq!(
+                candidate, reference,
+                "count={count}, grouped={grouped}, value={value:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sql_decimal_avg_grouped_count_conversion_boundary_matches_native() {
+        assert_boundary_counts(
+            ScalarValue::Decimal32(Some(8), 9, 0),
+            &[
+                1,
+                i32::MAX as u64,
+                (i32::MAX as u64) + 1,
+                u64::from(u32::MAX),
+                u64::from(u32::MAX) + 2,
+            ],
+            true,
+        )
+        .await;
+        assert_boundary_counts(
+            ScalarValue::Decimal64(Some(8), 18, 0),
+            &[1, i64::MAX as u64, (i64::MAX as u64) + 1, u64::MAX],
+            true,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_sql_decimal_avg_wrapped_zero_count_preserves_native_failure() {
+        assert_boundary_counts(
+            ScalarValue::Decimal32(Some(8), 9, 0),
+            &[0, u64::from(u32::MAX) + 1],
+            true,
+        )
+        .await;
+        assert_boundary_counts(ScalarValue::Decimal64(Some(8), 18, 0), &[0], true).await;
+    }
+
+    #[tokio::test]
+    async fn test_sql_decimal_avg_global_count_conversion_preserves_scalar() {
+        assert_boundary_counts(
+            ScalarValue::Decimal32(Some(8), 9, 0),
+            &[0, 1, (i32::MAX as u64) + 1],
+            false,
+        )
+        .await;
+        assert_boundary_counts(
+            ScalarValue::Decimal64(Some(8), 18, 0),
+            &[0, 1, (i64::MAX as u64) + 1],
+            false,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_sql_decimal_avg_unseen_seed_and_null_sum_match_native() {
+        for value in [
+            ScalarValue::Decimal32(None, 9, 0),
+            ScalarValue::Decimal64(None, 18, 0),
+            ScalarValue::Decimal128(None, 38, 0),
+            ScalarValue::Decimal256(None, 76, 0),
+        ] {
+            let (plan, record) = boundary_plan(&value, true).await;
+            for count in [None, Some(1), Some((i32::MAX as u64) + 1)] {
+                assert_eq!(
+                    candidate_boundary(&plan, &record, count, &value).await,
+                    reference_boundary(&plan, count, &value)
+                );
+            }
+        }
+    }
+
+    struct BoundaryReject;
+
+    #[async_trait::async_trait]
+    impl crate::StreamCollector for BoundaryReject {
+        async fn emit(&mut self, _port: &str, _batch: Batch) -> Result<()> {
+            Err(CalcFlowError::Operator {
+                node_id: "boundary-reject".into(),
+                message: "injected emit rejection".into(),
+            })
+        }
+    }
+
+    async fn boundary_rejected_update(value: ScalarValue, count: u64) {
+        use crate::{OperatorMetadata, StreamOperator};
+        use futures::FutureExt;
+        let (plan, record) = boundary_plan(&value, true).await;
+        let input = Batch::table(vec![record], crate::BatchMetadata::default()).unwrap();
+        let mut operator = crate::SqlOperator::new(
+            "totals",
+            "SELECT key, AVG(value) AS mean FROM events GROUP BY key",
+            vec!["events".into()],
+            vec![],
+        )
+        .unwrap();
+        let job = crate::StreamJobContext::new(
+            1,
+            "boundary",
+            crate::JsonMap::new(),
+            None,
+            crate::CancellationToken::new(),
+        );
+        let context = StreamOperatorContext::new(&job, "totals", None);
+        let mut collector = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("events", input.clone(), &context, &mut collector)
+            .await
+            .unwrap();
+        collector.drain("output");
+        let incremental = operator.incremental.as_mut().unwrap();
+        incremental.groups[0].states[0][0] = ScalarValue::UInt64(Some(count));
+        let before = operator.checkpoint(crate::Epoch::INITIAL).unwrap();
+        let failed = std::panic::AssertUnwindSafe(operator.process_data(
+            "events",
+            input.clone(),
+            &context,
+            &mut BoundaryReject,
+        ))
+        .catch_unwind()
+        .await;
+        assert!(
+            matches!(failed, Ok(Err(CalcFlowError::Operator {node_id, ..})) if node_id == "boundary-reject")
+        );
+        let after = operator.checkpoint(crate::Epoch::INITIAL).unwrap();
+        assert_eq!(before.inline_metadata, after.inline_metadata);
+        assert!(Arc::ptr_eq(
+            &before.segments["input"].bytes_arc(),
+            &after.segments["input"].bytes_arc()
+        ));
+        assert_eq!(
+            operator.incremental.as_ref().unwrap().groups[0].states[0][0],
+            ScalarValue::UInt64(Some(count))
+        );
+        operator
+            .process_data("events", input, &context, &mut collector)
+            .await
+            .unwrap();
+        let output = collector.drain("output");
+        assert_eq!(output.len(), 1);
+        let record = &output[0]
+            .as_data()
+            .unwrap()
+            .table_payload()
+            .unwrap()
+            .batches()[0];
+        let result = ScalarValue::try_from_array(record.column(1), 0).unwrap();
+        assert_eq!(
+            BoundaryResult::Value(result),
+            reference_boundary(&plan, Some(count + 1), &value)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sql_decimal_avg_grouped_boundary_rejected_output_rolls_back_and_retries() {
+        boundary_rejected_update(ScalarValue::Decimal32(Some(0), 9, 0), (i32::MAX as u64) + 1)
+            .await;
+        boundary_rejected_update(
+            ScalarValue::Decimal64(Some(0), 18, 0),
+            (i64::MAX as u64) + 1,
+        )
+        .await;
+    }
+
+    fn native_finalizer_peak(expression: &AggregateFunctionExpr, sum: &ScalarValue) -> usize {
+        let count = ScalarValue::UInt64(if sum.is_null() { None } else { Some(1) });
+        let arrays = vec![count.to_array().unwrap(), sum.to_array().unwrap()];
+        let seed_bytes = arrays
+            .iter()
+            .map(|array| array.get_array_memory_size())
+            .sum::<usize>()
+            + arrays.capacity() * size_of::<ArrayRef>();
+        let mut native = expression.create_groups_accumulator().unwrap();
+        let owner_bytes = size_of_val(native.as_ref());
+        native.merge_batch(&arrays, &[0], None, 1).unwrap();
+        let state = native.state(EmitTo::All).unwrap();
+        let state_bytes = state
+            .iter()
+            .map(|array| array.get_array_memory_size())
+            .sum::<usize>()
+            + state.capacity() * size_of::<ArrayRef>();
+        let mut result_owner = expression.create_groups_accumulator().unwrap();
+        result_owner.merge_batch(&arrays, &[0], None, 1).unwrap();
+        let result = result_owner.evaluate(EmitTo::All).unwrap();
+        seed_bytes + state_bytes + 2 * owner_bytes + result.get_array_memory_size()
+    }
+
+    async fn assert_native_finalizer_lease(value: ScalarValue) {
+        use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryConsumer, MemoryPool};
+        let (mut plan, record) = boundary_plan(&value, true).await;
+        let peak = native_finalizer_peak(&plan.aggregates[0], &value);
+        assert!(peak <= plan.finalizer_bytes);
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+        plan.reservation = MemoryConsumer::new("finalizer-test").register(&pool);
+        plan.reservation.try_grow(plan.plan_bytes).unwrap();
+        let job = crate::StreamJobContext::new(
+            1,
+            "finalizer-test",
+            crate::JsonMap::new(),
+            None,
+            crate::CancellationToken::new(),
+        );
+        let context = StreamOperatorContext::new(&job, "totals", None);
+        let input = Batch::table(vec![record], crate::BatchMetadata::default()).unwrap();
+        let transaction = plan.update(&input, &context, "totals").await.unwrap();
+        let Transaction {
+            _reservation: lease,
+            ..
+        } = &transaction;
+        assert!(lease.size() >= 4096 + plan.finalizer_bytes);
+        let pressure = MemoryConsumer::new("pressure").register(&pool);
+        pressure.try_grow((1 << 20) - pool.reserved()).unwrap();
+        assert_eq!(pool.reserved(), 1 << 20);
+        drop(transaction);
+        assert!(pool.reserved() < 1 << 20);
+        assert!(plan.groups.is_empty());
+        drop(pressure);
+        drop(plan);
+        assert_eq!(pool.reserved(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_sql_decimal_avg_native_finalizer_peak_is_prepaid_until_transaction_drops() {
+        for value in [
+            ScalarValue::Decimal32(Some(8), 9, 0),
+            ScalarValue::Decimal64(Some(8), 18, 0),
+            ScalarValue::Decimal128(Some(8), 38, 0),
+            ScalarValue::Decimal256(
+                Some(datafusion::arrow::datatypes::i256::from_i128(8)),
+                76,
+                0,
+            ),
+        ] {
+            let null = ScalarValue::try_from(&value.data_type()).unwrap();
+            assert_native_finalizer_lease(value).await;
+            assert_native_finalizer_lease(null).await;
+        }
+    }
 
     #[test]
     fn test_sql_incremental_touched_map_growth_fits_prepaid_containers() {

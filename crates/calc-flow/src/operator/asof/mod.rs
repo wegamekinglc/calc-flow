@@ -9,6 +9,7 @@ mod identity;
 mod identity_compare;
 mod metadata;
 mod output;
+mod output_plan;
 mod schema;
 mod spec;
 mod state;
@@ -103,9 +104,15 @@ impl StreamAsofJoinOperator {
             .prepare_right_admission_copies(&admission.right_capacities, context)
             .await
             .map_err(|error| self.attempt_error(error))?;
+        let storage = self
+            .state
+            .right
+            .prepare_storage(&admission.right_capacities, &self.runtime.pool, &self.name)
+            .map_err(|error| self.attempt_error(error))?;
         context.check_cancelled()?;
         // Everything after this point is synchronous and infallible. A dropped
         // future or failed preflight cannot expose a partially admitted row.
+        storage.install(&mut self.state.right);
         copies.install(&mut self.state.right);
         self.state.batches.reserve_admission(batches);
         admission.install(ingress, &mut self.state, &mut status);

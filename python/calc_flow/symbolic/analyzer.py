@@ -2767,6 +2767,7 @@ def explain_program(program: object, runtime: object, mode: object, /) -> str:
     issues = analyzer.issues
     if not issues:
         from calc_flow.errors import CompileError
+        from calc_flow.symbolic.asof_analysis import default_state_layout
         from calc_flow.symbolic.lower import lower_program_document
         from calc_flow.symbolic.optimizer import explain_optimization
 
@@ -2775,7 +2776,11 @@ def explain_program(program: object, runtime: object, mode: object, /) -> str:
         except CompileError:
             pass
         else:
-            lines.extend(explain_optimization(document))
+            lines.extend(
+                explain_optimization(
+                    document, asof_state_layout=default_state_layout(capabilities)
+                )
+            )
     if issues:
         lines.append("  issues")
         lines.extend(

@@ -1,6 +1,12 @@
 use super::{
-    StreamAsofJoinOperator, StreamAsofJoinStatus, SweepStamp, checked, reason,
-    state::{self, BatchKey, LeftPrefix, PayloadView},
+    StreamAsofJoinOperator, StreamAsofJoinStatus, SweepStamp, checked,
+    output_plan::{OutputPlan, OutputPlanBuilder},
+    reason,
+    state::{self, LeftPrefix},
+};
+#[cfg(test)]
+use super::{
+    state::{BatchKey, PayloadView},
     workspace::{ColumnWorkspace, OutputColumns},
 };
 use crate::{
@@ -9,7 +15,9 @@ use crate::{
 };
 use ahash::RandomState;
 use datafusion::execution::memory_pool::MemoryReservation;
-use std::collections::{BTreeMap, HashMap};
+#[cfg(test)]
+use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 mod prefix;
 
@@ -22,8 +30,8 @@ struct PreparedOutput {
     prefix: LeftPrefix,
 }
 
-struct MatchedPrefix<'a> {
-    rows: Vec<(PayloadView<'a>, Option<PayloadView<'a>>)>,
+struct MatchedPrefix {
+    plan: OutputPlan,
     prefix: LeftPrefix,
 }
 
@@ -141,13 +149,9 @@ impl StreamAsofJoinOperator {
         let preview =
             self.state
                 .preview_eviction(&self.status, self.spec.tolerance_micros(), &self.name)?;
-        let (length, inventory, bytes) = self.state.project_capacity_eviction(
-            self.capacity_snapshot(),
-            &preview,
-            &self.status,
-            self.spec.tolerance_micros(),
-            &self.name,
-        )?;
+        let (length, inventory, bytes) =
+            self.state
+                .project_capacity_eviction(self.capacity_snapshot(), &preview, &self.name)?;
         self.check_inventory_limits(&inventory)?;
         Ok((preview, length, inventory, bytes))
     }
@@ -161,15 +165,27 @@ impl StreamAsofJoinOperator {
         let staging = self.reserve_capacity_eviction_staging()?;
         let (preview, length, inventory, bytes) = self.capacity_eviction_projection()?;
         let columns = self.reserve_workspace(bytes)?;
+        let dictionary = self.state.right.prepare_compaction(
+            self.state.right.len() - preview.projected_right.0,
+            &columns,
+            &self.runtime.pool,
+            &self.name,
+        )?;
         let status = self.capacity_progress_status(&preview, &inventory, frontier)?;
         let pool = self
             .prepare_pool_compaction(&preview.batches, context)
             .await?;
-        let copies = self.checked_right_eviction_copies(context).await?;
+        let copies = self
+            .checked_right_eviction_copies(&preview.selected, context)
+            .await?;
         copies.install(&mut self.state.right);
-        let evicted =
-            self.state
-                .evict_prepared(&status, self.spec.tolerance_micros(), pool, &preview);
+        let evicted = self.state.evict_prepared(
+            &status,
+            self.spec.tolerance_micros(),
+            pool,
+            dictionary,
+            &preview,
+        );
         debug_assert_eq!(evicted, preview.evicted_payloads);
         self.status = status;
         self.prepared = None;
@@ -183,19 +199,26 @@ impl StreamAsofJoinOperator {
                 + if length == 0 { 0 } else { length + 256 },
             self.status.state_bytes
         );
-        drop((columns, staging));
+        drop((preview, columns, staging));
         Ok(())
     }
 
     fn reserve_capacity_eviction_staging(&self) -> Result<MemoryReservation> {
-        self.reserve_workspace(self.state.eviction_workspace_bytes(&self.name)?)
+        self.reserve_workspace(self.state.eviction_workspace_bytes(
+            &self.status,
+            self.spec.tolerance_micros(),
+            &self.name,
+        )?)
     }
 
     async fn checked_right_eviction_copies(
         &self,
+        selected: &[u32],
         context: &StreamOperatorContext<'_>,
     ) -> Result<super::copy::PreparedRightCopies> {
-        let copies = self.prepare_right_eviction_copies(context).await?;
+        let copies = self
+            .prepare_right_eviction_copies(selected, context)
+            .await?;
         context.check_cancelled()?;
         Ok(copies)
     }
@@ -258,32 +281,18 @@ impl StreamAsofJoinOperator {
         context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedOutput> {
         let cursor_workspace = self.cursor_workspace(count)?;
-        let MatchedPrefix { rows, prefix } = match_output_prefix(
-            &self.state,
-            count,
-            self.spec.tolerance_micros(),
-            context,
-            &self.name,
-            cursor_workspace,
-        )?;
+        let mut workspace = self.reserve_workspace(0)?;
+        let MatchedPrefix { plan, prefix } =
+            match_output_prefix(self, count, context, cursor_workspace, &mut workspace).await?;
         context.check_cancelled()?;
-        let matched = rows.iter().filter(|(_, right)| right.is_some()).count() as u64;
-        let mut workspace = self.reserve_workspace(16 * 1024)?;
-        let bytes = output_workspace(
-            &rows,
-            &self.schemas[1],
-            self.output_columns.as_ref(),
-            &mut workspace,
-            &self.name,
-        )?;
-        let remaining = bytes.saturating_sub(workspace.size() as u64);
-        grow_output_workspace(&mut workspace, remaining, &self.name)?;
+        let matched = plan.matched;
         let (result, workspace) = self
             .runtime
-            .materialize(
-                &rows,
+            .materialize_plan(
+                plan,
                 self.outputs[0].schema().expect("exact ASOF output"),
                 workspace,
+                &self.name,
                 || context.check_cancelled(),
             )
             .await?;
@@ -325,80 +334,95 @@ impl StreamAsofJoinOperator {
     }
 }
 
-fn match_output_prefix<'a>(
-    state: &'a state::State,
+async fn match_output_prefix(
+    operator: &StreamAsofJoinOperator,
     count: usize,
-    tolerance: u64,
     context: &StreamOperatorContext<'_>,
-    name: &str,
     cursor_workspace: Option<MemoryReservation>,
-) -> Result<MatchedPrefix<'a>> {
-    let matched = if cursor_workspace.is_some() {
-        monotonic_candidate_rows(state, count, tolerance, context, name)?
+    workspace: &mut MemoryReservation,
+) -> Result<MatchedPrefix> {
+    let mut plan = OutputPlanBuilder::new(
+        count,
+        operator.output_columns.as_ref(),
+        workspace,
+        &operator.name,
+    )?;
+    let prefix = if cursor_workspace.is_some() {
+        monotonic_candidate_rows(operator, count, context, &mut plan, workspace).await?
     } else {
-        binary_search_candidate_rows(state, count, tolerance, context, name)?
+        binary_search_candidate_rows(operator, count, context, &mut plan, workspace).await?
     };
     drop(cursor_workspace);
-    Ok(matched)
+    let plan = plan.finish(&operator.schemas[1], workspace, &operator.name)?;
+    Ok(MatchedPrefix { plan, prefix })
 }
 
-fn binary_search_candidate_rows<'a>(
-    state: &'a state::State,
+async fn binary_search_candidate_rows(
+    operator: &StreamAsofJoinOperator,
     count: usize,
-    tolerance: u64,
     context: &StreamOperatorContext<'_>,
-    name: &str,
-) -> Result<MatchedPrefix<'a>> {
-    let mut rows = Vec::with_capacity(count);
+    plan: &mut OutputPlanBuilder<'_>,
+    workspace: &mut MemoryReservation,
+) -> Result<LeftPrefix> {
+    let state = &operator.state;
+    let tolerance = operator.spec.tolerance_micros();
     let mut prefix = LeftPrefix::default();
     for (index, (key, left)) in state.left.output_iter().take(count).enumerate() {
-        if index % 1_024 == 0 {
-            context.check_cancelled()?;
-        }
+        check_match_progress(index, context).await?;
         let left = state.batches.view(left);
-        rows.push((
-            left,
-            state
-                .candidate(key.1, *key.0, tolerance)
-                .map(|row| state.batches.view(*row)),
-        ));
-        prefix.visit_owners(key.1, key.2, left.batch.key, name)?;
+        let right = state
+            .candidate(key.1, *key.0, tolerance)
+            .map(|row| state.batches.view(*row));
+        plan.push(left, right, workspace, &operator.name)?;
+        prefix.visit_owners(key.1, key.2, left.batch.key, &operator.name)?;
     }
-    Ok(MatchedPrefix { rows, prefix })
+    Ok(prefix)
 }
 
-fn monotonic_candidate_rows<'a>(
-    state: &'a state::State,
+async fn monotonic_candidate_rows(
+    operator: &StreamAsofJoinOperator,
     count: usize,
-    tolerance: u64,
     context: &StreamOperatorContext<'_>,
-    name: &str,
-) -> Result<MatchedPrefix<'a>> {
-    let first_time = state
+    plan: &mut OutputPlanBuilder<'_>,
+    workspace: &mut MemoryReservation,
+) -> Result<LeftPrefix> {
+    let state = &operator.state;
+    let first_time = *state
         .left
         .first_key_value()
         .expect("nonempty ASOF prefix")
         .0
         .0;
-    let first_time = *first_time;
     let mut cursors = HashMap::with_capacity_and_hasher(state.right.len(), RandomState::new());
     for (key, bucket) in &state.right {
         cursors.insert(key.clone(), (bucket, bucket.cursor_at(first_time)));
     }
-    let mut rows = Vec::with_capacity(count);
     let mut prefix = LeftPrefix::default();
     for (index, (key, left)) in state.left.output_iter().take(count).enumerate() {
-        if index % 1_024 == 0 {
-            context.check_cancelled()?;
-        }
-        let right = cursors
-            .get_mut(key.1)
-            .and_then(|(bucket, next)| bucket.candidate_monotonic(*key.0, tolerance, next));
+        check_match_progress(index, context).await?;
+        let right = cursors.get_mut(key.1).and_then(|(bucket, next)| {
+            bucket.candidate_monotonic(*key.0, operator.spec.tolerance_micros(), next)
+        });
         let left = state.batches.view(left);
-        rows.push((left, right.map(|row| state.batches.view(*row))));
-        prefix.visit_owners(key.1, key.2, left.batch.key, name)?;
+        plan.push(
+            left,
+            right.map(|row| state.batches.view(*row)),
+            workspace,
+            &operator.name,
+        )?;
+        prefix.visit_owners(key.1, key.2, left.batch.key, &operator.name)?;
     }
-    Ok(MatchedPrefix { rows, prefix })
+    Ok(prefix)
+}
+
+async fn check_match_progress(index: usize, context: &StreamOperatorContext<'_>) -> Result<()> {
+    if index % 1_024 == 0 {
+        if index > 0 {
+            tokio::task::yield_now().await;
+        }
+        context.check_cancelled()?;
+    }
+    Ok(())
 }
 
 fn retryable(error: &CalcFlowError) -> bool {
@@ -413,9 +437,7 @@ fn retryable(error: &CalcFlowError) -> bool {
 }
 
 fn prefix_workspace_bytes(count: usize) -> u64 {
-    // Candidate references, batch-reference count tree (including a minimum
-    // leaf), and allocator slack. No owned identity vector is constructed.
-    (count * (size_of::<(PayloadView<'_>, Option<PayloadView<'_>>)>() + 640) + 2_048) as u64
+    (count * 640 + 2_048) as u64
 }
 
 fn shrink_prefix_workspace(count: usize, heap_bytes: u64, reservation: &MemoryReservation) {
@@ -424,10 +446,7 @@ fn shrink_prefix_workspace(count: usize, heap_bytes: u64, reservation: &MemoryRe
     reservation.shrink(reservation.size() - needed);
 }
 
-/// Reserve for direct Arrow copies, temporary value-buffer growth, position
-/// spans, and per-source column metadata. The row charge is computed from
-/// actual Arrow slice widths, including repeated right candidates; the fourfold
-/// multiplier covers a growing output buffer and a simultaneous old buffer.
+#[cfg(test)]
 fn output_workspace(
     rows: &[(PayloadView<'_>, Option<PayloadView<'_>>)],
     right_schema: &datafusion::arrow::datatypes::Schema,
@@ -451,6 +470,7 @@ fn output_workspace(
     )
 }
 
+#[cfg(test)]
 fn raw_output_bytes(
     rows: &[(PayloadView<'_>, Option<PayloadView<'_>>)],
     selected: Option<&[Vec<usize>; 2]>,
@@ -475,6 +495,7 @@ fn raw_output_bytes(
     checked(name, left, right)
 }
 
+#[cfg(test)]
 fn raw_side_bytes<'a>(
     rows: impl Iterator<Item = PayloadView<'a>>,
     selected: Option<&[usize]>,
@@ -486,32 +507,49 @@ fn raw_side_bytes<'a>(
     let mut raw = 0;
     while let Some(row) = rows.next() {
         let source = source_columns(&row, selected, columns, workspace, name)?;
-        let bytes = if source.is_fixed_width() {
-            let mut count = 1;
-            while rows
-                .peek()
-                .is_some_and(|next| next.batch.key == row.batch.key)
-            {
-                rows.next();
-                count += 1;
-            }
-            source.fixed_bytes(count, name)?
-        } else {
-            let mut end = row.row + 1;
-            while rows
-                .peek()
-                .is_some_and(|next| next.batch.key == row.batch.key && next.row == end)
-            {
-                rows.next();
-                end += 1;
-            }
-            source.range_bytes(row.row..end, name)?
-        };
+        let bytes = source_run_bytes(row, source, &mut rows, name)?;
         raw = checked(name, raw, bytes)?;
     }
     Ok(raw)
 }
 
+#[cfg(test)]
+fn source_run_bytes<'a>(
+    row: PayloadView<'a>,
+    source: &OutputColumns,
+    rows: &mut std::iter::Peekable<impl Iterator<Item = PayloadView<'a>>>,
+    name: &str,
+) -> Result<u64> {
+    if source.is_fixed_width() {
+        let count = fixed_run_count(row.batch.key, rows);
+        source.fixed_bytes(count, name)
+    } else {
+        let mut end = row.row + 1;
+        while rows
+            .peek()
+            .is_some_and(|next| next.batch.key == row.batch.key && next.row == end)
+        {
+            rows.next();
+            end += 1;
+        }
+        source.range_bytes(row.row..end, name)
+    }
+}
+
+#[cfg(test)]
+fn fixed_run_count<'a>(
+    key: BatchKey,
+    rows: &mut std::iter::Peekable<impl Iterator<Item = PayloadView<'a>>>,
+) -> usize {
+    let mut count = 1;
+    while rows.peek().is_some_and(|next| next.batch.key == key) {
+        rows.next();
+        count += 1;
+    }
+    count
+}
+
+#[cfg(test)]
 fn output_buffer_bytes(
     rows: &[(PayloadView<'_>, Option<PayloadView<'_>>)],
     right_schema: &datafusion::arrow::datatypes::Schema,
@@ -528,6 +566,7 @@ fn output_buffer_bytes(
         .ok_or_else(|| workspace_overflow(name))
 }
 
+#[cfg(test)]
 fn output_bookkeeping_bytes(
     rows: usize,
     columns: &BTreeMap<BatchKey, OutputColumns>,
@@ -546,35 +585,16 @@ fn output_bookkeeping_bytes(
     checked(name, row_scratch, checked(name, source_scratch, 16 * 1024)?)
 }
 
+#[cfg(test)]
 fn null_output_row_bytes(
     schema: &datafusion::arrow::datatypes::Schema,
     selected: Option<&[usize]>,
     name: &str,
 ) -> Result<u64> {
-    use datafusion::arrow::datatypes::DataType;
-    schema
-        .fields()
-        .iter()
-        .enumerate()
-        .filter(|(index, _)| selected.is_none_or(|selected| selected.contains(index)))
-        .try_fold(0, |total, (_, field)| {
-            let data_type = field.data_type();
-            let value_bytes = match data_type {
-                DataType::Null => 0,
-                DataType::Boolean => 1,
-                DataType::Utf8 | DataType::Binary => 4,
-                DataType::LargeUtf8 | DataType::LargeBinary => 8,
-                DataType::FixedSizeBinary(width) => {
-                    u64::try_from(*width).expect("validated ASOF fixed binary width")
-                }
-                _ => data_type
-                    .primitive_width()
-                    .expect("validated flat ASOF type") as u64,
-            };
-            checked(name, total, checked(name, value_bytes, 1)?)
-        })
+    super::output_plan::null_row_bytes(schema, selected, name)
 }
 
+#[cfg(test)]
 fn workspace_overflow(name: &str) -> CalcFlowError {
     reason(
         name,
@@ -593,6 +613,7 @@ fn take_source_probes() -> usize {
     SOURCE_PROBES.with(|probes| probes.replace(0))
 }
 
+#[cfg(test)]
 fn source_columns<'a>(
     row: &PayloadView<'_>,
     selected: Option<&[usize]>,
@@ -605,20 +626,14 @@ fn source_columns<'a>(
     Ok(match cache.entry(row.batch.key) {
         std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
         std::collections::btree_map::Entry::Vacant(entry) => {
+            #[cfg(test)]
+            super::workspace::record_output_source_registration();
             grow_output_workspace(
                 workspace,
                 128 + selected.map_or(row.batch.record.num_columns(), <[usize]>::len) as u64 * 512,
                 name,
             )?;
-            let columns = row
-                .batch
-                .record
-                .columns()
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| selected.is_none_or(|selected| selected.contains(index)))
-                .map(|(_, column)| column)
-                .cloned()
+            let columns = super::output_plan::selected_columns(&row.batch.record, selected)
                 .map(ColumnWorkspace::new)
                 .collect::<Result<Vec<_>>>()?;
             entry.insert(OutputColumns::new(columns, name)?)
@@ -626,6 +641,7 @@ fn source_columns<'a>(
     })
 }
 
+#[cfg(test)]
 fn grow_output_workspace(
     reservation: &mut MemoryReservation,
     bytes: u64,
@@ -682,6 +698,80 @@ mod workspace_tests {
             }),
             row: 0,
         }
+    }
+
+    #[test]
+    fn output_plan_charges_repeated_selected_columns() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            false,
+        )]));
+        let source = payload(
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![7]))])
+                .unwrap(),
+            (0, 0),
+        );
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+        let mut reservation = MemoryConsumer::new("output-test").register(&pool);
+        let selected = [vec![0, 0, 0], Vec::new()];
+        let mut builder =
+            OutputPlanBuilder::new(1, Some(&selected), &mut reservation, "asof").unwrap();
+        builder
+            .push(source.view(), None, &mut reservation, "asof")
+            .unwrap();
+        let plan = builder.finish(&schema, &mut reservation, "asof").unwrap();
+        assert_eq!(plan.raw_bytes, 24);
+        assert_eq!(
+            null_output_row_bytes(&schema, Some(&[0, 0, 0]), "asof").unwrap(),
+            27
+        );
+    }
+
+    #[test]
+    fn output_plan_accounts_shared_source_separately_for_each_side() {
+        use datafusion::arrow::array::StringArray;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("value", DataType::Int64, false),
+            Field::new("text", DataType::Utf8, false),
+        ]));
+        let source = payload(
+            RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(Int64Array::from(vec![7])),
+                    Arc::new(StringArray::from(vec!["longer than an integer"])),
+                ],
+            )
+            .unwrap(),
+            (0, 0),
+        );
+        let expected = source
+            .batch
+            .record
+            .column(0)
+            .to_data()
+            .get_slice_memory_size()
+            .unwrap()
+            + source
+                .batch
+                .record
+                .column(1)
+                .to_data()
+                .get_slice_memory_size()
+                .unwrap();
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+        let mut reservation = MemoryConsumer::new("output-test").register(&pool);
+        let selected = [vec![0], vec![1]];
+        let mut builder =
+            OutputPlanBuilder::new(1, Some(&selected), &mut reservation, "asof").unwrap();
+        builder
+            .push(source.view(), Some(source.view()), &mut reservation, "asof")
+            .unwrap();
+        let plan = builder
+            .finish(&source.batch.record.schema(), &mut reservation, "asof")
+            .unwrap();
+        assert_eq!(plan.raw_bytes, expected as u64);
     }
 
     #[test]
@@ -773,14 +863,7 @@ mod workspace_tests {
             + 16 * 1024
     }
 
-    #[test]
-    fn output_source_charge_matches_arrow_slices_with_projection_and_repeats() {
-        fn view(source: &state::RowPayload, row: usize) -> PayloadView<'_> {
-            PayloadView {
-                batch: source.batch.as_ref(),
-                row,
-            }
-        }
+    fn mixed_output_record() -> RecordBatch {
         use datafusion::arrow::array::{
             ArrayRef, BinaryArray, BooleanArray, FixedSizeBinaryArray, Float64Array,
             LargeBinaryArray, LargeStringArray, NullArray, StringArray,
@@ -837,7 +920,19 @@ mod workspace_tests {
                 .map(|(i, a)| Field::new(format!("field_{i}"), a.data_type().clone(), true))
                 .collect::<Vec<_>>(),
         ));
-        let record = RecordBatch::try_new(schema.clone(), arrays).unwrap();
+        RecordBatch::try_new(schema, arrays).unwrap()
+    }
+
+    #[test]
+    fn output_source_charge_matches_arrow_slices_with_projection_and_repeats() {
+        fn view(source: &state::RowPayload, row: usize) -> PayloadView<'_> {
+            PayloadView {
+                batch: source.batch.as_ref(),
+                row,
+            }
+        }
+        let record = mixed_output_record();
+        let schema = record.schema();
         let left_a = payload(record.slice(1, 3), (0, 0));
         let left_b = payload(record.clone(), (0, 1));
         let right_a = payload(record.slice(1, 3), (1, 0));
@@ -865,6 +960,34 @@ mod workspace_tests {
             let actual =
                 output_workspace(&rows, &schema, selected.as_ref(), &mut reservation, "asof")
                     .unwrap();
+            let mut builder =
+                OutputPlanBuilder::new(rows.len(), selected.as_ref(), &mut reservation, "asof")
+                    .unwrap();
+            for &(left, right) in &rows {
+                builder.push(left, right, &mut reservation, "asof").unwrap();
+            }
+            let plan = builder.finish(&schema, &mut reservation, "asof").unwrap();
+            let raw = rows
+                .iter()
+                .flat_map(|(left, right)| [(0, Some(*left)), (1, *right)])
+                .filter_map(|(side, row)| row.map(|row| (side, row)))
+                .map(|(side, row)| {
+                    super::super::output_plan::selected_columns(
+                        &row.batch.record,
+                        selected.as_ref().map(|columns| columns[side].as_slice()),
+                    )
+                    .map(|column| {
+                        column
+                            .to_data()
+                            .slice(row.row, 1)
+                            .get_slice_memory_size()
+                            .unwrap() as u64
+                    })
+                    .sum::<u64>()
+                })
+                .sum::<u64>();
+            assert_eq!(plan.raw_bytes, raw);
+            assert_eq!(plan.matched, 6);
             assert_eq!(
                 actual,
                 legacy_workspace_bytes(&rows, &schema, selected.as_ref())
