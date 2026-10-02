@@ -99,6 +99,50 @@ def _rows(table: pa.Table) -> dict[str, list[object]]:
     return table.sort_by([("key", "ascending")]).to_pydict()
 
 
+def _assert_projected_checkpoint(tmp_path: Path) -> None:
+    manifests = sorted((tmp_path / "manifests").glob("manifest-*.json"))
+    assert len(manifests) == 1
+    manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+    entries = [
+        entry
+        for entry in manifest["operators"].values()
+        if "query_sha256" in entry["inline_metadata"]
+    ]
+    assert len(entries) == 1
+    entry = entries[0]
+    metadata = entry["inline_metadata"]
+    assert metadata.get("state_layout", 1) == 2
+    assert metadata["state_accounting"] == 2
+    assert metadata["retained_ordinals"] == [0, 1]
+    assert metadata["rows"] == 3
+    segments = {handle["segment_id"]: handle for handle in entry["segments"]}
+    assert set(segments) == {"input-projected", "logical-schema", "batch-metadata"}
+
+    def body(name: str) -> bytes:
+        handle = segments[name]
+        raw = (tmp_path / "state" / handle["relative_path"]).read_bytes()
+        assert len(raw) == handle["byte_len"]
+        assert hashlib.sha256(raw).hexdigest() == handle["sha256"]
+        return raw
+
+    projected = pa.ipc.open_file(pa.BufferReader(body("input-projected"))).read_all()
+    assert projected.schema.equals(
+        pa.schema(list(_schema())[:2], metadata=_schema().metadata),
+        check_metadata=True,
+    )
+    assert projected.to_pydict() == {"key": ["a", "b", "a"], "value": [1, 2, 3]}
+    assert projected.nbytes < _table(["a", "b", "a"], [1, 2, 3]).nbytes / 100
+    logical = pa.ipc.open_file(pa.BufferReader(body("logical-schema")))
+    assert logical.schema.equals(_schema(), check_metadata=True)
+    assert logical.num_record_batches == 0
+    batch_metadata = json.loads(body("batch-metadata"))
+    assert batch_metadata == {
+        "source": "input",
+        "sequence": 0,
+        "attributes": {"batch": 0, "description": "x" * 8192},
+    }
+
+
 def test_sql_projected_checkpoint_restores_and_continues(tmp_path: Path) -> None:
     offsets: list[int] = []
     sink = _Sink()
@@ -134,49 +178,7 @@ def test_sql_projected_checkpoint_restores_and_continues(tmp_path: Path) -> None
         finally:
             await asyncio.wait_for(first.cancel_async(), 30)
 
-        manifests = sorted((tmp_path / "manifests").glob("manifest-*.json"))
-        assert len(manifests) == 1
-        manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
-        entries = [
-            entry
-            for entry in manifest["operators"].values()
-            if "query_sha256" in entry["inline_metadata"]
-        ]
-        assert len(entries) == 1
-        entry = entries[0]
-        metadata = entry["inline_metadata"]
-        assert metadata.get("state_layout", 1) == 2
-        assert metadata["state_accounting"] == 2
-        assert metadata["retained_ordinals"] == [0, 1]
-        assert metadata["rows"] == 3
-        segments = {handle["segment_id"]: handle for handle in entry["segments"]}
-        assert set(segments) == {"input-projected", "logical-schema", "batch-metadata"}
-
-        def body(name: str) -> bytes:
-            handle = segments[name]
-            raw = (tmp_path / "state" / handle["relative_path"]).read_bytes()
-            assert len(raw) == handle["byte_len"]
-            assert hashlib.sha256(raw).hexdigest() == handle["sha256"]
-            return raw
-
-        projected = pa.ipc.open_file(
-            pa.BufferReader(body("input-projected"))
-        ).read_all()
-        assert projected.schema.equals(
-            pa.schema(list(_schema())[:2], metadata=_schema().metadata),
-            check_metadata=True,
-        )
-        assert projected.to_pydict() == {"key": ["a", "b", "a"], "value": [1, 2, 3]}
-        assert projected.nbytes < _table(["a", "b", "a"], [1, 2, 3]).nbytes / 100
-        logical = pa.ipc.open_file(pa.BufferReader(body("logical-schema")))
-        assert logical.schema.equals(_schema(), check_metadata=True)
-        assert logical.num_record_batches == 0
-        batch_metadata = json.loads(body("batch-metadata"))
-        assert batch_metadata == {
-            "source": "input",
-            "sequence": 0,
-            "attributes": {"batch": 0, "description": "x" * 8192},
-        }
+        _assert_projected_checkpoint(tmp_path)
 
         second_runner = runner(_Source(False, offsets))
         second = await asyncio.wait_for(second_runner.start_async(), 30)
