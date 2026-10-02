@@ -35,7 +35,7 @@ fn record(groups: Vec<ArrayRef>) -> RecordBatch {
 }
 
 fn validate_update(record: &RecordBatch, spec: WindowSpec) -> (usize, usize) {
-    let operator = WindowAggregateOperator::new("window", record.schema(), spec.clone()).unwrap();
+    let operator = WindowAggregateOperator::new("window", record.schema(), spec).unwrap();
     let mut expected = BTreeMap::<Vec<u8>, i128>::new();
     for row in 0..record.num_rows() {
         let mut key = Vec::new();
