@@ -1,8 +1,9 @@
+use datafusion::execution::memory_pool::MemoryReservation;
 use serde_json::Value;
 
 use super::{
-    Batch, OperatorStateSnapshot, Result, RetainedSqlInput, SqlOperator, StateSegment,
-    decode_sql_state, incremental, ipc, metadata, record_copy_reservation, retention,
+    Batch, DataFusionRuntime, OperatorStateSnapshot, Result, RetainedSqlInput, SqlOperator,
+    StateSegment, decode_sql_state, incremental, ipc, metadata, record_copy_reservation, retention,
     sql_state_error,
 };
 
@@ -27,42 +28,45 @@ impl SqlOperator {
         if snapshot.inline_metadata.is_empty() && snapshot.segments.is_empty() {
             return Ok(PreparedSqlRestore { retained: None });
         }
+        self.prepare_nonempty_restore(snapshot, check_cancelled)
+    }
+
+    fn prepare_nonempty_restore(
+        &mut self,
+        snapshot: &OperatorStateSnapshot,
+        check_cancelled: &dyn Fn() -> Result<()>,
+    ) -> Result<PreparedSqlRestore> {
         self.stream_state.runtime()?;
-        let LegacyRestoreInput {
-            projection,
-            segment,
-            rows,
-            bytes,
-        } = self.legacy_restore_input(snapshot)?;
-        let projected = projection.is_some();
+        let input = self.legacy_restore_input(snapshot)?;
         let runtime = self.retention_runtime()?;
-        let backing = runtime.incremental_reservation(&self.name);
-        let decode_bytes =
-            incremental::checked_bytes(4096, [(segment.bytes().len(), 4)], &self.name)?;
-        incremental::ensure_reservation(&backing, decode_bytes, &self.name)?;
+        let backing = reserve_restore_decode(runtime, &input.segment, &self.name)?;
+        let (batch, metadata_segment, copies) =
+            self.decode_restore_batch(snapshot, &input, runtime, check_cancelled)?;
+        let retained =
+            self.prepare_restored_input(&batch, input, metadata_segment, backing, copies, runtime)?;
         check_cancelled()?;
-        let mut batch = decode_sql_state(segment.bytes())?;
+        Ok(PreparedSqlRestore {
+            retained: Some(retained),
+        })
+    }
+
+    fn decode_restore_batch(
+        &self,
+        snapshot: &OperatorStateSnapshot,
+        input: &LegacyRestoreInput,
+        runtime: &DataFusionRuntime,
+        check_cancelled: &dyn Fn() -> Result<()>,
+    ) -> Result<(
+        Batch,
+        Option<std::sync::Arc<metadata::SqlMetadata>>,
+        MemoryReservation,
+    )> {
         check_cancelled()?;
-        let mut metadata_segment = None;
-        if let Some(projection) = &projection {
-            if batch.table_payload()?.schema() != projection.columns.physical_schema() {
-                return Err(sql_state_error(
-                    "SQL checkpoint physical schema does not match its trusted dependencies",
-                ));
-            }
-            let (metadata, encoded) =
-                metadata::decode(runtime, &snapshot.segments["batch-metadata"], &self.name)?;
-            batch = Batch::table(batch.table_payload()?.batches().to_vec(), metadata)?;
-            metadata_segment = Some(encoded);
-        } else if self.input_ports[0]
-            .schema()
-            .is_some_and(|schema| schema != batch.table_payload().expect("decoded table").schema())
-        {
-            return Err(sql_state_error(
-                "SQL legacy logical schema does not match the declared input",
-            ));
-        }
-        self.validate_checkpoint_charge(&batch, rows, bytes)?;
+        let batch = decode_sql_state(input.segment.bytes())?;
+        check_cancelled()?;
+        let (batch, metadata_segment) =
+            self.validate_restore_schema(batch, snapshot, input, runtime)?;
+        self.validate_checkpoint_charge(&batch, input.rows, input.bytes)?;
         let table = batch.table_payload()?;
         let copies = record_copy_reservation(
             runtime,
@@ -71,6 +75,65 @@ impl SqlOperator {
             table.schema().fields().len(),
             1,
         )?;
+        Ok((batch, metadata_segment, copies))
+    }
+
+    fn validate_restore_schema(
+        &self,
+        batch: Batch,
+        snapshot: &OperatorStateSnapshot,
+        input: &LegacyRestoreInput,
+        runtime: &DataFusionRuntime,
+    ) -> Result<(Batch, Option<std::sync::Arc<metadata::SqlMetadata>>)> {
+        if let Some(projection) = &input.projection {
+            self.decode_projected_restore_batch(&batch, snapshot, projection, runtime)
+        } else if self.input_ports[0]
+            .schema()
+            .is_some_and(|schema| schema != batch.table_payload().expect("decoded table").schema())
+        {
+            Err(sql_state_error(
+                "SQL legacy logical schema does not match the declared input",
+            ))
+        } else {
+            Ok((batch, None))
+        }
+    }
+
+    fn decode_projected_restore_batch(
+        &self,
+        batch: &Batch,
+        snapshot: &OperatorStateSnapshot,
+        projection: &retention::SqlProjection,
+        runtime: &DataFusionRuntime,
+    ) -> Result<(Batch, Option<std::sync::Arc<metadata::SqlMetadata>>)> {
+        if batch.table_payload()?.schema() != projection.columns.physical_schema() {
+            return Err(sql_state_error(
+                "SQL checkpoint physical schema does not match its trusted dependencies",
+            ));
+        }
+        let (metadata, encoded) =
+            metadata::decode(runtime, &snapshot.segments["batch-metadata"], &self.name)?;
+        let batch = Batch::table(batch.table_payload()?.batches().to_vec(), metadata)?;
+        Ok((batch, Some(encoded)))
+    }
+
+    fn prepare_restored_input(
+        &self,
+        batch: &Batch,
+        input: LegacyRestoreInput,
+        metadata_segment: Option<std::sync::Arc<metadata::SqlMetadata>>,
+        backing: MemoryReservation,
+        copies: MemoryReservation,
+        runtime: &DataFusionRuntime,
+    ) -> Result<RetainedSqlInput> {
+        let LegacyRestoreInput {
+            projection,
+            segment,
+            rows,
+            bytes,
+        } = input;
+        let projected = projection.is_some();
+        let table = batch.table_payload()?;
         let backing = std::sync::Arc::new(backing);
         let mut retained = RetainedSqlInput {
             records: Vec::new(),
@@ -92,24 +155,12 @@ impl SqlOperator {
         )?;
         retained.records.extend(table.batches().iter().cloned());
         drop(copies);
-        check_cancelled()?;
-        Ok(PreparedSqlRestore {
-            retained: Some(retained),
-        })
+        Ok(retained)
     }
 
     fn legacy_restore_input(&self, snapshot: &OperatorStateSnapshot) -> Result<LegacyRestoreInput> {
         let projected = snapshot.inline_metadata.contains_key("state_layout");
-        let projection = if projected {
-            Some(self.read_projection(snapshot)?)
-        } else {
-            if !self.checkpoint_matches(snapshot) {
-                return Err(sql_state_error(
-                    "SQL aggregate checkpoint does not match this operator",
-                ));
-            }
-            None
-        };
+        let projection = self.legacy_restore_projection(snapshot, projected)?;
         let input_key = if projected {
             "input-projected"
         } else {
@@ -120,16 +171,7 @@ impl SqlOperator {
             .get(input_key)
             .ok_or_else(|| sql_state_error("SQL checkpoint has no retained input segment"))?
             .clone();
-        let rows = snapshot
-            .inline_metadata
-            .get("rows")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| sql_state_error("SQL checkpoint has no row count"))?;
-        let bytes = snapshot
-            .inline_metadata
-            .get("bytes")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| sql_state_error("SQL checkpoint has no byte count"))?;
+        let (rows, bytes) = legacy_restore_counts(snapshot)?;
         Ok(LegacyRestoreInput {
             projection,
             segment,
@@ -138,11 +180,52 @@ impl SqlOperator {
         })
     }
 
+    fn legacy_restore_projection(
+        &self,
+        snapshot: &OperatorStateSnapshot,
+        projected: bool,
+    ) -> Result<Option<std::sync::Arc<retention::SqlProjection>>> {
+        if projected {
+            self.read_projection(snapshot).map(Some)
+        } else if !self.checkpoint_matches(snapshot) {
+            Err(sql_state_error(
+                "SQL aggregate checkpoint does not match this operator",
+            ))
+        } else {
+            Ok(None)
+        }
+    }
+
     pub(crate) fn install_restore(&mut self, prepared: PreparedSqlRestore) {
         self.incremental = None;
         self.incremental_checked = false;
         self.retained = prepared.retained;
     }
+}
+
+fn reserve_restore_decode(
+    runtime: &DataFusionRuntime,
+    segment: &StateSegment,
+    name: &str,
+) -> Result<MemoryReservation> {
+    let backing = runtime.incremental_reservation(name);
+    let decode_bytes = incremental::checked_bytes(4096, [(segment.bytes().len(), 4)], name)?;
+    incremental::ensure_reservation(&backing, decode_bytes, name)?;
+    Ok(backing)
+}
+
+fn legacy_restore_counts(snapshot: &OperatorStateSnapshot) -> Result<(u64, u64)> {
+    let rows = snapshot
+        .inline_metadata
+        .get("rows")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| sql_state_error("SQL checkpoint has no row count"))?;
+    let bytes = snapshot
+        .inline_metadata
+        .get("bytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| sql_state_error("SQL checkpoint has no byte count"))?;
+    Ok((rows, bytes))
 }
 
 #[cfg(test)]
