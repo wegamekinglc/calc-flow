@@ -109,3 +109,6 @@ fn output_plan_reserves_timestamp_timezone_backing() {
     drop((row, builder, credit));
     assert_eq!(pool.reserved(), 0);
 }
+
+#[path = "tests/backing_allocation.rs"]
+mod backing_allocation;

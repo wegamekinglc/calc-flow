@@ -2039,3 +2039,6 @@ mod expiration_index;
 
 #[path = "tests/expiration_output_integration.rs"]
 mod expiration_output_integration;
+
+#[path = "tests/restored_workspace.rs"]
+mod restored_workspace;

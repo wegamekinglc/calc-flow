@@ -11,6 +11,8 @@ use datafusion::{
 };
 use std::{collections::HashMap, sync::Arc};
 
+mod backing;
+
 #[derive(Clone, Copy)]
 pub(super) struct Span {
     pub source: usize,
@@ -208,7 +210,7 @@ impl<'a> SideBuilder<'a> {
         workspace: &mut MemoryReservation,
         name: &str,
     ) -> Result<usize> {
-        grow_workspace(workspace, self.source_credit(row, name)?, name)?;
+        grow_workspace(workspace, self.source_credit(row, workspace, name)?, name)?;
         let descriptors = selected_columns(&row.batch.record, self.selected)
             .map(ColumnWorkspace::new)
             .collect::<Result<Vec<_>>>()?;
@@ -222,7 +224,12 @@ impl<'a> SideBuilder<'a> {
         Ok(source)
     }
 
-    fn source_credit(&self, row: PayloadView<'_>, name: &str) -> Result<u64> {
+    fn source_credit(
+        &self,
+        row: PayloadView<'_>,
+        workspace: &MemoryReservation,
+        name: &str,
+    ) -> Result<u64> {
         let fields = self
             .selected
             .map_or(row.batch.record.num_columns(), <[usize]>::len);
@@ -237,7 +244,11 @@ impl<'a> SideBuilder<'a> {
         let heads = (columns.len() as u64)
             .checked_mul(256)
             .ok_or_else(|| overflow(name))?;
-        let backing = checked(name, row.batch.record.get_array_memory_size() as u64, types)?;
+        let backing = checked(
+            name,
+            backing::source_bytes(&row.batch.record, workspace, name)?,
+            types,
+        )?;
         checked(name, metadata, checked(name, heads, backing)?)
     }
 
