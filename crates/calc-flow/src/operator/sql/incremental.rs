@@ -1672,12 +1672,16 @@ fn eligible(expr: &Expr, schema: &SchemaRef, global: bool) -> bool {
 
 fn aggregate_argument_supported(data_type: &DataType, function: &str, global: bool) -> bool {
     match function {
-        "sum" => exact_numeric(data_type) || data_type == &DataType::Float64,
+        "sum" => {
+            exact_numeric(data_type) || matches!(data_type, DataType::Float32 | DataType::Float64)
+        }
         "min" | "max" => extrema_argument_supported(data_type, global),
         "avg" => matches!(
             data_type,
             DataType::Int64
                 | DataType::UInt64
+                | DataType::Float32
+                | DataType::Float64
                 | DataType::Decimal32(_, 0..)
                 | DataType::Decimal64(_, 0..)
                 | DataType::Decimal128(_, 0..)
