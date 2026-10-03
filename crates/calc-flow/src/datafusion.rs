@@ -1658,3 +1658,7 @@ mod datafusion_grouped_float_diagnostics;
 #[cfg(test)]
 #[path = "datafusion_grouped_float_seed_tests.rs"]
 mod datafusion_grouped_float_seed_tests;
+
+#[cfg(test)]
+#[path = "datafusion_grouped_float_continuation_tests.rs"]
+mod datafusion_grouped_float_continuation_tests;
