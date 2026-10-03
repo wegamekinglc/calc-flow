@@ -61,6 +61,7 @@ mod soak;
     reason = "source integration is exercised through public source bindings"
 )]
 pub(crate) mod source_task;
+mod sql_recovery_work;
 #[allow(
     dead_code,
     reason = "task supervision is an internal continuous-runtime detail"

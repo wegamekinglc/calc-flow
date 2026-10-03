@@ -159,6 +159,7 @@ fn native_inputs(
     OperatorTaskInputs {
         late_output_ports: node.late_output_ports,
         entity_work: None,
+        sql_recovery: None,
         context: context.for_node(&node.node_id).unwrap(),
         node_id: node.node_id,
         operator: node.operator,

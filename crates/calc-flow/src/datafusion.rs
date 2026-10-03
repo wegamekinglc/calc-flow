@@ -385,6 +385,37 @@ impl DataFusionRuntime {
         Ok((raw, analyzed))
     }
 
+    pub(crate) const fn compact_runtime_config(&self) -> DataFusionConfig {
+        self.config
+    }
+
+    pub(crate) fn incremental_sql_plan_sync(
+        &self,
+        query: &ValidatedQuery,
+        alias: &str,
+        schema: SchemaRef,
+        node_id: &str,
+        reservation: datafusion::execution::memory_pool::MemoryReservation,
+    ) -> Result<compact::PaidSqlPlan> {
+        compact::plan(self, query, alias, schema, node_id, reservation)
+    }
+
+    pub(crate) fn retained_sql_plan_sync(
+        &self,
+        query: &ValidatedQuery,
+        alias: &str,
+        schema: SchemaRef,
+        node_id: &str,
+        reservation: datafusion::execution::memory_pool::MemoryReservation,
+    ) -> Result<compact::PaidSqlPlan> {
+        compact::plan_retained(self, query, alias, schema, node_id, reservation)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn incremental_planner_context(&self, rows: usize) -> &SessionContext {
+        self.context_for_rows(rows, None, "not_evaluated")
+    }
+
     pub(crate) fn incremental_reservation(
         &self,
         node_id: &str,
@@ -1612,3 +1643,10 @@ mod tests {
         assert_eq!(decision.limit_reason, "minimum_rows_per_partition");
     }
 }
+
+#[cfg(test)]
+#[path = "datafusion_compact_planner.rs"]
+mod datafusion_compact_planner;
+
+#[path = "datafusion_compact.rs"]
+pub(crate) mod compact;

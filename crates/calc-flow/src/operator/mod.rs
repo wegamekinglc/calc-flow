@@ -13,6 +13,7 @@ pub(crate) mod rolling;
 pub(crate) mod rolling_metrics;
 pub(crate) mod row_cost;
 mod sql;
+pub(crate) use sql::{PreparedSqlCheckpoint, PreparedSqlRestore};
 mod state_budget;
 mod stream;
 mod union;

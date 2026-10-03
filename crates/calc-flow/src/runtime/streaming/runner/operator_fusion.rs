@@ -406,6 +406,7 @@ mod tests {
         OperatorTaskInputs {
             late_output_ports: std::collections::BTreeSet::new(),
             entity_work: None,
+            sql_recovery: None,
             node_id: name.into(),
             operator: crate::pipeline::CompiledStreamOperator::External(Box::new(CallbackProbe {
                 name,

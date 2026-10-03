@@ -184,6 +184,7 @@ fn traced_inputs(
     OperatorTaskInputs {
         late_output_ports: BTreeSet::new(),
         entity_work: None,
+        sql_recovery: None,
         context: context.for_node(&node_id).unwrap(),
         node_id,
         operator: CompiledStreamOperator::External(Box::new(TracedNative {

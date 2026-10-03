@@ -10,7 +10,9 @@ use datafusion::arrow::{
     ipc::{reader::FileReader, writer::FileWriter},
     record_batch::RecordBatch,
 };
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -27,19 +29,26 @@ use super::{
 
 use super::expression::required_input;
 
+#[cfg(test)]
+mod checkpoint_test_hooks;
+mod compact;
+#[cfg(test)]
+mod current_checkpoint_tests;
+mod current_retained;
 mod incremental;
 mod ipc;
 mod metadata;
+#[cfg(test)]
+mod recovery_test_hooks;
 mod restore;
+pub(crate) use restore::PreparedSqlRestore;
 mod retention;
 
 /// A multi-input `DataFusion` SQL operator.
 ///
-/// Batch graphs may use several input aliases. Stream graphs accept exactly
-/// one alias (spec NG6: incremental multi-input joins are undefined); the
-/// single-alias form retains input for cumulative aggregate snapshots
-/// and processes row-level SQL independently for each batch. Call
-/// [`Self::set_state_budget`] to enforce an application-chosen state limit.
+/// Batch graphs may use several input aliases. Stream graphs accept one alias,
+/// emit cumulative aggregate snapshots and process row-level SQL per batch.
+/// Use [`Self::set_state_budget`] to enforce an application-chosen state limit.
 pub struct SqlOperator {
     name: String,
     query: String,
@@ -51,6 +60,8 @@ pub struct SqlOperator {
     stream_state: StreamRuntimeState,
     stream_aggregate: bool,
     retained: Option<RetainedSqlInput>,
+    compact: Option<Box<compact::CompactSqlState>>,
+    retained_capture: Option<std::sync::Arc<current_retained::RetainedCapture>>,
     state_budget: Option<StateBudget>,
     incremental: Option<Box<incremental::IncrementalSql>>,
     incremental_checked: bool,
@@ -58,6 +69,8 @@ pub struct SqlOperator {
     incremental_work: (usize, usize),
     #[cfg(test)]
     retained_handles_copied: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    checkpoint_test_owner: std::sync::OnceLock<std::sync::Arc<()>>,
 }
 
 struct RetainedSqlInput {
@@ -74,28 +87,25 @@ struct RetainedSqlInput {
     bytes: u64,
 }
 
-struct PendingSqlInput {
-    first: Option<RetainedSqlInput>,
-    records: Vec<RecordBatch>,
-    metadata: BatchMetadata,
-    rows: u64,
-    bytes: u64,
-    clear_segment: bool,
-    backing_reservation:
-        Option<std::sync::Arc<datafusion::execution::memory_pool::MemoryReservation>>,
-    _reservation: Option<datafusion::execution::memory_pool::MemoryReservation>,
-}
-
 type RetentionPlans = (
     datafusion::logical_expr::LogicalPlan,
     datafusion::logical_expr::LogicalPlan,
 );
 
-type SqlCheckpointInput = (
-    Vec<RecordBatch>,
-    BatchMetadata,
-    datafusion::execution::memory_pool::MemoryReservation,
-    datafusion::execution::memory_pool::MemoryReservation,
+struct SqlCheckpointInput {
+    records: Vec<RecordBatch>,
+    metadata: BatchMetadata,
+    native: Option<incremental::compact_state::PaidNativeStateRecords>,
+    #[cfg(test)]
+    native_name: Option<String>,
+    reservation: datafusion::execution::memory_pool::MemoryReservation,
+    input_reservation: datafusion::execution::memory_pool::MemoryReservation,
+}
+
+type EncodedSqlState = (
+    Option<std::sync::Arc<ipc::SqlInputSegment>>,
+    Option<std::sync::Arc<metadata::SqlMetadata>>,
+    Option<incremental::compact_state::PaidNativeStateRecords>,
 );
 
 struct PreparedRetention {
@@ -103,19 +113,37 @@ struct PreparedRetention {
     plans: Option<RetentionPlans>,
     backing_reservation:
         Option<std::sync::Arc<datafusion::execution::memory_pool::MemoryReservation>>,
-    migrated: Option<RetainedSqlInput>,
     projection: Option<std::sync::Arc<retention::SqlProjection>>,
     _reservation: Option<datafusion::execution::memory_pool::MemoryReservation>,
 }
 
+pub(crate) struct PreparedSqlCheckpoint {
+    compact: Option<std::sync::Arc<compact::CompactCapture>>,
+    retained: Option<std::sync::Arc<current_retained::RetainedCapture>>,
+}
+
 struct MaterializedSqlInput {
     batch: Batch,
+    native: Option<incremental::compact_state::PaidNativeStateRecords>,
+    #[cfg(test)]
+    native_name: Option<String>,
     _reservation: datafusion::execution::memory_pool::MemoryReservation,
 }
 
 impl MaterializedSqlInput {
     fn batch(&self) -> &Batch {
         &self.batch
+    }
+}
+
+impl PreparedSqlCheckpoint {
+    pub(crate) fn snapshot(&self) -> Result<OperatorStateSnapshot> {
+        match (&self.compact, &self.retained) {
+            (Some(_), Some(_)) => Err(sql_state_error("SQL checkpoint contains both state shapes")),
+            (Some(capture), None) => Ok(capture.snapshot.clone()),
+            (None, Some(capture)) => Ok(capture.snapshot.clone()),
+            (None, None) => Ok(OperatorStateSnapshot::default()),
+        }
     }
 }
 
@@ -164,6 +192,9 @@ impl RetainedSqlInput {
         let batch = Batch::table(records, self.metadata.clone())?;
         Ok(MaterializedSqlInput {
             batch,
+            native: None,
+            #[cfg(test)]
+            native_name: None,
             _reservation: reservation,
         })
     }
@@ -216,12 +247,15 @@ impl RetainedSqlInput {
         let prepared = if self.segment.is_none() {
             let (records, metadata, reservation) =
                 self.checkpoint_records(runtime, name, context).await?;
-            Some((
+            Some(SqlCheckpointInput {
                 records,
                 metadata,
                 reservation,
-                runtime.incremental_reservation(name),
-            ))
+                input_reservation: runtime.incremental_reservation(name),
+                native: None,
+                #[cfg(test)]
+                native_name: None,
+            })
         } else {
             None
         };
@@ -293,6 +327,8 @@ impl Clone for SqlOperator {
             stream_state: self.stream_state.clone(),
             stream_aggregate: self.stream_aggregate,
             retained: None,
+            compact: None,
+            retained_capture: None,
             state_budget: self.state_budget,
             incremental: None,
             incremental_checked: false,
@@ -300,6 +336,8 @@ impl Clone for SqlOperator {
             incremental_work: (0, 0),
             #[cfg(test)]
             retained_handles_copied: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            checkpoint_test_owner: std::sync::OnceLock::new(),
         }
     }
 }
@@ -363,6 +401,8 @@ impl SqlOperator {
             stream_state: StreamRuntimeState::new(),
             stream_aggregate,
             retained: None,
+            compact: None,
+            retained_capture: None,
             state_budget: None,
             incremental: None,
             incremental_checked: false,
@@ -370,6 +410,8 @@ impl SqlOperator {
             incremental_work: (0, 0),
             #[cfg(test)]
             retained_handles_copied: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            checkpoint_test_owner: std::sync::OnceLock::new(),
         })
     }
 
@@ -484,6 +526,10 @@ impl SqlOperator {
             self.retained
                 .as_ref()
                 .is_some_and(|state| !budget.allows(state.rows, state.bytes))
+                || self
+                    .compact
+                    .as_ref()
+                    .is_some_and(|state| !budget.allows(state.ledger.rows, state.ledger.bytes))
         }) {
             return Err(CalcFlowError::InvalidArgument {
                 field: "sql.state_budget".into(),
@@ -509,12 +555,14 @@ impl SqlOperator {
         alias: &str,
         context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedRetention> {
+        if let Some(state) = &self.compact {
+            state.check_input(self, &batch)?;
+        }
         if !self.can_project_retention() {
             return Ok(PreparedRetention {
                 batch,
                 plans: None,
                 backing_reservation: None,
-                migrated: None,
                 projection: None,
                 _reservation: None,
             });
@@ -528,7 +576,6 @@ impl SqlOperator {
                 batch,
                 plans: None,
                 backing_reservation: None,
-                migrated: None,
                 projection: None,
                 _reservation: None,
             });
@@ -540,17 +587,10 @@ impl SqlOperator {
             &projection,
         )?;
         let (projected, backing_reservation) = self.detach_backing(projected)?;
-        let migrated = self
-            .retained
-            .as_ref()
-            .filter(|state| state.projection.is_none())
-            .map(|state| self.project_legacy(state, &projection))
-            .transpose()?;
         Ok(PreparedRetention {
             batch: projected,
             plans,
             backing_reservation,
-            migrated,
             projection: Some(projection),
             _reservation: Some(reservation),
         })
@@ -559,6 +599,10 @@ impl SqlOperator {
     fn can_project_retention(&self) -> bool {
         self.stream_aggregate
             && self.udfs.is_empty()
+            && self
+                .compact
+                .as_ref()
+                .is_none_or(|state| state.projection().is_some())
             && !self
                 .retained
                 .as_ref()
@@ -578,7 +622,12 @@ impl SqlOperator {
         let existing = self
             .retained
             .as_ref()
-            .and_then(|state| state.projection.clone());
+            .and_then(|state| state.projection.clone())
+            .or_else(|| {
+                self.compact
+                    .as_deref()
+                    .and_then(compact::CompactSqlState::projection)
+            });
         let mut plans = None;
         let projection = if let Some(projection) = existing {
             Some(projection)
@@ -678,55 +727,57 @@ impl SqlOperator {
         Ok((reservation, bound))
     }
 
-    fn project_legacy(
+    pub(crate) fn prepare_checkpoint_work(
         &self,
-        state: &RetainedSqlInput,
-        projection: &std::sync::Arc<retention::SqlProjection>,
-    ) -> Result<RetainedSqlInput> {
-        let runtime = self.retention_runtime()?;
-        let (copies, projected) =
-            self.project_retained_records(runtime, &state.records, &state.metadata, projection)?;
-        let (projected, backing) = self.detach_backing(projected)?;
-        let bytes = self.projected_legacy_charge(&projected, state.rows)?;
-        let mut migrated = RetainedSqlInput {
-            records: Vec::new(),
-            metadata: state.metadata.clone(),
-            projection: Some(projection.clone()),
-            projection_checked: true,
-            backing_reservations: backing.map_or_else(
-                || state.backing_reservations.clone(),
-                |reservation| vec![reservation],
-            ),
-            reservation: None,
-            segment: None,
-            metadata_segment: None,
-            rows: state.rows,
-            bytes,
-        };
-        let records = projected.table_payload()?.batches();
-        migrated.reserve_append(
-            records.len(),
-            runtime,
-            &self.name,
-            projection.columns.ordinals().len(),
-        )?;
-        migrated.records.extend_from_slice(records);
-        drop(copies);
-        Ok(migrated)
+        check_cancelled: &dyn Fn() -> Result<()>,
+    ) -> Result<PreparedSqlCheckpoint> {
+        #[cfg(test)]
+        let _test_exit = checkpoint_test_hooks::WorkExit::new(self);
+        check_cancelled()?;
+        let compact = self
+            .compact
+            .as_ref()
+            .map(|state| {
+                compact::prepare_capture(
+                    self,
+                    state,
+                    self.incremental.as_ref().expect("compact native plan"),
+                    check_cancelled,
+                )
+            })
+            .transpose()?;
+        let retained = self
+            .retained
+            .as_ref()
+            .map(|state| {
+                self.retained_capture.as_ref().map_or_else(
+                    || current_retained::capture(self, state, check_cancelled),
+                    |capture| Ok(capture.clone()),
+                )
+            })
+            .transpose()?;
+        #[cfg(test)]
+        if let Some(capture) = &compact {
+            checkpoint_test_hooks::prepared(self, capture)?;
+        }
+        check_cancelled()?;
+        Ok(PreparedSqlCheckpoint { compact, retained })
     }
 
-    fn projected_legacy_charge(&self, projected: &Batch, rows: u64) -> Result<u64> {
-        let bytes = u64::try_from(projected.estimated_bytes()?)
-            .map_err(|_| sql_state_error("projected byte charge exceeds u64"))?;
-        if self
-            .state_budget
-            .is_some_and(|budget| !budget.allows(rows, bytes))
-        {
-            return Err(sql_state_error(
-                "projected legacy input exceeds the state budget",
-            ));
+    pub(crate) fn install_checkpoint_work(&mut self, prepared: PreparedSqlCheckpoint) {
+        #[cfg(test)]
+        let observed_compact = prepared.compact.is_some();
+        if let Some(capture) = prepared.compact {
+            self.compact
+                .as_mut()
+                .expect("capture retains its original operator")
+                .capture = Some(capture);
         }
-        Ok(bytes)
+        self.retained_capture = prepared.retained;
+        #[cfg(test)]
+        if observed_compact {
+            checkpoint_test_hooks::installed(self);
+        }
     }
 
     fn query_digest(&self) -> String {
@@ -783,7 +834,7 @@ impl SqlOperator {
 
     fn accumulate(&self, prepared: &PreparedRetention) -> Result<RetainedSqlInput> {
         let batch = &prepared.batch;
-        let previous = prepared.migrated.as_ref().or(self.retained.as_ref());
+        let previous = self.retained.as_ref();
         let (rows, bytes) = self.accumulated_charge(batch, previous)?;
         let table = batch.table_payload()?;
         let count = previous
@@ -833,108 +884,6 @@ impl SqlOperator {
         })
     }
 
-    fn read_projection(
-        &self,
-        snapshot: &OperatorStateSnapshot,
-    ) -> Result<std::sync::Arc<retention::SqlProjection>> {
-        if !self.projection_checkpoint_matches(snapshot) {
-            return Err(sql_state_error(
-                "SQL pruned checkpoint identity or inventory is invalid",
-            ));
-        }
-        let runtime = self.retention_runtime()?;
-        let (_schema_workspace, schema) = self.read_projection_schema(snapshot, runtime)?;
-        let [alias] = self.aliases.as_slice() else {
-            return Err(sql_state_error("SQL pruned restore requires one alias"));
-        };
-        let projection = retention::SqlProjection::resolve(
-            self.retention_runtime()?,
-            &self.validated,
-            alias,
-            schema,
-            &self.name,
-        )?;
-        validate_projection_descriptor(snapshot, projection)
-    }
-
-    fn projection_checkpoint_matches(&self, snapshot: &OperatorStateSnapshot) -> bool {
-        let fields = [
-            "query_sha256",
-            "rows",
-            "bytes",
-            "state_layout",
-            "state_accounting",
-            "retained_ordinals",
-            "dependency_sha256",
-            "physical_schema_sha256",
-            "batch_metadata_sha256",
-        ];
-        self.stream_aggregate
-            && self.udfs.is_empty()
-            && snapshot.inline_metadata.len() == fields.len()
-            && fields
-                .iter()
-                .all(|field| snapshot.inline_metadata.contains_key(*field))
-            && snapshot.inline_metadata["state_layout"] == json!(2)
-            && snapshot.inline_metadata["state_accounting"] == json!(2)
-            && snapshot.inline_metadata["query_sha256"] == json!(self.query_digest())
-            && projection_checkpoint_segments_match(snapshot)
-    }
-
-    fn read_projection_schema(
-        &self,
-        snapshot: &OperatorStateSnapshot,
-        runtime: &DataFusionRuntime,
-    ) -> Result<(
-        datafusion::execution::memory_pool::MemoryReservation,
-        SchemaRef,
-    )> {
-        let schema_workspace = runtime.incremental_reservation(&self.name);
-        incremental::ensure_reservation(
-            &schema_workspace,
-            incremental::checked_bytes(
-                8192,
-                [(snapshot.segments["logical-schema"].bytes().len(), 8)],
-                &self.name,
-            )?,
-            &self.name,
-        )?;
-        let schema = retention::decode_schema(&snapshot.segments["logical-schema"])?;
-        if self.input_ports[0]
-            .schema()
-            .is_some_and(|expected| *expected != schema)
-        {
-            return Err(sql_state_error(
-                "SQL checkpoint logical schema differs from the declared input",
-            ));
-        }
-        Ok((schema_workspace, schema))
-    }
-
-    fn checkpoint_matches(&self, snapshot: &OperatorStateSnapshot) -> bool {
-        let fields = [
-            "query_sha256",
-            "rows",
-            "bytes",
-            "state_layout",
-            "state_accounting",
-            "batch_metadata_sha256",
-        ];
-        self.stream_aggregate
-            && snapshot.inline_metadata.len() == fields.len()
-            && fields
-                .iter()
-                .all(|field| snapshot.inline_metadata.contains_key(*field))
-            && snapshot.inline_metadata["state_layout"] == json!(2)
-            && snapshot.inline_metadata["state_accounting"] == json!(2)
-            && snapshot.inline_metadata["query_sha256"] == json!(self.query_digest())
-            && snapshot.segments.len() == 2
-            && snapshot.segments.contains_key("input")
-            && snapshot.segments.contains_key("batch-metadata")
-            && snapshot.inline_metadata["batch_metadata_sha256"]
-                == json!(snapshot.segments["batch-metadata"].sha256())
-    }
-
     fn validate_checkpoint_charge(&self, batch: &Batch, rows: u64, bytes: u64) -> Result<()> {
         let actual_rows = u64::try_from(batch.num_rows())
             .map_err(|_| sql_state_error("restored row count exceeds u64"))?;
@@ -958,7 +907,6 @@ impl SqlOperator {
         alias: &str,
         batch: &Batch,
         context: &StreamOperatorContext<'_>,
-        migrated: Option<&RetainedSqlInput>,
         plans: Option<(
             datafusion::logical_expr::LogicalPlan,
             datafusion::logical_expr::LogicalPlan,
@@ -967,15 +915,14 @@ impl SqlOperator {
         if self.incremental_checked {
             return Ok(None);
         }
-        let mut initialized = self.plan_incremental(alias, batch, migrated, plans).await?;
+        let mut initialized = self.plan_incremental(alias, batch, plans).await?;
         context.check_cancelled()?;
         if let Some(incremental) = initialized.as_mut() {
             #[cfg(test)]
             {
                 self.incremental_work.1 += 1;
             }
-            self.rebuild_incremental(incremental, context, migrated)
-                .await?;
+            self.rebuild_incremental(incremental, context).await?;
         } else {
             self.incremental_checked = true;
         }
@@ -986,13 +933,12 @@ impl SqlOperator {
         &mut self,
         alias: &str,
         batch: &Batch,
-        migrated: Option<&RetainedSqlInput>,
         plans: Option<(
             datafusion::logical_expr::LogicalPlan,
             datafusion::logical_expr::LogicalPlan,
         )>,
     ) -> Result<Option<Box<incremental::IncrementalSql>>> {
-        let schema = migrated.or(self.retained.as_ref()).map_or_else(
+        let schema = self.retained.as_ref().map_or_else(
             || batch.table_payload().map(|table| table.schema().clone()),
             |state| Ok(state.records[0].schema()),
         )?;
@@ -1022,9 +968,8 @@ impl SqlOperator {
         &mut self,
         incremental: &mut incremental::IncrementalSql,
         context: &StreamOperatorContext<'_>,
-        migrated: Option<&RetainedSqlInput>,
     ) -> Result<()> {
-        if let Some(retained) = migrated.or(self.retained.as_ref()) {
+        if let Some(retained) = self.retained.as_ref() {
             let runtime = self.stream_state.runtime()?;
             let materialized = retained.materialize(runtime, &self.name)?;
             let transaction = incremental
@@ -1041,97 +986,13 @@ impl SqlOperator {
 
     async fn process_incremental(
         &mut self,
-        mut prepared: PreparedRetention,
-        mut initialized: Option<Box<incremental::IncrementalSql>>,
+        prepared: PreparedRetention,
+        initialized: Option<Box<incremental::IncrementalSql>>,
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
-        let pending = self.prepare_incremental_input(&mut prepared)?;
-        let batch = prepared.batch;
-        let incremental = initialized
-            .as_mut()
-            .or(self.incremental.as_mut())
-            .expect("checked incremental plan");
-        let runtime = self.stream_state.runtime()?;
-        let transaction = incremental.update(&batch, context, &self.name).await?;
-        #[cfg(test)]
-        {
-            self.incremental_work.0 += transaction.rows;
-        }
-        let produced =
-            runtime.incremental_output(transaction.records.clone(), batch.metadata().clone())?;
-        context.check_cancelled()?;
-        output.emit("output", produced).await?;
-        incremental.commit(transaction);
-        self.commit_incremental_input(initialized, pending);
-        Ok(())
-    }
-
-    fn prepare_incremental_input(
-        &mut self,
-        prepared: &mut PreparedRetention,
-    ) -> Result<PendingSqlInput> {
-        let batch = &prepared.batch;
-        let previous = prepared.migrated.as_ref().or(self.retained.as_ref());
-        let (rows, bytes) = self.accumulated_charge(batch, previous)?;
-        let (append, additional) = validate_incremental_append(batch, previous)?;
-        let metadata = batch.metadata().clone();
-        let mut first = initial_incremental_input(
-            prepared.migrated.take(),
-            self.retained.as_ref(),
-            &metadata,
-            prepared.projection.as_ref(),
-        );
-        let runtime = self.stream_state.runtime()?;
-        let columns = batch.table_payload()?.schema().fields().len();
-        let reservation = reserve_incremental_records(
-            &mut first,
-            &mut self.retained,
-            additional,
-            columns,
-            runtime,
-            &self.name,
-        )?;
-        let records = append_batches(batch, append)?.to_vec();
-        Ok(PendingSqlInput {
-            first,
-            records,
-            metadata,
-            rows,
-            bytes,
-            clear_segment: batch.num_rows() != 0,
-            backing_reservation: prepared.backing_reservation.clone(),
-            _reservation: reservation,
-        })
-    }
-
-    fn commit_incremental_input(
-        &mut self,
-        initialized: Option<Box<incremental::IncrementalSql>>,
-        pending: PendingSqlInput,
-    ) {
-        if initialized.is_some() {
-            self.incremental = initialized;
-        }
-        self.incremental_checked = true;
-        if let Some(first) = pending.first {
-            self.retained = Some(first);
-        }
-        let state = self.retained.as_mut().expect("retained after emission");
-        state.records.extend(pending.records);
-        state
-            .backing_reservations
-            .extend(pending.backing_reservation);
-        let metadata_changed = state.metadata != pending.metadata;
-        state.metadata = pending.metadata;
-        if metadata_changed {
-            state.metadata_segment = None;
-        }
-        state.rows = pending.rows;
-        state.bytes = pending.bytes;
-        if pending.clear_segment {
-            state.segment = None;
-        }
+        self.process_compact(prepared, initialized, context, output)
+            .await
     }
 
     #[doc(hidden)]
@@ -1248,13 +1109,7 @@ impl StreamOperator for SqlOperator {
         let mut prepared = self.prepare_retention(batch, &alias, context).await?;
         if self.stream_aggregate && self.udfs.is_empty() {
             let initialized = self
-                .initialize_incremental(
-                    &alias,
-                    &prepared.batch,
-                    context,
-                    prepared.migrated.as_ref(),
-                    prepared.plans.take(),
-                )
+                .initialize_incremental(&alias, &prepared.batch, context, prepared.plans.take())
                 .await?;
             if self.incremental.is_some() || initialized.is_some() {
                 return self
@@ -1290,6 +1145,7 @@ impl StreamOperator for SqlOperator {
         context.check_cancelled()?;
         output.emit("output", produced).await?;
         self.retained = next;
+        self.retained_capture = None;
         Ok(())
     }
 
@@ -1315,6 +1171,9 @@ impl StreamOperator for SqlOperator {
         context: &StreamOperatorContext<'_>,
     ) -> Result<()> {
         context.check_cancelled()?;
+        if self.compact.is_some() {
+            return self.prepare_compact_capture_async(context).await;
+        }
         let Some(state) = self
             .retained
             .as_ref()
@@ -1329,7 +1188,9 @@ impl StreamOperator for SqlOperator {
         let job = context.job().clone();
         let attempt = tokio_util::sync::CancellationToken::new();
         let _cancel_on_drop = attempt.clone().drop_guard();
-        let (segment, metadata) = encode_sql_state_async(prepared, metadata, job, attempt).await?;
+        let (segment, metadata, native) =
+            encode_sql_state_async(prepared, metadata, job, attempt).await?;
+        drop(native);
         context.check_cancelled()?;
         let state = self.retained.as_mut().expect("retained during preparation");
         if segment.is_some() {
@@ -1342,105 +1203,17 @@ impl StreamOperator for SqlOperator {
     }
 
     fn checkpoint(&mut self, _epoch: Epoch) -> Result<OperatorStateSnapshot> {
-        if let Some(state) = self
-            .retained
-            .as_mut()
-            .filter(|state| state.segment.is_none() || state.metadata_segment.is_none())
-        {
-            let runtime = self.stream_state.runtime()?;
-            let segment = if state.segment.is_none() {
-                let materialized = state.materialize(runtime, &self.name)?;
-                Some(ipc::encode(
-                    &materialized.batch,
-                    runtime.incremental_reservation(&self.name),
-                    || Ok(()),
-                )?)
-            } else {
-                None
-            };
-            let metadata = if state.metadata_segment.is_none() {
-                Some(metadata::encode(
-                    &state.metadata,
-                    metadata::reserve(runtime, &state.metadata, &self.name)?,
-                    || Ok(()),
-                )?)
-            } else {
-                None
-            };
-            if segment.is_some() {
-                state.segment = segment;
-            }
-            if metadata.is_some() {
-                state.metadata_segment = metadata;
-            }
+        if self.compact.is_some() {
+            return self.compact_checkpoint();
         }
-        let Some(state) = &self.retained else {
-            return Ok(OperatorStateSnapshot::default());
-        };
-        let mut inline_metadata = BTreeMap::from([
-            ("query_sha256".into(), json!(self.query_digest())),
-            ("rows".into(), json!(state.rows)),
-            ("bytes".into(), json!(state.bytes)),
-            ("state_layout".into(), json!(2)),
-            ("state_accounting".into(), json!(2)),
-            (
-                "batch_metadata_sha256".into(),
-                json!(
-                    state
-                        .metadata_segment
-                        .as_ref()
-                        .expect("prepared metadata")
-                        .segment
-                        .sha256()
-                ),
-            ),
-        ]);
-        let mut segments = BTreeMap::from([(
-            "batch-metadata".into(),
-            state
-                .metadata_segment
-                .as_ref()
-                .expect("prepared metadata")
-                .segment
-                .clone(),
-        )]);
-        if let Some(projection) = &state.projection {
-            inline_metadata.extend([
-                (
-                    "retained_ordinals".into(),
-                    json!(projection.columns.ordinals()),
-                ),
-                (
-                    "dependency_sha256".into(),
-                    json!(hex::encode(projection.columns.dependency_digest())),
-                ),
-                (
-                    "physical_schema_sha256".into(),
-                    json!(retention::schema_digest(
-                        projection.columns.physical_schema()
-                    )?),
-                ),
-            ]);
-            segments.insert("logical-schema".into(), projection.logical_segment.clone());
-        }
-        let input_name = if state.projection.is_some() {
-            "input-projected"
-        } else {
-            "input"
-        };
-        segments.insert(
-            input_name.into(),
-            state
-                .segment
-                .as_ref()
-                .expect("prepared segment")
-                .segment
-                .clone(),
-        );
-        Ok(OperatorStateSnapshot {
-            inline_metadata,
-            segments,
-        })
+        let prepared = self.prepare_checkpoint_work(&|| Ok(()))?;
+        self.install_checkpoint_work(prepared);
+        Ok(self
+            .retained_capture
+            .as_ref()
+            .map_or_else(OperatorStateSnapshot::default, |capture| {
+                capture.snapshot.clone()
+            }))
     }
 
     fn restore(&mut self, snapshot: &OperatorStateSnapshot) -> Result<()> {
@@ -1450,7 +1223,9 @@ impl StreamOperator for SqlOperator {
     }
 
     fn reset(&mut self) -> Result<()> {
+        self.compact = None;
         self.retained = None;
+        self.retained_capture = None;
         self.incremental = None;
         self.incremental_checked = false;
         Ok(())
@@ -1501,25 +1276,10 @@ async fn encode_sql_state_async(
     )>,
     job: crate::StreamJobContext,
     attempt: tokio_util::sync::CancellationToken,
-) -> Result<(
-    Option<std::sync::Arc<ipc::SqlInputSegment>>,
-    Option<std::sync::Arc<metadata::SqlMetadata>>,
-)> {
+) -> Result<EncodedSqlState> {
     tokio::task::spawn_blocking(move || {
-        let segment = prepared
-            .map(|(records, metadata, reservation, input_reservation)| {
-                let materialized = MaterializedSqlInput {
-                    batch: Batch::table(records, metadata)?,
-                    _reservation: reservation,
-                };
-                let batch = materialized.batch();
-                let result = ipc::encode(batch, input_reservation, || {
-                    check_encoding_cancelled(&job, &attempt)
-                });
-                #[cfg(test)]
-                tests::after_encode(batch);
-                result
-            })
+        let prepared = prepared
+            .map(|input| encode_checkpoint_input(input, &job, &attempt))
             .transpose()?;
         let metadata = metadata
             .map(|(metadata, reservation)| {
@@ -1528,12 +1288,51 @@ async fn encode_sql_state_async(
                 })
             })
             .transpose()?;
-        Ok((segment, metadata))
+        let (segment, native) =
+            prepared.map_or((None, None), |(segment, native)| (Some(segment), native));
+        Ok((segment, metadata, native))
     })
     .await
     .map_err(|error| CalcFlowError::Internal {
         message: format!("SQL state encoder task failed: {error}"),
     })?
+}
+
+fn encode_checkpoint_input(
+    input: SqlCheckpointInput,
+    job: &crate::StreamJobContext,
+    attempt: &tokio_util::sync::CancellationToken,
+) -> Result<(
+    std::sync::Arc<ipc::SqlInputSegment>,
+    Option<incremental::compact_state::PaidNativeStateRecords>,
+)> {
+    check_encoding_cancelled(job, attempt)?;
+    let SqlCheckpointInput {
+        records,
+        metadata,
+        reservation,
+        input_reservation,
+        native,
+        #[cfg(test)]
+        native_name,
+    } = input;
+    let mut materialized = MaterializedSqlInput {
+        batch: Batch::table(records, metadata)?,
+        native,
+        #[cfg(test)]
+        native_name,
+        _reservation: reservation,
+    };
+    #[cfg(test)]
+    if let (Some(name), Some(export)) = (&materialized.native_name, &materialized.native) {
+        compact::direct_async_tests::before_ipc(name, export.records(), export.reserved_bytes());
+    }
+    let result = ipc::encode(materialized.batch(), input_reservation, || {
+        check_encoding_cancelled(job, attempt)
+    });
+    #[cfg(test)]
+    tests::after_encode(materialized.batch());
+    result.map(|segment| (segment, materialized.native.take()))
 }
 
 fn check_encoding_cancelled(
@@ -1547,109 +1346,6 @@ fn check_encoding_cancelled(
         });
     }
     Ok(())
-}
-
-fn projection_checkpoint_segments_match(snapshot: &OperatorStateSnapshot) -> bool {
-    snapshot.segments.len() == 3
-        && snapshot.segments.contains_key("input-projected")
-        && snapshot.segments.contains_key("logical-schema")
-        && snapshot.segments.contains_key("batch-metadata")
-        && snapshot.inline_metadata["batch_metadata_sha256"]
-            == json!(snapshot.segments["batch-metadata"].sha256())
-}
-
-fn validate_projection_descriptor(
-    snapshot: &OperatorStateSnapshot,
-    projection: Option<std::sync::Arc<retention::SqlProjection>>,
-) -> Result<std::sync::Arc<retention::SqlProjection>> {
-    let projection = projection.ok_or_else(|| {
-        sql_state_error("SQL pruned checkpoint cannot prove complete dependencies")
-    })?;
-    if snapshot.inline_metadata["retained_ordinals"] != json!(projection.columns.ordinals())
-        || snapshot.inline_metadata["dependency_sha256"]
-            != json!(hex::encode(projection.columns.dependency_digest()))
-        || snapshot.inline_metadata["physical_schema_sha256"]
-            != json!(retention::schema_digest(
-                projection.columns.physical_schema()
-            )?)
-        || projection.logical_segment.bytes() != snapshot.segments["logical-schema"].bytes()
-    {
-        return Err(sql_state_error(
-            "SQL pruned checkpoint descriptor differs from trusted dependencies",
-        ));
-    }
-    Ok(projection)
-}
-
-fn validate_incremental_append(
-    batch: &Batch,
-    previous: Option<&RetainedSqlInput>,
-) -> Result<(bool, usize)> {
-    let append = batch.num_rows() > 0 || previous.is_none();
-    if append
-        && previous.is_some_and(|state| {
-            state.records[0].schema()
-                != batch
-                    .table_payload()
-                    .expect("validated table")
-                    .schema()
-                    .clone()
-        })
-    {
-        return Err(CalcFlowError::InvalidArgument {
-            field: "batches".into(),
-            message: "schemas must match".into(),
-        });
-    }
-    let additional = append_batches(batch, append)?.len();
-    Ok((append, additional))
-}
-
-fn initial_incremental_input(
-    migrated: Option<RetainedSqlInput>,
-    retained: Option<&RetainedSqlInput>,
-    metadata: &BatchMetadata,
-    projection: Option<&std::sync::Arc<retention::SqlProjection>>,
-) -> Option<RetainedSqlInput> {
-    migrated.or_else(|| {
-        retained.is_none().then(|| RetainedSqlInput {
-            records: Vec::new(),
-            metadata: metadata.clone(),
-            projection: projection.cloned(),
-            projection_checked: true,
-            backing_reservations: Vec::new(),
-            reservation: None,
-            segment: None,
-            metadata_segment: None,
-            rows: 0,
-            bytes: 0,
-        })
-    })
-}
-
-fn reserve_incremental_records(
-    first: &mut Option<RetainedSqlInput>,
-    retained: &mut Option<RetainedSqlInput>,
-    additional: usize,
-    columns: usize,
-    runtime: &DataFusionRuntime,
-    name: &str,
-) -> Result<Option<datafusion::execution::memory_pool::MemoryReservation>> {
-    let reservation = if additional == 0 {
-        None
-    } else {
-        Some(record_copy_reservation(
-            runtime, name, additional, columns, 1,
-        )?)
-    };
-    if additional != 0 {
-        first
-            .as_mut()
-            .or(retained.as_mut())
-            .expect("retained preflight")
-            .reserve_append(additional, runtime, name, columns)?;
-    }
-    Ok(reservation)
 }
 
 fn sql_array_bytes(
@@ -1756,14 +1452,6 @@ fn write_sql_records<W: std::io::Write>(
             .map_err(|error| sql_state_error(&format!("SQL state IPC write failed: {error}")))?;
     }
     Ok(())
-}
-
-fn append_batches(batch: &Batch, append: bool) -> Result<&[RecordBatch]> {
-    if append {
-        Ok(batch.table_payload()?.batches())
-    } else {
-        Ok(&[])
-    }
 }
 
 fn decode_sql_state(bytes: &[u8]) -> Result<Batch> {
@@ -1874,7 +1562,7 @@ mod tests {
     fn operator() -> SqlOperator {
         SqlOperator::new(
             "totals",
-            "SELECT SUM(value) AS total FROM events",
+            "SELECT SUM(value) AS total FROM events WHERE value IS NOT NULL",
             vec!["events".into()],
             Vec::new(),
         )
@@ -1943,8 +1631,8 @@ mod tests {
         operator.prepare_checkpoint_async(&context).await.unwrap();
         let second = operator.checkpoint(Epoch::INITIAL).unwrap();
         assert!(Arc::ptr_eq(
-            &first.segments["input"].bytes_arc(),
-            &second.segments["input"].bytes_arc()
+            &first.segments["input-retained"].bytes_arc(),
+            &second.segments["input-retained"].bytes_arc()
         ));
         assert_eq!(ENCODE_CALLS.load(Ordering::SeqCst), 1);
         operator
@@ -1962,8 +1650,8 @@ mod tests {
         let third = operator.checkpoint(Epoch::INITIAL).unwrap();
         assert_eq!(ENCODE_CALLS.load(Ordering::SeqCst), 2);
         assert!(!Arc::ptr_eq(
-            &first.segments["input"].bytes_arc(),
-            &third.segments["input"].bytes_arc()
+            &first.segments["input-retained"].bytes_arc(),
+            &third.segments["input-retained"].bytes_arc()
         ));
         let mut restored = self::operator();
         StreamOperator::restore(&mut restored, &third).unwrap();
@@ -2026,9 +1714,14 @@ mod tests {
     }
 
     fn same_segment(left: &OperatorStateSnapshot, right: &OperatorStateSnapshot) -> bool {
+        let name = if left.inline_metadata["state_layout"] == json!(3) {
+            "group-state"
+        } else {
+            "input-retained"
+        };
         Arc::ptr_eq(
-            &left.segments["input"].bytes_arc(),
-            &right.segments["input"].bytes_arc(),
+            &left.segments[name].bytes_arc(),
+            &right.segments[name].bytes_arc(),
         )
     }
 
@@ -2074,89 +1767,34 @@ mod tests {
         assert_eq!(total(&mut collector), 3);
         restored.prepare_checkpoint_async(&context).await.unwrap();
         let first = restored.checkpoint(Epoch::INITIAL).unwrap();
-        let empty = batch("different-empty-metadata", &[]);
-        let metadata = empty.metadata().clone();
         restored
-            .process_data("events", empty, &context, &mut collector)
+            .process_data(
+                "events",
+                batch("different-empty-metadata", &[]),
+                &context,
+                &mut collector,
+            )
             .await
             .unwrap();
         assert_eq!(total(&mut collector), 3);
         restored.prepare_checkpoint_async(&context).await.unwrap();
         let second = restored.checkpoint(Epoch::INITIAL).unwrap();
         assert!(same_segment(&first, &second));
-        for field in [
-            "query_sha256",
-            "rows",
-            "bytes",
-            "state_layout",
-            "state_accounting",
-        ] {
-            assert_eq!(first.inline_metadata[field], second.inline_metadata[field]);
-        }
+        assert_eq!(
+            first.inline_metadata["rows"],
+            second.inline_metadata["rows"]
+        );
+        assert_eq!(
+            first.inline_metadata["bytes"],
+            second.inline_metadata["bytes"]
+        );
         assert_ne!(
             first.segments["batch-metadata"].bytes(),
             second.segments["batch-metadata"].bytes()
         );
-        let mut recovered = self::operator();
-        StreamOperator::restore(&mut recovered, &second).unwrap();
-        assert_eq!(recovered.retained.as_ref().unwrap().metadata, metadata);
-    }
-
-    #[tokio::test]
-    async fn test_sql_current_checkpoint_restore_and_clone() {
-        let job = job();
-        let context = StreamOperatorContext::new(&job, "totals", None);
-        let mut source = operator();
-        let mut initial = EdgeCollector::new(source.output_ports().to_vec());
-        source
-            .process_data("events", batch("current", &[1, 2]), &context, &mut initial)
-            .await
-            .unwrap();
-        source.prepare_checkpoint_async(&context).await.unwrap();
-        let captured = source.checkpoint(Epoch::INITIAL).unwrap();
-        let mut operator = operator();
-        StreamOperator::restore(&mut operator, &captured).unwrap();
-        let mut invalid = captured.clone();
-        invalid.inline_metadata.insert("rows".into(), json!(3));
-        assert!(StreamOperator::restore(&mut operator, &invalid).is_err());
-        assert!(same_segment(
-            &captured,
-            &operator.checkpoint(Epoch::INITIAL).unwrap()
-        ));
-        let mut cloned = operator.clone();
-        assert!(
-            cloned
-                .checkpoint(Epoch::INITIAL)
-                .unwrap()
-                .segments
-                .is_empty()
-        );
-        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
-        operator
-            .process_data("events", batch("continued", &[3]), &context, &mut collector)
-            .await
-            .unwrap();
-        assert_eq!(total(&mut collector), 6);
-        cloned
-            .process_data("events", batch("cloned", &[4]), &context, &mut collector)
-            .await
-            .unwrap();
-        assert_eq!(total(&mut collector), 4);
-        StreamOperator::reset(&mut operator).unwrap();
-        assert!(
-            operator
-                .checkpoint(Epoch::INITIAL)
-                .unwrap()
-                .segments
-                .is_empty()
-        );
-        StreamOperator::restore(&mut cloned, &OperatorStateSnapshot::default()).unwrap();
-        assert!(
-            cloned
-                .checkpoint(Epoch::INITIAL)
-                .unwrap()
-                .segments
-                .is_empty()
+        assert_eq!(
+            restored.retained.as_ref().unwrap().metadata.source(),
+            "different-empty-metadata"
         );
     }
 
@@ -2172,64 +1810,117 @@ mod tests {
         }
     }
 
+    fn rollback_state(operator: &SqlOperator) -> ((u64, u64), BatchMetadata, bool) {
+        if let Some(state) = &operator.compact {
+            assert!(operator.retained.is_none());
+            assert!(operator.incremental.is_some());
+            (
+                (state.ledger.rows, state.ledger.bytes),
+                state.metadata.clone(),
+                state.capture.is_some(),
+            )
+        } else {
+            let state = operator.retained.as_ref().unwrap();
+            assert!(operator.incremental.is_none());
+            (
+                (state.rows, state.bytes),
+                state.metadata.clone(),
+                operator.retained_capture.is_some(),
+            )
+        }
+    }
+
+    async fn assert_retry_total(query: &str, collector: &mut EdgeCollector) {
+        let expected = DataFusionRuntime::new(DataFusionConfig::default())
+            .unwrap()
+            .sql(
+                query,
+                &BTreeMap::from([("events".into(), batch("emit-next", &[1, 3]))]),
+                Some("rollback-oracle"),
+            )
+            .await
+            .unwrap();
+        let output = collector.drain("output");
+        assert_eq!(output.len(), 1);
+        let actual = output[0].as_data().unwrap();
+        assert_eq!(actual.metadata(), expected.metadata());
+        let actual_table = actual.table_payload().unwrap();
+        let expected_table = expected.table_payload().unwrap();
+        assert_eq!(actual_table.schema(), expected_table.schema());
+        assert_eq!(actual_table.batches(), expected_table.batches());
+        assert_eq!(
+            actual_table.batches()[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0),
+            4
+        );
+    }
+
     #[tokio::test]
     async fn test_sql_rejected_output_preserves_clean_and_dirty_state() {
         let job = job();
         let context = StreamOperatorContext::new(&job, "totals", None);
-        for prepared in [false, true] {
-            let mut operator = operator();
-            let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
-            operator
-                .process_data(
-                    "events",
-                    batch("emit-initial", &[1]),
-                    &context,
-                    &mut collector,
-                )
-                .await
-                .unwrap();
-            collector.drain("output");
-            let before = if prepared {
-                Some(operator.checkpoint(Epoch::INITIAL).unwrap())
-            } else {
-                None
-            };
-            let charge = operator
-                .retained
-                .as_ref()
-                .map(|state| (state.rows, state.bytes));
-            let error = operator
-                .process_data(
-                    "events",
-                    batch("emit-rejected", &[2]),
-                    &context,
-                    &mut RejectOutput,
-                )
-                .await
-                .unwrap_err();
-            assert!(error.to_string().contains("injected emit failure"));
-            assert_eq!(
+        for (query, native) in [
+            (
+                "SELECT SUM(value) AS total FROM events WHERE value IS NOT NULL",
+                false,
+            ),
+            ("SELECT SUM(value) AS total FROM events", true),
+        ] {
+            for prepared in [false, true] {
+                let mut operator =
+                    SqlOperator::new("totals", query, vec!["events".into()], vec![]).unwrap();
+                let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
                 operator
-                    .retained
-                    .as_ref()
-                    .map(|state| (state.rows, state.bytes)),
-                charge
-            );
-            assert_eq!(
-                operator.retained.as_ref().unwrap().segment.is_some(),
-                prepared
-            );
-            if let Some(before) = before {
-                assert!(same_segment(
-                    &before,
-                    &operator.checkpoint(Epoch::INITIAL).unwrap()
-                ));
+                    .process_data(
+                        "events",
+                        batch("emit-initial", &[1]),
+                        &context,
+                        &mut collector,
+                    )
+                    .await
+                    .unwrap();
+                collector.drain("output");
+                assert_eq!(operator.compact.is_some(), native);
+                let before = prepared.then(|| operator.checkpoint(Epoch::INITIAL).unwrap());
+                let state = rollback_state(&operator);
+                assert_eq!(state.2, prepared);
+                let error = operator
+                    .process_data(
+                        "events",
+                        batch("emit-rejected", &[2]),
+                        &context,
+                        &mut RejectOutput,
+                    )
+                    .await
+                    .unwrap_err();
+                assert!(error.to_string().contains("injected emit failure"));
+                assert_eq!(rollback_state(&operator), state);
+                if let Some(before) = before {
+                    let after = operator.checkpoint(Epoch::INITIAL).unwrap();
+                    assert_eq!(
+                        before.inline_metadata["state_layout"],
+                        json!(if native { 3 } else { 4 })
+                    );
+                    assert_eq!(before.inline_metadata, after.inline_metadata);
+                    assert!(same_segment(&before, &after));
+                    assert_eq!(
+                        before.segments.keys().collect::<Vec<_>>(),
+                        after.segments.keys().collect::<Vec<_>>()
+                    );
+                    for (name, segment) in &before.segments {
+                        assert_eq!(segment.bytes(), after.segments[name].bytes());
+                    }
+                }
+                operator
+                    .process_data("events", batch("emit-next", &[3]), &context, &mut collector)
+                    .await
+                    .unwrap();
+                assert_retry_total(query, &mut collector).await;
             }
-            operator
-                .process_data("events", batch("emit-next", &[3]), &context, &mut collector)
-                .await
-                .unwrap();
-            assert_eq!(total(&mut collector), 4);
         }
     }
 

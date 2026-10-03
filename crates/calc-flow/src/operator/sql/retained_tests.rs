@@ -8,6 +8,8 @@ use datafusion::arrow::{
 
 use super::*;
 
+const RAW_SUM: &str = "SELECT SUM(value) AS total FROM events WHERE value IS NOT NULL";
+
 fn wide_input(sequence: u64) -> (Batch, Weak<dyn Array>, Buffer) {
     let unused: ArrayRef = Arc::new(StringArray::from(vec![
         "unused payload".repeat(1024),
@@ -56,12 +58,42 @@ fn setup(query: &str) -> (SqlOperator, StreamJobContext, EdgeCollector) {
 }
 
 fn retained_names(operator: &SqlOperator) -> Vec<String> {
-    operator.retained.as_ref().unwrap().records[0]
-        .schema()
+    let schema = if let Some(state) = &operator.compact {
+        assert!(operator.retained.is_none());
+        state
+            .projection()
+            .unwrap()
+            .columns
+            .physical_schema()
+            .clone()
+    } else {
+        operator.retained.as_ref().unwrap().records[0].schema()
+    };
+    schema
         .fields()
         .iter()
         .map(|field| field.name().clone())
         .collect()
+}
+
+async fn assert_raw_oracle(operator: &SqlOperator, input: &Batch, observed: &Batch) {
+    assert!(operator.incremental.is_none());
+    assert!(operator.compact.is_none());
+    let expected = DataFusionRuntime::new(DataFusionConfig::default())
+        .unwrap()
+        .sql(
+            &operator.query,
+            &BTreeMap::from([("events".into(), input.clone())]),
+            Some("independent-current-raw"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(observed.metadata(), expected.metadata());
+    assert_eq!(
+        observed.table_payload().unwrap().schema(),
+        expected.table_payload().unwrap().schema()
+    );
+    assert_eq!(rows(observed), rows(&expected));
 }
 
 #[tokio::test]
@@ -104,14 +136,17 @@ async fn test_sql_retained_projection_releases_unused_array_ownership() {
 
 #[tokio::test]
 async fn test_sql_retained_projection_crops_checkpoint_ipc_fields() {
-    let (mut operator, job, mut collector) = setup("SELECT SUM(value) AS total FROM events");
+    let (mut operator, job, mut collector) = setup(RAW_SUM);
     let context = StreamOperatorContext::new(&job, "totals", None);
     let (input, _, _) = wide_input(0);
     let full_ipc_bytes = encode_sql_state(&input).unwrap().len();
     operator
-        .process_data("events", input, &context, &mut collector)
+        .process_data("events", input.clone(), &context, &mut collector)
         .await
         .unwrap();
+    let emitted = collector.drain("output");
+    assert_eq!(emitted.len(), 1);
+    assert_raw_oracle(&operator, &input, emitted[0].as_data().unwrap()).await;
     operator.prepare_checkpoint_async(&context).await.unwrap();
     let snapshot = operator.checkpoint(Epoch::INITIAL).unwrap();
     let fields = snapshot
@@ -160,21 +195,20 @@ async fn test_sql_retained_count_star_preserves_rows_without_columns() {
         rows(output[1].as_data().unwrap()),
         vec![vec![datafusion::common::ScalarValue::Int64(Some(6))]]
     );
-    let retained = operator.retained.as_ref().unwrap();
-    assert!(
-        retained
-            .records
-            .iter()
-            .all(|record| record.num_columns() == 0)
-    );
+    assert!(operator.retained.is_none());
+    let compact = operator.compact.as_ref().unwrap();
     assert_eq!(
-        retained
-            .records
-            .iter()
-            .map(RecordBatch::num_rows)
-            .sum::<usize>(),
-        6
+        compact
+            .projection()
+            .unwrap()
+            .columns
+            .physical_schema()
+            .fields()
+            .len(),
+        0
     );
+    assert_eq!(compact.ledger.rows, 6);
+    assert_eq!(compact.ledger.bytes, 0);
     operator.prepare_checkpoint_async(&context).await.unwrap();
     let snapshot = operator.checkpoint(Epoch::INITIAL).unwrap();
     let (mut restored, _, mut recovered_output) = setup(query);
@@ -213,7 +247,7 @@ async fn test_sql_retained_projection_keeps_hidden_fallback_dependencies() {
 }
 
 #[tokio::test]
-async fn test_sql_retained_current_snapshot_continues_cumulative_output() {
+async fn test_sql_current_native_snapshot_continues_cumulative_output() {
     let query = "SELECT SUM(value) AS total FROM events";
     let (mut operator, job, mut collector) = setup(query);
     let context = StreamOperatorContext::new(&job, "totals", None);

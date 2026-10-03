@@ -12,15 +12,10 @@ pub(crate) struct RetainedColumns {
     physical: SchemaRef,
     ordinals: Vec<usize>,
     inverse: Vec<Option<usize>>,
-    dependency_digest: [u8; 32],
 }
 
 impl RetainedColumns {
-    pub(crate) fn try_new(
-        logical: SchemaRef,
-        required: &[usize],
-        dependency_digest: [u8; 32],
-    ) -> Result<Self> {
+    pub(crate) fn try_new(logical: SchemaRef, required: &[usize]) -> Result<Self> {
         if required.windows(2).any(|pair| pair[0] >= pair[1])
             || required
                 .iter()
@@ -48,7 +43,6 @@ impl RetainedColumns {
             physical,
             ordinals: required.to_vec(),
             inverse,
-            dependency_digest,
         })
     }
 
@@ -90,9 +84,6 @@ impl RetainedColumns {
     }
     pub(crate) fn ordinals(&self) -> &[usize] {
         &self.ordinals
-    }
-    pub(crate) const fn dependency_digest(&self) -> &[u8; 32] {
-        &self.dependency_digest
     }
 }
 

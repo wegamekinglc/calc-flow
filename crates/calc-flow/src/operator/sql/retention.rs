@@ -49,8 +49,7 @@ impl SqlProjection {
                 "logical schema exceeded descriptor reservation",
             ));
         }
-        let digest = dependency_digest(query, alias, logical_segment.bytes(), &ordinals)?;
-        let columns = RetainedColumns::try_new(schema, &ordinals, digest)?;
+        let columns = RetainedColumns::try_new(schema, &ordinals)?;
         let reservation = Arc::new(reservation);
         Ok(Some(Arc::new(Self {
             columns,
@@ -128,21 +127,7 @@ pub(super) fn schema_digest(schema: &SchemaRef) -> Result<String> {
     Ok(hex::encode(Sha256::digest(encode_schema(schema)?.bytes())))
 }
 
-fn dependency_digest(
-    query: &ValidatedQuery,
-    alias: &str,
-    logical: &[u8],
-    ordinals: &[usize],
-) -> Result<[u8; 32]> {
-    let identity = serde_json::json!({
-        "query": query.text(), "alias": alias,
-        "logical_schema_sha256": hex::encode(Sha256::digest(logical)),
-        "retained_ordinals": ordinals, "udfs": [],
-    });
-    Ok(Sha256::digest(crate::canonical_json(&identity)?.as_bytes()).into())
-}
-
-fn plan_dependencies_fit(plan: &LogicalPlan, columns: &RetainedColumns) -> Result<bool> {
+pub(super) fn plan_dependencies_fit(plan: &LogicalPlan, columns: &RetainedColumns) -> Result<bool> {
     let mut fits = true;
     plan.apply_with_subqueries(|node| {
         if let LogicalPlan::TableScan(scan) = node {

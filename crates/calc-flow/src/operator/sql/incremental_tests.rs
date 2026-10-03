@@ -172,7 +172,7 @@ async fn test_sql_incremental_grouped_prefixes_touch_only_new_input() {
 }
 
 #[tokio::test]
-async fn test_sql_incremental_restore_rebuilds_without_extra_output() {
+async fn test_sql_incremental_restore_imports_without_extra_output() {
     let query = "SELECT key, COUNT(*) AS rows, SUM(value) AS total FROM events GROUP BY key";
     let mut initial = SqlOperator::new("totals", query, vec!["events".into()], vec![]).unwrap();
     let job = StreamJobContext::new(1, "restore", JsonMap::new(), None, CancellationToken::new());
@@ -218,7 +218,7 @@ async fn test_sql_incremental_restore_rebuilds_without_extra_output() {
         .await
         .unwrap();
     assert_eq!(rows(output[0].as_data().unwrap()), rows(&expected));
-    assert_eq!(restored.incremental_work, (4, 1));
+    assert_eq!(restored.incremental_work, (2, 0));
     restored
         .process_data(
             "events",
@@ -228,7 +228,7 @@ async fn test_sql_incremental_restore_rebuilds_without_extra_output() {
         )
         .await
         .unwrap();
-    assert_eq!(restored.incremental_work, (5, 1));
+    assert_eq!(restored.incremental_work, (3, 0));
 }
 
 #[tokio::test]
@@ -257,11 +257,13 @@ async fn test_sql_incremental_retention_does_not_copy_historical_handles() {
         0
     );
     let snapshot = operator.checkpoint(Epoch::INITIAL).unwrap();
+    assert!(operator.retained.is_none());
+    assert_eq!(snapshot.inline_metadata["rows"], serde_json::json!(20));
     assert_eq!(
-        decode_sql_state(snapshot.segments["input"].bytes())
+        decode_sql_state(snapshot.segments["group-state"].bytes())
             .unwrap()
             .num_rows(),
-        20
+        1
     );
 }
 
@@ -702,6 +704,7 @@ async fn test_sql_incremental_ignored_wide_empty_schema_does_not_reserve_handles
         BatchMetadata::new("wide-empty", 9, JsonMap::new()).unwrap(),
     )
     .unwrap();
+    let expected_metadata = empty.metadata().clone();
     operator
         .process_data("events", empty, &context, &mut collector)
         .await
@@ -711,15 +714,32 @@ async fn test_sql_incremental_ignored_wide_empty_schema_does_not_reserve_handles
         rows(output[0].as_data().unwrap()),
         vec![vec![datafusion::common::ScalarValue::Int64(Some(3))]]
     );
-    assert_eq!(
-        output[0].as_data().unwrap().metadata().source(),
-        "wide-empty"
-    );
+    assert_eq!(output[0].as_data().unwrap().metadata(), &expected_metadata);
     let after = operator.checkpoint(Epoch::INITIAL).unwrap();
-    assert_eq!(before.inline_metadata, after.inline_metadata);
+    for field in [
+        "state_layout",
+        "state_accounting",
+        "query_sha256",
+        "rows",
+        "bytes",
+    ] {
+        assert_eq!(before.inline_metadata[field], after.inline_metadata[field]);
+    }
+    assert_ne!(
+        before.inline_metadata["control_sha256"],
+        after.inline_metadata["control_sha256"]
+    );
+    assert_eq!(
+        after.inline_metadata["control_sha256"],
+        serde_json::json!(after.segments["control"].sha256())
+    );
+    assert_ne!(
+        before.segments["batch-metadata"].bytes(),
+        after.segments["batch-metadata"].bytes()
+    );
     assert!(Arc::ptr_eq(
-        &before.segments["input"].bytes_arc(),
-        &after.segments["input"].bytes_arc()
+        &before.segments["group-state"].bytes_arc(),
+        &after.segments["group-state"].bytes_arc()
     ));
 }
 
@@ -733,7 +753,7 @@ async fn test_sql_incremental_pending_empty_record_copies_are_reserved() {
     let input = Batch::table(vec![record; 12_000], BatchMetadata::default()).unwrap();
     let mut operator = SqlOperator::new(
         "totals",
-        "SELECT SUM(value) AS total FROM events",
+        "SELECT SUM(value) AS total FROM events WHERE value IS NOT NULL",
         vec!["events".into()],
         vec![],
     )
@@ -763,13 +783,37 @@ async fn test_sql_incremental_pending_empty_record_copies_are_reserved() {
     assert!(collector.drain("output").is_empty());
     drop(pressure);
     operator
-        .process_data("events", input, &context, &mut collector)
+        .process_data("events", input.clone(), &context, &mut collector)
+        .await
+        .unwrap();
+    let output = collector.drain("output");
+    assert_eq!(output.len(), 1);
+    let actual = output[0].as_data().unwrap();
+    assert_eq!(
+        rows(actual),
+        vec![vec![datafusion::common::ScalarValue::Int64(None)]]
+    );
+    assert_raw_copy_output(&operator, &input, actual).await;
+}
+
+async fn assert_raw_copy_output(operator: &SqlOperator, input: &Batch, actual: &Batch) {
+    assert!(operator.incremental.is_none());
+    assert!(operator.compact.is_none());
+    let expected = DataFusionRuntime::new(DataFusionConfig::default())
+        .unwrap()
+        .sql(
+            &operator.query,
+            &BTreeMap::from([("events".into(), input.clone())]),
+            Some("raw-copy-oracle"),
+        )
         .await
         .unwrap();
     assert_eq!(
-        rows(collector.drain("output")[0].as_data().unwrap()),
-        vec![vec![datafusion::common::ScalarValue::Int64(None)]]
+        actual.table_payload().unwrap().schema(),
+        expected.table_payload().unwrap().schema()
     );
+    assert_eq!(actual.metadata(), expected.metadata());
+    assert_eq!(rows(actual), rows(&expected));
 }
 
 struct RejectOutput;
@@ -843,8 +887,8 @@ async fn test_sql_incremental_rejected_new_groups_release_candidates_and_retry_o
             let after = operator.checkpoint(Epoch::INITIAL).unwrap();
             assert_eq!(before.inline_metadata, after.inline_metadata);
             assert!(Arc::ptr_eq(
-                &before.segments["input"].bytes_arc(),
-                &after.segments["input"].bytes_arc()
+                &before.segments["group-state"].bytes_arc(),
+                &after.segments["group-state"].bytes_arc()
             ));
             let pressure = operator
                 .stream_state
@@ -933,8 +977,8 @@ async fn test_sql_incremental_dropped_emit_preserves_state_and_retry_once() {
                 assert!(after.segments.is_empty());
             } else {
                 assert!(Arc::ptr_eq(
-                    &before.segments["input"].bytes_arc(),
-                    &after.segments["input"].bytes_arc()
+                    &before.segments["group-state"].bytes_arc(),
+                    &after.segments["group-state"].bytes_arc()
                 ));
             }
             operator
@@ -1034,8 +1078,8 @@ async fn test_sql_incremental_cancel_stops_group_finalization_and_rolls_back() {
         let after = operator.checkpoint(Epoch::INITIAL).unwrap();
         assert_eq!(before.inline_metadata, after.inline_metadata);
         assert!(Arc::ptr_eq(
-            &before.segments["input"].bytes_arc(),
-            &after.segments["input"].bytes_arc()
+            &before.segments["group-state"].bytes_arc(),
+            &after.segments["group-state"].bytes_arc()
         ));
     }
 }
@@ -1050,7 +1094,7 @@ pub(super) fn after_record_copies(metadata: &BatchMetadata, count: usize) {
 
 #[tokio::test]
 async fn test_sql_incremental_restore_reserves_empty_record_handles_atomically() {
-    let query = "SELECT COUNT(*) AS rows FROM events";
+    let query = "SELECT COUNT(*) AS rows FROM events WHERE value IS NOT NULL";
     let record = RecordBatch::try_from_iter(vec![(
         "value",
         Arc::new(Int64Array::from(Vec::<i64>::new())) as Arc<dyn Array>,
@@ -1097,7 +1141,6 @@ async fn test_sql_incremental_restore_reserves_empty_record_handles_atomically()
 #[tokio::test]
 async fn test_sql_incremental_prepare_stops_copying_records_when_cancelled() {
     use std::sync::atomic::Ordering;
-    MATERIALIZE_CLONES.store(0, Ordering::SeqCst);
     let record = RecordBatch::try_from_iter(vec![(
         "value",
         Arc::new(Int64Array::from(Vec::<i64>::new())) as Arc<dyn Array>,
@@ -1110,7 +1153,7 @@ async fn test_sql_incremental_prepare_stops_copying_records_when_cancelled() {
     .unwrap();
     let mut operator = SqlOperator::new(
         "totals",
-        "SELECT COUNT(*) AS rows FROM events",
+        "SELECT COUNT(*) AS rows FROM events WHERE value IS NOT NULL",
         vec!["events".into()],
         vec![],
     )
@@ -1125,9 +1168,24 @@ async fn test_sql_incremental_prepare_stops_copying_records_when_cancelled() {
     let context = StreamOperatorContext::new(&job, "totals", None);
     let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
     operator
-        .process_data("events", input, &context, &mut collector)
+        .process_data("events", input.clone(), &context, &mut collector)
         .await
         .unwrap();
+    let output = collector.drain("output");
+    assert_eq!(output.len(), 1);
+    assert_raw_copy_output(&operator, &input, output[0].as_data().unwrap()).await;
+    let state = operator.retained.as_ref().unwrap();
+    let before = (state.rows, state.bytes, state.metadata.clone());
+    let pool = operator
+        .retention_runtime()
+        .unwrap()
+        .incremental_planner_context(0)
+        .runtime_env()
+        .memory_pool
+        .clone();
+    let paid_before = pool.reserved();
+    assert!(paid_before > 0);
+    MATERIALIZE_CLONES.store(0, Ordering::SeqCst);
     let cancellation = job.cancellation().clone();
     let canceller = tokio::spawn(async move {
         while MATERIALIZE_CLONES.load(Ordering::SeqCst) == 0 {
@@ -1140,11 +1198,16 @@ async fn test_sql_incremental_prepare_stops_copying_records_when_cancelled() {
         Err(CalcFlowError::Cancelled { .. })
     ));
     canceller.await.unwrap();
+    let copies = MATERIALIZE_CLONES.load(Ordering::SeqCst);
     assert!(
-        MATERIALIZE_CLONES.load(Ordering::SeqCst) <= 16_384,
+        copies > 0 && copies <= 16_384,
         "copy must stop at a bounded record chunk"
     );
-    assert!(operator.retained.as_ref().unwrap().segment.is_none());
+    let state = operator.retained.as_ref().unwrap();
+    assert_eq!((state.rows, state.bytes, state.metadata.clone()), before);
+    assert!(state.segment.is_none());
+    assert!(operator.retained_capture.is_none());
+    assert_eq!(pool.reserved(), paid_before);
 }
 
 fn bulk_group_input() -> Batch {

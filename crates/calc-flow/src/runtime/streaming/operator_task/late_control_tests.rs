@@ -194,6 +194,7 @@ async fn run_graph(
         let inputs = OperatorTaskInputs {
             late_output_ports: node.late_output_ports,
             entity_work: None,
+            sql_recovery: None,
             ingresses: node
                 .ingress_edges
                 .iter()

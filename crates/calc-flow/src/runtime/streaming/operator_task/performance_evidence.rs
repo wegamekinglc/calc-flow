@@ -152,6 +152,7 @@ impl Fixture {
             inputs: OperatorTaskInputs {
                 late_output_ports: std::collections::BTreeSet::new(),
                 entity_work: None,
+                sql_recovery: None,
                 node_id: "rolling".into(),
                 operator: CompiledStreamOperator::Rolling(operator),
                 checkpoint_capability: OperatorCheckpointCapability::CheckpointedStateful {

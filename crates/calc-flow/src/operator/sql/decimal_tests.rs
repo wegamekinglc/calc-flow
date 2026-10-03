@@ -327,8 +327,8 @@ async fn decimal_transaction(value: &ScalarValue, native: bool, reject: bool) {
         let after = operator.checkpoint(Epoch::INITIAL).unwrap();
         assert_eq!(before.inline_metadata, after.inline_metadata);
         assert!(Arc::ptr_eq(
-            &before.segments["input"].bytes_arc(),
-            &after.segments["input"].bytes_arc()
+            &before.segments["group-state"].bytes_arc(),
+            &after.segments["group-state"].bytes_arc()
         ));
         let pressure = operator
             .stream_state
@@ -396,8 +396,8 @@ async fn test_sql_incremental_decimal_cancel_preserves_checkpoint() {
             let after = operator.checkpoint(Epoch::INITIAL).unwrap();
             assert_eq!(before.inline_metadata, after.inline_metadata);
             assert!(Arc::ptr_eq(
-                &before.segments["input"].bytes_arc(),
-                &after.segments["input"].bytes_arc()
+                &before.segments["group-state"].bytes_arc(),
+                &after.segments["group-state"].bytes_arc()
             ));
         }
     }

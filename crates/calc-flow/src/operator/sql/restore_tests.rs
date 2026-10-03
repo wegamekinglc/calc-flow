@@ -10,7 +10,7 @@ use datafusion::{
 
 use super::*;
 use crate::{
-    BatchMetadata, CalcFlowError, CancellationToken, DataFusionConfig, DataFusionRuntime,
+    Batch, BatchMetadata, CalcFlowError, CancellationToken, DataFusionConfig, DataFusionRuntime,
     EdgeCollector, Epoch, JsonMap, StreamJobContext,
     operator::{OperatorMetadata, StreamOperator, StreamOperatorContext},
 };
@@ -91,8 +91,8 @@ async fn test_prepared_current_restore_is_paid_and_installed_only_when_observed(
             .map(String::as_str)
             .collect::<Vec<_>>(),
         [
-            "batch_metadata_sha256",
             "bytes",
+            "control_sha256",
             "query_sha256",
             "rows",
             "state_accounting",
@@ -105,7 +105,7 @@ async fn test_prepared_current_restore_is_paid_and_installed_only_when_observed(
             .keys()
             .map(String::as_str)
             .collect::<Vec<_>>(),
-        ["batch-metadata", "input"]
+        ["batch-metadata", "control", "group-state", "logical-schema"]
     );
     let pool = pool(&target);
     let before = pool.reserved();
@@ -117,7 +117,9 @@ async fn test_prepared_current_restore_is_paid_and_installed_only_when_observed(
     assert_eq!(pool.reserved(), before);
     let prepared = target.prepare_restore(&replacement, &|| Ok(())).unwrap();
     target.install_restore(prepared);
-    assert!(target.incremental.is_none());
+    assert!(target.incremental.is_some());
+    assert!(target.compact.is_some());
+    assert!(target.retained.is_none());
     same_capture(&replacement, &target.checkpoint(Epoch::INITIAL).unwrap());
     let observed = push(&mut target, input("direct-prepare-continued", &[4]), &job).await;
     let oracle = DataFusionRuntime::new(DataFusionConfig::default())
@@ -184,6 +186,7 @@ async fn test_cancelled_and_empty_prepared_restore_preserve_committed_state() {
     target.install_restore(prepared);
     assert!(target.retained.is_none());
     assert!(target.incremental.is_none());
+    assert!(target.compact.is_none());
     assert!(!target.incremental_checked);
     assert!(
         target
@@ -227,4 +230,98 @@ async fn test_invalid_and_unfunded_prepared_restore_preserve_previous_state() {
     let prepared = target.prepare_restore(&replacement, &|| Ok(())).unwrap();
     target.install_restore(prepared);
     same_capture(&replacement, &target.checkpoint(Epoch::INITIAL).unwrap());
+}
+
+#[tokio::test]
+async fn test_prepared_current_checkpoint_snapshot_is_paid_without_installing() {
+    let job = job();
+    for (query, layout) in [
+        (QUERY, 3),
+        (
+            "SELECT SUM(value) AS total, COUNT(*) AS rows FROM events WHERE value IS NOT NULL",
+            4,
+        ),
+    ] {
+        let mut operator =
+            SqlOperator::new("totals", query, vec!["events".into()], vec![]).unwrap();
+        let _output = push(
+            &mut operator,
+            input("prepared-capture-snapshot", &[1, 2]),
+            &job,
+        )
+        .await;
+        let pool = pool(&operator);
+        let before = pool.reserved();
+        let prepared = operator.prepare_checkpoint_work(&|| Ok(())).unwrap();
+        let snapshot = prepared.snapshot().unwrap();
+        assert_eq!(snapshot.inline_metadata["state_layout"], json!(layout));
+        assert_eq!(snapshot.inline_metadata["rows"], json!(2));
+        assert!(pool.reserved() > before);
+        assert!(operator.retained_capture.is_none());
+        if let Some(compact) = &operator.compact {
+            assert!(compact.capture.is_none());
+        }
+        drop(prepared);
+        assert!(pool.reserved() > before);
+        drop(snapshot);
+        assert_eq!(pool.reserved(), before);
+        let prepared = operator.prepare_checkpoint_work(&|| Ok(())).unwrap();
+        let snapshot = prepared.snapshot().unwrap();
+        operator.install_checkpoint_work(prepared);
+        same_capture(&snapshot, &operator.checkpoint(Epoch::INITIAL).unwrap());
+    }
+}
+
+#[tokio::test]
+async fn test_checkpoint_identity_fee_rejection_preserves_state_and_refunds() {
+    let job = job();
+    let mut operator = seeded(&[1, 2], &job).await;
+    let committed = operator.checkpoint(Epoch::INITIAL).unwrap();
+    let pool = pool(&operator);
+    let before = pool.reserved();
+    let short = operator
+        .reserve_checkpoint_envelope("totals".len())
+        .unwrap();
+    let allowance = short.size();
+    drop(short);
+    assert_eq!(pool.reserved(), before);
+    let pressure = operator
+        .retention_runtime()
+        .unwrap()
+        .incremental_reservation("checkpoint-identity-pressure");
+    pressure.try_grow((1 << 30) - before - allowance).unwrap();
+    let charged = pool.reserved();
+    let node_id = "x".repeat(32768);
+    assert!(matches!(
+        operator.reserve_checkpoint_envelope(node_id.len()),
+        Err(CalcFlowError::DataFusion { .. })
+    ));
+    assert_eq!(pool.reserved(), charged);
+    same_capture(&committed, &operator.checkpoint(Epoch::INITIAL).unwrap());
+    let short = operator
+        .reserve_checkpoint_envelope("totals".len())
+        .unwrap();
+    assert_eq!(pool.reserved(), 1 << 30);
+    drop(short);
+    drop(pressure);
+    assert_eq!(pool.reserved(), before);
+    let observed = push(&mut operator, input("identity-fee-continued", &[4]), &job).await;
+    let oracle = DataFusionRuntime::new(DataFusionConfig::default())
+        .unwrap()
+        .sql(
+            QUERY,
+            &BTreeMap::from([("events".into(), input("identity-fee-continued", &[1, 2, 4]))]),
+            Some("identity-fee-independent-prefix"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(observed.metadata(), oracle.metadata());
+    assert_eq!(
+        observed.table_payload().unwrap().schema(),
+        oracle.table_payload().unwrap().schema()
+    );
+    assert_eq!(
+        observed.table_payload().unwrap().batches(),
+        oracle.table_payload().unwrap().batches()
+    );
 }

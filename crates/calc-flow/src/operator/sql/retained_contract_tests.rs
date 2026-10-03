@@ -1,129 +1,5 @@
 use super::*;
 
-fn previous_checkpoint() -> (String, OperatorStateSnapshot) {
-    let fixture: Value =
-        serde_json::from_str(include_str!("fixtures/retained-input-v1.json")).unwrap();
-    let snapshot = OperatorStateSnapshot {
-        inline_metadata: serde_json::from_value(fixture["inline_metadata"].clone()).unwrap(),
-        segments: fixture["segments"]
-            .as_object()
-            .unwrap()
-            .iter()
-            .map(|(name, bytes)| {
-                (
-                    name.clone(),
-                    StateSegment::new(hex::decode(bytes.as_str().unwrap()).unwrap()),
-                )
-            })
-            .collect(),
-    };
-    (fixture["query"].as_str().unwrap().into(), snapshot)
-}
-
-#[tokio::test]
-async fn test_sql_current_checkpoint_rejects_previous_layout_atomically() {
-    let (query, snapshot) = previous_checkpoint();
-    assert!(!snapshot.inline_metadata.contains_key("state_layout"));
-    assert_eq!(
-        decode_sql_state(snapshot.segments["input"].bytes())
-            .unwrap()
-            .num_rows(),
-        3
-    );
-    let mut outcomes = Vec::new();
-    for version in [None, Some(1)] {
-        let (mut operator, job, mut output) = setup(&query);
-        let context = StreamOperatorContext::new(&job, "totals", None);
-        operator
-            .process_data("events", wide_input(9).0, &context, &mut output)
-            .await
-            .unwrap();
-        let before = operator.checkpoint(Epoch::INITIAL).unwrap();
-        let pool = operator
-            .retention_runtime()
-            .unwrap()
-            .incremental_memory_pool();
-        let reserved = pool.reserved();
-        let mut previous = snapshot.clone();
-        if let Some(version) = version {
-            previous
-                .inline_metadata
-                .insert("state_layout".into(), json!(version));
-            previous
-                .inline_metadata
-                .insert("state_accounting".into(), json!(version));
-        }
-        let result = operator.prepare_restore(&previous, &|| Ok(()));
-        let rejected = matches!(result, Err(CalcFlowError::Format { ref message, .. }) if message == "SQL checkpoint layout is unsupported (expected 2)");
-        drop(result);
-        assert_same_snapshot(&before, &operator.checkpoint(Epoch::INITIAL).unwrap());
-        assert_eq!(pool.reserved(), reserved);
-        outcomes.push((version, rejected));
-    }
-    assert!(
-        outcomes.iter().all(|(_, rejected)| *rejected),
-        "{outcomes:?}"
-    );
-}
-
-#[tokio::test]
-async fn test_sql_current_checkpoint_rejects_previous_layout_before_decode() {
-    let (query, mut snapshot) = previous_checkpoint();
-    snapshot
-        .segments
-        .insert("input".into(), StateSegment::new(b"invalid IPC".to_vec()));
-    let (mut operator, _, _) = setup(&query);
-    let result = operator.prepare_restore(&snapshot, &|| Ok(()));
-    assert!(
-        matches!(result, Err(CalcFlowError::Format { ref message, .. }) if message == "SQL checkpoint layout is unsupported (expected 2)")
-    );
-    assert!(!operator.stream_runtime_initialized());
-}
-
-#[tokio::test]
-async fn test_sql_current_checkpoint_full_input_has_explicit_layout() {
-    let query = "WITH selected AS (SELECT * FROM events) SELECT SUM(value) AS total FROM selected";
-    let (mut operator, job, mut output) = setup(query);
-    let context = StreamOperatorContext::new(&job, "totals", None);
-    let input = wide_input(7).0;
-    operator
-        .process_data("events", input.clone(), &context, &mut output)
-        .await
-        .unwrap();
-    let snapshot = operator.checkpoint(Epoch::INITIAL).unwrap();
-    assert_eq!(
-        snapshot.inline_metadata.get("state_layout"),
-        Some(&json!(2))
-    );
-    assert_eq!(
-        snapshot.inline_metadata.get("state_accounting"),
-        Some(&json!(2))
-    );
-    assert_eq!(
-        snapshot
-            .segments
-            .keys()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-        ["batch-metadata", "input"]
-    );
-    let (mut restored, _, mut resumed_output) = setup(query);
-    StreamOperator::restore(&mut restored, &snapshot).unwrap();
-    assert_eq!(
-        restored.retained.as_ref().unwrap().metadata,
-        *input.metadata()
-    );
-    restored
-        .process_data("events", wide_input(8).0, &context, &mut resumed_output)
-        .await
-        .unwrap();
-    let produced = resumed_output.drain("output");
-    assert_eq!(
-        rows(produced[0].as_data().unwrap()),
-        vec![vec![datafusion::common::ScalarValue::Int64(Some(24))]]
-    );
-}
-
 #[tokio::test]
 async fn test_sql_retained_descriptor_rejects_forgery_atomically() {
     let (mut operator, job, mut collector) = setup("SELECT SUM(value) AS total FROM events");
@@ -133,12 +9,9 @@ async fn test_sql_retained_descriptor_rejects_forgery_atomically() {
         .await
         .unwrap();
     let before = operator.checkpoint(Epoch::INITIAL).unwrap();
-    assert_eq!(before.inline_metadata["state_layout"], json!(2));
+    assert_eq!(before.inline_metadata["state_layout"], json!(3));
     let mutations = [
-        ("retained_ordinals", json!([0, 1])),
-        ("dependency_sha256", json!("00".repeat(32))),
-        ("physical_schema_sha256", json!("00".repeat(32))),
-        ("state_layout", json!(3)),
+        ("state_layout", json!(4)),
         ("state_accounting", json!(1)),
         ("rows", json!(4)),
         ("bytes", json!(0)),
@@ -150,6 +23,26 @@ async fn test_sql_retained_descriptor_rejects_forgery_atomically() {
         assert!(
             StreamOperator::restore(&mut operator, &forged).is_err(),
             "accepted forged {field}"
+        );
+        assert_same_snapshot(&before, &operator.checkpoint(Epoch::INITIAL).unwrap());
+    }
+    for (field, value) in [
+        ("retained_ordinals", json!([0, 1])),
+        ("logical_schema_sha256", json!("00".repeat(32))),
+        ("physical_schema_sha256", json!("00".repeat(32))),
+    ] {
+        let mut forged = before.clone();
+        let mut control: Value =
+            serde_json::from_slice(forged.segments["control"].bytes()).unwrap();
+        control["identity"][field] = value;
+        let segment = StateSegment::new(serde_json::to_vec(&control).unwrap());
+        forged
+            .inline_metadata
+            .insert("control_sha256".into(), json!(segment.sha256()));
+        forged.segments.insert("control".into(), segment);
+        assert!(
+            StreamOperator::restore(&mut operator, &forged).is_err(),
+            "accepted forged control {field}"
         );
         assert_same_snapshot(&before, &operator.checkpoint(Epoch::INITIAL).unwrap());
     }
@@ -243,13 +136,25 @@ async fn test_sql_retained_row_budget_and_physical_byte_charge() {
         .unwrap();
     let context = StreamOperatorContext::new(&job, "totals", None);
     let input = wide_input(0).0;
+    let physical = Batch::table(
+        input
+            .table_payload()
+            .unwrap()
+            .batches()
+            .iter()
+            .map(|record| record.project(&[1]).unwrap())
+            .collect(),
+        input.metadata().clone(),
+    )
+    .unwrap();
     assert!(input.estimated_bytes().unwrap() > 100);
     operator
         .process_data("events", input, &context, &mut output)
         .await
         .unwrap();
     let before = operator.checkpoint(Epoch::INITIAL).unwrap();
-    let physical = decode_sql_state(before.segments["input-projected"].bytes()).unwrap();
+    assert!(operator.retained.is_none());
+    assert_eq!(operator.compact.as_ref().unwrap().ledger.rows, 3);
     assert_eq!(
         before.inline_metadata["bytes"],
         json!(physical.estimated_bytes().unwrap())
@@ -332,13 +237,19 @@ async fn test_sql_retained_unproved_lineage_keeps_full_schema() {
     assert_eq!(retained_names(&operator).len(), 8);
     let snapshot = operator.checkpoint(Epoch::INITIAL).unwrap();
     assert_eq!(snapshot.inline_metadata.len(), 6);
+    assert_eq!(snapshot.inline_metadata["state_layout"], json!(4));
     assert_eq!(
         snapshot
             .segments
             .keys()
             .map(String::as_str)
             .collect::<Vec<_>>(),
-        vec!["batch-metadata", "input"]
+        vec![
+            "batch-metadata",
+            "control",
+            "input-retained",
+            "logical-schema"
+        ]
     );
 }
 
@@ -346,7 +257,7 @@ async fn test_sql_retained_unproved_lineage_keeps_full_schema() {
 async fn test_sql_retained_shared_ipc_backing_detaches_only_selected_payload() {
     let bytes = encode_sql_state(&wide_input(0).0).unwrap();
     let decoded = decode_sql_state(&bytes).unwrap();
-    let (mut operator, job, mut output) = setup("SELECT SUM(value) AS total FROM events");
+    let (mut operator, job, mut output) = setup(RAW_SUM);
     let context = StreamOperatorContext::new(&job, "totals", None);
     let source_capacity = decoded.table_payload().unwrap().batches()[0]
         .column(1)
@@ -358,9 +269,13 @@ async fn test_sql_retained_shared_ipc_backing_detaches_only_selected_payload() {
         "fixture does not share the wide IPC body"
     );
     operator
-        .process_data("events", decoded, &context, &mut output)
+        .process_data("events", decoded.clone(), &context, &mut output)
         .await
         .unwrap();
+    let emitted = output.drain("output");
+    assert_eq!(emitted.len(), 1);
+    let observed = emitted[0].as_data().unwrap();
+    assert_raw_oracle(&operator, &decoded, observed).await;
     let retained = &operator.retained.as_ref().unwrap().records[0];
     assert_eq!(retained.num_columns(), 1);
     assert!(
@@ -368,7 +283,7 @@ async fn test_sql_retained_shared_ipc_backing_detaches_only_selected_payload() {
         "narrow SQL state still pins the wide IPC allocation"
     );
     assert_eq!(
-        rows(output.drain("output")[0].as_data().unwrap()),
+        rows(observed),
         vec![vec![datafusion::common::ScalarValue::Int64(Some(12))]]
     );
 }
@@ -401,7 +316,8 @@ async fn test_sql_retained_checkpoint_keeps_large_metadata_out_of_inline_manifes
     assert!(snapshot.segments.contains_key("batch-metadata"));
     let (mut restored, _, mut continuation) = setup("SELECT SUM(value) AS total FROM events");
     StreamOperator::restore(&mut restored, &snapshot).unwrap();
-    assert_eq!(restored.retained.as_ref().unwrap().metadata, metadata);
+    assert!(restored.retained.is_none());
+    assert_eq!(restored.compact.as_ref().unwrap().metadata, metadata);
     restored
         .process_data("events", wide_input(1).0, &context, &mut continuation)
         .await
@@ -414,7 +330,7 @@ async fn test_sql_retained_checkpoint_keeps_large_metadata_out_of_inline_manifes
 
 #[tokio::test]
 async fn test_sql_retained_checkpoint_ipc_body_is_prepaid_and_failure_atomic() {
-    let (mut operator, job, mut output) = setup("SELECT SUM(value) AS total FROM events");
+    let (mut operator, job, mut output) = setup(RAW_SUM);
     let context = StreamOperatorContext::new(&job, "totals", None);
     let values: ArrayRef = Arc::new(Int64Array::from_iter_values(0..100_000));
     let record = RecordBatch::try_new(
@@ -428,9 +344,13 @@ async fn test_sql_retained_checkpoint_ipc_body_is_prepaid_and_failure_atomic() {
     .unwrap();
     let input = Batch::table(vec![record], BatchMetadata::default()).unwrap();
     operator
-        .process_data("events", input, &context, &mut output)
+        .process_data("events", input.clone(), &context, &mut output)
         .await
         .unwrap();
+    let emitted = output.drain("output");
+    assert_eq!(emitted.len(), 1);
+    let observed = emitted[0].as_data().unwrap();
+    assert_raw_oracle(&operator, &input, observed).await;
     assert!(operator.retained.as_ref().unwrap().projection.is_none());
     let runtime = operator.stream_state.runtime().unwrap();
     let spare = runtime.incremental_reservation("checkpoint-spare");
@@ -452,7 +372,7 @@ async fn test_sql_retained_checkpoint_ipc_body_is_prepaid_and_failure_atomic() {
     drop(pressure);
     operator.prepare_checkpoint_async(&context).await.unwrap();
     let snapshot = operator.checkpoint(Epoch::INITIAL).unwrap();
-    assert!(snapshot.segments["input"].bytes().len() > 64 << 10);
+    assert!(snapshot.segments["input-retained"].bytes().len() > 64 << 10);
 }
 
 struct PauseMetadata(tokio::sync::oneshot::Sender<()>);
@@ -499,8 +419,8 @@ async fn test_sql_retained_empty_metadata_changes_and_failed_updates_recover_exa
         .unwrap();
     let changed = operator.checkpoint(Epoch::INITIAL).unwrap();
     assert!(Arc::ptr_eq(
-        &before.segments["input-projected"].bytes_arc(),
-        &changed.segments["input-projected"].bytes_arc()
+        &before.segments["group-state"].bytes_arc(),
+        &changed.segments["group-state"].bytes_arc()
     ));
     assert_ne!(
         before.segments["batch-metadata"].bytes(),
@@ -537,7 +457,8 @@ async fn test_sql_retained_empty_metadata_changes_and_failed_updates_recover_exa
     assert_same_snapshot(&changed, &operator.checkpoint(Epoch::INITIAL).unwrap());
     let (mut restored, _, mut recovered) = setup(query);
     StreamOperator::restore(&mut restored, &changed).unwrap();
-    assert_eq!(restored.retained.as_ref().unwrap().metadata, accepted);
+    assert!(restored.retained.is_none());
+    assert_eq!(restored.compact.as_ref().unwrap().metadata, accepted);
     restored
         .process_data("events", wide_input(1).0, &context, &mut recovered)
         .await
@@ -552,7 +473,7 @@ async fn test_sql_retained_empty_metadata_changes_and_failed_updates_recover_exa
 async fn test_sql_retained_snapshot_holds_input_and_metadata_body_credits_after_reset() {
     let mut held = Vec::new();
     for with_metadata in [false, true] {
-        let (mut operator, job, mut output) = setup("SELECT SUM(value) AS total FROM events");
+        let (mut operator, job, mut output) = setup(RAW_SUM);
         let context = StreamOperatorContext::new(&job, "totals", None);
         let input = if with_metadata {
             let data = wide_input(0).0;
@@ -634,12 +555,16 @@ async fn test_sql_retained_shared_backing_with_large_schema_metadata_remains_val
             .capacity()
             > 32_000
     );
-    let (mut operator, job, mut output) = setup("SELECT SUM(value) AS total FROM events");
+    let (mut operator, job, mut output) = setup(RAW_SUM);
     let context = StreamOperatorContext::new(&job, "totals", None);
     operator
         .process_data("events", input.clone(), &context, &mut output)
         .await
         .unwrap();
+    let emitted = output.drain("output");
+    assert_eq!(emitted.len(), 1);
+    let observed = emitted[0].as_data().unwrap();
+    assert_raw_oracle(&operator, &input, observed).await;
     let retained = &operator.retained.as_ref().unwrap().records[0];
     assert_eq!(retained.num_columns(), 1);
     assert!(retained.column(0).to_data().buffers()[0].capacity() < 4096);
@@ -649,17 +574,17 @@ async fn test_sql_retained_shared_backing_with_large_schema_metadata_remains_val
         &metadata
     );
     assert_eq!(
-        rows(output.drain("output")[0].as_data().unwrap()),
+        rows(observed),
         vec![vec![datafusion::common::ScalarValue::Int64(Some(12))]]
     );
     operator.prepare_checkpoint_async(&context).await.unwrap();
     let snapshot = operator.checkpoint(Epoch::INITIAL).unwrap();
-    let physical = decode_sql_state(snapshot.segments["input-projected"].bytes()).unwrap();
+    let physical = decode_sql_state(snapshot.segments["input-retained"].bytes()).unwrap();
     assert_eq!(
         physical.table_payload().unwrap().schema().metadata(),
         &metadata
     );
-    let (mut restored, _, mut continued) = setup("SELECT SUM(value) AS total FROM events");
+    let (mut restored, _, mut continued) = setup(RAW_SUM);
     StreamOperator::restore(&mut restored, &snapshot).unwrap();
     assert_eq!(
         restored.retained.as_ref().unwrap().records[0]
@@ -668,7 +593,7 @@ async fn test_sql_retained_shared_backing_with_large_schema_metadata_remains_val
         &metadata
     );
     restored
-        .process_data("events", input, &context, &mut continued)
+        .process_data("events", input.clone(), &context, &mut continued)
         .await
         .unwrap();
     assert_eq!(
@@ -696,7 +621,7 @@ async fn assert_schema_workspace_funded(
     metadata: std::collections::HashMap<String, String>,
     source: &str,
 ) {
-    let (mut operator, job, mut output) = setup("SELECT SUM(value) AS total FROM events");
+    let (mut operator, job, mut output) = setup(RAW_SUM);
     let context = StreamOperatorContext::new(&job, "totals", None);
     let record = RecordBatch::try_new(
         Arc::new(Schema::new_with_metadata(
@@ -715,6 +640,9 @@ async fn assert_schema_workspace_funded(
         .process_data("events", input.clone(), &context, &mut output)
         .await
         .unwrap();
+    let emitted = output.drain("output");
+    assert_eq!(emitted.len(), 1);
+    assert_raw_oracle(&operator, &input, emitted[0].as_data().unwrap()).await;
     assert!(operator.retained.as_ref().unwrap().projection.is_none());
     let state = operator.retained.as_ref().unwrap();
     let gauges = (state.rows, state.bytes);
@@ -750,7 +678,7 @@ async fn assert_schema_workspace_funded(
     operator.prepare_checkpoint_async(&context).await.unwrap();
     assert_eq!(allocated.load(std::sync::atomic::Ordering::SeqCst), 1);
     let snapshot = operator.checkpoint(Epoch::INITIAL).unwrap();
-    let decoded = decode_sql_state(snapshot.segments["input"].bytes()).unwrap();
+    let decoded = decode_sql_state(snapshot.segments["input-retained"].bytes()).unwrap();
     assert_eq!(
         decoded.table_payload().unwrap().schema().metadata(),
         &metadata

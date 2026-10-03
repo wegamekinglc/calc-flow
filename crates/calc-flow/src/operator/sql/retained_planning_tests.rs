@@ -99,11 +99,22 @@ async fn assert_two_batches_plan_once(query: &str) {
         );
         assert_eq!(rows(actual), rows(&expected));
         assert_eq!(input.table_payload().unwrap().batches(), before);
-        let retained = operator.retained.as_ref().unwrap();
-        assert_eq!(retained.rows, 4 * (sequence + 1));
-        assert_eq!(retained.records[0].num_columns(), 2);
-        assert_eq!(retained.records[0].schema().field(0).name(), "key");
-        assert_eq!(retained.records[0].schema().field(1).name(), "v7");
+        let (retained_rows, physical) = if let Some(state) = &operator.compact {
+            assert!(operator.retained.is_none());
+            assert!(operator.incremental.is_some());
+            let projection = state.projection().unwrap();
+            (
+                state.ledger.rows,
+                projection.columns.physical_schema().clone(),
+            )
+        } else {
+            let retained = operator.retained.as_ref().unwrap();
+            (retained.rows, retained.records[0].schema())
+        };
+        assert_eq!(retained_rows, 4 * (sequence + 1));
+        assert_eq!(physical.fields().len(), 2);
+        assert_eq!(physical.field(0).name(), "key");
+        assert_eq!(physical.field(1).name(), "v7");
     }
     assert_eq!(oracle.incremental_sql_plan_calls.load(Ordering::Relaxed), 0,);
     let runtime = operator.retention_runtime().unwrap();

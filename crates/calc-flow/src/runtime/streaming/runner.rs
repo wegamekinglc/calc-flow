@@ -1,6 +1,7 @@
 mod asof;
 mod checkpoint_task;
 mod operator_fusion;
+mod sql_recovery;
 mod supervision;
 
 #[cfg(test)]
@@ -75,6 +76,7 @@ use super::{
         SourceBinding, SourceProgress, SourceProgressSnapshot,
         spawn_source_tasks_gated_with_live_progress,
     },
+    sql_recovery_work::{JobSqlRecoveryOwner, SqlRecoveryClient},
     supervisor::{
         SupervisionReport, TaskFailure, TaskId, TaskRegistry, TaskStatus, TaskSupervisor,
         terminal::{TerminalArbiter, TerminalDecision},
@@ -153,6 +155,7 @@ pub(super) struct JobCore {
     manual_checkpoint: Mutex<Option<CheckpointCoordinatorHandle>>,
     operation_cancel_requested: AtomicBool,
     entity_work: JobEntityWorkOwner,
+    sql_recovery: JobSqlRecoveryOwner,
     supervision: SupervisionHome,
     #[cfg(test)]
     owned_lane_launches: Arc<AtomicU64>,
@@ -223,6 +226,7 @@ impl JobCore {
                 #[cfg(test)]
                 owned_lane_launches.clone(),
             ),
+            sql_recovery: JobSqlRecoveryOwner::new(),
             supervision: SupervisionHome::default(),
             #[cfg(test)]
             owned_lane_launches,
@@ -1582,7 +1586,10 @@ struct DriverReportGate {
 }
 
 async fn settle_driver_report(core: &Arc<JobCore>, join_error: Option<&str>) -> DriverReport {
-    if let Some(mut loan) = core.supervision.take(core.entity_work.clone()) {
+    if let Some(mut loan) = core
+        .supervision
+        .take(core.entity_work.clone(), core.sql_recovery.clone())
+    {
         let report = loan.join_all().await;
         if !core.supervision.has_report() {
             core.supervision
@@ -1590,6 +1597,9 @@ async fn settle_driver_report(core: &Arc<JobCore>, join_error: Option<&str>) -> 
         }
         drop(loan);
     }
+    core.sql_recovery.close_admission();
+    let sql_failures = core.sql_recovery.drain().await;
+    core.supervision.append_cleanup(sql_failures);
     if !core.supervision.has_report() {
         core.entity_work.close_admission();
         let secondary = core.entity_work.drain().await;
@@ -1946,6 +1956,19 @@ async fn run_job_driver(
         delivery_proofs: _,
         static_inputs: _,
     } = validated;
+    if let Err(error) = core.sql_recovery.configure(
+        plan.nodes
+            .iter()
+            .filter(|node| {
+                matches!(
+                    node.operator,
+                    crate::pipeline::CompiledStreamOperator::Sql(_)
+                )
+            })
+            .count(),
+    ) {
+        return core.prepare_driver_report(checkpoint_start_failure(launch_id, error));
+    }
     core.runtime_status.lock().rolling_metrics = plan
         .nodes
         .iter()
@@ -2002,6 +2025,25 @@ async fn run_job_driver(
         }
         match manifest_is_terminal(&selected.manifest, &plan) {
             Ok(true) => {
+                let mut sql_frames = sql_recovery::TerminalSqlFrames::default();
+                match sql_recovery::restore_terminal(
+                    &mut plan,
+                    &mut sql_frames,
+                    checkpoint,
+                    &context,
+                    &core.sql_recovery,
+                    &core.launch_cancel,
+                )
+                .await
+                {
+                    Ok(nodes) => core.runtime_status.lock().nodes.extend(nodes),
+                    Err(error) => {
+                        return core.prepare_driver_report(checkpoint_start_failure(
+                            launch_id,
+                            sanitize_managed_recovery_error(error, checkpoint.managed),
+                        ));
+                    }
+                }
                 let restored = asof::restore_terminal(
                     &mut plan,
                     checkpoint,
@@ -3011,9 +3053,11 @@ async fn run_operator_entry(
         cancellation.clone(),
         core.terminal_arbiter.clone(),
     );
-    let mut supervisor = core
-        .supervision
-        .install(supervisor, core.entity_work.clone());
+    let mut supervisor = core.supervision.install(
+        supervisor,
+        core.entity_work.clone(),
+        core.sql_recovery.clone(),
+    );
     core.runtime_status.lock().tasks = supervisor.registry();
     let (entry_tx, _) = watch::channel(false);
     let (data_tx, _) = watch::channel(false);
@@ -3022,6 +3066,7 @@ async fn run_operator_entry(
         create_runtime_channels(&plan, &core.metrics).map_err(preflight_entry_failure)?;
     let node_count = plan.nodes.len();
     let registration = &mut OperatorRegistration {
+        next_node_order: 0,
         context,
         core,
         entry_tx: &entry_tx,
@@ -3080,6 +3125,7 @@ async fn run_operator_entry(
 }
 
 struct OperatorRegistration<'a> {
+    next_node_order: usize,
     context: &'a super::StreamJobContext,
     core: &'a Arc<JobCore>,
     entry_tx: &'a watch::Sender<bool>,
@@ -3146,7 +3192,18 @@ fn prepare_operator_task(
         .context
         .for_node(&node_id)
         .map_err(preflight_entry_failure)?;
+    let node_order = registration.next_node_order;
+    registration.next_node_order += 1;
     let inputs = OperatorTaskInputs {
+        sql_recovery: matches!(
+            &node.operator,
+            crate::pipeline::CompiledStreamOperator::Sql(_)
+        )
+        .then(|| SqlRecoveryClient {
+            owner: registration.core.sql_recovery.clone(),
+            node_order,
+            task_id: None,
+        }),
         late_output_ports: node.late_output_ports,
         entity_work: matches!(
             &node.operator,

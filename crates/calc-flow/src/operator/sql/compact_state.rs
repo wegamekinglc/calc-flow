@@ -1,0 +1,618 @@
+#[path = "compact_state/export.rs"]
+mod export;
+
+use super::{
+    AggregateFunctionExpr, Arc, ArrayRef, CHUNK_ROWS, DataType, Field, Group, IncrementalSql,
+    MemoryReservation, PhysicalExpr, RecordBatch, Result, ScalarValue, Schema, SchemaRef,
+    checked_bytes, df_error, ensure_reservation, native_grouped_result,
+};
+use datafusion::arrow::{
+    array::{Array, Int64Array, LargeStringArray, StringArray, UInt64Array},
+    datatypes::FieldRef,
+};
+use datafusion::physical_expr::expressions::{CastExpr, Column, Literal};
+
+const STATE_CHUNK_ROWS: usize = 128;
+
+#[derive(Clone, Copy)]
+enum StateColumn {
+    Key(usize),
+    Aggregate(usize, usize),
+}
+
+#[derive(Debug, PartialEq)]
+pub(in crate::operator::sql) enum NativeAggregateInput {
+    Column {
+        index: usize,
+        field: FieldRef,
+    },
+    Literal(ScalarValue),
+    Cast {
+        input: Box<Self>,
+        field: FieldRef,
+        safe: bool,
+    },
+}
+
+pub(in crate::operator::sql) struct NativeStateDescriptor {
+    pub(in crate::operator::sql) key_fields: Vec<FieldRef>,
+    pub(in crate::operator::sql) aggregate_names: Vec<String>,
+    pub(in crate::operator::sql) aggregate_inputs: Vec<Vec<NativeAggregateInput>>,
+    pub(in crate::operator::sql) count_all_rows: Vec<bool>,
+    pub(in crate::operator::sql) state_fields: Vec<Vec<FieldRef>>,
+    pub(in crate::operator::sql) result_fields: Vec<FieldRef>,
+    pub(in crate::operator::sql) wire_schema: SchemaRef,
+    pub(in crate::operator::sql) output_schema: SchemaRef,
+    pub(in crate::operator::sql) projection_slots: Vec<usize>,
+    pub(in crate::operator::sql) group_count: usize,
+    pub(in crate::operator::sql) policy: &'static str,
+    _reservation: MemoryReservation,
+}
+
+pub(in crate::operator::sql) struct PaidNativeStateRecords {
+    records: Vec<RecordBatch>,
+    pub(in crate::operator::sql) descriptor: NativeStateDescriptor,
+    _reservation: MemoryReservation,
+}
+
+impl PaidNativeStateRecords {
+    pub(in crate::operator::sql) fn into_descriptor(self) -> NativeStateDescriptor {
+        let Self {
+            records,
+            descriptor,
+            _reservation: reservation,
+        } = self;
+        drop(records);
+        drop(reservation);
+        descriptor
+    }
+
+    pub(in crate::operator::sql) fn records(&self) -> &[RecordBatch] {
+        &self.records
+    }
+
+    #[cfg(test)]
+    pub(in crate::operator::sql) fn reserved_bytes(&self) -> usize {
+        let Self {
+            _reservation: reservation,
+            descriptor,
+            ..
+        } = self;
+        let NativeStateDescriptor {
+            _reservation: descriptor_reservation,
+            ..
+        } = descriptor;
+        reservation.size() + descriptor_reservation.size()
+    }
+}
+
+impl IncrementalSql {
+    pub(in crate::operator::sql) fn native_descriptor(
+        &self,
+        name: &str,
+    ) -> Result<NativeStateDescriptor> {
+        let input_bytes =
+            super::super::ipc::schema_bytes(&self.schema).map_err(|error| df_error(name, error))?;
+        let aggregate_bytes = super::super::ipc::schema_bytes(&self.aggregate_schema)
+            .map_err(|error| df_error(name, error))?;
+        let output_bytes = super::super::ipc::schema_bytes(&self.output_schema)
+            .map_err(|error| df_error(name, error))?;
+        let schema_bytes =
+            checked_bytes(input_bytes, [(aggregate_bytes, 1), (output_bytes, 1)], name)?;
+        let bytes = checked_bytes(
+            4096,
+            [
+                (schema_bytes, 4),
+                (self.keys.len(), 256),
+                (self.aggregates.len(), 1024),
+                (self.projection.len(), size_of::<usize>()),
+            ],
+            name,
+        )?;
+        let reservation = self.reservation.new_empty();
+        ensure_reservation(&reservation, bytes, name)?;
+        let key_fields = self
+            .keys
+            .iter()
+            .map(|&key| self.schema.fields()[key].clone())
+            .collect::<Vec<_>>();
+        let aggregate_names = self
+            .aggregates
+            .iter()
+            .map(|expression| expression.fun().name().to_owned())
+            .collect::<Vec<_>>();
+        let aggregate_inputs = self
+            .aggregates
+            .iter()
+            .map(|expression| {
+                expression
+                    .expressions()
+                    .iter()
+                    .map(|input| describe_input(input.as_ref(), &self.schema, 0, name))
+                    .collect::<Result<Vec<_>>>()
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let count_all_rows = aggregate_names.iter().zip(&aggregate_inputs).map(|(function, inputs)| {
+            function == "count" && matches!(inputs.as_slice(), [NativeAggregateInput::Literal(value)] if !value.is_null())
+        }).collect::<Vec<_>>();
+        let projection_slots = self
+            .projection
+            .iter()
+            .map(|expression| {
+                expression
+                    .downcast_ref::<Column>()
+                    .map(Column::index)
+                    .ok_or_else(|| df_error(name, "native output projection is not a column"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let state_fields = self
+            .aggregates
+            .iter()
+            .map(|expression| {
+                expression
+                    .state_fields()
+                    .map_err(|error| df_error(name, error))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let result_fields = self
+            .aggregates
+            .iter()
+            .map(|expression| expression.field())
+            .collect::<Vec<_>>();
+        let fields = key_fields
+            .iter()
+            .enumerate()
+            .map(|(key, field)| field.as_ref().clone().with_name(format!("key_{key}")))
+            .chain(
+                state_fields
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(aggregate, fields)| {
+                        fields.iter().enumerate().map(move |(state, field)| {
+                            field
+                                .as_ref()
+                                .clone()
+                                .with_name(format!("state_{aggregate}_{state}"))
+                        })
+                    }),
+            )
+            .collect::<Vec<_>>();
+        Ok(NativeStateDescriptor {
+            key_fields,
+            aggregate_names,
+            aggregate_inputs,
+            count_all_rows,
+            state_fields,
+            result_fields,
+            wire_schema: Arc::new(Schema::new(fields)),
+            output_schema: self.output_schema.clone(),
+            projection_slots,
+            group_count: self.groups.len(),
+            policy: "exact-numeric-v1",
+            _reservation: reservation,
+        })
+    }
+
+    pub(in crate::operator::sql) fn export_native_state(
+        &self,
+        name: &str,
+        mut check_cancelled: impl FnMut() -> Result<()>,
+    ) -> Result<PaidNativeStateRecords> {
+        check_cancelled()?;
+        let mut cursor = export::ExportCursor::new(self, name)?;
+        while !cursor.step(&mut check_cancelled)? {}
+        check_cancelled()?;
+        Ok(cursor.finish())
+    }
+
+    pub(in crate::operator::sql) async fn export_native_state_async(
+        &self,
+        name: &str,
+        mut check_cancelled: impl FnMut() -> Result<()>,
+    ) -> Result<PaidNativeStateRecords> {
+        check_cancelled()?;
+        let mut cursor = export::ExportCursor::new(self, name)?;
+        loop {
+            let complete = cursor.step(&mut check_cancelled)?;
+            check_cancelled()?;
+            if complete {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        Ok(cursor.finish())
+    }
+
+    pub(in crate::operator::sql) fn import_native_state(
+        mut self,
+        records: &[RecordBatch],
+        historical_rows: u64,
+        seen_input: bool,
+        mut check_cancelled: impl FnMut() -> Result<()>,
+        name: &str,
+    ) -> Result<Self> {
+        check_cancelled()?;
+        if !self.groups.is_empty() || !self.index.is_empty() {
+            return Err(df_error(name, "native state import requires an empty plan"));
+        }
+        let descriptor = self.native_descriptor(name)?;
+        let validation = self.reservation.new_empty();
+        ensure_reservation(
+            &validation,
+            checked_bytes(0, [(self.aggregates.len(), size_of::<u64>())], name)?,
+            name,
+        )?;
+        let groups = validate_records(
+            records,
+            &descriptor,
+            historical_rows,
+            &mut check_cancelled,
+            name,
+        )?;
+        validate_ledger(
+            groups,
+            historical_rows,
+            seen_input,
+            self.keys.is_empty(),
+            name,
+        )?;
+        self.reserve_groups(groups, groups, name)?;
+        let workspace = self.reservation.new_empty();
+        for record in records {
+            if record.num_rows() == 0 {
+                check_cancelled()?;
+            }
+            for start in (0..record.num_rows()).step_by(STATE_CHUNK_ROWS) {
+                check_cancelled()?;
+                let rows = STATE_CHUNK_ROWS.min(record.num_rows() - start);
+                let variable = key_variable_bytes(record, self.keys.len(), start, rows, name)?;
+                let charge = checked_bytes(
+                    4096,
+                    [
+                        (self.finalizer_bytes, 1),
+                        (self.aggregate_bytes, 1),
+                        (variable, 4),
+                        (
+                            rows,
+                            checked_bytes(
+                                256,
+                                [
+                                    (self.keys.len(), 128),
+                                    (
+                                        descriptor.wire_schema.fields().len(),
+                                        size_of::<ScalarValue>() * 2,
+                                    ),
+                                ],
+                                name,
+                            )?,
+                        ),
+                    ],
+                    name,
+                )?;
+                ensure_reservation(&workspace, charge, name)?;
+                let chunk = record.slice(start, rows);
+                let encoded = if let Some(converter) = &self.converter {
+                    let columns = chunk.columns()[..self.keys.len()].to_vec();
+                    Some(
+                        converter
+                            .convert_columns(&columns)
+                            .map_err(|error| df_error(name, error))?,
+                    )
+                } else {
+                    None
+                };
+                for row in 0..rows {
+                    let key = encoded.as_ref().map(|encoded| encoded.row(row));
+                    let key = key.as_ref().map_or(&[][..], |key| key.as_ref());
+                    if self.index.contains_key(key) {
+                        return Err(df_error(name, "native state contains duplicate keys"));
+                    }
+                    let group = self.import_group(&chunk, row, key, &descriptor, name)?;
+                    let slot = self.groups.len();
+                    self.index.insert(group.key.clone(), slot);
+                    self.groups.push(group);
+                }
+            }
+        }
+        check_cancelled()?;
+        Ok(self)
+    }
+
+    fn import_group(
+        &self,
+        record: &RecordBatch,
+        row: usize,
+        key: &[u8],
+        descriptor: &NativeStateDescriptor,
+        name: &str,
+    ) -> Result<Group> {
+        let variable = key_variable_bytes(record, self.keys.len(), row, 1, name)?;
+        let charge = checked_bytes(
+            self.aggregate_bytes,
+            [
+                (key.len(), 4),
+                (variable, 4),
+                (1, size_of::<Group>()),
+                (
+                    descriptor.wire_schema.fields().len(),
+                    size_of::<ScalarValue>() * 2,
+                ),
+                (
+                    self.aggregates.len(),
+                    size_of::<Vec<ScalarValue>>() + size_of::<ScalarValue>(),
+                ),
+                (self.keys.len(), size_of::<ScalarValue>()),
+            ],
+            name,
+        )?;
+        let reservation = self.reservation.new_empty();
+        ensure_reservation(&reservation, charge, name)?;
+        let values = record.columns()[..self.keys.len()]
+            .iter()
+            .map(|array| {
+                ScalarValue::try_from_array(array, row).map_err(|error| df_error(name, error))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut states = Vec::with_capacity(self.aggregates.len());
+        let mut results = Vec::with_capacity(self.aggregates.len());
+        let mut column = self.keys.len();
+        for (aggregate, expression) in self.aggregates.iter().enumerate() {
+            let width = descriptor.state_fields[aggregate].len();
+            let state = record.columns()[column..column + width]
+                .iter()
+                .map(|array| {
+                    ScalarValue::try_from_array(array, row).map_err(|error| df_error(name, error))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let result = restored_result(expression, &state, !self.keys.is_empty(), name)?;
+            validate_scalar(&result, &descriptor.result_fields[aggregate], name)?;
+            states.push(state);
+            results.push(result);
+            column += width;
+        }
+        Ok(Group {
+            key: Arc::from(key),
+            values: Arc::from(values),
+            states,
+            results,
+            _reservation: reservation,
+        })
+    }
+}
+
+fn describe_input(
+    expression: &dyn PhysicalExpr,
+    schema: &Schema,
+    depth: usize,
+    name: &str,
+) -> Result<NativeAggregateInput> {
+    if depth > 8 {
+        return Err(df_error(name, "native aggregate input is too deep"));
+    }
+    if let Some(column) = expression.downcast_ref::<Column>() {
+        return Ok(NativeAggregateInput::Column {
+            index: column.index(),
+            field: schema.fields()[column.index()].clone(),
+        });
+    }
+    if let Some(literal) = expression.downcast_ref::<Literal>() {
+        return Ok(NativeAggregateInput::Literal(literal.value().clone()));
+    }
+    if let Some(cast) = expression.downcast_ref::<CastExpr>() {
+        if cast.cast_options().format_options != datafusion::common::format::DEFAULT_FORMAT_OPTIONS
+        {
+            return Err(df_error(name, "native cast has unsupported format options"));
+        }
+        return Ok(NativeAggregateInput::Cast {
+            input: Box::new(describe_input(
+                cast.expr().as_ref(),
+                schema,
+                depth + 1,
+                name,
+            )?),
+            field: cast.target_field().clone(),
+            safe: cast.cast_options().safe,
+        });
+    }
+    Err(df_error(
+        name,
+        "native aggregate input has an unsupported expression",
+    ))
+}
+
+fn validate_scalar(value: &ScalarValue, field: &Field, name: &str) -> Result<()> {
+    if value.data_type() != *field.data_type() || (!field.is_nullable() && value.is_null()) {
+        return Err(df_error(name, "native scalar differs from trusted field"));
+    }
+    Ok(())
+}
+
+fn validate_records(
+    records: &[RecordBatch],
+    descriptor: &NativeStateDescriptor,
+    historical_rows: u64,
+    check_cancelled: &mut impl FnMut() -> Result<()>,
+    name: &str,
+) -> Result<usize> {
+    if records.is_empty() {
+        return Err(df_error(name, "native state is missing its schema record"));
+    }
+    let mut groups = 0usize;
+    let mut counts = vec![0u64; descriptor.aggregate_names.len()];
+    for record in records {
+        if record.num_rows() == 0 {
+            check_cancelled()?;
+        }
+        if record.schema() != descriptor.wire_schema {
+            return Err(df_error(
+                name,
+                "native state schema differs from trusted plan",
+            ));
+        }
+        for (array, field) in record.columns().iter().zip(descriptor.wire_schema.fields()) {
+            if !field.is_nullable() && array.null_count() != 0 {
+                return Err(df_error(name, "native state has nulls in a required field"));
+            }
+        }
+        groups = groups
+            .checked_add(record.num_rows())
+            .ok_or_else(|| df_error(name, "native group count overflowed"))?;
+        for start in (0..record.num_rows()).step_by(STATE_CHUNK_ROWS) {
+            check_cancelled()?;
+            for row in start..(start + STATE_CHUNK_ROWS).min(record.num_rows()) {
+                validate_counts(record, row, descriptor, historical_rows, &mut counts, name)?;
+            }
+        }
+    }
+    for (count, all_rows) in counts.iter().zip(&descriptor.count_all_rows) {
+        if *all_rows && *count != historical_rows {
+            return Err(df_error(
+                name,
+                "native all-row COUNT differs from historical rows",
+            ));
+        }
+    }
+    Ok(groups)
+}
+
+fn validate_counts(
+    record: &RecordBatch,
+    row: usize,
+    descriptor: &NativeStateDescriptor,
+    historical_rows: u64,
+    totals: &mut [u64],
+    name: &str,
+) -> Result<()> {
+    let mut column = descriptor.key_fields.len();
+    for (aggregate, function) in descriptor.aggregate_names.iter().enumerate() {
+        match function.as_str() {
+            "count" => {
+                let array = record
+                    .column(column)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .ok_or_else(|| df_error(name, "native COUNT state is not Int64"))?;
+                let count = u64::try_from(array.value(row))
+                    .map_err(|_| df_error(name, "native COUNT state is negative"))?;
+                add_count(&mut totals[aggregate], count, historical_rows, name)?;
+                if descriptor.count_all_rows[aggregate]
+                    && !descriptor.key_fields.is_empty()
+                    && count == 0
+                {
+                    return Err(df_error(name, "native grouped all-row COUNT is zero"));
+                }
+            }
+            "avg" => {
+                let counts = record
+                    .column(column)
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .ok_or_else(|| df_error(name, "native AVG count is not UInt64"))?;
+                let count = if counts.is_null(row) {
+                    0
+                } else {
+                    counts.value(row)
+                };
+                add_count(&mut totals[aggregate], count, historical_rows, name)?;
+                let null_sum = record.column(column + 1).is_null(row);
+                if count > historical_rows || (count == 0) != null_sum {
+                    return Err(df_error(name, "native AVG count and sum are inconsistent"));
+                }
+            }
+            _ => {
+                if historical_rows == 0 && !record.column(column).is_null(row) {
+                    return Err(df_error(
+                        name,
+                        "native aggregate has a value before input rows",
+                    ));
+                }
+            }
+        }
+        column += descriptor.state_fields[aggregate].len();
+    }
+    Ok(())
+}
+
+fn add_count(total: &mut u64, count: u64, historical_rows: u64, name: &str) -> Result<()> {
+    *total = total
+        .checked_add(count)
+        .filter(|&total| total <= historical_rows)
+        .ok_or_else(|| df_error(name, "native aggregate count exceeds historical rows"))?;
+    Ok(())
+}
+
+fn validate_ledger(groups: usize, rows: u64, seen: bool, scalar: bool, name: &str) -> Result<()> {
+    let valid = if !seen {
+        rows == 0 && groups == 0
+    } else if scalar {
+        groups == 1
+    } else {
+        u64::try_from(groups).is_ok_and(|groups| groups <= rows && (rows == 0 || groups != 0))
+    };
+    if !valid {
+        return Err(df_error(
+            name,
+            "native group census differs from historical ledger",
+        ));
+    }
+    Ok(())
+}
+
+fn key_variable_bytes(
+    record: &RecordBatch,
+    keys: usize,
+    start: usize,
+    rows: usize,
+    name: &str,
+) -> Result<usize> {
+    let mut bytes = 0;
+    for array in &record.columns()[..keys] {
+        for row in start..start + rows {
+            let width = match array.data_type() {
+                DataType::Utf8 => array
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or_else(|| df_error(name, "native Utf8 key differs"))?
+                    .value(row)
+                    .len(),
+                DataType::LargeUtf8 => array
+                    .as_any()
+                    .downcast_ref::<LargeStringArray>()
+                    .ok_or_else(|| df_error(name, "native LargeUtf8 key differs"))?
+                    .value(row)
+                    .len(),
+                _ => 0,
+            };
+            bytes = checked_bytes(bytes, [(width, 1)], name)?;
+        }
+    }
+    Ok(bytes)
+}
+
+fn restored_result(
+    expression: &AggregateFunctionExpr,
+    state: &[ScalarValue],
+    grouped: bool,
+    name: &str,
+) -> Result<ScalarValue> {
+    if grouped && expression.fun().name() == "avg" {
+        return native_grouped_result(expression, state, name);
+    }
+    let mut accumulator = expression
+        .create_accumulator()
+        .map_err(|error| df_error(name, error))?;
+    let arrays = state
+        .iter()
+        .map(|value| value.to_array().map_err(|error| df_error(name, error)))
+        .collect::<Result<Vec<_>>>()?;
+    accumulator
+        .merge_batch(&arrays)
+        .map_err(|error| df_error(name, error))?;
+    accumulator
+        .evaluate()
+        .map_err(|error| df_error(name, error))
+}
+
+#[path = "compact_state_tests.rs"]
+#[cfg(test)]
+mod tests;

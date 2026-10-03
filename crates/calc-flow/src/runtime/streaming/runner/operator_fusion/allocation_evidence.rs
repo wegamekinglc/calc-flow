@@ -337,6 +337,7 @@ impl TaskFixture {
         let (mut senders, mut receivers) = create_runtime_channels(&graph, &core.metrics).unwrap();
         let mut restores = BTreeMap::new();
         let mut registration = OperatorRegistration {
+            next_node_order: 0,
             context: &context,
             core: &core,
             entry_tx: &entry,

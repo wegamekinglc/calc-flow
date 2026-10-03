@@ -13,7 +13,7 @@ async fn aborted_driver_returns_complete_supervisor_and_settled_primary_error() 
     });
     supervisor.spawn("pending", std::future::pending());
     let registry = supervisor.registry();
-    let mut loan = home.install(supervisor, cpu.clone());
+    let mut loan = home.install(supervisor, cpu.clone(), JobSqlRecoveryOwner::new());
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let driver = tokio::spawn(async move {
         // The original join keeps its settled error in the supervisor while
@@ -29,7 +29,9 @@ async fn aborted_driver_returns_complete_supervisor_and_settled_primary_error() 
     driver.abort();
     assert!(driver.await.unwrap_err().is_cancelled());
     assert!(!registry.snapshot().is_empty());
-    let mut returned = home.take(cpu).expect("abort returns the unique loan");
+    let mut returned = home
+        .take(cpu, JobSqlRecoveryOwner::new())
+        .expect("abort returns the unique loan");
     let report = returned.join_all().await;
     assert_eq!(report.primary_errors().len(), 1);
     assert_eq!(report.primary_errors()[0].task_id, failed_id);
@@ -47,7 +49,7 @@ async fn prepared_report_survives_driver_drop_until_lifecycle_takes_it() {
     let home = SupervisionHome::default();
     let cpu = JobEntityWorkOwner::new(7, Arc::new(AtomicU64::new(0)));
     let supervisor = TaskSupervisor::new(CancellationToken::new());
-    let mut loan = home.install(supervisor, cpu);
+    let mut loan = home.install(supervisor, cpu, JobSqlRecoveryOwner::new());
     assert!(loan.join_all().await.errors.is_empty());
     let launch_id = LaunchId::new(1);
     home.prepare(DriverReport::aborted(launch_id, "prepared original"));

@@ -32,6 +32,9 @@ use crate::{
 
 const CHUNK_ROWS: usize = 8192;
 
+#[path = "compact_state.rs"]
+pub(super) mod compact_state;
+
 pub(super) struct IncrementalSql {
     schema: SchemaRef,
     aggregate_schema: SchemaRef,
@@ -420,6 +423,25 @@ impl IncrementalSql {
             .incremental_sql_plan(query, alias, schema.clone(), name)
             .await?;
         Self::from_plan(runtime, query, schema, &raw, &analyzed, name)
+    }
+
+    pub(super) fn plan_sync(
+        runtime: &DataFusionRuntime,
+        query: &ValidatedQuery,
+        alias: &str,
+        logical_schema: SchemaRef,
+        physical_schema: SchemaRef,
+        name: &str,
+    ) -> Result<Option<Self>> {
+        let plans = prepare_sync_plan(runtime, query, alias, logical_schema, name)?;
+        Self::from_plan(
+            runtime,
+            query,
+            physical_schema,
+            &plans.raw,
+            &plans.analyzed,
+            name,
+        )
     }
 
     pub(super) fn from_plan(
@@ -1182,6 +1204,29 @@ impl IncrementalSql {
             self.groups.push(group);
         }
     }
+}
+
+fn prepare_sync_plan(
+    runtime: &DataFusionRuntime,
+    query: &ValidatedQuery,
+    alias: &str,
+    schema: SchemaRef,
+    name: &str,
+) -> Result<crate::datafusion::compact::PaidSqlPlan> {
+    let fields = super::ipc::schema_bytes(&schema).map_err(|error| df_error(name, error))?;
+    let charge = checked_bytes(
+        8192,
+        [
+            (query.text().len(), 16),
+            (alias.len(), 16),
+            (fields, 16),
+            (schema.fields().len(), 512),
+        ],
+        name,
+    )?;
+    let reservation = runtime.incremental_reservation(name);
+    ensure_reservation(&reservation, charge, name)?;
+    runtime.incremental_sql_plan_sync(query, alias, schema, name, reservation)
 }
 
 fn grouped_layout(
@@ -1991,8 +2036,8 @@ mod tests {
         let after = operator.checkpoint(crate::Epoch::INITIAL).unwrap();
         assert_eq!(before.inline_metadata, after.inline_metadata);
         assert!(Arc::ptr_eq(
-            &before.segments["input"].bytes_arc(),
-            &after.segments["input"].bytes_arc()
+            &before.segments["group-state"].bytes_arc(),
+            &after.segments["group-state"].bytes_arc()
         ));
         assert_eq!(
             operator.incremental.as_ref().unwrap().groups[0].states[0][0],
@@ -2472,3 +2517,11 @@ mod tests {
         assert_eq!(actual_rows, expected_rows);
     }
 }
+
+#[cfg(test)]
+#[path = "compact_checkpoint_tests.rs"]
+mod compact_checkpoint_tests;
+
+#[cfg(test)]
+#[path = "compact_plan_tests.rs"]
+mod compact_plan_tests;
