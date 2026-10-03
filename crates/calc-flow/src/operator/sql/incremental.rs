@@ -1415,7 +1415,9 @@ fn aggregate_argument_supported(data_type: &DataType, function: &str) -> bool {
 }
 
 fn count_argument_supported(data_type: &DataType) -> bool {
-    key_type(data_type) || exact_numeric(data_type)
+    key_type(data_type)
+        || exact_numeric(data_type)
+        || matches!(data_type, DataType::Float32 | DataType::Float64)
 }
 
 fn exact_numeric(data_type: &DataType) -> bool {

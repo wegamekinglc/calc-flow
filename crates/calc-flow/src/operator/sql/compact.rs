@@ -94,3 +94,6 @@ mod storage_tests;
 
 #[cfg(test)]
 pub(in crate::operator::sql) mod direct_async_tests;
+
+#[cfg(test)]
+mod float_count_tests;
