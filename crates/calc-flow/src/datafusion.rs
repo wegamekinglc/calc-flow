@@ -1650,3 +1650,11 @@ mod datafusion_compact_planner;
 
 #[path = "datafusion_compact.rs"]
 pub(crate) mod compact;
+
+#[cfg(test)]
+#[path = "datafusion_grouped_float_diagnostics.rs"]
+mod datafusion_grouped_float_diagnostics;
+
+#[cfg(test)]
+#[path = "datafusion_grouped_float_seed_tests.rs"]
+mod datafusion_grouped_float_seed_tests;

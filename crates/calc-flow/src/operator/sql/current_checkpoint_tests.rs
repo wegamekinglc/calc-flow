@@ -167,148 +167,25 @@ async fn test_current_ineligible_sql_checkpoint_writes_retained_layout4() {
     );
 }
 
-fn old_snapshot(operator: &mut SqlOperator, layout: u64) -> OperatorStateSnapshot {
-    let batch = input();
-    operator.stream_state.runtime().unwrap();
-    let runtime = operator.retention_runtime().unwrap();
-    let mut inline = BTreeMap::from([
-        ("query_sha256".into(), json!(operator.query_digest())),
-        ("rows".into(), json!(4)),
-    ]);
-    if layout == 1 {
-        inline.insert("bytes".into(), json!(batch.estimated_bytes().unwrap()));
-        let segment = StateSegment::new(encode_sql_state(&batch).unwrap());
-        let decoded = decode_sql_state(segment.bytes()).unwrap();
-        assert_eq!(decoded.metadata(), &BatchMetadata::default());
-        assert_eq!(
-            decoded.table_payload().unwrap().schema(),
-            batch.table_payload().unwrap().schema()
-        );
-        assert_eq!(decoded.num_rows(), 4);
-        assert_eq!(rows(&decoded), rows(&batch));
-        return OperatorStateSnapshot {
-            inline_metadata: inline,
-            segments: BTreeMap::from([("input".into(), segment)]),
-        };
-    }
-    let projection = retention::SqlProjection::resolve(
-        runtime,
-        &operator.validated,
-        "events",
-        schema(),
-        "current_sql",
-    )
-    .unwrap()
-    .unwrap();
-    let physical = Batch::table(
-        batch
-            .table_payload()
-            .unwrap()
-            .batches()
-            .iter()
-            .map(|record| projection.columns.project(record).unwrap())
-            .collect(),
-        batch.metadata().clone(),
-    )
-    .unwrap();
-    inline.extend([
-        ("bytes".into(), json!(physical.estimated_bytes().unwrap())),
-        ("state_layout".into(), json!(2)),
-        ("state_accounting".into(), json!(2)),
-        (
-            "retained_ordinals".into(),
-            json!(projection.columns.ordinals()),
-        ),
-        (
-            "dependency_sha256".into(),
-            json!(old_dependency_digest(operator, &projection)),
-        ),
-        (
-            "physical_schema_sha256".into(),
-            json!(retention::schema_digest(projection.columns.physical_schema()).unwrap()),
-        ),
-    ]);
-    let encoded = ipc::encode(
-        &physical,
-        runtime.incremental_reservation("old-negative-input"),
-        || Ok(()),
-    )
-    .unwrap();
-    let metadata = metadata::encode(
-        batch.metadata(),
-        metadata::reserve(runtime, batch.metadata(), "old-negative-metadata").unwrap(),
-        || Ok(()),
-    )
-    .unwrap();
-    inline.insert(
-        "batch_metadata_sha256".into(),
-        json!(metadata.segment.sha256()),
-    );
-    assert_eq!(
-        decode_sql_state(encoded.segment.bytes())
-            .unwrap()
-            .table_payload()
-            .unwrap()
-            .schema(),
-        projection.columns.physical_schema()
-    );
-    OperatorStateSnapshot {
-        inline_metadata: inline,
-        segments: BTreeMap::from([
-            ("input-projected".into(), encoded.segment.clone()),
-            ("logical-schema".into(), projection.logical_segment.clone()),
-            ("batch-metadata".into(), metadata.segment.clone()),
-        ]),
-    }
-}
-
-fn old_dependency_digest(operator: &SqlOperator, projection: &retention::SqlProjection) -> String {
-    let identity = json!({
-        "query": operator.validated.text(),
-        "alias": "events",
-        "logical_schema_sha256": projection.logical_segment.sha256(),
-        "retained_ordinals": projection.columns.ordinals(),
-        "udfs": [],
-    });
-    hex::encode(Sha256::digest(
-        crate::canonical_json(&identity).unwrap().as_bytes(),
-    ))
-}
-
-#[tokio::test]
-async fn test_old_sql_layouts_are_rejected_before_input_decode() {
-    let mut observed = Vec::new();
-    for layout in [1, 2] {
-        for corrupt in [false, true] {
-            let mut operator = operator(NATIVE);
-            let mut snapshot = old_snapshot(&mut operator, layout);
-            if corrupt {
-                let input = if layout == 1 {
-                    "input"
-                } else {
-                    "input-projected"
-                };
-                snapshot
-                    .segments
-                    .insert(input.into(), StateSegment::new(b"not Arrow IPC".to_vec()));
-            }
-            let outcome = operator.prepare_restore(&snapshot, &|| Ok(()));
-            let error = match outcome {
-                Ok(prepared) => {
-                    drop(prepared);
-                    None
-                }
-                Err(error) => Some(error),
-            };
-            drop((snapshot, operator));
-            eprintln!("old layout {layout}, corrupt={corrupt}, error={error:?}");
-            observed.push((layout, corrupt, error));
+#[test]
+fn test_old_sql_layouts_are_rejected_before_input_decode() {
+    for layout in [None, Some(0), Some(1), Some(2), Some(5)] {
+        let mut inline_metadata = BTreeMap::new();
+        if let Some(layout) = layout {
+            inline_metadata.insert("state_layout".into(), json!(layout));
         }
-    }
-    for (layout, corrupt, error) in observed {
+        let snapshot = OperatorStateSnapshot {
+            inline_metadata,
+            segments: BTreeMap::from([(
+                "input".into(),
+                StateSegment::new(b"not Arrow IPC".to_vec()),
+            )]),
+        };
+        let mut operator = operator(NATIVE);
+        let result = operator.prepare_restore(&snapshot, &|| Ok(()));
         assert!(
-            matches!(error, Some(CalcFlowError::Format { ref message }) if message == LAYOUT_REFUSAL),
-            "layout={layout}, corrupt={corrupt}, error={error:?}"
+            matches!(result, Err(CalcFlowError::Format { ref message }) if message == LAYOUT_REFUSAL),
+            "layout={layout:?}"
         );
     }
 }
