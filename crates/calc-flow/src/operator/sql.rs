@@ -198,7 +198,7 @@ impl RetainedSqlInput {
     }
 
     fn needs_checkpoint(&self) -> bool {
-        self.segment.is_none() || (self.projection.is_some() && self.metadata_segment.is_none())
+        self.segment.is_none() || self.metadata_segment.is_none()
     }
 
     async fn prepare_checkpoint_parts(
@@ -225,7 +225,7 @@ impl RetainedSqlInput {
         } else {
             None
         };
-        let metadata = if self.projection.is_some() && self.metadata_segment.is_none() {
+        let metadata = if self.metadata_segment.is_none() {
             let reservation = metadata::reserve(runtime, &self.metadata, name)?;
             Some((self.metadata.clone(), reservation))
         } else {
@@ -912,14 +912,27 @@ impl SqlOperator {
     }
 
     fn checkpoint_matches(&self, snapshot: &OperatorStateSnapshot) -> bool {
+        let fields = [
+            "query_sha256",
+            "rows",
+            "bytes",
+            "state_layout",
+            "state_accounting",
+            "batch_metadata_sha256",
+        ];
         self.stream_aggregate
-            && snapshot.inline_metadata.len() == 3
-            && snapshot.segments.len() == 1
-            && snapshot
-                .inline_metadata
-                .get("query_sha256")
-                .and_then(Value::as_str)
-                == Some(self.query_digest().as_str())
+            && snapshot.inline_metadata.len() == fields.len()
+            && fields
+                .iter()
+                .all(|field| snapshot.inline_metadata.contains_key(*field))
+            && snapshot.inline_metadata["state_layout"] == json!(2)
+            && snapshot.inline_metadata["state_accounting"] == json!(2)
+            && snapshot.inline_metadata["query_sha256"] == json!(self.query_digest())
+            && snapshot.segments.len() == 2
+            && snapshot.segments.contains_key("input")
+            && snapshot.segments.contains_key("batch-metadata")
+            && snapshot.inline_metadata["batch_metadata_sha256"]
+                == json!(snapshot.segments["batch-metadata"].sha256())
     }
 
     fn validate_checkpoint_charge(&self, batch: &Batch, rows: u64, bytes: u64) -> Result<()> {
@@ -1329,10 +1342,11 @@ impl StreamOperator for SqlOperator {
     }
 
     fn checkpoint(&mut self, _epoch: Epoch) -> Result<OperatorStateSnapshot> {
-        if let Some(state) = self.retained.as_mut().filter(|state| {
-            state.segment.is_none()
-                || (state.projection.is_some() && state.metadata_segment.is_none())
-        }) {
+        if let Some(state) = self
+            .retained
+            .as_mut()
+            .filter(|state| state.segment.is_none() || state.metadata_segment.is_none())
+        {
             let runtime = self.stream_state.runtime()?;
             let segment = if state.segment.is_none() {
                 let materialized = state.materialize(runtime, &self.name)?;
@@ -1344,7 +1358,7 @@ impl StreamOperator for SqlOperator {
             } else {
                 None
             };
-            let metadata = if state.projection.is_some() && state.metadata_segment.is_none() {
+            let metadata = if state.metadata_segment.is_none() {
                 Some(metadata::encode(
                     &state.metadata,
                     metadata::reserve(runtime, &state.metadata, &self.name)?,
@@ -1367,12 +1381,31 @@ impl StreamOperator for SqlOperator {
             ("query_sha256".into(), json!(self.query_digest())),
             ("rows".into(), json!(state.rows)),
             ("bytes".into(), json!(state.bytes)),
+            ("state_layout".into(), json!(2)),
+            ("state_accounting".into(), json!(2)),
+            (
+                "batch_metadata_sha256".into(),
+                json!(
+                    state
+                        .metadata_segment
+                        .as_ref()
+                        .expect("prepared metadata")
+                        .segment
+                        .sha256()
+                ),
+            ),
         ]);
-        let mut segments = BTreeMap::new();
+        let mut segments = BTreeMap::from([(
+            "batch-metadata".into(),
+            state
+                .metadata_segment
+                .as_ref()
+                .expect("prepared metadata")
+                .segment
+                .clone(),
+        )]);
         if let Some(projection) = &state.projection {
             inline_metadata.extend([
-                ("state_layout".into(), json!(2)),
-                ("state_accounting".into(), json!(2)),
                 (
                     "retained_ordinals".into(),
                     json!(projection.columns.ordinals()),
@@ -1387,28 +1420,8 @@ impl StreamOperator for SqlOperator {
                         projection.columns.physical_schema()
                     )?),
                 ),
-                (
-                    "batch_metadata_sha256".into(),
-                    json!(
-                        state
-                            .metadata_segment
-                            .as_ref()
-                            .expect("prepared metadata")
-                            .segment
-                            .sha256()
-                    ),
-                ),
             ]);
             segments.insert("logical-schema".into(), projection.logical_segment.clone());
-            segments.insert(
-                "batch-metadata".into(),
-                state
-                    .metadata_segment
-                    .as_ref()
-                    .expect("prepared metadata")
-                    .segment
-                    .clone(),
-            );
         }
         let input_name = if state.projection.is_some() {
             "input-projected"
@@ -2061,50 +2074,49 @@ mod tests {
         assert_eq!(total(&mut collector), 3);
         restored.prepare_checkpoint_async(&context).await.unwrap();
         let first = restored.checkpoint(Epoch::INITIAL).unwrap();
+        let empty = batch("different-empty-metadata", &[]);
+        let metadata = empty.metadata().clone();
         restored
-            .process_data(
-                "events",
-                batch("different-empty-metadata", &[]),
-                &context,
-                &mut collector,
-            )
+            .process_data("events", empty, &context, &mut collector)
             .await
             .unwrap();
         assert_eq!(total(&mut collector), 3);
         restored.prepare_checkpoint_async(&context).await.unwrap();
         let second = restored.checkpoint(Epoch::INITIAL).unwrap();
         assert!(same_segment(&first, &second));
-        assert_eq!(first.inline_metadata, second.inline_metadata);
+        for field in [
+            "query_sha256",
+            "rows",
+            "bytes",
+            "state_layout",
+            "state_accounting",
+        ] {
+            assert_eq!(first.inline_metadata[field], second.inline_metadata[field]);
+        }
+        assert_ne!(
+            first.segments["batch-metadata"].bytes(),
+            second.segments["batch-metadata"].bytes()
+        );
+        let mut recovered = self::operator();
+        StreamOperator::restore(&mut recovered, &second).unwrap();
+        assert_eq!(recovered.retained.as_ref().unwrap().metadata, metadata);
     }
 
     #[tokio::test]
-    async fn test_sql_legacy_checkpoint_restore_and_clone() {
-        let input = batch("legacy", &[1, 2]);
-        let mut bytes = Vec::new();
-        let table = input.table_payload().unwrap();
-        let mut writer = FileWriter::try_new(&mut bytes, table.schema()).unwrap();
-        for record in table.batches() {
-            writer.write(record).unwrap();
-        }
-        writer.finish().unwrap();
-        drop(writer);
-        let mut operator = operator();
-        let legacy = OperatorStateSnapshot {
-            inline_metadata: BTreeMap::from([
-                ("query_sha256".into(), json!(operator.query_digest())),
-                ("rows".into(), json!(2)),
-                ("bytes".into(), json!(input.estimated_bytes().unwrap())),
-            ]),
-            segments: BTreeMap::from([("input".into(), StateSegment::new(bytes))]),
-        };
-        StreamOperator::restore(&mut operator, &legacy).unwrap();
+    async fn test_sql_current_checkpoint_restore_and_clone() {
         let job = job();
         let context = StreamOperatorContext::new(&job, "totals", None);
-        operator.prepare_checkpoint_async(&context).await.unwrap();
-        let captured = operator.checkpoint(Epoch::INITIAL).unwrap();
-        assert!(same_segment(&legacy, &captured));
-        assert_eq!(legacy.inline_metadata, captured.inline_metadata);
-        let mut invalid = legacy.clone();
+        let mut source = operator();
+        let mut initial = EdgeCollector::new(source.output_ports().to_vec());
+        source
+            .process_data("events", batch("current", &[1, 2]), &context, &mut initial)
+            .await
+            .unwrap();
+        source.prepare_checkpoint_async(&context).await.unwrap();
+        let captured = source.checkpoint(Epoch::INITIAL).unwrap();
+        let mut operator = operator();
+        StreamOperator::restore(&mut operator, &captured).unwrap();
+        let mut invalid = captured.clone();
         invalid.inline_metadata.insert("rows".into(), json!(3));
         assert!(StreamOperator::restore(&mut operator, &invalid).is_err());
         assert!(same_segment(

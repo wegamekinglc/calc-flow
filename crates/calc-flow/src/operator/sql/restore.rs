@@ -11,7 +11,7 @@ pub(crate) struct PreparedSqlRestore {
     retained: Option<RetainedSqlInput>,
 }
 
-struct LegacyRestoreInput {
+struct CurrentRestoreInput {
     projection: Option<std::sync::Arc<retention::SqlProjection>>,
     segment: StateSegment,
     rows: u64,
@@ -36,8 +36,23 @@ impl SqlOperator {
         snapshot: &OperatorStateSnapshot,
         check_cancelled: &dyn Fn() -> Result<()>,
     ) -> Result<PreparedSqlRestore> {
+        if snapshot
+            .inline_metadata
+            .get("state_layout")
+            .and_then(Value::as_u64)
+            != Some(2)
+            || snapshot
+                .inline_metadata
+                .get("state_accounting")
+                .and_then(Value::as_u64)
+                != Some(2)
+        {
+            return Err(sql_state_error(
+                "SQL checkpoint layout is unsupported (expected 2)",
+            ));
+        }
         self.stream_state.runtime()?;
-        let input = self.legacy_restore_input(snapshot)?;
+        let input = self.current_restore_input(snapshot)?;
         let runtime = self.retention_runtime()?;
         let backing = reserve_restore_decode(runtime, &input.segment, &self.name)?;
         let (batch, metadata_segment, copies) =
@@ -53,7 +68,7 @@ impl SqlOperator {
     fn decode_restore_batch(
         &self,
         snapshot: &OperatorStateSnapshot,
-        input: &LegacyRestoreInput,
+        input: &CurrentRestoreInput,
         runtime: &DataFusionRuntime,
         check_cancelled: &dyn Fn() -> Result<()>,
     ) -> Result<(
@@ -65,7 +80,7 @@ impl SqlOperator {
         let batch = decode_sql_state(input.segment.bytes())?;
         check_cancelled()?;
         let (batch, metadata_segment) =
-            self.validate_restore_schema(batch, snapshot, input, runtime)?;
+            self.validate_restore_schema(&batch, snapshot, input, runtime)?;
         self.validate_checkpoint_charge(&batch, input.rows, input.bytes)?;
         let table = batch.table_payload()?;
         let copies = record_copy_reservation(
@@ -80,22 +95,25 @@ impl SqlOperator {
 
     fn validate_restore_schema(
         &self,
-        batch: Batch,
+        batch: &Batch,
         snapshot: &OperatorStateSnapshot,
-        input: &LegacyRestoreInput,
+        input: &CurrentRestoreInput,
         runtime: &DataFusionRuntime,
     ) -> Result<(Batch, Option<std::sync::Arc<metadata::SqlMetadata>>)> {
         if let Some(projection) = &input.projection {
-            self.decode_projected_restore_batch(&batch, snapshot, projection, runtime)
+            self.decode_projected_restore_batch(batch, snapshot, projection, runtime)
         } else if self.input_ports[0]
             .schema()
             .is_some_and(|schema| schema != batch.table_payload().expect("decoded table").schema())
         {
             Err(sql_state_error(
-                "SQL legacy logical schema does not match the declared input",
+                "SQL checkpoint logical schema does not match the declared input",
             ))
         } else {
-            Ok((batch, None))
+            let (metadata, encoded) =
+                metadata::decode(runtime, &snapshot.segments["batch-metadata"], &self.name)?;
+            let batch = Batch::table(batch.table_payload()?.batches().to_vec(), metadata)?;
+            Ok((batch, Some(encoded)))
         }
     }
 
@@ -120,13 +138,13 @@ impl SqlOperator {
     fn prepare_restored_input(
         &self,
         batch: &Batch,
-        input: LegacyRestoreInput,
+        input: CurrentRestoreInput,
         metadata_segment: Option<std::sync::Arc<metadata::SqlMetadata>>,
         backing: MemoryReservation,
         copies: MemoryReservation,
         runtime: &DataFusionRuntime,
     ) -> Result<RetainedSqlInput> {
-        let LegacyRestoreInput {
+        let CurrentRestoreInput {
             projection,
             segment,
             rows,
@@ -158,9 +176,12 @@ impl SqlOperator {
         Ok(retained)
     }
 
-    fn legacy_restore_input(&self, snapshot: &OperatorStateSnapshot) -> Result<LegacyRestoreInput> {
-        let projected = snapshot.inline_metadata.contains_key("state_layout");
-        let projection = self.legacy_restore_projection(snapshot, projected)?;
+    fn current_restore_input(
+        &self,
+        snapshot: &OperatorStateSnapshot,
+    ) -> Result<CurrentRestoreInput> {
+        let projected = snapshot.segments.contains_key("input-projected");
+        let projection = self.current_restore_projection(snapshot, projected)?;
         let input_key = if projected {
             "input-projected"
         } else {
@@ -171,8 +192,8 @@ impl SqlOperator {
             .get(input_key)
             .ok_or_else(|| sql_state_error("SQL checkpoint has no retained input segment"))?
             .clone();
-        let (rows, bytes) = legacy_restore_counts(snapshot)?;
-        Ok(LegacyRestoreInput {
+        let (rows, bytes) = restore_counts(snapshot)?;
+        Ok(CurrentRestoreInput {
             projection,
             segment,
             rows,
@@ -180,7 +201,7 @@ impl SqlOperator {
         })
     }
 
-    fn legacy_restore_projection(
+    fn current_restore_projection(
         &self,
         snapshot: &OperatorStateSnapshot,
         projected: bool,
@@ -214,7 +235,7 @@ fn reserve_restore_decode(
     Ok(backing)
 }
 
-fn legacy_restore_counts(snapshot: &OperatorStateSnapshot) -> Result<(u64, u64)> {
+fn restore_counts(snapshot: &OperatorStateSnapshot) -> Result<(u64, u64)> {
     let rows = snapshot
         .inline_metadata
         .get("rows")

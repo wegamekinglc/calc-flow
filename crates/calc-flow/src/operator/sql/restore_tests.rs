@@ -78,7 +78,7 @@ fn same_capture(left: &OperatorStateSnapshot, right: &OperatorStateSnapshot) {
 }
 
 #[tokio::test]
-async fn test_prepared_legacy_restore_is_paid_and_installed_only_when_observed() {
+async fn test_prepared_current_restore_is_paid_and_installed_only_when_observed() {
     let job = job();
     let mut target = seeded(&[1, 2], &job).await;
     let mut source = seeded(&[10, 20], &job).await;
@@ -90,7 +90,14 @@ async fn test_prepared_legacy_restore_is_paid_and_installed_only_when_observed()
             .keys()
             .map(String::as_str)
             .collect::<Vec<_>>(),
-        ["bytes", "query_sha256", "rows"]
+        [
+            "batch_metadata_sha256",
+            "bytes",
+            "query_sha256",
+            "rows",
+            "state_accounting",
+            "state_layout"
+        ]
     );
     assert_eq!(
         replacement
@@ -98,7 +105,7 @@ async fn test_prepared_legacy_restore_is_paid_and_installed_only_when_observed()
             .keys()
             .map(String::as_str)
             .collect::<Vec<_>>(),
-        ["input"]
+        ["batch-metadata", "input"]
     );
     let pool = pool(&target);
     let before = pool.reserved();

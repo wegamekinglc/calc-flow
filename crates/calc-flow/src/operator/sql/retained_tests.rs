@@ -213,7 +213,7 @@ async fn test_sql_retained_projection_keeps_hidden_fallback_dependencies() {
 }
 
 #[tokio::test]
-async fn test_sql_retained_legacy_snapshot_continues_cumulative_output() {
+async fn test_sql_retained_current_snapshot_continues_cumulative_output() {
     let query = "SELECT SUM(value) AS total FROM events";
     let (mut operator, job, mut collector) = setup(query);
     let context = StreamOperatorContext::new(&job, "totals", None);
@@ -223,22 +223,6 @@ async fn test_sql_retained_legacy_snapshot_continues_cumulative_output() {
         .unwrap();
     operator.prepare_checkpoint_async(&context).await.unwrap();
     let snapshot = operator.checkpoint(Epoch::INITIAL).unwrap();
-    if let Some(directory) = std::env::var_os("CALC_FLOW_SQL_RETAINED_CAPTURE_DIR") {
-        let path = std::path::PathBuf::from(directory).join("sum-wide.json");
-        let fixture = json!({
-            "query": query,
-            "inline_metadata": snapshot.inline_metadata,
-            "segments": snapshot.segments.iter().map(|(name, segment)| {
-                (name, hex::encode(segment.bytes()))
-            }).collect::<BTreeMap<_, _>>(),
-        });
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)
-            .unwrap();
-        serde_json::to_writer_pretty(file, &fixture).unwrap();
-    }
     let (mut restored, _, mut recovered_output) = setup(query);
     StreamOperator::restore(&mut restored, &snapshot).unwrap();
     restored
