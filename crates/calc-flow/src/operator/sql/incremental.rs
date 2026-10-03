@@ -41,6 +41,9 @@ pub(in crate::operator::sql) mod grouped_float;
 #[path = "grouped_sum.rs"]
 mod grouped_sum;
 
+#[path = "global_record.rs"]
+pub(in crate::operator::sql) mod global_record;
+
 pub(super) struct IncrementalSql {
     schema: SchemaRef,
     aggregate_schema: SchemaRef,
@@ -56,6 +59,7 @@ pub(super) struct IncrementalSql {
     index: HashMap<Arc<[u8]>, usize, RandomState>,
     groups: Vec<Group>,
     sequential: Option<grouped_float::Proof>,
+    global_records: Option<global_record::Proof>,
     container_fee: Option<MemoryReservation>,
     reservation: MemoryReservation,
     #[cfg(test)]
@@ -563,17 +567,19 @@ impl IncrementalSql {
         if !grouped_aggregates_supported(&keys, &aggregates) {
             return Ok(None);
         }
-        let sequential = match initial_grouped_proof(
-            runtime,
-            &reservation,
-            &keys,
-            &schema,
-            &aggregates,
-            name,
-        )? {
-            GroupStrategy::Unsupported => return Ok(None),
-            GroupStrategy::Exact => None,
-            GroupStrategy::Sequential(proof) => Some(proof),
+        let global_records = if global_record::raw_selected(raw, &schema) {
+            global_record::Proof::new(runtime, &aggregates[0], name)?
+        } else {
+            None
+        };
+        let sequential = if global_records.is_some() {
+            None
+        } else {
+            match initial_grouped_proof(runtime, &reservation, &keys, &schema, &aggregates, name)? {
+                GroupStrategy::Unsupported => return Ok(None),
+                GroupStrategy::Exact => None,
+                GroupStrategy::Sequential(proof) => Some(proof),
+            }
         };
         let (converter, finalizer_bytes) = grouped_layout(&keys, &aggregates, &schema, name)?;
         Ok(Some(Self {
@@ -590,6 +596,7 @@ impl IncrementalSql {
             converter,
             groups: Vec::new(),
             sequential,
+            global_records,
             container_fee: None,
             index: HashMap::with_hasher(RandomState::new()),
             reservation,
@@ -608,8 +615,14 @@ impl IncrementalSql {
         self.sequential.is_some()
     }
 
+    pub(super) fn requires_global_record_proof(&self) -> bool {
+        self.global_records.is_some()
+    }
+
     fn native_policy(&self) -> &'static str {
-        if self.requires_grouped_float_proof() {
+        if self.requires_global_record_proof() {
+            "global-record-float-v1"
+        } else if self.requires_grouped_float_proof() {
             "sequential-grouped-float-v1"
         } else {
             "exact-numeric-v1"
@@ -617,6 +630,9 @@ impl IncrementalSql {
     }
 
     pub(in crate::operator::sql) fn checkpoint_policy(&self) -> grouped_float::Policy {
+        if let Some(global) = &self.global_records {
+            return grouped_float::Policy::GlobalRecordFloatV1(global.policy.clone());
+        }
         self.sequential
             .as_ref()
             .map_or(grouped_float::Policy::ExactNumericV1, |proof| {
@@ -748,7 +764,9 @@ impl IncrementalSql {
             .iter()
             .enumerate()
             .map(|(index, expr)| {
-                if self.sequential.is_some() && grouped_float::selected(expr) {
+                if self.global_records.is_some()
+                    || (self.sequential.is_some() && grouped_float::selected(expr))
+                {
                     return Ok(None);
                 }
                 let mut accumulator = expr
@@ -776,21 +794,48 @@ impl IncrementalSql {
         context: &StreamOperatorContext<'_>,
         name: &str,
     ) -> Result<Transaction> {
+        self.update_with_input_owner(batch, None, context, name)
+            .await
+    }
+
+    pub(super) async fn update_with_input_owner(
+        &mut self,
+        batch: &Batch,
+        input_owner: Option<Arc<MemoryReservation>>,
+        context: &StreamOperatorContext<'_>,
+        name: &str,
+    ) -> Result<Transaction> {
         let table = batch.table_payload()?;
         self.validate_input_schema(batch.num_rows(), table.schema())?;
         let proof = self.prepare_grouped_proof(table.batches(), name)?;
         let (reservation, workspace, mut candidates) =
             self.input_candidates(batch.num_rows(), name)?;
         candidates.proof = proof;
-        let rows_processed = self
-            .update_records(
+        let rows_processed = if let Some(global) = &self.global_records {
+            let candidate = candidates.groups.get_mut(&0).expect("global candidate");
+            let expression = &self.aggregates[0].expressions()[0];
+            let values = global
+                .update(
+                    (table.batches(), input_owner),
+                    (expression, &candidate.group.states[0]),
+                    self.reservation.new_empty(),
+                    context,
+                    name,
+                )
+                .await?;
+            candidate.group.results[0] = global.result(&values, name)?;
+            candidate.group.states[0] = values;
+            batch.num_rows()
+        } else {
+            self.update_records(
                 table.batches(),
                 &mut candidates,
                 (&reservation, workspace),
                 context,
                 name,
             )
-            .await?;
+            .await?
+        };
         #[cfg(not(test))]
         let _ = rows_processed;
         self.finish_candidates(&mut candidates, context, name)

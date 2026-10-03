@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 pub(in crate::operator::sql) enum Policy {
     ExactNumericV1,
     SequentialGroupedFloatV1(SequentialPolicy),
+    GlobalRecordFloatV1(super::global_record::Policy),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -36,7 +37,7 @@ pub(in crate::operator::sql) enum Model {
     Df54SingleLinearMemtableV1,
 }
 
-fn required_config<'de, D: serde::Deserializer<'de>>(
+pub(super) fn required_config<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<DataFusionConfig, D::Error> {
     let value = serde_json::Value::deserialize(deserializer)?;
@@ -174,12 +175,18 @@ impl Policy {
         match self {
             Self::ExactNumericV1 => "exact_numeric_v1",
             Self::SequentialGroupedFloatV1(_) => "sequential_grouped_float_v1",
+            Self::GlobalRecordFloatV1(_) => "global_record_float_v1",
         }
     }
 
     pub fn validate(&self, expected: &Self, rows: u64, name: &str) -> Result<()> {
         match (self, expected) {
             (Self::ExactNumericV1, Self::ExactNumericV1) => Ok(()),
+            (Self::GlobalRecordFloatV1(actual), Self::GlobalRecordFloatV1(trusted))
+                if actual == trusted && rows != 0 =>
+            {
+                Ok(())
+            }
             (Self::SequentialGroupedFloatV1(actual), Self::SequentialGroupedFloatV1(trusted)) => {
                 if actual.config != trusted.config
                     || actual.factory != trusted.factory

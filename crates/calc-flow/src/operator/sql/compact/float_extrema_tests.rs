@@ -17,6 +17,9 @@ use serde_json::json;
 use super::super::*;
 use crate::{CancellationToken, EdgeCollector, StreamJobContext};
 
+#[path = "global_float_sum_avg_tests.rs"]
+mod global_float_sum_avg_tests;
+
 type Bits = (u32, u64);
 type Part = Vec<Option<Bits>>;
 const ZERO: Bits = (0, 0);

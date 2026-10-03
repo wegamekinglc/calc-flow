@@ -930,6 +930,19 @@ impl SqlOperator {
             return Ok(None);
         }
         context.check_cancelled()?;
+        if initialized
+            .as_ref()
+            .is_some_and(|plan| plan.requires_global_record_proof())
+            && !self
+                .stream_state
+                .runtime()?
+                .prove_global_record_plan(&self.validated, alias, batch, &self.name)
+                .await?
+        {
+            self.incremental_checked = true;
+            return Ok(None);
+        }
+        context.check_cancelled()?;
         if let Some(incremental) = initialized.as_mut() {
             #[cfg(test)]
             {

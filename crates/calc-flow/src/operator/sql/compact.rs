@@ -30,7 +30,14 @@ impl SqlOperator {
             .then(|| native.native_descriptor(&self.name))
             .transpose()?;
         let runtime = self.stream_state.runtime()?;
-        let transaction = native.update(&batch, context, &self.name).await?;
+        let transaction = native
+            .update_with_input_owner(
+                &batch,
+                prepared.backing_reservation.clone(),
+                context,
+                &self.name,
+            )
+            .await?;
         #[cfg(test)]
         {
             self.incremental_work.0 += transaction.rows;

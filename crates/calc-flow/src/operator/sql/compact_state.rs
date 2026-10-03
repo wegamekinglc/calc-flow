@@ -256,6 +256,9 @@ impl IncrementalSql {
             self.keys.is_empty(),
             name,
         )?;
+        if let Some(global) = &self.global_records {
+            global.validate_state(records, historical_rows, name)?;
+        }
         self.reserve_groups(groups, groups, name)?;
         let workspace = self.reservation.new_empty();
         for record in records {
@@ -364,7 +367,9 @@ impl IncrementalSql {
                     ScalarValue::try_from_array(array, row).map_err(|error| df_error(name, error))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let result = if self.requires_grouped_float_proof()
+            let result = if let Some(global) = &self.global_records {
+                global.result(&state, name)?
+            } else if self.requires_grouped_float_proof()
                 && super::grouped_float::selected(expression)
             {
                 super::grouped_sum::result(&state, name)?

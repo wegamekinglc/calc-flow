@@ -1665,3 +1665,10 @@ mod datafusion_grouped_float_continuation_tests;
 
 #[path = "datafusion_grouped_float.rs"]
 mod grouped_float;
+
+#[path = "datafusion_global_record.rs"]
+mod global_record;
+
+#[cfg(test)]
+#[path = "datafusion_global_float_plan_tests.rs"]
+mod global_float_plan_tests;

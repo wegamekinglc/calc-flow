@@ -116,7 +116,7 @@ fn single_aggregate(aggregate: &AggregateExec) -> bool {
         && aggregate.filter_expr().iter().all(Option::is_none)
 }
 
-fn fifo_source(source: &DataSourceExec, input: &Batch) -> Result<bool> {
+pub(super) fn fifo_source(source: &DataSourceExec, input: &Batch) -> Result<bool> {
     let Some(scan) = source.data_source().downcast_ref::<MemorySourceConfig>() else {
         return Ok(false);
     };
@@ -144,7 +144,7 @@ fn fifo_source(source: &DataSourceExec, input: &Batch) -> Result<bool> {
             }))
 }
 
-fn plan_charge(input: &Batch, query: &ValidatedQuery, node: &str) -> Result<usize> {
+pub(super) fn plan_charge(input: &Batch, query: &ValidatedQuery, node: &str) -> Result<usize> {
     let table = input.table_payload()?;
     let schema = table.schema();
     let fields = schema
