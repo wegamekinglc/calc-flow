@@ -276,22 +276,13 @@ impl PartialGroups {
         }
         for rank in self.seeded..self.slots.len() {
             let candidate = &candidates[&self.slots[rank]];
-            for (index, expression) in aggregates.iter().enumerate() {
+            for (index, _) in aggregates.iter().enumerate() {
                 if !self.sequential[index] {
                     continue;
                 }
-                if let Some(saved) = candidate.group.states[index].first() {
+                let saved = &candidate.group.states[index];
+                if !saved.is_empty() {
                     self.seed_value(index, rank, saved, name)?;
-                } else if expression
-                    .state_fields()
-                    .map_err(|error| df_error(name, error))?
-                    .len()
-                    != 1
-                {
-                    return Err(df_error(
-                        name,
-                        "sequential aggregate requires one state field",
-                    ));
                 }
             }
         }
@@ -303,7 +294,7 @@ impl PartialGroups {
         &mut self,
         index: usize,
         rank: usize,
-        saved: &ScalarValue,
+        saved: &[ScalarValue],
         name: &str,
     ) -> Result<()> {
         self.accumulators[index].seed(rank, saved, self.slots.len(), name)
@@ -367,10 +358,15 @@ impl PartialGroups {
                 .expect("candidate for partial group");
             for (index, arrays) in states.iter().enumerate() {
                 if self.sequential[index] {
-                    let value = ScalarValue::try_from_array(&arrays[0], rank)
-                        .map_err(|error| df_error(name, error))?;
-                    candidate.group.states[index] = vec![value.clone()];
-                    candidate.group.results[index] = value;
+                    let state = arrays
+                        .iter()
+                        .map(|array| {
+                            ScalarValue::try_from_array(array, rank)
+                                .map_err(|error| df_error(name, error))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    candidate.group.results[index] = grouped_sum::result(&state, name)?;
+                    candidate.group.states[index] = state;
                 } else {
                     let arrays = arrays
                         .iter()
@@ -1680,7 +1676,9 @@ fn aggregate_argument_supported(data_type: &DataType, function: &str, global: bo
         "min" | "max" => extrema_argument_supported(data_type, global),
         "avg" => matches!(
             data_type,
-            DataType::Decimal32(_, 0..)
+            DataType::Int64
+                | DataType::UInt64
+                | DataType::Decimal32(_, 0..)
                 | DataType::Decimal64(_, 0..)
                 | DataType::Decimal128(_, 0..)
                 | DataType::Decimal256(_, 0..)

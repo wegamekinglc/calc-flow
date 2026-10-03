@@ -450,3 +450,6 @@ mod safety;
 
 #[path = "grouped_sum_tests.rs"]
 mod grouped_sum_tests;
+
+#[path = "grouped_integer_avg_tests.rs"]
+mod grouped_integer_avg_tests;

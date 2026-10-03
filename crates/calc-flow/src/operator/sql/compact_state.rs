@@ -367,10 +367,7 @@ impl IncrementalSql {
             let result = if self.requires_grouped_float_proof()
                 && super::grouped_float::selected(expression)
             {
-                state
-                    .first()
-                    .cloned()
-                    .ok_or_else(|| df_error(name, "sequential aggregate state is empty"))?
+                super::grouped_sum::result(&state, name)?
             } else {
                 restored_result(expression, &state, !self.keys.is_empty(), name)?
             };

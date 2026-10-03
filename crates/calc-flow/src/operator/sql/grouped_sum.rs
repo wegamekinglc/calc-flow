@@ -1,7 +1,7 @@
 use super::{AggregateFunctionExpr, ArrayRef, GroupsAccumulator, Result, ScalarValue, df_error};
 use datafusion::{
     arrow::{
-        array::{ArrowNativeTypeOp, Float64Array},
+        array::{ArrowNativeTypeOp, Float64Array, UInt64Array},
         datatypes::DataType,
     },
     common::{DataFusionError, Result as DataFusionResult},
@@ -9,18 +9,27 @@ use datafusion::{
 };
 
 pub(super) fn selected(expression: &AggregateFunctionExpr) -> bool {
-    expression.fun().name() == "sum" && expression.field().data_type() == &DataType::Float64
+    matches!(expression.fun().name(), "sum" | "avg")
+        && expression.field().data_type() == &DataType::Float64
 }
 
 pub(super) enum PartialAccumulator {
     Native(Box<dyn GroupsAccumulator>),
-    OrderedSum(Vec<Option<f64>>),
+    Ordered(OrderedState),
+}
+
+pub(super) struct OrderedState {
+    sums: Vec<Option<f64>>,
+    counts: Option<Vec<u64>>,
 }
 
 impl PartialAccumulator {
     pub fn new(expression: &AggregateFunctionExpr, name: &str) -> Result<Self> {
         if selected(expression) {
-            Ok(Self::OrderedSum(Vec::new()))
+            Ok(Self::Ordered(OrderedState {
+                sums: Vec::new(),
+                counts: (expression.fun().name() == "avg").then(Vec::new),
+            }))
         } else {
             expression
                 .create_groups_accumulator()
@@ -32,20 +41,28 @@ impl PartialAccumulator {
     pub fn seed(
         &mut self,
         rank: usize,
-        saved: &ScalarValue,
+        saved: &[ScalarValue],
         count: usize,
         name: &str,
     ) -> Result<()> {
         match self {
-            Self::OrderedSum(sums) => {
-                let ScalarValue::Float64(saved) = saved else {
-                    return Err(df_error(name, "ordered SUM state must be Float64"));
+            Self::Ordered(state) => {
+                let ScalarValue::Float64(sum) = saved.last().expect("ordered state") else {
+                    return Err(df_error(name, "ordered numeric sum must be Float64"));
                 };
-                sums.resize(count, None);
-                sums[rank] = *saved;
+                state.sums.resize(count, None);
+                state.sums[rank] = *sum;
+                if let Some(counts) = &mut state.counts {
+                    let ScalarValue::UInt64(saved) = saved[0] else {
+                        return Err(df_error(name, "ordered AVG count must be UInt64"));
+                    };
+                    counts.resize(count, 0);
+                    counts[rank] = saved.unwrap_or(0);
+                }
                 Ok(())
             }
             Self::Native(accumulator) => {
+                let saved = &saved[0];
                 if saved.is_null() {
                     return Ok(());
                 }
@@ -72,17 +89,26 @@ impl PartialAccumulator {
     ) -> DataFusionResult<()> {
         match self {
             Self::Native(accumulator) => accumulator.update_batch(values, indices, None, count),
-            Self::OrderedSum(sums) => {
+            Self::Ordered(state) => {
                 let values = values[0]
                     .as_any()
                     .downcast_ref::<Float64Array>()
                     .ok_or_else(|| {
-                        DataFusionError::Internal("ordered SUM input must be Float64".into())
+                        DataFusionError::Internal("ordered numeric input must be Float64".into())
                     })?;
-                sums.resize(count, None);
+                state.sums.resize(count, None);
+                if let Some(counts) = &mut state.counts {
+                    counts.resize(count, 0);
+                }
                 for (&rank, value) in indices.iter().zip(values.iter()) {
                     if let Some(value) = value {
-                        sums[rank] = Some(sums[rank].unwrap_or(0.0).add_wrapping(value));
+                        state.sums[rank] =
+                            Some(state.sums[rank].unwrap_or(0.0).add_wrapping(value));
+                        if let Some(counts) = &mut state.counts {
+                            counts[rank] = counts[rank].checked_add(1).ok_or_else(|| {
+                                DataFusionError::Internal("ordered AVG count overflowed".into())
+                            })?;
+                        }
                     }
                 }
                 Ok(())
@@ -93,18 +119,51 @@ impl PartialAccumulator {
     pub fn state(&mut self, emit_to: EmitTo) -> DataFusionResult<Vec<ArrayRef>> {
         match self {
             Self::Native(accumulator) => accumulator.state(emit_to),
-            Self::OrderedSum(sums) => Ok(vec![std::sync::Arc::new(Float64Array::from(
-                emit_to.take_needed(sums),
-            ))]),
+            Self::Ordered(state) => {
+                let sums = emit_to.take_needed(&mut state.sums);
+                let mut arrays = Vec::new();
+                if let Some(counts) = &mut state.counts {
+                    let counts = emit_to.take_needed(counts);
+                    arrays.push(std::sync::Arc::new(UInt64Array::from(
+                        counts
+                            .into_iter()
+                            .zip(&sums)
+                            .map(|(count, sum)| sum.map(|_| count))
+                            .collect::<Vec<_>>(),
+                    )) as ArrayRef);
+                }
+                arrays.push(std::sync::Arc::new(Float64Array::from(sums)));
+                Ok(arrays)
+            }
         }
     }
 
     pub fn size(&self) -> usize {
         match self {
             Self::Native(accumulator) => accumulator.size(),
-            Self::OrderedSum(sums) => {
-                size_of::<Self>() + sums.capacity() * size_of::<Option<f64>>()
+            Self::Ordered(state) => {
+                size_of::<Self>()
+                    + state.sums.capacity() * size_of::<Option<f64>>()
+                    + state
+                        .counts
+                        .as_ref()
+                        .map_or(0, |counts| counts.capacity() * size_of::<u64>())
             }
         }
     }
+}
+
+pub(super) fn result(state: &[ScalarValue], name: &str) -> Result<ScalarValue> {
+    match state {
+        [value] => Ok(value.clone()),
+        [ScalarValue::UInt64(count), ScalarValue::Float64(sum)] => Ok(ScalarValue::Float64(
+            sum.zip(*count).map(|(sum, count)| average(sum, count)),
+        )),
+        _ => Err(df_error(name, "sequential aggregate state is invalid")),
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn average(sum: f64, count: u64) -> f64 {
+    sum / count as f64
 }
