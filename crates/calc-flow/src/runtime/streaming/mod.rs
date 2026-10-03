@@ -16,6 +16,7 @@ mod checkpoint_status;
 mod context;
 pub(crate) mod entity_work;
 pub(crate) mod failure;
+pub(crate) mod gather_work;
 #[allow(
     dead_code,
     reason = "runtime completion is owned behind the safe continuous facade"

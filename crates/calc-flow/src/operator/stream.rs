@@ -249,6 +249,7 @@ pub struct StreamOperatorContext<'a> {
     late_metrics: Arc<dyn LateMetricSink>,
     rolling_metrics: Option<RollingMetricsRecorder>,
     entity_work: Option<ScopedEntityWorkClient>,
+    task_id: Option<crate::runtime::streaming::gather_work::TaskId>,
 }
 
 impl<'a> StreamOperatorContext<'a> {
@@ -267,6 +268,7 @@ impl<'a> StreamOperatorContext<'a> {
             late_metrics: Arc::new(LateMetricRecorder::default()),
             rolling_metrics: None,
             entity_work: None,
+            task_id: None,
         }
     }
 
@@ -286,6 +288,7 @@ impl<'a> StreamOperatorContext<'a> {
             late_metrics: Arc::new(LateMetricRecorder::default()),
             rolling_metrics: None,
             entity_work: None,
+            task_id: None,
         }
     }
 
@@ -306,6 +309,7 @@ impl<'a> StreamOperatorContext<'a> {
             late_metrics,
             rolling_metrics: None,
             entity_work: None,
+            task_id: None,
         }
     }
 
@@ -316,6 +320,23 @@ impl<'a> StreamOperatorContext<'a> {
 
     pub(crate) fn rolling_metrics(&self) -> Option<&RollingMetricsRecorder> {
         self.rolling_metrics.as_ref()
+    }
+
+    pub(crate) fn with_task_id(
+        mut self,
+        task_id: Option<crate::runtime::streaming::gather_work::TaskId>,
+    ) -> Self {
+        self.task_id = task_id;
+        self
+    }
+
+    pub(crate) fn gather_client(
+        &self,
+        operator: crate::runtime::streaming::gather_work::GatherOperatorId,
+    ) -> crate::runtime::streaming::gather_work::GatherClient {
+        self.job
+            .gather_owner()
+            .client(operator.with_task(self.task_id))
     }
 
     pub(crate) fn with_entity_work(mut self, client: ScopedEntityWorkClient) -> Self {

@@ -68,6 +68,16 @@ async fn test_a03_a10_projected_restore_preserves_multiplicity_and_funding() {
     }
     assert_eq!(restored.status.matched_rows, 3);
     assert_eq!(restored.status.state_bytes, 0);
+    let funding = job.gather_owner().funding();
+    let retained = restored.runtime.pool.reserved();
+    let failures = job.gather_owner().close_and_drain().await;
+    let drained = job.gather_owner().funding();
+    drop(context);
+    drop(job);
+    assert_eq!(funding, (16_384, 16_384, 0));
+    assert_eq!(retained, restored_configured + funding.0 + funding.1);
+    assert_eq!((drained.1, drained.2), (0, 0));
+    assert!(failures.is_empty());
     assert_eq!(restored.runtime.pool.reserved(), restored_configured);
     let restored_pool = restored.runtime.pool.clone();
     drop(restored);
@@ -313,7 +323,20 @@ async fn assert_cropped_continuation(
     restored.on_end(&ready, output).await.unwrap();
     assert!(output.drain("output").is_empty());
     assert_eq!(restored.status.state_rows, 0);
-    assert_eq!(restored.runtime.pool.reserved(), restored_configured);
+    let funding = job.gather_owner().funding();
+    assert_eq!(funding, (16_384, 16_384, 0));
+    assert_eq!(
+        restored.runtime.pool.reserved(),
+        restored_configured + funding.0 + funding.1,
+    );
+    let failures = job.gather_owner().close_and_drain().await;
+    let drained = job.gather_owner().funding();
+    assert!(failures.is_empty());
+    assert_eq!((drained.1, drained.2), (0, 0));
+    assert_eq!(
+        restored.runtime.pool.reserved(),
+        restored_configured + drained.0,
+    );
     delivered
 }
 
@@ -402,6 +425,8 @@ async fn test_cropped_dominance_only_progress_restores_typed_identity_and_comple
         &left_original,
     )
     .await;
+    drop(job);
+    assert_eq!(restored.runtime.pool.reserved(), restored_configured);
     let pool = restored.runtime.pool.clone();
     drop(restored);
     assert_eq!(pool.reserved(), 0);

@@ -293,7 +293,7 @@ impl StreamAsofJoinOperator {
                 self.outputs[0].schema().expect("exact ASOF output"),
                 workspace,
                 &self.name,
-                || context.check_cancelled(),
+                context,
             )
             .await?;
         let batch = self.output_batch(&result, context)?;

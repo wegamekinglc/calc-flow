@@ -651,6 +651,7 @@ async fn run_after_operator_entry(
     {
         return Ok(());
     }
+    inputs.context.bind_task_id(task_id);
     if let Some(client) = &mut inputs.entity_work {
         client.activate(task_id);
     }
@@ -891,7 +892,8 @@ async fn finish_operator(
         input_progress.snapshot()?,
         output_budget,
         late_metrics,
-    );
+    )
+    .with_task_id(inputs.context.task_id());
     inputs.progress.record_on_end()?;
     let callback = inputs
         .progress
@@ -1380,7 +1382,8 @@ async fn capture_operator_checkpoint(
             input_progress.snapshot()?,
             effective_output_budget(&inputs.outputs),
             Arc::new(inputs.progress.clone()),
-        );
+        )
+        .with_task_id(inputs.context.task_id());
         inputs.operator.prepare_checkpoint_async(&context).await?;
         inputs.operator.checkpoint(epoch)?
     };
@@ -1529,7 +1532,8 @@ async fn dispatch_data(
         ingress_progress,
         output_budget,
         late_metrics,
-    );
+    )
+    .with_task_id(inputs.context.task_id());
     let context = attach_rolling_context(context, callback.as_ref());
     let context = attach_entity_context(context, inputs.entity_work.as_ref());
     let mut collector = ChannelStreamCollector::new(
@@ -1582,7 +1586,8 @@ async fn dispatch_watermark_handler(
         ingress_progress,
         output_budget,
         late_metrics,
-    );
+    )
+    .with_task_id(inputs.context.task_id());
     let context = attach_rolling_context(context, callback.as_ref());
     let context = attach_entity_context(context, inputs.entity_work.as_ref());
     let mut collector = ChannelStreamCollector::new(
@@ -1672,7 +1677,8 @@ async fn dispatch_progress_transition(
         ingress_progress.clone(),
         output_budget,
         late_metrics,
-    );
+    )
+    .with_task_id(inputs.context.task_id());
     let mut collector = ChannelStreamCollector::new(
         &inputs.node_id,
         inputs.context.job().job_id(),

@@ -2048,3 +2048,6 @@ mod dominated_payloads;
 
 #[path = "tests/retained_projection.rs"]
 mod retained_projection;
+
+#[path = "tests/gather_admission.rs"]
+mod gather_admission;

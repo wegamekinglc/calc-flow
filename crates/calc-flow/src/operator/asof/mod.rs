@@ -231,11 +231,13 @@ impl StreamAsofJoinOperator {
             state::SequenceKind::for_side(&schemas[0], spec.left()),
             state::SequenceKind::for_side(&schemas[1], spec.right()),
         ];
+        let name = name.into();
+        let runtime = output::OutputRuntime::new(limit, &name);
         Ok(Self {
             fingerprint,
             schema_digests,
             payload_header_bytes,
-            name: name.into(),
+            name,
             spec,
             inputs,
             outputs,
@@ -249,7 +251,7 @@ impl StreamAsofJoinOperator {
             terminal: false,
             next_output_sequence: 0,
             status: StreamAsofJoinStatus::default(),
-            runtime: output::OutputRuntime::new(limit),
+            runtime,
         })
     }
     /// Returns the immutable declaration.
@@ -531,3 +533,6 @@ fn input_ports(left: &SchemaRef, right: &SchemaRef) -> Result<Vec<Port>> {
         })
         .collect()
 }
+
+#[cfg(test)]
+pub(crate) use output::gather_lifecycle_bridge;

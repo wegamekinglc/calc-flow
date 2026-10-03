@@ -671,3 +671,6 @@ impl From<Box<StreamAsofJoinOperator>> for NodeOperator {
         Self::StreamAsofJoin(value)
     }
 }
+
+#[cfg(test)]
+pub(crate) use asof::gather_lifecycle_bridge;

@@ -156,6 +156,7 @@ pub(super) struct JobCore {
     operation_cancel_requested: AtomicBool,
     entity_work: JobEntityWorkOwner,
     sql_recovery: JobSqlRecoveryOwner,
+    gather_work: super::gather_work::JobGatherOwner,
     supervision: SupervisionHome,
     #[cfg(test)]
     owned_lane_launches: Arc<AtomicU64>,
@@ -227,6 +228,7 @@ impl JobCore {
                 owned_lane_launches.clone(),
             ),
             sql_recovery: JobSqlRecoveryOwner::new(),
+            gather_work: super::gather_work::JobGatherOwner::new(job_id.to_string().into()),
             supervision: SupervisionHome::default(),
             #[cfg(test)]
             owned_lane_launches,
@@ -1586,10 +1588,11 @@ struct DriverReportGate {
 }
 
 async fn settle_driver_report(core: &Arc<JobCore>, join_error: Option<&str>) -> DriverReport {
-    if let Some(mut loan) = core
-        .supervision
-        .take(core.entity_work.clone(), core.sql_recovery.clone())
-    {
+    if let Some(mut loan) = core.supervision.take(
+        core.entity_work.clone(),
+        core.sql_recovery.clone(),
+        core.gather_work.clone(),
+    ) {
         let report = loan.join_all().await;
         if !core.supervision.has_report() {
             core.supervision
@@ -1602,7 +1605,8 @@ async fn settle_driver_report(core: &Arc<JobCore>, join_error: Option<&str>) -> 
     core.supervision.append_cleanup(sql_failures);
     if !core.supervision.has_report() {
         core.entity_work.close_admission();
-        let secondary = core.entity_work.drain().await;
+        let mut secondary = core.entity_work.drain().await;
+        secondary.extend(core.gather_work.close_and_drain().await);
         let mut failed = unprepared_driver_report(
             core,
             SupervisionReport {
@@ -1615,6 +1619,11 @@ async fn settle_driver_report(core: &Arc<JobCore>, join_error: Option<&str>) -> 
             .cleanup_failures
             .extend(secondary.into_iter().map(task_runtime_failure));
         core.supervision.prepare(failed);
+    }
+    core.gather_work.close_admission();
+    let gather_secondary = core.gather_work.close_and_drain().await;
+    if !gather_secondary.is_empty() {
+        core.supervision.append_secondary(gather_secondary);
     }
     #[cfg(test)]
     {
@@ -1969,6 +1978,7 @@ async fn run_job_driver(
     ) {
         return core.prepare_driver_report(checkpoint_start_failure(launch_id, error));
     }
+    let context = context.with_gather_owner(core.gather_work.clone());
     core.runtime_status.lock().rolling_metrics = plan
         .nodes
         .iter()
@@ -3057,6 +3067,7 @@ async fn run_operator_entry(
         supervisor,
         core.entity_work.clone(),
         core.sql_recovery.clone(),
+        core.gather_work.clone(),
     );
     core.runtime_status.lock().tasks = supervisor.registry();
     let (entry_tx, _) = watch::channel(false);

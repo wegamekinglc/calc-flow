@@ -3,7 +3,10 @@
 use super::output_plan::{OutputPlan, OutputSide, Span};
 #[cfg(test)]
 use super::state::{BatchKey, PayloadView};
-use crate::{Batch, BatchMetadata, DataFusionConfig, Result};
+use crate::runtime::streaming::gather_work::{
+    AdmissionFailure, GatherOperatorId, GatherPlan as OwnedGatherPlan, GatherStop, RowGather,
+};
+use crate::{Batch, BatchMetadata, DataFusionConfig, Result, StreamOperatorContext};
 #[cfg(test)]
 use ahash::RandomState;
 use arrow_data::transform::MutableArrayData;
@@ -25,8 +28,11 @@ pub(super) struct OutputRuntime {
     pub pool: Arc<dyn MemoryPool>,
     config: DataFusionConfig,
     output_columns: Option<Vec<usize>>,
+    operator: GatherOperatorId,
     #[cfg(test)]
     worker_gate: Option<(std::sync::mpsc::Sender<()>, Arc<std::sync::Barrier>)>,
+    #[cfg(test)]
+    worker_probe: Option<Arc<gather_lifecycle_bridge::WorkerProbe>>,
 }
 
 struct ColumnRequest {
@@ -37,41 +43,113 @@ struct ColumnRequest {
 struct MaterializationInput {
     rows: OutputPlan,
     requests: Vec<ColumnRequest>,
-    workspace: MemoryReservation,
+    #[cfg(test)]
+    worker_gate: Option<(std::sync::mpsc::Sender<()>, Arc<std::sync::Barrier>)>,
+    #[cfg(test)]
+    worker_probe: Option<Arc<gather_lifecycle_bridge::WorkerProbe>>,
 }
 
-struct GatheredColumns {
-    columns: Vec<ArrayRef>,
-    workspace: MemoryReservation,
-}
+impl OwnedGatherPlan for MaterializationInput {
+    fn column_count(&self) -> usize {
+        self.requests.len()
+    }
 
-impl MaterializationInput {
-    fn materialize(self) -> Result<GatheredColumns> {
+    fn row_gather(&self) -> Result<Option<RowGather>> {
+        if self.rows.len < 2 || self.parallelism() <= 1 {
+            return Ok(None);
+        }
+        let mut copied = None;
+        for ordinal in 0..self.requests.len() {
+            if self.shared_column(ordinal)?.is_none() && copied.replace(ordinal).is_some() {
+                return Ok(None);
+            }
+        }
+        let Some(ordinal) = copied else {
+            return Ok(None);
+        };
+        let request = &self.requests[ordinal];
+        let left_fields = self.rows.left.batches.first().map_or(0, Vec::len);
+        if request.index < left_fields {
+            return Ok(None);
+        }
+        let Some(width) = request.data_type.primitive_width() else {
+            return Ok(None);
+        };
+        Ok(Some(RowGather {
+            ordinal,
+            rows: self.rows.len,
+            width,
+            sources: self.rows.right.batches.len(),
+        }))
+    }
+
+    fn shared_column(&self, ordinal: usize) -> Result<Option<ArrayRef>> {
+        let request = &self.requests[ordinal];
+        let left_fields = self.rows.left.batches.first().map_or(0, Vec::len);
+        if request.index < left_fields {
+            GatherPlan::new(&self.rows.left, false).shared_column(request.index)
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn gather_range(
+        &self,
+        ordinal: usize,
+        range: std::ops::Range<usize>,
+        stop: &GatherStop,
+    ) -> Result<ArrayRef> {
+        stop.check()?;
+        if range.is_empty() || range.end > self.rows.len {
+            return Err(super::arrow_error(
+                &datafusion::arrow::error::ArrowError::InvalidArgumentError(
+                    "invalid ASOF row range".into(),
+                ),
+            ));
+        }
+        let request = &self.requests[ordinal];
+        let left_fields = self.rows.left.batches.first().map_or(0, Vec::len);
+        if request.index < left_fields {
+            return Err(super::arrow_error(
+                &datafusion::arrow::error::ArrowError::InvalidArgumentError(
+                    "left row gather unsupported".into(),
+                ),
+            ));
+        }
+        let mut right = GatherPlan::new(&self.rows.right, true);
+        right.positions = right.positions.map(|positions| &positions[range.clone()]);
+        right.column(request.index - left_fields, &request.data_type, range.len())
+    }
+
+    fn gather(&self, ordinal: usize, stop: &GatherStop) -> Result<ArrayRef> {
+        #[cfg(test)]
+        if ordinal == 0 {
+            if let Some(probe) = &self.worker_probe {
+                probe.wait();
+            }
+            if let Some((started, gate)) = &self.worker_gate {
+                let _ = started.send(());
+                gate.wait();
+            }
+        }
+        stop.check()?;
         let left = GatherPlan::new(&self.rows.left, false);
         let right = GatherPlan::new(&self.rows.right, true);
-        let columns = materialize_columns(&left, &right, self.rows.len, &self.requests)?;
-        Ok(GatheredColumns {
-            columns,
-            workspace: self.workspace,
-        })
-    }
-}
-
-impl GatheredColumns {
-    fn into_batch(self, schema: &SchemaRef, rows: usize) -> Result<(Batch, MemoryReservation)> {
-        let batch = materialize_batch(self.columns, schema, rows)?;
-        Ok((batch, self.workspace))
+        materialize_column(&left, &right, self.rows.len, &self.requests[ordinal])
     }
 }
 
 impl OutputRuntime {
-    pub fn new(limit: usize) -> Self {
+    pub fn new(limit: usize, name: &str) -> Self {
         Self {
             pool: Arc::new(GreedyMemoryPool::new(limit)),
             config: DataFusionConfig::default(),
             output_columns: None,
+            operator: GatherOperatorId::new(format!("operator:{name}").into()),
             #[cfg(test)]
             worker_gate: None,
+            #[cfg(test)]
+            worker_probe: None,
         }
     }
 
@@ -89,35 +167,53 @@ impl OutputRuntime {
         schema: &SchemaRef,
         mut workspace: MemoryReservation,
         name: &str,
-        check_cancelled: impl Fn() -> Result<()> + Send + Sync,
+        context: &StreamOperatorContext<'_>,
     ) -> Result<(Batch, MemoryReservation)> {
         self.config.validate()?;
         tokio::task::yield_now().await;
-        check_cancelled()?;
+        context.check_cancelled()?;
         reserve_column_types(schema, &mut workspace, name)?;
         let requests = column_requests(schema, self.output_columns.as_deref());
         let rows = owned.len;
-        #[cfg(test)]
-        let worker_gate = self.worker_gate.clone();
-        let input = MaterializationInput {
+        if requests.is_empty() {
+            return Ok((materialize_batch(Vec::new(), schema, rows)?, workspace));
+        }
+        let left_fields = owned.left.batches.first().map_or(0, Vec::len);
+        if requests.iter().all(|request| request.index < left_fields) {
+            let left = GatherPlan::new(&owned.left, false);
+            let shared = requests
+                .iter()
+                .map(|request| left.shared_column(request.index))
+                .collect::<Result<Option<Vec<_>>>>()?;
+            if let Some(columns) = shared {
+                context.check_cancelled()?;
+                return Ok((materialize_batch(columns, schema, rows)?, workspace));
+            }
+        }
+        let input = Arc::new(MaterializationInput {
             rows: owned,
             requests,
-            workspace,
-        };
-        // Copies retain their reservation until the worker exits.
-        let result = tokio::task::spawn_blocking(move || {
             #[cfg(test)]
-            if let Some((started, gate)) = worker_gate {
-                let _ = started.send(());
-                gate.wait();
-            }
-            input.materialize()
-        })
-        .await
-        .map_err(|error| crate::CalcFlowError::Internal {
-            message: format!("ASOF output materialization task failed: {error}"),
-        })??;
-        result.into_batch(schema, rows)
+            worker_gate: self.worker_gate.clone(),
+            #[cfg(test)]
+            worker_probe: self.worker_probe.clone(),
+        });
+        let client = context.gather_client(self.operator.clone());
+        let scope = client.scope()?;
+        let ticket = scope
+            .submit(input, workspace, GatherStop::from_job(context.job()))
+            .await
+            .map_err(|failure| match failure {
+                AdmissionFailure::Budget { stage, source } => super::reason(
+                    name,
+                    crate::StreamingFailureReason::AsofWorkspaceLimitExceeded,
+                    &format!("native {stage} admission failed: {source}"),
+                ),
+                AdmissionFailure::Runtime(error) => error,
+            })?;
+        let output = ticket.finish().await?;
+        let batch = materialize_batch(output.value, schema, rows)?;
+        Ok((batch, output.credit))
     }
 }
 
@@ -153,8 +249,19 @@ impl OutputRuntime {
             matched: rows.iter().filter(|(_, right)| right.is_some()).count() as u64,
             raw_bytes: 0,
         };
-        self.materialize_plan(plan, schema, workspace, "asof", check_cancelled)
-            .await
+        let job = crate::StreamJobContext::new(
+            0,
+            "asof-output-test",
+            crate::JsonMap::new(),
+            None,
+            crate::CancellationToken::new(),
+        );
+        let context = StreamOperatorContext::new(&job, "asof", None);
+        let result = self
+            .materialize_plan(plan, schema, workspace, "asof", &context)
+            .await;
+        job.gather_owner().close_and_drain().await;
+        result
     }
 }
 
@@ -342,22 +449,30 @@ fn column_requests(schema: &SchemaRef, output_columns: Option<&[usize]>) -> Vec<
         .collect()
 }
 
+fn materialize_column(
+    left: &GatherPlan<'_>,
+    right: &GatherPlan<'_>,
+    len: usize,
+    request: &ColumnRequest,
+) -> Result<ArrayRef> {
+    let left_fields = left.batches.first().map_or(0, Vec::len);
+    if request.index < left_fields {
+        left.column(request.index, &request.data_type, len)
+    } else {
+        right.column(request.index - left_fields, &request.data_type, len)
+    }
+}
+
+#[cfg(test)]
 fn materialize_columns(
     left: &GatherPlan<'_>,
     right: &GatherPlan<'_>,
     len: usize,
     requests: &[ColumnRequest],
 ) -> Result<Vec<ArrayRef>> {
-    let left_fields = left.batches.first().map_or(0, Vec::len);
     requests
         .iter()
-        .map(|request| {
-            if request.index < left_fields {
-                left.column(request.index, &request.data_type, len)
-            } else {
-                right.column(request.index - left_fields, &request.data_type, len)
-            }
-        })
+        .map(|request| materialize_column(left, right, len, request))
         .collect()
 }
 
@@ -383,3 +498,6 @@ fn materialize_plans(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(crate) mod gather_lifecycle_bridge;
