@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import unittest
+from functools import lru_cache
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, patch
@@ -56,7 +57,183 @@ def report() -> dict:
     }
 
 
+@lru_cache(maxsize=2)
+def integer_recovery_digest(rows: int, unique: bool) -> str:
+    import hashlib
+    import struct
+
+    groups = {}
+    combined = hashlib.sha256()
+    for row in range(rows + 1):
+        key = (row if unique else row % 64) if row % 101 else None
+        value = row % 257 - 128 if row % 13 and key != 63 else None
+        count, total, low, high = groups.get(key, (0, 0, None, None))
+        if value is not None:
+            count += 1
+            total += value
+            low = value if low is None else min(low, value)
+            high = value if high is None else max(high, value)
+        groups[key] = (count, total, low, high)
+        if row + 1 in (rows, rows + 1):
+            digest = hashlib.sha256()
+            for key in sorted(groups, key=lambda key: (key is not None, key or 0)):
+                count, total, low, high = groups[key]
+                digest.update(struct.pack("<Bq", key is not None, key or 0))
+                digest.update(struct.pack("<q", count))
+                for value in (total if count else None, low, high):
+                    digest.update(struct.pack("<Bq", value is not None, value or 0))
+            combined.update(digest.digest())
+    return combined.hexdigest()
+
+
+def input_logical_bytes(batches: int, rows: int, bits: int = 64) -> int:
+    chunk = rows // batches
+    bitmap_bytes = (chunk + 7) // 8
+    return rows * (8 + bits // 8) + sum(
+        bitmap_bytes
+        * sum(
+            (start + divisor - 1) // divisor * divisor < start + chunk
+            for divisor in (101, 13)
+        )
+        for start in range(0, rows, chunk)
+    )
+
+
+def current_report(layout: int = 3) -> dict:
+    evidence = copy.deepcopy(report())
+    evidence["schema"] = "calc-flow.sql-stream-aggregate.v3"
+    for case in evidence["cases"]:
+        batches, _, rows, unique = CASES[case["name"]]
+        state = {
+            "layout": layout,
+            "accounting": layout,
+            "segment": "group-state" if layout == 3 else "input-retained",
+            "rows": case["maximum_groups"] if layout == 3 else rows,
+            "columns": 5 if layout == 3 else 2,
+            "logical_rows": rows,
+            "logical_bytes": input_logical_bytes(batches, rows),
+            "segment_ids": [
+                "batch-metadata",
+                "control",
+                "group-state" if layout == 3 else "input-retained",
+                "logical-schema",
+            ],
+            "total_bytes": 200,
+            "snapshot_sha256": "1" * 64,
+        }
+        case["samples"] = [copy.deepcopy(sample) for sample in case["samples"]]
+        for sample in [case["oracle"], *case["samples"]]:
+            sample["checkpoint_state"] = copy.deepcopy(state)
+            if case["checkpoint_every"]:
+                sample["checkpoint_bytes"] *= 2
+            sample["recovery_snapshots_sha256"] = None
+        case["oracle"]["recovery_snapshots_sha256"] = integer_recovery_digest(
+            rows, unique
+        )
+    return evidence
+
+
 class SqlStreamEvidenceTests(unittest.IsolatedAsyncioTestCase):
+    def test_current_checkpoint_shapes_preserve_all_prefixes_and_integer_recovery(self):
+        for layout in (3, 4):
+            evidence = current_report(layout)
+            with TemporaryDirectory() as raw, self.subTest(layout=layout):
+                path = Path(raw) / "current.json"
+                path.write_text(json.dumps(evidence))
+                rows = sql_stream_rows(path)
+                row = rows["stream_sql_aggregate/fixed_groups_100_batches"]
+                self.assertEqual(
+                    row["metadata"]["oracle"], evidence["cases"][2]["oracle"]
+                )
+                self.assertEqual(
+                    row["metadata"]["observations"], evidence["cases"][2]["samples"]
+                )
+
+    def test_current_decimal_widths_and_signed_scales_keep_typed_recovery(self):
+        from scripts.test_benchmark_sql_decimal import decimal_report
+
+        for bits in (32, 64, 128, 256):
+            for scale in (-2, 2):
+                evidence = decimal_report(bits, scale)
+                state_evidence = current_report(4 if scale < 0 else 3)
+                evidence["schema"] = state_evidence["schema"]
+                for case, state_case in zip(evidence["cases"], state_evidence["cases"]):
+                    batches, _, rows, _ = CASES[case["name"]]
+                    state = copy.deepcopy(state_case["oracle"]["checkpoint_state"])
+                    state["logical_bytes"] = input_logical_bytes(batches, rows, bits)
+                    for sample in [case["oracle"], *case["samples"]]:
+                        sample["checkpoint_state"] = copy.deepcopy(state)
+                        if case["checkpoint_every"]:
+                            sample["checkpoint_bytes"] *= 2
+                with TemporaryDirectory() as raw, self.subTest(bits=bits, scale=scale):
+                    path = Path(raw) / "decimal-current.json"
+                    path.write_text(json.dumps(evidence))
+                    rows = sql_stream_rows(path)
+                    key = (
+                        f"stream_sql_aggregate/decimal{bits}_scale{scale}"
+                        "/fixed_groups_100_batches"
+                    )
+                    self.assertEqual(
+                        rows[key]["metadata"]["value_type"], evidence["value_type"]
+                    )
+                    self.assertEqual(
+                        rows[key]["metadata"]["oracle"], evidence["cases"][2]["oracle"]
+                    )
+
+    def test_current_checkpoint_census_layout_ledger_inventory_and_bytes_are_strict(
+        self,
+    ):
+        invalid = []
+        for field, value in (
+            ("layout", 2),
+            ("accounting", 4),
+            ("segment", "input-retained"),
+            ("rows", 64),
+            ("columns", 2),
+            ("logical_rows", 1),
+            ("logical_bytes", True),
+            ("logical_bytes", 16 * 100_000),
+            ("total_bytes", 100),
+            ("snapshot_sha256", "z" * 64),
+            ("layout", True),
+            ("logical_bytes", -1),
+            ("segment_ids", ["input"]),
+        ):
+            item = current_report()
+            item["cases"][0]["oracle"]["checkpoint_state"][field] = value
+            invalid.append(item)
+        item = current_report(4)
+        item["cases"][0]["oracle"]["checkpoint_state"]["rows"] = 65
+        invalid.append(item)
+        item = current_report()
+        del item["cases"][0]["oracle"]["checkpoint_state"]
+        invalid.append(item)
+        item = current_report()
+        item["cases"][3]["oracle"]["checkpoint_bytes"] = 150
+        invalid.append(item)
+        self.assert_invalid(invalid)
+
+    def test_current_selected_payload_size_is_stable_with_same_arm_checkpoint(self):
+        evidence = current_report()
+        evidence["cases"][0]["samples"][0]["final_checkpoint_bytes"] += 1
+        self.assert_invalid([evidence])
+
+    def test_current_integer_recovery_digest_and_same_arm_checkpoint_census_are_strict(
+        self,
+    ):
+        invalid = []
+        for recovery in (None, "0" * 64):
+            item = current_report()
+            item["cases"][0]["oracle"]["recovery_snapshots_sha256"] = recovery
+            invalid.append(item)
+        item = current_report()
+        item["cases"][0]["samples"][0]["recovery_snapshots_sha256"] = "0" * 64
+        invalid.append(item)
+        item = current_report()
+        item["cases"][0]["samples"][0]["checkpoint_state"]["logical_bytes"] += 1
+        invalid.append(item)
+        self.assert_invalid(invalid)
+
     def test_inventory_covers_batch_scaling_and_growing_snapshot_cost(self):
         self.assertEqual(
             set(CASES),

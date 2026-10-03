@@ -8,6 +8,7 @@ use calc_flow::{
 use datafusion::arrow::{
     array::{Array, ArrayRef, Int64Array, new_empty_array},
     datatypes::{DataType, Field, Schema, i256},
+    ipc::reader::FileReader,
     record_batch::RecordBatch,
 };
 use datafusion::common::ScalarValue;
@@ -15,7 +16,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
-    io::{self, Write},
+    io::{self, Cursor, Write},
     sync::Arc,
     time::Instant,
 };
@@ -264,21 +265,18 @@ fn update(
 
 type SnapshotValues = (i64, ScalarValue, ScalarValue, ScalarValue);
 
+fn snapshot_schema(value_type: ValueType) -> Schema {
+    Schema::new(vec![
+        Field::new("key", DataType::Int64, true),
+        Field::new("total", value_type.data_type(true), true),
+        Field::new("count", DataType::Int64, false),
+        Field::new("minimum", value_type.data_type(false), true),
+        Field::new("maximum", value_type.data_type(false), true),
+    ])
+}
+
 fn snapshot_columns(record: &RecordBatch, value_type: ValueType) {
-    let names = ["key", "total", "count", "minimum", "maximum"];
-    let types = [
-        DataType::Int64,
-        value_type.data_type(true),
-        DataType::Int64,
-        value_type.data_type(false),
-        value_type.data_type(false),
-    ];
-    assert_eq!(record.schema().fields().len(), names.len());
-    for (index, (name, dtype)) in names.iter().zip(types).enumerate() {
-        assert_eq!(record.schema().field(index).name(), *name);
-        assert_eq!(record.schema().field(index).data_type(), &dtype);
-        assert_eq!(record.schema().field(index).is_nullable(), index != 2);
-    }
+    assert_eq!(record.schema().as_ref(), &snapshot_schema(value_type));
 }
 
 fn validate_snapshot_row(
@@ -306,6 +304,7 @@ fn snapshot_values(
     expected: &BTreeMap<Option<i64>, Aggregate>,
     value_type: ValueType,
 ) -> BTreeMap<Option<i64>, SnapshotValues> {
+    assert_eq!(batch.metadata(), &BatchMetadata::default());
     let mut seen = BTreeMap::new();
     for record in batch.table_payload().unwrap().batches() {
         snapshot_columns(record, value_type);
@@ -508,29 +507,20 @@ fn sample(
     });
     let seconds = started.elapsed().as_secs_f64();
     assert_eq!(collector.snapshots.len(), inputs.len());
-    let mut expected = BTreeMap::new();
-    let mut output_rows = 0;
-    let mut output_hash = Sha256::new();
-    for (index, batch) in collector.snapshots.iter().enumerate() {
-        update(
-            &mut expected,
-            index * (case.rows / case.batches),
-            case.rows / case.batches,
-            case.unique_keys,
-        );
-        let (rows, digest) = validate_snapshot(batch, &expected, value_type);
-        output_rows += rows;
-        output_hash.update(digest);
-    }
+    let (mut expected, output_rows, output_hash) =
+        validate_snapshots(&collector.snapshots, case, value_type);
     let final_checkpoint = runtime.block_on(capture(&mut operator, &context));
-    let segment = final_checkpoint.segments.get("input").unwrap();
-    assert_eq!(
-        final_checkpoint.inline_metadata["rows"].as_u64(),
-        Some(case.rows as u64)
+    let state = checkpoint_state(
+        &final_checkpoint,
+        inputs,
+        expected.len(),
+        value_type,
+        case.unique_keys,
     );
+    let segment = &final_checkpoint.segments[state["segment"].as_str().unwrap()];
     let checkpoint_sha256 = hex::encode(Sha256::digest(segment.bytes()));
     if let Some(last) = last_checkpoint {
-        assert_eq!(last.segments["input"].bytes(), segment.bytes());
+        assert_checkpoint_reuse(&last, &final_checkpoint);
     }
     let recovery_digest = recover.then(|| {
         validate_recovery(
@@ -544,14 +534,150 @@ fn sample(
     });
 
     let mut observation = json!({"seconds":seconds,"process_seconds":process_seconds,"prepare_seconds":prepare_seconds,"capture_seconds":capture_seconds,"checkpoint_bytes":checkpoint_bytes,"checkpoint_count":checkpoint_count,"final_checkpoint_bytes":segment.bytes().len(),"final_checkpoint_sha256":checkpoint_sha256,"output_rows":output_rows,"snapshot_count":collector.snapshots.len(),"input_rows":case.rows,"all_snapshots_sha256":hex::encode(output_hash.finalize()),"validated_all_snapshots":true,"validated_recovery":recover});
-    add_recovery_digest(&mut observation, recovery_digest, value_type);
+    observation["checkpoint_state"] = state;
+    observation["recovery_snapshots_sha256"] = recovery_digest.map_or(Value::Null, Value::String);
     observation
 }
 
-fn add_recovery_digest(observation: &mut Value, digest: Option<String>, value_type: ValueType) {
-    if value_type.bits != 0 {
-        observation["recovery_snapshots_sha256"] = digest.map_or(Value::Null, Value::String);
+fn validate_snapshots(
+    snapshots: &[Batch],
+    case: Case,
+    value_type: ValueType,
+) -> (BTreeMap<Option<i64>, Aggregate>, usize, Sha256) {
+    let mut expected = BTreeMap::new();
+    let mut output_rows = 0;
+    let mut output_hash = Sha256::new();
+    for (index, batch) in snapshots.iter().enumerate() {
+        update(
+            &mut expected,
+            index * (case.rows / case.batches),
+            case.rows / case.batches,
+            case.unique_keys,
+        );
+        let (rows, digest) = validate_snapshot(batch, &expected, value_type);
+        output_rows += rows;
+        output_hash.update(digest);
     }
+    (expected, output_rows, output_hash)
+}
+
+fn assert_checkpoint_reuse(previous: &OperatorStateSnapshot, current: &OperatorStateSnapshot) {
+    assert_eq!(previous.inline_metadata, current.inline_metadata);
+    assert_eq!(
+        previous.segments.keys().collect::<Vec<_>>(),
+        current.segments.keys().collect::<Vec<_>>()
+    );
+    for (id, segment) in &previous.segments {
+        assert_eq!(segment.bytes(), current.segments[id].bytes());
+    }
+}
+
+fn checkpoint_digest(snapshot: &OperatorStateSnapshot) -> String {
+    let mut hash = Sha256::new();
+    let metadata = serde_json::to_vec(&snapshot.inline_metadata).unwrap();
+    hash.update(u64::try_from(metadata.len()).unwrap().to_le_bytes());
+    hash.update(metadata);
+    for (id, segment) in &snapshot.segments {
+        hash.update(u64::try_from(id.len()).unwrap().to_le_bytes());
+        hash.update(id.as_bytes());
+        hash.update(u64::try_from(segment.bytes().len()).unwrap().to_le_bytes());
+        hash.update(segment.bytes());
+    }
+    hex::encode(hash.finalize())
+}
+
+fn checkpoint_state(
+    snapshot: &OperatorStateSnapshot,
+    inputs: &[Batch],
+    groups: usize,
+    value_type: ValueType,
+    unique_keys: bool,
+) -> Value {
+    let layout = snapshot.inline_metadata["state_layout"].as_u64().unwrap();
+    assert_eq!(
+        snapshot.inline_metadata["state_accounting"].as_u64(),
+        Some(layout)
+    );
+    let (segment, columns) = match layout {
+        3 => ("group-state", 5),
+        4 => ("input-retained", 2),
+        _ => panic!("unexpected current SQL checkpoint layout"),
+    };
+    let inventory = snapshot
+        .segments
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        inventory,
+        ["batch-metadata", "control", segment, "logical-schema"]
+    );
+    let rows = inputs.iter().map(Batch::num_rows).sum::<usize>();
+    let bytes = inputs
+        .iter()
+        .map(|batch| batch.estimated_bytes().unwrap())
+        .sum::<usize>();
+    assert_eq!(
+        snapshot.inline_metadata["rows"].as_u64(),
+        Some(u64::try_from(rows).unwrap())
+    );
+    assert_eq!(
+        snapshot.inline_metadata["bytes"].as_u64(),
+        Some(u64::try_from(bytes).unwrap())
+    );
+    let census = state_census(
+        snapshot.segments[segment].bytes(),
+        layout,
+        value_type,
+        unique_keys,
+    );
+    assert_eq!(census.1, columns);
+    assert_eq!(census.0, if layout == 3 { groups } else { rows });
+    if layout == 3 {
+        let control: Value = serde_json::from_slice(snapshot.segments["control"].bytes()).unwrap();
+        assert_eq!(
+            control["groups"].as_u64(),
+            Some(u64::try_from(census.0).unwrap())
+        );
+    }
+    json!({
+        "layout":layout, "accounting":layout, "segment":segment,
+        "rows":census.0, "columns":census.1, "logical_rows":rows, "logical_bytes":bytes,
+        "segment_ids":inventory,
+        "total_bytes":snapshot.segments.values().map(|segment| segment.bytes().len()).sum::<usize>(),
+        "snapshot_sha256":checkpoint_digest(snapshot)
+    })
+}
+
+fn state_census(
+    bytes: &[u8],
+    layout: u64,
+    value_type: ValueType,
+    unique_keys: bool,
+) -> (usize, usize) {
+    let reader = FileReader::try_new(Cursor::new(bytes), None).unwrap();
+    let columns = reader.schema().fields().len();
+    let mut rows = 0;
+    for record in reader {
+        let record = record.unwrap();
+        assert_eq!(record.num_columns(), columns);
+        if layout == 4 {
+            assert_eq!(record.schema().as_ref(), schema(value_type).as_ref());
+            for row in 0..record.num_rows() {
+                let (key, value) = input_row(rows + row, unique_keys);
+                assert_eq!(
+                    ScalarValue::try_from_array(record.column(0), row).unwrap(),
+                    ScalarValue::Int64(key)
+                );
+                assert_eq!(
+                    ScalarValue::try_from_array(record.column(1), row).unwrap(),
+                    value_type.scalar(value, false)
+                );
+            }
+        }
+        rows += record.num_rows();
+    }
+    (rows, columns)
 }
 
 fn main() {
@@ -580,9 +706,8 @@ fn main() {
         let observations = if check { Vec::new() } else { (0..samples).map(|_| sample(&runtime, case, &inputs, false, value_type)).collect::<Vec<_>>() };
         json!({"name":case.name,"rows":case.rows,"batches":case.batches,"maximum_groups":if case.unique_keys { case.rows - case.rows.div_ceil(101) + 1 } else { 65 },"unique_keys":case.unique_keys,"checkpoint_every":case.checkpoint_every,"query":QUERY,"oracle":oracle,"samples":observations})
     }).collect::<Vec<_>>();
-    let mut report = json!({"schema":"calc-flow.sql-stream-aggregate.v1","scope":"warm-native-operator-cumulative-snapshots","cases":cases});
+    let mut report = json!({"schema":"calc-flow.sql-stream-aggregate.v3","scope":"warm-native-operator-cumulative-snapshots","cases":cases});
     if value_type.bits != 0 {
-        report["schema"] = json!("calc-flow.sql-stream-aggregate.v2");
         report["value_type"] = value_type.descriptor();
     }
     let bytes = serde_json::to_vec_pretty(&report).unwrap();

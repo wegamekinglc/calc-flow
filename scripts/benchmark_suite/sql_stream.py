@@ -103,7 +103,9 @@ def expected_snapshot_digest(
 
 
 @lru_cache(maxsize=16)
-def expected_recovery_digest(rows: int, unique_keys: bool, decimal: DecimalType) -> str:
+def expected_recovery_digest(
+    rows: int, unique_keys: bool, decimal: DecimalType | None
+) -> str:
     groups: dict[int | None, tuple[int, int, int | None, int | None]] = {}
     recovery = hashlib.sha256()
     for index in range(rows + 1):
@@ -169,7 +171,12 @@ def _validate_counts(sample: dict, workload: Workload) -> None:
 
 
 def _validate_oracle(
-    sample: dict, workload: Workload, decimal: DecimalType | None, *, oracle: bool
+    sample: dict,
+    workload: Workload,
+    decimal: DecimalType | None,
+    *,
+    oracle: bool,
+    current: bool,
 ) -> None:
     batches, _, rows, unique_keys = workload
     if (
@@ -179,7 +186,7 @@ def _validate_oracle(
         != expected_snapshot_digest(batches, rows, unique_keys, decimal)
     ):
         raise ValueError("invalid SQL stream snapshot oracle")
-    if decimal is not None:
+    if decimal is not None or current:
         expected = (
             expected_recovery_digest(rows, unique_keys, decimal) if oracle else None
         )
@@ -200,10 +207,70 @@ def _validate_checkpoint_fields(sample: dict) -> None:
         raise ValueError("invalid SQL stream checkpoint evidence")
 
 
-def _validate_checkpoint(sample: dict, checkpoint: int) -> None:
+def _expected_logical_bytes(workload: Workload, decimal: DecimalType | None) -> int:
+    batches, _, rows, _ = workload
+    chunk = rows // batches
+    bitmap = (chunk + 7) // 8
+    width = 8 if decimal is None else decimal[0] // 8
+    validity = sum(
+        bitmap
+        * sum(
+            (start + divisor - 1) // divisor * divisor < start + chunk
+            for divisor in (101, 13)
+        )
+        for start in range(0, rows, chunk)
+    )
+    return rows * (8 + width) + validity
+
+
+def _validate_current_checkpoint(
+    sample: dict, workload: Workload, decimal: DecimalType | None
+) -> int:
+    state = sample.get("checkpoint_state")
+    if not isinstance(state, dict) or type(state.get("layout")) is not int:
+        raise ValueError("invalid SQL stream current checkpoint state")
+    layout = state["layout"]
+    if layout not in (3, 4):
+        raise ValueError("invalid SQL stream current checkpoint layout")
+    _, _, rows, unique = workload
+    groups = rows - (rows + 100) // 101 + 1 if unique else 65
+    segment = "group-state" if layout == 3 else "input-retained"
+    expected = {
+        "accounting": layout,
+        "rows": groups if layout == 3 else rows,
+        "columns": 5 if layout == 3 else 2,
+        "logical_rows": rows,
+        "logical_bytes": _expected_logical_bytes(workload, decimal),
+    }
+    if any(not _integer(state.get(field), value) for field, value in expected.items()):
+        raise ValueError("invalid SQL stream current checkpoint census or ledger")
+    if state.get("segment") != segment or state.get("segment_ids") != [
+        "batch-metadata",
+        "control",
+        segment,
+        "logical-schema",
+    ]:
+        raise ValueError("invalid SQL stream current checkpoint inventory")
+    if (
+        not _integer(state.get("total_bytes"))
+        or state["total_bytes"] <= sample["final_checkpoint_bytes"]
+        or not _digest(state.get("snapshot_sha256"))
+    ):
+        raise ValueError("invalid SQL stream current checkpoint bytes")
+    return state["total_bytes"]
+
+
+def _validate_checkpoint(
+    sample: dict, workload: Workload, decimal: DecimalType | None, *, current: bool
+) -> None:
     _validate_checkpoint_fields(sample)
-    if checkpoint:
-        if sample["checkpoint_bytes"] < sample["final_checkpoint_bytes"]:
+    final_bytes = (
+        _validate_current_checkpoint(sample, workload, decimal)
+        if current
+        else sample["final_checkpoint_bytes"]
+    )
+    if workload[1]:
+        if sample["checkpoint_bytes"] < final_bytes:
             raise ValueError("incomplete SQL stream checkpoint bytes")
     elif any(
         sample[field] != 0
@@ -213,14 +280,19 @@ def _validate_checkpoint(sample: dict, checkpoint: int) -> None:
 
 
 def _validate_sample(
-    sample: object, workload: Workload, decimal: DecimalType | None, *, oracle: bool
+    sample: object,
+    workload: Workload,
+    decimal: DecimalType | None,
+    *,
+    oracle: bool,
+    current: bool,
 ) -> None:
     if not isinstance(sample, dict):
         raise ValueError("invalid SQL stream observation")
     _validate_timing(sample)
     _validate_counts(sample, workload)
-    _validate_oracle(sample, workload, decimal, oracle=oracle)
-    _validate_checkpoint(sample, workload[1])
+    _validate_oracle(sample, workload, decimal, oracle=oracle, current=current)
+    _validate_checkpoint(sample, workload, decimal, current=current)
 
 
 def _validate_inventory(cases: object) -> list[dict]:
@@ -252,7 +324,12 @@ def _validate_workload(case: dict, workload: Workload) -> None:
 
 
 def _case_row(
-    case: dict, scope: str, minimum_samples: int, decimal: DecimalType | None
+    case: dict,
+    scope: str,
+    minimum_samples: int,
+    decimal: DecimalType | None,
+    *,
+    current: bool,
 ) -> dict:
     workload = CASES[case["name"]]
     batches, checkpoint, count, unique = workload
@@ -260,14 +337,22 @@ def _case_row(
     samples = case.get("samples")
     if not isinstance(samples, list) or len(samples) < minimum_samples:
         raise ValueError("incomplete SQL stream observations")
-    _validate_sample(case.get("oracle"), workload, decimal, oracle=True)
+    _validate_sample(
+        case.get("oracle"), workload, decimal, oracle=True, current=current
+    )
     for sample in samples:
-        _validate_sample(sample, workload, decimal, oracle=False)
+        _validate_sample(sample, workload, decimal, oracle=False, current=current)
     if any(
         sample["final_checkpoint_sha256"] != case["oracle"]["final_checkpoint_sha256"]
+        or sample["final_checkpoint_bytes"] != case["oracle"]["final_checkpoint_bytes"]
         for sample in samples
     ):
         raise ValueError("unstable SQL stream checkpoint bytes")
+    if current and any(
+        sample["checkpoint_state"] != case["oracle"]["checkpoint_state"]
+        for sample in samples
+    ):
+        raise ValueError("unstable SQL stream current checkpoint state")
     return {
         "samples": [sample["seconds"] for sample in samples],
         "rows": count,
@@ -300,7 +385,15 @@ def _report_decimal(report: dict) -> DecimalType | None:
         if "value_type" in report:
             raise ValueError("undeclared SQL stream datatype")
         return None
-    if report.get("schema") != "calc-flow.sql-stream-aggregate.v2":
+    if (
+        report.get("schema") == "calc-flow.sql-stream-aggregate.v3"
+        and "value_type" not in report
+    ):
+        return None
+    if report.get("schema") not in (
+        "calc-flow.sql-stream-aggregate.v2",
+        "calc-flow.sql-stream-aggregate.v3",
+    ):
         raise ValueError("invalid SQL stream benchmark contract")
     return _validate_decimal_descriptor(report.get("value_type"))
 
@@ -332,7 +425,13 @@ def _validate_decimal_numbers(value: dict) -> None:
 def _typed_case_row(
     case: dict, report: dict, minimum_samples: int, decimal: DecimalType | None
 ) -> dict:
-    row = _case_row(case, report["scope"], minimum_samples, decimal)
+    row = _case_row(
+        case,
+        report["scope"],
+        minimum_samples,
+        decimal,
+        current=report["schema"] == "calc-flow.sql-stream-aggregate.v3",
+    )
     if decimal is not None:
         row["metadata"]["value_type"] = report["value_type"]
     return row
