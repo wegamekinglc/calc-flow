@@ -131,7 +131,7 @@ impl StreamAsofJoinOperator {
         admission.install(ingress, &mut self.state, &mut status);
         self.state.install_encoding_owners(owners);
         self.status = status;
-        self.checkpoint_log.journal.install(journal);
+        self.checkpoint_log.install_journal(journal);
         self.checkpoint_log.credit = Some(credit);
         self.checkpoint_log.retention_bytes = retention_bytes;
         self.checkpoint_log.pending = None;

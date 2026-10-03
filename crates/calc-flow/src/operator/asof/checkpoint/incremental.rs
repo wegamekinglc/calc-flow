@@ -124,6 +124,10 @@ impl LogState {
     pub fn keeps_delta(&self) -> bool {
         !self.force_base && !self.frames.is_empty()
     }
+    pub fn install_journal(&mut self, prepared: Journal) {
+        self.force_base |= prepared.requires_base();
+        self.journal.install(prepared);
+    }
     pub fn credit_bytes(
         &self,
         owns: impl Fn(usize) -> bool,
@@ -304,6 +308,11 @@ impl crate::runtime::streaming::gather_work::OwnedCpuWork for DeltaWork {
 }
 
 impl StreamAsofJoinOperator {
+    fn log_prefers_base(&self, changes: u64) -> bool {
+        let rows = changes.saturating_add(self.checkpoint_log.journal.changes().len() as u64);
+        rows >= 4096 && rows >= self.status.state_rows / 8
+    }
+
     pub(in crate::operator::asof) fn log_projection(
         &self,
         mut inventory: Inventory,
@@ -375,6 +384,9 @@ impl StreamAsofJoinOperator {
         } else {
             admission.rows.len()
         };
+        if self.log_prefers_base(count as u64) {
+            return Ok(Journal::base());
+        }
         let _workspace = self.reserve_workspace(count as u64 * size_of::<Change>() as u64 + 256)?;
         let mut edits = Vec::with_capacity(count);
         if side == 0 {
@@ -425,6 +437,9 @@ impl StreamAsofJoinOperator {
         if !self.checkpoint_log.keeps_delta() {
             return Ok(Journal::default());
         }
+        if self.log_prefers_base(prefix.batches.len() as u64) {
+            return Ok(Journal::base());
+        }
         let _workspace = self.reserve_workspace(
             prefix.batches.len() as u64 * (size_of::<Change>() + 512) as u64 + 4096,
         )?;
@@ -453,6 +468,9 @@ impl StreamAsofJoinOperator {
         let count = preview.evicted_payloads
             + preview.removed_identity_only
             + preview.selected.len() as u64;
+        if self.log_prefers_base(count) {
+            return Ok(Journal::base());
+        }
         let _workspace =
             self.reserve_workspace(count * (size_of::<Change>() + 512) as u64 * 2 + 4096)?;
         let mut edits = Vec::with_capacity(usize::try_from(count).expect("bounded eviction rows"));

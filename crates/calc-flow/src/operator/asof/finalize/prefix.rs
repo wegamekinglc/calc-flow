@@ -67,7 +67,7 @@ impl StreamAsofJoinOperator {
         // Right payloads remain until finish_progress sweeps them once.
         self.swept = None;
         self.status = status;
-        self.checkpoint_log.journal.install(prepared.journal);
+        self.checkpoint_log.install_journal(prepared.journal);
         self.checkpoint_log.credit = Some(prepared.credit);
         self.checkpoint_log.retention_bytes = prepared.retention_bytes;
         self.checkpoint_log.pending = None;

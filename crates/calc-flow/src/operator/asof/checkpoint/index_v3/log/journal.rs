@@ -75,9 +75,21 @@ pub(in crate::operator::asof) struct Journal {
     changes: Vec<Change>,
     keys: Vec<Encoding>,
     lease: Option<MemoryReservation>,
+    rebase: bool,
 }
 
 impl Journal {
+    pub fn base() -> Self {
+        Self {
+            rebase: true,
+            ..Self::default()
+        }
+    }
+
+    pub fn requires_base(&self) -> bool {
+        self.rebase
+    }
+
     pub fn changes(&self) -> &[Change] {
         &self.changes
     }
@@ -174,6 +186,7 @@ impl Journal {
             changes,
             keys: dirty_keys,
             lease: Some(lease),
+            rebase: false,
         })
     }
 

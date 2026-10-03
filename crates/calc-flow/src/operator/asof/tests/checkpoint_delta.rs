@@ -28,6 +28,130 @@ fn batch(operator: &StreamAsofJoinOperator, rows: &[(&str, i64, i64)]) -> Batch 
     .unwrap()
 }
 
+#[tokio::test]
+async fn test_a12_bulk_restore_finalization_rebases_within_workspace() {
+    let mut live = operator();
+    let rows = (0..65_537_i64)
+        .map(|row| ("A", row, row))
+        .collect::<Vec<_>>();
+    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+    let context = StreamOperatorContext::new(&job, "asof", None);
+    let mut output = EdgeCollector::new(live.output_ports().to_vec());
+    live.process_data(
+        "right",
+        batch(&live, &rows[..65_536]),
+        &context,
+        &mut output,
+    )
+    .await
+    .unwrap();
+    let base = live.capture(Epoch::INITIAL).unwrap();
+    live.process_data(
+        "right",
+        batch(&live, &rows[65_536..]),
+        &context,
+        &mut output,
+    )
+    .await
+    .unwrap();
+    let changed = live.capture(Epoch::new(2).unwrap()).unwrap();
+    let mut restored = operator();
+    restored.restore(&changed).unwrap();
+    assert_eq!(restored.status(), live.status());
+    restored
+        .process_data("left", batch(&restored, &rows), &context, &mut output)
+        .await
+        .unwrap();
+    restored.on_end(&context, &mut output).await.unwrap();
+    assert_eq!(restored.status.matched_rows, rows.len() as u64);
+    assert_eq!(restored.status.state_rows, 0);
+    assert!(restored.checkpoint_log.force_base);
+    assert!(restored.checkpoint_log.journal.is_empty());
+    let records = output
+        .drain("output")
+        .into_iter()
+        .filter_map(|message| message.as_data().cloned())
+        .flat_map(|batch| batch.table_payload().unwrap().batches().to_vec())
+        .collect::<Vec<_>>();
+    let combined = concat_batches(&restored.schemas[2], &records).unwrap();
+    for name in ["left__seq", "right__seq"] {
+        let sequence = combined
+            .column_by_name(name)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(sequence.values(), &(0..65_537_i64).collect::<Vec<_>>());
+    }
+    let terminal = restored.capture(Epoch::new(3).unwrap()).unwrap();
+    assert_eq!(
+        terminal.inline_metadata["checkpoint_log"]["frames"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    assert!(terminal.segments.is_empty());
+    let mut final_restore = operator();
+    final_restore.restore(&terminal).unwrap();
+    let repeated = final_restore.capture(Epoch::new(4).unwrap()).unwrap();
+    assert_eq!(
+        repeated.inline_metadata["metrics"],
+        terminal.inline_metadata["metrics"]
+    );
+    drop(base);
+    job.gather_owner().close_and_drain().await;
+}
+
+#[tokio::test]
+async fn test_a12_bulk_admission_rebases_and_preserves_later_mutations() {
+    let mut live = operator();
+    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+    let context = StreamOperatorContext::new(&job, "asof", None);
+    let mut output = EdgeCollector::new(live.output_ports().to_vec());
+    let rows = (0..9_218_i64)
+        .map(|row| ("A", row, row))
+        .collect::<Vec<_>>();
+    live.process_data("right", batch(&live, &rows[..1024]), &context, &mut output)
+        .await
+        .unwrap();
+    let base = live.capture(Epoch::INITIAL).unwrap();
+    live.process_data(
+        "right",
+        batch(&live, &rows[1024..9216]),
+        &context,
+        &mut output,
+    )
+    .await
+    .unwrap();
+    assert!(live.checkpoint_log.force_base);
+    assert!(live.checkpoint_log.journal.is_empty());
+    live.process_data("right", batch(&live, &rows[9216..]), &context, &mut output)
+        .await
+        .unwrap();
+    assert!(live.checkpoint_log.force_base);
+    let current = live.capture(Epoch::new(2).unwrap()).unwrap();
+    assert!(
+        current.inline_metadata["checkpoint_log"]["generation"]
+            .as_u64()
+            .unwrap()
+            > base.inline_metadata["checkpoint_log"]["generation"]
+                .as_u64()
+                .unwrap()
+    );
+    assert_eq!(
+        current.inline_metadata["checkpoint_log"]["frames"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let mut restored = operator();
+    restored.restore(&current).unwrap();
+    assert_eq!(restored.status(), live.status());
+    assert_eq!(restored.status.retained_right_rows, rows.len() as u64);
+}
+
 async fn single_hot_key_delta(rows: usize) {
     let mut operator = operator();
     let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
