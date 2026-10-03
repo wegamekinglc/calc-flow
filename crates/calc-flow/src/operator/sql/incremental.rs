@@ -3,7 +3,7 @@ use std::{mem::size_of, sync::Arc};
 use ahash::RandomState;
 use datafusion::{
     arrow::{
-        array::{ArrayRef, BooleanArray},
+        array::ArrayRef,
         datatypes::{DataType, Field, Schema, SchemaRef},
         record_batch::RecordBatch,
         row::{RowConverter, SortField},
@@ -37,6 +37,9 @@ pub(super) mod compact_state;
 
 #[path = "grouped_float.rs"]
 pub(in crate::operator::sql) mod grouped_float;
+
+#[path = "grouped_sum.rs"]
+mod grouped_sum;
 
 pub(super) struct IncrementalSql {
     schema: SchemaRef,
@@ -190,7 +193,7 @@ fn native_key_bytes(count: usize, rows: usize, width: usize, name: &str) -> Resu
 }
 
 struct PartialGroups {
-    accumulators: Vec<Box<dyn GroupsAccumulator>>,
+    accumulators: Vec<grouped_sum::PartialAccumulator>,
     slots: Vec<usize>,
     sequential: Vec<bool>,
     seeded: usize,
@@ -213,10 +216,7 @@ impl PartialGroups {
         let (group_bytes, state_fields) = native_state_charge(aggregates, name)?;
         let accumulators = aggregates
             .iter()
-            .map(|expr| {
-                expr.create_groups_accumulator()
-                    .map_err(|error| df_error(name, error))
-            })
+            .map(|expr| grouped_sum::PartialAccumulator::new(expr, name))
             .collect::<Result<Vec<_>>>()?;
         Ok(Self {
             accumulators,
@@ -290,7 +290,7 @@ impl PartialGroups {
                 {
                     return Err(df_error(
                         name,
-                        "sequential extrema requires one state field",
+                        "sequential aggregate requires one state field",
                     ));
                 }
             }
@@ -306,21 +306,7 @@ impl PartialGroups {
         saved: &ScalarValue,
         name: &str,
     ) -> Result<()> {
-        if saved.is_null() {
-            return Ok(());
-        }
-        let reset = grouped_float::reset(saved, name)?
-            .to_array()
-            .map_err(|error| df_error(name, error))?;
-        let saved = saved.to_array().map_err(|error| df_error(name, error))?;
-        let count = self.slots.len();
-        let filter = BooleanArray::from(vec![true]);
-        self.accumulators[index]
-            .merge_batch(&[reset], &[rank], Some(&filter), count)
-            .map_err(|error| df_error(name, error))?;
-        self.accumulators[index]
-            .merge_batch(&[saved], &[rank], Some(&filter), count)
-            .map_err(|error| df_error(name, error))
+        self.accumulators[index].seed(rank, saved, self.slots.len(), name)
     }
 
     fn update(
@@ -332,7 +318,7 @@ impl PartialGroups {
     ) -> Result<()> {
         for (accumulator, arguments) in self.accumulators.iter_mut().zip(arguments) {
             accumulator
-                .update_batch(arguments, indices, None, count)
+                .update_batch(arguments, indices, count)
                 .map_err(|error| df_error(name, error))?;
         }
         let actual = self.accumulators.iter().try_fold(
@@ -1690,7 +1676,7 @@ fn eligible(expr: &Expr, schema: &SchemaRef, global: bool) -> bool {
 
 fn aggregate_argument_supported(data_type: &DataType, function: &str, global: bool) -> bool {
     match function {
-        "sum" => exact_numeric(data_type),
+        "sum" => exact_numeric(data_type) || data_type == &DataType::Float64,
         "min" | "max" => extrema_argument_supported(data_type, global),
         "avg" => matches!(
             data_type,
@@ -1805,6 +1791,13 @@ fn initial_grouped_proof(
     aggregates: &[Arc<AggregateFunctionExpr>],
     name: &str,
 ) -> Result<GroupStrategy> {
+    if aggregates
+        .iter()
+        .any(|expression| grouped_sum::selected(expression))
+        && (keys.len() != 1 || aggregates.len() != 1)
+    {
+        return Ok(GroupStrategy::Unsupported);
+    }
     if keys.is_empty()
         || !aggregates
             .iter()

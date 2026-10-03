@@ -90,7 +90,11 @@ fn input(dtype: &DataType, parts: &[Part], sequence: u64) -> Batch {
 }
 
 fn operator(dtype: &DataType) -> SqlOperator {
-    SqlOperator::new("grouped_float", QUERY, vec!["events".into()], vec![])
+    operator_query(dtype, QUERY)
+}
+
+fn operator_query(dtype: &DataType, query: &str) -> SqlOperator {
+    SqlOperator::new("grouped_float", query, vec!["events".into()], vec![])
         .unwrap()
         .with_ports(
             vec![
@@ -178,11 +182,21 @@ async fn process(
 }
 
 async fn assert_oracle(actual: &Batch, dtype: &DataType, parts: &[Part], sequence: u64) {
+    assert_query_oracle(actual, QUERY, dtype, parts, sequence).await;
+}
+
+async fn assert_query_oracle(
+    actual: &Batch,
+    query: &str,
+    dtype: &DataType,
+    parts: &[Part],
+    sequence: u64,
+) {
     let batch = input(dtype, parts, sequence);
     let expected = DataFusionRuntime::new(DataFusionConfig::default())
         .unwrap()
         .sql(
-            QUERY,
+            query,
             &BTreeMap::from([("events".into(), batch.clone())]),
             Some("oracle"),
         )
@@ -433,3 +447,6 @@ async fn test_grouped_float_emit_failure_preserves_capture_then_single_retry() {
 
 #[path = "grouped_float_safety_tests.rs"]
 mod safety;
+
+#[path = "grouped_sum_tests.rs"]
+mod grouped_sum_tests;

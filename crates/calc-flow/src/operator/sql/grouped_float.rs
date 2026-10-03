@@ -111,11 +111,12 @@ impl Proof {
 }
 
 pub(super) fn selected(expression: &AggregateFunctionExpr) -> bool {
-    matches!(expression.fun().name(), "min" | "max")
+    (matches!(expression.fun().name(), "min" | "max")
         && matches!(
             expression.field().data_type(),
             DataType::Float32 | DataType::Float64
-        )
+        ))
+        || super::grouped_sum::selected(expression)
 }
 
 pub(super) fn reset(value: &ScalarValue, name: &str) -> Result<ScalarValue> {

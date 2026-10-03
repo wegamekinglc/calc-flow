@@ -370,7 +370,7 @@ impl IncrementalSql {
                 state
                     .first()
                     .cloned()
-                    .ok_or_else(|| df_error(name, "sequential extrema state is empty"))?
+                    .ok_or_else(|| df_error(name, "sequential aggregate state is empty"))?
             } else {
                 restored_result(expression, &state, !self.keys.is_empty(), name)?
             };
