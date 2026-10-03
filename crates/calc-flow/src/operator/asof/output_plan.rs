@@ -237,13 +237,7 @@ impl<'a> SideBuilder<'a> {
             .checked_mul(512)
             .and_then(|bytes| bytes.checked_add(512))
             .ok_or_else(|| overflow(name))?;
-        let columns = row.batch.record.columns();
-        let types = columns.iter().try_fold(0, |total, column| {
-            checked(name, total, column.data_type().size() as u64)
-        })?;
-        let heads = (columns.len() as u64)
-            .checked_mul(256)
-            .ok_or_else(|| overflow(name))?;
+        let (types, heads) = source_headers(&row.batch.record, name)?;
         let backing = checked(
             name,
             backing::source_bytes(&row.batch.record, workspace, name)?,
@@ -321,6 +315,17 @@ fn output_buffer_bytes(raw: u64, null: u64, name: &str) -> Result<u64> {
     checked(name, raw, null)?
         .checked_mul(4)
         .ok_or_else(|| overflow(name))
+}
+
+fn source_headers(record: &RecordBatch, name: &str) -> Result<(u64, u64)> {
+    let columns = record.columns();
+    let types = columns.iter().try_fold(0, |total, column| {
+        checked(name, total, column.data_type().size() as u64)
+    })?;
+    let heads = (columns.len() as u64)
+        .checked_mul(256)
+        .ok_or_else(|| overflow(name))?;
+    Ok((types, heads))
 }
 
 pub(super) fn selected_columns<'a>(
