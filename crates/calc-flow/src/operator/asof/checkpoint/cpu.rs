@@ -1,6 +1,6 @@
 use super::super::{StreamAsofJoinOperator, state::PayloadBatch};
 use crate::{
-    Result, StreamOperatorContext,
+    Result,
     runtime::streaming::gather_work::{
         AdmissionFailure, GatherOperatorId, GatherStop, OwnedCpuWork,
     },
@@ -25,37 +25,6 @@ impl OwnedCpuWork for PayloadWork {
             batch.ensure_encoded(self.limit, &self.name)?;
         }
         stop.check()
-    }
-}
-
-impl StreamAsofJoinOperator {
-    pub(in crate::operator::asof) async fn run_checkpoint_cpu<W: OwnedCpuWork>(
-        &self,
-        work: W,
-        context: &StreamOperatorContext<'_>,
-    ) -> Result<W::Output> {
-        context.check_cancelled()?;
-        let credit = self.reserve_workspace(crate::operator::asof::checked(
-            &self.name,
-            1024 + size_of::<W>() as u64,
-            self.name.len() as u64 * 2,
-        )?)?;
-        let operator = GatherOperatorId::new(Arc::from(self.name.as_str()));
-        let scope = context.gather_client(operator).scope()?;
-        let ticket = scope
-            .submit_work(work, credit, GatherStop::from_job(context.job()))
-            .await
-            .map_err(|failure| match failure {
-                AdmissionFailure::Budget { .. } => crate::operator::asof::reason(
-                    &self.name,
-                    crate::StreamingFailureReason::AsofWorkspaceLimitExceeded,
-                    "ASOF checkpoint work admission exceeds max_state_bytes",
-                ),
-                AdmissionFailure::Runtime(error) => error,
-            })?;
-        let output = ticket.finish().await?;
-        context.check_cancelled()?;
-        Ok(output.value)
     }
 }
 

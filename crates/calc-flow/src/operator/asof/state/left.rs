@@ -153,7 +153,9 @@ impl ChunkData {
         batch: &PayloadBatch,
         side: &AsofJoinSide,
         name: &str,
+        cancelled: &dyn Fn() -> Result<()>,
     ) -> Result<Self> {
+        cancelled()?;
         let ordered = rows.windows(2).all(|pair| pair[0].0 < pair[1].0);
         let contiguous = rows
             .iter()
@@ -164,6 +166,7 @@ impl ChunkData {
         } else {
             Some(chunk_sort_indices(rows, batch, side, contiguous)?)
         };
+        cancelled()?;
         let positions = chunk_positions(rows, sorted.as_ref(), contiguous);
         let mut keys = Vec::with_capacity(1);
         let mut key_counts = Vec::with_capacity(1);
@@ -177,6 +180,9 @@ impl ChunkData {
         let mut interned = HashMap::<Encoding, u32, ahash::RandomState>::default();
         let mut owners = EncodingOwners::default();
         for ordinal in 0..rows.len() {
+            if ordinal.is_multiple_of(128) {
+                cancelled()?;
+            }
             let row = sorted
                 .as_ref()
                 .map_or(ordinal, |indices| indices.value(ordinal) as usize);
@@ -390,9 +396,21 @@ impl PreparedLeftChunk {
         side: &AsofJoinSide,
         name: &str,
     ) -> Result<Vec<Self>> {
+        Self::prepare_checked(rows, batches, side, name, &|| Ok(()))
+    }
+
+    pub fn prepare_checked(
+        rows: &[(LeftOrder, AdmissionRef)],
+        batches: &[Arc<PayloadBatch>],
+        side: &AsofJoinSide,
+        name: &str,
+        cancelled: &dyn Fn() -> Result<()>,
+    ) -> Result<Vec<Self>> {
+        cancelled()?;
         let mut chunks = Vec::new();
         let mut start = 0;
         while start < rows.len() {
+            cancelled()?;
             let batch_index = rows[start].1.batch_index;
             let owner = &batches[batch_index];
             let end = start
@@ -420,7 +438,7 @@ impl PreparedLeftChunk {
                     Ok((order, position))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let data = ChunkData::prepare(&identities, owner, side, name)?;
+            let data = ChunkData::prepare(&identities, owner, side, name, cancelled)?;
             chunks.push(Self {
                 owner: owner.clone(),
                 data,
@@ -1190,7 +1208,7 @@ mod tests {
                     .iter()
                     .map(|(order, row)| (order, u32::try_from(row.row).unwrap()))
                     .collect::<Vec<_>>();
-                let data = ChunkData::prepare(&compact, &owner, &side, "asof").unwrap();
+                let data = ChunkData::prepare(&compact, &owner, &side, "asof", &|| Ok(())).unwrap();
                 let mut expected = compact
                     .iter()
                     .map(|(identity, _)| (*identity).clone())
@@ -1310,7 +1328,7 @@ mod tests {
             .iter()
             .map(|(order, row)| (order, *row))
             .collect::<Vec<_>>();
-        let data = ChunkData::prepare(&borrowed_rows, &owner, &side, "asof").unwrap();
+        let data = ChunkData::prepare(&borrowed_rows, &owner, &side, "asof", &|| Ok(())).unwrap();
         assert_eq!(
             (0..6).map(|row| data.position(row)).collect::<Vec<_>>(),
             vec![5, 3, 2, 1, 4, 0]

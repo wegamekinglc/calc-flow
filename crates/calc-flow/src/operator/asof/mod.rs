@@ -3,6 +3,7 @@ mod admission;
 mod checkpoint;
 mod codec;
 mod copy;
+mod cpu;
 mod duplicate_fallback;
 mod finalize;
 mod identity;

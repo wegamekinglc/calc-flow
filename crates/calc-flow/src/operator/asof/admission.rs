@@ -4,7 +4,10 @@ use super::{
     state::{self, AdmissionRef, LeftOrder},
     workspace::ReservedIdentities,
 };
-use crate::{Batch, Result, StreamOperatorContext, StreamingFailureReason};
+use crate::{
+    Batch, Result, StreamOperatorContext, StreamingFailureReason,
+    runtime::streaming::gather_work::{GatherStop, OwnedCpuWork},
+};
 use ahash::RandomState;
 use datafusion::arrow::{
     array::{Array, TimestampMicrosecondArray, UInt64Array},
@@ -42,6 +45,32 @@ struct AdmissionWorkspace {
     _identity: MemoryReservation,
     _payload: MemoryReservation,
     _keys: Option<MemoryReservation>,
+}
+
+struct LeftChunkWork {
+    rows: Vec<(LeftOrder, AdmissionRef)>,
+    batches: Vec<Arc<state::PayloadBatch>>,
+    workspace: AdmissionWorkspace,
+    side: AsofJoinSide,
+    name: String,
+    _descriptor: MemoryReservation,
+}
+
+impl OwnedCpuWork for LeftChunkWork {
+    type Output = PreparedInput;
+
+    fn run(self, stop: &GatherStop) -> Result<PreparedInput> {
+        stop.check()?;
+        let chunks = state::PreparedLeftChunk::prepare_checked(
+            &self.rows,
+            &self.batches,
+            &self.side,
+            &self.name,
+            &|| stop.check(),
+        )?;
+        stop.check()?;
+        Ok((self.rows, Some(chunks), self.workspace))
+    }
 }
 
 struct AdmittedKey {
@@ -403,29 +432,45 @@ impl StreamAsofJoinOperator {
         side: usize,
         context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedInput> {
-        Ok(if side == 0 {
-            let side = self.spec.left().clone();
-            let name = self.name.clone();
+        if side != 0 {
+            return Ok((rows, None, workspace));
+        }
+        context.check_cancelled()?;
+        if rows.len() <= 256 {
+            let chunks =
+                state::PreparedLeftChunk::prepare(&rows, batches, self.spec.left(), &self.name)?;
             context.check_cancelled()?;
-            // A detached worker retains one owner per payload together with
-            // the reservation that funds the rows, table, and chunk scratch.
-            let batches = batches.to_vec();
-            let work = chunk_worker(workspace, move || {
-                let chunks = state::PreparedLeftChunk::prepare(&rows, &batches, &side, &name)?;
-                Ok((rows, chunks))
-            });
-            let ((rows, chunks), workspace) = tokio::select! {
-                result = work => result?,
-                () = context.job().cancellation().cancelled() => {
-                    context.check_cancelled()?;
-                    unreachable!("cancelled ASOF admission")
-                }
-            };
-            context.check_cancelled()?;
-            (rows, Some(chunks), workspace)
-        } else {
-            (rows, None, workspace)
-        })
+            return Ok((rows, Some(chunks), workspace));
+        }
+        let descriptor = self.reserve_left_work(batches.len())?;
+        let work = LeftChunkWork {
+            rows,
+            batches: batches.to_vec(),
+            workspace,
+            side: self.spec.left().clone(),
+            name: self.name.clone(),
+            _descriptor: descriptor,
+        };
+        self.run_cpu_work(work, context).await
+    }
+
+    fn reserve_left_work(&self, batches: usize) -> Result<MemoryReservation> {
+        let side = self.spec.left();
+        let columns = side.keys().len() + side.sequence_by().len();
+        let names = side
+            .keys()
+            .iter()
+            .chain(side.sequence_by())
+            .map(String::len)
+            .sum::<usize>()
+            + side.event_time().len()
+            + side.prefix().len();
+        let bytes = 256_u64
+            + batches as u64 * size_of::<Arc<state::PayloadBatch>>() as u64
+            + columns as u64 * size_of::<String>() as u64
+            + names as u64
+            + self.name.len() as u64;
+        self.reserve_workspace(bytes)
     }
 
     async fn reserve_admission_identities(
@@ -750,19 +795,6 @@ impl Admission {
     }
 }
 
-/// Detached blocking work owns its reservations until every retained input
-/// and temporary sort buffer has been released, even if admission is dropped.
-async fn chunk_worker<R: Send + 'static>(
-    workspace: AdmissionWorkspace,
-    work: impl FnOnce() -> Result<R> + Send + 'static,
-) -> Result<(R, AdmissionWorkspace)> {
-    tokio::task::spawn_blocking(move || Ok((work()?, workspace)))
-        .await
-        .map_err(|error| crate::CalcFlowError::Internal {
-            message: format!("ASOF chunk preparation task failed: {error}"),
-        })?
-}
-
 /// Identity columns in declaration order: keys, sequence columns, event time.
 pub(super) fn identity_column_names(side: &AsofJoinSide) -> impl Iterator<Item = &str> {
     side.keys()
@@ -978,6 +1010,8 @@ fn can_share_batch(batch: &RecordBatch) -> Result<bool> {
 
 #[cfg(test)]
 mod identity_tests {
+    mod cpu;
+
     use super::*;
     use crate::{CancellationToken, JsonMap, StreamJobContext};
 
@@ -1081,116 +1115,6 @@ mod identity_tests {
                 "side={index}: watermark caused identity Vec growth: {allocations:?}"
             );
         }
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn chunk_worker_leaves_timers_running_and_keeps_workspace_until_exit() {
-        let (operator, _) = identity_fixture();
-        let pool = operator.runtime.pool.clone();
-        let workspace = AdmissionWorkspace {
-            _identity: operator.reserve_workspace(4_096).unwrap(),
-            _payload: operator.reserve_workspace(0).unwrap(),
-            _keys: None,
-        };
-        let (started_tx, started_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let gate = Arc::new(std::sync::Barrier::new(2));
-        let worker_gate = gate.clone();
-        // A timeout releases the gate even when the synchronous red version
-        // blocks polling, so the regression fails instead of hanging.
-        let releaser = std::thread::spawn(move || {
-            let _ = release_rx.recv_timeout(std::time::Duration::from_secs(1));
-            gate.wait();
-        });
-        let mut future = Box::pin(chunk_worker(workspace, move || {
-            started_tx.send(()).unwrap();
-            worker_gate.wait();
-            Ok(())
-        }));
-        assert!(futures::poll!(future.as_mut()).is_pending());
-        started_rx
-            .recv_timeout(std::time::Duration::from_secs(1))
-            .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-        drop(future);
-        assert_eq!(pool.reserved(), 4_096);
-        release_tx.send(()).unwrap();
-        tokio::task::spawn_blocking(move || releaser.join().unwrap())
-            .await
-            .unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while pool.reserved() != 0 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-    }
-
-    #[test]
-    fn dropped_left_preparation_retains_indexed_batch_table_and_workspace() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .max_blocking_threads(1)
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let (operator, schema) = identity_fixture();
-            let record = repeated_key_batch(&schema, 0, 1);
-            let keys = state::encode_columns(&record, operator.spec.left().keys()).unwrap();
-            let sequences =
-                state::encode_columns(&record, operator.spec.left().sequence_by()).unwrap();
-            let batches = vec![
-                encode_payload(record, 0, 0, operator.payload_header_bytes[0], "asof").unwrap(),
-            ];
-            let weak = Arc::downgrade(&batches[0]);
-            let rows = vec![(
-                (10, keys.row(0), sequences.row(0)),
-                AdmissionRef {
-                    batch_index: 0,
-                    row: 0,
-                },
-            )];
-            let pool = operator.runtime.pool.clone();
-            let workspace = AdmissionWorkspace {
-                _identity: operator.reserve_workspace(4_096).unwrap(),
-                _payload: operator.reserve_workspace(0).unwrap(),
-                _keys: None,
-            };
-            let job =
-                StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
-            let context = StreamOperatorContext::new(&job, "asof", None);
-            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-            let (release_tx, release_rx) = std::sync::mpsc::channel();
-            let blocker = tokio::task::spawn_blocking(move || {
-                started_tx.send(()).unwrap();
-                release_rx
-                    .recv_timeout(std::time::Duration::from_secs(5))
-                    .unwrap();
-            });
-            started_rx.await.unwrap();
-            let mut operation =
-                Box::pin(operator.prepare_input_chunks(rows, &batches, workspace, 0, &context));
-            assert!(futures::poll!(operation.as_mut()).is_pending());
-            drop(operation);
-            drop(batches);
-            assert!(
-                weak.upgrade().is_some(),
-                "queued worker lost its indexed payload owner"
-            );
-            assert_eq!(pool.reserved(), 4_096);
-            release_tx.send(()).unwrap();
-            blocker.await.unwrap();
-            tokio::time::timeout(std::time::Duration::from_secs(5), async {
-                while pool.reserved() != 0 || weak.upgrade().is_some() {
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .unwrap();
-            assert_eq!(operator.status.left.accepted_rows, 0);
-            assert_eq!(operator.status.state_rows, 0);
-        });
     }
 
     #[tokio::test]

@@ -187,7 +187,7 @@ impl StreamAsofJoinOperator {
         let limit = usize::try_from(self.spec.limits().max_state_bytes()).expect("validated");
         let name = self.name.clone();
         context.check_cancelled()?;
-        self.run_checkpoint_cpu(
+        self.run_cpu_work(
             cpu::PayloadWork {
                 pending,
                 workspace,

@@ -583,7 +583,7 @@ impl StreamAsofJoinOperator {
         let limit =
             usize::try_from(self.spec.limits().max_state_bytes()).expect("validated byte limit");
         let rows = self.status.state_rows;
-        self.run_checkpoint_cpu(
+        self.run_cpu_work(
             BaseWork {
                 snapshot,
                 workspace,
@@ -620,7 +620,7 @@ impl StreamAsofJoinOperator {
             let pool = self.runtime.pool.clone();
             let name = self.name.clone();
             let limit = self.spec.limits().max_state_bytes();
-            self.run_checkpoint_cpu(
+            self.run_cpu_work(
                 DeltaWork {
                     input,
                     pool,
