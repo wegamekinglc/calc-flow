@@ -60,30 +60,40 @@ def report() -> dict:
 @lru_cache(maxsize=2)
 def integer_recovery_digest(rows: int, unique: bool) -> str:
     import hashlib
-    import struct
 
     groups = {}
     combined = hashlib.sha256()
     for row in range(rows + 1):
         key = (row if unique else row % 64) if row % 101 else None
         value = row % 257 - 128 if row % 13 and key != 63 else None
-        count, total, low, high = groups.get(key, (0, 0, None, None))
-        if value is not None:
-            count += 1
-            total += value
-            low = value if low is None else min(low, value)
-            high = value if high is None else max(high, value)
-        groups[key] = (count, total, low, high)
+        groups[key] = integer_aggregate(groups.get(key, (0, 0, None, None)), value)
         if row + 1 in (rows, rows + 1):
-            digest = hashlib.sha256()
-            for key in sorted(groups, key=lambda key: (key is not None, key or 0)):
-                count, total, low, high = groups[key]
-                digest.update(struct.pack("<Bq", key is not None, key or 0))
-                digest.update(struct.pack("<q", count))
-                for value in (total if count else None, low, high):
-                    digest.update(struct.pack("<Bq", value is not None, value or 0))
-            combined.update(digest.digest())
+            combined.update(integer_snapshot_digest(groups))
     return combined.hexdigest()
+
+
+def integer_aggregate(aggregate, value):
+    count, total, low, high = aggregate
+    if value is not None:
+        count += 1
+        total += value
+        low = value if low is None else min(low, value)
+        high = value if high is None else max(high, value)
+    return count, total, low, high
+
+
+def integer_snapshot_digest(groups):
+    import hashlib
+    import struct
+
+    digest = hashlib.sha256()
+    for key in sorted(groups, key=lambda key: (key is not None, key or 0)):
+        count, total, low, high = groups[key]
+        digest.update(struct.pack("<Bq", key is not None, key or 0))
+        digest.update(struct.pack("<q", count))
+        for value in (total if count else None, low, high):
+            digest.update(struct.pack("<Bq", value is not None, value or 0))
+    return digest.digest()
 
 
 def input_logical_bytes(batches: int, rows: int, bits: int = 64) -> int:
@@ -104,33 +114,41 @@ def current_report(layout: int = 3) -> dict:
     evidence["schema"] = "calc-flow.sql-stream-aggregate.v3"
     for case in evidence["cases"]:
         batches, _, rows, unique = CASES[case["name"]]
-        state = {
-            "layout": layout,
-            "accounting": layout,
-            "segment": "group-state" if layout == 3 else "input-retained",
-            "rows": case["maximum_groups"] if layout == 3 else rows,
-            "columns": 5 if layout == 3 else 2,
-            "logical_rows": rows,
-            "logical_bytes": input_logical_bytes(batches, rows),
-            "segment_ids": [
-                "batch-metadata",
-                "control",
-                "group-state" if layout == 3 else "input-retained",
-                "logical-schema",
-            ],
-            "total_bytes": 200,
-            "snapshot_sha256": "1" * 64,
-        }
+        state = current_checkpoint_state(case, layout, batches, rows)
         case["samples"] = [copy.deepcopy(sample) for sample in case["samples"]]
         for sample in [case["oracle"], *case["samples"]]:
-            sample["checkpoint_state"] = copy.deepcopy(state)
-            if case["checkpoint_every"]:
-                sample["checkpoint_bytes"] *= 2
-            sample["recovery_snapshots_sha256"] = None
+            attach_current_checkpoint(sample, state, case["checkpoint_every"])
         case["oracle"]["recovery_snapshots_sha256"] = integer_recovery_digest(
             rows, unique
         )
     return evidence
+
+
+def current_checkpoint_state(case, layout, batches, rows):
+    return {
+        "layout": layout,
+        "accounting": layout,
+        "segment": "group-state" if layout == 3 else "input-retained",
+        "rows": case["maximum_groups"] if layout == 3 else rows,
+        "columns": 5 if layout == 3 else 2,
+        "logical_rows": rows,
+        "logical_bytes": input_logical_bytes(batches, rows),
+        "segment_ids": [
+            "batch-metadata",
+            "control",
+            "group-state" if layout == 3 else "input-retained",
+            "logical-schema",
+        ],
+        "total_bytes": 200,
+        "snapshot_sha256": "1" * 64,
+    }
+
+
+def attach_current_checkpoint(sample, state, checkpoint_every):
+    sample["checkpoint_state"] = copy.deepcopy(state)
+    if checkpoint_every:
+        sample["checkpoint_bytes"] *= 2
+    sample["recovery_snapshots_sha256"] = None
 
 
 class SqlStreamEvidenceTests(unittest.IsolatedAsyncioTestCase):
@@ -157,7 +175,9 @@ class SqlStreamEvidenceTests(unittest.IsolatedAsyncioTestCase):
                 evidence = decimal_report(bits, scale)
                 state_evidence = current_report(4 if scale < 0 else 3)
                 evidence["schema"] = state_evidence["schema"]
-                for case, state_case in zip(evidence["cases"], state_evidence["cases"]):
+                for case, state_case in zip(
+                    evidence["cases"], state_evidence["cases"], strict=False
+                ):
                     batches, _, rows, _ = CASES[case["name"]]
                     state = copy.deepcopy(state_case["oracle"]["checkpoint_state"])
                     state["logical_bytes"] = input_logical_bytes(batches, rows, bits)
