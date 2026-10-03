@@ -70,8 +70,8 @@ fn reject_without_replacing_state(
     expected_message: &str,
     case: &str,
 ) {
-    let before_status = op.status();
     let before = op.checkpoint(Epoch::INITIAL).unwrap();
+    let before_status = op.status();
     let error = op.restore(damaged).expect_err(case);
     assert!(
         matches!(error, CalcFlowError::CheckpointMismatch { ref message }
@@ -305,8 +305,9 @@ fn sequence_width(flag: u8) -> usize {
 }
 
 fn columnar_entry_ranges(bytes: &[u8]) -> [Vec<Range<usize>>; 3] {
-    assert_eq!(&bytes[..8], b"CFASOF06");
-    let mut cursor = 8;
+    assert_eq!(&bytes[..8], b"CFASDL09");
+    assert_eq!(&bytes[128..136], b"CFASOF09");
+    let mut cursor = 136;
     let chunks = read_count(bytes, &mut cursor);
     let buckets = read_count(bytes, &mut cursor);
     read_count(bytes, &mut cursor);
@@ -360,7 +361,7 @@ fn columnar_entry_ranges(bytes: &[u8]) -> [Vec<Range<usize>>; 3] {
 #[tokio::test]
 async fn test_asof_v3_restore_rejects_serialized_duplicates_and_noncanonical_order_atomically() {
     let original = populated_snapshot().await;
-    let bytes = original.segments["asof-index-v6"].bytes();
+    let bytes = original.segments["asof-log-v9-1-0-1"].bytes();
     let mut target = operator(10);
     seed_live_state(&mut target, &schema()).await;
     for (entries, message) in columnar_entry_ranges(bytes).into_iter().zip([
@@ -380,16 +381,23 @@ async fn test_asof_v3_restore_rejects_serialized_duplicates_and_noncanonical_ord
                 ]
                 .concat()
             };
-            let replacement = [
+            let mut replacement = [
                 bytes[..first.start].to_vec(),
                 middle,
                 bytes[second.end..].to_vec(),
             ]
             .concat();
+            let body_bytes = u64::try_from(replacement.len() - 128).unwrap();
+            replacement[112..120].copy_from_slice(&body_bytes.to_le_bytes());
+            let replacement = StateSegment::new(replacement);
             let mut damaged = original.clone();
+            let frame =
+                &mut damaged.inline_metadata.get_mut("checkpoint_log").unwrap()["frames"][0];
+            frame["sha256"] = json!(replacement.sha256());
+            frame["bytes"] = json!(replacement.bytes().len());
             damaged
                 .segments
-                .insert("asof-index-v6".into(), StateSegment::new(replacement));
+                .insert("asof-log-v9-1-0-1".into(), replacement);
             reject_without_replacing_state(
                 &mut target,
                 &damaged,

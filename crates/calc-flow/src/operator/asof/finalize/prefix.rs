@@ -17,6 +17,9 @@ struct PreparedPrefix {
     drain: PreparedLeftDrain,
     inventory: Inventory,
     pool: PreparedPayloadRemoval,
+    journal: crate::operator::asof::checkpoint::index_v3::log::journal::Journal,
+    credit: std::sync::Arc<MemoryReservation>,
+    retention_bytes: u64,
     _workspace: MemoryReservation,
     _drain_workspace: MemoryReservation,
 }
@@ -64,6 +67,11 @@ impl StreamAsofJoinOperator {
         // Right payloads remain until finish_progress sweeps them once.
         self.swept = None;
         self.status = status;
+        self.checkpoint_log.journal.install(prepared.journal);
+        self.checkpoint_log.credit = Some(prepared.credit);
+        self.checkpoint_log.retention_bytes = prepared.retention_bytes;
+        self.checkpoint_log.pending = None;
+        self.checkpoint_log.dirty_cut = self.checkpoint_log.keeps_delta();
         self.prepared = prepared.segment;
         self.deferred_index_len = prepared.deferred_len;
         self.next_output_sequence = next_sequence;
@@ -72,8 +80,7 @@ impl StreamAsofJoinOperator {
                 let inventory = self
                     .current_inventory(self.prepared.as_ref())
                     .expect("committed prefix inventory");
-                inventory.bytes + self.deferred_index_len.map_or(0, |length| length + 256)
-                    == self.status.state_bytes
+                inventory.bytes == self.status.state_bytes
             },
             "prefix inventory must match committed gauge"
         );
@@ -93,6 +100,10 @@ impl StreamAsofJoinOperator {
             &drain,
             &self.name,
         )?;
+        let journal = self.prepare_log_prefix(prefix, &drain)?;
+        let (credit, retention_bytes) =
+            self.prepare_log_retention(&prefix.owners, &prefix.batches)?;
+        let inventory = self.log_projection(inventory, length, &journal, retention_bytes)?;
         let workspace = self.reserve_workspace(length)?;
         let pool = self
             .prepare_pool_compaction(&prefix.batches, context)
@@ -106,6 +117,9 @@ impl StreamAsofJoinOperator {
             drain,
             inventory,
             pool,
+            journal,
+            credit,
+            retention_bytes,
             _workspace: workspace,
             _drain_workspace: drain_workspace,
         })

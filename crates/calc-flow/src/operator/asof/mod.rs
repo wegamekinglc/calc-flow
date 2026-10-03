@@ -65,8 +65,7 @@ pub struct StreamAsofJoinOperator {
     payload_projection: Option<Box<payload_projection::PayloadProjection>>,
     state: State,
     prepared: Option<checkpoint::PreparedSegment>,
-    /// Exact index length reserved in the state gauge, encoded on the first
-    /// output or checkpoint capture that needs canonical bytes.
+    checkpoint_log: checkpoint::LogState,
     deferred_index_len: Option<u64>,
     /// `Some` when the committed state was eviction-swept under the stamped
     /// inputs; `None` when admissions, removals or a restore may have left
@@ -91,6 +90,18 @@ impl StreamAsofJoinOperator {
     ) -> Result<()> {
         let staging_workspace = self.reserve_admission_staging(&admission)?;
         let (index_len, projected, owners) = self.checked_capacity_admission(&admission)?;
+        let journal = self
+            .prepare_log_admission(&admission, validated.index, &owners)
+            .map_err(|error| self.attempt_error(error))?;
+        let (credit, retention_bytes) = self
+            .prepare_log_retention(
+                &std::collections::BTreeMap::default(),
+                &std::collections::BTreeMap::default(),
+            )
+            .map_err(|error| self.attempt_error(error))?;
+        let projected = self
+            .log_projection(projected, index_len, &journal, retention_bytes)
+            .map_err(|error| self.attempt_error(error))?;
         let mut status = self
             .admitted_status(validated.index, admission.rows.len(), &projected)
             .map_err(|error| self.attempt_error(error))?;
@@ -120,6 +131,11 @@ impl StreamAsofJoinOperator {
         admission.install(ingress, &mut self.state, &mut status);
         self.state.install_encoding_owners(owners);
         self.status = status;
+        self.checkpoint_log.journal.install(journal);
+        self.checkpoint_log.credit = Some(credit);
+        self.checkpoint_log.retention_bytes = retention_bytes;
+        self.checkpoint_log.pending = None;
+        self.checkpoint_log.dirty_cut = self.checkpoint_log.keeps_delta();
         self.prepared = None;
         self.deferred_index_len = Some(index_len);
         self.swept = None;
@@ -130,9 +146,7 @@ impl StreamAsofJoinOperator {
         debug_assert_eq!(
             self.current_inventory(None)
                 .expect("committed admission inventory")
-                .bytes
-                + index_len
-                + 256,
+                .bytes,
             self.status.state_bytes
         );
         drop((admission, index_workspace, staging_workspace));
@@ -167,8 +181,6 @@ impl StreamAsofJoinOperator {
                 &admission.batches,
                 &self.name,
             )
-            .map_err(|error| self.attempt_error(error))?;
-        self.check_inventory_limits(&projected.1)
             .map_err(|error| self.attempt_error(error))?;
         Ok(projected)
     }
@@ -246,6 +258,7 @@ impl StreamAsofJoinOperator {
             payload_projection: None,
             state,
             prepared: None,
+            checkpoint_log: checkpoint::LogState::default(),
             deferred_index_len: None,
             swept: None,
             terminal: false,
@@ -353,7 +366,13 @@ impl StreamAsofJoinOperator {
                 identities: self.status.state_rows,
                 right_payloads: self.status.retained_right_rows,
                 identity_only: self.status.identity_only_rows,
-                bytes: self.status.state_bytes,
+                bytes: self
+                    .status
+                    .state_bytes
+                    .saturating_sub(self.checkpoint_log.bytes())
+                    + self
+                        .deferred_index_len
+                        .map_or(0, |length| if length == 0 { 0 } else { length + 256 }),
             },
             index_length: self
                 .deferred_index_len
@@ -366,7 +385,7 @@ impl StreamAsofJoinOperator {
                         .as_ref()
                         .map(|segment| segment.capacity() as u64)
                 })
-                .map_or(0, |bytes| bytes + 256),
+                .map_or(0, |bytes| if bytes == 0 { 0 } else { bytes + 256 }),
         }
     }
 
@@ -436,7 +455,6 @@ impl StreamOperator for StreamAsofJoinOperator {
     }
     fn restore(&mut self, snapshot: &crate::OperatorStateSnapshot) -> Result<()> {
         let decoded = self.decoded_snapshot(snapshot)?;
-        let decoded = self.normalize_empty_snapshot(decoded)?;
         self.install_restored(snapshot, decoded);
         Ok(())
     }
@@ -445,6 +463,7 @@ impl StreamOperator for StreamAsofJoinOperator {
         self.state.sequence_kinds = self.sequence_kinds();
         self.status = StreamAsofJoinStatus::default();
         self.prepared = None;
+        self.checkpoint_log = checkpoint::LogState::default();
         self.deferred_index_len = None;
         self.swept = None;
         self.terminal = false;

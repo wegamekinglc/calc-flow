@@ -137,6 +137,17 @@ fn copied_chunk_sequences(
 }
 
 impl ChunkData {
+    pub fn checkpoint_capacities(&self) -> [usize; 6] {
+        [
+            self.times.inner().capacity() / 8,
+            self.positions.as_ref().map_or(0, Vec::capacity),
+            self.keys.capacity(),
+            self.key_counts.capacity(),
+            self.key_ids.capacity(),
+            self.sequences.capacity(),
+        ]
+    }
+
     fn prepare(
         rows: &[(&LeftOrder, u32)],
         batch: &PayloadBatch,
@@ -201,7 +212,7 @@ impl ChunkData {
         })
     }
 
-    fn retained_input_bytes(&self, name: &str) -> Result<u64> {
+    pub fn retained_input_bytes(&self, name: &str) -> Result<u64> {
         let time_buffer = self.times.inner();
         [
             size_of::<Self>() + 2 * size_of::<usize>(),
@@ -337,6 +348,19 @@ pub(in super::super) struct PreparedLeftChunk {
 }
 
 impl PreparedLeftChunk {
+    pub fn batch_key(&self) -> BatchKey {
+        self.owner.key
+    }
+    pub fn journal_version(&self) -> super::super::checkpoint::index_v3::log::journal::Version {
+        super::super::checkpoint::index_v3::log::journal::Version::Left {
+            rows: self.data.sequences.len() as u64,
+            capacities: self.data.checkpoint_capacities(),
+        }
+    }
+    pub fn into_parts(self) -> (Arc<PayloadBatch>, ChunkData) {
+        (self.owner, self.data)
+    }
+
     pub fn key_counts(&self) -> impl Iterator<Item = (&Encoding, usize)> {
         self.data
             .keys
@@ -443,6 +467,41 @@ pub(in super::super) struct LeftState {
 }
 
 impl LeftState {
+    pub fn journal_prefix(
+        &self,
+        prefix: &super::LeftPrefix,
+        prepared: &PreparedLeftDrain,
+        pool: &PayloadPool,
+    ) -> Vec<super::super::checkpoint::index_v3::log::journal::Change> {
+        use super::super::checkpoint::index_v3::log::journal::{Change, Identity, Version};
+        let mut changes = Vec::with_capacity(prefix.batches.len());
+        for (index, chunk) in self.chunks.iter().enumerate() {
+            let batch = pool.key(chunk.reference);
+            let amount = prefix.batches.get(&batch).copied().unwrap_or(0);
+            if amount == 0 {
+                continue;
+            }
+            let rows = chunk.len();
+            let replacement = prepared
+                .compacted
+                .iter()
+                .find(|(current, _)| *current == index)
+                .map_or(chunk.data.as_ref(), |(_, data)| data.as_ref());
+            changes.push(Change {
+                identity: Identity::Left(batch),
+                before: Some(Version::Left {
+                    rows: rows as u64,
+                    capacities: chunk.data.checkpoint_capacities(),
+                }),
+                after: (rows > amount).then_some(Version::Left {
+                    rows: (rows - amount) as u64,
+                    capacities: replacement.checkpoint_capacities(),
+                }),
+            });
+        }
+        changes
+    }
+
     pub fn projected_drain(
         &self,
         prefix: &super::LeftPrefix,

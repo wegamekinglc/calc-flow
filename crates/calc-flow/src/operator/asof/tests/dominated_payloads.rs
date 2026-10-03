@@ -104,17 +104,14 @@ async fn dominated_payload_progress_runs_when_tolerance_and_identity_are_not_due
         .unwrap();
     assert_eq!(right_sequences(&output.drain("output")), vec![Some(2)]);
     restored.prepare_checkpoint_async(&ready).await.unwrap();
-    let next = restored.capture(Epoch::INITIAL).unwrap();
+    let next = restored.capture(Epoch::new(2).unwrap()).unwrap();
     operator
         .restore_with_progress(&next, &asymmetric_progress(111, 111), None)
         .unwrap();
     assert_eq!(operator.status.retained_right_rows, 1);
     assert_eq!(operator.status.evicted_right_rows, 2);
     assert_eq!(operator.status.identity_only_rows, 0);
-    assert_eq!(
-        operator.runtime.pool.reserved(),
-        operator.state.right.auxiliary_bytes()
-    );
+    assert_log_funded(&operator);
 }
 
 #[tokio::test]
@@ -257,17 +254,14 @@ async fn dominated_payload_checkpoint_pays_for_current_layout_six() {
     );
     assert_eq!(
         snapshot.inline_metadata["layout_version"],
-        serde_json::json!(6)
+        serde_json::json!(9)
     );
     assert_eq!(
         snapshot.inline_metadata["accounting_version"],
-        serde_json::json!(6)
+        serde_json::json!(9)
     );
-    assert!(snapshot.segments.contains_key("asof-index-v6"));
-    assert_eq!(
-        operator.runtime.pool.reserved(),
-        operator.state.right.auxiliary_bytes()
-    );
+    assert!(snapshot.segments.contains_key("asof-log-v9-1-0-1"));
+    assert_log_funded(&operator);
 }
 
 #[tokio::test]

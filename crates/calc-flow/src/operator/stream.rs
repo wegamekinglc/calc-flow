@@ -98,6 +98,10 @@ impl StateSegment {
         }
     }
 
+    pub(crate) fn has_owner(&self) -> bool {
+        self.owner.is_some()
+    }
+
     pub(crate) fn with_owner(mut self, owner: Arc<dyn std::any::Any + Send + Sync>) -> Self {
         self.owner = Some(match self.owner.take() {
             None => owner,

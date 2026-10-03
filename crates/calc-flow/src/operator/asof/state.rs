@@ -284,6 +284,8 @@ impl PayloadBatch {
             )
         })?;
         let bytes = super::codec::encode_batch_preallocated(&self.record, capacity, limit)?;
+        #[cfg(test)]
+        super::checkpoint::cost::ipc(self.record.num_rows(), bytes.len());
         let body = super::codec::payload_body_bytes(&bytes)?;
         if bytes.capacity() as u64 > self.encoded_charge_bytes || body > self.body_bytes {
             return Err(super::reason(
@@ -503,6 +505,22 @@ pub(super) struct State {
 }
 
 impl State {
+    pub fn owns_encoding(&self, address: usize) -> bool {
+        self.encoding_owners
+            .as_ref()
+            .is_some_and(|owners| owners.contains(address))
+    }
+    pub fn encoding_addresses(&self) -> impl Iterator<Item = usize> + '_ {
+        self.encoding_owners
+            .iter()
+            .flat_map(EncodingOwners::addresses)
+    }
+    pub fn keeps_encoding(&self, address: usize, removals: &OwnerRemovals) -> bool {
+        self.encoding_owners
+            .as_ref()
+            .is_some_and(|owners| owners.remains_after(address, removals))
+    }
+
     pub fn install_encoding_owners(&mut self, updates: OwnerUpdates) {
         self.encoding_owners
             .as_mut()
@@ -528,19 +546,38 @@ impl State {
         }
     }
 
+    #[cfg(test)]
     pub fn rebuild_encoding_owners(&mut self) {
+        self.rebuild_encoding_owners_checked(|| Ok(()))
+            .expect("uncancelled owner rebuild");
+    }
+
+    pub fn rebuild_encoding_owners_checked(
+        &mut self,
+        mut cancel: impl FnMut() -> Result<()>,
+    ) -> Result<()> {
+        cancel()?;
         let mut owners = EncodingOwners::default();
-        for ((_, key, sequence), _) in self.left.unordered_iter() {
+        for (ordinal, ((_, key, sequence), _)) in self.left.unordered_iter().enumerate() {
+            if ordinal.is_multiple_of(128) {
+                cancel()?;
+            }
             owners.attach(key);
             owners.attach(sequence.as_ref());
         }
         for (key, bucket) in &self.right {
-            for ((_, sequence), _) in bucket {
+            cancel()?;
+            for (ordinal, ((_, sequence), _)) in bucket.into_iter().enumerate() {
+                if ordinal.is_multiple_of(128) {
+                    cancel()?;
+                }
                 owners.attach(key);
                 owners.attach(sequence.as_ref());
             }
         }
+        cancel()?;
         self.encoding_owners = Some(owners);
+        Ok(())
     }
 
     #[cfg(test)]

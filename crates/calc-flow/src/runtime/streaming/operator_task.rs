@@ -629,7 +629,7 @@ async fn run_operator_task_body(
     {
         return Ok(());
     }
-    let Some(input_progress) = reset_and_acknowledge(inputs, task_id)? else {
+    let Some(input_progress) = reset_and_acknowledge(inputs, task_id).await? else {
         return Ok(());
     };
     run_after_operator_entry(inputs, input_progress, task_id, cooperation).await
@@ -662,18 +662,21 @@ async fn run_after_operator_entry(
     normalize_cancelled_result(inputs, result)
 }
 
-fn reset_and_acknowledge(
+async fn reset_and_acknowledge(
     inputs: &mut OperatorTaskInputs,
     task_id: TaskId,
 ) -> Result<Option<OperatorInputProgress>> {
-    let preparation_result = reset_operator(inputs, task_id).and_then(|()| match &inputs.restore {
-        Some(restore) => OperatorInputProgress::restore(
-            inputs.ingresses.keys(),
-            &restore.progress,
-            restore.output_frontier,
-        ),
-        None => Ok(OperatorInputProgress::new(inputs.ingresses.keys())),
-    });
+    let preparation_result =
+        reset_operator(inputs, task_id)
+            .await
+            .and_then(|()| match &inputs.restore {
+                Some(restore) => OperatorInputProgress::restore(
+                    inputs.ingresses.keys(),
+                    &restore.progress,
+                    restore.output_frontier,
+                ),
+                None => Ok(OperatorInputProgress::new(inputs.ingresses.keys())),
+            });
     acknowledge_entry(inputs, preparation_result)
 }
 
@@ -702,7 +705,38 @@ fn acknowledge_entry(
     Ok(input_progress)
 }
 
-fn reset_operator(inputs: &mut OperatorTaskInputs, task_id: TaskId) -> Result<()> {
+async fn reset_operator(inputs: &mut OperatorTaskInputs, task_id: TaskId) -> Result<()> {
+    if matches!(inputs.operator, CompiledStreamOperator::StreamAsofJoin(_))
+        && inputs.restore.is_some()
+    {
+        inputs.context.bind_task_id(task_id);
+        match catch_unwind(AssertUnwindSafe(|| inputs.operator.reset())) {
+            Ok(result) => result?,
+            Err(payload) => {
+                return Err(CalcFlowError::TaskPanicked {
+                    task_id: task_id.as_u64(),
+                    message: panic_message(payload.as_ref()),
+                });
+            }
+        }
+        let restore = inputs.restore.as_mut().expect("restore presence checked");
+        let progress = OperatorInputProgress::restore(
+            inputs.ingresses.keys(),
+            &restore.progress,
+            restore.output_frontier,
+        )?
+        .snapshot()?;
+        let snapshot = std::mem::take(&mut restore.snapshot);
+        return restore_asof_managed(
+            &mut inputs.operator,
+            snapshot,
+            progress,
+            restore.output_frontier,
+            inputs.context.job(),
+            Some(task_id),
+        )
+        .await;
+    }
     match catch_unwind(AssertUnwindSafe(|| {
         inputs.operator.reset()?;
         if let Some(restore) = &inputs.restore {
@@ -738,6 +772,29 @@ fn restore_operator_state(
     )
 }
 
+async fn restore_asof_managed(
+    operator: &mut CompiledStreamOperator,
+    snapshot: crate::OperatorStateSnapshot,
+    progress: IngressProgressSnapshot,
+    frontier: Option<EventTime>,
+    job: &crate::StreamJobContext,
+    task: Option<TaskId>,
+) -> Result<()> {
+    let owned = std::mem::replace(operator, CompiledStreamOperator::CheckpointLoan);
+    let CompiledStreamOperator::StreamAsofJoin(owned) = owned else {
+        *operator = owned;
+        return Err(CalcFlowError::Internal {
+            message: "managed ASOF restoration requires ASOF".into(),
+        });
+    };
+    *operator = CompiledStreamOperator::StreamAsofJoin(
+        owned
+            .restore_managed(snapshot, progress, frontier, job, task)
+            .await?,
+    );
+    Ok(())
+}
+
 pub(super) fn validate_sql_restore_progress<'a>(
     ingresses: impl IntoIterator<Item = &'a String>,
     progress: &BTreeMap<String, OperatorIngressManifestEntry>,
@@ -747,18 +804,23 @@ pub(super) fn validate_sql_restore_progress<'a>(
 }
 
 /// Validates terminal ASOF state through the same ingress contract as task entry.
-pub(super) fn restore_terminal_asof<'a>(
+pub(super) async fn restore_terminal_asof<'a>(
     operator: &mut CompiledStreamOperator,
     ingresses: impl IntoIterator<Item = &'a String>,
-    restore: &OperatorRestoreState,
+    restore: &mut OperatorRestoreState,
+    job: &crate::StreamJobContext,
 ) -> Result<OperatorProgress> {
     let inputs =
         OperatorInputProgress::restore(ingresses, &restore.progress, restore.output_frontier)?;
-    operator.restore_with_progress(
-        &restore.snapshot,
-        &inputs.snapshot()?,
+    restore_asof_managed(
+        operator,
+        std::mem::take(&mut restore.snapshot),
+        inputs.snapshot()?,
         restore.output_frontier,
-    )?;
+        job,
+        None,
+    )
+    .await?;
     let mut status = operator
         .stream_asof_join_status()
         .ok_or_else(|| CalcFlowError::Internal {
@@ -1366,6 +1428,24 @@ async fn prepare_sql_checkpoint(
     Ok(Some(snapshot))
 }
 
+async fn capture_prepared_asof(
+    operator: &mut CompiledStreamOperator,
+    epoch: Epoch,
+    job: &crate::StreamJobContext,
+    task: Option<TaskId>,
+) -> Result<crate::OperatorStateSnapshot> {
+    if !matches!(operator, CompiledStreamOperator::StreamAsofJoin(_)) {
+        return operator.checkpoint(epoch);
+    }
+    let owned = std::mem::replace(operator, CompiledStreamOperator::CheckpointLoan);
+    let CompiledStreamOperator::StreamAsofJoin(owned) = owned else {
+        unreachable!("ASOF capture routing checked variant");
+    };
+    let (restored, snapshot) = owned.capture_managed(epoch, job, task).await?;
+    *operator = CompiledStreamOperator::StreamAsofJoin(restored);
+    Ok(snapshot)
+}
+
 async fn capture_operator_checkpoint(
     inputs: &mut OperatorTaskInputs,
     input_progress: &OperatorInputProgress,
@@ -1385,7 +1465,13 @@ async fn capture_operator_checkpoint(
         )
         .with_task_id(inputs.context.task_id());
         inputs.operator.prepare_checkpoint_async(&context).await?;
-        inputs.operator.checkpoint(epoch)?
+        capture_prepared_asof(
+            &mut inputs.operator,
+            epoch,
+            inputs.context.job(),
+            inputs.context.task_id(),
+        )
+        .await?
     };
     let transaction = inputs
         .checkpoint

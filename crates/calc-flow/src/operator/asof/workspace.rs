@@ -244,6 +244,16 @@ fn variable_length(column: &ArrayRef, row: usize) -> Result<u64> {
 }
 
 impl StreamAsofJoinOperator {
+    pub(crate) fn reserve_checkpoint_preload(
+        &self,
+        lengths: impl IntoIterator<Item = u64>,
+    ) -> Result<MemoryReservation> {
+        let bytes = lengths.into_iter().try_fold(0, |total, length| {
+            checked(&self.name, checked(&self.name, total, length)?, 256)
+        })?;
+        self.reserve_workspace(bytes)
+    }
+
     pub(super) fn reserve_workspace(&self, bytes: u64) -> Result<MemoryReservation> {
         let bytes = usize::try_from(bytes).map_err(|_| {
             reason(

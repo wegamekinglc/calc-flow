@@ -138,6 +138,10 @@ impl StreamAsofJoinOperator {
                 .map(EventTime::from_micros)
                 .or(self.status.output_watermark_micros);
             self.terminal = ended;
+            if ended && self.state.left.is_empty() && self.state.right.is_empty() {
+                self.status.state_bytes -= self.checkpoint_log.bytes();
+                self.checkpoint_log = super::checkpoint::LogState::default();
+            }
             self.swept = Some(stamp);
             return Ok(());
         }
@@ -152,7 +156,6 @@ impl StreamAsofJoinOperator {
         let (length, inventory, bytes) =
             self.state
                 .project_capacity_eviction(self.capacity_snapshot(), &preview, &self.name)?;
-        self.check_inventory_limits(&inventory)?;
         Ok((preview, length, inventory, bytes))
     }
 
@@ -164,6 +167,10 @@ impl StreamAsofJoinOperator {
     ) -> Result<()> {
         let staging = self.reserve_capacity_eviction_staging()?;
         let (preview, length, inventory, bytes) = self.capacity_eviction_projection()?;
+        let journal = self.prepare_log_eviction(&preview)?;
+        let (credit, retention_bytes) =
+            self.prepare_log_retention(&preview.owners, &preview.batches)?;
+        let inventory = self.log_projection(inventory, length, &journal, retention_bytes)?;
         let columns = self.reserve_workspace(bytes)?;
         let dictionary = self.state.right.prepare_compaction(
             self.state.right.len() - preview.projected_right.0,
@@ -188,15 +195,23 @@ impl StreamAsofJoinOperator {
         );
         debug_assert_eq!(evicted, preview.evicted_payloads);
         self.status = status;
+        self.checkpoint_log.journal.install(journal);
+        self.checkpoint_log.credit = Some(credit);
+        self.checkpoint_log.retention_bytes = retention_bytes;
+        self.checkpoint_log.pending = None;
+        self.checkpoint_log.dirty_cut = self.checkpoint_log.keeps_delta();
         self.prepared = None;
         self.deferred_index_len = (length != 0).then_some(length);
         self.swept = Some(SweepStamp::current(&self.status));
         self.terminal = ended;
+        if ended && self.state.left.is_empty() && self.state.right.is_empty() {
+            self.status.state_bytes -= self.checkpoint_log.bytes();
+            self.checkpoint_log = super::checkpoint::LogState::default();
+        }
         debug_assert_eq!(
             self.current_inventory(None)
                 .expect("committed eviction inventory")
-                .bytes
-                + if length == 0 { 0 } else { length + 256 },
+                .bytes,
             self.status.state_bytes
         );
         drop((preview, columns, staging));

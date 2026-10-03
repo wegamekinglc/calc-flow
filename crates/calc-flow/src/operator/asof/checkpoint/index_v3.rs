@@ -2,8 +2,9 @@
 //! Capacity hints are validated before allocation and are never accepted as
 //! accounting evidence: restored buffers are measured again by the runtime.
 
-mod owned;
-mod owners;
+pub(in crate::operator::asof) mod log;
+pub(super) mod owned;
+pub(super) mod owners;
 
 use super::mismatch;
 use crate::operator::asof::{
@@ -18,22 +19,38 @@ use crate::{Result, StateSegment};
 use owners::{OwnerReader, OwnerWriter};
 use std::{collections::BTreeMap, sync::Arc};
 
-pub(super) const INDEX_SEGMENT: &str = "asof-index-v6";
-pub(super) const FULL_SEGMENT: &str = "asof-index-v5";
-const MAGIC: &[u8; 8] = b"CFASOF06";
-const FULL_MAGIC: &[u8; 8] = b"CFASOF05";
+#[cfg(test)]
+pub(super) const INDEX_SEGMENT: &str = "asof-log-v9-1-0-1";
+const MAGIC: &[u8; 8] = b"CFASOF09";
 pub(in super::super) const BASE_BYTES: u64 = 104;
 const LEFT_HEADER: u64 = 73;
 const RIGHT_HEADER: u64 = 65;
 
+#[derive(Clone)]
 pub(super) struct Cursor<'a> {
     bytes: &'a [u8],
     limit: u64,
+    cancel: Option<&'a dyn Fn() -> Result<()>>,
+    steps: usize,
 }
 
 impl<'a> Cursor<'a> {
     fn new(bytes: &'a [u8], limit: u64) -> Self {
-        Self { bytes, limit }
+        Self {
+            bytes,
+            limit,
+            cancel: None,
+            steps: 0,
+        }
+    }
+
+    fn new_checked(bytes: &'a [u8], limit: u64, cancel: &'a dyn Fn() -> Result<()>) -> Self {
+        Self {
+            bytes,
+            limit,
+            cancel: Some(cancel),
+            steps: 0,
+        }
     }
 
     fn addresses<const N: usize>(&mut self) -> Result<[usize; N]> {
@@ -60,6 +77,12 @@ impl<'a> Cursor<'a> {
     }
 
     fn take(&mut self, count: usize) -> Result<&'a [u8]> {
+        if self.steps.is_multiple_of(128)
+            && let Some(cancel) = self.cancel
+        {
+            cancel()?;
+        }
+        self.steps += 1;
         if count > self.bytes.len() {
             return Err(mismatch("ASOF truncated v3 index"));
         }
@@ -115,7 +138,7 @@ fn put(bytes: &mut Vec<u8>, value: u64) {
     bytes.extend_from_slice(&value.to_le_bytes());
 }
 
-fn source_owners(state: &State) -> OwnerWriter {
+pub(in crate::operator::asof) fn source_owners(state: &State) -> OwnerWriter {
     let mut owners = OwnerWriter::default();
     for (_, data, head) in state.left.checkpoint_chunks(&state.batches) {
         let mut keys = data
@@ -209,6 +232,7 @@ pub(super) fn workspace_bytes(state: &State, length: u64, owned: bool, name: &st
     owned::workspace_bytes(state, length, owned, name)
 }
 
+#[cfg(test)]
 pub(super) async fn encode(
     state: &State,
     length: u64,
@@ -281,6 +305,8 @@ pub(super) fn encode_sync(state: &State, length: u64, limit: usize) -> Result<St
     if bytes.len() != capacity {
         return Err(mismatch("ASOF v3 encoded length differs"));
     }
+    #[cfg(test)]
+    super::cost::index_bytes(bytes.len());
     Ok(StateSegment::new(bytes))
 }
 
@@ -297,6 +323,13 @@ fn write_sequence(
     }
 }
 
+pub(super) fn check_step(ordinal: usize, cancel: &dyn Fn() -> Result<()>) -> Result<()> {
+    if ordinal.is_multiple_of(128) {
+        cancel()?;
+    }
+    Ok(())
+}
+
 fn write_left(
     bytes: &mut Vec<u8>,
     batch: BatchKey,
@@ -305,6 +338,22 @@ fn write_left(
     kind: SequenceKind,
     owners: &OwnerWriter,
 ) {
+    write_left_checked(bytes, batch, data, head, kind, owners, &|| Ok(()))
+        .expect("uncancelled writer");
+}
+
+fn write_left_checked(
+    bytes: &mut Vec<u8>,
+    batch: BatchKey,
+    data: &ChunkData,
+    head: usize,
+    kind: SequenceKind,
+    owners: &OwnerWriter,
+    cancel: &dyn Fn() -> Result<()>,
+) -> Result<()> {
+    cancel()?;
+    #[cfg(test)]
+    super::cost::index_rows(data.sequences.len() - head);
     let mut keys = data
         .keys
         .iter()
@@ -329,28 +378,39 @@ fn write_left(
         put(bytes, capacity as u64);
     }
     for (id, (old, key)) in keys.into_iter().enumerate() {
+        check_step(id, cancel)?;
         remap[old] = u32::try_from(id).expect("preflighted key domain");
         owners.reference(bytes, key);
     }
     #[cfg(target_endian = "little")]
-    bytes.extend_from_slice(&data.times.inner().as_slice()[head * 8..]);
+    for chunk in data.times.inner().as_slice()[head * 8..].chunks(128 * 8) {
+        cancel()?;
+        bytes.extend_from_slice(chunk);
+    }
     #[cfg(target_endian = "big")]
     for time in &data.times[head..] {
         bytes.extend_from_slice(&time.to_le_bytes());
     }
-    for key in &data.key_ids[head..] {
+    for (ordinal, key) in data.key_ids[head..].iter().enumerate() {
+        check_step(ordinal, cancel)?;
         bytes.extend_from_slice(&remap[*key as usize].to_le_bytes());
     }
     if let Some(values) = data.sequences.integer_slice(head..data.sequences.len()) {
-        bytes.extend_from_slice(values);
+        for chunk in values.chunks(128 * kind.width().expect("integer sequence width")) {
+            cancel()?;
+            bytes.extend_from_slice(chunk);
+        }
     } else {
-        for sequence in data.sequences.iter().skip(head) {
+        for (ordinal, sequence) in data.sequences.iter().skip(head).enumerate() {
+            check_step(ordinal, cancel)?;
             write_sequence(bytes, kind, sequence.as_ref(), owners);
         }
     }
     for ordinal in head..data.sequences.len() {
+        check_step(ordinal - head, cancel)?;
         bytes.extend_from_slice(&data.position(ordinal).to_le_bytes());
     }
+    cancel()
 }
 
 fn write_right(
@@ -373,6 +433,22 @@ fn write_right_columns(
     owners: &OwnerWriter,
     batch_id: impl Fn(RowRef) -> u64,
 ) {
+    write_right_columns_checked(bytes, key, bucket, kind, owners, batch_id, &|| Ok(()))
+        .expect("uncancelled writer");
+}
+
+fn write_right_columns_checked(
+    bytes: &mut Vec<u8>,
+    key: &Encoding,
+    bucket: &RightBucket,
+    kind: SequenceKind,
+    owners: &OwnerWriter,
+    batch_id: impl Fn(RowRef) -> u64,
+    cancel: &dyn Fn() -> Result<()>,
+) -> Result<()> {
+    cancel()?;
+    #[cfg(test)]
+    super::cost::index_rows(bucket.len());
     owners.reference(bytes, key);
     put(bytes, bucket.len() as u64);
     bytes.push(kind.flag());
@@ -380,47 +456,59 @@ fn write_right_columns(
         put(bytes, capacity as u64);
     }
     if let Some((times, sequences)) = bucket.checkpoint_integer_columns() {
-        for time in times {
+        for (ordinal, time) in times.iter().enumerate() {
+            check_step(ordinal, cancel)?;
             bytes.extend_from_slice(&time.to_le_bytes());
         }
-        bytes.extend_from_slice(sequences);
+        for chunk in sequences.chunks(128 * kind.width().expect("integer sequence width")) {
+            cancel()?;
+            bytes.extend_from_slice(chunk);
+        }
         bytes.resize(
             bytes.len() + bucket.len(),
             u8::from(bucket.payload_len() != 0),
         );
-        write_right_payload_refs(bytes, bucket, &batch_id);
-        return;
+        write_right_payload_refs_checked(bytes, bucket, &batch_id, cancel)?;
+        return cancel();
     }
-    for ((time, _), _) in bucket {
+    for (ordinal, ((time, _), _)) in bucket.into_iter().enumerate() {
+        check_step(ordinal, cancel)?;
         bytes.extend_from_slice(&time.to_le_bytes());
     }
-    for ((_, sequence), _) in bucket {
+    for (ordinal, ((_, sequence), _)) in bucket.into_iter().enumerate() {
+        check_step(ordinal, cancel)?;
         write_sequence(bytes, kind, sequence.as_ref(), owners);
     }
-    for (_, _, tag) in bucket.checkpoint_rows() {
+    for (ordinal, (_, _, tag)) in bucket.checkpoint_rows().enumerate() {
+        check_step(ordinal, cancel)?;
         bytes.push(tag);
     }
-    write_right_payload_refs(bytes, bucket, &batch_id);
+    write_right_payload_refs_checked(bytes, bucket, &batch_id, cancel)?;
+    cancel()
 }
 
-fn write_right_payload_refs(
+fn write_right_payload_refs_checked(
     bytes: &mut Vec<u8>,
     bucket: &RightBucket,
     batch_id: &impl Fn(RowRef) -> u64,
-) {
+    cancel: &dyn Fn() -> Result<()>,
+) -> Result<()> {
     if let Some(rows) = bucket.checkpoint_payload_refs() {
-        for row in rows.iter().flatten() {
+        for (ordinal, row) in rows.iter().flatten().enumerate() {
+            check_step(ordinal, cancel)?;
             put(bytes, batch_id(*row));
             bytes.extend_from_slice(&row.row.to_le_bytes());
         }
     } else {
-        for (_, row) in bucket {
+        for (ordinal, (_, row)) in bucket.into_iter().enumerate() {
+            check_step(ordinal, cancel)?;
             if let Some(row) = row {
                 put(bytes, batch_id(*row));
                 bytes.extend_from_slice(&row.row.to_le_bytes());
             }
         }
     }
+    cancel()
 }
 
 fn sequence_kind(cursor: &mut Cursor<'_>, expected: SequenceKind) -> Result<SequenceKind> {
@@ -462,7 +550,7 @@ struct Header {
 
 fn read_header(cursor: &mut Cursor<'_>, max_rows: u64) -> Result<Header> {
     let magic = cursor.take(8)?;
-    if magic != MAGIC && magic != FULL_MAGIC {
+    if magic != MAGIC {
         return Err(mismatch("ASOF index magic differs"));
     }
     let [chunks, buckets, left_rows] = cursor.addresses()?;
@@ -520,8 +608,19 @@ fn validate_hash_capacity(capacity: usize) -> Result<()> {
 
 /// Scan all declared allocations without allocating index columns. The caller
 /// reserves this checked total before decoding either indexes or payloads.
+#[cfg(test)]
 pub(super) fn restore_charge(bytes: &[u8], max_rows: u64, max_bytes: u64) -> Result<u64> {
-    let mut cursor = Cursor::new(bytes, max_bytes);
+    restore_charge_checked(bytes, max_rows, max_bytes, &|| Ok(()))
+}
+
+pub(super) fn restore_charge_checked(
+    bytes: &[u8],
+    max_rows: u64,
+    max_bytes: u64,
+    cancel: &dyn Fn() -> Result<()>,
+) -> Result<u64> {
+    cancel()?;
+    let mut cursor = Cursor::new_checked(bytes, max_bytes, cancel);
     let header = read_header(&mut cursor, max_rows)?;
     let mut charge = header_restore_charge(&header, max_bytes)?;
     charge = restore_add(charge, owners::restore_charge(&mut cursor)?)?;
@@ -689,6 +788,7 @@ fn scan_right_rows(
     Ok((rows as u64, charge))
 }
 
+#[cfg(test)]
 pub(super) fn decode(
     segment: &StateSegment,
     batches: &BTreeMap<BatchKey, Arc<PayloadBatch>>,
@@ -696,7 +796,41 @@ pub(super) fn decode(
     max_bytes: u64,
     kinds: [SequenceKind; 2],
 ) -> Result<State> {
-    let mut cursor = Cursor::new(segment.bytes(), max_bytes);
+    decode_registered(segment, batches, max_rows, max_bytes, kinds).map(|(state, _)| state)
+}
+
+#[cfg(test)]
+pub(super) fn decode_registered(
+    segment: &StateSegment,
+    batches: &BTreeMap<BatchKey, Arc<PayloadBatch>>,
+    max_rows: u64,
+    max_bytes: u64,
+    kinds: [SequenceKind; 2],
+) -> Result<(State, OwnerReader)> {
+    decode_registered_bytes(segment.bytes(), batches, max_rows, max_bytes, kinds)
+}
+
+#[cfg(test)]
+pub(in crate::operator::asof) fn decode_registered_bytes(
+    bytes: &[u8],
+    batches: &BTreeMap<BatchKey, Arc<PayloadBatch>>,
+    max_rows: u64,
+    max_bytes: u64,
+    kinds: [SequenceKind; 2],
+) -> Result<(State, OwnerReader)> {
+    decode_registered_bytes_checked(bytes, batches, max_rows, max_bytes, kinds, &|| Ok(()))
+}
+
+pub(in crate::operator::asof) fn decode_registered_bytes_checked(
+    bytes: &[u8],
+    batches: &BTreeMap<BatchKey, Arc<PayloadBatch>>,
+    max_rows: u64,
+    max_bytes: u64,
+    kinds: [SequenceKind; 2],
+    cancel: &dyn Fn() -> Result<()>,
+) -> Result<(State, OwnerReader)> {
+    cancel()?;
+    let mut cursor = Cursor::new_checked(bytes, max_bytes, cancel);
     let header = read_header(&mut cursor, max_rows)?;
     let mut owners = OwnerReader::read(&mut cursor)?;
     let mut state = State::empty_tracked();
@@ -722,16 +856,22 @@ pub(super) fn decode(
         max_rows,
     )?;
     finish_decoded_columns(&cursor, &owners)?;
-    finalize_restored_state(&mut state, &header, batches.len())?;
-    Ok(state)
+    finalize_restored_state(&mut state, &header, batches.len(), cancel)?;
+    Ok((state, owners))
 }
 
-fn finalize_restored_state(state: &mut State, header: &Header, batch_count: usize) -> Result<()> {
+fn finalize_restored_state(
+    state: &mut State,
+    header: &Header,
+    batch_count: usize,
+    cancel: &dyn Fn() -> Result<()>,
+) -> Result<()> {
+    cancel()?;
     if state.batches.len() != batch_count {
         return Err(mismatch("ASOF v3 contains unreferenced payload batches"));
     }
-    validate_left_order(state)?;
-    state.rebuild_encoding_owners();
+    validate_left_order(state, cancel)?;
+    state.rebuild_encoding_owners_checked(cancel)?;
     [
         state.right_payload_min,
         state.right_identity_min,
@@ -817,9 +957,10 @@ fn validate_reconstructed_capacities(state: &State, header: &Header) -> Result<(
     Ok(())
 }
 
-fn validate_left_order(state: &State) -> Result<()> {
+fn validate_left_order(state: &State, cancel: &dyn Fn() -> Result<()>) -> Result<()> {
     let mut previous = None;
-    for (identity, _) in state.left.iter() {
+    for (ordinal, (identity, _)) in state.left.iter().enumerate() {
+        check_step(ordinal, cancel)?;
         if previous.is_some_and(|last| last >= identity) {
             return Err(mismatch("ASOF v3 left identity order is not strict"));
         }
@@ -833,12 +974,15 @@ fn left_encoding_owners(
     keys: &[Option<Encoding>],
     key_ids: &[u32],
     sequences: &SequenceColumn,
+    cancel: &dyn Fn() -> Result<()>,
 ) -> Result<EncodingOwners> {
     let mut encodings = EncodingOwners::default();
-    for key in keys.iter().flatten() {
+    for (ordinal, key) in keys.iter().flatten().enumerate() {
+        check_step(ordinal, cancel)?;
         encodings.attach(key);
     }
     for ordinal in 0..times.len() {
+        check_step(ordinal, cancel)?;
         let identity = (
             &times[ordinal],
             keys[key_ids[ordinal] as usize]
@@ -1077,7 +1221,13 @@ fn read_left(
         .ok_or_else(|| mismatch("ASOF v3 left payload batch is missing"))?;
     let (positions, start) =
         read_left_positions(cursor, rows, capacities[1], owner.record.num_rows())?;
-    let encodings = left_encoding_owners(&times, &keys, &key_ids, &sequences)?;
+    let encodings = left_encoding_owners(
+        &times,
+        &keys,
+        &key_ids,
+        &sequences,
+        cursor.cancel.unwrap_or(&|| Ok(())),
+    )?;
     Ok(PreparedLeftChunk::from_index(
         owner.clone(),
         ChunkData {
@@ -1211,7 +1361,12 @@ fn read_right(
         sequences: encoded,
         tags,
     } = read_right_columns(cursor, expected, remaining)?;
-    let mut sequences = Cursor::new(encoded, cursor.limit);
+    let mut sequences = Cursor {
+        bytes: encoded,
+        limit: cursor.limit,
+        cancel: cursor.cancel,
+        steps: 0,
+    };
     let mut bucket = RightBucket::with_index_capacities(capacities, kind);
     let mut previous = None;
     for (time, &tag) in times.chunks_exact(8).zip(tags) {
@@ -1696,5 +1851,78 @@ mod tests {
             );
         });
         assert!(allocations.bytes_max < 16_384, "{allocations:?}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_a12_owned_base_encode_cancellation_preserves_source() {
+        let (state, _) = fixture();
+        let length = encoded_length(&state, "asof").unwrap();
+        let before = encode_sync(&state, length, 1 << 20).unwrap();
+        let job = crate::StreamJobContext::new(
+            1,
+            "asof",
+            crate::JsonMap::new(),
+            None,
+            crate::CancellationToken::new(),
+        );
+        let context = crate::StreamOperatorContext::new(&job, "asof", None);
+        let captured = owned::Index::capture(&state, &context).await.unwrap();
+        let calls = std::cell::Cell::new(0);
+        let error = captured
+            .encode_registered_checked(length, 1 << 20, &|| {
+                calls.set(calls.get() + 1);
+                if calls.get() >= 3 {
+                    Err(crate::CalcFlowError::Cancelled {
+                        run_id: "asof".into(),
+                    })
+                } else {
+                    Ok(())
+                }
+            })
+            .err()
+            .unwrap();
+        assert!(matches!(error, crate::CalcFlowError::Cancelled { .. }));
+        assert_eq!(calls.get(), 3);
+        let after = encode_sync(&state, length, 1 << 20).unwrap();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn test_a12_native_base_decode_cancellation_preserves_source() {
+        let (state, batches) = fixture();
+        let length = encoded_length(&state, "asof").unwrap();
+        let snapshot = encode_sync(&state, length, 1 << 20).unwrap();
+        let calls = std::cell::Cell::new(0);
+        let error = decode_registered_bytes_checked(
+            snapshot.bytes(),
+            &batches,
+            100,
+            1 << 20,
+            state.sequence_kinds,
+            &|| {
+                calls.set(calls.get() + 1);
+                if calls.get() >= 3 {
+                    Err(crate::CalcFlowError::Cancelled {
+                        run_id: "asof".into(),
+                    })
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .err()
+        .unwrap();
+        assert!(matches!(error, crate::CalcFlowError::Cancelled { .. }));
+        assert_eq!(calls.get(), 3);
+        assert_eq!(snapshot, encode_sync(&state, length, 1 << 20).unwrap());
+        let restored = decode_registered_bytes(
+            snapshot.bytes(),
+            &batches,
+            100,
+            1 << 20,
+            state.sequence_kinds,
+        )
+        .unwrap();
+        assert_eq!(snapshot, encode_sync(&restored.0, length, 1 << 20).unwrap());
     }
 }

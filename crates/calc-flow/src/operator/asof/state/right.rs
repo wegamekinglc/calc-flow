@@ -667,6 +667,111 @@ impl RightBucket {
         )
     }
 
+    pub fn journal_eviction(
+        &self,
+        key: &Encoding,
+        batches: &super::PayloadPool,
+        status: &super::super::StreamAsofJoinStatus,
+        tolerance: u64,
+        threshold: i128,
+    ) -> Vec<super::super::checkpoint::index_v3::log::journal::Change> {
+        use super::super::checkpoint::index_v3::log::journal::{Change, Identity, Version};
+        let payloads = self.payloads();
+        let payload_count = self.payload_removal_count(tolerance, threshold);
+        let identity_count = self
+            .identities
+            .prefix_len(|time| super::identity_expired(time, status));
+        let general_count = self
+            .general_identities
+            .iter()
+            .take_while(|order| super::identity_expired(order.0, status))
+            .count();
+        let mut changes = Vec::with_capacity(payload_count + identity_count + general_count + 1);
+        let mut ordered_last = (identity_count < self.identities.len())
+            .then(|| self.identities.last().expect("retained ordered identity").0)
+            .map(|(time, sequence)| (*time, sequence.into_owned()));
+        let mut promoted = 0;
+        for index in payloads.head..payloads.head + payload_count {
+            let time = payloads.times[index];
+            let sequence = payloads
+                .sequences
+                .get(index)
+                .expect("expired payload sequence")
+                .into_owned();
+            let row = payloads.values.get(index);
+            let after = if super::identity_expired(time, status) {
+                None
+            } else {
+                promoted += 1;
+                let order = (time, sequence.clone());
+                let tag = if ordered_last.as_ref().is_none_or(|last| last < &order) {
+                    ordered_last = Some(order);
+                    0
+                } else {
+                    2
+                };
+                Some(Version::Right { tag, payload: None })
+            };
+            changes.push(Change {
+                identity: Identity::Right((time, key.clone(), sequence)),
+                before: Some(Version::Right {
+                    tag: 1,
+                    payload: Some((batches.key(*row), row.row)),
+                }),
+                after,
+            });
+        }
+        for index in self.identities.head..self.identities.head + identity_count {
+            changes.push(Change {
+                identity: Identity::Right((
+                    self.identities.times[index],
+                    key.clone(),
+                    self.identities
+                        .sequences
+                        .get(index)
+                        .expect("expired identity sequence")
+                        .into_owned(),
+                )),
+                before: Some(Version::Right {
+                    tag: 0,
+                    payload: None,
+                }),
+                after: None,
+            });
+        }
+        for order in self.general_identities.iter().take(general_count) {
+            changes.push(Change {
+                identity: Identity::Right((order.0, key.clone(), order.1.clone())),
+                before: Some(Version::Right {
+                    tag: 2,
+                    payload: None,
+                }),
+                after: None,
+            });
+        }
+        if identity_count == self.identities.len()
+            && promoted == 0
+            && self.general_identities.len() - general_count == 1
+        {
+            let order = self
+                .general_identities
+                .last()
+                .expect("remaining tree identity");
+            changes.push(Change {
+                identity: Identity::Right((order.0, key.clone(), order.1.clone())),
+                before: Some(Version::Right {
+                    tag: 2,
+                    payload: None,
+                }),
+                after: Some(Version::Right {
+                    tag: 0,
+                    payload: None,
+                }),
+            });
+        }
+        changes
+    }
+
     pub fn expired_rows<'a>(
         &'a self,
         status: &'a super::super::StreamAsofJoinStatus,

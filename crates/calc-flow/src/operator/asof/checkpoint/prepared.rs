@@ -1,4 +1,4 @@
-//! Immutable canonical V3 checkpoint bytes, shared by repeated captures.
+//! Immutable native index bytes used by capacity verification.
 
 use crate::StateSegment;
 
@@ -6,6 +6,7 @@ use crate::StateSegment;
 pub(in super::super) struct PreparedSegment(StateSegment);
 
 impl PreparedSegment {
+    #[cfg(test)]
     pub(in super::super) const fn new(segment: StateSegment) -> Self {
         Self(segment)
     }
@@ -15,6 +16,7 @@ impl PreparedSegment {
     pub(in super::super) fn capacity(&self) -> usize {
         self.0.bytes_arc().capacity()
     }
+    #[cfg(test)]
     pub(in super::super) fn canonical(&self) -> StateSegment {
         self.0.clone()
     }

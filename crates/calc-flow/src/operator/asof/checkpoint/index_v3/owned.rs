@@ -3,7 +3,7 @@
 
 use super::{
     ChunkData, Encoding, OwnerWriter, RightBucket, SequenceKind, State, StateSegment, checked,
-    mismatch, put, write_left, write_right_columns,
+    mismatch, put,
 };
 use crate::{Result, StreamOperatorContext};
 use std::sync::Arc;
@@ -17,7 +17,7 @@ struct Bucket {
     rows: Arc<RightBucket>,
 }
 
-pub(super) struct Index {
+pub(in crate::operator::asof) struct Index {
     capacities: [usize; 8],
     kinds: [SequenceKind; 2],
     left_rows: usize,
@@ -128,7 +128,8 @@ impl Index {
         })
     }
 
-    fn owners(&self) -> OwnerWriter {
+    fn owners(&self, cancel: &dyn Fn() -> Result<()>) -> Result<OwnerWriter> {
+        cancel()?;
         let mut owners = OwnerWriter::default();
         for (_, data, head) in &self.left {
             let mut keys = data
@@ -137,27 +138,52 @@ impl Index {
                 .filter_map(Option::as_ref)
                 .collect::<Vec<_>>();
             keys.sort_unstable();
-            for key in keys {
+            for (ordinal, key) in keys.into_iter().enumerate() {
+                super::check_step(ordinal, cancel)?;
                 owners.register(key);
             }
             if data.sequences.kind() == SequenceKind::Canonical {
-                for sequence in data.sequences.iter().skip(*head) {
+                for (ordinal, sequence) in data.sequences.iter().skip(*head).enumerate() {
+                    super::check_step(ordinal, cancel)?;
                     owners.register(sequence.as_ref());
                 }
             }
         }
-        for bucket in &self.right {
+        for (ordinal, bucket) in self.right.iter().enumerate() {
+            super::check_step(ordinal, cancel)?;
             owners.register(&bucket.key);
             if self.kinds[1] == SequenceKind::Canonical {
-                for ((_, sequence), _) in bucket.rows.as_ref() {
+                for (ordinal, ((_, sequence), _)) in bucket.rows.as_ref().into_iter().enumerate() {
+                    super::check_step(ordinal, cancel)?;
                     owners.register(sequence.as_ref());
                 }
             }
         }
-        owners
+        cancel()?;
+        Ok(owners)
     }
 
-    pub fn encode(mut self, length: u64, limit: usize) -> Result<StateSegment> {
+    #[cfg(test)]
+    pub fn encode(self, length: u64, limit: usize) -> Result<StateSegment> {
+        self.encode_registered(length, limit)
+            .map(|(segment, _)| segment)
+    }
+    #[cfg(test)]
+    pub fn encode_registered(
+        self,
+        length: u64,
+        limit: usize,
+    ) -> Result<(StateSegment, OwnerWriter)> {
+        self.encode_registered_checked(length, limit, &|| Ok(()))
+    }
+
+    pub fn encode_registered_checked(
+        mut self,
+        length: u64,
+        limit: usize,
+        cancel: &dyn Fn() -> Result<()>,
+    ) -> Result<(StateSegment, OwnerWriter)> {
+        cancel()?;
         let capacity = usize::try_from(length)
             .map_err(|_| mismatch("ASOF v3 index exceeds address domain"))?;
         if capacity > limit {
@@ -166,7 +192,7 @@ impl Index {
         self.right
             .sort_unstable_by(|left, right| left.key.cmp(&right.key));
         self.batches.sort_unstable_by_key(|(handle, _)| *handle);
-        let owners = self.owners();
+        let owners = self.owners(cancel)?;
         let mut bytes = Vec::with_capacity(capacity);
         bytes.extend_from_slice(super::MAGIC);
         for count in [self.left.len(), self.right.len(), self.left_rows] {
@@ -175,12 +201,20 @@ impl Index {
         for capacity in self.capacities {
             put(&mut bytes, capacity as u64);
         }
-        owners.write(&mut bytes);
+        owners.write_checked(&mut bytes, 0, cancel)?;
         for (batch, data, head) in &self.left {
-            write_left(&mut bytes, *batch, data, *head, self.kinds[0], &owners);
+            super::write_left_checked(
+                &mut bytes,
+                *batch,
+                data,
+                *head,
+                self.kinds[0],
+                &owners,
+                cancel,
+            )?;
         }
         for bucket in &self.right {
-            write_right_columns(
+            super::write_right_columns_checked(
                 &mut bytes,
                 &bucket.key,
                 &bucket.rows,
@@ -193,12 +227,16 @@ impl Index {
                         .expect("captured batch handle");
                     self.batches[index].1
                 },
-            );
+                cancel,
+            )?;
         }
         if bytes.len() != capacity {
             return Err(mismatch("ASOF v3 encoded length differs"));
         }
-        Ok(StateSegment::new(bytes))
+        #[cfg(test)]
+        super::super::cost::index_bytes(bytes.len());
+        cancel()?;
+        Ok((StateSegment::new(bytes), owners))
     }
 }
 

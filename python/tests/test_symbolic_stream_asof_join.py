@@ -56,7 +56,7 @@ def runtime(monkeypatch):
         requires_watermark=True,
         checkpoint_support="checkpointed_stateful",
         state_version=3,
-        state_layouts=(5, 6),
+        state_layouts=(9,),
         deterministic=True,
         replay_safe=True,
     )
@@ -398,7 +398,7 @@ def test_asof_explain_states_matching_finality_resources_and_unique_ownership(
         "output_time=left.time",
         "frontier_lag_micros=1",
         "state_version=3",
-        "state_layout=6",
+        "state_layout=9",
         "max_state_rows=100",
         "max_state_bytes=1000000",
         "workspace_bytes=1000000",
@@ -730,7 +730,7 @@ def test_asof_builtin_capability_is_an_independent_complete_contract() -> None:
         "requires_watermark": True,
         "checkpoint_support": "checkpointed_stateful",
         "state_version": 3,
-        "state_layouts": (5, 6),
+        "state_layouts": (9,),
         "deterministic": True,
         "replay_safe": True,
     }
@@ -809,7 +809,7 @@ def test_stateful_consumers_require_all_left_asof_ordering_metadata(
         program.compile_stream(runtime)
 
 
-@pytest.mark.parametrize("layouts,selected", [((6,), 6), ((5, 6), 6)])
+@pytest.mark.parametrize("layouts,selected", [((9,), 9)])
 def test_asof_default_layout_membership_and_explanation(
     runtime, monkeypatch, layouts, selected
 ):
@@ -831,7 +831,7 @@ def test_asof_default_layout_membership_and_explanation(
     )
 
 
-@pytest.mark.parametrize("layouts", [(), (1, 2), (3, 4), (5,), (7,)])
+@pytest.mark.parametrize("layouts", [(), (1, 2), (3, 4), (5,), (6,), (5, 6), (7,)])
 def test_asof_default_capability_rejects_missing_recovery_layout(
     runtime, monkeypatch, layouts
 ):

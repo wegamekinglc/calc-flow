@@ -134,7 +134,7 @@ def test_empty_runtime_capabilities_are_frozen_and_session_scoped() -> None:
             requires_watermark=True,
             checkpoint_support="checkpointed_stateful",
             state_version=3,
-            state_layouts=(5, 6),
+            state_layouts=(9,),
             deterministic=True,
             replay_safe=True,
         ),
@@ -993,7 +993,7 @@ def test_capability_catalog_reports_every_durable_state_layout() -> None:
     assert operators["cross_section"].state_layouts == (1,)
     assert operators["stream_join"].state_layouts == (1,)
     assert operators["stream_asof_join"].state_version == 3
-    assert operators["stream_asof_join"].state_layouts == (5, 6)
+    assert operators["stream_asof_join"].state_layouts == (9,)
     assert operators["window"].state_layouts == (1,)
     assert operators["expression"].state_layouts == ()
     assert operators["sql"].state_version == 1

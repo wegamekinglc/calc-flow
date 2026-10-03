@@ -7,6 +7,22 @@ use calc_flow::{
 };
 use std::collections::BTreeMap;
 
+fn replace_payload(snapshot: &mut calc_flow::OperatorStateSnapshot, id: String, bytes: Vec<u8>) {
+    let segment = calc_flow::StateSegment::new(bytes);
+    let payload = snapshot.inline_metadata.get_mut("checkpoint_log").unwrap()["payloads"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|payload| {
+            let key = payload["key"].as_array().unwrap();
+            id == format!("asof-batch-{}-{}", key[0], key[1])
+        })
+        .unwrap();
+    payload["sha256"] = serde_json::json!(segment.sha256());
+    payload["bytes"] = serde_json::json!(segment.bytes().len());
+    snapshot.segments.insert(id, segment);
+}
+
 #[tokio::test]
 async fn duplicate_in_batch_is_rejected_atomically() {
     let mut op = operator(10);
@@ -392,7 +408,7 @@ async fn failed_restore_is_atomic_and_reset_does_not_mutate_shared_segments() {
 
 #[tokio::test]
 async fn malformed_ipc_body_length_is_rejected_before_body_allocation() {
-    use calc_flow::{Epoch, StateSegment};
+    use calc_flow::Epoch;
     let mut op = operator(10);
     let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
     let cx = StreamOperatorContext::new(&job, "asof", None);
@@ -431,9 +447,7 @@ async fn malformed_ipc_body_length_is_rejected_before_body_allocation() {
         }
         cursor = start + metadata_length + usize::try_from(message.bodyLength()).unwrap();
     }
-    snapshot
-        .segments
-        .insert(segment_id, StateSegment::new(bytes));
+    replace_payload(&mut snapshot, segment_id, bytes);
     let original = op.status();
     let allocations = allocation_counter::measure(|| {
         assert!(matches!(
@@ -553,17 +567,18 @@ async fn restored_identity_only_encoding_is_validated_without_payload() {
         .unwrap();
     assert_eq!(op.status().identity_only_rows, 1);
     let mut snapshot = op.checkpoint(Epoch::INITIAL).unwrap();
-    let key = "asof-index-v6";
+    let key = "asof-log-v9-1-0-1";
     let mut bytes = snapshot.segments[key].bytes().to_vec();
-    // Corrupt the inline key marker without an Arrow payload.
-    assert_eq!(&bytes[..8], b"CFASOF06");
-    assert_eq!(&bytes[96..104], &[0; 8]);
-    assert_eq!(bytes[104], 0);
-    assert_eq!(bytes[106], 2);
-    bytes[106] = 0;
-    snapshot
-        .segments
-        .insert(key.into(), StateSegment::new(bytes));
+    assert_eq!(&bytes[..8], b"CFASDL09");
+    assert_eq!(&bytes[128..136], b"CFASOF09");
+    assert_eq!(&bytes[224..232], &[0; 8]);
+    assert_eq!(bytes[232], 0);
+    assert_eq!(bytes[234], 2);
+    bytes[234] = 0;
+    let segment = StateSegment::new(bytes);
+    let frame = &mut snapshot.inline_metadata.get_mut("checkpoint_log").unwrap()["frames"][0];
+    frame["sha256"] = serde_json::json!(segment.sha256());
+    snapshot.segments.insert(key.into(), segment);
     let previous = op.status();
     assert!(matches!(
         op.restore(&snapshot),
@@ -700,7 +715,7 @@ async fn duplicate_identity_precedes_even_unavailable_identity_workspace() {
 
 #[tokio::test]
 async fn malformed_ipc_schema_is_rejected_before_arrow_schema_conversion() {
-    use calc_flow::{Epoch, StateSegment};
+    use calc_flow::Epoch;
     let mut op = operator(10);
     let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
     let cx = StreamOperatorContext::new(&job, "asof", None);
@@ -724,9 +739,7 @@ async fn malformed_ipc_schema_is_rejected_before_arrow_schema_conversion() {
     let vtable = usize::try_from(i64::try_from(table).unwrap() - i64::from(distance)).unwrap();
     let entry = vtable + usize::from(datafusion::arrow::ipc::Schema::VT_FIELDS);
     bytes[entry..entry + 2].fill(0);
-    snapshot
-        .segments
-        .insert(segment_id, StateSegment::new(bytes));
+    replace_payload(&mut snapshot, segment_id, bytes);
     let before = op.status();
     assert!(matches!(
         op.restore(&snapshot),
@@ -986,7 +999,7 @@ async fn flat_payload_types_roundtrip_through_checkpoint_and_arrow_output() {
 
 #[tokio::test]
 async fn a_second_ipc_schema_is_rejected_before_arrow_conversion() {
-    use calc_flow::{Epoch, StateSegment};
+    use calc_flow::Epoch;
     let mut op = operator(10);
     let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
     let cx = StreamOperatorContext::new(&job, "asof", None);
@@ -1012,9 +1025,7 @@ async fn a_second_ipc_schema_is_rejected_before_arrow_conversion() {
     let entry = vtable + usize::from(datafusion::arrow::ipc::Schema::VT_FIELDS);
     malicious[entry..entry + 2].fill(0);
     bytes.splice(schema_length..schema_length, malicious);
-    snapshot
-        .segments
-        .insert(segment_id, StateSegment::new(bytes));
+    replace_payload(&mut snapshot, segment_id, bytes);
     let before = op.status();
     assert!(matches!(
         op.restore(&snapshot),

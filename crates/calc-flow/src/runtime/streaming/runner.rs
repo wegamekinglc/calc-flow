@@ -157,6 +157,7 @@ pub(super) struct JobCore {
     entity_work: JobEntityWorkOwner,
     sql_recovery: JobSqlRecoveryOwner,
     gather_work: super::gather_work::JobGatherOwner,
+    asof_loads: asof::LoadOwner,
     supervision: SupervisionHome,
     #[cfg(test)]
     owned_lane_launches: Arc<AtomicU64>,
@@ -229,6 +230,7 @@ impl JobCore {
             ),
             sql_recovery: JobSqlRecoveryOwner::new(),
             gather_work: super::gather_work::JobGatherOwner::new(job_id.to_string().into()),
+            asof_loads: asof::LoadOwner::default(),
             supervision: SupervisionHome::default(),
             #[cfg(test)]
             owned_lane_launches,
@@ -1588,6 +1590,13 @@ struct DriverReportGate {
 }
 
 async fn settle_driver_report(core: &Arc<JobCore>, join_error: Option<&str>) -> DriverReport {
+    if let Some(error) = core.asof_loads.close_and_drain().await {
+        core.supervision
+            .append_cleanup(vec![Arc::new(RuntimeFailure {
+                origin: FailureOrigin::Preflight,
+                error,
+            })]);
+    }
     if let Some(mut loan) = core.supervision.take(
         core.entity_work.clone(),
         core.sql_recovery.clone(),
@@ -2058,7 +2067,9 @@ async fn run_job_driver(
                     &mut plan,
                     checkpoint,
                     &prepared_progress,
+                    &core.asof_loads,
                     &cancellation,
+                    &context,
                 )
                 .await;
                 match restored {
@@ -2104,6 +2115,7 @@ async fn run_job_driver(
                 &plan,
                 &prepared_progress,
                 &mut sources,
+                &core.asof_loads,
                 &cancellation,
             )
             .await
@@ -2458,6 +2470,7 @@ async fn prepare_checkpoint_recovery(
     plan: &StreamRuntimePlanParts,
     prepared_progress: &super::progress::PreparedStreamJob,
     sources: &mut BTreeMap<String, SourceBinding>,
+    loads: &asof::LoadOwner,
     cancellation: &CancellationToken,
 ) -> crate::Result<(
     BTreeMap<String, OperatorRestoreState>,
@@ -2493,6 +2506,7 @@ async fn prepare_checkpoint_recovery(
             (
                 node.operator_id.as_str(),
                 (
+                    &node.operator,
                     node.checkpoint_capability,
                     node.operator.requires_output_frontier_state(),
                 ),
@@ -2501,17 +2515,22 @@ async fn prepare_checkpoint_recovery(
         .collect::<BTreeMap<_, _>>();
     let mut operators = BTreeMap::new();
     for (operator_id, entry) in selected.manifest.operators() {
-        let snapshot = checkpoint
-            .transaction
-            .load_operator_state_cancellable(operator_id, entry, cancellation)
-            .await?;
-        let &(checkpoint_capability, requires_output_frontier) = checkpoint_capabilities
+        let &(operator, checkpoint_capability, requires_output_frontier) = checkpoint_capabilities
             .get(operator_id.as_str())
             .ok_or_else(|| CalcFlowError::CheckpointMismatch {
                 message: format!(
                     "checkpoint operator {operator_id:?} is absent from the prepared plan"
                 ),
             })?;
+        let snapshot = asof::load_snapshot(
+            &checkpoint.transaction,
+            loads,
+            operator,
+            operator_id,
+            entry,
+            cancellation,
+        )
+        .await?;
         let mut snapshot = checkpoint_capability.decode_snapshot(operator_id, snapshot)?;
         let restored_output_frontier = snapshot
             .inline_metadata

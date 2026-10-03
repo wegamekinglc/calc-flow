@@ -87,7 +87,7 @@ fn current_restore_rejects_layout_three_and_four_before_workspace() {
     let current = source.capture(Epoch::INITIAL).unwrap();
     assert_eq!(
         current.inline_metadata["layout_version"],
-        serde_json::json!(5)
+        serde_json::json!(9)
     );
     let results = [3, 4].map(|layout| {
         let mut snapshot = current.clone();
@@ -149,20 +149,23 @@ async fn historical_indexes_do_not_replace_live_current_state() {
         let before = target.capture(Epoch::INITIAL).unwrap();
         assert_eq!(
             before.inline_metadata["layout_version"],
-            serde_json::json!(6)
+            serde_json::json!(9)
         );
         let status = target.status();
         let pool = target.runtime.pool.clone();
         let paid = pool.reserved();
         let sequence = target.next_output_sequence;
         let result = target.restore(&snapshot);
+        let refunded = pool.reserved() == paid;
         let repeated = target.capture(Epoch::INITIAL).unwrap();
         let unchanged = target.status() == status
             && target.next_output_sequence == sequence
-            && pool.reserved() == paid
+            && refunded
             && repeated.inline_metadata == before.inline_metadata
             && repeated.segments == before.segments;
         drop(target);
+        drop(before);
+        drop(repeated);
         assert_eq!(pool.reserved(), 0);
         results.push((result, unchanged));
     }

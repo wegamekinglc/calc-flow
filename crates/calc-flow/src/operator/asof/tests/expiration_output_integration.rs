@@ -26,7 +26,7 @@ async fn test_a03_a10_projected_restore_preserves_multiplicity_and_funding() {
     let snapshot = operator.capture(Epoch::INITIAL).unwrap();
     assert_eq!(
         snapshot.inline_metadata["layout_version"],
-        serde_json::json!(6)
+        serde_json::json!(9)
     );
     let (mut restored, _, _) = prefix_fixture();
     restored.set_output_projection(vec![2, 5, 5]).unwrap();
@@ -34,10 +34,7 @@ async fn test_a03_a10_projected_restore_preserves_multiplicity_and_funding() {
     assert!(restored_configured > 0);
     restored.restore(&snapshot).unwrap();
     assert!(restored.state.right.auxiliary_bytes() > 0);
-    assert_eq!(
-        restored.runtime.pool.reserved(),
-        restored_configured + restored.state.right.auxiliary_bytes()
-    );
+    assert_log_funded(&restored);
     let mut output = EdgeCollector::new(restored.output_ports().to_vec());
     workspace::take_output_source_registrations();
     restored.on_end(&context, &mut output).await.unwrap();
@@ -84,6 +81,7 @@ async fn test_a03_a10_projected_restore_preserves_multiplicity_and_funding() {
     assert_eq!(restored_pool.reserved(), 0);
     let original_pool = operator.runtime.pool.clone();
     drop(operator);
+    drop(snapshot);
     assert_eq!(original_pool.reserved(), 0);
 }
 
@@ -128,10 +126,7 @@ async fn test_a03_a10_zero_column_cancelled_prefix_recovers_exactly() {
     let restored_configured = restored.runtime.pool.reserved();
     assert!(restored_configured > 0);
     restored.restore(&snapshot).unwrap();
-    assert_eq!(
-        restored.runtime.pool.reserved(),
-        restored_configured + restored.state.right.auxiliary_bytes()
-    );
+    assert_log_funded(&restored);
     let job = StreamJobContext::new(2, "asof", JsonMap::new(), None, CancellationToken::new());
     let context = StreamOperatorContext::new(&job, "asof", None)
         .with_test_output_budget(EdgeBudget::new(1, 1 << 20).unwrap());
@@ -158,6 +153,7 @@ async fn test_a03_a10_zero_column_cancelled_prefix_recovers_exactly() {
     assert_eq!(restored_pool.reserved(), 0);
     let original_pool = operator.runtime.pool.clone();
     drop(operator);
+    drop(snapshot);
     assert_eq!(original_pool.reserved(), 0);
 }
 
@@ -211,7 +207,6 @@ async fn assert_cropped_refusals(
     job: &StreamJobContext,
     output: &mut EdgeCollector,
 ) {
-    let reserved = operator.runtime.pool.reserved();
     let stalled = StreamOperatorContext::with_ingress_progress(
         job,
         "asof",
@@ -237,6 +232,7 @@ async fn assert_cropped_refusals(
         operator.capture(Epoch::INITIAL).unwrap().segments,
         snapshot.segments
     );
+    let reserved = operator.runtime.pool.reserved();
     cancellation.cancel();
     let refused = cropped_input(operator, &[("A", 105, 123)]);
     assert!(matches!(
@@ -394,7 +390,7 @@ async fn test_cropped_dominance_only_progress_restores_typed_identity_and_comple
     let snapshot = operator.capture(Epoch::INITIAL).unwrap();
     assert_eq!(
         snapshot.inline_metadata["layout_version"],
-        serde_json::json!(6)
+        serde_json::json!(9)
     );
     assert_eq!(
         snapshot.inline_metadata["retained_payloads"]["columns"],
@@ -409,10 +405,7 @@ async fn test_cropped_dominance_only_progress_restores_typed_identity_and_comple
         .unwrap();
     assert_eq!(restored.status.retained_right_rows, 1);
     assert_eq!(restored.status.identity_only_rows, 2);
-    assert_eq!(
-        restored.runtime.pool.reserved(),
-        restored_configured + restored.state.right.auxiliary_bytes()
-    );
+    assert_log_funded(&restored);
     let job = StreamJobContext::new(2, "asof", JsonMap::new(), None, CancellationToken::new());
     let left_caller = cropped_input(&restored, &[("A", 105, 123), ("B", 105, 124)]);
     let left_original = left_caller.table_payload().unwrap().batches()[0].clone();
@@ -432,6 +425,7 @@ async fn test_cropped_dominance_only_progress_restores_typed_identity_and_comple
     assert_eq!(pool.reserved(), 0);
     let pool = operator.runtime.pool.clone();
     drop(operator);
+    drop(snapshot);
     assert_eq!(pool.reserved(), 0);
 }
 
@@ -470,7 +464,7 @@ async fn assert_empty_terminal_wire_roundtrips(
     ]));
     assert_eq!(
         terminal.inline_metadata["layout_version"],
-        serde_json::json!(5)
+        serde_json::json!(9)
     );
     let wire = terminal.clone();
     let mut target = tiny_empty_operator();
@@ -495,11 +489,11 @@ async fn test_empty_default_checkpoint_keeps_tiny_budget_and_managed_progress() 
     let snapshot = source.capture(Epoch::INITIAL).unwrap();
     assert_eq!(
         snapshot.inline_metadata["layout_version"],
-        serde_json::json!(5)
+        serde_json::json!(9)
     );
     assert_eq!(
         snapshot.inline_metadata["accounting_version"],
-        serde_json::json!(5)
+        serde_json::json!(9)
     );
     assert!(!snapshot.inline_metadata.contains_key("retained_payloads"));
     assert!(snapshot.segments.is_empty());
@@ -624,7 +618,7 @@ async fn test_empty_checkpoint_preserves_history_and_configured_descriptor() {
         let snapshot = source.capture(Epoch::INITIAL).unwrap();
         assert_eq!(
             snapshot.inline_metadata["layout_version"],
-            serde_json::json!(if configured { 6 } else { 5 })
+            serde_json::json!(9)
         );
         assert_eq!(
             snapshot.inline_metadata.contains_key("retained_payloads"),
@@ -694,10 +688,10 @@ fn test_current_empty_wire_restore_needs_no_copy_reservation() {
         1 << 20,
     ));
     let wire = source.capture(Epoch::INITIAL).unwrap();
-    assert_eq!(wire.inline_metadata["layout_version"], serde_json::json!(5));
+    assert_eq!(wire.inline_metadata["layout_version"], serde_json::json!(9));
     assert_eq!(
         wire.inline_metadata["accounting_version"],
-        serde_json::json!(5)
+        serde_json::json!(9)
     );
     assert!(!wire.inline_metadata.contains_key("retained_payloads"));
     assert!(wire.segments.is_empty());

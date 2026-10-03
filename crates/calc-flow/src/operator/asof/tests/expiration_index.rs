@@ -16,7 +16,7 @@ async fn populated_current_snapshot() -> (StreamAsofJoinOperator, crate::Operato
     let snapshot = operator.capture(Epoch::INITIAL).unwrap();
     assert_eq!(
         snapshot.inline_metadata["layout_version"],
-        serde_json::json!(6)
+        serde_json::json!(9)
     );
     (operator, snapshot)
 }
@@ -68,7 +68,7 @@ async fn test_a03_guard_dropped_preparation_preserves_installed_lease() {
     operator.restore(&snapshot).unwrap();
     let before = operator.status();
     let capacities = operator.state.right.checkpoint_capacities();
-    let expected = operator.state.right.auxiliary_bytes();
+    let expected = operator.runtime.pool.reserved();
     let prepared = operator
         .state
         .right
@@ -85,6 +85,7 @@ async fn test_a03_guard_dropped_preparation_preserves_installed_lease() {
     assert_eq!(operator.runtime.pool.reserved(), expected);
     let pool = operator.runtime.pool.clone();
     drop(operator);
+    drop(snapshot);
     assert_eq!(pool.reserved(), 0);
 }
 
@@ -92,7 +93,7 @@ async fn test_a03_guard_dropped_preparation_preserves_installed_lease() {
 async fn test_a03_guard_failed_restore_preserves_live_state_and_lease() {
     let (mut operator, snapshot) = populated_current_snapshot().await;
     let before = operator.status();
-    let expected = operator.state.right.auxiliary_bytes();
+    let expected = operator.runtime.pool.reserved();
     let mut invalid = snapshot.clone();
     invalid.inline_metadata.get_mut("metrics").unwrap()["state_bytes"] =
         serde_json::json!(before.state_bytes + 1);
@@ -112,7 +113,7 @@ async fn test_a03_guard_failed_restore_preserves_live_state_and_lease() {
 async fn test_a03_guard_progress_rejection_preserves_installed_lease() {
     let (mut operator, current) = populated_current_snapshot().await;
     let before = operator.status();
-    let expected = operator.state.right.auxiliary_bytes();
+    let expected = operator.runtime.pool.reserved();
     assert!(matches!(
         operator.restore_with_progress(&current, &asymmetric_progress(150, 150), None),
         Err(CalcFlowError::CheckpointMismatch { .. })
@@ -179,11 +180,13 @@ async fn test_a03_current_layout_restore_keeps_live_capacity_funded() {
     let snapshot = operator.capture(Epoch::INITIAL).unwrap();
     let (mut restored, _) = fixture();
     restored.restore(&snapshot).unwrap();
-    let expected = restored.state.right.auxiliary_bytes();
+    let expected = restored.runtime.pool.reserved();
     assert!(expected > 0);
-    assert_eq!(restored.runtime.pool.reserved(), expected);
+    assert_log_funded(&restored);
+    assert!(restored.state.right.auxiliary_bytes() > 0);
     let pool = restored.runtime.pool.clone();
     drop(restored);
+    drop(snapshot);
     assert_eq!(pool.reserved(), 0);
 }
 
@@ -243,9 +246,7 @@ async fn test_a03_cold_compaction_releases_sparse_dictionary_and_queue_capacity(
     );
     assert_eq!(
         operator.status.state_bytes,
-        operator.current_inventory(None).unwrap().bytes
-            + operator.deferred_index_len.unwrap()
-            + 256,
+        operator.current_inventory(None).unwrap().bytes,
     );
     operator.reset().unwrap();
     assert_eq!(operator.runtime.pool.reserved(), 0);
@@ -268,18 +269,18 @@ async fn test_a03_expiration_index_captures_distinct_accounting_layout() {
     );
     assert_eq!(
         snapshot.inline_metadata["layout_version"],
-        serde_json::json!(6)
+        serde_json::json!(9)
     );
     assert_eq!(
         snapshot.inline_metadata["accounting_version"],
-        serde_json::json!(6)
+        serde_json::json!(9)
     );
     assert_eq!(
-        &snapshot.segments["asof-index-v6"].bytes()[..8],
-        b"CFASOF06"
+        &snapshot.segments["asof-log-v9-1-0-1"].bytes()[..8],
+        b"CFASDL09"
     );
     assert!(!snapshot.segments.contains_key("asof-index-v3"));
-    let bytes = snapshot.segments["asof-index-v6"].bytes();
+    let bytes = &snapshot.segments["asof-log-v9-1-0-1"].bytes()[128..];
     let declared = [
         u64::from_le_bytes(bytes[72..80].try_into().unwrap()),
         u64::from_le_bytes(bytes[80..88].try_into().unwrap()),

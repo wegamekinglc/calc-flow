@@ -42,9 +42,9 @@ def default_state_layout(capabilities: RuntimeCapabilities) -> int:
             for operator in capabilities.operators
             if operator.kind == "stream_asof_join"
             for layout in operator.state_layouts
-            if layout in (5, 6)
+            if layout == 9
         ),
-        default=6,
+        default=9,
     )
 
 
@@ -84,7 +84,7 @@ def _capability(analyzer: _Analyzer, path: str) -> None:
     }
     if (
         len(offered) == 1
-        and 6 in offered[0].state_layouts
+        and 9 in offered[0].state_layouts
         and all(getattr(offered[0], name) == value for name, value in expected.items())
     ):
         return

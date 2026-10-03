@@ -238,6 +238,7 @@ async fn admit_workspace_input(
     fixture: &RestoredWorkspaceFixture,
     context: &StreamOperatorContext<'_>,
 ) {
+    let configured = operator.runtime.pool.reserved();
     let left_metadata = fixture.left.metadata().clone();
     let right_metadata = fixture.right.metadata().clone();
     let mut output = EdgeCollector::new(operator.output_ports().to_vec());
@@ -256,10 +257,15 @@ async fn admit_workspace_input(
         operator.status.pending_left_rows,
         (SOURCE_ROWS * SOURCE_BATCHES) as u64
     );
-    assert_eq!(
-        operator.runtime.pool.reserved(),
-        operator.state.right.auxiliary_bytes()
-    );
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while operator.runtime.pool.reserved()
+            != configured + operator.state.right.auxiliary_bytes()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
 }
 
 fn expected_workspace_output(schema: &SchemaRef, start: usize, narrow: bool) -> RecordBatch {
@@ -353,10 +359,7 @@ async fn assert_restored_workspace_output(narrow: bool) {
         .map(|message| message.as_data().unwrap().clone())
         .collect::<Vec<_>>();
     assert_workspace_output(&independent_output, &fixture, narrow);
-    assert_eq!(
-        admitted.runtime.pool.reserved(),
-        admitted.state.right.auxiliary_bytes()
-    );
+    assert_log_funded(&admitted);
     let before_status = restored.status.clone();
     let before_sequence = restored.next_output_sequence;
     let mut output = EdgeCollector::new(restored.output_ports().to_vec());
@@ -401,14 +404,19 @@ async fn assert_restored_workspace_output(narrow: bool) {
         (SOURCE_ROWS * SOURCE_BATCHES) as u64
     );
     assert_eq!(restored.status.pending_left_rows, 0);
-    assert_eq!(
-        restored.runtime.pool.reserved(),
-        restored.state.right.auxiliary_bytes()
-    );
+    assert_log_funded(&restored);
     restored.reset().unwrap();
     admitted.reset().unwrap();
-    assert_eq!(restored.runtime.pool.reserved(), 0);
-    assert_eq!(admitted.runtime.pool.reserved(), 0);
+    let restored_pool = restored.runtime.pool.clone();
+    let admitted_pool = admitted.runtime.pool.clone();
+    drop(snapshot);
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(context);
+    drop(job);
+    drop(restored);
+    drop(admitted);
+    assert_eq!(restored_pool.reserved(), 0);
+    assert_eq!(admitted_pool.reserved(), 0);
 }
 
 #[tokio::test]
@@ -427,10 +435,10 @@ async fn restored_source_rejects_a_pool_smaller_than_its_full_backing() {
     let fixture = restored_workspace_fixture();
     let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
     let context = StreamOperatorContext::new(&job, "asof", None);
-    let mut admitted = workspace_operator(&fixture, true);
+    let mut admitted = workspace_operator(&fixture, false);
     admit_workspace_input(&mut admitted, &fixture, &context).await;
     let snapshot = admitted.capture(Epoch::INITIAL).unwrap();
-    let mut restored = workspace_operator(&fixture, true);
+    let mut restored = workspace_operator(&fixture, false);
     restored.restore(&snapshot).unwrap();
     let payload = restored
         .state
@@ -462,8 +470,14 @@ async fn restored_source_rejects_a_pool_smaller_than_its_full_backing() {
     assert_eq!(pool.reserved(), 0);
     restored.reset().unwrap();
     admitted.reset().unwrap();
-    assert_eq!(restored.runtime.pool.reserved(), 0);
-    assert_eq!(admitted.runtime.pool.reserved(), 0);
+    let restored_pool = restored.runtime.pool.clone();
+    let admitted_pool = admitted.runtime.pool.clone();
+    drop(row);
+    drop(snapshot);
+    drop(restored);
+    drop(admitted);
+    assert_eq!(restored_pool.reserved(), 0);
+    assert_eq!(admitted_pool.reserved(), 0);
 }
 
 #[tokio::test]
@@ -492,14 +506,15 @@ async fn occupied_workspace_rejects_atomically_and_refunds_only_owned_lease() {
     expected_status.workspace_limit_failures += 1;
     assert_eq!(operator.status, expected_status);
     assert_eq!(operator.next_output_sequence, 0);
-    assert_eq!(
-        operator.capture(Epoch::INITIAL).unwrap().segments,
-        before.segments
-    );
+
     assert!(output.drain("output").is_empty());
     assert_eq!(operator.runtime.pool.reserved(), paid);
     drop(occupied);
     assert_eq!(operator.runtime.pool.reserved(), reserved);
+    assert_eq!(
+        operator.capture(Epoch::INITIAL).unwrap().segments,
+        before.segments
+    );
     operator
         .on_watermark(EventTime::from_micros(1_000), &context, &mut output)
         .await
@@ -511,7 +526,13 @@ async fn occupied_workspace_rejects_atomically_and_refunds_only_owned_lease() {
         .collect::<Vec<_>>();
     assert_workspace_output(&batches, &fixture, true);
     operator.reset().unwrap();
-    assert_eq!(operator.runtime.pool.reserved(), 0);
+    let pool = operator.runtime.pool.clone();
+    drop(before);
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(context);
+    drop(job);
+    drop(operator);
+    assert_eq!(pool.reserved(), 0);
 }
 
 struct RejectWorkspaceOutput {
@@ -550,11 +571,21 @@ async fn rejected_workspace_prefix_preserves_snapshot_sequence_and_refunds() {
     assert_eq!(output.calls, 1);
     assert_eq!(operator.status, before_status);
     assert_eq!(operator.next_output_sequence, 0);
+    let funding = job.gather_owner().funding();
+    assert_eq!(
+        operator.runtime.pool.reserved(),
+        before_reserved + funding.0 + funding.1
+    );
     assert_eq!(
         operator.capture(Epoch::INITIAL).unwrap().segments,
         before.segments
     );
-    assert_eq!(operator.runtime.pool.reserved(), before_reserved);
     operator.reset().unwrap();
-    assert_eq!(operator.runtime.pool.reserved(), 0);
+    let pool = operator.runtime.pool.clone();
+    drop(before);
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(context);
+    drop(job);
+    drop(operator);
+    assert_eq!(pool.reserved(), 0);
 }
