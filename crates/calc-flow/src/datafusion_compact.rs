@@ -80,13 +80,7 @@ fn plan_with_policy(
     let context = runtime.context_for_rows(0, None, "not_evaluated");
     let state_ref = context.state_ref();
     let state = state_ref.read();
-    let bytes = registry_charge(&state, node_id)?;
-    reservation
-        .try_grow(bytes)
-        .map_err(|error| datafusion_error(Some(node_id), error))?;
-    if native {
-        reject_extensions(&state, node_id)?;
-    }
+    reserve_plan_registry(&state, &reservation, node_id, native)?;
     let options = state.config_options();
     let declared = TableReference::from(alias).resolve(
         &options.catalog.default_catalog,
@@ -95,27 +89,10 @@ fn plan_with_policy(
     let references = state
         .resolve_table_references(&query.statement())
         .map_err(|error| datafusion_error(Some(node_id), error))?;
-    if (native && references.len() != 1)
-        || references.iter().any(|reference| {
-            reference.clone().resolve(
-                &options.catalog.default_catalog,
-                &options.catalog.default_schema,
-            ) != declared
-        })
-    {
-        return Err(datafusion_error(
-            Some(node_id),
-            DataFusionError::Plan("compact planner requires one declared input lookup".into()),
-        ));
-    }
+    validate_declared_input(&references, &declared, options, node_id, native)?;
     let source = MemTable::try_new(schema.clone(), vec![vec![RecordBatch::new_empty(schema)]])
         .map_err(|error| datafusion_error(Some(node_id), error))?;
-    let type_planner = if native {
-        None
-    } else {
-        let mut view = SessionStateBuilder::new_from_existing(state.clone());
-        view.type_planner().clone()
-    };
+    let type_planner = planning_type_planner(&state, native);
     let provider = SingleInput {
         state: &state,
         declared,
@@ -124,18 +101,77 @@ fn plan_with_policy(
         native,
         type_planner,
     };
-    let raw = SqlToRel::new_with_options(&provider, ParserOptions::from(&options.sql_parser))
+    let (raw, analyzed) = analyze_query(&state, &provider, options, query, node_id)?;
+    Ok(PaidSqlPlan {
+        raw,
+        analyzed,
+        _reservation: reservation,
+    })
+}
+
+fn reserve_plan_registry(
+    state: &SessionState,
+    reservation: &MemoryReservation,
+    node_id: &str,
+    native: bool,
+) -> Result<()> {
+    let bytes = registry_charge(state, node_id)?;
+    reservation
+        .try_grow(bytes)
+        .map_err(|error| datafusion_error(Some(node_id), error))?;
+    if native {
+        reject_extensions(state, node_id)?;
+    }
+    Ok(())
+}
+
+fn validate_declared_input(
+    references: &[TableReference],
+    declared: &ResolvedTableReference,
+    options: &ConfigOptions,
+    node_id: &str,
+    native: bool,
+) -> Result<()> {
+    if (native && references.len() != 1)
+        || references.iter().any(|reference| {
+            reference.clone().resolve(
+                &options.catalog.default_catalog,
+                &options.catalog.default_schema,
+            ) != *declared
+        })
+    {
+        return Err(datafusion_error(
+            Some(node_id),
+            DataFusionError::Plan("compact planner requires one declared input lookup".into()),
+        ));
+    }
+    Ok(())
+}
+
+fn planning_type_planner(state: &SessionState, native: bool) -> Option<Arc<dyn TypePlanner>> {
+    if native {
+        None
+    } else {
+        let mut view = SessionStateBuilder::new_from_existing(state.clone());
+        view.type_planner().clone()
+    }
+}
+
+fn analyze_query(
+    state: &SessionState,
+    provider: &SingleInput<'_>,
+    options: &ConfigOptions,
+    query: &ValidatedQuery,
+    node_id: &str,
+) -> Result<(LogicalPlan, LogicalPlan)> {
+    let raw = SqlToRel::new_with_options(provider, ParserOptions::from(&options.sql_parser))
         .statement_to_plan(query.statement())
         .map_err(|error| datafusion_error(Some(node_id), error))?;
     let analyzed = state
         .analyzer()
         .execute_and_check(raw.clone(), options, |_, _| {})
         .map_err(|error| datafusion_error(Some(node_id), error))?;
-    Ok(PaidSqlPlan {
-        raw,
-        analyzed,
-        _reservation: reservation,
-    })
+    Ok((raw, analyzed))
 }
 
 fn reject_extensions(state: &SessionState, node_id: &str) -> Result<()> {
