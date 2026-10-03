@@ -22,9 +22,10 @@ struct Entry {
     bucket: Arc<RightBucket>,
     payload_position: u32,
     identity_position: u32,
+    dominance_position: u32,
 }
 
-const _: () = assert!(size_of::<Entry>() == 40);
+const _: () = assert!(size_of::<Entry>() == 48);
 
 pub(in super::super) struct RightState {
     pub(in super::super) buckets: HashTable<u32>,
@@ -32,6 +33,7 @@ pub(in super::super) struct RightState {
     hasher: RandomState,
     payloads: Heap,
     identities: Heap,
+    dominance: Heap,
     bucket_bytes: u64,
     lease: Option<Arc<datafusion::execution::memory_pool::MemoryReservation>>,
 }
@@ -44,6 +46,7 @@ impl Default for RightState {
             hasher: RandomState::with_seed(ahash::RandomState::new().hash_one(0_u64)),
             payloads: Heap::new(Kind::Payload, 0),
             identities: Heap::new(Kind::Identity, 0),
+            dominance: Heap::new(Kind::Dominance, 0),
             bucket_bytes: 0,
             lease: None,
         }
@@ -58,11 +61,12 @@ impl RightState {
         ]
     }
 
-    pub fn with_index_capacities(entries: usize, buckets: usize, heaps: [usize; 2]) -> Self {
+    pub fn with_index_capacities(entries: usize, buckets: usize, heaps: [usize; 3]) -> Self {
         Self {
             entries: Vec::with_capacity(entries),
             payloads: Heap::new(Kind::Payload, heaps[0]),
             identities: Heap::new(Kind::Identity, heaps[1]),
+            dominance: Heap::new(Kind::Dominance, heaps[2]),
             buckets: HashTable::with_capacity(super::payload::bucket_capacity(buckets)),
             ..Self::default()
         }
@@ -75,22 +79,33 @@ impl RightState {
         self.bucket_bytes
     }
 
-    pub fn heap_capacities(&self) -> [usize; 2] {
-        [self.payloads.capacity(), self.identities.capacity()]
+    pub fn heap_capacities(&self) -> [usize; 3] {
+        [
+            self.payloads.capacity(),
+            self.identities.capacity(),
+            self.dominance.capacity(),
+        ]
     }
 
-    pub fn minima(&self) -> [Option<i64>; 2] {
-        [self.payloads.minimum(), self.identities.minimum()]
+    pub fn minima(&self) -> [Option<i64>; 3] {
+        [
+            self.payloads.minimum(),
+            self.identities.minimum(),
+            self.dominance.minimum(),
+        ]
     }
 
-    pub fn due_count(&self, cutoffs: [i128; 2]) -> usize {
-        self.payloads.due_count(cutoffs[0]) + self.identities.due_count(cutoffs[1])
+    pub fn due_count(&self, cutoffs: [i128; 3]) -> usize {
+        self.payloads.due_count(cutoffs[0])
+            + self.identities.due_count(cutoffs[1])
+            + self.dominance.due_count(cutoffs[2])
     }
 
-    pub fn due_keys(&self, cutoffs: [i128; 2]) -> Vec<u32> {
+    pub fn due_keys(&self, cutoffs: [i128; 3]) -> Vec<u32> {
         let mut ids = Vec::with_capacity(self.due_count(cutoffs));
         self.payloads.collect_due(cutoffs[0], &mut ids);
         self.identities.collect_due(cutoffs[1], &mut ids);
+        self.dominance.collect_due(cutoffs[2], &mut ids);
         ids.sort_unstable();
         ids.dedup();
         ids
@@ -105,6 +120,7 @@ impl RightState {
         (self.entries.capacity() * size_of::<Entry>()
             + self.payloads.allocation_bytes()
             + self.identities.allocation_bytes()
+            + self.dominance.allocation_bytes()
             + hash_allocation(super::payload::backing_buckets(&self.buckets))
             + self.entries.len() * (size_of::<RightBucket>() + 2 * size_of::<usize>()))
             as u64
@@ -155,6 +171,7 @@ impl RightState {
         let mut bytes = ((capacity - self.entries.capacity()) * size_of::<Entry>()
             + capacity.saturating_sub(self.payloads.capacity()) * 16
             + capacity.saturating_sub(self.identities.capacity()) * 16
+            + capacity.saturating_sub(self.dominance.capacity()) * 16
             + hash_allocation(buckets)
             - hash_allocation(previous_buckets)
             + new * (size_of::<RightBucket>() + 2 * size_of::<usize>()))
@@ -340,8 +357,12 @@ impl RightState {
         let bucket = &self.entries[id as usize].bucket;
         let payload = bucket.payload_min();
         let identity = bucket.identity_min();
+        let dominance = bucket.dominance_min();
         self.payloads.replace(&mut self.entries, id, payload);
         self.identities.replace(&mut self.entries, id, identity);
+        if self.dominance.capacity() != 0 {
+            self.dominance.replace(&mut self.entries, id, dominance);
+        }
     }
 
     pub fn evict_bucket(
@@ -375,6 +396,7 @@ impl RightState {
         super::expiration_cost_tests::record_dictionary();
         self.payloads.replace(&mut self.entries, id, None);
         self.identities.replace(&mut self.entries, id, None);
+        self.dominance.replace(&mut self.entries, id, None);
         let hash = self.entries[id as usize].hash;
         self.buckets
             .find_entry(hash, |entry| *entry == id)
@@ -399,6 +421,7 @@ impl RightState {
             .expect("moved ASOF hash handle") = id;
         self.payloads.rename(&mut self.entries, id);
         self.identities.rename(&mut self.entries, id);
+        self.dominance.rename(&mut self.entries, id);
     }
 
     #[cfg(test)]
@@ -422,13 +445,17 @@ impl RightState {
         if self.identities.capacity() < self.entries.len() {
             self.identities.reserve_exact(self.entries.capacity());
         }
+        if self.dominance.capacity() < self.entries.len() {
+            self.dominance.reserve_exact(self.entries.capacity());
+        }
         self.refresh(u32::try_from(id).expect("preflighted ASOF dictionary handle"));
         id
     }
 
     pub fn insert_restored(&mut self, key: Encoding, bucket: RightBucket) {
         let hash = self.hasher.hash_one(key.as_slice());
-        self.insert_unique(hash, key, bucket);
+        let id = self.insert_unindexed(hash, key, bucket);
+        self.refresh(u32::try_from(id).expect("preflighted ASOF dictionary handle"));
     }
 
     fn insert_unindexed(&mut self, hash: u64, key: Encoding, bucket: RightBucket) -> usize {
@@ -444,6 +471,7 @@ impl RightState {
             bucket: Arc::new(bucket),
             payload_position: ABSENT,
             identity_position: ABSENT,
+            dominance_position: ABSENT,
         });
         let entries = &self.entries;
         self.buckets

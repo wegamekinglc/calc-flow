@@ -18,9 +18,11 @@ use crate::{Result, StateSegment};
 use owners::{OwnerReader, OwnerWriter};
 use std::{collections::BTreeMap, sync::Arc};
 
-pub(super) const INDEX_SEGMENT: &str = "asof-index-v4";
-const MAGIC: &[u8; 8] = b"CFASOF04";
-pub(in super::super) const BASE_BYTES: u64 = 96;
+pub(super) const INDEX_SEGMENT: &str = "asof-index-v6";
+pub(super) const FULL_SEGMENT: &str = "asof-index-v5";
+const MAGIC: &[u8; 8] = b"CFASOF06";
+const FULL_MAGIC: &[u8; 8] = b"CFASOF05";
+pub(in super::super) const BASE_BYTES: u64 = 104;
 const LEFT_HEADER: u64 = 73;
 const RIGHT_HEADER: u64 = 65;
 
@@ -258,6 +260,7 @@ pub(super) fn encode_sync(state: &State, length: u64, limit: usize) -> Result<St
         state.left.chunk_capacity(),
         state.right.heap_capacities()[0],
         state.right.heap_capacities()[1],
+        state.right.heap_capacities()[2],
     ] {
         put(&mut bytes, value as u64);
     }
@@ -454,19 +457,19 @@ struct Header {
     buckets: usize,
     left_rows: usize,
     capacities: [usize; 5],
-    heaps: [usize; 2],
+    heaps: [usize; 3],
 }
 
 fn read_header(cursor: &mut Cursor<'_>, max_rows: u64) -> Result<Header> {
     let magic = cursor.take(8)?;
-    if magic != MAGIC {
+    if magic != MAGIC && magic != FULL_MAGIC {
         return Err(mismatch("ASOF index magic differs"));
     }
     let [chunks, buckets, left_rows] = cursor.addresses()?;
     validate_header_counts(chunks, buckets, left_rows, max_rows)?;
-    let capacities = cursor.capacities([25, 25, 40, 5, 32])?;
+    let capacities = cursor.capacities([25, 25, 48, 5, 32])?;
     validate_header_capacities(capacities, chunks, buckets)?;
-    let heaps = cursor.capacities([16, 16])?;
+    let heaps = cursor.capacities([16, 16, 16])?;
     for capacity in heaps {
         require_capacity(capacity, buckets)?;
         u32::try_from(capacity)
@@ -543,7 +546,7 @@ fn scan_column_charge(
 
 fn header_restore_charge(header: &Header, max_bytes: u64) -> Result<u64> {
     let mut charge = 0;
-    for (capacity, width) in header.capacities.into_iter().zip([25, 25, 40, 5, 32]) {
+    for (capacity, width) in header.capacities.into_iter().zip([25, 25, 48, 5, 32]) {
         charge = restore_add(charge, allocation(capacity, width, max_bytes)?)?;
     }
     for capacity in header.heaps {
@@ -729,7 +732,11 @@ fn finalize_restored_state(state: &mut State, header: &Header, batch_count: usiz
     }
     validate_left_order(state)?;
     state.rebuild_encoding_owners();
-    [state.right_payload_min, state.right_identity_min] = state.right.minima();
+    [
+        state.right_payload_min,
+        state.right_identity_min,
+        state.right_dominance_min,
+    ] = state.right.minima();
     validate_reconstructed_capacities(state, header)
 }
 
@@ -1370,6 +1377,7 @@ mod tests {
             u64::from(right),
             if right { 4 } else { 0 },
             u64::from(!right),
+            u64::from(right),
             u64::from(right),
             u64::from(right),
         ] {

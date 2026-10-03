@@ -146,7 +146,7 @@ fn test_asof_all_due_expiration_releases_index_capacity() {
     assert_eq!(preview.removed_identities, 4_096);
     assert!(state.right.is_empty());
     assert_eq!(state.right.checkpoint_capacities(), [0, 0]);
-    assert_eq!(state.right.heap_capacities(), [0, 0]);
+    assert_eq!(state.right.heap_capacities(), [0, 0, 0]);
     assert_eq!(state.right_identity_min, None);
     assert_eq!(visits.preview, 4_096);
     assert_eq!(visits.dictionary, 4_096);

@@ -353,7 +353,7 @@ async fn assert_shared_right_copy_preparation(admission: bool) {
 }
 
 #[tokio::test]
-async fn new_checkpoint_uses_columnar_v4_and_restores_the_same_state_charge() {
+async fn new_checkpoint_uses_columnar_v6_and_restores_the_same_state_charge() {
     let (mut operator, left, right) = prefix_fixture();
     let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
     let context = StreamOperatorContext::new(&job, "asof", None);
@@ -372,13 +372,13 @@ async fn new_checkpoint_uses_columnar_v4_and_restores_the_same_state_charge() {
         serde_json::json!(3)
     );
     for field in ["layout_version", "accounting_version"] {
-        assert_eq!(snapshot.inline_metadata[field], serde_json::json!(4));
+        assert_eq!(snapshot.inline_metadata[field], serde_json::json!(6));
     }
     let index = snapshot
         .segments
-        .get("asof-index-v4")
-        .expect("columnar v4 index");
-    assert_eq!(&index.bytes()[..8], b"CFASOF04");
+        .get("asof-index-v6")
+        .expect("columnar v6 index");
+    assert_eq!(&index.bytes()[..8], b"CFASOF06");
     let (mut restored, _, _) = prefix_fixture();
     restored.restore(&snapshot).unwrap();
     assert_eq!(restored.status.state_bytes, operator.status.state_bytes);
@@ -858,7 +858,7 @@ async fn admission_prepares_index_only_when_checkpoint_is_captured() {
     assert!(op.prepared.is_none(), "admission must defer index encoding");
     let charged = op.status.state_bytes;
     let snapshot = op.capture(Epoch::INITIAL).unwrap();
-    assert!(snapshot.segments.contains_key("asof-index-v4"));
+    assert!(snapshot.segments.contains_key("asof-index-v6"));
     assert_eq!(op.status.state_bytes, charged);
     assert!(op.prepared.is_some());
 }
@@ -920,7 +920,7 @@ async fn async_checkpoint_preparation_keeps_capture_on_shared_bytes() {
     let snapshot = op.checkpoint(Epoch::INITIAL).unwrap();
     assert!(Arc::ptr_eq(
         &prepared,
-        &snapshot.segments["asof-index-v4"].bytes_arc()
+        &snapshot.segments["asof-index-v6"].bytes_arc()
     ));
 }
 
@@ -1178,7 +1178,7 @@ async fn finalization_without_eviction_does_not_clone_retained_state() {
     let expected = op.prepare_checkpoint(&op.state, &cx).await.unwrap();
     let captured = op.capture(Epoch::INITIAL).unwrap();
     assert_eq!(
-        captured.segments.get("asof-index-v4").cloned(),
+        captured.segments.get("asof-index-v6").cloned(),
         expected.segment.map(|segment| segment.canonical()),
         "checkpoint bytes stay canonical"
     );
@@ -1196,7 +1196,7 @@ async fn finalized_prefixes_release_old_checkpoint_bytes_and_defer_new_encoding(
     op.process_data("left", left, &cx, &mut collector)
         .await
         .unwrap();
-    let committed = op.capture(Epoch::INITIAL).unwrap().segments["asof-index-v4"].bytes_arc();
+    let committed = op.capture(Epoch::INITIAL).unwrap().segments["asof-index-v6"].bytes_arc();
     let owners = Arc::strong_count(&committed);
     op.on_watermark(EventTime::from_micros(103), &cx, &mut collector)
         .await
@@ -1222,14 +1222,14 @@ async fn finalized_prefixes_release_old_checkpoint_bytes_and_defer_new_encoding(
         op.status.state_bytes,
         op.current_inventory(op.prepared.as_ref()).unwrap().bytes
     );
-    let captured = op.capture(Epoch::INITIAL).unwrap().segments["asof-index-v4"].clone();
+    let captured = op.capture(Epoch::INITIAL).unwrap().segments["asof-index-v6"].clone();
     assert_eq!(Some(captured.clone()), expected, "capture stays canonical");
     assert_eq!(
         Arc::strong_count(&committed),
         1,
         "obsolete checkpoint bytes stay unowned by the operator"
     );
-    let repeated = op.capture(Epoch::INITIAL).unwrap().segments["asof-index-v4"].bytes_arc();
+    let repeated = op.capture(Epoch::INITIAL).unwrap().segments["asof-index-v6"].bytes_arc();
     assert!(
         Arc::ptr_eq(&captured.bytes_arc(), &repeated),
         "later captures share the materialized bytes"
@@ -1300,8 +1300,8 @@ async fn cancelled_prefix_has_canonical_checkpoint_and_resumes_exactly() {
     restored.restore(&snapshot).unwrap();
     let repeated = restored.capture(Epoch::INITIAL).unwrap();
     assert!(Arc::ptr_eq(
-        &snapshot.segments["asof-index-v4"].bytes_arc(),
-        &repeated.segments["asof-index-v4"].bytes_arc()
+        &snapshot.segments["asof-index-v6"].bytes_arc(),
+        &repeated.segments["asof-index-v6"].bytes_arc()
     ));
     restored.restore(&repeated).unwrap();
     let mut remaining = EdgeCollector::new(restored.output_ports().to_vec());
@@ -1632,7 +1632,7 @@ async fn finalized_prefix_keeps_index_deferred_until_capture() {
         Some(checkpoint::v3_encoded_length(&op.state, &op.name).unwrap())
     );
     let snapshot = op.capture(Epoch::INITIAL).unwrap();
-    assert!(snapshot.segments.contains_key("asof-index-v4"));
+    assert!(snapshot.segments.contains_key("asof-index-v6"));
 }
 
 #[tokio::test]
@@ -1930,8 +1930,8 @@ async fn watermark_tick_without_eviction_reuses_the_prepared_segment() {
     let swept = op.capture(Epoch::INITIAL).unwrap();
     assert_eq!(op.status().evicted_right_rows, 1);
     assert!(!Arc::ptr_eq(
-        &admitted.segments["asof-index-v4"].bytes_arc(),
-        &swept.segments["asof-index-v4"].bytes_arc()
+        &admitted.segments["asof-index-v6"].bytes_arc(),
+        &swept.segments["asof-index-v6"].bytes_arc()
     ));
 
     // An identical tick changes nothing: status is untouched and the prepared
@@ -1943,8 +1943,8 @@ async fn watermark_tick_without_eviction_reuses_the_prepared_segment() {
     let repeated = op.capture(Epoch::INITIAL).unwrap();
     assert_eq!(op.status(), status);
     assert!(Arc::ptr_eq(
-        &swept.segments["asof-index-v4"].bytes_arc(),
-        &repeated.segments["asof-index-v4"].bytes_arc()
+        &swept.segments["asof-index-v6"].bytes_arc(),
+        &repeated.segments["asof-index-v6"].bytes_arc()
     ));
 
     // Watermark progress below the next evictable row also reuses it.
@@ -1954,8 +1954,8 @@ async fn watermark_tick_without_eviction_reuses_the_prepared_segment() {
         .unwrap();
     let advanced = op.capture(Epoch::INITIAL).unwrap();
     assert!(Arc::ptr_eq(
-        &swept.segments["asof-index-v4"].bytes_arc(),
-        &advanced.segments["asof-index-v4"].bytes_arc()
+        &swept.segments["asof-index-v6"].bytes_arc(),
+        &advanced.segments["asof-index-v6"].bytes_arc()
     ));
     assert_eq!(
         op.status().output_watermark_micros,
@@ -2042,3 +2042,9 @@ mod expiration_output_integration;
 
 #[path = "tests/restored_workspace.rs"]
 mod restored_workspace;
+
+#[path = "tests/dominated_payloads.rs"]
+mod dominated_payloads;
+
+#[path = "tests/retained_projection.rs"]
+mod retained_projection;

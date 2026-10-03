@@ -497,6 +497,7 @@ pub(super) struct State {
     pub batches: PayloadPool,
     pub right_payload_min: Option<i64>,
     pub right_identity_min: Option<i64>,
+    pub right_dominance_min: Option<i64>,
     encoding_owners: Option<EncodingOwners>,
     pub sequence_kinds: [SequenceKind; 2],
 }
@@ -546,7 +547,14 @@ impl State {
     pub fn rebuild_right_minima(&mut self) {
         self.right_payload_min = None;
         self.right_identity_min = None;
+        self.right_dominance_min = None;
         for bucket in self.right.values() {
+            if let Some(time) = bucket.dominance_min() {
+                self.right_dominance_min = Some(
+                    self.right_dominance_min
+                        .map_or(time, |previous| previous.min(time)),
+                );
+            }
             if let Some(time) = bucket.payload_min() {
                 self.right_payload_min = Some(
                     self.right_payload_min
@@ -1018,8 +1026,7 @@ fn preview_row_disposition(
     row: Option<&RowRef>,
     conditions: &EvictionConditions<'_>,
 ) -> (bool, bool) {
-    let expired_payload =
-        row.is_some() && payload_expired(time, conditions.tolerance, conditions.threshold);
+    let expired_payload = row.is_some();
     let remove = (row.is_none() || expired_payload) && identity_expired(time, conditions.status);
     (expired_payload, remove)
 }
@@ -1325,7 +1332,11 @@ impl State {
         if let Some(dictionary) = dictionary {
             dictionary.install(&mut self.right);
         }
-        [self.right_payload_min, self.right_identity_min] = self.right.minima();
+        [
+            self.right_payload_min,
+            self.right_identity_min,
+            self.right_dominance_min,
+        ] = self.right.minima();
         for (&batch, &removed) in &preview.batches {
             self.batches.detach_count(batch, removed);
         }
@@ -1375,7 +1386,7 @@ fn eviction_cutoffs(
     status: &super::StreamAsofJoinStatus,
     tolerance: u64,
     threshold: i128,
-) -> [i128; 2] {
+) -> [i128; 3] {
     let payload = threshold.saturating_sub(i128::from(tolerance));
     let identity = if status.right.ended {
         i128::MAX
@@ -1385,7 +1396,7 @@ fn eviction_cutoffs(
             .watermark_micros
             .map_or(i128::MIN, |time| i128::from(time.as_micros()))
     };
-    [payload, identity]
+    [payload, identity, threshold.saturating_add(1)]
 }
 
 /// Reports whether `evict` would drop any payload or identity, without
@@ -1398,8 +1409,11 @@ pub(super) fn eviction_pending(
 ) -> bool {
     let threshold = retention_threshold(state, status);
     state
-        .right_payload_min
-        .is_some_and(|time| payload_expired(time, tolerance, threshold))
+        .right_dominance_min
+        .is_some_and(|time| i128::from(time) <= threshold)
+        || state
+            .right_payload_min
+            .is_some_and(|time| payload_expired(time, tolerance, threshold))
         || state
             .right_identity_min
             .is_some_and(|time| identity_expired(time, status))

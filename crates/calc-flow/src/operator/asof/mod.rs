@@ -10,6 +10,7 @@ mod identity_compare;
 mod metadata;
 mod output;
 mod output_plan;
+mod payload_projection;
 mod schema;
 mod spec;
 mod state;
@@ -61,6 +62,7 @@ pub struct StreamAsofJoinOperator {
     outputs: Vec<Port>,
     schemas: [SchemaRef; 3],
     output_columns: Option<[Vec<usize>; 2]>,
+    payload_projection: Option<Box<payload_projection::PayloadProjection>>,
     state: State,
     prepared: Option<checkpoint::PreparedSegment>,
     /// Exact index length reserved in the state gauge, encoded on the first
@@ -239,6 +241,7 @@ impl StreamAsofJoinOperator {
             outputs,
             schemas,
             output_columns: None,
+            payload_projection: None,
             state,
             prepared: None,
             deferred_index_len: None,
@@ -258,30 +261,7 @@ impl StreamAsofJoinOperator {
     /// fingerprint intact. Input validation and duplicate proofs still use
     /// every declared identity column.
     pub(crate) fn set_output_projection(&mut self, columns: Vec<usize>) -> Result<()> {
-        let schema = self.schemas[2]
-            .project(&columns)
-            .map_err(|error| arrow_error(&error))?;
-        self.outputs[0] = Port::with_schema_ref(
-            "output",
-            BatchKind::Table,
-            true,
-            Some(std::sync::Arc::new(schema)),
-        )?;
-        self.runtime.set_output_projection(columns.clone());
-        let left_fields = self.schemas[0].fields().len();
-        self.output_columns = Some([
-            columns
-                .iter()
-                .copied()
-                .filter(|&index| index < left_fields)
-                .collect(),
-            columns
-                .into_iter()
-                .filter(|&index| index >= left_fields)
-                .map(|index| index - left_fields)
-                .collect(),
-        ]);
-        Ok(())
+        self.configure_projection(columns)
     }
     /// Returns payload-free committed state and attempt counters.
     pub fn status(&self) -> StreamAsofJoinStatus {
@@ -454,6 +434,7 @@ impl StreamOperator for StreamAsofJoinOperator {
     }
     fn restore(&mut self, snapshot: &crate::OperatorStateSnapshot) -> Result<()> {
         let decoded = self.decoded_snapshot(snapshot)?;
+        let decoded = self.normalize_empty_snapshot(decoded)?;
         self.install_restored(snapshot, decoded);
         Ok(())
     }

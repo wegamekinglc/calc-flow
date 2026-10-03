@@ -12,7 +12,7 @@ pub(super) struct Capacities {
 
 impl Capacities {
     pub fn container_bytes(&self, keys: usize) -> u64 {
-        (self.entries * (size_of::<Entry>() + 32)
+        (self.entries * (size_of::<Entry>() + 48)
             + hash_allocation(self.backing)
             + keys * (size_of::<RightBucket>() + 2 * size_of::<usize>())) as u64
     }
@@ -20,9 +20,9 @@ impl Capacities {
     pub fn workspace_bytes(&self, state: &RightState, name: &str) -> Result<usize> {
         total(
             &[
-                allocation(state.entries.capacity(), size_of::<Entry>() - 8, name)?,
+                allocation(state.entries.capacity(), size_of::<Entry>() - 16, name)?,
                 hash_allocation(super::super::payload::backing_buckets(&state.buckets)),
-                allocation(self.entries, size_of::<Entry>() + 32, name)?,
+                allocation(self.entries, size_of::<Entry>() + 48, name)?,
                 hash_allocation(self.backing),
             ],
             name,
@@ -35,6 +35,7 @@ pub(in super::super::super) struct PreparedCompaction {
     buckets: HashTable<u32>,
     payloads: Heap,
     identities: Heap,
+    dominance: Heap,
     growth: Growth,
     _workspace: MemoryReservation,
 }
@@ -53,10 +54,12 @@ impl PreparedCompaction {
         }
         self.payloads.copy_records_from(&state.payloads);
         self.identities.copy_records_from(&state.identities);
+        self.dominance.copy_records_from(&state.dominance);
         state.entries = self.entries;
         state.buckets = self.buckets;
         state.payloads = self.payloads;
         state.identities = self.identities;
+        state.dominance = self.dominance;
         let reservation = self.growth.commit();
         reservation.shrink(reservation.size() - state.auxiliary_bytes());
         state.lease = Some(reservation);
@@ -73,6 +76,7 @@ impl RightState {
             .capacity()
             .max(self.payloads.capacity())
             .max(self.identities.capacity())
+            .max(self.dominance.capacity())
             .max(super::super::payload::bucket_capacity(
                 super::super::payload::backing_buckets(&self.buckets),
             ));
@@ -105,6 +109,7 @@ impl RightState {
             )),
             payloads: Heap::new(Kind::Payload, capacities.entries),
             identities: Heap::new(Kind::Identity, capacities.entries),
+            dominance: Heap::new(Kind::Dominance, capacities.entries),
             growth,
             _workspace: workspace,
         }))

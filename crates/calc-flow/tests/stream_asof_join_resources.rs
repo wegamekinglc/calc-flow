@@ -343,9 +343,14 @@ async fn run_trace(trace: Trace, observation: &mut Observation) {
 fn assert_retained_history(op: &StreamAsofJoinOperator, trace: Trace, round: usize) {
     if matches!(trace, Trace::Advancing | Trace::HotKey) {
         assert_eq!(op.status().pending_left_rows, 0);
+        let keys = if matches!(trace, Trace::HotKey) && round >= 4 {
+            101
+        } else {
+            KEYS
+        };
         assert_eq!(
             op.status().retained_right_rows,
-            u64::try_from((round + 1).min(4) * KEYS).unwrap()
+            u64::try_from(keys).unwrap()
         );
     }
 }

@@ -275,12 +275,20 @@ impl StreamAsofJoinOperator {
                 continue;
             }
             let event_times = super::admission::times(record, side);
-            let _column_scratch = self.reserve_workspace(record.num_columns() as u64 * 512)?;
+            let _column_scratch = self
+                .reserve_workspace(self.physical_schema(input.index).fields().len() as u64 * 512)?;
+            let retained = self
+                .payload_projection
+                .as_ref()
+                .map(|plan| &plan.columns[input.index]);
             let columns = record
                 .columns()
                 .iter()
-                .cloned()
-                .map(ColumnWorkspace::new)
+                .enumerate()
+                .filter(|(index, _)| {
+                    retained.is_none_or(|columns| columns.binary_search(index).is_ok())
+                })
+                .map(|(_, column)| ColumnWorkspace::new(column.clone()))
                 .collect::<Result<Vec<_>>>()?;
             let mut accepted = 0_u64;
             let mut raw = 0_u64;
@@ -297,7 +305,8 @@ impl StreamAsofJoinOperator {
             if accepted == 0 {
                 continue;
             }
-            let schema = payload_charge(record.schema().as_ref(), &self.name)?.schema_bytes;
+            let schema =
+                payload_charge(self.physical_schema(input.index), &self.name)?.schema_bytes;
             let estimate = checked(&self.name, schema.saturating_mul(2), raw.saturating_mul(4))?;
             bytes = checked(
                 &self.name,

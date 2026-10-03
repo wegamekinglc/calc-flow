@@ -343,7 +343,10 @@ impl StreamAsofJoinOperator {
             rows,
             input.index,
             base,
-            self.payload_header_bytes[input.index],
+            self.physical_header(input.index),
+            self.payload_projection
+                .as_ref()
+                .map(|plan| plan.columns[input.index].as_slice()),
             &self.name,
         )?;
         let rows = ordered_admission_rows(rows, input.index);
@@ -737,7 +740,11 @@ impl Admission {
             for (key, _) in self.right_capacities.drain(..) {
                 state.right.refresh_key(&key);
             }
-            [state.right_payload_min, state.right_identity_min] = state.right.minima();
+            [
+                state.right_payload_min,
+                state.right_identity_min,
+                state.right_dominance_min,
+            ] = state.right.minima();
             status.right.accepted_rows = self.accepted;
         }
     }
@@ -870,6 +877,7 @@ fn encode_rows(
     side: usize,
     base: u64,
     header: u64,
+    retained: Option<&[usize]>,
     name: &str,
 ) -> Result<EncodedInput> {
     let mut payloads = Vec::new();
@@ -881,7 +889,16 @@ fn encode_rows(
                 .iter()
                 .take_while(|(_, candidate, _)| std::ptr::eq(*candidate, batch))
                 .count();
-        let compact = compact_accepted_rows(&rows[position..end], batch)?;
+        let projected = retained
+            .filter(|columns| columns.len() != batch.num_columns())
+            .map(|columns| {
+                batch
+                    .project(columns)
+                    .map_err(|error| super::arrow_error(&error))
+            })
+            .transpose()?;
+        let compact =
+            compact_accepted_rows(&rows[position..end], projected.as_ref().unwrap_or(batch))?;
         let payload = encode_payload(compact, side, base + position as u64, header, name)?;
         payloads.push((end - position, payload));
         position = end;
@@ -1014,6 +1031,7 @@ mod identity_tests {
             0,
             0,
             operator.payload_header_bytes[0],
+            None,
             "asof",
         )
         .unwrap();

@@ -18,7 +18,7 @@ struct Bucket {
 }
 
 pub(super) struct Index {
-    capacities: [usize; 7],
+    capacities: [usize; 8],
     kinds: [SequenceKind; 2],
     left_rows: usize,
     left: Vec<LeftChunk>,
@@ -118,6 +118,7 @@ impl Index {
                 state.left.chunk_capacity(),
                 state.right.heap_capacities()[0],
                 state.right.heap_capacities()[1],
+                state.right.heap_capacities()[2],
             ],
             kinds: state.sequence_kinds,
             left_rows: state.left.len(),

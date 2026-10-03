@@ -13,6 +13,7 @@ pub(super) fn validate_shape(metadata: &JsonMap) -> Result<()> {
         | "next_output_sequence" => value.as_u64().is_some(),
         "terminal" => value.is_boolean(),
         "metrics" => metrics(value),
+        "retained_payloads" => true,
         _ => false,
     }) {
         return Ok(());

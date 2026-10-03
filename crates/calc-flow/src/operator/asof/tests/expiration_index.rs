@@ -1,24 +1,31 @@
 use super::*;
 
-async fn current_snapshot() -> (StreamAsofJoinOperator, crate::OperatorStateSnapshot) {
+async fn populated_current_snapshot() -> (StreamAsofJoinOperator, crate::OperatorStateSnapshot) {
     let (mut operator, input) = fixture();
     let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
     let context = StreamOperatorContext::new(&job, "asof", None);
     let mut output = EdgeCollector::new(operator.output_ports().to_vec());
     operator
-        .process_data("right", input, &context, &mut output)
+        .process_data("right", input.clone(), &context, &mut output)
+        .await
+        .unwrap();
+    operator
+        .process_data("left", input, &context, &mut output)
         .await
         .unwrap();
     let snapshot = operator.capture(Epoch::INITIAL).unwrap();
-    operator.restore(&snapshot).unwrap();
+    assert_eq!(
+        snapshot.inline_metadata["layout_version"],
+        serde_json::json!(6)
+    );
     (operator, snapshot)
 }
 
-#[test]
-fn test_a03_mixed_and_unknown_snapshot_versions_fail_before_allocation() {
-    let (mut operator, _) = fixture();
-    let snapshot = operator.capture(Epoch::INITIAL).unwrap();
+#[tokio::test]
+async fn test_a03_mixed_and_unknown_snapshot_versions_fail_before_allocation() {
+    let (mut operator, snapshot) = populated_current_snapshot().await;
     let before = operator.status();
+    let reserved = operator.runtime.pool.reserved();
     for (state, layout, accounting) in [(3, 3, 4), (3, 4, 3), (3, 5, 5), (4, 4, 4)] {
         let mut invalid = snapshot.clone();
         invalid
@@ -32,7 +39,7 @@ fn test_a03_mixed_and_unknown_snapshot_versions_fail_before_allocation() {
             .insert("accounting_version".into(), serde_json::json!(accounting));
         assert!(operator.restore(&invalid).is_err());
         assert_eq!(operator.status(), before);
-        assert_eq!(operator.runtime.pool.reserved(), 0);
+        assert_eq!(operator.runtime.pool.reserved(), reserved);
     }
 }
 
@@ -52,12 +59,13 @@ fn test_a03_guard_preparation_workspace_failure_releases_auxiliary_growth() {
     ));
     assert_eq!(pool.reserved(), 0);
     assert_eq!(state.checkpoint_capacities(), [0, 0]);
-    assert_eq!(state.heap_capacities(), [0, 0]);
+    assert_eq!(state.heap_capacities(), [0, 0, 0]);
 }
 
 #[tokio::test]
 async fn test_a03_guard_dropped_preparation_preserves_installed_lease() {
-    let (operator, _) = current_snapshot().await;
+    let (mut operator, snapshot) = populated_current_snapshot().await;
+    operator.restore(&snapshot).unwrap();
     let before = operator.status();
     let capacities = operator.state.right.checkpoint_capacities();
     let expected = operator.state.right.auxiliary_bytes();
@@ -82,7 +90,7 @@ async fn test_a03_guard_dropped_preparation_preserves_installed_lease() {
 
 #[tokio::test]
 async fn test_a03_guard_failed_restore_preserves_live_state_and_lease() {
-    let (mut operator, snapshot) = current_snapshot().await;
+    let (mut operator, snapshot) = populated_current_snapshot().await;
     let before = operator.status();
     let expected = operator.state.right.auxiliary_bytes();
     let mut invalid = snapshot.clone();
@@ -102,17 +110,7 @@ async fn test_a03_guard_failed_restore_preserves_live_state_and_lease() {
 
 #[tokio::test]
 async fn test_a03_guard_progress_rejection_preserves_installed_lease() {
-    let (mut operator, _) = current_snapshot().await;
-    let (_, input) = fixture();
-    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
-    let context = StreamOperatorContext::new(&job, "asof", None);
-    let mut output = EdgeCollector::new(operator.output_ports().to_vec());
-    operator
-        .process_data("left", input, &context, &mut output)
-        .await
-        .unwrap();
-    assert_eq!(operator.status.pending_left_rows, 1);
-    let current = operator.capture(Epoch::INITIAL).unwrap();
+    let (mut operator, current) = populated_current_snapshot().await;
     let before = operator.status();
     let expected = operator.state.right.auxiliary_bytes();
     assert!(matches!(
@@ -141,7 +139,7 @@ async fn test_a03_guard_end_releases_all_expiration_storage() {
     assert_eq!(operator.status.state_rows, 0);
     assert_eq!(operator.status.state_bytes, 0);
     assert_eq!(operator.state.right.checkpoint_capacities(), [0, 0]);
-    assert_eq!(operator.state.right.heap_capacities(), [0, 0]);
+    assert_eq!(operator.state.right.heap_capacities(), [0, 0, 0]);
     assert_eq!(operator.runtime.pool.reserved(), 0);
 }
 
@@ -157,7 +155,7 @@ async fn test_a03_expiration_index_keeps_live_capacity_funded() {
         .unwrap();
     let dictionary = operator.state.right.checkpoint_capacities()[0];
     let heaps = operator.state.right.heap_capacities();
-    let expected = dictionary * 8 + heaps.into_iter().sum::<usize>() * 16;
+    let expected = dictionary * 16 + heaps.into_iter().sum::<usize>() * 16;
     assert!(expected > 0);
     assert_eq!(
         operator.runtime.pool.reserved(),
@@ -270,21 +268,22 @@ async fn test_a03_expiration_index_captures_distinct_accounting_layout() {
     );
     assert_eq!(
         snapshot.inline_metadata["layout_version"],
-        serde_json::json!(4)
+        serde_json::json!(6)
     );
     assert_eq!(
         snapshot.inline_metadata["accounting_version"],
-        serde_json::json!(4)
+        serde_json::json!(6)
     );
     assert_eq!(
-        &snapshot.segments["asof-index-v4"].bytes()[..8],
-        b"CFASOF04"
+        &snapshot.segments["asof-index-v6"].bytes()[..8],
+        b"CFASOF06"
     );
     assert!(!snapshot.segments.contains_key("asof-index-v3"));
-    let bytes = snapshot.segments["asof-index-v4"].bytes();
+    let bytes = snapshot.segments["asof-index-v6"].bytes();
     let declared = [
         u64::from_le_bytes(bytes[72..80].try_into().unwrap()),
         u64::from_le_bytes(bytes[80..88].try_into().unwrap()),
+        u64::from_le_bytes(bytes[88..96].try_into().unwrap()),
     ];
     assert_eq!(
         declared,

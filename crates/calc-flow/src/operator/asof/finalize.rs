@@ -353,7 +353,7 @@ async fn match_output_prefix(
         binary_search_candidate_rows(operator, count, context, &mut plan, workspace).await?
     };
     drop(cursor_workspace);
-    let plan = plan.finish(&operator.schemas[1], workspace, &operator.name)?;
+    let plan = plan.finish(operator.physical_schema(1), workspace, &operator.name)?;
     Ok(MatchedPrefix { plan, prefix })
 }
 

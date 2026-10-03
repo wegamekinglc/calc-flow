@@ -313,8 +313,7 @@ impl RightBucket {
         threshold: i128,
     ) -> (usize, u64, u64) {
         let payloads = self.payloads();
-        let removed_payloads =
-            payloads.prefix_len(|time| super::payload_expired(time, tolerance, threshold));
+        let removed_payloads = self.payload_removal_count(tolerance, threshold);
         let removed_ordered = self
             .identities
             .prefix_len(|time| super::identity_expired(time, status));
@@ -675,8 +674,7 @@ impl RightBucket {
         threshold: i128,
     ) -> impl Iterator<Item = ExpiredRow<'a>> {
         let payloads = self.payloads();
-        let payload_count =
-            payloads.prefix_len(|time| super::payload_expired(time, tolerance, threshold));
+        let payload_count = self.payload_removal_count(tolerance, threshold);
         let identity_count = self
             .identities
             .prefix_len(|time| super::identity_expired(time, status));
@@ -720,12 +718,11 @@ impl RightBucket {
         {
             self.general_identities.pop_first();
         }
+        let payload_count = self.payload_removal_count(tolerance, threshold);
         let Some(payloads) = self.payloads.as_mut() else {
             self.compact_identity_storage();
             return 0;
         };
-        let payload_count =
-            payloads.prefix_len(|time| super::payload_expired(time, tolerance, threshold));
         let identities = &mut self.identities;
         let general = &mut self.general_identities;
         let end = payloads.head + payload_count;
@@ -746,6 +743,28 @@ impl RightBucket {
         }
         self.compact_identity_storage();
         payload_count as u64
+    }
+
+    fn payload_removal_count(&self, tolerance: u64, threshold: i128) -> usize {
+        let payloads = self.payloads();
+        let expired =
+            payloads.prefix_len(|time| super::payload_expired(time, tolerance, threshold));
+        let dominated = payloads
+            .prefix_len(|time| i128::from(time) <= threshold)
+            .saturating_sub(1);
+        expired.max(dominated)
+    }
+
+    pub fn has_dominating_payload(&self, order: &OrderRef<'_>, threshold: i128) -> bool {
+        let payloads = self.payloads();
+        let end = payloads.head + payloads.prefix_len(|time| i128::from(time) <= threshold);
+        end.checked_sub(1)
+            .and_then(|index| payloads.at(index))
+            .is_some_and(|(witness, _)| &witness > order)
+    }
+
+    pub fn dominance_min(&self) -> Option<i64> {
+        self.payloads().times.get(self.payloads().head + 1).copied()
     }
 
     pub fn payload_min(&self) -> Option<i64> {

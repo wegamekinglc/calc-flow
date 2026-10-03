@@ -14,6 +14,7 @@ const _: () = assert!(size_of::<Deadline>() == 16);
 pub(super) enum Kind {
     Payload,
     Identity,
+    Dominance,
 }
 
 impl Kind {
@@ -21,6 +22,7 @@ impl Kind {
         match self {
             Self::Payload => entry.payload_position,
             Self::Identity => entry.identity_position,
+            Self::Dominance => entry.dominance_position,
         }
     }
 
@@ -28,6 +30,7 @@ impl Kind {
         match self {
             Self::Payload => entry.payload_position = position,
             Self::Identity => entry.identity_position = position,
+            Self::Dominance => entry.dominance_position = position,
         }
     }
 }

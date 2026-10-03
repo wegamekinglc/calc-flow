@@ -36,13 +36,15 @@ _TIME_TYPE = "timestamp[us, UTC]"
 
 
 def default_state_layout(capabilities: RuntimeCapabilities) -> int:
-    return (
-        4
-        if any(
-            operator.kind == "stream_asof_join" and 4 in operator.state_layouts
+    return max(
+        (
+            layout
             for operator in capabilities.operators
-        )
-        else 3
+            if operator.kind == "stream_asof_join"
+            for layout in operator.state_layouts
+            if layout in (5, 6)
+        ),
+        default=6,
     )
 
 
@@ -82,7 +84,7 @@ def _capability(analyzer: _Analyzer, path: str) -> None:
     }
     if (
         len(offered) == 1
-        and any(layout in offered[0].state_layouts for layout in (3, 4))
+        and 6 in offered[0].state_layouts
         and all(getattr(offered[0], name) == value for name, value in expected.items())
     ):
         return

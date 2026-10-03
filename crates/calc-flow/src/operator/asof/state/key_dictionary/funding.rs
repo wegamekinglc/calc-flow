@@ -50,6 +50,7 @@ pub(in super::super::super) struct PreparedStorage {
     buckets: Option<HashTable<u32>>,
     payloads: Option<Heap>,
     identities: Option<Heap>,
+    dominance: Option<Heap>,
     growth: Growth,
     _workspace: MemoryReservation,
 }
@@ -67,6 +68,9 @@ impl PreparedStorage {
         }
         if let Some(identities) = self.identities {
             state.identities = identities;
+        }
+        if let Some(dominance) = self.dominance {
+            state.dominance = dominance;
         }
         state.lease = Some(self.growth.commit());
     }
@@ -96,9 +100,10 @@ impl RightState {
     }
 
     pub fn auxiliary_bytes(&self) -> usize {
-        self.entries.capacity() * 8
+        self.entries.capacity() * 16
             + self.payloads.allocation_bytes()
             + self.identities.allocation_bytes()
+            + self.dominance.allocation_bytes()
     }
 
     pub fn prepare_storage(
@@ -119,6 +124,7 @@ impl RightState {
             buckets: self.copy_hash(backing),
             payloads: Self::copy_heap(&self.payloads, capacity),
             identities: Self::copy_heap(&self.identities, capacity),
+            dominance: Self::copy_heap(&self.dominance, capacity),
             growth,
             _workspace: workspace,
         })
@@ -127,9 +133,10 @@ impl RightState {
     fn auxiliary_capacity_bytes(&self, capacity: usize, name: &str) -> Result<usize> {
         total(
             &[
-                allocation(capacity, 8, name)?,
+                allocation(capacity, 16, name)?,
                 allocation(capacity.max(self.payloads.capacity()), 16, name)?,
                 allocation(capacity.max(self.identities.capacity()), 16, name)?,
+                allocation(capacity.max(self.dominance.capacity()), 16, name)?,
             ],
             name,
         )
@@ -145,14 +152,14 @@ impl RightState {
             total(
                 &[
                     allocation(self.entries.capacity(), size_of::<Entry>(), name)?,
-                    allocation(capacity, size_of::<Entry>() - 8, name)?,
+                    allocation(capacity, size_of::<Entry>() - 16, name)?,
                 ],
                 name,
             )?
         } else {
             0
         };
-        let heaps = [&self.payloads, &self.identities]
+        let heaps = [&self.payloads, &self.identities, &self.dominance]
             .into_iter()
             .filter(|heap| capacity > heap.capacity())
             .map(Heap::allocation_bytes)

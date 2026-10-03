@@ -69,8 +69,11 @@ fn historical_snapshot(value: &str) -> (StreamAsofJoinOperator, OperatorStateSna
     (operator, snapshot)
 }
 
-fn old_snapshots() -> [&'static str; 1] {
-    [include_str!("../tests/fixtures/legacy-v3/populated.json")]
+fn old_snapshots() -> [&'static str; 2] {
+    [
+        include_str!("../tests/fixtures/legacy-v3/populated.json"),
+        include_str!("../tests/fixtures/legacy-v4/dominated-retained.json"),
+    ]
 }
 
 fn is_version_mismatch(error: &CalcFlowError) -> bool {
@@ -79,14 +82,14 @@ fn is_version_mismatch(error: &CalcFlowError) -> bool {
 }
 
 #[test]
-fn current_restore_rejects_layout_three_before_workspace() {
+fn current_restore_rejects_layout_three_and_four_before_workspace() {
     let mut source = operator(None);
     let current = source.capture(Epoch::INITIAL).unwrap();
     assert_eq!(
         current.inline_metadata["layout_version"],
-        serde_json::json!(4)
+        serde_json::json!(5)
     );
-    let results = [3].map(|layout| {
+    let results = [3, 4].map(|layout| {
         let mut snapshot = current.clone();
         snapshot
             .inline_metadata
@@ -146,7 +149,7 @@ async fn historical_indexes_do_not_replace_live_current_state() {
         let before = target.capture(Epoch::INITIAL).unwrap();
         assert_eq!(
             before.inline_metadata["layout_version"],
-            serde_json::json!(4)
+            serde_json::json!(6)
         );
         let status = target.status();
         let pool = target.runtime.pool.clone();
