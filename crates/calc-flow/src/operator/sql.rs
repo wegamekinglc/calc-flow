@@ -30,6 +30,7 @@ use super::expression::required_input;
 mod incremental;
 mod ipc;
 mod metadata;
+mod restore;
 mod retention;
 
 /// A multi-input `DataFusion` SQL operator.
@@ -1430,102 +1431,8 @@ impl StreamOperator for SqlOperator {
     }
 
     fn restore(&mut self, snapshot: &OperatorStateSnapshot) -> Result<()> {
-        if snapshot.inline_metadata.is_empty() && snapshot.segments.is_empty() {
-            self.retained = None;
-            self.incremental = None;
-            self.incremental_checked = false;
-            return Ok(());
-        }
-        self.stream_state.runtime()?;
-        let projected = snapshot.inline_metadata.contains_key("state_layout");
-        let projection = if projected {
-            Some(self.read_projection(snapshot)?)
-        } else {
-            if !self.checkpoint_matches(snapshot) {
-                return Err(sql_state_error(
-                    "SQL aggregate checkpoint does not match this operator",
-                ));
-            }
-            None
-        };
-        let input_key = if projected {
-            "input-projected"
-        } else {
-            "input"
-        };
-        let segment = snapshot
-            .segments
-            .get(input_key)
-            .ok_or_else(|| sql_state_error("SQL checkpoint has no retained input segment"))?
-            .clone();
-        let rows = snapshot
-            .inline_metadata
-            .get("rows")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| sql_state_error("SQL checkpoint has no row count"))?;
-        let bytes = snapshot
-            .inline_metadata
-            .get("bytes")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| sql_state_error("SQL checkpoint has no byte count"))?;
-        let runtime = self.retention_runtime()?;
-        let backing = runtime.incremental_reservation(&self.name);
-        let decode_bytes =
-            incremental::checked_bytes(4096, [(segment.bytes().len(), 4)], &self.name)?;
-        incremental::ensure_reservation(&backing, decode_bytes, &self.name)?;
-        let mut batch = decode_sql_state(segment.bytes())?;
-        let mut metadata_segment = None;
-        if let Some(projection) = &projection {
-            if batch.table_payload()?.schema() != projection.columns.physical_schema() {
-                return Err(sql_state_error(
-                    "SQL checkpoint physical schema does not match its trusted dependencies",
-                ));
-            }
-            let (metadata, encoded) =
-                metadata::decode(runtime, &snapshot.segments["batch-metadata"], &self.name)?;
-            batch = Batch::table(batch.table_payload()?.batches().to_vec(), metadata)?;
-            metadata_segment = Some(encoded);
-        } else if self.input_ports[0]
-            .schema()
-            .is_some_and(|schema| schema != batch.table_payload().expect("decoded table").schema())
-        {
-            return Err(sql_state_error(
-                "SQL legacy logical schema does not match the declared input",
-            ));
-        }
-        self.validate_checkpoint_charge(&batch, rows, bytes)?;
-        let table = batch.table_payload()?;
-        let copies = record_copy_reservation(
-            runtime,
-            &self.name,
-            table.batches().len(),
-            table.schema().fields().len(),
-            1,
-        )?;
-        let backing = std::sync::Arc::new(backing);
-        let mut retained = RetainedSqlInput {
-            records: Vec::new(),
-            metadata: batch.metadata().clone(),
-            projection,
-            projection_checked: projected,
-            backing_reservations: vec![backing.clone()],
-            reservation: None,
-            segment: Some(ipc::SqlInputSegment::restored(segment, backing)),
-            metadata_segment,
-            rows,
-            bytes,
-        };
-        retained.reserve_append(
-            table.batches().len(),
-            runtime,
-            &self.name,
-            table.schema().fields().len(),
-        )?;
-        retained.records.extend(table.batches().iter().cloned());
-        drop(copies);
-        self.incremental = None;
-        self.incremental_checked = false;
-        self.retained = Some(retained);
+        let prepared = self.prepare_restore(snapshot, &|| Ok(()))?;
+        self.install_restore(prepared);
         Ok(())
     }
 

@@ -395,6 +395,13 @@ impl DataFusionRuntime {
         .register(&self.runtime_env.memory_pool)
     }
 
+    #[cfg(test)]
+    pub(crate) fn incremental_memory_pool(
+        &self,
+    ) -> Arc<dyn datafusion::execution::memory_pool::MemoryPool> {
+        self.runtime_env.memory_pool.clone()
+    }
+
     pub(crate) fn incremental_output(
         &self,
         records: Vec<RecordBatch>,
