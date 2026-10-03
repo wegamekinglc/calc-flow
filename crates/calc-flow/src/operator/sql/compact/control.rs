@@ -44,7 +44,7 @@ pub(super) struct CompactControl {
     pub state_accounting: u32,
     pub native_semantics: u32,
     pub datafusion_version: String,
-    pub state_policy: String,
+    pub state_policy: incremental::grouped_float::Policy,
     pub identity: CompactIdentity,
     pub ledger: QuotaLedger,
     pub groups: u64,
@@ -67,7 +67,6 @@ impl CompactControl {
             || self.state_accounting != 3
             || self.native_semantics != 1
             || self.datafusion_version != "54.0.0"
-            || self.state_policy != "exact_numeric_v1"
             || self.identity != *trusted
             || !self.ledger.seen_input
         {
@@ -167,7 +166,7 @@ pub(super) fn decode(
 fn encode_bound(control: &CompactControl, name: &str) -> Result<usize> {
     let identity = &control.identity;
     let strings = [
-        control.state_policy.as_str(),
+        control.state_policy.label(),
         control.datafusion_version.as_str(),
         identity.query_sha256.as_str(),
         identity.input_alias.as_str(),

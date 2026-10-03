@@ -389,7 +389,7 @@ async fn test_current_float_extrema_rejected_emit_preserves_state_and_retry() {
     }
 }
 
-async fn raw_prefixes(dtype: &DataType, query: &str, parts: Vec<Part>) {
+async fn checked_prefixes(dtype: &DataType, query: &str, parts: Vec<Part>, native: bool) {
     let job = job();
     let context = StreamOperatorContext::new(&job, "float_extrema", None);
     let mut state = operator(dtype, query);
@@ -405,10 +405,18 @@ async fn raw_prefixes(dtype: &DataType, query: &str, parts: Vec<Part>) {
         assert_oracle(&actual, query, dtype, &prefix, sequence as u64).await;
     }
     let snapshot = state.checkpoint(Epoch::INITIAL).unwrap();
-    assert_eq!(snapshot.inline_metadata["state_layout"], json!(4));
-    assert_eq!(snapshot.inline_metadata["state_accounting"], json!(4));
-    assert!(snapshot.segments.contains_key("input-retained"));
-    assert!(state.incremental.is_none() && state.compact.is_none());
+    let layout = if native { 3 } else { 4 };
+    assert_eq!(snapshot.inline_metadata["state_layout"], json!(layout));
+    assert_eq!(snapshot.inline_metadata["state_accounting"], json!(layout));
+    assert!(snapshot.segments.contains_key(if native {
+        "group-state"
+    } else {
+        "input-retained"
+    }));
+    assert_eq!(
+        state.incremental.is_some() && state.compact.is_some() && state.retained.is_none(),
+        native
+    );
     let pool = state
         .stream_state
         .runtime()
@@ -419,24 +427,27 @@ async fn raw_prefixes(dtype: &DataType, query: &str, parts: Vec<Part>) {
 }
 
 #[tokio::test]
-async fn test_current_float_extrema_grouped_and_mixed_sum_keep_raw4() {
+async fn test_current_float_extrema_grouped_native3_and_mixed_sum_raw4() {
     for dtype in [DataType::Float32, DataType::Float64] {
-        raw_prefixes(
+        checked_prefixes(
             &dtype,
             GROUPED,
             vec![vec![Some(ZERO)], vec![Some(NEG_ZERO)]],
+            true,
         )
         .await;
-        raw_prefixes(
+        checked_prefixes(
             &dtype,
             GROUPED,
             vec![vec![Some(ONE)], vec![Some(NAN_A), Some(TWO)]],
+            true,
         )
         .await;
-        raw_prefixes(
+        checked_prefixes(
             &dtype,
             "SELECT MIN(value) AS lo, MAX(value) AS hi, SUM(value) AS total FROM events",
             vec![vec![Some(ONE)], vec![Some(TWO), None]],
+            false,
         )
         .await;
     }

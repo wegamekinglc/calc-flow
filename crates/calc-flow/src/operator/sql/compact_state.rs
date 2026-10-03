@@ -188,7 +188,7 @@ impl IncrementalSql {
             output_schema: self.output_schema.clone(),
             projection_slots,
             group_count: self.groups.len(),
-            policy: "exact-numeric-v1",
+            policy: self.native_policy(),
             _reservation: reservation,
         })
     }
@@ -364,7 +364,16 @@ impl IncrementalSql {
                     ScalarValue::try_from_array(array, row).map_err(|error| df_error(name, error))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let result = restored_result(expression, &state, !self.keys.is_empty(), name)?;
+            let result = if self.requires_grouped_float_proof()
+                && super::grouped_float::selected(expression)
+            {
+                state
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| df_error(name, "sequential extrema state is empty"))?
+            } else {
+                restored_result(expression, &state, !self.keys.is_empty(), name)?
+            };
             validate_scalar(&result, &descriptor.result_fields[aggregate], name)?;
             states.push(state);
             results.push(result);

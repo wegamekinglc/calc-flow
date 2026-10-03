@@ -3,7 +3,7 @@ use std::{mem::size_of, sync::Arc};
 use ahash::RandomState;
 use datafusion::{
     arrow::{
-        array::ArrayRef,
+        array::{ArrayRef, BooleanArray},
         datatypes::{DataType, Field, Schema, SchemaRef},
         record_batch::RecordBatch,
         row::{RowConverter, SortField},
@@ -35,6 +35,9 @@ const CHUNK_ROWS: usize = 8192;
 #[path = "compact_state.rs"]
 pub(super) mod compact_state;
 
+#[path = "grouped_float.rs"]
+pub(in crate::operator::sql) mod grouped_float;
+
 pub(super) struct IncrementalSql {
     schema: SchemaRef,
     aggregate_schema: SchemaRef,
@@ -47,8 +50,10 @@ pub(super) struct IncrementalSql {
     keys: Vec<usize>,
     variable_columns: Vec<usize>,
     converter: Option<RowConverter>,
-    groups: Vec<Group>,
     index: HashMap<Arc<[u8]>, usize, RandomState>,
+    groups: Vec<Group>,
+    sequential: Option<grouped_float::Proof>,
+    container_fee: Option<MemoryReservation>,
     reservation: MemoryReservation,
     #[cfg(test)]
     pub(super) finalized_groups: Arc<std::sync::atomic::AtomicUsize>,
@@ -69,16 +74,17 @@ struct Group {
 }
 
 struct Candidate {
+    accumulators: Vec<Option<Box<dyn Accumulator>>>,
     group: Group,
-    accumulators: Vec<Box<dyn Accumulator>>,
 }
 
 struct InputCandidates {
-    groups: CandidateMap,
     touched: KeyIndex,
+    groups: CandidateMap,
     new_count: usize,
     native: Option<NativeKeys>,
     partial: Option<PartialGroups>,
+    proof: Option<grouped_float::Proof>,
 }
 
 struct NativeKeys {
@@ -186,6 +192,8 @@ fn native_key_bytes(count: usize, rows: usize, width: usize, name: &str) -> Resu
 struct PartialGroups {
     accumulators: Vec<Box<dyn GroupsAccumulator>>,
     slots: Vec<usize>,
+    sequential: Vec<bool>,
+    seeded: usize,
     base_bytes: usize,
     group_bytes: usize,
     state_fields: usize,
@@ -213,6 +221,8 @@ impl PartialGroups {
         Ok(Self {
             accumulators,
             slots: Vec::new(),
+            sequential: vec![false; aggregates.len()],
+            seeded: 0,
             base_bytes,
             group_bytes,
             state_fields,
@@ -233,10 +243,14 @@ impl PartialGroups {
     }
 
     fn reserve(&mut self, count: usize, name: &str) -> Result<()> {
-        let capacity = count
-            .max(4)
-            .checked_next_power_of_two()
-            .ok_or_else(|| df_error(name, "partial group capacity overflowed"))?;
+        let capacity = if self.sequential.iter().any(|selected| *selected) {
+            grouped_float::capacity(count, name)?
+        } else {
+            count
+                .max(4)
+                .checked_next_power_of_two()
+                .ok_or_else(|| df_error(name, "partial group capacity overflowed"))?
+        };
         let bitmap_bytes = checked_bytes(0, [(capacity.div_ceil(512), 64)], name)?;
         let bitmap_copies = checked_bytes(0, [(self.state_fields, 3)], name)?;
         let bytes = checked_bytes(
@@ -249,6 +263,64 @@ impl PartialGroups {
             .try_reserve_exact(capacity - self.slots.len())
             .map_err(|error| df_error(name, error))?;
         Ok(())
+    }
+
+    fn seed(
+        &mut self,
+        candidates: &CandidateMap,
+        aggregates: &[Arc<AggregateFunctionExpr>],
+        name: &str,
+    ) -> Result<()> {
+        if !self.sequential.iter().any(|selected| *selected) {
+            return Ok(());
+        }
+        for rank in self.seeded..self.slots.len() {
+            let candidate = &candidates[&self.slots[rank]];
+            for (index, expression) in aggregates.iter().enumerate() {
+                if !self.sequential[index] {
+                    continue;
+                }
+                if let Some(saved) = candidate.group.states[index].first() {
+                    self.seed_value(index, rank, saved, name)?;
+                } else if expression
+                    .state_fields()
+                    .map_err(|error| df_error(name, error))?
+                    .len()
+                    != 1
+                {
+                    return Err(df_error(
+                        name,
+                        "sequential extrema requires one state field",
+                    ));
+                }
+            }
+        }
+        self.seeded = self.slots.len();
+        Ok(())
+    }
+
+    fn seed_value(
+        &mut self,
+        index: usize,
+        rank: usize,
+        saved: &ScalarValue,
+        name: &str,
+    ) -> Result<()> {
+        if saved.is_null() {
+            return Ok(());
+        }
+        let reset = grouped_float::reset(saved, name)?
+            .to_array()
+            .map_err(|error| df_error(name, error))?;
+        let saved = saved.to_array().map_err(|error| df_error(name, error))?;
+        let count = self.slots.len();
+        let filter = BooleanArray::from(vec![true]);
+        self.accumulators[index]
+            .merge_batch(&[reset], &[rank], Some(&filter), count)
+            .map_err(|error| df_error(name, error))?;
+        self.accumulators[index]
+            .merge_batch(&[saved], &[rank], Some(&filter), count)
+            .map_err(|error| df_error(name, error))
     }
 
     fn update(
@@ -307,14 +379,23 @@ impl PartialGroups {
             let candidate = candidates
                 .get_mut(slot)
                 .expect("candidate for partial group");
-            for (accumulator, states) in candidate.accumulators.iter_mut().zip(&states) {
-                let arrays = states
-                    .iter()
-                    .map(|array| array.slice(rank, 1))
-                    .collect::<Vec<_>>();
-                accumulator
-                    .merge_batch(&arrays)
-                    .map_err(|error| df_error(name, error))?;
+            for (index, arrays) in states.iter().enumerate() {
+                if self.sequential[index] {
+                    let value = ScalarValue::try_from_array(&arrays[0], rank)
+                        .map_err(|error| df_error(name, error))?;
+                    candidate.group.states[index] = vec![value.clone()];
+                    candidate.group.results[index] = value;
+                } else {
+                    let arrays = arrays
+                        .iter()
+                        .map(|array| array.slice(rank, 1))
+                        .collect::<Vec<_>>();
+                    candidate.accumulators[index]
+                        .as_mut()
+                        .expect("summary accumulator")
+                        .merge_batch(&arrays)
+                        .map_err(|error| df_error(name, error))?;
+                }
             }
         }
         Ok(())
@@ -400,15 +481,28 @@ fn native_state_charge(
 type CandidateMap = HashMap<usize, Candidate, RandomState>;
 type KeyIndex = HashMap<Arc<[u8]>, usize, RandomState>;
 type PreparedGroups = (Vec<(usize, Group)>, Vec<Option<Group>>);
-type PreparedTransaction = (Vec<RecordBatch>, Vec<(usize, Group)>, Vec<Option<Group>>);
+type PreparedTransaction = (
+    Vec<RecordBatch>,
+    Vec<(usize, Group)>,
+    Vec<Option<Group>>,
+    Option<GroupContainer>,
+);
+
+struct GroupContainer {
+    groups: Vec<Group>,
+    index: KeyIndex,
+    reservation: MemoryReservation,
+}
 
 pub(super) struct Transaction {
+    container: Option<GroupContainer>,
     pub records: Vec<RecordBatch>,
     #[cfg(test)]
     pub rows: usize,
     groups: Vec<(usize, Group)>,
     new_groups: Vec<Option<Group>>,
     _reservation: MemoryReservation,
+    proof: Option<grouped_float::Proof>,
 }
 
 impl IncrementalSql {
@@ -487,6 +581,18 @@ impl IncrementalSql {
         if !grouped_aggregates_supported(&keys, &aggregates) {
             return Ok(None);
         }
+        let sequential = match initial_grouped_proof(
+            runtime,
+            &reservation,
+            &keys,
+            &schema,
+            &aggregates,
+            name,
+        )? {
+            GroupStrategy::Unsupported => return Ok(None),
+            GroupStrategy::Exact => None,
+            GroupStrategy::Sequential(proof) => Some(proof),
+        };
         let (converter, finalizer_bytes) = grouped_layout(&keys, &aggregates, &schema, name)?;
         Ok(Some(Self {
             schema,
@@ -501,6 +607,8 @@ impl IncrementalSql {
             variable_columns,
             converter,
             groups: Vec::new(),
+            sequential,
+            container_fee: None,
             index: HashMap::with_hasher(RandomState::new()),
             reservation,
             #[cfg(test)]
@@ -512,6 +620,84 @@ impl IncrementalSql {
             #[cfg(test)]
             encoded_rows: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }))
+    }
+
+    pub(super) fn requires_grouped_float_proof(&self) -> bool {
+        self.sequential.is_some()
+    }
+
+    fn native_policy(&self) -> &'static str {
+        if self.requires_grouped_float_proof() {
+            "sequential-grouped-float-v1"
+        } else {
+            "exact-numeric-v1"
+        }
+    }
+
+    pub(in crate::operator::sql) fn checkpoint_policy(&self) -> grouped_float::Policy {
+        self.sequential
+            .as_ref()
+            .map_or(grouped_float::Policy::ExactNumericV1, |proof| {
+                grouped_float::Policy::SequentialGroupedFloatV1(proof.policy.clone())
+            })
+    }
+
+    pub(in crate::operator::sql) fn restore_grouped_proof(
+        &mut self,
+        policy: &grouped_float::Policy,
+        groups: usize,
+        rows: u64,
+        name: &str,
+    ) -> Result<()> {
+        policy.validate(&self.checkpoint_policy(), rows, name)?;
+        if !self.groups.is_empty() || !self.index.is_empty() {
+            return Err(df_error(name, "restored proof requires an empty candidate"));
+        }
+        if let grouped_float::Policy::SequentialGroupedFloatV1(policy) = policy {
+            let width = native_key_width(self.schema.field(self.keys[0]).data_type())
+                .expect("certified fixed key");
+            let rows =
+                usize::try_from(policy.max_record_rows).map_err(|error| df_error(name, error))?;
+            self.sequential = Some(grouped_float::Proof::new(
+                self.reservation.new_empty(),
+                policy.config,
+                groups,
+                rows,
+                width,
+                &self.aggregates,
+                name,
+            )?);
+        }
+        Ok(())
+    }
+
+    fn prepare_grouped_proof(
+        &self,
+        records: &[RecordBatch],
+        name: &str,
+    ) -> Result<Option<grouped_float::Proof>> {
+        self.sequential
+            .as_ref()
+            .map(|previous| {
+                let previous_rows = usize::try_from(previous.policy.max_record_rows)
+                    .map_err(|error| df_error(name, error))?;
+                let rows = records
+                    .iter()
+                    .map(RecordBatch::num_rows)
+                    .fold(previous_rows, usize::max);
+                let width = native_key_width(self.schema.field(self.keys[0]).data_type())
+                    .expect("certified fixed key");
+                grouped_float::Proof::new(
+                    self.reservation.new_empty(),
+                    previous.policy.config,
+                    self.groups.len(),
+                    rows,
+                    width,
+                    &self.aggregates,
+                    name,
+                )
+            })
+            .transpose()
     }
 
     fn candidate(
@@ -559,8 +745,11 @@ impl IncrementalSql {
             group: Group {
                 key,
                 values,
-                states: Vec::new(),
-                results: Vec::new(),
+                states: previous.map_or_else(
+                    || vec![Vec::new(); self.aggregates.len()],
+                    |previous| previous.states.clone(),
+                ),
+                results: vec![ScalarValue::Null; self.aggregates.len()],
                 _reservation: reservation,
             },
             accumulators,
@@ -571,12 +760,15 @@ impl IncrementalSql {
         &self,
         previous: Option<&Group>,
         name: &str,
-    ) -> Result<Vec<Box<dyn Accumulator>>> {
+    ) -> Result<Vec<Option<Box<dyn Accumulator>>>> {
         let accumulators = self
             .aggregates
             .iter()
             .enumerate()
             .map(|(index, expr)| {
+                if self.sequential.is_some() && grouped_float::selected(expr) {
+                    return Ok(None);
+                }
                 let mut accumulator = expr
                     .create_accumulator()
                     .map_err(|error| df_error(name, error))?;
@@ -590,7 +782,7 @@ impl IncrementalSql {
                         .merge_batch(&arrays)
                         .map_err(|error| df_error(name, error))?;
                 }
-                Ok(accumulator)
+                Ok(Some(accumulator))
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(accumulators)
@@ -604,8 +796,10 @@ impl IncrementalSql {
     ) -> Result<Transaction> {
         let table = batch.table_payload()?;
         self.validate_input_schema(batch.num_rows(), table.schema())?;
+        let proof = self.prepare_grouped_proof(table.batches(), name)?;
         let (reservation, workspace, mut candidates) =
             self.input_candidates(batch.num_rows(), name)?;
+        candidates.proof = proof;
         let rows_processed = self
             .update_records(
                 table.batches(),
@@ -619,7 +813,8 @@ impl IncrementalSql {
         let _ = rows_processed;
         self.finish_candidates(&mut candidates, context, name)
             .await?;
-        let (records, groups, new_groups) = self
+        let proof = candidates.proof.take();
+        let (records, groups, new_groups, container) = self
             .prepare_transaction(candidates, &reservation, context, name)
             .await?;
         Ok(Transaction {
@@ -629,6 +824,8 @@ impl IncrementalSql {
             groups,
             new_groups,
             _reservation: reservation,
+            proof,
+            container,
         })
     }
 
@@ -644,11 +841,16 @@ impl IncrementalSql {
             .output_records(count, &candidates.groups, reservation, context, name)
             .await?;
         let new_count = count - self.groups.len();
-        self.reserve_groups(new_count, count, name)?;
+        if self.sequential.is_none() {
+            self.reserve_groups(new_count, count, name)?;
+        }
+        let container = (self.sequential.is_some() && new_count != 0)
+            .then(|| self.prepare_container(&candidates.groups, count, name))
+            .transpose()?;
         let (groups, new_groups) = self
             .prepare_groups(candidates.groups, new_count, context)
             .await?;
-        Ok((records, groups, new_groups))
+        Ok((records, groups, new_groups, container))
     }
 
     fn validate_input_schema(&self, rows: usize, schema: &SchemaRef) -> Result<()> {
@@ -667,7 +869,7 @@ impl IncrementalSql {
         name: &str,
     ) -> Result<(MemoryReservation, usize, InputCandidates)> {
         let (reservation, workspace) = self.input_workspace(rows, name)?;
-        let partial = if self.keys.is_empty() {
+        let mut partial = if self.keys.is_empty() {
             None
         } else {
             Some(PartialGroups::new(
@@ -676,13 +878,27 @@ impl IncrementalSql {
                 name,
             )?)
         };
-        let native = self.native_keys(rows, name)?;
+        if self.sequential.is_some() {
+            if let Some(partial) = &mut partial {
+                partial.sequential = self
+                    .aggregates
+                    .iter()
+                    .map(|expression| grouped_float::selected(expression))
+                    .collect();
+            }
+        }
+        let native = if self.sequential.is_some() {
+            None
+        } else {
+            self.native_keys(rows, name)?
+        };
         let mut candidates = InputCandidates {
             groups: HashMap::with_hasher(RandomState::new()),
             touched: HashMap::with_hasher(RandomState::new()),
             new_count: 0,
             native,
             partial,
+            proof: None,
         };
         if self.keys.is_empty() {
             candidates
@@ -876,6 +1092,16 @@ impl IncrementalSql {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let (slot, previous, new_count) =
                 self.candidate_slot(key, candidates.new_count, name)?;
+            if let Some(proof) = &candidates.proof {
+                let count = self
+                    .groups
+                    .len()
+                    .checked_add(new_count)
+                    .ok_or_else(|| df_error(name, "sequential group count overflowed"))?;
+                let width = native_key_width(self.schema.field(self.keys[0]).data_type())
+                    .expect("certified fixed key");
+                proof.grow(count, width, &self.aggregates, name)?;
+            }
             let candidate = self.candidate(previous, key, Some((&key_arrays, row)), name)?;
             let rank = partial.add_slot(slot, name)?;
             candidates.touched.insert(candidate.group.key.clone(), rank);
@@ -883,6 +1109,7 @@ impl IncrementalSql {
             candidates.new_count = new_count;
             indices.push(rank);
         }
+        partial.seed(&candidates.groups, &self.aggregates, name)?;
         partial.update(arguments, &indices, partial.slots.len(), name)?;
         #[cfg(test)]
         self.partial_groups
@@ -1021,24 +1248,19 @@ impl IncrementalSql {
                 }
                 context.check_cancelled()?;
             }
-            candidate.group.states = candidate
-                .accumulators
-                .iter_mut()
-                .map(|accumulator| accumulator.state().map_err(|error| df_error(name, error)))
-                .collect::<Result<Vec<_>>>()?;
-            candidate.group.results = candidate
-                .accumulators
-                .iter_mut()
-                .enumerate()
-                .map(|(index, accumulator)| {
-                    self.candidate_result(
+            for (index, accumulator) in candidate.accumulators.iter_mut().enumerate() {
+                if let Some(accumulator) = accumulator {
+                    let state = accumulator.state().map_err(|error| df_error(name, error))?;
+                    let result = self.candidate_result(
                         &self.aggregates[index],
-                        &candidate.group.states[index],
+                        &state,
                         accumulator.as_mut(),
                         name,
-                    )
-                })
-                .collect::<Result<Vec<_>>>()?;
+                    )?;
+                    candidate.group.states[index] = state;
+                    candidate.group.results[index] = result;
+                }
+            }
             #[cfg(test)]
             self.finalized_groups
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1136,7 +1358,67 @@ impl IncrementalSql {
             .map_err(|error| df_error(name, error))
     }
 
+    fn prepare_container(
+        &self,
+        candidates: &CandidateMap,
+        count: usize,
+        name: &str,
+    ) -> Result<GroupContainer> {
+        let capacity = count
+            .max(4)
+            .checked_next_power_of_two()
+            .ok_or_else(|| df_error(name, "sequential container capacity overflowed"))?;
+        let bytes = checked_bytes(
+            4096,
+            [
+                (capacity, size_of::<Group>()),
+                (
+                    capacity,
+                    4 * (size_of::<Arc<[u8]>>() + size_of::<usize>() + 1),
+                ),
+            ],
+            name,
+        )?;
+        let reservation = self.reservation.new_empty();
+        ensure_reservation(&reservation, bytes, name)?;
+        let mut groups = Vec::new();
+        groups
+            .try_reserve_exact(capacity)
+            .map_err(|error| df_error(name, error))?;
+        let mut index = KeyIndex::with_hasher(RandomState::new());
+        index
+            .try_reserve(count)
+            .map_err(|error| df_error(name, error))?;
+        index.extend(self.index.iter().map(|(key, &slot)| (key.clone(), slot)));
+        index.extend(
+            candidates
+                .iter()
+                .map(|(&slot, candidate)| (candidate.group.key.clone(), slot)),
+        );
+        Ok(GroupContainer {
+            groups,
+            index,
+            reservation,
+        })
+    }
+
+    fn install_container(&mut self, mut container: GroupContainer) {
+        container.groups.append(&mut self.groups);
+        self.groups = container.groups;
+        self.index = container.index;
+        self.container_fee = Some(container.reservation);
+    }
+
     fn reserve_groups(&mut self, new_count: usize, count: usize, name: &str) -> Result<()> {
+        if self.sequential.is_some() {
+            let container = self.prepare_container(
+                &CandidateMap::with_hasher(RandomState::new()),
+                count,
+                name,
+            )?;
+            self.install_container(container);
+            return Ok(());
+        }
         if new_count != 0 {
             let capacity = count
                 .checked_next_power_of_two()
@@ -1195,6 +1477,12 @@ impl IncrementalSql {
     }
 
     pub fn commit(&mut self, transaction: Transaction) {
+        if let Some(container) = transaction.container {
+            self.install_container(container);
+        }
+        if let Some(proof) = transaction.proof {
+            self.sequential = Some(proof);
+        }
         for (slot, group) in transaction.groups {
             self.groups[slot] = group;
         }
@@ -1495,10 +1783,62 @@ fn update_global(
     let candidate = candidates.get_mut(&0).expect("global candidate");
     for (arguments, accumulator) in arguments.iter().zip(&mut candidate.accumulators) {
         accumulator
+            .as_mut()
+            .expect("global summary accumulator")
             .update_batch(arguments)
             .map_err(|error| df_error(name, error))?;
     }
     Ok(())
+}
+
+enum GroupStrategy {
+    Unsupported,
+    Exact,
+    Sequential(grouped_float::Proof),
+}
+
+fn initial_grouped_proof(
+    runtime: &DataFusionRuntime,
+    reservation: &MemoryReservation,
+    keys: &[usize],
+    schema: &SchemaRef,
+    aggregates: &[Arc<AggregateFunctionExpr>],
+    name: &str,
+) -> Result<GroupStrategy> {
+    if keys.is_empty()
+        || !aggregates
+            .iter()
+            .any(|expression| grouped_float::selected(expression))
+    {
+        return Ok(GroupStrategy::Exact);
+    }
+    if keys.len() != 1 || !runtime.grouped_float_model_supported(name)? {
+        return Ok(GroupStrategy::Unsupported);
+    }
+    let Some(width) = native_key_width(schema.field(keys[0]).data_type()) else {
+        return Ok(GroupStrategy::Unsupported);
+    };
+    grouped_float::Proof::new(
+        reservation.new_empty(),
+        runtime.compact_runtime_config(),
+        0,
+        0,
+        width,
+        aggregates,
+        name,
+    )
+    .map(GroupStrategy::Sequential)
+}
+
+fn fixed_group_key(aggregate: &datafusion::logical_expr::Aggregate, schema: &SchemaRef) -> bool {
+    let [Expr::Column(column)] = aggregate.group_expr.as_slice() else {
+        return false;
+    };
+    schema
+        .field_with_name(&column.name)
+        .ok()
+        .and_then(|field| native_key_width(field.data_type()))
+        .is_some()
 }
 
 fn plan_inputs(
@@ -1510,10 +1850,13 @@ fn plan_inputs(
         return Ok(None);
     };
     if raw_aggregate.aggr_expr.is_empty()
-        || !raw_aggregate
-            .aggr_expr
-            .iter()
-            .all(|expr| eligible(expr, schema, raw_aggregate.group_expr.is_empty()))
+        || !raw_aggregate.aggr_expr.iter().all(|expr| {
+            eligible(
+                expr,
+                schema,
+                raw_aggregate.group_expr.is_empty() || fixed_group_key(raw_aggregate, schema),
+            )
+        })
     {
         return Ok(None);
     }
@@ -1882,6 +2225,8 @@ mod tests {
         };
         let mut candidate = plan.candidate(None, &[0], keys, "totals").unwrap();
         candidate.accumulators[0]
+            .as_mut()
+            .unwrap()
             .merge_batch(&[
                 ScalarValue::UInt64(Some(count.unwrap_or(0)))
                     .to_array()

@@ -56,7 +56,7 @@ pub(in crate::operator::sql) fn prepare(
         &operator.name,
     )?;
     let columns = storage::columns(operator, logical.clone(), projection)?;
-    let native = trusted_plan(operator, logical, columns.physical.clone())?;
+    let mut native = trusted_plan(operator, logical, columns.physical.clone())?;
     check()?;
     let descriptor = native.native_descriptor(&operator.name)?;
     let identity = identity::build(
@@ -69,6 +69,12 @@ pub(in crate::operator::sql) fn prepare(
     decoded.value.validate_identity(&identity.value)?;
     let state = decode_sql_state(snapshot.segments["group-state"].bytes())?;
     validate_state_census(&state, &decoded.value)?;
+    native.restore_grouped_proof(
+        &decoded.value.state_policy,
+        state.num_rows(),
+        decoded.value.ledger.rows,
+        &operator.name,
+    )?;
     let native = native.import_native_state(
         state.table_payload()?.batches(),
         decoded.value.ledger.rows,

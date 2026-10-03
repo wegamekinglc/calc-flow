@@ -70,6 +70,7 @@ struct CaptureParts {
     group_state: super::super::StateSegment,
     metadata: Arc<metadata::SqlMetadata>,
     groups: usize,
+    policy: incremental::grouped_float::Policy,
     reservation: Arc<MemoryReservation>,
 }
 
@@ -115,6 +116,7 @@ pub(in crate::operator::sql) fn prepare(
             group_state,
             metadata,
             groups: descriptor.group_count,
+            policy: native.checkpoint_policy(),
             reservation,
         },
         check,
@@ -192,6 +194,7 @@ pub(in crate::operator::sql) async fn prepare_async(
             group_state,
             metadata,
             groups,
+            policy: native.checkpoint_policy(),
             reservation,
         },
         &|| context.check_cancelled(),
@@ -259,7 +262,7 @@ fn finish(
         state_accounting: 3,
         native_semantics: 1,
         datafusion_version: "54.0.0".into(),
-        state_policy: "exact_numeric_v1".into(),
+        state_policy: parts.policy,
         identity: parts.identity.value,
         ledger: state.ledger,
         groups: u64::try_from(parts.groups)

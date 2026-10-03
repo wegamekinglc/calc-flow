@@ -9,7 +9,7 @@ fn control() -> CompactControl {
         state_accounting: 3,
         native_semantics: 1,
         datafusion_version: "54.0.0".into(),
-        state_policy: "exact_numeric_v1".into(),
+        state_policy: incremental::grouped_float::Policy::ExactNumericV1,
         identity: CompactIdentity {
             query_sha256: "q".repeat(64),
             input_alias: "events".into(),
@@ -106,13 +106,15 @@ fn compact_control_unknown_fields_and_policies_are_rejected_without_credit_leaks
         ("state_accounting", json!(2)),
         ("native_semantics", json!(2)),
         ("datafusion_version", json!("53.0.0")),
-        ("state_policy", json!("float_v1")),
     ] {
         let mut value = serde_json::to_value(control()).unwrap();
         value[field] = replacement;
         let forged: CompactControl = serde_json::from_value(value).unwrap();
         assert!(forged.validate_identity(&trusted.identity).is_err());
     }
+    let mut invalid_policy = serde_json::to_value(control()).unwrap();
+    invalid_policy["state_policy"] = json!("float_v1");
+    assert!(serde_json::from_value::<CompactControl>(invalid_policy).is_err());
     let mut forged = control();
     forged.ledger.seen_input = false;
     assert!(forged.validate_identity(&trusted.identity).is_err());

@@ -100,3 +100,6 @@ mod float_count_tests;
 
 #[cfg(test)]
 mod float_extrema_tests;
+
+#[cfg(test)]
+mod grouped_float_tests;

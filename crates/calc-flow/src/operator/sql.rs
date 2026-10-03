@@ -917,6 +917,19 @@ impl SqlOperator {
         }
         let mut initialized = self.plan_incremental(alias, batch, plans).await?;
         context.check_cancelled()?;
+        if initialized
+            .as_ref()
+            .is_some_and(|plan| plan.requires_grouped_float_proof())
+            && !self
+                .stream_state
+                .runtime()?
+                .prove_grouped_float_plan(&self.validated, alias, batch, &self.name)
+                .await?
+        {
+            self.incremental_checked = true;
+            return Ok(None);
+        }
+        context.check_cancelled()?;
         if let Some(incremental) = initialized.as_mut() {
             #[cfg(test)]
             {
