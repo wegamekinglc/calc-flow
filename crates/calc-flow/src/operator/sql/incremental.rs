@@ -1364,7 +1364,7 @@ fn key_type(data_type: &DataType) -> bool {
     )
 }
 
-fn eligible(expr: &Expr, schema: &SchemaRef) -> bool {
+fn eligible(expr: &Expr, schema: &SchemaRef, global: bool) -> bool {
     let Expr::AggregateFunction(function) = unalias(expr) else {
         return false;
     };
@@ -1396,13 +1396,14 @@ fn eligible(expr: &Expr, schema: &SchemaRef) -> bool {
     if count {
         count_argument_supported(field.data_type())
     } else {
-        aggregate_argument_supported(field.data_type(), function.func.name())
+        aggregate_argument_supported(field.data_type(), function.func.name(), global)
     }
 }
 
-fn aggregate_argument_supported(data_type: &DataType, function: &str) -> bool {
+fn aggregate_argument_supported(data_type: &DataType, function: &str, global: bool) -> bool {
     match function {
-        "sum" | "min" | "max" => exact_numeric(data_type),
+        "sum" => exact_numeric(data_type),
+        "min" | "max" => extrema_argument_supported(data_type, global),
         "avg" => matches!(
             data_type,
             DataType::Decimal32(_, 0..)
@@ -1412,6 +1413,11 @@ fn aggregate_argument_supported(data_type: &DataType, function: &str) -> bool {
         ),
         _ => false,
     }
+}
+
+fn extrema_argument_supported(data_type: &DataType, global: bool) -> bool {
+    exact_numeric(data_type)
+        || (global && matches!(data_type, DataType::Float32 | DataType::Float64))
 }
 
 fn count_argument_supported(data_type: &DataType) -> bool {
@@ -1507,7 +1513,7 @@ fn plan_inputs(
         || !raw_aggregate
             .aggr_expr
             .iter()
-            .all(|expr| eligible(expr, schema))
+            .all(|expr| eligible(expr, schema, raw_aggregate.group_expr.is_empty()))
     {
         return Ok(None);
     }
