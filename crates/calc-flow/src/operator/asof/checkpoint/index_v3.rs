@@ -19,9 +19,7 @@ use owners::{OwnerReader, OwnerWriter};
 use std::{collections::BTreeMap, sync::Arc};
 
 pub(super) const INDEX_SEGMENT: &str = "asof-index-v4";
-pub(super) const LEGACY_SEGMENT: &str = "asof-index-v3";
 const MAGIC: &[u8; 8] = b"CFASOF04";
-const LEGACY_MAGIC: &[u8; 8] = b"CFASOF03";
 pub(in super::super) const BASE_BYTES: u64 = 96;
 const LEFT_HEADER: u64 = 73;
 const RIGHT_HEADER: u64 = 65;
@@ -452,7 +450,6 @@ fn require_capacity(capacity: usize, count: usize) -> Result<()> {
 }
 
 struct Header {
-    legacy: bool,
     chunks: usize,
     buckets: usize,
     left_rows: usize,
@@ -462,25 +459,20 @@ struct Header {
 
 fn read_header(cursor: &mut Cursor<'_>, max_rows: u64) -> Result<Header> {
     let magic = cursor.take(8)?;
-    if magic != MAGIC && magic != LEGACY_MAGIC {
+    if magic != MAGIC {
         return Err(mismatch("ASOF index magic differs"));
     }
     let [chunks, buckets, left_rows] = cursor.addresses()?;
     validate_header_counts(chunks, buckets, left_rows, max_rows)?;
     let capacities = cursor.capacities([25, 25, 40, 5, 32])?;
     validate_header_capacities(capacities, chunks, buckets)?;
-    let heaps = if magic == MAGIC {
-        cursor.capacities([16, 16])?
-    } else {
-        [capacities[2]; 2]
-    };
+    let heaps = cursor.capacities([16, 16])?;
     for capacity in heaps {
         require_capacity(capacity, buckets)?;
         u32::try_from(capacity)
             .map_err(|_| mismatch("ASOF heap capacity exceeds handle domain"))?;
     }
     Ok(Header {
-        legacy: magic == LEGACY_MAGIC,
         chunks,
         buckets,
         left_rows,
@@ -707,11 +699,8 @@ pub(super) fn decode(
     let mut state = State::empty_tracked();
     state.sequence_kinds = kinds;
     state.batches = PayloadPool::with_backing_buckets(header.capacities[0], header.capacities[1]);
-    state.right = RightState::with_index_capacities(
-        header.capacities[2],
-        header.capacities[3],
-        if header.legacy { [0; 2] } else { header.heaps },
-    );
+    state.right =
+        RightState::with_index_capacities(header.capacities[2], header.capacities[3], header.heaps);
     state.left.reserve_chunks_exact(header.capacities[4]);
     decode_left_chunks(
         &mut cursor,
@@ -805,7 +794,7 @@ fn decode_right_buckets(
         {
             return Err(mismatch("ASOF v3 right key order is not strict"));
         }
-        state.right.insert_restored(key, bucket, !header.legacy);
+        state.right.insert_restored(key, bucket);
     }
     Ok(())
 }
@@ -813,7 +802,7 @@ fn decode_right_buckets(
 fn validate_reconstructed_capacities(state: &State, header: &Header) -> Result<()> {
     if state.batches.backing_buckets() != (header.capacities[0], header.capacities[1])
         || state.right.checkpoint_capacities() != [header.capacities[2], header.capacities[3]]
-        || (!header.legacy && state.right.heap_capacities() != header.heaps)
+        || state.right.heap_capacities() != header.heaps
         || state.left.chunk_capacity() != header.capacities[4]
     {
         return Err(mismatch("ASOF v3 capacity reconstruction differs"));

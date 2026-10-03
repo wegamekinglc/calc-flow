@@ -91,24 +91,6 @@ pub(super) fn total(values: &[usize], name: &str) -> Result<usize> {
 }
 
 impl RightState {
-    pub fn build_recovery_index(
-        &mut self,
-        workspace: &MemoryReservation,
-        name: &str,
-    ) -> Result<()> {
-        let capacity = self.entries.capacity();
-        let bytes = allocation(capacity, 32, name)?;
-        if bytes > workspace.size() {
-            return Err(failure(name));
-        }
-        self.payloads = Heap::new(super::Kind::Payload, capacity);
-        self.identities = Heap::new(super::Kind::Identity, capacity);
-        for id in 0..self.entries.len() {
-            self.refresh(u32::try_from(id).expect("preflighted ASOF dictionary handle"));
-        }
-        Ok(())
-    }
-
     pub fn install_recovery_lease(&mut self, reservation: MemoryReservation) {
         self.lease = (reservation.size() != 0).then(|| Arc::new(reservation));
     }

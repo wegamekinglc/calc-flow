@@ -4,6 +4,9 @@ mod prepared;
 mod validation;
 
 #[cfg(test)]
+mod current_format_tests;
+
+#[cfg(test)]
 use super::state::{RightBucket, RowPayload};
 use super::{
     StreamAsofJoinOperator, StreamAsofJoinStatus,
@@ -53,7 +56,6 @@ pub(super) struct DecodedSnapshot {
     terminal: bool,
     sequence: u64,
     prepared: Option<PreparedSegment>,
-    deferred_len: Option<u64>,
     _workspace: MemoryReservation,
 }
 
@@ -92,22 +94,14 @@ impl StreamAsofJoinOperator {
         snapshot: &OperatorStateSnapshot,
         metadata: &Metadata<'_>,
     ) -> Result<DecodedSnapshot> {
-        let segment = snapshot_segment(snapshot, metadata.layout_version)?;
+        let segment = snapshot_segment(snapshot)?;
         let workspace = self.snapshot_restore_workspace(snapshot, segment)?;
         let batches = self.decode_validated_payloads(snapshot, &metadata.metrics)?;
         let mut state = self.decode_snapshot_index(segment, &batches)?;
         state.sequence_kinds = self.sequence_kinds();
         self.validate_indexed_rows(&state)?;
-        let mut prepared = segment.cloned().map(PreparedSegment::new);
+        let prepared = segment.cloned().map(PreparedSegment::new);
         self.validate_snapshot_inventory(&state, prepared.as_ref(), metadata)?;
-        if metadata.layout_version == 3 {
-            state.right.build_recovery_index(&workspace, &self.name)?;
-            [state.right_payload_min, state.right_identity_min] = state.right.minima();
-        }
-        let (metrics, deferred_len) = self.migrate_snapshot_inventory(&state, metadata)?;
-        if metadata.layout_version == 3 {
-            prepared = None;
-        }
         let auxiliary = state.right.auxiliary_bytes();
         if auxiliary > workspace.size() {
             return Err(mismatch("ASOF recovery index exceeds prepaid workspace"));
@@ -117,11 +111,10 @@ impl StreamAsofJoinOperator {
             .install_recovery_lease(workspace.split(auxiliary));
         Ok(DecodedSnapshot {
             state,
-            metrics,
+            metrics: metadata.metrics.clone(),
             terminal: metadata.terminal,
             sequence: metadata.next_output_sequence,
             prepared,
-            deferred_len,
             _workspace: workspace,
         })
     }
@@ -132,37 +125,9 @@ impl StreamAsofJoinOperator {
         prepared: Option<&PreparedSegment>,
         metadata: &Metadata<'_>,
     ) -> Result<()> {
-        let right_bytes = if metadata.layout_version == 3 {
-            state.right.legacy_metadata_bytes()
-        } else {
-            state.right.metadata_bytes()
-        };
-        let inventory = state.capacity_inventory_with_right(right_bytes, prepared, &self.name)?;
+        let inventory = state.capacity_inventory(prepared, &self.name)?;
         validate_gauges(&inventory, state.left.len() as u64, &metadata.metrics)?;
         self.validate_restored_limits(&inventory, metadata)
-    }
-
-    fn migrate_snapshot_inventory(
-        &self,
-        state: &State,
-        metadata: &Metadata<'_>,
-    ) -> Result<(StreamAsofJoinStatus, Option<u64>)> {
-        let mut metrics = metadata.metrics.clone();
-        if metadata.layout_version != 3 {
-            return Ok((metrics, None));
-        }
-        let length = v3_encoded_length(state, &self.name)?;
-        let mut inventory = state.capacity_inventory(None, &self.name)?;
-        if length != 0 {
-            inventory.bytes = super::checked(&self.name, inventory.bytes, length + 256)?;
-        }
-        if inventory.bytes > self.spec.limits().max_state_bytes() {
-            return Err(mismatch(
-                "ASOF restored state with expiration index exceeds limits.max_state_bytes",
-            ));
-        }
-        metrics.state_bytes = inventory.bytes;
-        Ok((metrics, (length != 0).then_some(length)))
     }
 
     fn decode_snapshot_index(
@@ -235,7 +200,7 @@ impl StreamAsofJoinOperator {
         let mut retained = 0;
         let mut scratch = 0;
         for (name, segment) in &snapshot.segments {
-            if name == index_v3::INDEX_SEGMENT || name == index_v3::LEGACY_SEGMENT {
+            if name == INDEX_SEGMENT {
                 continue;
             }
             let key = payload_segments::parse_batch_segment(name)?;
@@ -452,7 +417,7 @@ impl StreamAsofJoinOperator {
             || metadata.state_version != 3
             || !matches!(
                 (metadata.layout_version, metadata.accounting_version),
-                (3, 3) | (4, 4)
+                (4, 4)
             )
             || metadata.row_encoding != "arrow-batch-58.3.0"
             || metadata.fingerprint != self.fingerprint
@@ -472,7 +437,7 @@ impl StreamAsofJoinOperator {
             .map_err(|_| mismatch("ASOF payload batches exceed compact reference range"))?;
         let mut batches = BTreeMap::new();
         for (name, encoded) in &snapshot.segments {
-            if name == INDEX_SEGMENT || name == index_v3::LEGACY_SEGMENT {
+            if name == INDEX_SEGMENT {
                 continue;
             }
             let key = payload_segments::parse_batch_segment(name)?;
@@ -634,7 +599,7 @@ impl StreamAsofJoinOperator {
         self.terminal = decoded.terminal;
         self.next_output_sequence = decoded.sequence;
         self.prepared = decoded.prepared;
-        self.deferred_index_len = decoded.deferred_len;
+        self.deferred_index_len = None;
         self.swept = None;
     }
 }
@@ -660,15 +625,8 @@ fn validate_batch_ranges(
     Ok(())
 }
 
-fn snapshot_segment(
-    snapshot: &OperatorStateSnapshot,
-    layout: u32,
-) -> Result<Option<&StateSegment>> {
-    let name = if layout == 3 {
-        index_v3::LEGACY_SEGMENT
-    } else {
-        INDEX_SEGMENT
-    };
+fn snapshot_segment(snapshot: &OperatorStateSnapshot) -> Result<Option<&StateSegment>> {
+    let name = INDEX_SEGMENT;
     let index = snapshot.segments.get(name);
     if snapshot
         .segments
@@ -678,11 +636,7 @@ fn snapshot_segment(
     {
         return Err(mismatch("unexpected ASOF columnar segment inventory"));
     }
-    let magic: &[u8] = if layout == 3 {
-        b"CFASOF03"
-    } else {
-        b"CFASOF04"
-    };
+    let magic: &[u8] = b"CFASOF04";
     if index.is_some_and(|segment| !segment.bytes().starts_with(magic)) {
         return Err(mismatch("ASOF index layout differs from metadata"));
     }

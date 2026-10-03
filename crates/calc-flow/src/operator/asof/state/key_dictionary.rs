@@ -71,15 +71,6 @@ impl RightState {
         self.container_bytes() + self.bucket_bytes
     }
 
-    pub fn legacy_metadata_bytes(&self) -> u64 {
-        const ENTRY_BYTES: usize = 32;
-        const BUCKET_OWNER_BYTES: usize = 120;
-        (self.entries.capacity() * ENTRY_BYTES
-            + hash_allocation(super::payload::backing_buckets(&self.buckets))
-            + self.entries.len() * BUCKET_OWNER_BYTES) as u64
-            + self.bucket_bytes
-    }
-
     pub fn bucket_bytes(&self) -> u64 {
         self.bucket_bytes
     }
@@ -435,13 +426,9 @@ impl RightState {
         id
     }
 
-    pub fn insert_restored(&mut self, key: Encoding, bucket: RightBucket, indexed: bool) {
+    pub fn insert_restored(&mut self, key: Encoding, bucket: RightBucket) {
         let hash = self.hasher.hash_one(key.as_slice());
-        if indexed {
-            self.insert_unique(hash, key, bucket);
-        } else {
-            self.insert_unindexed(hash, key, bucket);
-        }
+        self.insert_unique(hash, key, bucket);
     }
 
     fn insert_unindexed(&mut self, hash: u64, key: Encoding, bucket: RightBucket) -> usize {
