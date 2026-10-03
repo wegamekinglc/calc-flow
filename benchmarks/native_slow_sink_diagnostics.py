@@ -857,8 +857,8 @@ def _workload(config) -> dict:
 
 def _instrument() -> dict:
     from benchmarks import (
-        native_checkpoint_compatibility,
         native_memory_profile,
+        native_release_identity,
         rolling_indicator_comparison,
         warm_stream,
     )
@@ -868,7 +868,7 @@ def _instrument() -> dict:
         *(
             Path(module.__file__)
             for module in (
-                native_checkpoint_compatibility,
+                native_release_identity,
                 native_memory_profile,
                 rolling_indicator_comparison,
                 warm_stream,
@@ -878,7 +878,7 @@ def _instrument() -> dict:
     return {
         path.name: {
             "path": str(path.resolve()),
-            "sha256": native_checkpoint_compatibility.file_hash(path),
+            "sha256": native_release_identity.file_hash(path),
         }
         for path in paths
     }
@@ -911,7 +911,7 @@ def _preload_record(preload: dict) -> dict:
 
 
 async def run(args, release: dict, declared: dict) -> dict:
-    from benchmarks.native_checkpoint_compatibility import file_hash
+    from benchmarks.native_release_identity import file_hash
     from benchmarks.rolling_indicator_comparison import _native_program
     from benchmarks.warm_stream import ScenarioConfig
     from calc_flow import (
@@ -1050,7 +1050,7 @@ async def run(args, release: dict, declared: dict) -> dict:
 
 
 def _read_result(role: str, directory: Path) -> dict:
-    from benchmarks.native_checkpoint_compatibility import file_hash
+    from benchmarks.native_release_identity import file_hash
 
     result = json.loads((directory / "result.json").read_text())
     if result["role"] != role or result["passed"] is not True:
@@ -1090,7 +1090,7 @@ def _check_comparison_identity(first: dict, second: dict) -> None:
 
 
 def compare(candidate: Path, control: Path) -> dict:
-    from benchmarks.native_checkpoint_compatibility import file_hash
+    from benchmarks.native_release_identity import file_hash
     from scripts import measure_performance_plan
 
     records = {}
@@ -1147,7 +1147,7 @@ def main() -> None:
         with args.output.open("x") as target:
             target.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
     else:
-        from benchmarks.native_checkpoint_compatibility import release_identity
+        from benchmarks.native_release_identity import release_identity
 
         os.environ.update(thread_settings(os.environ))
         declared = release_pair(
