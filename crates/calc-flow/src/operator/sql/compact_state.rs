@@ -368,7 +368,7 @@ impl IncrementalSql {
                 })
                 .collect::<Result<Vec<_>>>()?;
             let result = if let Some(global) = &self.global_records {
-                global.result(&state, name)?
+                global.result(aggregate, &state, name)?
             } else if self.requires_grouped_float_proof()
                 && super::grouped_float::selected(expression)
             {

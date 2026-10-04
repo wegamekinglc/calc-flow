@@ -568,7 +568,7 @@ impl IncrementalSql {
             return Ok(None);
         }
         let global_records = if global_record::raw_selected(raw, &schema) {
-            global_record::Proof::new(runtime, &aggregates[0], name)?
+            global_record::Proof::new(runtime, &aggregates, name)?
         } else {
             None
         };
@@ -813,18 +813,19 @@ impl IncrementalSql {
         candidates.proof = proof;
         let rows_processed = if let Some(global) = &self.global_records {
             let candidate = candidates.groups.get_mut(&0).expect("global candidate");
-            let expression = &self.aggregates[0].expressions()[0];
             let values = global
                 .update(
                     (table.batches(), input_owner),
-                    (expression, &candidate.group.states[0]),
+                    (&self.aggregates, &candidate.group.states),
                     self.reservation.new_empty(),
                     context,
                     name,
                 )
                 .await?;
-            candidate.group.results[0] = global.result(&values, name)?;
-            candidate.group.states[0] = values;
+            for (index, state) in values.into_iter().enumerate() {
+                candidate.group.results[index] = global.result(index, &state, name)?;
+                candidate.group.states[index] = state;
+            }
             batch.num_rows()
         } else {
             self.update_records(

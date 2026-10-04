@@ -44,7 +44,13 @@ fn inspect(plan: &dyn ExecutionPlan, original: &Batch, census: &mut [usize; 2]) 
         assert_eq!(*aggregate.input_order_mode(), InputOrderMode::Linear);
         assert!(aggregate.group_expr().expr().is_empty());
         assert!(aggregate.group_expr().groups().is_empty());
-        assert_eq!(aggregate.aggr_expr().len(), 1);
+        assert!(!aggregate.aggr_expr().is_empty());
+        assert!(
+            aggregate
+                .aggr_expr()
+                .iter()
+                .all(|expression| matches!(expression.fun().name(), "sum" | "avg"))
+        );
         assert!(aggregate.limit_options().is_none());
         assert!(aggregate.filter_expr().iter().all(Option::is_none));
     } else if let Some(source) = plan.downcast_ref::<DataSourceExec>() {
@@ -114,27 +120,35 @@ impl DataFusionRuntime {
         inspect(planned.physical_plan.as_ref(), input, &mut census);
         assert_eq!(census, [1, 1]);
         let aggregate = aggregate(planned.physical_plan.as_ref());
-        let expression = &aggregate.aggr_expr()[0];
-        let mut accumulator = expression.create_accumulator().unwrap();
-        let arguments = expression.expressions();
+        let mut accumulators = aggregate
+            .aggr_expr()
+            .iter()
+            .map(|expression| expression.create_accumulator().unwrap())
+            .collect::<Vec<_>>();
         let mut stream = aggregate
             .input()
             .execute(0, planned.task_ctx.clone())
             .unwrap();
         while let Some(record) = stream.next().await {
             let record = record.unwrap();
-            let values = arguments
-                .iter()
-                .map(|argument| {
-                    argument
-                        .evaluate(&record)
-                        .and_then(|value| value.into_array(record.num_rows()))
-                        .unwrap()
-                })
-                .collect::<Vec<_>>();
-            accumulator.update_batch(&values).unwrap();
+            for (expression, accumulator) in aggregate.aggr_expr().iter().zip(&mut accumulators) {
+                let values = expression
+                    .expressions()
+                    .iter()
+                    .map(|argument| {
+                        argument
+                            .evaluate(&record)
+                            .and_then(|value| value.into_array(record.num_rows()))
+                            .unwrap()
+                    })
+                    .collect::<Vec<_>>();
+                accumulator.update_batch(&values).unwrap();
+            }
         }
-        accumulator.state().unwrap()
+        accumulators
+            .iter_mut()
+            .flat_map(|accumulator| accumulator.state().unwrap())
+            .collect()
     }
 }
 
@@ -144,6 +158,8 @@ async fn test_global_float_executed_source_splits_each_original_record() {
         for query in [
             "SELECT SUM(value) FROM events",
             "SELECT AVG(value) FROM events",
+            "SELECT SUM(value), AVG(value) FROM events",
+            "SELECT AVG(value) AS mean, SUM(value) AS total, AVG(value) AS again FROM events",
         ] {
             let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
             let batch = input(&dtype, &[3, 8194, 1, 2]);
@@ -191,6 +207,8 @@ async fn test_global_float_default_single_plan_preserves_original_records() {
         for query in [
             "SELECT SUM(value) FROM events",
             "SELECT AVG(value) FROM events",
+            "SELECT SUM(value), AVG(value) FROM events",
+            "SELECT AVG(value) AS mean, SUM(value) AS total, AVG(value) AS again FROM events",
         ] {
             let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
             assert!(

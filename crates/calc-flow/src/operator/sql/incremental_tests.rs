@@ -483,7 +483,7 @@ async fn test_sql_incremental_float_decimal_queries_preserve_cumulative_engine()
     for (array, eligible) in [
         (
             Arc::new(Float64Array::from(vec![1e16, 1.0, -1e16, 3.0])) as Arc<dyn Array>,
-            false,
+            true,
         ),
         (
             Arc::new(

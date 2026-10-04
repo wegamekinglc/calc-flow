@@ -9,12 +9,22 @@ const MIXED: &str = "SELECT SUM(value) AS total, AVG(value) AS mean FROM events"
 const LARGE: Bits = (0x5a80_0000, 0x4350_0000_0000_0000);
 const NEG_LARGE: Bits = (0xda80_0000, 0xc350_0000_0000_0000);
 
-fn cases() -> [(DataType, &'static str); 4] {
+fn cases() -> [(DataType, &'static str); 8] {
     [
         (DataType::Float32, SUM),
         (DataType::Float64, SUM),
         (DataType::Float32, AVG),
         (DataType::Float64, AVG),
+        (DataType::Float32, MIXED),
+        (DataType::Float64, MIXED),
+        (
+            DataType::Float32,
+            "SELECT AVG(value) AS mean, SUM(value) AS total, AVG(value) AS again FROM events",
+        ),
+        (
+            DataType::Float64,
+            "SELECT AVG(value) AS mean, SUM(value) AS total, AVG(value) AS again FROM events",
+        ),
     ]
 }
 
@@ -87,15 +97,15 @@ async fn capture(
     let wire = decode_sql_state(snapshot.segments["group-state"].bytes()).unwrap();
     assert_eq!(rows(&wire), vec![values]);
     let fields = wire.table_payload().unwrap().schema().fields();
-    let types = if query == AVG {
-        vec![DataType::UInt64, DataType::Float64]
-    } else {
-        vec![DataType::Float64]
-    };
-    assert_eq!(fields.len(), types.len());
-    for (ordinal, (field, dtype)) in fields.iter().zip(types).enumerate() {
-        assert_eq!(field.name(), &format!("state_0_{ordinal}"));
-        assert_eq!(field.data_type(), &dtype);
+    let descriptor = state
+        .incremental
+        .as_ref()
+        .unwrap()
+        .native_descriptor("float_extrema")
+        .unwrap();
+    assert_eq!(fields, descriptor.wire_schema.fields());
+    for (field, value) in fields.iter().zip(expected) {
+        assert_eq!(field.data_type(), &value.data_type());
         assert!(field.is_nullable());
     }
     snapshot
@@ -232,18 +242,19 @@ async fn test_global_float_sum_average_rejected_emit_refund_then_once_retry() {
 }
 
 #[tokio::test]
-async fn test_global_float_mixed_sum_average_keeps_current_raw4() {
+async fn test_global_float_mixed_sum_average_releases_inputs_native3() {
     for dtype in [DataType::Float32, DataType::Float64] {
         let job = job();
         let context = StreamOperatorContext::new(&job, "float_extrema", None);
         let mut state = operator(&dtype, MIXED);
         let first = finite_arrivals(false).remove(1);
-        let actual = process(&mut state, input(&dtype, &first, 0), &context).await;
+        let batch = input(&dtype, &first, 0);
+        let weak = weak_arrays(&batch);
+        let actual = process(&mut state, batch, &context).await;
         assert_oracle(&actual, MIXED, &dtype, &first, 0).await;
-        let before = state.checkpoint(Epoch::INITIAL).unwrap();
-        assert_eq!(before.inline_metadata["state_layout"], json!(4));
-        assert_eq!(before.inline_metadata["state_accounting"], json!(4));
-        assert!(before.segments.contains_key("input-retained"));
+        let before = capture(&mut state, &dtype, MIXED, &first, 0).await;
+        assert!(weak.iter().all(|array| array.upgrade().is_none()));
+        drop(actual);
         let pool = state
             .stream_state
             .runtime()
@@ -257,15 +268,138 @@ async fn test_global_float_mixed_sum_average_keeps_current_raw4() {
         let actual = process(&mut restored, input(&dtype, &next, 1), &context).await;
         let all = first.into_iter().chain(next).collect::<Vec<_>>();
         assert_oracle(&actual, MIXED, &dtype, &all, 1).await;
-        let after = restored.checkpoint(Epoch::INITIAL).unwrap();
-        assert_eq!(after.inline_metadata["state_layout"], json!(4));
+        let after = capture(&mut restored, &dtype, MIXED, &all, 1).await;
         let target = restored
             .stream_state
             .runtime()
             .unwrap()
             .incremental_memory_pool();
         drop((restored, before, after, actual));
+        assert!(job.gather_owner().close_and_drain().await.is_empty());
+        drop(context);
+        drop(job);
         assert_eq!(pool.reserved(), 0);
         assert_eq!(target.reserved(), 0);
     }
+}
+
+fn two_columns(parts: &[Part], sequence: u64) -> Batch {
+    let first = input(&DataType::Float32, parts, sequence);
+    let original = first.table_payload().unwrap();
+    let mut fields = original.schema().fields().to_vec();
+    fields.push(Arc::new(Field::new("other", DataType::Float64, true)));
+    let schema = Arc::new(Schema::new_with_metadata(
+        fields,
+        original.schema().metadata().clone(),
+    ));
+    let records = original
+        .batches()
+        .iter()
+        .zip(parts)
+        .map(|(record, part)| {
+            let mut arrays = record.columns().to_vec();
+            arrays.push(Arc::new(Float64Array::from(
+                part.iter()
+                    .map(|value| {
+                        if value.is_none() {
+                            Some(2.0)
+                        } else {
+                            Some(-3.0)
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            )));
+            RecordBatch::try_new(schema.clone(), arrays).unwrap()
+        })
+        .collect();
+    Batch::table(records, metadata(sequence)).unwrap()
+}
+
+#[tokio::test]
+async fn test_global_float_multiple_columns_native3_prefix_restore() {
+    let query =
+        "SELECT AVG(other) AS a, SUM(value) AS b, SUM(other) AS c, AVG(value) AS d FROM events";
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "float_extrema", None);
+    let mut state =
+        SqlOperator::new("float_extrema", query, vec!["events".into()], vec![]).unwrap();
+    let mut prefix = Vec::new();
+    let mut pools = Vec::new();
+    for (sequence, parts) in finite_arrivals(false).into_iter().enumerate() {
+        let batch = two_columns(&parts, sequence as u64);
+        let weak = weak_arrays(&batch);
+        let actual = process(&mut state, batch, &context).await;
+        prefix.extend(parts);
+        let oracle_input = two_columns(&prefix, sequence as u64);
+        let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+        let expected = runtime
+            .sql(
+                query,
+                &BTreeMap::from([("events".into(), oracle_input.clone())]),
+                Some("oracle"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows(&actual), rows(&expected));
+        assert_eq!(
+            actual.table_payload().unwrap().schema(),
+            expected.table_payload().unwrap().schema()
+        );
+        assert_eq!(actual.metadata(), expected.metadata());
+        assert!(weak.iter().all(|array| array.upgrade().is_none()));
+        let snapshot = state.checkpoint(Epoch::INITIAL).unwrap();
+        assert_eq!(snapshot.inline_metadata["state_layout"], json!(3));
+        assert_eq!(snapshot.inline_metadata["state_accounting"], json!(3));
+        assert!(!snapshot.segments.contains_key("input-retained"));
+        let wire = decode_sql_state(snapshot.segments["group-state"].bytes()).unwrap();
+        let scalar_state = runtime
+            .global_record_accumulator_state(query, &oracle_input)
+            .await;
+        assert_eq!(
+            rows(&wire),
+            vec![
+                scalar_state
+                    .iter()
+                    .map(|value| cell(&value.to_array_of_size(1).unwrap(), 0))
+                    .collect::<Vec<_>>()
+            ]
+        );
+        assert_eq!(
+            state
+                .compact
+                .as_ref()
+                .unwrap()
+                .projection()
+                .unwrap()
+                .columns
+                .ordinals(),
+            &[1, 2]
+        );
+        pools.push(
+            state
+                .stream_state
+                .runtime()
+                .unwrap()
+                .incremental_memory_pool(),
+        );
+        drop(state);
+        state = SqlOperator::new("float_extrema", query, vec!["events".into()], vec![]).unwrap();
+        StreamOperator::restore(&mut state, &snapshot).unwrap();
+        same_snapshot(&snapshot, &state.checkpoint(Epoch::INITIAL).unwrap());
+    }
+    pools.push(
+        state
+            .stream_state
+            .runtime()
+            .unwrap()
+            .incremental_memory_pool(),
+    );
+    drop(state);
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(context);
+    drop(job);
+    assert_eq!(
+        pools.iter().map(|pool| pool.reserved()).collect::<Vec<_>>(),
+        vec![0; pools.len()]
+    );
 }

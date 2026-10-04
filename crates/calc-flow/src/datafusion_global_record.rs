@@ -67,8 +67,11 @@ fn scalar_aggregate(aggregate: &AggregateExec) -> bool {
 fn scalar_shape(aggregate: &AggregateExec) -> bool {
     aggregate.group_expr().expr().is_empty()
         && aggregate.group_expr().groups().is_empty()
-        && aggregate.aggr_expr().len() == 1
-        && matches!(aggregate.aggr_expr()[0].fun().name(), "sum" | "avg")
+        && !aggregate.aggr_expr().is_empty()
+        && aggregate
+            .aggr_expr()
+            .iter()
+            .all(|expression| matches!(expression.fun().name(), "sum" | "avg"))
         && aggregate.limit_options().is_none()
         && aggregate.filter_expr().iter().all(Option::is_none)
 }

@@ -76,27 +76,22 @@ fn policy_snapshot(snapshot: &OperatorStateSnapshot, policy: Value) -> OperatorS
     snapshot
 }
 
-fn null_count_snapshot(snapshot: &OperatorStateSnapshot) -> OperatorStateSnapshot {
-    state_snapshot(
-        snapshot,
-        vec![
-            Arc::new(datafusion::arrow::array::UInt64Array::from(vec![
-                None::<u64>,
-            ])),
-            Arc::new(Float64Array::from(vec![None::<f64>])),
-        ],
-        false,
-    )
-}
-
-fn zero_input_snapshot(snapshot: &OperatorStateSnapshot, query: &str) -> OperatorStateSnapshot {
-    let mut values: Vec<ArrayRef> = Vec::new();
-    if query == AVG {
-        values.push(Arc::new(datafusion::arrow::array::UInt64Array::from(vec![
-            Some(0_u64),
-        ])));
-    }
-    values.push(Arc::new(Float64Array::from(vec![None::<f64>])));
+fn zero_input_snapshot(snapshot: &OperatorStateSnapshot) -> OperatorStateSnapshot {
+    let state = decode_sql_state(snapshot.segments["group-state"].bytes()).unwrap();
+    let values = state
+        .table_payload()
+        .unwrap()
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| match field.data_type() {
+            DataType::UInt64 => Arc::new(datafusion::arrow::array::UInt64Array::from(vec![Some(
+                0_u64,
+            )])) as ArrayRef,
+            DataType::Float64 => Arc::new(Float64Array::from(vec![None::<f64>])) as ArrayRef,
+            _ => unreachable!(),
+        })
+        .collect();
     state_snapshot(snapshot, values, true)
 }
 
@@ -142,18 +137,27 @@ async fn test_global_record_current_policy_required_and_cold_replanned() {
         assert!(
             StreamOperator::restore(
                 &mut operator(&dtype, query),
-                &zero_input_snapshot(&snapshot, query)
+                &zero_input_snapshot(&snapshot)
             )
             .is_err()
         );
-        if query == AVG {
-            assert!(
-                StreamOperator::restore(
-                    &mut operator(&dtype, query),
-                    &null_count_snapshot(&snapshot)
-                )
-                .is_err()
-            );
+        let wire = decode_sql_state(snapshot.segments["group-state"].bytes()).unwrap();
+        let columns = wire.table_payload().unwrap().batches()[0].columns();
+        for (index, column) in columns.iter().enumerate() {
+            if column.data_type() != &DataType::UInt64 {
+                continue;
+            }
+            for count in [None, Some(0), Some(3)] {
+                let mut values = columns.to_vec();
+                values[index] = Arc::new(datafusion::arrow::array::UInt64Array::from(vec![count]));
+                assert!(
+                    StreamOperator::restore(
+                        &mut operator(&dtype, query),
+                        &state_snapshot(&snapshot, values, false),
+                    )
+                    .is_err()
+                );
+            }
         }
         let control: Value = serde_json::from_slice(snapshot.segments["control"].bytes()).unwrap();
         let original = control["state_policy"].clone();
