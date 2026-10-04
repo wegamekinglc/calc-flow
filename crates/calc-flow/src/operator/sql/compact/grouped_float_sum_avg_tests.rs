@@ -2,18 +2,27 @@ use super::*;
 
 const FLOAT_SUM: &str = "SELECT key, SUM(value) AS total FROM events GROUP BY key";
 const FLOAT_AVG: &str = "SELECT key, AVG(value) AS mean FROM events GROUP BY key";
-const FLOAT_STATE: &str = "SELECT key, COUNT(value) AS valid, SUM(CAST(value AS DOUBLE)) AS total FROM events GROUP BY key";
+const FLOAT_MIXED: &str =
+    "SELECT key, SUM(value) AS total, AVG(value) AS mean FROM events GROUP BY key";
+const FLOAT_MIXED_COUNT: &str = "SELECT key, COUNT(value) AS valid, SUM(value) AS total, AVG(value) AS mean FROM events GROUP BY key";
+const FLOAT_ALL: &str = "SELECT key, MIN(value) AS lo, MAX(value) AS hi, COUNT(value) AS valid, SUM(value) AS total, AVG(value) AS mean FROM events GROUP BY key";
+const FLOAT_STATE: &str = "SELECT key, COUNT(value) AS valid, SUM(CAST(value AS DOUBLE)) AS total, MIN(value) AS lo, MAX(value) AS hi FROM events GROUP BY key";
 const LARGE_FLOAT: Bits = (0x5a80_0000, 0x4350_0000_0000_0000);
 const NEG_LARGE_FLOAT: Bits = (0xda80_0000, 0xc350_0000_0000_0000);
 const SECOND_NAN: Bits = (0xffc0_0002, 0xfff8_0000_0000_0002);
 const SUBNORMAL: Bits = (1, 1);
 const NEG_SUBNORMAL: Bits = (0x8000_0001, 0x8000_0000_0000_0001);
 
-fn cases() -> [(DataType, &'static str); 3] {
+fn cases() -> [(DataType, &'static str); 8] {
     [
         (DataType::Float32, FLOAT_SUM),
         (DataType::Float32, FLOAT_AVG),
         (DataType::Float64, FLOAT_AVG),
+        (DataType::Float32, FLOAT_MIXED),
+        (DataType::Float64, FLOAT_MIXED),
+        (DataType::Float64, FLOAT_MIXED_COUNT),
+        (DataType::Float32, FLOAT_ALL),
+        (DataType::Float64, FLOAT_ALL),
     ]
 }
 
@@ -82,17 +91,32 @@ fn float_wire_rows(expected: &Batch, query: &str) -> BTreeMap<Option<i64>, Vec<C
     rows(expected)
         .into_iter()
         .map(|(key, mut values)| {
-            let sum = values.pop().unwrap();
+            let hi = values.pop().unwrap();
+            let lo = values.pop().unwrap();
+            let Cell::Float64(sum) = values.pop().unwrap() else {
+                panic!("DF grouped SUM(CAST(value AS DOUBLE)) must be Float64");
+            };
             let Cell::Other(ScalarValue::Int64(Some(count))) = values.pop().unwrap() else {
                 panic!("DF COUNT(value) must be non-null Int64");
             };
             let mut values = vec![Cell::Other(ScalarValue::Int64(key))];
-            if query == FLOAT_AVG {
-                values.push(Cell::Other(ScalarValue::UInt64(
-                    (count != 0).then(|| u64::try_from(count).unwrap()),
-                )));
+            if query == FLOAT_ALL {
+                values.extend([lo, hi]);
             }
-            values.push(sum);
+            if matches!(query, FLOAT_ALL | FLOAT_MIXED_COUNT) {
+                values.push(Cell::Other(ScalarValue::Int64(Some(count))));
+            }
+            if query != FLOAT_AVG {
+                values.push(Cell::Float64(sum));
+            }
+            if query != FLOAT_SUM {
+                values.extend([
+                    Cell::Other(ScalarValue::UInt64(
+                        (count != 0).then(|| u64::try_from(count).unwrap()),
+                    )),
+                    Cell::Float64(sum),
+                ]);
+            }
             (key, values)
         })
         .collect()
@@ -129,20 +153,20 @@ async fn float_capture(
     assert_eq!(projection.columns.ordinals(), &[0, 6]);
     let wire = decode_sql_state(snapshot.segments["group-state"].bytes()).unwrap();
     let fields = wire.table_payload().unwrap().schema().fields();
-    let expected = if query == FLOAT_AVG {
-        vec![
-            ("key_0", DataType::Int64),
-            ("state_0_0", DataType::UInt64),
-            ("state_0_1", DataType::Float64),
-        ]
-    } else {
-        vec![("key_0", DataType::Int64), ("state_0_0", DataType::Float64)]
-    };
-    assert_eq!(fields.len(), expected.len());
-    for (field, (name, dtype)) in fields.iter().zip(expected) {
-        assert_eq!(field.name(), name);
-        assert_eq!(field.data_type(), &dtype);
-        assert!(field.is_nullable());
+    let descriptor = state
+        .incremental
+        .as_ref()
+        .unwrap()
+        .native_descriptor("grouped_float")
+        .unwrap();
+    assert_eq!(fields, descriptor.wire_schema.fields());
+    for field in fields {
+        let count = match query {
+            FLOAT_MIXED_COUNT => field.name() == "state_0_0",
+            FLOAT_ALL => field.name() == "state_2_0",
+            _ => false,
+        };
+        assert_eq!(field.is_nullable(), !count);
     }
     let expected = float_state_expected(dtype, parts, sequence).await;
     assert_eq!(rows(&wire), float_wire_rows(&expected, query));
@@ -282,6 +306,39 @@ async fn test_grouped_float_sum_average_emit_failure_refunds_then_single_retry()
         let after = float_capture(&mut state, &dtype, query, &all, 1).await;
         assert!(weak.iter().all(|array| array.upgrade().is_none()));
         drop((state, before, after, initial, actual));
+        assert_eq!(pool.reserved(), 0);
+    }
+}
+
+#[tokio::test]
+async fn test_grouped_mixed_float_nondefault_keeps_retained4() {
+    for dtype in [DataType::Float32, DataType::Float64] {
+        let job = job();
+        let context = StreamOperatorContext::new(&job, "grouped_float", None);
+        let mut state = operator_query(&dtype, FLOAT_ALL);
+        state.set_stream_resources(
+            DataFusionConfig {
+                target_partitions: 4,
+                ..DataFusionConfig::default()
+            },
+            UdfRegistrySnapshot::default(),
+            vec![],
+        );
+        let parts = vec![vec![(Some(1), Some(ONE)), (None, None)]];
+        let actual = process(&mut state, input(&dtype, &parts, 0), &context).await;
+        assert_query_oracle(&actual, FLOAT_ALL, &dtype, &parts, 0).await;
+        let snapshot = state.checkpoint(Epoch::INITIAL).unwrap();
+        assert_eq!(snapshot.inline_metadata["state_layout"], json!(4));
+        assert!(snapshot.segments.contains_key("input-retained"));
+        let pool = state
+            .stream_state
+            .runtime()
+            .unwrap()
+            .incremental_memory_pool();
+        drop((state, snapshot, actual));
+        assert!(job.gather_owner().close_and_drain().await.is_empty());
+        drop(context);
+        drop(job);
         assert_eq!(pool.reserved(), 0);
     }
 }

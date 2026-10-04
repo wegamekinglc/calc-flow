@@ -1855,7 +1855,7 @@ fn initial_grouped_proof(
     if aggregates
         .iter()
         .any(|expression| grouped_sum::selected(expression))
-        && (keys.len() != 1 || aggregates.len() != 1)
+        && keys.len() != 1
     {
         return Ok(GroupStrategy::Unsupported);
     }

@@ -6,6 +6,64 @@ const AVG_QUERY: &str = "SELECT key, AVG(value) AS mean FROM events GROUP BY key
 const STATE_QUERY: &str = "SELECT key, COUNT(value) AS valid, SUM(CAST(value AS DOUBLE)) AS total FROM events GROUP BY key";
 const INTEGER_LARGE: i128 = 1 << 54;
 
+#[tokio::test]
+async fn test_grouped_integer_mixed_sum_average_count_prefix_restore() {
+    let query = "SELECT key, SUM(value) AS total, AVG(value) AS mean, COUNT(value) AS valid FROM events GROUP BY key";
+    for dtype in [DataType::Int64, DataType::UInt64] {
+        let job = job();
+        let context = StreamOperatorContext::new(&job, "grouped_float", None);
+        let mut state = operator_query(&dtype, query);
+        let mut prefix = Vec::new();
+        let mut pools = Vec::new();
+        for (sequence, parts) in average_arrivals(&dtype).into_iter().enumerate() {
+            let batch = average_input(&dtype, &parts, sequence as u64);
+            let weak = weak_arrays(&batch);
+            let actual = process(&mut state, batch, &context).await;
+            prefix.extend(parts);
+            let expected = average_expected(query, &dtype, &prefix, sequence as u64).await;
+            assert_eq!(rows(&actual), rows(&expected));
+            assert_eq!(
+                actual.table_payload().unwrap().schema(),
+                expected.table_payload().unwrap().schema()
+            );
+            assert_eq!(actual.metadata(), expected.metadata());
+            assert!(weak.iter().all(|array| array.upgrade().is_none()));
+            let snapshot = state.checkpoint(Epoch::INITIAL).unwrap();
+            assert_eq!(snapshot.inline_metadata["state_layout"], json!(3));
+            assert!(
+                snapshot.segments.contains_key("group-state")
+                    && !snapshot.segments.contains_key("input-retained")
+            );
+            pools.push(
+                state
+                    .stream_state
+                    .runtime()
+                    .unwrap()
+                    .incremental_memory_pool(),
+            );
+            drop(state);
+            state = operator_query(&dtype, query);
+            StreamOperator::restore(&mut state, &snapshot).unwrap();
+            same_snapshot(&snapshot, &state.checkpoint(Epoch::INITIAL).unwrap());
+        }
+        pools.push(
+            state
+                .stream_state
+                .runtime()
+                .unwrap()
+                .incremental_memory_pool(),
+        );
+        drop(state);
+        assert!(job.gather_owner().close_and_drain().await.is_empty());
+        drop(context);
+        drop(job);
+        assert_eq!(
+            pools.iter().map(|pool| pool.reserved()).collect::<Vec<_>>(),
+            vec![0; pools.len()]
+        );
+    }
+}
+
 fn average_input(dtype: &DataType, parts: &[IntegerPart], sequence: u64) -> Batch {
     let records = parts
         .iter()
