@@ -165,6 +165,20 @@ async fn test_global_integer_average_original_record_bits_native3() {
 }
 
 #[tokio::test]
+async fn test_global_integer_sum_average_mixtures_native3() {
+    for column in integer_columns() {
+        for query in [
+            "SELECT SUM(value) AS total, AVG(value) AS mean FROM events",
+            "SELECT COUNT(value) AS valid, MIN(value) AS lo, MAX(value) AS hi, SUM(value) AS total, AVG(value) AS mean FROM events",
+            "SELECT AVG(value) AS mean, SUM(value) AS total, COUNT(value) AS valid, COUNT(*) AS arrivals FROM events",
+            "SELECT SUM(value) AS total, AVG(other) AS other_mean, SUM(price) AS price_total FROM events",
+        ] {
+            integer_prefix(&column, query).await;
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_global_integer_average_nondefault_empty_and_grouped_controls() {
     let column = integer_columns().into_iter().next().unwrap();
     let mut nondefault = integer_operator(AVG);

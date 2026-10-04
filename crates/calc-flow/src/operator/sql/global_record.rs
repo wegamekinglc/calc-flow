@@ -29,41 +29,40 @@ pub(in crate::operator::sql) enum Model {
     Df54SingleSourceSplitRecordsV1,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Kind {
-    Sum,
+    Scalar(DataType),
     Average,
     Count,
-    Extrema32,
-    Extrema64,
 }
 
 impl Kind {
     fn of(expression: &AggregateFunctionExpr) -> Option<Self> {
-        if expression.fun().name() == "count" && expression.field().data_type() == &DataType::Int64
-        {
-            return Some(Self::Count);
-        }
-        if matches!(expression.fun().name(), "min" | "max") {
-            return match expression.field().data_type() {
-                DataType::Float32 => Some(Self::Extrema32),
-                DataType::Float64 => Some(Self::Extrema64),
-                _ => None,
-            };
-        }
-        if expression.field().data_type() != &DataType::Float64 {
-            return None;
-        }
+        let field = expression.field();
+        let dtype = field.data_type();
         match expression.fun().name() {
-            "sum" => Some(Self::Sum),
-            "avg" => Some(Self::Average),
+            "count" if dtype == &DataType::Int64 => Some(Self::Count),
+            "avg" if dtype == &DataType::Float64 => Some(Self::Average),
+            "sum"
+                if matches!(
+                    dtype,
+                    DataType::Float64 | DataType::Int64 | DataType::UInt64
+                ) =>
+            {
+                Some(Self::Scalar(dtype.clone()))
+            }
+            "min" | "max"
+                if dtype.is_integer() || matches!(dtype, DataType::Float32 | DataType::Float64) =>
+            {
+                Some(Self::Scalar(dtype.clone()))
+            }
             _ => None,
         }
     }
 
-    fn width(self) -> usize {
+    fn width(&self) -> usize {
         match self {
-            Self::Sum | Self::Count | Self::Extrema32 | Self::Extrema64 => 1,
+            Self::Scalar(_) | Self::Count => 1,
             Self::Average => 2,
         }
     }
@@ -76,11 +75,10 @@ pub(super) struct Proof {
     _reservation: MemoryReservation,
 }
 
-fn saved_count(kind: Kind, values: &[ScalarValue], name: &str) -> Result<u64> {
+fn saved_count(kind: &Kind, values: &[ScalarValue], name: &str) -> Result<u64> {
     match (kind, values) {
-        (_, [])
-        | (Kind::Sum | Kind::Extrema64, [ScalarValue::Float64(_)])
-        | (Kind::Extrema32, [ScalarValue::Float32(_)]) => Ok(0),
+        (_, []) => Ok(0),
+        (Kind::Scalar(dtype), [value]) if value.data_type() == *dtype => Ok(0),
         (Kind::Count, [ScalarValue::Int64(Some(count))]) => {
             u64::try_from(*count).map_err(|error| df_error(name, error))
         }
@@ -123,7 +121,7 @@ pub(super) fn raw_selected(raw: &LogicalPlan, schema: &SchemaRef) -> bool {
         };
         schema.field_with_name(&column.name).is_ok_and(|field| {
             matches!(field.data_type(), DataType::Float32 | DataType::Float64)
-                || (function.func.name() == "avg" && field.data_type().is_integer())
+                || field.data_type().is_integer()
         })
     })
 }
@@ -171,7 +169,7 @@ impl Proof {
         values: &[ScalarValue],
         name: &str,
     ) -> Result<ScalarValue> {
-        saved_count(self.kinds[index], values, name)?;
+        saved_count(&self.kinds[index], values, name)?;
         super::grouped_sum::result(values, name)
     }
 
@@ -192,7 +190,7 @@ impl Proof {
             .find(|record| record.num_rows() != 0)
             .expect("scalar row");
         let mut columns = record.columns().iter();
-        for &kind in self.kinds.iter() {
+        for kind in self.kinds.iter() {
             let mut values = [ScalarValue::Null, ScalarValue::Null];
             for value in &mut values[..kind.width()] {
                 let array = columns
@@ -239,7 +237,7 @@ impl Proof {
             )?
         };
         super::ensure_reservation(&credit, charge, name)?;
-        for (&kind, state) in self.kinds.iter().zip(values) {
+        for (kind, state) in self.kinds.iter().zip(values) {
             saved_count(kind, state, name)?;
         }
         if empty {
